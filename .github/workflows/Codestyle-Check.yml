@@ -7,7 +7,7 @@ on:
 jobs:
   pre-commit:
     name: Codestyle Check
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    # if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on: ubuntu-latest
     env:
       PR_ID: ${{ github.event.pull_request.number }}
