@@ -79,7 +79,7 @@ class TestPPChunkRecorder(unittest.TestCase):
             remove_tail_layers,
         )
 
-        # Simulate forward passes for all layers across all steps
+        # Simulate forward passes for all layers across a global_step
         for i in range(num_acc_steps):
             for j in range(num_hidden_layers):
                 pp_chunk_recorder.record_chunk_forward(j)
