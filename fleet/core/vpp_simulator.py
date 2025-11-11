@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-VPPSimulator, simulates VPP scheduling for balanced elastic layer skipping strategy
+VPPSimulator, simulates VPP scheduling
 """
 import math
 import random
@@ -95,7 +95,7 @@ class Chunk:
 
 class VPPSimulator:
     """
-    Simulates Virtual Pipeline Parallel (VPP) scheduling for balanced elastic training.
+    Simulates Virtual Pipeline Parallel (VPP) scheduling
     
     Implements algorithms for:
     - Pipeline schedule simulation
