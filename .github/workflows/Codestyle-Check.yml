@@ -1,76 +1,52 @@
-name: Pylint
+name: Codestyle-Check
 
-on: [push]
+on:
+  push:
+  pull_request:
+  # branches: ["develop"]
 
 jobs:
-  build:
+  pre-commit:
+    name: Codestyle Check
+    # if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.8", "3.9", "3.10"]
+    # env:
+    #   PR_ID: ${{ github.event.pull_request.number }}
+    #   BRANCH: develop
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v3
+      - name: Checkout base repo
+        uses: actions/checkout@v4
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pylint
-      - name: Analysing the code with pylint
-        run: |
-          pylint $(git ls-files '*.py')
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 1000
 
-# name: Codestyle-Check
+    # - name: Check bypass
+    #   id: check-bypass
+    #   uses: ./.github/actions/check-bypass
+    #   with:
+    #     github-token: ${{ secrets.GITHUB_TOKEN }}
+    #     workflow-name: codestyle
 
-# on:
-#   push:
-#   pull_request:
-#   # branches: ["develop"]
+    # - name: Merge PR to test branch
+    #   if: steps.check-bypass.outputs.can-skip != 'true'
+    #   run: |
+    #     git fetch origin pull/${PR_ID}/merge
+    #     git checkout -b test FETCH_HEAD
 
-# jobs:
-#   pre-commit:
-#     name: Codestyle Check
-#     # if: github.repository == 'PaddlePaddle/PaddleFleet'
-#     # runs-on: ubuntu-latest
-#     # env:
-#     #   PR_ID: ${{ github.event.pull_request.number }}
-#     #   BRANCH: develop
+    # - name: Setup python3.12
+    #   if: steps.check-bypass.outputs.can-skip != 'true'
+    #   uses: actions/setup-python@v5
+    #   with:
+    #     python-version: '3.12'
+    #     cache: 'pip'
 
-#     steps:
-#       - name: Checkout base repo
-#         uses: actions/checkout@v4
-#         with:
-#           ref: ${{ github.event.pull_request.base.ref }}
-#           fetch-depth: 1000
+    # - name: Install dependencies
+    #   if: steps.check-bypass.outputs.can-skip != 'true'
+    #   run: |
+    #     pip install pre-commit==2.17.0 cpplint==1.6.0  clang-format==13.0.0
 
-#     # - name: Check bypass
-#     #   id: check-bypass
-#     #   uses: ./.github/actions/check-bypass
-#     #   with:
-#     #     github-token: ${{ secrets.GITHUB_TOKEN }}
-#     #     workflow-name: codestyle
-
-#     # - name: Merge PR to test branch
-#     #   if: steps.check-bypass.outputs.can-skip != 'true'
-#     #   run: |
-#     #     git fetch origin pull/${PR_ID}/merge
-#     #     git checkout -b test FETCH_HEAD
-
-#     # - name: Setup python3.12
-#     #   if: steps.check-bypass.outputs.can-skip != 'true'
-#     #   uses: actions/setup-python@v5
-#     #   with:
-#     #     python-version: '3.12'
-#     #     cache: 'pip'
-
-#     # - name: Install dependencies
-#     #   if: steps.check-bypass.outputs.can-skip != 'true'
-#     #   run: |
-#     #     pip install pre-commit==2.17.0 cpplint==1.6.0  clang-format==13.0.0
-
-#     # - name: Check pre-commit
-#     #   if: steps.check-bypass.outputs.can-skip != 'true'
-#     #   run: |
-#     #     pre-commit run --all-files
+    # - name: Check pre-commit
+    #   if: steps.check-bypass.outputs.can-skip != 'true'
+    #   run: |
+    #     pre-commit run --all-files
