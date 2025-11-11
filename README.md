@@ -1,2 +1,2 @@
 # PaddleFleet
-Core Functional Library for Distributed Training
+Core Functional Library for Large Scale Distributed Training
