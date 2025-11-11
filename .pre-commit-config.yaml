@@ -22,13 +22,13 @@ repos:
         files: \.(py|pyi)$
         args: [--whitespaces-count, '4']
   # Check content of copyright
-  # - repo: local
-  #   hooks:
-  #     - id: copyright_checker
-  #       name: copyright_checker
-  #       entry: python ./hooks/copyright.py
-  #       language: system
-  #       files: \.(c|cc|cxx|cpp|cu|h|cuh|hpp|hxx|py|pyi|sh)$
+  - repo: local
+    hooks:
+      - id: copyright_checker
+        name: copyright_checker
+        entry: python ./hooks/copyright.py
+        language: system
+        files: \.(c|cc|cxx|cpp|cu|h|cuh|hpp|hxx|py|pyi|sh)$
   - repo: https://github.com/PFCCLab/typos-pre-commit-mirror.git
     rev: v1.39.0
     hooks:
@@ -71,7 +71,7 @@ repos:
     rev: v1.5.1
     hooks:
       - id: cmakelint
-        args: [--config=./tools/codestyle/.cmakelintrc]
+        args: [--config=.cmakelintrc]
   # For YAML files
   - repo: https://github.com/PFCCLab/yamlfmt-pre-commit-mirror.git
     rev: v0.16.0
