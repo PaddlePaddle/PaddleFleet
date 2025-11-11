@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 import types
 from dataclasses import dataclass, field
-from typing import Tuple, Union
 
 
 @dataclass
@@ -12,7 +13,7 @@ class ModuleSpec:
     passed to initialize the module.
 
     Args:
-        module (Union[Tuple, type]): A tuple describing the location of the
+        module (Union[tuple, type]): A tuple describing the location of the
             module class e.g. `(module.location, ModuleClass)` or the imported
             module class itself e.g. `ModuleClass` (which is already imported
             using `from module.location import ModuleClass`).
@@ -20,14 +21,13 @@ class ModuleSpec:
 
     """
 
-    module: Union[Tuple, type]
+    module: tuple | type
     params: dict = field(default_factory=lambda: {})
     submodules: type = None
 
 
-def import_module(module_path: Tuple[str]):
-    """Import a named object from a module in the context of this function.
-    """
+def import_module(module_path: tuple[str]):
+    """Import a named object from a module in the context of this function."""
     base_path, name = module_path
     try:
         module = __import__(base_path, globals(), locals(), [name])
@@ -37,8 +37,8 @@ def import_module(module_path: Tuple[str]):
     return vars(module)[name]
 
 
-def get_module(spec_or_module: Union[ModuleSpec, type], **additional_kwargs):
-    # If a module clas is already provided return it as is
+def get_module(spec_or_module: ModuleSpec | type, **additional_kwargs):
+    # If a module class is already provided return it as is
     if isinstance(spec_or_module, (type, types.FunctionType)):
         return spec_or_module
 
@@ -50,7 +50,7 @@ def get_module(spec_or_module: Union[ModuleSpec, type], **additional_kwargs):
     return import_module(spec_or_module.module)
 
 
-def build_module(spec_or_module: Union[ModuleSpec, type], *args, **kwargs):
+def build_module(spec_or_module: ModuleSpec | type, *args, **kwargs):
     # If the passed `spec_or_module` is
     # a `Function`, then return it as it is
     # NOTE: to support an already initialized module add the following condition
@@ -70,7 +70,9 @@ def build_module(spec_or_module: Union[ModuleSpec, type], *args, **kwargs):
     # itself is a class
     if isinstance(spec_or_module, type):
         module = spec_or_module
-    elif hasattr(spec_or_module, "module") and isinstance(spec_or_module.module, type):
+    elif hasattr(spec_or_module, "module") and isinstance(
+        spec_or_module.module, type
+    ):
         module = spec_or_module.module
     else:
         # Otherwise, dynamically import the module from the module path
@@ -85,17 +87,24 @@ def build_module(spec_or_module: Union[ModuleSpec, type], *args, **kwargs):
 
     # Add the `submodules` argument to the module init call if it exists in the
     # spec.
-    if hasattr(spec_or_module, "submodules") and spec_or_module.submodules is not None:
+    if (
+        hasattr(spec_or_module, "submodules")
+        and spec_or_module.submodules is not None
+    ):
         kwargs["submodules"] = spec_or_module.submodules
 
     try:
         return module(
-            *args, **spec_or_module.params if hasattr(spec_or_module, "params") else {}, **kwargs
+            *args,
+            **spec_or_module.params
+            if hasattr(spec_or_module, "params")
+            else {},
+            **kwargs,
         )
     except Exception as e:
         # improve the error message since we hide the module name in the line above
         import sys
 
-        raise type(e)(f"{str(e)} when instantiating {module.__name__}").with_traceback(
-            sys.exc_info()[2]
-        )
+        raise type(e)(
+            f"{e!s} when instantiating {module.__name__}"
+        ).with_traceback(sys.exc_info()[2])

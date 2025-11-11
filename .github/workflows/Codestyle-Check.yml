@@ -1,9 +1,9 @@
 name: Codestyle-Check
 
 on:
-  push:
   pull_request:
-  # branches: ["develop"]
+    branches:
+      - develop
 
 jobs:
   pre-commit:
@@ -21,12 +21,12 @@ jobs:
           ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 1000
 
-      # - name: Check bypass
-      #   id: check-bypass
-      #   uses: ./.github/actions/check-bypass
-      #   with:
-      #     github-token: ${{ secrets.GITHUB_TOKEN }}
-      #     workflow-name: codestyle
+      - name: Check bypass
+        id: check-bypass
+        uses: ./.github/actions/check-bypass
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          workflow-name: codestyle
 
       - name: Merge PR to test branch
         if: steps.check-bypass.outputs.can-skip != 'true'

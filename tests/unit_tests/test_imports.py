@@ -13,20 +13,20 @@
 # limitations under the License.
 
 
+import importlib
+import inspect
 import os
 import sys
 import traceback
-import inspect
-import importlib
+
 import paddle
 import wrapt
-
 
 from fleet.core.transformer.layer import FleetLayer
 
 
 def import_class_by_path(path: str):
-    paths = path.split('.')
+    paths = path.split(".")
     path = ".".join(paths[:-1])
     class_name = paths[-1]
     mod = __import__(path, fromlist=[class_name])
@@ -72,7 +72,7 @@ def _test_domain_module_imports(module, subdomains: list):
         basepath = module.__path__[0]
         fleet_index = basepath.rfind("fleet")
         basepath = basepath[fleet_index:].replace(os.path.sep, ".")
-        new_path = '.'.join([basepath, *subdomains])
+        new_path = ".".join([basepath, *subdomains])
 
         try:
             module = importlib.import_module(new_path)
@@ -100,7 +100,8 @@ def _test_domain_module_imports(module, subdomains: list):
     print()
     for module in failed_list:
         print(
-            "Module did not match a valid signature of fleet core Model (hence ignored):", module
+            "Module did not match a valid signature of fleet core Model (hence ignored):",
+            module,
         )
 
     print()
@@ -127,12 +128,11 @@ def _test_domain_module_imports(module, subdomains: list):
 def test_domain_core():
     from fleet import core
 
-    all_passed = _test_domain_module_imports(core, subdomains=['transformer'])
-
+    all_passed = _test_domain_module_imports(core, subdomains=["transformer"])
 
     if not all_passed:
-        exit(1)
+        sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_domain_core()

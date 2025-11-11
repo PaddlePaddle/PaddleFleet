@@ -15,8 +15,14 @@
 # Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Callable, ContextManager, Optional
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
 
 import paddle
 
@@ -34,7 +40,7 @@ class ModelParallelConfig:
     tensor_model_parallel_size: int = 1
     """Intra-layer model parallelism. Splits tensors across GPU ranks."""
 
-    pipeline_model_parallel_comm_backend: Optional[str] = None
+    pipeline_model_parallel_comm_backend: str = None
     """Configuring backend option of pipeline parallel communication (e.g., nccl, ucc)
        If None, the default backend will be used.
     """
@@ -42,7 +48,7 @@ class ModelParallelConfig:
     pipeline_model_parallel_size: int = 1
     """Inter-layer model parallelism. Splits transformer layers across GPU ranks."""
 
-    virtual_pipeline_model_parallel_size: Optional[int] = None
+    virtual_pipeline_model_parallel_size: int = None
     """Interleaved pipeline parallelism is used to improve performance by reducing the pipeline
        bubble.  Considers a transformer block as a list of smaller transformer (virtual) blocks.
        The number of virtual blocks per pipeline model parallel rank is the virtual model parallel
@@ -59,8 +65,8 @@ class ModelParallelConfig:
     context_parallel_size: int = 1
     """Splits network input along sequence dimension across GPU ranks."""
 
-    hierarchical_context_parallel_sizes: Optional[list[int]] = None
-    """Degrees of the hierarchical context parallelism. Users should provide a list to specify 
+    hierarchical_context_parallel_sizes: list[int] = None
+    """Degrees of the hierarchical context parallelism. Users should provide a list to specify
        the sizes for different levels. Taking the a2a+p2p cp comm type as example, it contains
        groups of two levels, so the first value of the list indicates the group size of the a2a
        communication type, and the second value indicates the group size of the p2p communication
@@ -70,7 +76,7 @@ class ModelParallelConfig:
     expert_model_parallel_size: int = 1
     """Distributes Moe Experts across sub data parallel dimension."""
 
-    expert_tensor_parallel_size: Optional[int] = None
+    expert_tensor_parallel_size: int = None
     """Intra-layer tensor model parallelsm for expert layer. Splits tensors across GPU ranks."""
 
     moe_extended_tp: bool = False
@@ -102,35 +108,35 @@ class ModelParallelConfig:
     """If true, train with bf16 mixed precision training."""
 
     params_dtype: paddle.dtype = paddle.float32
-    """dtype used when intializing the weights."""
+    """dtype used when initializing the weights."""
 
-    timers: Optional[Callable] = None
+    timers: Callable = None
     """Timers object to call for various timing functions. See megatron.core.timers.Timers"""
 
-    finalize_model_grads_func: Optional[Callable] = None
+    finalize_model_grads_func: Callable = None
     """Function that finalizes gradients on all workers. Could include ensuring that grads are
        all-reduced across data parallelism, pipeline parallelism, and sequence parallelism
        dimensions.
     """
 
-    grad_scale_func: Optional[Callable] = None
+    grad_scale_func: Callable = None
     """If using loss scaling, this function should take the loss and return the scaled loss. If
        None, no function is called on the loss.
     """
 
-    no_sync_func: Optional[Callable] = None
+    no_sync_func: Callable = None
     """Function that creates a context that suppresses asynchronous data-parallel communication. If
        the model is an instance of core.distributed.DistributedDataParallel, the default is to use
        core.distributed.DistributedDataParallel.no_sync.
     """
 
-    grad_sync_func: Optional[Callable] = None
+    grad_sync_func: Callable = None
     """Function that launches asynchronous gradient reductions (e.g. distributed optimizer gradient
        reduce-scatters). The function should take one argument: an iterable of parameters whose
        gradients are to be synchronized.
     """
 
-    param_sync_func: Optional[Callable] = None
+    param_sync_func: Callable = None
     """Function that launches asynchronous parameter synchronizations (e.g. distributed optimizer
        parameter all-gathers). The function should take one argument: an iterable of parameters to
        be synchronized.
@@ -143,10 +149,10 @@ class ModelParallelConfig:
     enable_autocast: bool = False
     """If true runs the forward step function inside paddle.amp.autocast context."""
 
-    autocast_dtype: Optional[paddle.dtype] = None
+    autocast_dtype: paddle.dtype = None
     """dtype to pass to paddle.amp.autocast when enabled. If None, is set to pipeline_dtype."""
 
-    num_microbatches_with_partial_activation_checkpoints: Optional[int] = None
+    num_microbatches_with_partial_activation_checkpoints: int = None
     """If int, set the number of microbatches where not all of the layers will be checkpointed and
        recomputed. The rest of the microbatches within the window of maximum outstanding
        microbatches will recompute all layers (either full recompute or selective recompute). If
@@ -232,7 +238,7 @@ class ModelParallelConfig:
        Defaults to False.
     """
 
-    cross_entropy_fusion_impl: str = 'native'
+    cross_entropy_fusion_impl: str = "native"
     """If 'native', MCore based CE loss fusion is used, if 'te', Parallel CE loss
        from Transformer Engine library is used. Defaults to 'native'.
     """
@@ -247,7 +253,7 @@ class ModelParallelConfig:
        If true, the AllGather -> Gemm overlap for FC1 layer of MLP gets disabled
     """
 
-    tp_comm_bootstrap_backend: str = 'nccl'
+    tp_comm_bootstrap_backend: str = "nccl"
     """
        Set the bootstrapping backend out of 'nccl', 'mpi', and 'gloo'
     """
@@ -298,29 +304,29 @@ class ModelParallelConfig:
        Defaults to 0, which means all micro-batches are deferred.
     """
 
-    pipeline_model_parallel_split_rank: Optional[int] = None
+    pipeline_model_parallel_split_rank: int = None
     """If int, rank where encoder and decoder should be split in cases where the model has both an
        encoder and decoder (e.g., T5). Ignored if None.
     """
 
     overlap_p2p_comm_warmup_flush: bool = False
     """If true, overlap communication and computation in warm up and flush phase.
-       Only valid when overlap_p2p_comm is True and batch_p2p_comm is False. 
+       Only valid when overlap_p2p_comm is True and batch_p2p_comm is False.
        Defaults to False.
     """
 
-    microbatch_group_size_per_vp_stage: Optional[int] = None
-    """This value specifies the number of micro-batches that are executed 
+    microbatch_group_size_per_vp_stage: int = None
+    """This value specifies the number of micro-batches that are executed
        at a time for a given virtual stage (both forward and backward).
-       Default (in __post_init__() method below) to pipeline_parallel_size 
+       Default (in __post_init__() method below) to pipeline_parallel_size
        which specifies a depth-first schedule.
-       Example: for PP=2 VP=2, when microbatch_group_size_per_vp_stage=2, 
-       num_microbatches = 4, we have 
+       Example: for PP=2 VP=2, when microbatch_group_size_per_vp_stage=2,
+       num_microbatches = 4, we have
        rank 0 | 0 1 0 1 2 3 2 3
        rank 1 |   0 1 0 1 2 3 2 3
-       When microbatch_group_size_per_vp_stage=3, num_microbatches = 5, 
+       When microbatch_group_size_per_vp_stage=3, num_microbatches = 5,
        we have
-       rank 0 | 0 1 2 0 1 2 3 4 3 4 
+       rank 0 | 0 1 2 0 1 2 3 4 3 4
        rank 1 |   0 1 2 0 1 2 3 4 3 4
     """
 
@@ -336,7 +342,7 @@ class ModelParallelConfig:
     cpu_offloading_num_layers: int = 0
     """Tells the number of transformer layers for which activations has to be offloaded."""
 
-    _cpu_offloading_context: Optional[ContextManager] = (
+    _cpu_offloading_context: AbstractContextManager = (
         None
         # Used for internal use only, not to be set by a user.
         # TODO: Need to move to the 'right' place when possible.
@@ -365,7 +371,9 @@ class ModelParallelConfig:
         """
         if self.sequence_parallel:
             if self.tensor_model_parallel_size <= 1:
-                raise ValueError("Can not use sequence paralllelism without tensor parallelism")
+                raise ValueError(
+                    "Can not use sequence paralllelism without tensor parallelism"
+                )
 
         if self.expert_tensor_parallel_size is None:
             self.expert_tensor_parallel_size = self.tensor_model_parallel_size
@@ -379,12 +387,18 @@ class ModelParallelConfig:
         if self.autocast_dtype is None:
             self.autocast_dtype = self.params_dtype
 
-        if self.defer_embedding_wgrad_compute and self.pipeline_model_parallel_size == 1:
+        if (
+            self.defer_embedding_wgrad_compute
+            and self.pipeline_model_parallel_size == 1
+        ):
             raise ValueError(
                 "Cannot defer embedding wgrad compute when pipeline model parallel is not used"
             )
 
-        if self.defer_embedding_wgrad_compute and not self.gradient_accumulation_fusion:
+        if (
+            self.defer_embedding_wgrad_compute
+            and not self.gradient_accumulation_fusion
+        ):
             raise ValueError(
                 "Cannot defer embedding wgrad compute when gradient accumulation fusion is not used"
             )
@@ -394,7 +408,10 @@ class ModelParallelConfig:
                 "Wgrad deferral limit should be greater than or equal to 0 when it is enabled!"
             )
 
-        if self.expert_model_parallel_size > 1 and self.tensor_model_parallel_size > 1:
+        if (
+            self.expert_model_parallel_size > 1
+            and self.tensor_model_parallel_size > 1
+        ):
             if self.sequence_parallel is False:
                 raise ValueError(
                     "When using expert parallelism and tensor parallelism, "
@@ -402,7 +419,9 @@ class ModelParallelConfig:
                 )
 
         if self.microbatch_group_size_per_vp_stage is None:
-            self.microbatch_group_size_per_vp_stage = self.pipeline_model_parallel_size
+            self.microbatch_group_size_per_vp_stage = (
+                self.pipeline_model_parallel_size
+            )
 
         if self.overlap_p2p_comm_warmup_flush:
             if not self.overlap_p2p_comm or self.batch_p2p_comm:

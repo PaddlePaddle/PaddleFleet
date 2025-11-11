@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Refered to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
+# Referred to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reservede
 
-from typing import List, Sequence
+from collections.abc import Sequence
 
 import paddle
 import paddle.distributed as dist
@@ -23,13 +23,14 @@ import paddle.distributed as dist
 from ..utils import (
     divide,
     get_tensor_model_parallel_group_if_none,
-    is_torch_min_version,
 )
 
 
 def split_tensor_along_last_dim(
-    tensor: paddle.Tensor, num_partitions: int, contiguous_split_chunks: bool = False
-) -> List[paddle.Tensor]:
+    tensor: paddle.Tensor,
+    num_partitions: int,
+    contiguous_split_chunks: bool = False,
+) -> list[paddle.Tensor]:
     """Split a tensor along its last dimension.
 
     Args:
@@ -44,7 +45,9 @@ def split_tensor_along_last_dim(
     # Get the size and dimension.
     last_dim = tensor.ndim() - 1
     last_dim_size = divide(tensor.size()[last_dim], num_partitions)
-    assert last_dim_size % num_partitions == 0, f"{last_dim_size} is not divisible by {num_partitions}."
+    assert last_dim_size % num_partitions == 0, (
+        f"{last_dim_size} is not divisible by {num_partitions}."
+    )
 
     tensor_list = paddle.split(tensor, num_partitions, dim=last_dim)
     # Note: torch.split does not create contiguous tensors by default.
@@ -94,11 +97,13 @@ def gather_split_1d_tensor(tensor, tp_group=None):
     Args:
         tensor: A Tensor or view of this rank's portion of the data.
     """
-    assert tensor.ndim() == 1, f"Input tensor's rank should be 1, but got {tensor.ndim()}"
+    assert tensor.ndim() == 1, (
+        f"Input tensor's rank should be 1, but got {tensor.ndim()}"
+    )
     tp_group = get_tensor_model_parallel_group_if_none(tp_group)
     numel_gathered = paddle.numel(tensor) * tp_group.world_size
     gathered = paddle.empty(
-        [numel_gathered], dtype=tensor.dtype, stop_gradient=True 
+        [numel_gathered], dtype=tensor.dtype, stop_gradient=True
     )
 
     dist.stream.all_gather(gathered, tensor, tp_group)

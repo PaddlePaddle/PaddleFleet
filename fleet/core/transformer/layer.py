@@ -13,12 +13,12 @@
 # limitations under the License.
 
 import paddle
+
 from fleet.core.transformer.transformer_config import TransformerConfig
 
 
-
 class FleetLayer(paddle.nn.Layer):
-    """Base Fleet Layer inhertied by all Models.
+    """Base Fleet Layer inherited by all Models.
     Args:
         config (TransformerConfig): Transformer config
     """

@@ -12,16 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import paddle
-import warnings
 from dataclasses import dataclass
+
 from ..fleet_config import FleetConfig
 
 
 @dataclass
 class TransformerConfig(FleetConfig):
-    """Configuration object for  transformers.
-    """
+    """Configuration object for  transformers."""
 
     ####################
     # model architecture

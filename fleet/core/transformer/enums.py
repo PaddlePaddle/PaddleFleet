@@ -61,4 +61,3 @@ class AttnBackend(enum.Enum):
     unfused = 3
     local = 4
     auto = 5
-

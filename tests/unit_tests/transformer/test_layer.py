@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
+import unittest
+
 import paddle
 
 from fleet.core.transformer.layer import FleetLayer
 from fleet.core.transformer.transformer_config import TransformerConfig
 
-import unittest
 
 class DummyLayer(FleetLayer):
     def __init__(self, config: TransformerConfig):
@@ -31,7 +31,6 @@ class DummyLayer(FleetLayer):
 
 
 class TestFleetLayer(unittest.TestCase):
-
     def setUp(self):
         transformer_config = TransformerConfig(
             num_layers=2, hidden_size=12, num_attention_heads=4

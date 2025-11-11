@@ -16,9 +16,9 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reservede
 
 import paddle
+import torch
 
 from ..utils import get_tensor_model_parallel_group_if_none
-
 
 _MAX_DATA_DIM = 5
 
@@ -26,10 +26,9 @@ _MAX_DATA_DIM = 5
 def _check_data_types(keys, data, target_dtype):
     """Check that all the keys have the same target data type."""
     for key in keys:
-        assert (
-            data[key].dtype == target_dtype
-        ), '{} has data type {} which ' 'is different than {}'.format(
-            key, data[key].dtype, target_dtype
+        assert data[key].dtype == target_dtype, (
+            f"{key} has data type {data[key].dtype} which "
+            f"is different than {target_dtype}"
         )
 
 
@@ -43,7 +42,7 @@ def _build_key_size_numel_dictionaries(keys, data, tp_group=None):
     if tp_group.rank() == 0:
         offset = 0
         for key in keys:
-            assert data[key].dim() < max_dim, 'you should increase MAX_DATA_DIM'
+            assert data[key].dim() < max_dim, "you should increase MAX_DATA_DIM"
             size = data[key].size()
             for i, s in enumerate(size):
                 sizes[i + offset] = s
@@ -82,7 +81,7 @@ def broadcast_data(keys, data, datatype, tp_group=None):
     members of the same model parallel group.
 
     Args:
-        keys: list of keys in the data disctionary to be broadcasted
+        keys: list of keys in the data dictionary to be broadcasted
         data: data dictionary of string keys and cpu tensor values.
         datatype: torch data type of all tensors in data associated
                   with keys.
@@ -90,16 +89,22 @@ def broadcast_data(keys, data, datatype, tp_group=None):
     """
     # Build (key, size) and (key, number of elements) dictionaries along
     # with the total number of elements on all ranks.
-    key_size, key_numel, total_numel = _build_key_size_numel_dictionaries(keys, data)
+    key_size, key_numel, total_numel = _build_key_size_numel_dictionaries(
+        keys, data
+    )
     tp_group = get_tensor_model_parallel_group_if_none(tp_group)
     # Pack on rank zero.
     if tp_group.rank() == 0:
         # Check that all keys have the same data type.
         _check_data_types(keys, data, datatype)
         # Flatten the data associated with the keys
-        flatten_data = paddle.concat([data[key].cuda().contiguous().view(-1) for key in keys], dim=0)
+        flatten_data = paddle.concat(
+            [data[key].cuda().contiguous().view(-1) for key in keys], dim=0
+        )
     else:
-        flatten_data = paddle.empty(total_numel, device=torch.cuda.current_device(), dtype=datatype)
+        flatten_data = paddle.empty(
+            total_numel, device=torch.cuda.current_device(), dtype=datatype
+        )
 
     # Broadcast
     group_ranks = tp_group.ranks

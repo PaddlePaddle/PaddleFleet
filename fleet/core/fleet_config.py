@@ -12,12 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
 from dataclasses import dataclass
-from typing import Callable, ContextManager, Optional
 
 
 @dataclass
 class FleetConfig:
-    """Base configuration for Fleet Core.
-    """
+    """Base configuration for Fleet Core."""
