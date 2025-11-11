@@ -21,18 +21,18 @@ jobs:
           ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 1000
 
+      - name: Merge PR to test branch
+        if: steps.check-bypass.outputs.can-skip != 'true'
+        run: |
+          git fetch origin pull/${PR_ID}/merge
+          git checkout -b test FETCH_HEAD
+
       - name: Check bypass
         id: check-bypass
         uses: ./.github/actions/check-bypass
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           workflow-name: codestyle
-
-      - name: Merge PR to test branch
-        if: steps.check-bypass.outputs.can-skip != 'true'
-        run: |
-          git fetch origin pull/${PR_ID}/merge
-          git checkout -b test FETCH_HEAD
 
       - name: Setup python3.12
         if: steps.check-bypass.outputs.can-skip != 'true'
