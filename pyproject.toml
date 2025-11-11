@@ -1,0 +1,141 @@
+[tool.ruff]
+exclude = [
+]
+line-length = 80
+target-version = "py39"
+
+[tool.ruff.format]
+
+[tool.ruff.lint]
+select = [
+    # Pycodestyle
+    "E",
+    "W",
+
+    # Pyflakes
+    "F",
+
+    # Isort
+    "I",
+
+    # Comprehensions
+    "C4",
+
+    # Debugger
+    "T100",
+
+    # Pyupgrade
+    "UP",
+
+    # Flake8-pyi
+    "PYI",
+
+    # NumPy-specific rules
+    "NPY001",
+    "NPY003",
+    "NPY201",
+
+    # Bugbear
+    "B002",
+    "B003",
+    "B004",
+    "B005",
+    "B009",
+    "B010",
+    "B011",
+    "B012",
+    "B013",
+    "B014",
+    "B015",
+    "B016",
+    "B017",
+    "B018",
+    "B019",
+    "B020",
+    "B021",
+    "B022",
+    "B025",
+    "B029",
+    "B032",
+
+    # Pylint
+    "PLE",
+    "PLC3002",
+    "PLR0206",
+    "PLR0402",
+    "PLR1711",
+    "PLR1722",
+    "PLW3301",
+
+    # Flake8-simplify
+    "SIM101",
+    "SIM117",
+
+    # Pygrep-hooks
+    "PGH004",
+
+    # Flake8-type-checking
+    "TC",
+
+    # Ruff-specific rules
+    "RUF005",
+    "RUF008",
+    "RUF009",
+    "RUF010",
+    "RUF013",
+    "RUF015",
+    "RUF016",
+    "RUF017",
+    "RUF018",
+    "RUF019",
+    "RUF020",
+    "RUF024",
+    "RUF026",
+    "RUF100",
+
+    # Flake8-raise
+    "RSE",
+
+    # Flake8-quotes
+    "Q003",
+    "Q004",
+
+    # Refurb
+    "FURB",
+
+    # Flake8-future-annotations
+    "FA",
+]
+unfixable = [
+    "NPY001"
+]
+ignore = [
+    # Whitespace before ‘,’, ‘;’, or ‘:’, it is not compatible with ruff format
+    "E203",
+    # Module level import not at top of file
+    "E402",
+    # Line too long (82 > 79 characters)
+    "E501",
+    # Do not compare types, use `isinstance()`
+    "E721",
+    # Do not use bare except, specify exception instead
+    "E722",
+    # Do not assign a lambda expression, use a def
+    "E731",
+    # Do not use variables named ‘l’, ‘O’, or ‘I’
+    "E741",
+    # `name` may be undefined, or defined from star imports: `module`
+    "F405",
+    # Local variable name is assigned to but never used
+    "F841",
+    # It not met the "Explicit is better than implicit" rule
+    "UP015",
+    # collections.namedtuple can be quickly created a inlined class
+    "PYI024",
+    # `__all__.append` is a common pattern in Paddle
+    "PYI056",
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["fleet"]
