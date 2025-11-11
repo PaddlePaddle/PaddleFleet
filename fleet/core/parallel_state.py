@@ -1,5 +1,9 @@
-import paddle.distributed.fleet.base.topology as tp
-from typing import Union
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import paddle.distributed.fleet.base.topology as tp
 
 # Intra-layer model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
@@ -23,7 +27,10 @@ _CONTEXT_PARALLEL_GROUP = None
 # Data parallel group information with context parallel combined.
 _DATA_PARALLEL_GROUP_WITH_CP = None
 
-def intialize_model_parallel(hcg: Union[tp.EPHybridCommunicateGroup, tp.HybridCommunicateGroup]):
+
+def initialize_model_parallel(
+    hcg: tp.EPHybridCommunicateGroup | tp.HybridCommunicateGroup,
+):
     global _TENSOR_MODEL_PARALLEL_GROUP
     global _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS
     _TENSOR_MODEL_PARALLEL_GROUP = hcg._mp_comm_group
@@ -40,7 +47,6 @@ def intialize_model_parallel(hcg: Union[tp.EPHybridCommunicateGroup, tp.HybridCo
     _EXPERT_MODEL_PARALLEL_GROUP = hcg._ep_comm_group
     _EXPERT_DATA_PARALLEL_GROUP = hcg._moe_sharding_comm_group
 
-
     global _CONTEXT_PARALLEL_GROUP
     global _DATA_PARALLEL_GROUP_WITH_CP
     _CONTEXT_PARALLEL_GROUP = hcg._cp_comm_group
@@ -50,58 +56,57 @@ def intialize_model_parallel(hcg: Union[tp.EPHybridCommunicateGroup, tp.HybridCo
 def get_tensor_model_parallel_group(check_initialized=True):
     """Get the tensor-model-parallel group the caller rank belongs to."""
     if check_initialized:
-        assert (
-            _TENSOR_MODEL_PARALLEL_GROUP is not None
-        ), "tensor model parallel group is not initialized"
+        assert _TENSOR_MODEL_PARALLEL_GROUP is not None, (
+            "tensor model parallel group is not initialized"
+        )
     return _TENSOR_MODEL_PARALLEL_GROUP
 
 
 def get_pipeline_model_parallel_group(check_initialized=True):
     """Get the pipeline-model-parallel group the caller rank belongs to."""
     if check_initialized:
-        assert (
-            _PIPELINE_MODEL_PARALLEL_GROUP is not None
-        ), "pipeline_model parallel group is not initialized"
+        assert _PIPELINE_MODEL_PARALLEL_GROUP is not None, (
+            "pipeline_model parallel group is not initialized"
+        )
     return _PIPELINE_MODEL_PARALLEL_GROUP
 
 
 def get_data_parallel_group(with_context_parallel=False):
     """Get the data-parallel group the caller rank belongs to."""
     if with_context_parallel:
-        assert (
-            _DATA_PARALLEL_GROUP_WITH_CP is not None
-        ), "data parallel group with context parallel combined is not initialized"
+        assert _DATA_PARALLEL_GROUP_WITH_CP is not None, (
+            "data parallel group with context parallel combined is not initialized"
+        )
         return _DATA_PARALLEL_GROUP_WITH_CP
     else:
-        assert _DATA_PARALLEL_GROUP is not None, "data parallel group is not initialized"
+        assert _DATA_PARALLEL_GROUP is not None, (
+            "data parallel group is not initialized"
+        )
         return _DATA_PARALLEL_GROUP
 
 
 def get_expert_model_parallel_group(check_initialized=True):
     """Get the expert-model-parallel group the caller rank belongs to."""
     if check_initialized:
-        assert (
-            _EXPERT_MODEL_PARALLEL_GROUP is not None
-        ), "expert model parallel group is not initialized"
+        assert _EXPERT_MODEL_PARALLEL_GROUP is not None, (
+            "expert model parallel group is not initialized"
+        )
     return _EXPERT_MODEL_PARALLEL_GROUP
 
 
 def get_expert_data_parallel_group(check_initialized=True):
     """Get expert data parallel group."""
     if check_initialized:
-        assert (
-            _EXPERT_DATA_PARALLEL_GROUP is not None
-        ), "Expert data parallel group is not initialized"
+        assert _EXPERT_DATA_PARALLEL_GROUP is not None, (
+            "Expert data parallel group is not initialized"
+        )
     return _EXPERT_DATA_PARALLEL_GROUP
 
-def get_context_parallel_group(check_initialized=True):
-    """Get the context-parallel group the caller rank belongs to."""
-    if check_initialized:
-        assert _CONTEXT_PARALLEL_GROUP is not None, "context parallel group is not initialized"
-    return _CONTEXT_PARALLEL_GROUP
 
 def get_context_parallel_group(check_initialized=True):
     """Get the context-parallel group the caller rank belongs to."""
     if check_initialized:
-        assert _CONTEXT_PARALLEL_GROUP is not None, "context parallel group is not initialized"
+        assert _CONTEXT_PARALLEL_GROUP is not None, (
+            "context parallel group is not initialized"
+        )
     return _CONTEXT_PARALLEL_GROUP

@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field, fields
 from functools import partial
-from typing import List, Optional
+from typing import TYPE_CHECKING
 
-import paddle
+if TYPE_CHECKING:
+    import paddle
 
 from fleet.core import parallel_state
 
@@ -65,14 +68,13 @@ class ProcessGroupCollection:
             else:
                 raise ValueError(f"Unknown attribute: {key}")
 
-    
     @classmethod
-    def use_mpu_process_groups(cls, required_pgs: Optional[List[str]] = None):
+    def use_mpu_process_groups(cls, required_pgs: list[str] | None = None):
         """
         Use the default process groups from parallel_state.
 
         Args:
-            required_pgs (List[str], optional): List of process group names to initialize.
+            required_pgs (list[str], optional): List of process group names to initialize.
                 If None, pull all default process groups. Each string should correspond to
                 one of the dataclass process group attributes.
         """
@@ -90,23 +92,37 @@ class ProcessGroupCollection:
 
         # Mapping of attribute names to their initialization functions
         pg_to_func = {
-            'tp': partial(parallel_state.get_tensor_model_parallel_group, check_initialized=False),
-            'pp': partial(
-                parallel_state.get_pipeline_model_parallel_group, check_initialized=False
+            "tp": partial(
+                parallel_state.get_tensor_model_parallel_group,
+                check_initialized=False,
             ),
-            'cp': partial(parallel_state.get_context_parallel_group, check_initialized=False),
-            'ep': partial(parallel_state.get_expert_model_parallel_group, check_initialized=False),
-            'dp': parallel_state.get_data_parallel_group,
-            'dp_cp': partial(parallel_state.get_data_parallel_group, with_context_parallel=True),
-            'expt_dp': partial(
-                parallel_state.get_expert_data_parallel_group, check_initialized=False
+            "pp": partial(
+                parallel_state.get_pipeline_model_parallel_group,
+                check_initialized=False,
+            ),
+            "cp": partial(
+                parallel_state.get_context_parallel_group,
+                check_initialized=False,
+            ),
+            "ep": partial(
+                parallel_state.get_expert_model_parallel_group,
+                check_initialized=False,
+            ),
+            "dp": parallel_state.get_data_parallel_group,
+            "dp_cp": partial(
+                parallel_state.get_data_parallel_group,
+                with_context_parallel=True,
+            ),
+            "expt_dp": partial(
+                parallel_state.get_expert_data_parallel_group,
+                check_initialized=False,
             ),
         }
 
-        assert all(
-            pg in pg_to_func for pg in required_pgs
-        ), f"Initialization function for process group not defined for all \
+        assert all(pg in pg_to_func for pg in required_pgs), (
+            "Initialization function for process group not defined for all \
         ProcessGroupCollection fields"
+        )
 
         # Build initialization dict by calling appropriate parallel_state get_foo_group
         init_dict = {pg: pg_to_func[pg]() for pg in required_pgs}
