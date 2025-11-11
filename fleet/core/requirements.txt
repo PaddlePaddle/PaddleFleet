@@ -1,2 +1,0 @@
-wrapt
-paddlepaddle==3.2.1

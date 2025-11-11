@@ -1,0 +1,94 @@
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[project]
+name = "fleet-core"
+dynamic = ["version", "readme"]
+description = "Fleet Core - Core Functional Library for Large Scale Distributed Training"
+requires-python = ">=3.10"
+license = { text = "Apache 2.0" }
+authors = [{ name = "PaddlePaddle", email = "Paddle-better@baidu.comm" }]
+maintainers = [{ name = "PaddlePaddle", email = "Paddle-better@baidu.com" }]
+keywords = [
+    "PaddlePaddle",
+    "Paddle",
+    "deep",
+    "gpu",
+    "language",
+    "learning",
+    "learning",
+    "machine",
+    "Nlp",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = ["wrapt", "paddlepaddle-gpu==3.2.1"]
+
+[project.urls]
+Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
+Homepage = "https://github.com/PaddlePaddle/PaddleFleet/fleet/core"
+
+[project.optional-dependencies]
+
+
+[build-system]
+requires = ["setuptools>=61.0.0,<80.0.0", "pybind11", "packaging>=24.2"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["fleet.core", "fleet.core.*"]
+exclude = ["tests", "docs", "examples", "build"]
+
+[tool.setuptools.dynamic]
+version = { attr = "fleet.core.package_info.__version__" }
+readme = { file = "README.md", content-type = "text/markdown" }
+
+[dependency-groups]
+test = [
+    "matplotlib",
+    "pytest",
+    "pyyaml",
+]
+build = [
+    "setuptools<80.0.0",
+    "packaging>=24.2"
+]
+linting = [
+    "ruff~=0.9.0",
+]
+ci = ["python-gitlab", "slack-sdk", "pandas"]
+
+[tool.uv]
+default-groups = ["build", "test"]
+link-mode = "copy"
+extra-index-url = ["https://www.paddlepaddle.org.cn/packages/stable/cu129/"]
+index-strategy = "unsafe-best-match"
