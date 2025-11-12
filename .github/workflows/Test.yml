@@ -63,6 +63,8 @@ jobs:
         continue-on-error: true
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
+          rm -rf * .[^.]*
+          set -e
           source /paddle/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
