@@ -70,6 +70,7 @@ jobs:
           git config pull.rebase false
           git pull origin pull/${PR_ID}/head
           pip install uv
+          uv sync > /dev/null
           '
 
       - name: Single card test
@@ -78,6 +79,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           uv run pytest tests/single_card_tests
+          echo $?
           '
 
       - name: Multi-card test

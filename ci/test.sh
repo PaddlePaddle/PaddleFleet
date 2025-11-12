@@ -29,10 +29,12 @@ done
 echo "======================================"
 if [ ${#failed_tests[@]} -eq 0 ]; then
     echo "All multi-card tests passed!"
+    echo "======================================"
 else
     echo "Some multi-card tests failed:"
     for fail in "${failed_tests[@]}"; do
-        echo " - $fail"
+        echo "::error:: - $fail"
     done
+    echo "======================================"
+    exit 1
 fi
-echo "======================================"
