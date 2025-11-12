@@ -17,15 +17,15 @@ import unittest
 
 import paddle
 
-from fleet.core.timers import DummyTimer, Timers
+from fleet.core import Timers
+from fleet.core.timers import DummyTimer
 from fleet.training.initialize import initialize_fleet
+
+strategy = paddle.distributed.fleet.DistributedStrategy()
+initialize_fleet(strategy=strategy)
 
 
 class TestTimers(unittest.TestCase):
-    def setUp(self):
-        strategy = paddle.distributed.fleet.DistributedStrategy()
-        initialize_fleet(strategy=strategy)
-
     def test_dummy_timer(self):
         timers = Timers(log_level=1, log_option="max")
         timer = timers("test_timer", log_level=2)
