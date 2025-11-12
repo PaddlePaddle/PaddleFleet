@@ -23,7 +23,7 @@ approval_line=`curl -H "Authorization: token ${GITHUB_TOKEN}" https://api.github
 echo approval_line:$approval_line
 git_files=`git diff --numstat upstream/$BRANCH| wc -l`
 git_count=`git diff --numstat upstream/$BRANCH| awk '{sum+=$1}END{print sum}'`
-failed_num=0
+failed_num=1
 echo_list=()
 
 
@@ -64,9 +64,22 @@ CODESTYLE_FILES=(
 for FILE in "${CODESTYLE_FILES[@]}"; do
     HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "^${FILE}" || true)
     if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
-        echo_line="You must be approved by ${CODESTYLE_APPROVERS} for changes in ${FILE}.\n"
+        echo_line="You must be approved by one of ${CODESTYLE_APPROVERS} for changes in ${FILE}.\n"
         APPROVER_LIST=(${CODESTYLE_APPROVERS})
         check_approval 1 "${APPROVER_LIST[@]}"
+    fi
+done
+
+
+CHECKTORCH_APPROVERS="From00"
+files=$(git diff --name-only upstream/$BRANCH)
+for file in $files; do
+    if [ -f "$file" ]; then
+        if grep -q 'torch' "$file"; then
+            echo_line="You must be approved by one of ${CHECKTORCH_APPROVERS} for changes in ${file} which include "torch".\n"
+            APPROVER_LIST=(${CHECKTORCH_APPROVERS})
+            check_approval 1 "${APPROVER_LIST[@]}"
+        fi
     fi
 done
 
