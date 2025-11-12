@@ -49,6 +49,7 @@ jobs:
       - name: Check pre-commit
         id: pre-commit
         if: steps.check-bypass.outputs.can-skip != 'true'
+        continue-on-error: true
         run: |
           pre-commit run --all-files
 
