@@ -86,7 +86,7 @@ done
 if [ -n "${echo_list}" ];then
   echo "****************"
   echo -e "${echo_list[@]}"
-  echo "There are ${failed_num} approved errors."
+  echo "There are `expr $failed_num + 1` approved errors."
   echo "****************"
 fi
 
