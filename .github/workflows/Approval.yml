@@ -24,7 +24,6 @@ jobs:
 
       - name: Update PaddleFleet repo
         run: |
-          python --version
           git switch -c test
           git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git
           git fetch upstream $BRANCH
@@ -39,13 +38,6 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           workflow-name: approval
-
-      - name: Setup python3.10
-        if: steps.check-bypass.outputs.can-skip != 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
 
       - name: Display Required Approvers
         if: steps.check-bypass.outputs.can-skip != 'true'

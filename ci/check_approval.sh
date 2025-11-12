@@ -19,7 +19,8 @@ fi
 PADDLE_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}")/../" && pwd )"
 # If you want to add monitoring file modifications, please perform the. github/CODEOWNERS operation
 
-approval_line=`curl -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/PaddlePaddle/Paddle/pulls/${PR_ID}/reviews?per_page=10000`
+approval_line=`curl -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/PaddlePaddle/PaddleFleet/pulls/${PR_ID}/reviews?per_page=10000`
+echo approval_line:$approval_line
 git_files=`git diff --numstat upstream/$BRANCH| wc -l`
 git_count=`git diff --numstat upstream/$BRANCH| awk '{sum+=$1}END{print sum}'`
 failed_num=0
