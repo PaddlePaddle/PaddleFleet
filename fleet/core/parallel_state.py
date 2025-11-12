@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import paddle.distributed.fleet.base.topology as tp
+import warnings
 
 # Intra-layer model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
@@ -25,6 +26,10 @@ _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = None
 
 # Inter-layer model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
+_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+
+_VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
+_VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
 
 # Data parallel group that the current rank belongs to.
 _DATA_PARALLEL_GROUP = None
@@ -44,6 +49,7 @@ _DATA_PARALLEL_GROUP_WITH_CP = None
 
 def initialize_model_parallel(
     hcg: tp.EPHybridCommunicateGroup | tp.HybridCommunicateGroup,
+    virtual_pipeline_model_parallel_size: int | None,
 ):
     global _TENSOR_MODEL_PARALLEL_GROUP
     global _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS
@@ -65,6 +71,18 @@ def initialize_model_parallel(
     global _DATA_PARALLEL_GROUP_WITH_CP
     _CONTEXT_PARALLEL_GROUP = hcg._cp_comm_group
     _DATA_PARALLEL_GROUP_WITH_CP = hcg._cp_sharding_comm_group
+
+    if virtual_pipeline_model_parallel_size is not None:
+        if not hcg._pp_comm_group.nranks > 1:
+            raise RuntimeError(
+                "pipeline-model-parallel size should be greater than 1 with interleaved schedule"
+            )
+        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
+        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+        _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = 0
+        _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = (
+            virtual_pipeline_model_parallel_size
+        )
 
 
 def get_tensor_model_parallel_group(check_initialized=True):
@@ -124,3 +142,40 @@ def get_context_parallel_group(check_initialized=True):
             "context parallel group is not initialized"
         )
     return _CONTEXT_PARALLEL_GROUP
+
+
+def get_pipeline_model_parallel_world_size():
+    """Return world size for the pipeline-model-parallel group."""
+    global _PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+    if _PIPELINE_MODEL_PARALLEL_WORLD_SIZE is not None:
+        return _PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+    return get_pipeline_model_parallel_group().nranks
+
+
+def set_pipeline_model_parallel_world_size(world_size):
+    """Set the pipeline-model-parallel size"""
+    global _PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+    _PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
+
+
+def get_virtual_pipeline_model_parallel_rank():
+    """Return the virtual pipeline-parallel rank."""
+    global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
+    return _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
+
+
+def set_virtual_pipeline_model_parallel_rank(rank):
+    """Set the virtual pipeline-parallel rank."""
+    warnings.warn(
+        "set_virtual_pipeline_model_parallel_rank in global scope is deprecated. "
+        "Pass vp_stage explicitly to is_pipeline_first_stage, is_pipeline_last_stage, etc.",
+        DeprecationWarning,
+    )
+    global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
+    _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = rank
+
+
+def get_virtual_pipeline_model_parallel_world_size():
+    """Return the virtual pipeline-parallel world size."""
+    global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+    return _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
