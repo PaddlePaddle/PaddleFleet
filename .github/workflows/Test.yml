@@ -68,6 +68,7 @@ jobs:
           source /utils/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
+          git config pull.rebase false
           git pull origin pull/${PR_ID}/head
           pip install uv
           '
