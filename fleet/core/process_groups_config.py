@@ -36,10 +36,10 @@ class ProcessGroupCollection:
         tp: Tensor parallel process group
         pp: Pipeline parallel process group
         cp: Context parallel process group
-        ep: Expert model parallel group
+        ep: Expert model parallel process group
         dp: Data parallel process group
-        dp_cp: Data and context parallel group
-        expt_dp: Expert data parallel group
+        cp_dp: context data parallel process group
+        expt_dp: Expert data parallel process group
 
     Example:
         # Create instance and set needed process groups
@@ -70,7 +70,7 @@ class ProcessGroupCollection:
     dp: paddle.distributed.communication.group.Group = field(init=False)
 
     # _DATA_PARALLEL_GROUP_WITH_CP
-    dp_cp: paddle.distributed.communication.group.Group = field(init=False)
+    cp_dp: paddle.distributed.communication.group.Group = field(init=False)
 
     # _EXPERT_DATA_PARALLEL_GROUP
     expt_dp: paddle.distributed.communication.group.Group = field(init=False)
@@ -123,7 +123,7 @@ class ProcessGroupCollection:
                 check_initialized=False,
             ),
             "dp": parallel_state.get_data_parallel_group,
-            "dp_cp": partial(
+            "cp_dp": partial(
                 parallel_state.get_data_parallel_group,
                 with_context_parallel=True,
             ),
