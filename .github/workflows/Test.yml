@@ -60,7 +60,6 @@ jobs:
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
-        continue-on-error: true
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           rm -rf * .[^.]*
