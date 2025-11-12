@@ -1,4 +1,4 @@
-name: Codestyle-Check
+name: Codestyle Check
 
 on:
   pull_request:
