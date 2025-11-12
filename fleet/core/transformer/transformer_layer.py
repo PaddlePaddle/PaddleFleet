@@ -284,7 +284,6 @@ class TransformerLayer(paddle.nn.Layer):
         )
 
         # [Layer 1: Input Layernorm] Optional Layernorm on the input data
-        # TODO: add pytorch only layernorm
         self.input_layernorm = build_layer(
             sublayers.input_layernorm,
             config=self.config,
