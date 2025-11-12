@@ -70,7 +70,7 @@ jobs:
           git config pull.rebase false
           git pull origin pull/${PR_ID}/head
           pip install uv
-          uv sync > /dev/null
+          uv sync > /dev/null 2>&1
           '
 
       - name: Single card test

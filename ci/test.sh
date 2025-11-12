@@ -33,7 +33,7 @@ if [ ${#failed_tests[@]} -eq 0 ]; then
 else
     echo "Some multi-card tests failed:"
     for fail in "${failed_tests[@]}"; do
-        echo "::error:: - $fail"
+        echo "::error - $fail::"
     done
     echo "======================================"
     exit 1
