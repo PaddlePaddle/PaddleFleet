@@ -56,7 +56,7 @@ def get_pg_rank(group=None):
 def log_single_rank(
     logger: logging.Logger, *args: Any, rank: int = 0, **kwargs: Any
 ):
-    """If torch distributed is initialized, write log on only one rank
+    """If paddle distributed is initialized, write log on only one rank
 
     Args:
         logger (logging.Logger): The logger to write the logs
