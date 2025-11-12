@@ -61,3 +61,4 @@ jobs:
           echo "::error::"
           echo "::error::    pip install pre-commit==2.17.0  cpplint==1.6.0  clang-format==13.0.0"
           echo "::error::    pre-commit run --all-files"
+          exit 1
