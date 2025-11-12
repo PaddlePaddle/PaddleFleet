@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor
@@ -28,14 +28,7 @@ from fleet.core.transformer.enums import LayerType
 from fleet.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from fleet.core.transformer.mlp import MLP
 from fleet.core.transformer.spec_utils import LayerSpec, build_layer
-from fleet.core.utils import (
-    deprecate_inference_params,
-    get_pg_rank,
-    log_single_rank,
-    make_viewless_tensor,
-    nvtx_range_pop,
-    nvtx_range_push,
-)
+from fleet.core.utils import get_pg_rank, log_single_rank
 
 if TYPE_CHECKING:
     from fleet.core.transformer.transformer_config import TransformerConfig
@@ -418,13 +411,7 @@ class TransformerLayer(paddle.nn.Layer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
-        rotary_pos_cos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
-        inference_context: Any | None = None,
-        packed_seq_params: Any | None = None,  # TE relating
-        sequence_len_offset: Tensor | None = None,
-        *,
-        inference_params: Any | None = None,
     ):
         """
         Perform a forward pass through the attention layer and the layernorms before and after
@@ -439,13 +426,7 @@ class TransformerLayer(paddle.nn.Layer):
             rotary_pos_emb (Tensor | None): Rotary positional embeddings.
             rotary_pos_cos (Tensor | None): Rotary embedding cosine.
             rotary_pos_sin (Tensor | None): Rotary embedding sine.
-            rotary_pos_cos_sin (Tensor | None): Combined rotary embedding cosine and sine.
-            Currently used exclusively for inference with dynamic batching and flashinfer RoPE.
             attention_bias (Tensor | None): Bias tensor for Q * K.T.
-            inference_context (object | None): Parameters for inference-time optimizations.
-            packed_seq_params (object | None): Parameters for packed sequence processing.
-            sequence_len_offset (Tensor | None): Offset along sequence dimension
-                during inference.
 
         Returns:
             Tuple[Tensor, Tensor]: A tuple containing:
@@ -453,11 +434,6 @@ class TransformerLayer(paddle.nn.Layer):
                 context (Tensor): Updated context tensor if cross-attention is used,
                 otherwise None.
         """
-        assert packed_seq_params is None, "Not supported"
-
-        inference_context = deprecate_inference_params(
-            inference_context, inference_params
-        )
 
         # Residual connection.
         residual = hidden_states
@@ -474,20 +450,14 @@ class TransformerLayer(paddle.nn.Layer):
             input_layernorm_output = self.input_layernorm(hidden_states)
 
         # Self attention.
-        nvtx_range_push(suffix="self_attention")
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,
             attention_mask=attention_mask,
-            inference_context=inference_context,
             rotary_pos_emb=rotary_pos_emb,
             rotary_pos_cos=rotary_pos_cos,
             rotary_pos_sin=rotary_pos_sin,
-            rotary_pos_cos_sin=rotary_pos_cos_sin,
             attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            sequence_len_offset=sequence_len_offset,
         )
-        nvtx_range_pop(suffix="self_attention")
 
         if self.recompute_input_layernorm:
             # discard the output of the input layernorm and register the recompute
@@ -496,12 +466,10 @@ class TransformerLayer(paddle.nn.Layer):
                 attention_output_with_bias[0]
             )
 
-        nvtx_range_push(suffix="self_attn_bda")
         with paddle.enable_grad():
             hidden_states = self.self_attn_bda(
                 self.training, self.config.bias_dropout_fusion
             )(attention_output_with_bias, residual, self.hidden_dropout)
-        nvtx_range_pop(suffix="self_attn_bda")
 
         # Residual connection.
         residual = hidden_states
@@ -516,7 +484,6 @@ class TransformerLayer(paddle.nn.Layer):
             pre_cross_attn_layernorm_output,
             attention_mask=context_mask,
             key_value_states=context,
-            inference_context=inference_context,
         )
 
         if (
@@ -532,7 +499,7 @@ class TransformerLayer(paddle.nn.Layer):
 
         return hidden_states, context
 
-    def _forward_mlp(self, hidden_states, inference_context=None):
+    def _forward_mlp(self, hidden_states):
         """
         Perform a forward pass through the feed-forward layer.
 
@@ -557,40 +524,10 @@ class TransformerLayer(paddle.nn.Layer):
         else:
             pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
-        nvtx_range_push(suffix="mlp")
-        # Potentially chunk the MLP computation during prefill to minimize the peak activation size
-        should_chunk_mlp_for_prefill = (
-            self.config.mlp_chunks_for_prefill > 1
-            and inference_context is not None
-            and not inference_context.is_decode_only()
-            and not isinstance(self.mlp, IdentityOp)
-        )
-
         if self.recompute_mlp:
             mlp_output_with_bias = tensor_parallel.checkpoint(
                 self.mlp, False, pre_mlp_layernorm_output
             )
-        elif should_chunk_mlp_for_prefill:
-            # Chunk input along sequence dimension
-            num_chunks = min(
-                self.config.mlp_chunks_for_prefill,
-                pre_mlp_layernorm_output.shape[0],
-            )
-            chunks = pre_mlp_layernorm_output.chunk(num_chunks, dim=0)
-
-            # Compute outputs for each chunk
-            outputs = [self.mlp(chunk) for chunk in chunks]
-
-            # Aggregate chunk outputs
-            mlp_output = paddle.cat([out for out, _ in outputs], dim=0)
-            bias_chunks = [bias for _, bias in outputs if bias is not None]
-            bias_output = (
-                paddle.stack(bias_chunks, dim=0).sum(dim=0)
-                if bias_chunks
-                else None
-            )
-            mlp_output_with_bias = (mlp_output, bias_output)
-
         else:
             mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
 
@@ -600,25 +537,10 @@ class TransformerLayer(paddle.nn.Layer):
             self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(
                 mlp_output_with_bias[0]
             )
-        nvtx_range_pop(suffix="mlp")
 
-        nvtx_range_push(suffix="mlp_bda")
         with paddle.enable_grad():
             hidden_states = self.mlp_bda(
                 self.training, self.config.bias_dropout_fusion
             )(mlp_output_with_bias, residual, self.hidden_dropout)
-        nvtx_range_pop(suffix="mlp_bda")
 
-        # Jit compiled function creates 'view' tensor. This tensor
-        # potentially gets saved in the MPU checkpoint function context,
-        # which rejects view tensors. While making a viewless tensor here
-        # won't result in memory savings (like the data loader, or
-        # p2p_communication), it serves to document the origin of this
-        # 'view' tensor.
-        output = make_viewless_tensor(
-            inp=hidden_states,
-            requires_grad=hidden_states.requires_grad,
-            keep_graph=True,
-        )
-
-        return output
+        return hidden_states

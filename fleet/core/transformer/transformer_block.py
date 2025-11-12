@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor
@@ -31,20 +31,17 @@ from fleet.core.pipeline_parallel.utils import (
 from fleet.core.process_groups_config import ProcessGroupCollection
 from fleet.core.transformer.enums import LayerType
 from fleet.core.transformer.layer import FleetLayer
-from fleet.core.transformer.spec_utils import LayerSpec
+from fleet.core.transformer.spec_utils import LayerSpec, build_layer
 from fleet.core.transformer.transformer_layer import (
     TransformerLayer,
     get_transformer_layer_offset,
 )
 from fleet.core.utils import (
     WrappedTensor,
-    deprecate_inference_params,
     get_pg_rank,
-    make_viewless_tensor,
 )
 
 if TYPE_CHECKING:
-    from fleet.core.inference.contexts import BaseInferenceContext
     from fleet.core.transformer.transformer_config import TransformerConfig
 
 get_cpu_offload_context = None
@@ -303,9 +300,7 @@ class TransformerBlock(FleetLayer):
             and "core_attn" in self.config.recompute_layers
         )
 
-        assert self.config.cpu_offloading is False, (
-            "CPU Offloading is enabled when TE is not present"
-        )
+        assert self.config.cpu_offloading is False
 
         self.config._cpu_offloading_context = None
 
@@ -314,12 +309,7 @@ class TransformerBlock(FleetLayer):
 
     def _build_layers(self):
         # Transformer layers.
-        # @jcasper can we improve how we deal with layer_number?
-        # currently it's only used in CoreAttention?
-        # if self.apply_query_key_layer_scaling:
-        #     coeff = self.layer_number
-        #     self.norm_factor *= coeff
-        def build_layer(layer_spec, layer_number):
+        def _build_layer(layer_spec, layer_number):
             global_layer_number = layer_number + get_transformer_layer_offset(
                 self.config, self.vp_stage, get_pg_rank(self.pg_collection.pp)
             )  # 1-based index
@@ -342,7 +332,7 @@ class TransformerBlock(FleetLayer):
         # offset is implicit in TransformerLayer
         self.layers = paddle.nn.LayerList(
             [
-                build_layer(layer_spec, i + 1)
+                _build_layer(layer_spec, i + 1)
                 for i, layer_spec in enumerate(self.sublayers.layer_specs)
             ]
         )
@@ -374,12 +364,8 @@ class TransformerBlock(FleetLayer):
         context_mask: Tensor,
         rotary_pos_emb: Tensor,
         attention_bias: Tensor,
-        packed_seq_params: None,
-        use_inner_quantization_context: bool,
     ):
         """Forward method with activation checkpointing."""
-
-        assert packed_seq_params is None
 
         def custom(start: int, end: int):
             def custom_forward(
@@ -399,8 +385,6 @@ class TransformerBlock(FleetLayer):
                         context_mask=context_mask,
                         rotary_pos_emb=rotary_pos_emb,
                         attention_bias=attention_bias,
-                        inference_context=None,
-                        packed_seq_params=packed_seq_params,
                     )
                 return hidden_states, context
 
@@ -472,14 +456,7 @@ class TransformerBlock(FleetLayer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
-        rotary_pos_cos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
-        inference_context: BaseInferenceContext | None = None,
-        packed_seq_params: Any | None = None,
-        sequence_len_offset: Tensor | None = None,
-        *,
-        inference_params: BaseInferenceContext | None = None,
-        dynamic_inference_decode_only: bool | None = None,
     ):
         """
         Perform the forward pass through the transformer block.
@@ -490,8 +467,6 @@ class TransformerBlock(FleetLayer):
         Args:
             hidden_states (Tensor | WrappedTensor): Input tensor of shape [s, b, h]
                 where s is the sequence length, b is the batch size, and h is the hidden size.
-                Can be passed as a WrappedTensor during inference to avoid an obsolete
-                reference in the calling function.
             attention_mask (Tensor): Boolean tensor of shape [1, 1, s, s] for masking
                 self-attention.
             context (Tensor | None): Context tensor for cross-attention.
@@ -499,66 +474,25 @@ class TransformerBlock(FleetLayer):
             rotary_pos_emb (Tensor | None): Rotary positional embeddings.
             rotary_pos_cos (Tensor | None): Rotary embedding cosine.
             rotary_pos_sin (Tensor | None): Rotary embedding sine.
-            rotary_pos_cos_sin (Tensor | None): Combined rotary embedding cosine and sine.
-            Currently used exclusively for inference with dynamic batching and flashinfer RoPE.
             attention_bias (Tensor | None): Bias tensor for Q * K.T of shape in shape broadcastable
                 to [b, num_head, sq, skv], e.g. [1, 1, sq, skv].
-                Used as an alternative to apply attention mask for TE cuDNN attention.
-            inference_context (BaseInferenceContext | None): Parameters for inference-time
-                optimizations.
-            packed_seq_params (PackedSeqParams | None): Parameters for packed sequence
-                processing.
-            dynamic_inference_decode_only: (bool | None): If true, indicates that the current
-                inference context is for decode-only. This args is only used to uniquely
-                identify decode and non-decode cuda graph runners in the cuda graph manager.
 
         Returns:
             Tensor | Tuple[Tensor, Tensor]: The output hidden states tensor of shape
             [s, b, h], and optionally the updated context tensor if cross-attention is used.
         """
-        assert packed_seq_params is None
-
-        inference_context = deprecate_inference_params(
-            inference_context, inference_params
-        )
-        # Remove 'dynamic_inference_decode_only' from kwargs if present
-        # this is only used to uniquely identify decode and non-decode cuda graph
-        # runners in the cuda graph manager
 
         # Delete the obsolete reference to the initial input tensor if necessary
         if isinstance(hidden_states, WrappedTensor):
             hidden_states = hidden_states.unwrap()
 
         if not self.pre_process:
-            # See set_input_tensor()
             hidden_states = self.input_tensor
-
-        # Viewless tensor.
-        # - We only need to create a viewless tensor in the case of micro batch
-        #   size (mbs) == 1, since in this case, 'hidden_states.transpose()'
-        #   above creates a view tensor, and '.contiguous()' is a pass-through.
-        #   For mbs >= 2, '.contiguous()' creates a new tensor, eliminating
-        #   the need to make it viewless.
-        #
-        #   However, we don't explicitly check mbs == 1 here because
-        #   make_viewless_tensor() has negligible overhead when its input
-        #   is already viewless.
-        #
-        # - For the 'else' case above, calling make_viewless_tensor() here is
-        #   likely redundant, since p2p_communication.py (likely originator)
-        #   already creates viewless tensors. That said, make_viewless_tensor()
-        #   is called here to be future-proof and corner-case-proof.
-        hidden_states = make_viewless_tensor(
-            inp=hidden_states, requires_grad=True, keep_graph=True
-        )
 
         if self.config.sequence_parallel:
             rng_context = tensor_parallel.get_cuda_rng_tracker().fork()
         else:
             rng_context = nullcontext()
-
-        # No quantization
-        use_inner_quantization_context = False
 
         with rng_context:
             # Forward pass.
@@ -570,8 +504,6 @@ class TransformerBlock(FleetLayer):
                     context_mask=context_mask,
                     rotary_pos_emb=rotary_pos_emb,
                     attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
-                    use_inner_quantization_context=use_inner_quantization_context,
                 )
             else:
                 for l_no, layer in enumerate(self.layers):
@@ -583,22 +515,12 @@ class TransformerBlock(FleetLayer):
                         rotary_pos_emb=rotary_pos_emb,
                         rotary_pos_cos=rotary_pos_cos,
                         rotary_pos_sin=rotary_pos_sin,
-                        rotary_pos_cos_sin=rotary_pos_cos_sin,
                         attention_bias=attention_bias,
-                        inference_context=inference_context,
-                        packed_seq_params=packed_seq_params,
-                        sequence_len_offset=sequence_len_offset,
                     )
 
         # Final layer norm.
         if self.final_layernorm is not None:
             hidden_states = self.final_layernorm(hidden_states)
-            # TENorm produces a "viewed" tensor. This will result in schedule.py's
-            # deallocate_output_tensor() throwing an error, so a viewless tensor is
-            # created to prevent this.
-            hidden_states = make_viewless_tensor(
-                inp=hidden_states, requires_grad=True, keep_graph=True
-            )
 
         # If this TransformerBlock is empty, input and output hidden states will be the same node
         # on the computational graph and will lead to unexpected errors in pipeline schedules.
