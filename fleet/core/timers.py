@@ -207,7 +207,7 @@ class Timers:
                               Allowed: ['max', 'minmax', 'all'].
         """
         self._log_level = log_level
-        allowed_log_options = set({"max", "minmax", "all"})
+        allowed_log_options = {"max", "minmax", "all"}
         assert log_option in allowed_log_options, (
             f"input log option {log_option} is invalid. It must be one of {allowed_log_options}"
         )
@@ -260,7 +260,7 @@ class Timers:
             barrier (bool): if set, do a global barrier before time measurements
 
         Returns:
-            paddle.tensor: Tensor of size [world_size, len(names)] with times in float.
+            paddle.Tensor: Tensor of size [world_size, len(names)] with times in float.
         """
 
         # First make sure all the callers are in sync.

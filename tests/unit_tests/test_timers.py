@@ -23,8 +23,9 @@ from fleet.training.initialize import initialize_fleet
 
 class TestTimers(unittest.TestCase):
     def setUp(self):
-        strategy = paddle.distributed.fleet.DistributedStrategy()
-        initialize_fleet(strategy=strategy)
+        if paddle.distributed.get_world_size() > 1:
+            strategy = paddle.distributed.fleet.DistributedStrategy()
+            initialize_fleet(strategy=strategy)
 
     def test_dummy_timer(self):
         timers = Timers(log_level=1, log_option="max")
