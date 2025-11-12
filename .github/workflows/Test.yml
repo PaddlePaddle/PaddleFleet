@@ -69,7 +69,7 @@ jobs:
           git config --global --add safe.directory /paddle
           git config pull.rebase false
           git pull origin pull/${PR_ID}/head
-          pip install uv
+          pip install -q uv
           uv sync > /dev/null 2>&1
           '
 
