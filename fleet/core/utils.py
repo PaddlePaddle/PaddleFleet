@@ -13,7 +13,9 @@
 # limitations under the License.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
+import functools
 import logging
+import math
 from typing import Any
 
 import paddle
@@ -37,6 +39,46 @@ class WrappedTensor:
         if len(self._wrapper) == 0:
             raise RuntimeError("WrappedTensor has already been unwrapped")
         return self._wrapper.pop(0)
+
+
+def ensure_divisibility(numerator, denominator):
+    """Ensure that numerator is divisible by the denominator."""
+    assert numerator % denominator == 0, (
+        f"{numerator} is not divisible by {denominator}"
+    )
+
+
+def divide(numerator, denominator):
+    """Ensure that numerator is divisible by the denominator and return
+    the division value."""
+    ensure_divisibility(numerator, denominator)
+    return numerator // denominator
+
+
+def init_method_normal(sigma):
+    """Init method based on N(0, sigma)."""
+    return functools.partial(paddle.nn.init.normal_, mean=0.0, std=sigma)
+
+
+def scaled_init_method_normal(sigma, num_layers, multiplier=2.0):
+    """Init method based on N(0, sigma/sqrt(2*num_layers)."""
+    std = sigma / math.sqrt(multiplier * num_layers)
+
+    return functools.partial(paddle.nn.init.normal_, mean=0.0, std=std)
+
+
+def get_pg_size(group=None):
+    """Get world size for a distributed group.
+
+    Args:
+        group: Process group to get world size for. If None, uses default group.
+
+    Returns:
+        int: World size (1 if distributed not initialized or group is None, else group.size())
+    """
+    if not paddle.distributed.is_initialized() or group is None:
+        return 1
+    return group.size()
 
 
 def get_pg_rank(group=None):
