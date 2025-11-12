@@ -72,27 +72,3 @@ def log_single_rank(
             logger.log(*args, **kwargs)
     else:
         logger.log(*args, **kwargs)
-
-
-def all_gather_into_tensor(
-    output: paddle.Tensor, input: paddle.Tensor, group=None, sync_op=True
-):
-    """
-    Gathers tensors from all participators and concatenates them in the output tensor.
-
-    Args:
-        output (paddle.Tensor): The output tensor to store gathered tensors. The first
-            dimension size should be equal to world_size (use stacking) or world_size *
-            input.shape[0] (use concatenating).
-        input (paddle.Tensor): The input tensor to send.
-        group: Process group to get rank for. If None, uses default group.
-        sync_op (bool, optional): Whether this op is a sync op. The default value is True.
-    """
-    tensor_list = []
-    paddle.distributed.all_gather(
-        tensor_list, input, group=group, sync_op=sync_op
-    )
-    if paddle.distributed.get_world_size() * input.shape[0] == output.shape[0]:
-        output = paddle.concat(tensor_list, axis=0)
-    else:
-        output = paddle.stack(tensor_list, axis=0)

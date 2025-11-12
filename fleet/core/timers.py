@@ -21,8 +21,6 @@ from abc import ABC, abstractmethod
 
 import paddle
 
-from .utils import all_gather_into_tensor
-
 try:
     import wandb
 except ImportError:
@@ -246,7 +244,9 @@ class Timers:
         self._log_levels[name] = log_level
         return self._timers[name]
 
-    def _get_elapsed_time_all_ranks(self, names, reset, barrier):
+    def _get_elapsed_time_all_ranks(
+        self, names, reset, barrier
+    ) -> paddle.Tensor:
         """Returns elapsed times of timers in names.
         Assumptions:
             - All the ranks call this function.
@@ -285,7 +285,12 @@ class Timers:
                     reset=reset
                 )
 
-        all_gather_into_tensor(rank_name_to_time, rank_name_to_time[rank, :])
+        if world_size > 1:
+            tensor_list = []
+            paddle.distributed.all_gather(
+                tensor_list, rank_name_to_time[rank, :]
+            )
+            rank_name_to_time = paddle.stack(tensor_list, axis=0)
 
         return rank_name_to_time
 
@@ -303,8 +308,8 @@ class Timers:
             # If the timer exists:
             if rank_to_time.numel() > 0:
                 name_to_min_max_time[name] = (
-                    rank_to_time.min().item() / normalizer,
-                    rank_to_time.max().item() / normalizer,
+                    paddle.min(rank_to_time).item() / normalizer,
+                    paddle.max(rank_to_time).item() / normalizer,
                 )
         return name_to_min_max_time
 
@@ -413,7 +418,7 @@ class Timers:
         Args:
             names (list[str]): Names of the timers to log.
             rank (int, optional): logs the timers to a specific rank. If set to None, logs to the
-                                  last rank. Defaults to None.
+                                  first rank. Defaults to None.
             normalizer (float, optional): Normalizes the timer values by the factor.
                                           Defaults to 1.0.
             reset (bool, optional): Whether to reset timer values after logging. Defaults to True.
@@ -424,9 +429,9 @@ class Timers:
         output_string = self.get_all_timers_string(
             names, normalizer, reset, barrier
         )
-        # If no input rank is provided, log on last rank.
+        # If no input rank is provided, log on first rank.
         if rank is None:
-            rank = paddle.distributed.get_world_size() - 1
+            rank = 0
         if rank == paddle.distributed.get_rank() and output_string is not None:
             print(output_string, flush=True)
 
