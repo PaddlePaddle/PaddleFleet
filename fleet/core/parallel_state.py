@@ -49,7 +49,7 @@ _DATA_PARALLEL_GROUP_WITH_CP = None
 
 def initialize_model_parallel(
     hcg: tp.EPHybridCommunicateGroup | tp.HybridCommunicateGroup,
-    virtual_pipeline_model_parallel_size: int | None,
+    virtual_pipeline_model_parallel_size: int | None = None,
 ):
     global _TENSOR_MODEL_PARALLEL_GROUP
     global _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS

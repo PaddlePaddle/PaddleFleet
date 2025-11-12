@@ -32,14 +32,10 @@ keywords = [
     "Nlp",
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
-    "Intended Audience :: Science/Research",
-    "Intended Audience :: Education",
-    "License :: OSI Approved :: Apache Software License",
-    "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -65,7 +61,6 @@ build-backend = "setuptools.build_meta"
 include-package-data = true
 
 [tool.setuptools.packages.find]
-#include = ["fleet.training", "fleet.core", "fleet.core.*"]
 exclude = ["tests", "docs", "examples", "build"]
 
 [tool.setuptools.dynamic]
@@ -83,7 +78,7 @@ build = [
     "packaging>=24.2"
 ]
 linting = [
-    "ruff~=0.9.0",
+    "ruff~=0.14.0",
 ]
 ci = ["python-gitlab", "slack-sdk", "pandas"]
 
