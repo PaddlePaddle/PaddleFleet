@@ -12,5 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .layer import FleetLayer
-from .transformer_config import TransformerConfig
+from .layer import FleetLayer as FleetLayer
+from .transformer_config import TransformerConfig as TransformerConfig

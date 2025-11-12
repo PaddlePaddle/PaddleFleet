@@ -12,24 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+import paddle.distributed as dist
+from paddle.distributed import fleet
 
-from ..fleet_config import FleetConfig
+from fleet.core import parallel_state as ps
 
 
-@dataclass
-class TransformerConfig(FleetConfig):
-    """Configuration object for  transformers."""
+def initialize_fleet(strategy: fleet.DistributedStrategy):
+    fleet.init(is_collective=True, strategy=strategy)
+    hcg = fleet.get_hybrid_communicate_group()
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
 
-    ####################
-    # model architecture
-    ####################
-
-    num_layers: int = 0
-    """Number of transformer layers in a transformer block."""
-
-    hidden_size: int = 0
-    """Transformer hidden size."""
-
-    num_attention_heads: int = 0
-    """Number of transformer attention heads."""
+    ps.initialize_model_parallel(hcg)
+    print(f"fleet initialize successfully: {rank=} {world_size=}")

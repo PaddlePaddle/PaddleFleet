@@ -1,4 +1,6 @@
-# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#!/bin/bash
+
+# Copyright (c) 2024 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,24 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+readonly VERSION="1.6.0"
 
-from ..fleet_config import FleetConfig
+version=$(cpplint --version)
 
+if ! [[ $version == *"$VERSION"* ]]; then
+    pip install cpplint==1.6.0
+fi
 
-@dataclass
-class TransformerConfig(FleetConfig):
-    """Configuration object for  transformers."""
-
-    ####################
-    # model architecture
-    ####################
-
-    num_layers: int = 0
-    """Number of transformer layers in a transformer block."""
-
-    hidden_size: int = 0
-    """Transformer hidden size."""
-
-    num_attention_heads: int = 0
-    """Number of transformer attention heads."""
+cpplint $@

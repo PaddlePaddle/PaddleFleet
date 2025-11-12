@@ -13,19 +13,22 @@
 # limitations under the License.
 
 import unittest
+
 import numpy as np
-from fleet.core.vpp_simulator import VPPSimulator, PPChunkRecorder
+
+from fleet.core.vpp_simulator import PPChunkRecorder, VPPSimulator
+
 
 class TestVPPSimulator(unittest.TestCase):
     """
     Unit tests for VPPSimulator class.
-    
+
     Tests include:
     - Bubble rate calculation
     - Visualization functionality
     - Schedule correctness
     """
-    
+
     def test_vpp_simulator(self):
         """
         Test basic VPP simulator functionality including:
@@ -34,28 +37,35 @@ class TestVPPSimulator(unittest.TestCase):
         - Visualization methods
         """
         pp_degree = 4  # Pipeline parallel degree
-        vpp_degree = 2  # Virtual pipeline degree  
+        vpp_degree = 2  # Virtual pipeline degree
         num_acc_steps = 16  # Gradient accumulation steps
 
         # Initialize simulator with test configuration
         vpp_simulator = VPPSimulator(pp_degree, vpp_degree, num_acc_steps)
         bubble_rate = vpp_simulator.compute_bubble_rate()
-        expected_bubble_rate = 1.0 * (pp_degree - 1) / (vpp_degree * num_acc_steps + (pp_degree - 1))
+        expected_bubble_rate = (
+            1.0
+            * (pp_degree - 1)
+            / (vpp_degree * num_acc_steps + (pp_degree - 1))
+        )
         # print(f"bubble_rate: {bubble_rate}, expected_bubble_rate: {expected_bubble_rate}")
-        assert bubble_rate == expected_bubble_rate, f"Expected bubble rate {expected_bubble_rate}, got {bubble_rate}"
+        assert bubble_rate == expected_bubble_rate, (
+            f"Expected bubble rate {expected_bubble_rate}, got {bubble_rate}"
+        )
         vpp_simulator.draw_balls()
         vpp_simulator.draw_chunks()
         assert True
 
+
 class TestPPChunkRecorder(unittest.TestCase):
     """
     Unit tests for PPChunkRecorder class.
-    
+
     Tests include:
     - Chunk recording functionality
     - Execution stamp tracking
     """
-    
+
     def test_pp_chunk_recorder(self):
         """
         Test chunk recording functionality by:
@@ -86,9 +96,9 @@ class TestPPChunkRecorder(unittest.TestCase):
 
         # Verify each layer was executed exactly num_acc_steps times
         result = np.array(pp_chunk_recorder.acc_stamp)
-        assert np.all(result == num_acc_steps), \
+        assert np.all(result == num_acc_steps), (
             f"Expected all layers to be executed {num_acc_steps} times"
- 
+        )
 
 
 if __name__ == "__main__":
