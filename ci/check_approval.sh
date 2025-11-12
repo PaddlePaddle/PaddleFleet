@@ -71,7 +71,7 @@ for FILE in "${CODESTYLE_FILES[@]}"; do
 done
 
 
-CHECKTORCH_APPROVERS="From00"
+CHECKTORCH_APPROVERS="risemeup1 swgu98"
 files=$(git diff --name-only upstream/$BRANCH)
 for file in $files; do
     if [ -f "$file" ]; then
