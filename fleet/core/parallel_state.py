@@ -64,13 +64,13 @@ def initialize_model_parallel(
 
     global _EXPERT_MODEL_PARALLEL_GROUP
     global _EXPERT_DATA_PARALLEL_GROUP
-    _EXPERT_MODEL_PARALLEL_GROUP = hcg._ep_comm_group
-    _EXPERT_DATA_PARALLEL_GROUP = hcg._moe_sharding_comm_group
+    _EXPERT_MODEL_PARALLEL_GROUP = getattr(hcg, "_ep_comm_group", None)
+    _EXPERT_DATA_PARALLEL_GROUP = getattr(hcg, "_moe_sharding_comm_group", None)
 
     global _CONTEXT_PARALLEL_GROUP
     global _DATA_PARALLEL_GROUP_WITH_CP
-    _CONTEXT_PARALLEL_GROUP = hcg._cp_comm_group
-    _DATA_PARALLEL_GROUP_WITH_CP = hcg._cp_sharding_comm_group
+    _CONTEXT_PARALLEL_GROUP = getattr(hcg, "_cp_comm_group", None)
+    _DATA_PARALLEL_GROUP_WITH_CP = getattr(hcg, "_cp_sharding_comm_group", None)
 
     if virtual_pipeline_model_parallel_size is not None:
         if not hcg._pp_comm_group.nranks > 1:
