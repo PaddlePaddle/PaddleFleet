@@ -25,7 +25,7 @@ from fleet.core.process_groups_config import ProcessGroupCollection
 from fleet.core.transformer.enums import LayerType
 from fleet.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from fleet.core.transformer.mlp import MLP
-from fleet.core.transformer.spec_utils import ModuleSpec, build_module
+from fleet.core.transformer.spec_utils import LayerSpec, build_layer
 from fleet.core.utils import (
     deprecate_inference_params,
     get_pg_rank,
@@ -215,44 +215,44 @@ def get_transformer_layer_offset(
 
 
 @dataclass
-class TransformerLayerSubmodules:
+class TransformerLayerSublayers:
     """
-    Configuration class for specifying the submodules of a transformer layer.
+    Configuration class for specifying the sublayers of a transformer layer.
 
     This class defines the structure and default implementations for various
     components of a transformer layer, allowing for flexible customization
     of the layer's architecture.
 
     Args:
-        input_layernorm (ModuleSpec | type): Specification for the input layer normalization.
-        self_attention (ModuleSpec | type): Specification for the self-attention mechanism.
-        self_attn_bda (ModuleSpec | type): Specification for the bias-dropout-add operation
+        input_layernorm (LayerSpec | type): Specification for the input layer normalization.
+        self_attention (LayerSpec | type): Specification for the self-attention mechanism.
+        self_attn_bda (LayerSpec | type): Specification for the bias-dropout-add operation
             after self-attention.
-        pre_cross_attn_layernorm (ModuleSpec | type): Specification for the layer
+        pre_cross_attn_layernorm (LayerSpec | type): Specification for the layer
             normalization before cross-attention.
-        cross_attention (ModuleSpec | type): Specification for the cross-attention mechanism.
-        cross_attn_bda (ModuleSpec | type): Specification for the bias-dropout-add operation
+        cross_attention (LayerSpec | type): Specification for the cross-attention mechanism.
+        cross_attn_bda (LayerSpec | type): Specification for the bias-dropout-add operation
             after cross-attention.
-        pre_mlp_layernorm (ModuleSpec | type): Specification for the layer normalization
+        pre_mlp_layernorm (LayerSpec | type): Specification for the layer normalization
             before the MLP.
-        mlp (ModuleSpec | type): Specification for the MLP in Dense layer.
-        mlp_bda (ModuleSpec | type): Specification for the bias-dropout-add operation
+        mlp (LayerSpec | type): Specification for the MLP in Dense layer.
+        mlp_bda (LayerSpec | type): Specification for the bias-dropout-add operation
             after the MLP.
         sharded_state_dict_keys_map (dict[str, str]): Mapping for sharded tensor keys to be applied
             in the `sharded_state_dict` method.
     """
 
-    input_layernorm: ModuleSpec | type = IdentityOp
-    self_attention: ModuleSpec | type = IdentityOp
-    self_attn_bda: ModuleSpec | type = IdentityFuncOp
+    input_layernorm: LayerSpec | type = IdentityOp
+    self_attention: LayerSpec | type = IdentityOp
+    self_attn_bda: LayerSpec | type = IdentityFuncOp
 
-    pre_cross_attn_layernorm: ModuleSpec | type = IdentityOp
-    cross_attention: ModuleSpec | type = IdentityOp
-    cross_attn_bda: ModuleSpec | type = IdentityFuncOp
+    pre_cross_attn_layernorm: LayerSpec | type = IdentityOp
+    cross_attention: LayerSpec | type = IdentityOp
+    cross_attn_bda: LayerSpec | type = IdentityFuncOp
 
-    pre_mlp_layernorm: ModuleSpec | type = IdentityOp
-    mlp: ModuleSpec | type = IdentityOp
-    mlp_bda: ModuleSpec | type = IdentityFuncOp
+    pre_mlp_layernorm: LayerSpec | type = IdentityOp
+    mlp: LayerSpec | type = IdentityOp
+    mlp_bda: LayerSpec | type = IdentityFuncOp
 
     # Mapping for sharded tensor keys to be applied in `sharded_state_dict` method
     sharded_state_dict_keys_map: dict[str, str] = field(default_factory=dict)
@@ -268,7 +268,7 @@ class TransformerLayer(paddle.nn.Layer):
     def __init__(
         self,
         config: TransformerConfig,
-        submodules: TransformerLayerSubmodules,
+        sublayers: TransformerLayerSublayers,
         layer_number: int = 1,
         hidden_dropout: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
@@ -280,7 +280,7 @@ class TransformerLayer(paddle.nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
-        self.submodules_config = submodules
+        self.sublayers_config = sublayers
         self.layer_number = layer_number + get_transformer_layer_offset(
             self.config, vp_stage, get_pg_rank(pg_collection.pp)
         )
@@ -288,10 +288,10 @@ class TransformerLayer(paddle.nn.Layer):
             config.hidden_dropout if hidden_dropout is None else hidden_dropout
         )
 
-        # [Module 1: Input Layernorm] Optional Layernorm on the input data
+        # [Layer 1: Input Layernorm] Optional Layernorm on the input data
         # TODO: add pytorch only layernorm
-        self.input_layernorm = build_module(
-            submodules.input_layernorm,
+        self.input_layernorm = build_layer(
+            sublayers.input_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
@@ -308,57 +308,57 @@ class TransformerLayer(paddle.nn.Layer):
 
         attention_optional_kwargs["pg_collection"] = pg_collection
 
-        # [Module 2: SelfAttention]
-        self.self_attention = build_module(
-            submodules.self_attention,
+        # [Layer 2: SelfAttention]
+        self.self_attention = build_layer(
+            sublayers.self_attention,
             config=self.config,
             layer_number=self.layer_number,
             **attention_optional_kwargs,
         )
 
-        # [Module 3: BiasDropoutFusion]
-        self.self_attn_bda = build_module(submodules.self_attn_bda)
+        # [Layer 3: BiasDropoutFusion]
+        self.self_attn_bda = build_layer(sublayers.self_attn_bda)
 
-        # [Module 4: Post SelfAttention] Optional Layernorm after self-attn
-        self.pre_cross_attn_layernorm = build_module(
-            submodules.pre_cross_attn_layernorm,
+        # [Layer 4: Post SelfAttention] Optional Layernorm after self-attn
+        self.pre_cross_attn_layernorm = build_layer(
+            sublayers.pre_cross_attn_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
         )
 
-        # [Module 5: CrossAttention]
-        self.cross_attention = build_module(
-            submodules.cross_attention,
+        # [Layer 5: CrossAttention]
+        self.cross_attention = build_layer(
+            sublayers.cross_attention,
             config=self.config,
             layer_number=self.layer_number,
             **attention_optional_kwargs,
         )
 
-        # [Module 6: BiasDropoutFusion]
-        self.cross_attn_bda = build_module(
-            submodules.cross_attn_bda, config=self.config
+        # [Layer 6: BiasDropoutFusion]
+        self.cross_attn_bda = build_layer(
+            sublayers.cross_attn_bda, config=self.config
         )
 
-        # [Module 7: Pre MLP] Optional Layernorm before MLP
-        self.pre_mlp_layernorm = build_module(
-            submodules.pre_mlp_layernorm,
+        # [Layer 7: Pre MLP] Optional Layernorm before MLP
+        self.pre_mlp_layernorm = build_layer(
+            sublayers.pre_mlp_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
         )
-        # [Module 8: MLP block]
+        # [Layer 8: MLP block]
         additional_mlp_kwargs = {}
         from fleet.core.transformer.moe.moe_layer import MoELayer
 
         # MLP expects tp_group but MoELayer expects pg_collection to be passed in.
         # We can change MLP to accept pg_collection but it makes the logic implicit
         # The conditional below is to make the logic explicit
-        # if submodules.mlp is not a ModuleSpec,we dont have to handle passing additional kwargs
-        if isinstance(submodules.mlp, ModuleSpec):
-            if submodules.mlp.module == MoELayer:
+        # if sublayers.mlp is not a LayerSpec,we dont have to handle passing additional kwargs
+        if isinstance(sublayers.mlp, LayerSpec):
+            if sublayers.mlp.layer == MoELayer:
                 additional_mlp_kwargs["pg_collection"] = pg_collection
-            elif submodules.mlp.module == MLP:
+            elif sublayers.mlp.layer == MLP:
                 assert hasattr(pg_collection, "tp"), (
                     "TP process group is required for MLP in TransformerLayer"
                 )
@@ -367,30 +367,28 @@ class TransformerLayer(paddle.nn.Layer):
                 log_single_rank(
                     logger,
                     logging.WARNING,
-                    f"Unknown MLP type: {type(submodules.mlp)}. Using default kwargs.",
+                    f"Unknown MLP type: {type(sublayers.mlp)}. Using default kwargs.",
                 )
-        self.mlp = build_module(
-            submodules.mlp, config=self.config, **additional_mlp_kwargs
+        self.mlp = build_layer(
+            sublayers.mlp, config=self.config, **additional_mlp_kwargs
         )
         if hasattr(self.mlp, "set_layer_number"):
             self.mlp.set_layer_number(self.layer_number)
 
-        # [Module 9: BiasDropoutFusion]
-        self.mlp_bda = build_module(submodules.mlp_bda)
+        # [Layer 9: BiasDropoutFusion]
+        self.mlp_bda = build_layer(sublayers.mlp_bda)
 
         self.recompute_input_layernorm = False
         self.recompute_pre_mlp_layernorm = False
         self.recompute_mlp = False
         if self.config.recompute_granularity == "selective":
-            if "layernorm" in self.config.recompute_modules:
+            if "layernorm" in self.config.recompute_layers:
                 if not isinstance(self.pre_mlp_layernorm, IdentityOp):
                     self.recompute_pre_mlp_layernorm = True
 
-            if "mlp" in self.config.recompute_modules:
+            if "mlp" in self.config.recompute_layers:
                 if not isinstance(self.mlp, MoELayer):
                     self.recompute_mlp = True
-
-        self.bias_dropout_add_exec_handler = paddle.enable_grad
 
     def forward(self, *args, **kwargs):
         """
@@ -496,10 +494,8 @@ class TransformerLayer(paddle.nn.Layer):
                 attention_output_with_bias[0]
             )
 
-        # TODO: could we move `bias_dropout_add_exec_handler` itself
-        # inside the module provided in the `bias_dropout_add_spec` module?
         nvtx_range_push(suffix="self_attn_bda")
-        with self.bias_dropout_add_exec_handler():
+        with paddle.enable_grad():
             hidden_states = self.self_attn_bda(
                 self.training, self.config.bias_dropout_fusion
             )(attention_output_with_bias, residual, self.hidden_dropout)
@@ -527,9 +523,7 @@ class TransformerLayer(paddle.nn.Layer):
         ):
             context = attention_output_with_bias["context"]
 
-        # TODO: could we move `bias_dropout_add_exec_handler` itself
-        # inside the module provided in the `bias_dropout_add_spec` module?
-        with self.bias_dropout_add_exec_handler():
+        with paddle.enable_grad():
             hidden_states = self.cross_attn_bda(
                 self.training, self.config.bias_dropout_fusion
             )(attention_output_with_bias, residual, self.hidden_dropout)
@@ -606,10 +600,8 @@ class TransformerLayer(paddle.nn.Layer):
             )
         nvtx_range_pop(suffix="mlp")
 
-        # TODO: could we move `bias_dropout_add_exec_handler` itself
-        # inside the module provided in the `bias_dropout_add_spec` module?
         nvtx_range_push(suffix="mlp_bda")
-        with self.bias_dropout_add_exec_handler():
+        with paddle.enable_grad():
             hidden_states = self.mlp_bda(
                 self.training, self.config.bias_dropout_fusion
             )(mlp_output_with_bias, residual, self.hidden_dropout)

@@ -29,7 +29,7 @@ from fleet.core.pipeline_parallel.utils import (
 from fleet.core.process_groups_config import ProcessGroupCollection
 from fleet.core.transformer.enums import LayerType
 from fleet.core.transformer.layer import FleetLayer
-from fleet.core.transformer.spec_utils import ModuleSpec, build_module
+from fleet.core.transformer.spec_utils import LayerSpec
 from fleet.core.transformer.transformer_layer import (
     TransformerLayer,
     get_transformer_layer_offset,
@@ -203,62 +203,62 @@ def get_num_layers_to_build(
 
 
 @dataclass
-class TransformerBlockSubmodules:
+class TransformerBlockSublayers:
     """
-    Dataclass for specifying the submodules of a transformer block.
+    Dataclass for specifying the sublayers of a transformer block.
 
     This class defines the structure for configuring the layers and normalization
     within a transformer block, allowing for flexible and customizable architecture designs.
 
     Args:
-        layer_specs (list[ModuleSpec] | None): A list of module specifications for
+        layer_specs (list[LayerSpec] | None): A list of layer specifications for
             the layers within the transformer block. Each specification typically
             defines a complete transformer layer (e.g., self-attention, feed-forward network).
-        layer_norm (ModuleSpec | paddle.nn.Layer | None): Specification
+        layer_norm (LayerSpec | paddle.nn.Layer | None): Specification
             or instance of the layer normalization to be applied.
     """
 
-    layer_specs: list[ModuleSpec] | None = None
-    layer_norm: ModuleSpec | paddle.nn.Layer | None = None
+    layer_specs: list[LayerSpec] | None = None
+    layer_norm: LayerSpec | paddle.nn.Layer | None = None
 
 
-def _get_block_submodules(
+def _get_block_sublayers(
     config: TransformerConfig,
-    spec: TransformerBlockSubmodules | ModuleSpec,
+    spec: TransformerBlockSublayers | LayerSpec,
     vp_stage: int | None = None,
     pp_rank: int | None = None,
-) -> TransformerBlockSubmodules:
+) -> TransformerBlockSublayers:
     """
-    Retrieve or construct TransformerBlockSubmodules based on the provided specification.
+    Retrieve or construct TransformerBlockSublayers based on the provided specification.
 
     Args:
         config (TransformerConfig): Configuration object for the transformer model.
-        spec (TransformerBlockSubmodules | ModuleSpec): Specification for the
-            transformer block submodules. Can be either a TransformerBlockSubmodules
-            instance or a ModuleSpec.
+        spec (TransformerBlockSublayers | LayerSpec): Specification for the
+            transformer block sublayers. Can be either a TransformerBlockSublayers
+            instance or a LayerSpec.
         vp_stage (int | None): Virtual pipeline stage number.
 
     Returns:
-        TransformerBlockSubmodules: The submodules for the transformer block.
+        TransformerBlockSublayers: The sublayers for the transformer block.
     """
 
-    # Transformer block submodules.
-    if isinstance(spec, TransformerBlockSubmodules):
+    # Transformer block sublayers.
+    if isinstance(spec, TransformerBlockSublayers):
         return spec
 
-    # ModuleSpec here is generally assumed to be for a transformer layer that
+    # LayerSpec here is generally assumed to be for a transformer layer that
     # is implemented in `transformer_layer.py` or if it subclasses
     # `TransformerLayer` from the `transformer_layer.py` file.
-    elif isinstance(spec, ModuleSpec):
-        if issubclass(spec.module, TransformerBlock):
-            return spec.submodules
-        elif issubclass(spec.module, TransformerLayer):
+    elif isinstance(spec, LayerSpec):
+        if issubclass(spec.layer, TransformerBlock):
+            return spec.sublayers
+        elif issubclass(spec.layer, TransformerLayer):
             num_layers = get_num_layers_to_build(config, vp_stage, pp_rank)
-            return TransformerBlockSubmodules(
+            return TransformerBlockSublayers(
                 layer_specs=[spec] * num_layers, layer_norm=LayerNormImpl
             )
         else:
-            raise Exception(f"specialize for {spec.module.__name__}.")
+            raise Exception(f"specialize for {spec.layer.__name__}.")
     else:
         raise Exception(f"specialize for {type(spec).__name__}.")
 
@@ -269,7 +269,7 @@ class TransformerBlock(FleetLayer):
     def __init__(
         self,
         config: TransformerConfig,
-        spec: TransformerBlockSubmodules | ModuleSpec,
+        spec: TransformerBlockSublayers | LayerSpec,
         post_layer_norm: bool = True,
         pre_process: bool = True,
         post_process: bool = True,
@@ -287,7 +287,7 @@ class TransformerBlock(FleetLayer):
         )
         pp_rank = get_pg_rank(pp_group)
 
-        self.submodules = _get_block_submodules(config, spec, vp_stage, pp_rank)
+        self.sublayers = _get_block_sublayers(config, spec, vp_stage, pp_rank)
         self.post_layer_norm = post_layer_norm
         self.pre_process = pre_process
         self.post_process = post_process
@@ -298,7 +298,7 @@ class TransformerBlock(FleetLayer):
 
         self.checkpoint_core_attention = (
             self.config.recompute_granularity == "selective"
-            and "core_attn" in self.config.recompute_modules
+            and "core_attn" in self.config.recompute_layers
         )
 
         assert self.config.cpu_offloading is False, (
@@ -328,32 +328,32 @@ class TransformerBlock(FleetLayer):
             else:
                 layer_config = self.config
 
-            module = build_module(
+            layer = build_layer(
                 layer_spec,
                 config=layer_config,
                 layer_number=layer_number,
                 pg_collection=self.pg_collection,
                 vp_stage=self.vp_stage,
             )
-            return module
+            return layer
 
         # offset is implicit in TransformerLayer
         self.layers = paddle.nn.LayerList(
             [
                 build_layer(layer_spec, i + 1)
-                for i, layer_spec in enumerate(self.submodules.layer_specs)
+                for i, layer_spec in enumerate(self.sublayers.layer_specs)
             ]
         )
 
         # In pipeline parallelism, we want to add this LN only to the last stage of the pipeline
         # self.post_process and self.post_layer_norm guide this behavior
         if (
-            self.submodules.layer_norm
+            self.sublayers.layer_norm
             and self.post_process
             and self.post_layer_norm
         ):
-            self.final_layernorm = build_module(
-                self.submodules.layer_norm,
+            self.final_layernorm = build_layer(
+                self.sublayers.layer_norm,
                 config=self.config,
                 hidden_size=self.config.hidden_size,
                 eps=self.config.layernorm_epsilon,
