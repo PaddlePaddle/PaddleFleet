@@ -16,9 +16,21 @@ import paddle.distributed as dist
 from paddle.distributed import fleet
 
 from fleet.core import parallel_state as ps
+from fleet.training.arguments import parse_args
+from fleet.training.global_vars import set_global_variables
 
 
-def initialize_fleet(strategy: fleet.DistributedStrategy):
+def initialize_fleet(
+    strategy: fleet.DistributedStrategy,
+    parsed_args=None,
+):
+    # Parse arguments
+    if parsed_args is None:
+        args = parse_args()
+    else:
+        args = parsed_args
+
+    set_global_variables(args)
     fleet.init(is_collective=True, strategy=strategy)
     hcg = fleet.get_hybrid_communicate_group()
     rank = dist.get_rank()

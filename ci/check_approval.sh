@@ -74,8 +74,8 @@ CHECKTORCH_APPROVERS="risemeup1 swgu98"
 files=$(git diff --name-only upstream/$BRANCH)
 for file in $files; do
     if [ -f "$file" ]; then
-        if grep -q 'torch' "$file"; then
-            echo_line="You must be approved by one of ${CHECKTORCH_APPROVERS} for changes in ${file} which include "torch".\n"
+        if git diff upstream/$BRANCH -- "$file" | grep -E '^\+[^\+]' | grep -q 'torch'; then
+            echo_line="You must be approved by one of ${CHECKTORCH_APPROVERS} for changes in ${file} which include \"torch\" in added lines.\n"
             APPROVER_LIST=(${CHECKTORCH_APPROVERS})
             check_approval 1 "${APPROVER_LIST[@]}"
         fi
@@ -86,7 +86,7 @@ done
 if [ -n "${echo_list}" ];then
   echo "****************"
   echo -e "${echo_list[@]}"
-  echo "There are ${failed_num} approved errors."
+  echo "There are `expr $failed_num - 1` approved errors."
   echo "****************"
 fi
 

@@ -25,4 +25,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from fleet.training.initialize import initialize_fleet as initialize_fleet
+
+from .global_vars import get_args as get_args
