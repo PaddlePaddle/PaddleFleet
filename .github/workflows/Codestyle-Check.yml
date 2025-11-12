@@ -47,6 +47,16 @@ jobs:
           pip install pre-commit==2.17.0 cpplint==1.6.0  clang-format==13.0.0
 
       - name: Check pre-commit
+        id: pre-commit
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           pre-commit run --all-files
+
+      - name: Failure message
+        if: steps.pre-commit.outcome == 'failure'
+        run: |
+          echo "::error::Codestyle check failed."
+          echo "::error::Please install pre-commit and run the following commands locally to fix the issues:"
+          echo "::error::"
+          echo "::error::    pip install pre-commit==2.17.0  cpplint==1.6.0  clang-format==13.0.0"
+          echo "::error::    pre-commit run --all-files"

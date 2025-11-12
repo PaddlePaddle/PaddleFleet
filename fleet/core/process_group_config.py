@@ -76,7 +76,7 @@ class ProcessGroupCollection:
     expt_dp: paddle.distributed.communication.group.Group = field(init=False)
 
     def __init__(self, **kwargs):
-        for key in kwargs:
+           for key in kwargs:
             if key in [field.name for field in fields(self)]:
                 setattr(self, key, kwargs[key])
             else:
