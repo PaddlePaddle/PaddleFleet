@@ -46,7 +46,7 @@ jobs:
           docker pull $docker_image
           docker run -d -t --gpus all --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
-            -v ${{ github.workspace }}/../../../proxy:/paddle/proxy \
+            -v ${{ github.workspace }}/../../../proxy:/utils/proxy \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
@@ -65,7 +65,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           rm -rf * .[^.]*
           set -e
-          source /paddle/proxy
+          source /utils/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
           git pull origin pull/${PR_ID}/head
