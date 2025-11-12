@@ -44,8 +44,6 @@ from fleet.core.utils import (
 if TYPE_CHECKING:
     from fleet.core.transformer.transformer_config import TransformerConfig
 
-get_cpu_offload_context = None
-te_checkpoint = None
 LayerNormImpl = None  # trans layer norm impl later
 
 
