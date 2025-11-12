@@ -22,8 +22,19 @@ defaults:
     shell: bash
 
 jobs:
+  check-bypass:
+    name: Check bypass
+    if: ${{ inputs.can-skip != 'true' }}
+    uses: ./.github/workflows/check-bypass.yml
+    with:
+      workflow-name: 'test'
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+
   test:
     name: Test
+    needs: check-bypass
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
       group: CI-H
 
@@ -35,7 +46,7 @@ jobs:
           docker pull $docker_image
           docker run -d -t --gpus all --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
-            -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
+            -v ${{ github.workspace }}/../../../proxy:/paddle/proxy \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
@@ -52,17 +63,11 @@ jobs:
         continue-on-error: true
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
-          . ../../../proxy
+          source /paddle/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
+          git config --global --add safe.directory /paddle
           git pull origin pull/${PR_ID}/head
           '
-
-      - name: Check bypass
-        id: check-bypass
-        uses: ./.github/actions/check-bypass
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          workflow-name: test
 
       - name: Single card test
         if: steps.check-bypass.outputs.can-skip != 'true'
