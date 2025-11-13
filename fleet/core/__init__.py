@@ -27,6 +27,8 @@ from fleet.core.package_info import (
     __version__,
 )
 
+mpu = parallel_state
+
 __all__ = [
     "parallel_state",
     "__contact_emails__",
