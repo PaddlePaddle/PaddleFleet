@@ -27,7 +27,9 @@ class TestParallelState(unittest.TestCase):
         strategy = fleet.DistributedStrategy()
         strategy.hybrid_configs = {
             "dp_degree": 2,
+            "mp_degree": 2,
             "pp_degree": 1,
+            "sharding_degree": 2,
         }
         initialize_fleet(strategy=strategy)
 
