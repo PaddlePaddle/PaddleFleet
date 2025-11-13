@@ -28,6 +28,8 @@ from fleet.core.package_info import (
 )
 from fleet.core.timers import Timers
 
+mpu = parallel_state
+
 __all__ = [
     "parallel_state",
     "Timers",

@@ -66,6 +66,7 @@ def get_layer(spec_or_layer: LayerSpec | type, **additional_kwargs):
 
 
 def build_layer(spec_or_layer: LayerSpec | type, *args, **kwargs):
+    # import pdb;pdb.set_trace()
     # If the passed `spec_or_layer` is
     # a `Function`, then return it as it is
     # NOTE: to support an already initialized layer add the following condition
@@ -107,7 +108,6 @@ def build_layer(spec_or_layer: LayerSpec | type, *args, **kwargs):
         and spec_or_layer.sublayers is not None
     ):
         kwargs["sublayers"] = spec_or_layer.sublayers
-
     try:
         return layer(
             *args,

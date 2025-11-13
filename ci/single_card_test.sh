@@ -12,27 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+disable_file="$work_dir/tests/single_card_tests/disable_single_card_uts.txt"
 
-from omegaconf import DictConfig, OmegaConf
+disabled=()
+if [ -f "$disable_file" ]; then
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+        filename=$(basename "$line")
+        disabled+=("$filename")
+    done < "$disable_file"
+fi
 
+echo -e "\033[34mDisabled tests:\033[0m ${disabled[@]}"
 
-def _flatten_configs(cfg):
-    result = {}
-
-    def recurse(node):
-        if isinstance(node, DictConfig):
-            for k, v in node.items():
-                if isinstance(v, DictConfig):
-                    recurse(v)
-                else:
-                    result[k] = v
-
-    recurse(cfg)
-    return OmegaConf.create(result)
-
-
-def load_yaml(yaml_path):
-    with open(yaml_path, "r") as f:
-        configs = OmegaConf.load(f)
-        config = _flatten_configs(configs)
-        return config
+uv run pytest tests/single_card_tests $(sed 's/^/--ignore=/' tests/single_card_tests/disable_single_card_uts.txt)

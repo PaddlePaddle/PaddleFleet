@@ -31,6 +31,7 @@ from fleet.core.transformer.spec_utils import LayerSpec, build_layer
 from fleet.core.utils import get_pg_rank, log_single_rank
 
 if TYPE_CHECKING:
+    from fleet.core.packed_seq_params import PackedSeqParams
     from fleet.core.transformer.transformer_config import TransformerConfig
 
 
@@ -411,6 +412,7 @@ class TransformerLayer(paddle.nn.Layer):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
     ):
         """
         Perform a forward pass through the attention layer and the layernorms before and after
@@ -426,6 +428,7 @@ class TransformerLayer(paddle.nn.Layer):
             rotary_pos_cos (Tensor | None): Rotary embedding cosine.
             rotary_pos_sin (Tensor | None): Rotary embedding sine.
             attention_bias (Tensor | None): Bias tensor for Q * K.T.
+            packed_seq_params (object, optional): Parameters for packed sequence processing.
 
         Returns:
             Tuple[Tensor, Tensor]: A tuple containing:
@@ -456,6 +459,7 @@ class TransformerLayer(paddle.nn.Layer):
             rotary_pos_cos=rotary_pos_cos,
             rotary_pos_sin=rotary_pos_sin,
             attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
         )
 
         if self.recompute_input_layernorm:

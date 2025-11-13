@@ -13,26 +13,24 @@
 # limitations under the License.
 
 
-from omegaconf import DictConfig, OmegaConf
+import paddle
 
 
-def _flatten_configs(cfg):
-    result = {}
-
-    def recurse(node):
-        if isinstance(node, DictConfig):
-            for k, v in node.items():
-                if isinstance(v, DictConfig):
-                    recurse(v)
-                else:
-                    result[k] = v
-
-    recurse(cfg)
-    return OmegaConf.create(result)
-
-
-def load_yaml(yaml_path):
-    with open(yaml_path, "r") as f:
-        configs = OmegaConf.load(f)
-        config = _flatten_configs(configs)
-        return config
+class TestModel(paddle.nn.Layer):
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        num_layers: int,
+        bias: bool,
+        shared_embedding: bool = False,
+    ):
+        super().__init__()
+        self.layers = paddle.nn.LayerList(
+            [
+                paddle.nn.Linear(input_dim, output_dim, bias)
+                for _ in range(num_layers)
+            ]
+        )
+        if shared_embedding:
+            self.layers[-1].weight.shared_embedding = True

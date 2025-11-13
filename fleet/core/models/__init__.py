@@ -11,28 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-from omegaconf import DictConfig, OmegaConf
-
-
-def _flatten_configs(cfg):
-    result = {}
-
-    def recurse(node):
-        if isinstance(node, DictConfig):
-            for k, v in node.items():
-                if isinstance(v, DictConfig):
-                    recurse(v)
-                else:
-                    result[k] = v
-
-    recurse(cfg)
-    return OmegaConf.create(result)
-
-
-def load_yaml(yaml_path):
-    with open(yaml_path, "r") as f:
-        configs = OmegaConf.load(f)
-        config = _flatten_configs(configs)
-        return config

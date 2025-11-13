@@ -12,27 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
 
-from omegaconf import DictConfig, OmegaConf
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-
-def _flatten_configs(cfg):
-    result = {}
-
-    def recurse(node):
-        if isinstance(node, DictConfig):
-            for k, v in node.items():
-                if isinstance(v, DictConfig):
-                    recurse(v)
-                else:
-                    result[k] = v
-
-    recurse(cfg)
-    return OmegaConf.create(result)
+if TYPE_CHECKING:
+    from paddle import Tensor
 
 
-def load_yaml(yaml_path):
-    with open(yaml_path, "r") as f:
-        configs = OmegaConf.load(f)
-        config = _flatten_configs(configs)
-        return config
+@dataclass
+class PackedSeqParams:
+    """
+    parameters to DotProductAttention and fused rope kernels for the
+    `thd` (packed) sequence format
+    """
+
+    qkv_format: str | None = None
+    cu_seqlens_q: Tensor | None = None
+    cu_seqlens_kv: Tensor | None = None
+    cu_seqlens_q_padded: Tensor | None = None
+    cu_seqlens_kv_padded: Tensor | None = None
+    max_seqlen_q: int | None = None
+    max_seqlen_kv: int | None = None

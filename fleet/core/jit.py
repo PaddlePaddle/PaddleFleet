@@ -11,10 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
-from dataclasses import dataclass
+import paddle
 
-
-@dataclass
-class FleetConfig:
-    """Base configuration for Fleet Core."""
+jit_fuser = paddle.jit.to_static(backend="CINN")
