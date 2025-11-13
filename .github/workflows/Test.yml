@@ -109,7 +109,6 @@ jobs:
 
       - name: Test summary
         if: steps.check-bypass.outputs.can-skip != 'true'
-        continue-on-error: true
         env:
           single_card_exit_code: ${{ env.single_card_exit_code }}
           multi_card_exit_code: ${{ env.multi_card_exit_code }}
