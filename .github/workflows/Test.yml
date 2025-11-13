@@ -42,7 +42,7 @@ jobs:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
-      group: BD_BJ-V100
+      group: CI-H
     env:
       PIP_CACHE_DIR: /root/.cache/pip
     steps:
@@ -68,6 +68,13 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
+            -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
+            -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
+            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
+            -e GITHUB_REPO_NAME="${{ github.repository }}" \
+            -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
@@ -88,22 +95,50 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           source $HOME/.local/bin/env
           echo "uv sync"
-          uv sync > /dev/null 2>&1
+          uv sync --group ci> /dev/null 2>&1
           '
 
       - name: Single card test
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
           source $HOME/.local/bin/env
+          pwd
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+
           bash ci/single_card_test.sh
           single_card_exit_code=$?
+          ls -a /paddle/coveragedata/
+          uv run coverage combine
+          uv run coverage report -m
+          uv run coverage xml -o /paddle/coveragedata/coverage.xml
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
             exit 1
           else
             echo -e "\033[32mSingle card test succeeded.\033[0m"
           fi
+          '
+
+      - name: Multi-card Coverage Upload to BOS
+        if: steps.check-bypass.outputs.can-skip != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          source $HOME/.local/bin/env
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/coveragedata/coverage.xml coverage.xml
+
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/single-card"
+          uv run ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
@@ -143,6 +178,14 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
+            -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
+            -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
+            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
+            -e GITHUB_REPO_NAME="${{ github.repository }}" \
+            -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
+            -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
@@ -163,7 +206,7 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           source $HOME/.local/bin/env
           echo "uv sync"
-          uv sync > /dev/null 2>&1
+          uv sync --group ci > /dev/null 2>&1
           '
 
       - name: Multi-card test
@@ -171,8 +214,17 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source $HOME/.local/bin/env
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
+          ls -a /paddle/coveragedata/
+          uv run coverage combine
+          uv run coverage xml -o /paddle/coveragedata/coverage.xml
+          uv run coverage report -m
+
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed.\033[0m"
             exit 1
@@ -181,9 +233,66 @@ jobs:
           fi
           '
 
+      - name: Multi-card Coverage Upload to BOS
+        if: steps.check-bypass.outputs.can-skip != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          source $HOME/.local/bin/env
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/coveragedata/coverage.xml coverage.xml
+
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/multi-card"
+          uv run ${push_file} coverage.xml ${target_path}
+          '
+
       - name: Terminate and delete the container
         if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
         run: |
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
+
+
+  codecov_use:
+    name: Upload Multi-card Coverage to Codecov
+    needs: [multi-card_test, single_card_test]
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_REPO_NAME: ${{ github.repository }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: coverage file download
+        shell: bash
+        run: |
+          multi_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/multi-card/coverage.xml"
+          wget "${multi_card_cov_file_url}" -O multi_coverage.xml --no-proxy
+          single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
+          wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
+          git diff origin/${BASE_REF}..HEAD --unified=0 > diff.txt
+          python -m pip install diff-cover
+          COVERAGE_EXIT_CODE=0
+          diff-cover multi_coverage.xml single_coverage.xml  --diff-file=diff.txt --fail-under=80 || COVERAGE_EXIT_CODE=9
+          exit ${COVERAGE_EXIT_CODE}
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./multi_coverage.xml, ./single_coverage.xml
+          flags: coverage_combine
+          name: "${{ env.TASK }}-${{ github.run_id }}"
+          fail_ci_if_error: true
+          verbose: true
