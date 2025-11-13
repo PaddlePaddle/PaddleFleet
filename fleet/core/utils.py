@@ -41,7 +41,7 @@ except ImportError:
 try:
     _paddle_version = PkgVersion(paddle.__version__)
 except Exception:
-    # This is a WAR for building docs, where torch is not actually imported
+    # This is a WAR for building docs, where paddle is not actually imported
     _paddle_version = PkgVersion("0.0.0") if HAVE_PACKAGING else "0.0.0"
 
 
@@ -141,14 +141,14 @@ def log_single_rank(
 
 
 def get_paddle_version():
-    """Get torch version from __version__."""
+    """Get paddle version from __version__."""
 
     global _paddle_version
     return _paddle_version
 
 
 def is_paddle_min_version(version, check_equality=True):
-    """Check if minimum version of `torch` is installed."""
+    """Check if minimum version of `paddle` is installed."""
     if not HAVE_PACKAGING:
         raise ImportError(
             "packaging is not installed. Please install it with `pip install packaging`."

@@ -40,7 +40,7 @@ class TransformerConfig(FleetConfig):
     init_method: Optional[Callable] = None
     """Method to initialize weights. Note that bias is always set to zero. Should be a function that
     takes a single Tensor and initializes it. If None, will be set to
-    megatron.core.utils.init_method_normal(init_method_std) which is torch nn init normal with
+    megatron.core.utils.init_method_normal(init_method_std) which is paddle nn init normal with
     mean=0.0 and std=init_method_std."""
 
     ffn_hidden_size: Optional[int] = None
@@ -65,7 +65,7 @@ class TransformerConfig(FleetConfig):
 
     output_layer_init_method: Optional[Callable] = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
-    will be set to megatron.core.utils.scaled_init_method_normal(init_method_std) which is torch nn
+    will be set to megatron.core.utils.scaled_init_method_normal(init_method_std) which is paddle nn
     init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""
 
     ####################

@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import warnings
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional,TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
@@ -29,7 +29,8 @@ from fleet.core.fusions.fused_bias_swiglu import (
 )
 from fleet.core.transformer.layer import FleetLayer
 from fleet.core.transformer.spec_utils import LayerSpec, build_layer
-from fleet.core.transformer.transformer_config import TransformerConfig
+if TYPE_CHECKING:
+    from fleet.core.transformer.transformer_config import TransformerConfig
 from fleet.core.utils import (
     get_tensor_model_parallel_group_if_none,
     nvtx_range_pop,
@@ -86,7 +87,7 @@ class MLP(FleetLayer):
         self.config: TransformerConfig = config
 
         self.input_size = (
-            input_size if input_size != None else self.config.hidden_size
+            input_size if input_size is not None else self.config.hidden_size
         )
 
         tp_group = get_tensor_model_parallel_group_if_none(
