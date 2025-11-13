@@ -14,6 +14,7 @@
 
 # Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+from __future__ import annotations
 
 import time
 
@@ -24,11 +25,21 @@ try:
 except ImportError:
     _GPUEventTimer = None
 
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
+try:
+    from tensorboardX import SummaryWriter
+except ImportError:
+    SummaryWriter = None
+
 
 class _Timer:
     """Profile Timer for recording time taken by forward/ backward/ reduce/ step."""
 
-    def __init__(self, name):
+    def __init__(self, name: str):
         self.name = name
         self.elapsed_ = 0.0
         self.started_ = False
@@ -55,7 +66,7 @@ class _Timer:
         self.elapsed_ = 0.0
         self.started_ = False
 
-    def elapsed(self, reset=True):
+    def elapsed(self, reset: bool = True):
         """Calculate the elapsed time."""
         started_ = self.started_
         # If the timing in progress, end it first.
@@ -82,7 +93,7 @@ class RuntimeTimer:
     def __init__(self):
         self.timer = _Timer("RuntimeTimer")
 
-    def start(self, name):
+    def start(self, name: str):
         """Start the RuntimeTimer."""
         self.timer.name = name
         self.timer.start()
@@ -110,7 +121,9 @@ class Timers:
     def __init__(self):
         self.timers = {}
 
-    def __call__(self, name, use_event=False) -> _Timer:
+    def __call__(
+        self, name: str, use_event: bool = False
+    ) -> _Timer | _GPUEventTimer:
         clazz = (
             _GPUEventTimer
             if use_event and paddle.is_compiled_with_cuda()
@@ -126,14 +139,29 @@ class Timers:
             )
         return timer
 
-    def write(self, names, writer, iteration, normalizer=1.0, reset=True):
+    def write(
+        self,
+        names: list[str],
+        writer: SummaryWriter | wandb,
+        iteration: int,
+        normalizer: float = 1.0,
+        reset: bool = True,
+    ):
         """Write timers to a tensorboard writer"""
         assert normalizer > 0.0
         for name in names:
             value = self.timers[name].elapsed(reset=reset) / normalizer
-            writer.add_scalar("timers/" + name, value, iteration)
+            if isinstance(writer, SummaryWriter) and SummaryWriter is not None:
+                writer.add_scalar("timers/" + name, value, iteration)
+            elif writer == wandb and wandb is not None:
+                writer.log({"timers/" + name: value}, iteration)
 
-    def log(self, names, normalizer=1.0, reset=True):
+    def log(
+        self,
+        names: list[str],
+        normalizer: float = 1.0,
+        reset: bool = True,
+    ):
         """Log a group of timers."""
         assert normalizer > 0.0
         string = "time (ms)"
@@ -152,7 +180,9 @@ class Timers:
             string += f" | {name} : {value:.2f}"
         print(string)
 
-    def info(self, names, normalizer=1.0, reset=False) -> dict[str, float]:
+    def info(
+        self, names: list[str], normalizer: float = 1.0, reset: bool = False
+    ) -> dict[str, float]:
         """Return a dict of timers."""
         assert normalizer > 0.0
         time_dict = {}
