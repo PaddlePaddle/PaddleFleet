@@ -13,6 +13,9 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from typing import Callable, Optional
+
+import paddle.nn.functional as F
 
 from ..fleet_config import FleetConfig
 
@@ -33,3 +36,40 @@ class TransformerConfig(FleetConfig):
 
     num_attention_heads: int = 0
     """Number of transformer attention heads."""
+
+    init_method: Optional[Callable] = None
+    """Method to initialize weights. Note that bias is always set to zero. Should be a function that
+    takes a single Tensor and initializes it. If None, will be set to
+    megatron.core.utils.init_method_normal(init_method_std) which is torch nn init normal with
+    mean=0.0 and std=init_method_std."""
+
+    ffn_hidden_size: Optional[int] = None
+    """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
+    if not provided."""
+
+    hidden_dropout: float = 0.1
+    """Dropout probability for transformer hidden state."""
+
+    gated_linear_unit: bool = False
+    """Use a gated linear unit for the first linear layer in the MLP."""
+
+    activation_func: Callable = F.gelu
+    """Activation function to use for the non-linearity in the MLP."""
+
+    add_bias_linear: bool = True
+    """Include a bias term in all linear layers (QKV projections, after core attention, and two in
+    MLP layer)."""
+
+    use_te_activation_func: bool = False
+    """Whether to use ffn activation functions implemented by TransformerEngine"""
+
+    output_layer_init_method: Optional[Callable] = None
+    """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
+    will be set to megatron.core.utils.scaled_init_method_normal(init_method_std) which is torch nn
+    init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""
+
+    ####################
+    # fusion
+    ####################
+    bias_activation_fusion: bool = False
+    """If True, fuses bias addition and the activation function when possible."""
