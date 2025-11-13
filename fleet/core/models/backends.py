@@ -25,8 +25,9 @@ from fleet.core.tensor_parallel.layers import (
 from fleet.core.transformer.dot_product_attention import DotProductAttention
 from fleet.core.transformer.mlp import MLPSublayers
 from fleet.core.transformer.moe.experts import GroupedMLP, SequentialMLP
+from fleet.core.transformer.paddle_norm import WrappedPaddleNorm
 
-LNImpl = None  # impl later
+LNImpl = WrappedPaddleNorm
 
 
 class BackendSpecProvider(Protocol):
@@ -95,12 +96,7 @@ class LocalSpecProvider(BackendSpecProvider):
         return None
 
     def layer_norm(self, rms_norm: bool = False, for_qk: bool = False) -> type:
-        """Which layer to use for layer norm"""
-        if rms_norm:
-            # Matching get_gpt_layer_local_spec.
-            # Why does the global need to be updated?
-            global LNImpl
-            LNImpl = None  # impl later
+        assert rms_norm, "Only support rms norm."
         return LNImpl
 
     def core_attention(self) -> type:

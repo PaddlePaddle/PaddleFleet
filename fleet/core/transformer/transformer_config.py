@@ -72,3 +72,12 @@ class TransformerConfig(FleetConfig):
     ####################
     bias_activation_fusion: bool = False
     """If True, fuses bias addition and the activation function when possible."""
+
+    fuse_rms_norm: bool = True
+    """Fused rms norm or not"""
+
+    normalization: str = "RMSNorm"
+    """Norm type"""
+
+    layernorm_epsilon: float = (1e-5,)
+    """Epsilon value for norm."""

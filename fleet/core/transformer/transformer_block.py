@@ -31,6 +31,7 @@ from fleet.core.pipeline_parallel.utils import (
 from fleet.core.process_groups_config import ProcessGroupCollection
 from fleet.core.transformer.enums import LayerType
 from fleet.core.transformer.layer import FleetLayer
+from fleet.core.transformer.paddle_norm import WrappedPaddleNorm
 from fleet.core.transformer.spec_utils import LayerSpec, build_layer
 from fleet.core.transformer.transformer_layer import (
     TransformerLayer,
@@ -44,8 +45,7 @@ from fleet.core.utils import (
 if TYPE_CHECKING:
     from fleet.core.transformer.transformer_config import TransformerConfig
 
-LayerNormImpl = None  # trans layer norm impl later
-
+LayerNormImpl = WrappedPaddleNorm
 
 logger = logging.getLogger(__name__)
 
