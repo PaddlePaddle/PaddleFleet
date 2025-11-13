@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reservede
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 
 import os
@@ -41,7 +41,7 @@ from ..utils import (
     prepare_input_tensors_for_wgrad_compute,
 )
 
-from ..dist_checkpointing.mapping import ShardedStateDict
+# from ..dist_checkpointing.mapping import ShardedStateDict
 from ..transformer.utils import make_sharded_tensors_for_checkpoint
 from .mappings import (
     copy_to_tensor_model_parallel_region,
@@ -290,19 +290,20 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         prefix: str = "",
         sharded_offsets: Tuple[Tuple[int, int, int]] = (),
         metadata: Optional[dict] = None,
-    ) -> ShardedStateDict:
+    ) -> None:
         """Non-default implementation for embeddings due to `allow_shape_mismatch` param"""
-        state_dict = self.state_dict(prefix="", keep_vars=True)
+        return None
+        # state_dict = self.state_dict(prefix="", keep_vars=True)
 
-        weight_prefix = f"{prefix}weight"
-        return {
-            weight_prefix: make_tp_sharded_tensor_for_checkpoint(
-                tensor=state_dict["weight"],
-                key=weight_prefix,
-                allow_shape_mismatch=True,
-                prepend_offsets=sharded_offsets,
-            )
-        }
+        # weight_prefix = f"{prefix}weight"
+        # return {
+        #     weight_prefix: make_tp_sharded_tensor_for_checkpoint(
+        #         tensor=state_dict["weight"],
+        #         key=weight_prefix,
+        #         allow_shape_mismatch=True,
+        #         prepend_offsets=sharded_offsets,
+        #     )
+        # }
 
 
 class LinearWithFrozenWeight(paddle.autograd.Function):

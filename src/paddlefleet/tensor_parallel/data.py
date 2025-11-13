@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reservede
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import paddle
 
