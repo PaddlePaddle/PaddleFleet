@@ -48,8 +48,9 @@ from fleet.core.transformer.transformer_layer import (
 if TYPE_CHECKING:
     from fleet.core.transformer.transformer_config import TransformerConfig
 
+from fleet.core.transformer.paddle_norm import WrappedPaddleNorm
 
-LNImpl = None
+LNImpl = WrappedPaddleNorm
 
 
 def get_gpt_layer_local_spec(
