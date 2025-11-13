@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -x
 disable_file="$work_dir/tests/multi_card_tests/disable_multi-card_uts.txt"
-failed_tests=()
 
 disabled=()
 if [ -f "$disable_file" ]; then
@@ -22,6 +22,8 @@ if [ -f "$disable_file" ]; then
         disabled+=("$line")
     done < "$disable_file"
 fi
+
+echo "Disabled tests: ${disabled[@]}"
 
 is_disabled() {
     local test=$1
@@ -33,6 +35,7 @@ is_disabled() {
     return 1
 }
 
+failed_tests=()
 for test_file in tests/multi_card_tests/*.py; do
     filename=$(basename "$test_file")
     if is_disabled "$filename"; then
