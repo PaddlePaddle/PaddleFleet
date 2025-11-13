@@ -22,7 +22,7 @@ if [ -f "$disable_file" ]; then
     done < "$disable_file"
 fi
 
-echo "Disabled tests: ${disabled[@]}"
+echo -e "\033[34mDisabled tests:\033[0m ${disabled[@]}"
 
 is_disabled() {
     local test=$1
@@ -55,7 +55,7 @@ done
 
 echo "======================================"
 if [ ${#failed_tests[@]} -eq 0 ]; then
-    echo "All multi-card tests passed!"
+    echo -e "\033[32mAll multi-card tests passed!\033[0m"
     echo "======================================"
 else
     echo -e "::error:: Some multi-card tests failed:"

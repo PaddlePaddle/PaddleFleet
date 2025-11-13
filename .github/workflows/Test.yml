@@ -116,16 +116,16 @@ jobs:
         run: |
           exit_code=0
           if [[ "$single_card_exit_code" != "0" ]]; then
-            echo -e "Single card test failed, please check the '\033[34mSingle card test\033[0m' step."
+            echo -e "::error:: Single card test failed, please check the '\033[34mSingle card test\033[0m' step."
             exit_code=1
           else
-            echo "Single card test succeeded."
+            echo -e "\033[32mSingle card test succeeded.\033[0m"
           fi
           if [[ "$multi_card_exit_code" != "0" ]]; then
-            echo -e "Multi card test failed, please check the '\033[34mMulti card test\033[0m' step."
+            echo -e "::error:: Multi card test failed, please check the '\033[34mMulti card test\033[0m' step."
             exit_code=1
           else
-            echo "Multi card test succeeded."
+            echo -e "\033[32mMulti card test succeeded.\033[0m"
           fi
           exit $exit_code
 
