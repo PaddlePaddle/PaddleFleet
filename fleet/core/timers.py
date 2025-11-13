@@ -217,7 +217,7 @@ class Timers:
         self._dummy_timer = DummyTimer()
         self._max_log_level = 2
 
-    def __call__(self, name, log_level=None) -> Timer:
+    def __call__(self, name, log_level=None) -> TimerBase:
         """Call timer with name and log level."""
         # If the timer has already been set, then check if the log-level
         # is provided, it matches the one that the timer was created with.
