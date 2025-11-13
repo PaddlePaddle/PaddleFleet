@@ -93,7 +93,8 @@ jobs:
         continue-on-error: true
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
-          uv run pytest tests/single_card_tests pytest tests/my_dir/ $(sed 's/^/--ignore=/' tests/single_card_tests/disable_single_card_uts.txt)
+          set -x
+          uv run pytest tests/single_card_tests pytest $(sed 's/^/--ignore=/' tests/single_card_tests/disable_single_card_uts.txt)
           single_card_exit_code=$?
           echo "single_card_exit_code=$single_card_exit_code" >> ${{ github.env }}
           '
