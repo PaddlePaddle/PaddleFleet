@@ -111,7 +111,7 @@ class ModelParallelConfig:
     """dtype used when initializing the weights."""
 
     timers: Callable = None
-    """Timers object to call for various timing functions. See megatron.core.timers.Timers"""
+    """Timers object to call for various timing functions. See fleet.core.timers.Timers"""
 
     finalize_model_grads_func: Callable = None
     """Function that finalizes gradients on all workers. Could include ensuring that grads are

@@ -17,8 +17,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from paddle.distributed.communication.group import Group
-
     from fleet.core.packed_seq_params import PackedSeqParams
     from fleet.core.transformer.transformer_block import TransformerBlock
     from fleet.core.transformer.transformer_config import TransformerConfig
@@ -28,11 +26,6 @@ import math
 
 import paddle
 from paddle import Tensor, nn
-
-from fleet.core import parallel_state
-from fleet.core.models.common.embeddings.rope_utils import (
-    get_pos_emb_on_this_cp_rank,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +49,6 @@ class RotaryEmbedding(nn.Layer):
             10000.
         rope_scaling (bool, optional): Apply rope scaling as used in llama 3.x.
         rope_scaling_factor (float, optional): rope scaling factor in llama 3.x. Defaults to 8.
-        use_cpu_initialization (bool, optional): If False, initialize the inv_freq directly
-            on the GPU. Defaults to False
-        cp_group (Group, optional): Process group for context parallel.
-            Defaults to None.
     """
 
     def __init__(
@@ -71,8 +60,6 @@ class RotaryEmbedding(nn.Layer):
         rotary_base: int = 10000,
         rope_scaling: bool = False,
         rope_scaling_factor: float = 8.0,
-        use_cpu_initialization: bool = False,
-        cp_group: Group | None = None,
     ) -> None:
         super().__init__()
 
@@ -82,11 +69,12 @@ class RotaryEmbedding(nn.Layer):
         self.rotary_interleaved = rotary_interleaved
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        device = "cpu" if use_cpu_initialization else paddle.get_device()
         self.inv_freq = 1.0 / (
             rotary_base
             ** (
-                paddle.arange(0, dim, 2, dtype=paddle.float32, device=device)
+                paddle.arange(0, dim, 2, dtype=paddle.int64).astype(
+                    dtype=paddle.float32
+                )
                 / dim
             )
         )
@@ -95,14 +83,6 @@ class RotaryEmbedding(nn.Layer):
             self.inv_freq = self._apply_scaling(
                 self.inv_freq, factor=rope_scaling_factor
             )
-
-        self.cp_group = (
-            cp_group
-            if cp_group is not None
-            else parallel_state.get_context_parallel_group(
-                check_initialized=False
-            )
-        )
 
     def _apply_scaling(
         self,
@@ -152,14 +132,7 @@ class RotaryEmbedding(nn.Layer):
     ) -> Tensor:
         """Generates matrix of frequencies based on positions in the sequence,
         used to create positional encodings"""
-        seq = (
-            paddle.arange(
-                max_seq_len,
-                device=self.inv_freq.place,
-                dtype=self.inv_freq.dtype,
-            )
-            + offset
-        )
+        seq = paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
 
         if self.seq_len_interpolation_factor is not None:
             seq *= 1 / self.seq_len_interpolation_factor
@@ -191,10 +164,6 @@ class RotaryEmbedding(nn.Layer):
         Returns:
             Tensor: Embeddings after applying RoPE.
         """
-        if self.inv_freq.place.is_cpu_place():
-            # move `inv_freq` to GPU once at the first micro-batch forward pass
-            self.inv_freq = self.inv_freq.to(device=paddle.get_device())
-
         freqs = self.get_freqs_non_repeated(max_seq_len, offset)
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size
@@ -202,25 +171,11 @@ class RotaryEmbedding(nn.Layer):
             emb = paddle.cat((freqs, freqs), axis=-1)
         else:
             emb = paddle.stack(
-                (freqs.view(-1, 1), freqs.view(-1, 1)), axis=-1
-            ).view(freqs.shape[0], -1)
+                (freqs.reshape((-1, 1)), freqs.reshape((-1, 1))), axis=-1
+            ).reshape((freqs.shape[0], -1))
         # emb [seq_length, .., dim]
         emb = emb[:, None, None, :]
-        if (
-            self.cp_group is not None
-            and self.cp_group.size() > 1
-            and not packed_seq
-        ):
-            # slice rotary_pos_emb along sequence dimension and select the partition of the current
-            # CP rank
-            emb = get_pos_emb_on_this_cp_rank(emb, 0, self.cp_group)
         return emb
-
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        state_dict.pop(f"{prefix}inv_freq", None)
-        return super()._load_from_state_dict(
-            state_dict, prefix, *args, **kwargs
-        )
 
     def get_rotary_seq_len(
         self,
