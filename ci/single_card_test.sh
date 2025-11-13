@@ -23,6 +23,6 @@ if [ -f "$disable_file" ]; then
     done < "$disable_file"
 fi
 
-echo "\033[34mDisabled tests:\033[0m ${disabled[@]}"
+echo -e "\033[34mDisabled tests:\033[0m ${disabled[@]}"
 
 uv run pytest tests/single_card_tests $(sed 's/^/--ignore=/' tests/single_card_tests/disable_single_card_uts.txt)
