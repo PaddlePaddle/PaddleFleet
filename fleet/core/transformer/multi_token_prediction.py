@@ -36,6 +36,7 @@ from fleet.core.transformer.layer import FleetLayer
 from fleet.core.transformer.spec_utils import LayerSpec, build_layer
 
 if TYPE_CHECKING:
+    from fleet.core.packed_seq_params import PackedSeqParams
     from fleet.core.transformer.transformer_block import (
         TransformerBlockSublayers,
     )
@@ -525,6 +526,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         rotary_pos_cos: paddle.Tensor | None = None,
         rotary_pos_sin: paddle.Tensor | None = None,
         attention_bias: paddle.Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
     ) -> paddle.Tensor:
         """
         Concatenates embeddings with hidden states and then applies transformer layer forward.
@@ -548,6 +550,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
                 attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
             )
 
         hidden_states = self._postprocess(hidden_states)
@@ -605,6 +608,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         rotary_pos_cos: Tensor = None,
         rotary_pos_sin: Tensor = None,
         attention_bias: Tensor = None,
+        packed_seq_params: PackedSeqParams = None,
         embedding=None,
     ):
         """
@@ -631,6 +635,9 @@ class MultiTokenPredictionLayer(FleetLayer):
         assert context is None, (
             "multi token prediction + cross attention is not yet supported."
         )
+        assert packed_seq_params is None, (
+            "multi token prediction + sequence packing is not yet supported."
+        )
 
         input_ids, position_ids, decoder_input, hidden_states = (
             self._get_embeddings(
@@ -653,6 +660,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
                 attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
             )
         else:
             hidden_states = self._proj_and_transformer_layer(
@@ -665,6 +673,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
                 attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
             )
 
         return hidden_states, input_ids, position_ids
@@ -799,6 +808,7 @@ class MultiTokenPredictionBlock(FleetLayer):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
         extra_block_kwargs: dict | None = None,
         embedding=None,
     ) -> Tensor:
@@ -831,6 +841,7 @@ class MultiTokenPredictionBlock(FleetLayer):
                 rotary_pos_emb=rotary_pos_emb,
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
+                packed_seq_params=packed_seq_params,
                 embedding=embedding,
                 **(extra_block_kwargs or {}),
             )

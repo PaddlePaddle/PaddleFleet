@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 import paddle
 from paddle import Tensor
+from paddle.distributed.fleet.meta_parallel import VocabParallelEmbedding
 
 from fleet.core import tensor_parallel
 from fleet.core.transformer.layer import FleetLayer
@@ -72,15 +73,18 @@ class LanguageModelEmbedding(FleetLayer):
             and self.config.sequence_parallel
             and self.scatter_to_sequence_parallel
         )
+        assert not self.reduce_scatter_embeddings, (
+            "Currently reduce_scatter_embeddings is not supported."
+        )
 
         # Word embeddings (parallel).
-        self.word_embeddings = tensor_parallel.VocabParallelEmbedding(
+        self.word_embeddings = VocabParallelEmbedding(
             num_embeddings=self.vocab_size,
             embedding_dim=self.config.hidden_size,
-            init_method=self.config.embedding_init_method,
-            reduce_scatter_embeddings=self.reduce_scatter_embeddings,
-            config=self.config,
-            tp_group=self.tp_group,
+            # init_method=self.config.embedding_init_method,
+            # reduce_scatter_embeddings=self.reduce_scatter_embeddings,
+            # deterministic_mode=self.config.deterministic_mode,
+            mp_group=self.tp_group,
         )
 
         # Position embedding (serial).

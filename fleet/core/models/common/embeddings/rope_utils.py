@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -26,8 +25,6 @@ import logging
 
 import paddle
 from paddle import Tensor
-
-from fleet.core import parallel_state
 
 logger = logging.getLogger(__name__)
 
@@ -261,62 +258,22 @@ def apply_rotary_pos_emb(
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
     """
-    global fused_apply_rotary_pos_emb, fused_apply_rotary_pos_emb_thd
 
-    # Keep for backward compatibility. Will deprecate in the future.
-    if cp_group is None:
-        cp_group = parallel_state.get_context_parallel_group()
-
-    if config.apply_rope_fusion:
-        if cu_seqlens is None:
-            # NOTE: TE backends do not support mRoPE in bshd format when bs > 1.
-            if config.mrope_section is not None and freqs.shape[1] > 1:
-                # TODO: Add a check in TransformerConfig and remove this unfused implementation.
-                warnings.warn(
-                    "apply_rope_fusion does not support mRoPE in bshd format when bs > 1. "
-                    "Please set apply_rope_fusion to false. This will become an error in v0.16."
-                )
-                return _apply_rotary_pos_emb_bshd(
-                    t,
-                    freqs,
-                    rotary_interleaved=config.rotary_interleaved,
-                    multi_latent_attention=config.multi_latent_attention,
-                    mscale=mscale,
-                )
-            else:
-                assert fused_apply_rotary_pos_emb is not None, (
-                    "apply_rope_fusion is not available."
-                )
-                return fused_apply_rotary_pos_emb(
-                    t, freqs, interleaved=config.rotary_interleaved
-                )
-        else:
-            assert fused_apply_rotary_pos_emb_thd is not None, (
-                "apply_rope_fusion is not available."
-            )
-            return fused_apply_rotary_pos_emb_thd(
-                t,
-                cu_seqlens,
-                freqs,
-                cp_size=cp_group.size(),
-                cp_rank=cp_group.rank(),
-            )
+    if cu_seqlens is None:
+        return _apply_rotary_pos_emb_bshd(
+            t,
+            freqs,
+            rotary_interleaved=config.rotary_interleaved,
+            multi_latent_attention=config.multi_latent_attention,
+            mscale=mscale,
+        )
     else:
-        if cu_seqlens is None:
-            return _apply_rotary_pos_emb_bshd(
-                t,
-                freqs,
-                rotary_interleaved=config.rotary_interleaved,
-                multi_latent_attention=config.multi_latent_attention,
-                mscale=mscale,
-            )
-        else:
-            return _apply_rotary_pos_emb_thd(
-                t,
-                cu_seqlens,
-                freqs,
-                rotary_interleaved=config.rotary_interleaved,
-                multi_latent_attention=config.multi_latent_attention,
-                mscale=mscale,
-                cp_group=cp_group,
-            )
+        return _apply_rotary_pos_emb_thd(
+            t,
+            cu_seqlens,
+            freqs,
+            rotary_interleaved=config.rotary_interleaved,
+            multi_latent_attention=config.multi_latent_attention,
+            mscale=mscale,
+            cp_group=cp_group,
+        )
