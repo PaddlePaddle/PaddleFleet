@@ -18,7 +18,7 @@ import paddle
 
 from fleet.core.transformer.attention import (
     SelfAttention,
-    SelfAttentionSublayers,
+    SelfAttentionSublayersSpec,
 )
 from fleet.core.transformer.dot_product_attention import DotProductAttention
 from fleet.core.transformer.transformer_config import TransformerConfig
@@ -86,7 +86,7 @@ class TestSelfAttention(unittest.TestCase):
 
         self.self_attention = SelfAttention(
             self.config,
-            SelfAttentionSublayers(
+            SelfAttentionSublayersSpec(
                 linear_qkv=BiasedLinear,
                 core_attention=DotProductAttention,
                 linear_proj=BiasedLinear,

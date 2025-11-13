@@ -40,9 +40,9 @@ from .enums import AttnMaskType
 
 
 @dataclass
-class SelfAttentionSublayers:
+class SelfAttentionSublayersSpec:
     """
-    Configuration class for specifying the sublayers of a self-attention.
+    Configuration class for specifying the sublayers_spec of a self-attention.
     """
 
     linear_qkv: LayerSpec | type = None
@@ -53,9 +53,9 @@ class SelfAttentionSublayers:
 
 
 @dataclass
-class CrossAttentionSublayers:
+class CrossAttentionSublayersSpec:
     """
-    Configuration class for specifying the sublayers of a cross-attention.
+    Configuration class for specifying the sublayers_spec of a cross-attention.
     """
 
     linear_q: LayerSpec | type = None
@@ -74,7 +74,8 @@ class Attention(FleetLayer, ABC):
     def __init__(
         self,
         config: TransformerConfig,
-        sublayers: SelfAttentionSublayers | CrossAttentionSublayers,
+        sublayers_spec: SelfAttentionSublayersSpec
+        | CrossAttentionSublayersSpec,
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
@@ -127,7 +128,7 @@ class Attention(FleetLayer, ABC):
         self.val_hidden_size = self.hidden_size_per_attention_head
 
         self.core_attention = build_layer(
-            sublayers.core_attention,
+            sublayers_spec.core_attention,
             config=self.config,
             layer_number=self.layer_number,
             attn_mask_type=self.attn_mask_type,
@@ -144,7 +145,7 @@ class Attention(FleetLayer, ABC):
 
         # Output.
         self.linear_proj = build_layer(
-            sublayers.linear_proj,
+            sublayers_spec.linear_proj,
             self.query_projection_size,
             self.config.hidden_size,
             config=self.config,
@@ -378,7 +379,7 @@ class SelfAttention(Attention):
     def __init__(
         self,
         config: TransformerConfig,
-        sublayers: SelfAttentionSublayers,
+        sublayers_spec: SelfAttentionSublayersSpec,
         layer_number: int,
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: str | None = None,
@@ -386,7 +387,7 @@ class SelfAttention(Attention):
     ):
         super().__init__(
             config=config,
-            sublayers=sublayers,
+            sublayers_spec=sublayers_spec,
             layer_number=layer_number,
             attn_mask_type=attn_mask_type,
             attention_type="self",
@@ -395,7 +396,7 @@ class SelfAttention(Attention):
         )
 
         self.linear_qkv = build_layer(
-            sublayers.linear_qkv,
+            sublayers_spec.linear_qkv,
             self.config.hidden_size,
             self.query_projection_size + 2 * self.kv_projection_size,
             config=self.config,
@@ -408,9 +409,9 @@ class SelfAttention(Attention):
             tp_group=self.pg_collection.tp,
         )
 
-        if sublayers.q_layernorm is not None:
+        if sublayers_spec.q_layernorm is not None:
             self.q_layernorm = build_layer(
-                sublayers.q_layernorm,
+                sublayers_spec.q_layernorm,
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.layernorm_epsilon,
@@ -418,9 +419,9 @@ class SelfAttention(Attention):
         else:
             self.q_layernorm = None
 
-        if sublayers.k_layernorm is not None:
+        if sublayers_spec.k_layernorm is not None:
             self.k_layernorm = build_layer(
-                sublayers.k_layernorm,
+                sublayers_spec.k_layernorm,
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.layernorm_epsilon,
@@ -511,7 +512,7 @@ class CrossAttention(Attention):
     def __init__(
         self,
         config: TransformerConfig,
-        sublayers: CrossAttentionSublayers,
+        sublayers_spec: CrossAttentionSublayersSpec,
         layer_number: int,
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: str | None = None,
@@ -519,7 +520,7 @@ class CrossAttention(Attention):
     ):
         super().__init__(
             config=config,
-            sublayers=sublayers,
+            sublayers_spec=sublayers_spec,
             layer_number=layer_number,
             attn_mask_type=attn_mask_type,
             attention_type="cross",
@@ -534,7 +535,7 @@ class CrossAttention(Attention):
         assert self.query_projection_size == self.kv_projection_size
 
         self.linear_q = build_layer(
-            sublayers.linear_q,
+            sublayers_spec.linear_q,
             self.config.hidden_size,
             self.query_projection_size,
             config=self.config,
@@ -546,7 +547,7 @@ class CrossAttention(Attention):
         )
 
         self.linear_kv = build_layer(
-            sublayers.linear_kv,
+            sublayers_spec.linear_kv,
             self.config.hidden_size,
             2 * self.kv_projection_size,
             config=self.config,

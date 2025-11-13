@@ -22,13 +22,13 @@ from fleet.core.models.backends import BackendSpecProvider, LocalSpecProvider
 from fleet.core.models.gpt.moe_layer_specs import get_moe_layer_spec_for_backend
 from fleet.core.transformer.attention import (
     SelfAttention,
-    SelfAttentionSublayers,
+    SelfAttentionSublayersSpec,
 )
 from fleet.core.transformer.enums import AttnMaskType, LayerType
 from fleet.core.transformer.identity_op import IdentityOp
-from fleet.core.transformer.mlp import MLP, MLPSublayers
+from fleet.core.transformer.mlp import MLP, MLPSublayersSpec
 from fleet.core.transformer.multi_token_prediction import (
-    MultiTokenPredictionBlockSublayers,
+    MultiTokenPredictionBlockSublayersSpec,
     get_mtp_layer_offset,
     get_mtp_layer_spec_for_backend,
     get_mtp_num_layers_to_build,
@@ -36,12 +36,12 @@ from fleet.core.transformer.multi_token_prediction import (
 from fleet.core.transformer.norm import L2Norm
 from fleet.core.transformer.spec_utils import LayerSpec
 from fleet.core.transformer.transformer_block import (
-    TransformerBlockSublayers,
+    TransformerBlockSublayersSpec,
     get_num_layers_to_build,
 )
 from fleet.core.transformer.transformer_layer import (
     TransformerLayer,
-    TransformerLayerSublayers,
+    TransformerLayerSublayersSpec,
     get_transformer_layer_offset,
 )
 
@@ -92,12 +92,12 @@ def get_gpt_layer_local_spec(
 
     return LayerSpec(
         layer=TransformerLayer,
-        sublayers=TransformerLayerSublayers(
+        sublayers_spec=TransformerLayerSublayersSpec(
             input_layernorm=layer_norm,
             self_attention=LayerSpec(
                 layer=SelfAttention,
                 params={"attn_mask_type": AttnMaskType.causal},
-                sublayers=SelfAttentionSublayers(
+                sublayers_spec=SelfAttentionSublayersSpec(
                     linear_qkv=backend.column_parallel_linear(),
                     core_attention=backend.core_attention(),
                     linear_proj=backend.row_parallel_linear(),
@@ -145,7 +145,7 @@ def get_mlp_layer_spec_for_backend(
             linear_fc1 = backend.column_parallel_linear()
         return LayerSpec(
             layer=layer,
-            sublayers=MLPSublayers(
+            sublayers_spec=MLPSublayersSpec(
                 linear_fc1=linear_fc1,
                 linear_fc2=linear_fc2,
                 activation_func=activation_func,
@@ -166,7 +166,7 @@ def get_gpt_decoder_block_spec(
     qk_l2_norm: bool | None = False,
     vp_stage: int | None = None,
     pp_rank: int | None = None,
-) -> TransformerBlockSublayers:
+) -> TransformerBlockSublayersSpec:
     """GPT block spec."""
     layer_norm_impl = LNImpl
     dense_layer_spec = get_gpt_layer_local_spec(
@@ -237,7 +237,7 @@ def get_gpt_decoder_block_spec(
         local_layer_specs = layer_specs[offset : offset + num_layers_to_build]
 
     # Block spec.
-    block_spec = TransformerBlockSublayers(
+    block_spec = TransformerBlockSublayersSpec(
         layer_specs=local_layer_specs, layer_norm=layer_norm_impl
     )
 
@@ -246,10 +246,10 @@ def get_gpt_decoder_block_spec(
 
 def get_gpt_mtp_block_spec(
     config: TransformerConfig,
-    spec: TransformerBlockSublayers | LayerSpec,
+    spec: TransformerBlockSublayersSpec | LayerSpec,
     vp_stage: int | None = None,
     pp_rank: int | None = None,
-) -> MultiTokenPredictionBlockSublayers:
+) -> MultiTokenPredictionBlockSublayersSpec:
     """GPT Multi-Token Prediction (MTP) block spec."""
     backend = LocalSpecProvider()
     return get_gpt_mtp_block_spec_for_backend(
@@ -263,11 +263,11 @@ def get_gpt_mtp_block_spec(
 
 def get_gpt_mtp_block_spec_for_backend(
     config: TransformerConfig,
-    spec: TransformerBlockSublayers | LayerSpec,
+    spec: TransformerBlockSublayersSpec | LayerSpec,
     backend: BackendSpecProvider,
     vp_stage: int | None = None,
     pp_rank: int | None = None,
-) -> MultiTokenPredictionBlockSublayers:
+) -> MultiTokenPredictionBlockSublayersSpec:
     """GPT Multi-Token Prediction (MTP) block spec."""
     num_layers_to_build = get_mtp_num_layers_to_build(
         config, vp_stage=vp_stage, pp_rank=pp_rank
@@ -275,7 +275,7 @@ def get_gpt_mtp_block_spec_for_backend(
     if num_layers_to_build == 0:
         return None
 
-    if isinstance(spec, TransformerBlockSublayers):
+    if isinstance(spec, TransformerBlockSublayersSpec):
         # get the spec for the last layer of decoder block
         transformer_layer_spec = spec.layer_specs[-1]
     elif isinstance(spec, LayerSpec) and spec.layer == TransformerLayer:
@@ -296,7 +296,7 @@ def get_gpt_mtp_block_spec_for_backend(
         assert len(mtp_layer_specs) == config.mtp_num_layers, (
             +"currently all of the mtp layers must stage in the same pipeline stage."
         )
-        mtp_block_spec = MultiTokenPredictionBlockSublayers(
+        mtp_block_spec = MultiTokenPredictionBlockSublayersSpec(
             layer_specs=mtp_layer_specs
         )
     else:
