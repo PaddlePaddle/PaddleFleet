@@ -31,7 +31,7 @@ if [ ${#failed_tests[@]} -eq 0 ]; then
     echo "All multi-card tests passed!"
     echo "======================================"
 else
-    echo -e "::error:: \033[31mSome multi-card tests failed:\033[0m"
+    echo -e "::error:: Some multi-card tests failed:"
     for fail in "${failed_tests[@]}"; do
         echo -e "::error:: \033[31m- $fail\033[0m"
     done

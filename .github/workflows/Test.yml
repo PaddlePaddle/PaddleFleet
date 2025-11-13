@@ -54,6 +54,7 @@ jobs:
           docker pull $docker_image
           docker run -d -t --gpus all --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
+            -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
             -v ${{ github.workspace }}/../../../.cache:/root/.cache \
             -v ${{ github.workspace }}:/paddle \
