@@ -14,7 +14,7 @@ concurrency:
 env:
   PR_ID: ${{ github.event.pull_request.number || '0' }}
   COMMIT_ID: ${{ github.event.pull_request.head.sha || github.sha }}
-  work_dir: /paddle
+  c: /paddle
   PADDLE_ROOT: /paddle
   TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-test
   ci_scripts: /paddle/ci

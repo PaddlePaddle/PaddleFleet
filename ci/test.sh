@@ -12,9 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+disable_file="$work_dir/tests/multi_card_tests/disable_multi-card_uts.txt"
 failed_tests=()
 
+disabled=()
+if [ -f "$disable_file" ]; then
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+        disabled+=("$line")
+    done < "$disable_file"
+fi
+
+is_disabled() {
+    local test=$1
+    for d in "${disabled[@]}"; do
+        if [[ "$test" == "$d" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 for test_file in tests/multi_card_tests/*.py; do
+    filename=$(basename "$test_file")
+    if is_disabled "$filename"; then
+        echo "Skipping disabled test: $filename"
+        continue
+    fi
+
     echo "Running multi-card test: $test_file"
     uv run -m paddle.distributed.launch --gpus "0,1,2,3,4,5,6,7" "$test_file"
     exit_code=$?
