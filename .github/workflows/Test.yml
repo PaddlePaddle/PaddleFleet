@@ -84,6 +84,7 @@ jobs:
           pip cache dir
           echo "Install uv"
           curl -LsSf https://astral.sh/uv/install.sh | sh
+          source $HOME/.local/bin/env
           echo "uv sync"
           uv sync > /dev/null 2>&1
           '
@@ -155,6 +156,7 @@ jobs:
           pip cache dir
           echo "Install uv"
           curl -LsSf https://astral.sh/uv/install.sh | sh
+          source $HOME/.local/bin/env
           echo "uv sync"
           uv sync > /dev/null 2>&1
           '
