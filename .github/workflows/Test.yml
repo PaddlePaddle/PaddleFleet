@@ -83,7 +83,7 @@ jobs:
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
-          pip install -q uv
+          curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "uv sync"
           uv sync > /dev/null 2>&1
           '
@@ -154,7 +154,7 @@ jobs:
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
-          pip install -q uv
+          curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "uv sync"
           uv sync > /dev/null 2>&1
           '
