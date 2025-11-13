@@ -1,2 +1,1 @@
-tests/single_card_tests/transformer/test_attention.py
-tests/single_card_tests/test_imports.py
+# tests/single_card_tests/transformer/test_attention.py
