@@ -79,8 +79,8 @@ if _GPUEventTimer is None:
 class RuntimeTimer:
     """A timer that can be dynamically adjusted during runtime."""
 
-    def __init__(self, name):
-        self.timer = _Timer(name)
+    def __init__(self):
+        self.timer = _Timer("RuntimeTimer")
 
     def start(self, name):
         """Start the RuntimeTimer."""
@@ -101,7 +101,7 @@ class RuntimeTimer:
         string = "[timelog] {}: {:.2f}s ({}) ".format(
             self.timer.name, runtime, time.strftime("%Y-%m-%d %H:%M:%S")
         )
-        return string
+        print(string)
 
 
 class Timers:
@@ -110,7 +110,7 @@ class Timers:
     def __init__(self):
         self.timers = {}
 
-    def __call__(self, name, use_event=False):
+    def __call__(self, name, use_event=False) -> _Timer:
         clazz = (
             _GPUEventTimer
             if use_event and paddle.is_compiled_with_cuda()
@@ -150,9 +150,9 @@ class Timers:
         for time_tuple in time_dict:
             name, value = time_tuple
             string += f" | {name} : {value:.2f}"
-        return string
+        print(string)
 
-    def info(self, names, normalizer=1.0, reset=False):
+    def info(self, names, normalizer=1.0, reset=False) -> dict[str, float]:
         """Return a dict of timers."""
         assert normalizer > 0.0
         time_dict = {}

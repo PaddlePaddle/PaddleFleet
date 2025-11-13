@@ -37,11 +37,11 @@ def set_args(args):
     _GLOBAL_ARGS = args
 
 
-def _set_timers(args):
+def _set_timers():
     """Initialize timers."""
     global _GLOBAL_TIMERS
     _ensure_var_is_not_initialized(_GLOBAL_TIMERS, "timers")
-    _GLOBAL_TIMERS = Timers(args.timing_log_level, args.timing_log_option)
+    _GLOBAL_TIMERS = Timers()
 
 
 def _ensure_var_is_initialized(var, name):
@@ -69,7 +69,7 @@ def set_global_variables(args):
 
     _ensure_var_is_not_initialized(_GLOBAL_ARGS, "args")
     set_args(args)
-    _set_timers(args)
+    _set_timers()
 
 
 def unset_global_variables():
