@@ -43,6 +43,7 @@ from fleet.core.utils import (
 )
 
 if TYPE_CHECKING:
+    from fleet.core.packed_seq_params import PackedSeqParams
     from fleet.core.transformer.transformer_config import TransformerConfig
 
 LayerNormImpl = WrappedPaddleNorm
@@ -362,6 +363,7 @@ class TransformerBlock(FleetLayer):
         context_mask: Tensor,
         rotary_pos_emb: Tensor,
         attention_bias: Tensor,
+        packed_seq_params: PackedSeqParams,
     ):
         """Forward method with activation checkpointing."""
 
@@ -383,6 +385,7 @@ class TransformerBlock(FleetLayer):
                         context_mask=context_mask,
                         rotary_pos_emb=rotary_pos_emb,
                         attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
                     )
                 return hidden_states, context
 
@@ -455,6 +458,7 @@ class TransformerBlock(FleetLayer):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
     ):
         """
         Perform the forward pass through the transformer block.
@@ -474,6 +478,8 @@ class TransformerBlock(FleetLayer):
             rotary_pos_sin (Tensor | None): Rotary embedding sine.
             attention_bias (Tensor | None): Bias tensor for Q * K.T of shape in shape broadcastable
                 to [b, num_head, sq, skv], e.g. [1, 1, sq, skv].
+            packed_seq_params (PackedSeqParams | None): Parameters for packed sequence
+                processing.
 
         Returns:
             Tensor | Tuple[Tensor, Tensor]: The output hidden states tensor of shape
@@ -502,6 +508,7 @@ class TransformerBlock(FleetLayer):
                     context_mask=context_mask,
                     rotary_pos_emb=rotary_pos_emb,
                     attention_bias=attention_bias,
+                    packed_seq_params=packed_seq_params,
                 )
             else:
                 for l_no, layer in enumerate(self.layers):
@@ -514,6 +521,7 @@ class TransformerBlock(FleetLayer):
                         rotary_pos_cos=rotary_pos_cos,
                         rotary_pos_sin=rotary_pos_sin,
                         attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
                     )
 
         # Final layer norm.
