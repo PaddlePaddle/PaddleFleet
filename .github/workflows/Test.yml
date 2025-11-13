@@ -54,9 +54,9 @@ jobs:
           docker run -d -t --gpus all --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
             -v "/home/data/cfs:/home/data/cfs" \
+            -v "/home/data/cfs/.cache:/root/.cache" \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v ${{ github.workspace }}/../../../.cache:/root/.cache \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
