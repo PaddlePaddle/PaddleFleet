@@ -42,7 +42,7 @@ jobs:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
-      group: v100-test
+      group: BD_BJ-V100
     env:
       PIP_CACHE_DIR: /root/.cache/pip
     steps:
@@ -53,6 +53,7 @@ jobs:
           docker pull $docker_image
           docker run -d -t --gpus all --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
+            -v "/home/data/cfs:/home/data/cfs" \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
             -v ${{ github.workspace }}/../../../.cache:/root/.cache \
