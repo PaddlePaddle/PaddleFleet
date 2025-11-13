@@ -217,7 +217,7 @@ class Timers:
         self._dummy_timer = DummyTimer()
         self._max_log_level = 2
 
-    def __call__(self, name, log_level=None):
+    def __call__(self, name, log_level=None) -> Timer:
         """Call timer with name and log level."""
         # If the timer has already been set, then check if the log-level
         # is provided, it matches the one that the timer was created with.
@@ -294,7 +294,9 @@ class Timers:
 
         return rank_name_to_time
 
-    def _get_global_min_max_time(self, names, reset, barrier, normalizer):
+    def _get_global_min_max_time(
+        self, names, reset, barrier, normalizer
+    ) -> dict[str, tuple]:
         """Report only min and max times across all ranks."""
 
         rank_name_to_time = self._get_elapsed_time_all_ranks(
@@ -315,7 +317,7 @@ class Timers:
 
     def _get_global_min_max_time_string(
         self, names, reset, barrier, normalizer, max_only
-    ):
+    ) -> str:
         """Report strings for max/minmax times across all ranks."""
         name_to_min_max_time = self._get_global_min_max_time(
             names, reset, barrier, normalizer
@@ -338,7 +340,9 @@ class Timers:
                 )
         return output_string
 
-    def _get_all_ranks_time_string(self, names, reset, barrier, normalizer):
+    def _get_all_ranks_time_string(
+        self, names, reset, barrier, normalizer
+    ) -> str:
         """Report times across all ranks."""
         rank_name_to_time = self._get_elapsed_time_all_ranks(
             names, reset, barrier
@@ -365,7 +369,7 @@ class Timers:
         normalizer: float = 1.0,
         reset: bool = True,
         barrier: bool = False,
-    ):
+    ) -> str:
         """Returns the output string with logged timer values according to configured options.
 
         Args:
