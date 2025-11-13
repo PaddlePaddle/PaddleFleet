@@ -5,6 +5,12 @@ on:
     branches:
       - develop
 
+permissions: read-all
+
+concurrency:
+  group: ${{ github.event.pull_request.number }}-${{ github.workflow }}
+  cancel-in-progress: true
+
 env:
   PR_ID: ${{ github.event.pull_request.number || '0' }}
   COMMIT_ID: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -37,6 +43,8 @@ jobs:
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
       group: CI-H
+    env:
+      PIP_CACHE_DIR: /root/.cache/pip
 
     steps:
       - name: Check docker image and run container
@@ -46,7 +54,8 @@ jobs:
           docker pull $docker_image
           docker run -d -t --gpus all --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
-            -v ${{ github.workspace }}/../../../proxy:/utils/proxy \
+            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
+            -v ${{ github.workspace }}/../../../.cache:/root/.cache \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
@@ -57,6 +66,7 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
+            -e PIP_CACHE_DIR \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
@@ -64,11 +74,13 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           rm -rf * .[^.]*
           set -e
-          source /utils/proxy
+          source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
           git config pull.rebase false
           git pull origin pull/${PR_ID}/head
+          echo "pipcache"
+          pip cache dir
           echo "Install uv"
           pip install -q uv
           echo "uv sync"
@@ -81,15 +93,38 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           uv run pytest tests/single_card_tests
-          echo $?
+          single_card_exit_code=$?
+          echo "single_card_exit_code=$single_card_exit_code" >> ${github.env}
           '
 
       - name: Multi-card test
         if: steps.check-bypass.outputs.can-skip != 'true'
+        continue-on-error: true
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           bash ci/test.sh
+          multi_card_exit_code=$?
+          echo "multi_card_exit_code=$multi_card_exit_code" >> ${github.env}
           '
+
+      - name: Test summary
+        if: steps.check-bypass.outputs.can-skip != 'true'
+        continue-on-error: true
+        env:
+          single_card_exit_code: ${{ env.single_card_exit_code }}
+          multi_card_exit_code: ${{ env.multi_card_exit_code }}
+        run: |
+          if [[ "$single_card_exit_code" != "0" ]]; then
+            echo "Single card test failed, please check the 'Single card test' step."
+          else
+            echo "Single card test succeeded."
+          fi
+
+          if [[ "$multi_card_exit_code" != "0" ]]; then
+            echo "Multi card test failed, please check the 'Multi card test' step."
+          else
+            echo "Multi card test succeeded."
+          fi
 
       - name: Terminate and delete the container
         if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
