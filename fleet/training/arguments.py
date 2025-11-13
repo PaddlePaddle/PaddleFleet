@@ -22,7 +22,6 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     )
 
     parser.add_argument("--configs", type=str, default=None)
-    parser = _add_logging_args(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:
@@ -40,34 +39,3 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
         args = load_yaml(args.configs)
 
     return args
-
-
-def _add_logging_args(parser: argparse.ArgumentParser):
-    group = parser.add_argument_group(title="logging")
-    group.add_argument(
-        "--timing_log_level",
-        type=int,
-        default=0,
-        choices=[0, 2],
-        help="Granularity level to measure and report timing. "
-        "   0: report only iteration time and make sure timing "
-        "      does not introduce extra overhead."
-        "   1: report timing for operations that are executed "
-        "      very limited times (basically once) during "
-        "      each iteration (such as gradient all-reduce) "
-        "   2: report timing for operations that might be "
-        "      executed numerous times during each iteration. "
-        "Note that setting the level to 1 or 2 might "
-        "cause increase in iteration time.",
-    )
-    group.add_argument(
-        "--timing_log_option",
-        type=str,
-        default="max",
-        choices=["min", "mean", "max"],
-        help="Options for logging timing:"
-        "  max: report the max timing across all ranks"
-        "  minmax: report min and max timings across all ranks"
-        "  all: report timings of all ranks.",
-    )
-    return parser
