@@ -99,11 +99,6 @@ class RMSNorm(paddle.nn.Layer):
 
 
 class WrappedPaddleNorm:
-    """
-    A conditional wrapper to initialize an instance of PyTorch's
-    `LayerNorm` or `RMSNorm` based on input
-    """
-
     def __new__(
         cls,
         config: TransformerConfig,
