@@ -19,12 +19,12 @@ from typing import Callable
 
 import paddle.nn.functional as F
 
-from ..fleet_config import FleetConfig
+from ..model_parallel_config import ModelParallelConfig
 
 
 @dataclass
-class TransformerConfig(FleetConfig):
-    """Configuration object for  transformers."""
+class TransformerConfig(ModelParallelConfig):
+    """Configuration object for transformers."""
 
     ####################
     # model architecture

@@ -29,7 +29,7 @@ import paddle
 
 @dataclass
 class ModelParallelConfig:
-    """Base configuration for Megatron Core
+    """Base configuration for Fleet Core
 
     The initialization function has an argument for each parameter.
     """
