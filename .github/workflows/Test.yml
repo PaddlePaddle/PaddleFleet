@@ -42,7 +42,7 @@ jobs:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
-      group: BD_BJ-V100
+      group: v100-test
     env:
       PIP_CACHE_DIR: /root/.cache/pip
     steps:
