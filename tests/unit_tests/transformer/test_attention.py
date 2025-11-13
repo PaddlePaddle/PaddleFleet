@@ -66,6 +66,8 @@ class TestSelfAttention(unittest.TestCase):
         self.config.no_rope_freq = None
         self.config.recompute_granularity = None
         self.config.fused_single_qkv_rope = False
+        self.config.rotary_interleaved = False
+        self.config.multi_latent_attention = True
         self.config.init_method = init_method_normal(0.02)
         self.config.output_layer_init_method = scaled_init_method_normal(
             0.02, 1, 2.0
@@ -100,13 +102,17 @@ class TestSelfAttention(unittest.TestCase):
         micro_batch_size = 2
         hidden_size = self.self_attention.config.hidden_size
 
-        hidden_states = paddle.ones(
+        hidden_states = paddle.randn(
             (sequence_length, micro_batch_size, hidden_size),
         )
+        rotary_pos_emb = paddle.randn(
+            (sequence_length, 1, 1, self.config.kv_channels)
+        )
 
-        output, bias = self.self_attention(hidden_states, attention_mask=None)
+        output, bias = self.self_attention(
+            hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb
+        )
 
-        assert config.recompute_granularity is None
         # Check if output and bias have the correct shape
         assert output.shape[0] == sequence_length
         assert output.shape[1] == micro_batch_size
