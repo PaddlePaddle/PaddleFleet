@@ -1,5 +1,7 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
+from __future__ import annotations
+
 import paddle
 
 from fleet.core.transformer.mlp import MLP, MLPSublayers
@@ -30,7 +32,7 @@ class Linear(paddle.nn.Linear):
         embedding_activation_buffer=None,
         grad_output_buffer=None,
         is_expert: bool = False,
-        tp_comm_buffer_name: str = None,  # Not used
+        tp_comm_buffer_name: str | None = None,  # Not used
         disable_grad_reduce: bool = False,
         tp_group: None,
     ):

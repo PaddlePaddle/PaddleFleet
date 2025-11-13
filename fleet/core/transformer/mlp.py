@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import warnings
 from dataclasses import dataclass
-from typing import Optional,TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
@@ -29,6 +29,7 @@ from fleet.core.fusions.fused_bias_swiglu import (
 )
 from fleet.core.transformer.layer import FleetLayer
 from fleet.core.transformer.spec_utils import LayerSpec, build_layer
+
 if TYPE_CHECKING:
     from fleet.core.transformer.transformer_config import TransformerConfig
 from fleet.core.utils import (
@@ -36,9 +37,6 @@ from fleet.core.utils import (
     nvtx_range_pop,
     nvtx_range_push,
 )
-
-HAVE_TE = False
-
 
 logger = logging.getLogger(__name__)
 
@@ -125,15 +123,7 @@ class MLP(FleetLayer):
             tp_group=tp_group,
         )
 
-        if (
-            self.config.use_te_activation_func
-            and sublayers.activation_func is not None
-        ):
-            self.activation_func = build_layer(
-                sublayers.activation_func, config=self.config
-            )
-        else:
-            self.activation_func = self.config.activation_func
+        self.activation_func = self.config.activation_func
 
         self.linear_fc2 = build_layer(
             sublayers.linear_fc2,
@@ -157,17 +147,7 @@ class MLP(FleetLayer):
         nvtx_range_pop(suffix="linear_fc1")
 
         nvtx_range_push(suffix="activation")
-        if self.config.use_te_activation_func:
-            if bias_parallel is not None:
-                intermediate_parallel = intermediate_parallel + bias_parallel
-            intermediate_parallel = self.activation_func(intermediate_parallel)
-            if per_token_scale is not None:
-                original_dtype = intermediate_parallel.dtype
-                intermediate_parallel = (
-                    intermediate_parallel * per_token_scale.unsqueeze(-1)
-                )
-                intermediate_parallel = intermediate_parallel.to(original_dtype)
-        elif self.config.bias_activation_fusion:
+        if self.config.bias_activation_fusion:
             if per_token_scale is not None:
                 if (
                     self.activation_func == F.silu
@@ -217,7 +197,7 @@ class MLP(FleetLayer):
                         self.config.activation_func_fp8_input_store,
                         self.config.cpu_offloading
                         and self.config.cpu_offloading_activations
-                        and HAVE_TE,
+                        and False,
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")
@@ -270,7 +250,7 @@ class MLP(FleetLayer):
         self,
         prefix: str = "",
         sharded_offsets: tuple = (),
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ):
         """Return the sharded state dictionary of the module."""
         pass

@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 import paddle.nn.functional as F
 
@@ -37,13 +39,13 @@ class TransformerConfig(FleetConfig):
     num_attention_heads: int = 0
     """Number of transformer attention heads."""
 
-    init_method: Optional[Callable] = None
+    init_method: Callable | None = None
     """Method to initialize weights. Note that bias is always set to zero. Should be a function that
     takes a single Tensor and initializes it. If None, will be set to
     megatron.core.utils.init_method_normal(init_method_std) which is paddle nn init normal with
     mean=0.0 and std=init_method_std."""
 
-    ffn_hidden_size: Optional[int] = None
+    ffn_hidden_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""
 
@@ -60,10 +62,7 @@ class TransformerConfig(FleetConfig):
     """Include a bias term in all linear layers (QKV projections, after core attention, and two in
     MLP layer)."""
 
-    use_te_activation_func: bool = False
-    """Whether to use ffn activation functions implemented by TransformerEngine"""
-
-    output_layer_init_method: Optional[Callable] = None
+    output_layer_init_method: Callable | None = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
     will be set to megatron.core.utils.scaled_init_method_normal(init_method_std) which is paddle nn
     init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""

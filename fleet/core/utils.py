@@ -13,12 +13,16 @@
 # limitations under the License.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
+from __future__ import annotations
+
 import functools
 import inspect
-import logging
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    import logging
 import math
 import warnings
-from typing import Any, Callable, Optional
 
 import paddle
 
@@ -248,7 +252,7 @@ def _nvtx_decorator_get_func_path(func):
     return f"{module.__name__}.{caller_func}"
 
 
-def nvtx_decorator(message: Optional[str] = None, color: Optional[str] = None):
+def nvtx_decorator(message: str | None = None, color: str | None = None):
     """Decorator to add NVTX range to a function.
 
     Args:
