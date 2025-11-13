@@ -17,7 +17,9 @@ import logging
 import paddle
 
 try:
-    from paddle.incubate.nn.functional import fused_rms_norm_ext
+    from paddle.incubate.nn.functional.fused_rms_norm_ext import (
+        fused_rms_norm_ext,
+    )
 except ImportError:
     logging.warn("Fail to import fused_rms_norm_ext!")
     fused_rms_norm_ext = None
