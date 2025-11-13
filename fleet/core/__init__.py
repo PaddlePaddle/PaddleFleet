@@ -26,11 +26,13 @@ from fleet.core.package_info import (
     __shortversion__,
     __version__,
 )
+from fleet.core.timers import Timers
 
 mpu = parallel_state
 
 __all__ = [
     "parallel_state",
+    "Timers",
     "__contact_emails__",
     "__contact_names__",
     "__description__",

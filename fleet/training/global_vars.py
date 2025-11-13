@@ -14,7 +14,10 @@
 
 """PaddleFleet global variables."""
 
+from fleet.core.timers import Timers
+
 _GLOBAL_ARGS = None
+_GLOBAL_TIMERS = None
 
 
 def get_args():
@@ -23,9 +26,22 @@ def get_args():
     return _GLOBAL_ARGS
 
 
+def get_timers() -> Timers:
+    """Return timers."""
+    _ensure_var_is_initialized(_GLOBAL_TIMERS, "timers")
+    return _GLOBAL_TIMERS
+
+
 def set_args(args):
     global _GLOBAL_ARGS
     _GLOBAL_ARGS = args
+
+
+def _set_timers():
+    """Initialize timers."""
+    global _GLOBAL_TIMERS
+    _ensure_var_is_not_initialized(_GLOBAL_TIMERS, "timers")
+    _GLOBAL_TIMERS = Timers()
 
 
 def _ensure_var_is_initialized(var, name):
@@ -42,16 +58,22 @@ def destroy_global_vars():
     global _GLOBAL_ARGS
     _GLOBAL_ARGS = None
 
+    global _GLOBAL_TIMERS
+    _GLOBAL_TIMERS = None
+
 
 def set_global_variables(args):
-    """Set args, etc."""
+    """Set args, timers etc."""
 
     assert args is not None
 
     _ensure_var_is_not_initialized(_GLOBAL_ARGS, "args")
     set_args(args)
+    _set_timers()
 
 
 def unset_global_variables():
     global _GLOBAL_ARGS
+    global _GLOBAL_TIMERS
     _GLOBAL_ARGS = None
+    _GLOBAL_TIMERS = None
