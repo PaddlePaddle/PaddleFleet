@@ -89,7 +89,6 @@ jobs:
 
       - name: Single card test
         if: steps.check-bypass.outputs.can-skip != 'true'
-        continue-on-error: true
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           bash ci/single_card_test.sh
@@ -161,7 +160,6 @@ jobs:
 
       - name: Multi-card test
         if: steps.check-bypass.outputs.can-skip != 'true'
-        continue-on-error: true
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           bash ci/multi-card_test.sh
