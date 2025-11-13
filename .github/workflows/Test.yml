@@ -101,6 +101,8 @@ jobs:
           export WITH_COVERAGE=ON
   
           bash ci/single_card_test.sh
+          ls -a /paddle/coveragedata/
+          uv run coverage combine
           uv run coverage report -m
 
           single_card_exit_code=$?
@@ -183,7 +185,8 @@ jobs:
 
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
-
+          ls -a /paddle/coveragedata/
+          uv run coverage combine
           uv run coverage report -m
 
           if [[ "$multi_card_exit_code" != "0" ]]; then
