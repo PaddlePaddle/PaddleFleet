@@ -18,7 +18,7 @@ import dataclasses
 from fleet.core.transformer import TransformerConfig
 
 
-def parse_args(extra_args_provider=None, ignore_unknown_args=False):
+def parse_args(extra_args_provider=None, ignore_unknown_args=False, args=None):
     """Parse all arguments."""
     parser = argparse.ArgumentParser(
         description="PaddleFleet Arguments", allow_abbrev=False
@@ -32,16 +32,16 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
 
     # Parse.
     if ignore_unknown_args:
-        args, _ = parser.parse_known_args()
+        parsed_args, _ = parser.parse_known_args(args)
     else:
-        args = parser.parse_args()
+        parsed_args = parser.parse_args(args)
 
-    if args.configs is not None:
+    if parsed_args.configs is not None:
         from .yaml_arguments import load_yaml
 
-        args = load_yaml(args.configs)
+        parsed_args = load_yaml(parsed_args.configs)
 
-    return args
+    return parsed_args
 
 
 def core_transformer_config_from_args(args, config_class=None):

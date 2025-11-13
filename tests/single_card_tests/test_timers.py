@@ -19,10 +19,11 @@ import paddle
 
 from fleet.core.timers import RuntimeTimer
 from fleet.training import get_timers
+from fleet.training.arguments import parse_args
 from fleet.training.initialize import initialize_fleet
 
 strategy = paddle.distributed.fleet.DistributedStrategy()
-initialize_fleet(strategy=strategy)
+initialize_fleet(strategy=strategy, parsed_args=parse_args(args=[]))
 
 
 class TestTimers(unittest.TestCase):
