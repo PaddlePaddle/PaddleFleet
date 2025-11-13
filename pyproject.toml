@@ -44,7 +44,8 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Typing :: Typed",
 ]
-dependencies = ["paddlepaddle-gpu==3.2.1"]
+
+dependencies = ["wrapt", "paddlepaddle-gpu==3.2.2"]
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
@@ -81,7 +82,7 @@ build = [
 linting = [
     "ruff~=0.14.0",
 ]
-ci = ["python-gitlab", "slack-sdk", "pandas"]
+ci = ["coverage"]
 
 [tool.uv]
 default-groups = ["build", "test"]

@@ -88,7 +88,7 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           source $HOME/.local/bin/env
           echo "uv sync"
-          uv sync > /dev/null 2>&1
+          uv sync --group ci> /dev/null 2>&1
           '
 
       - name: Single card test
@@ -96,7 +96,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source $HOME/.local/bin/env
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+  
           bash ci/single_card_test.sh
+          uv run coverage report -m
+
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
@@ -163,7 +169,7 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           source $HOME/.local/bin/env
           echo "uv sync"
-          uv sync > /dev/null 2>&1
+          uv sync --group ci > /dev/null 2>&1
           '
 
       - name: Multi-card test
@@ -171,8 +177,15 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source $HOME/.local/bin/env
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
+
+          uv run coverage report -m
+
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed.\033[0m"
             exit 1
