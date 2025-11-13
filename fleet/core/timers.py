@@ -66,7 +66,7 @@ class _Timer:
         self.elapsed_ = 0.0
         self.started_ = False
 
-    def elapsed(self, reset: bool = True):
+    def elapsed(self, reset: bool = True) -> float:
         """Calculate the elapsed time."""
         started_ = self.started_
         # If the timing in progress, end it first.
