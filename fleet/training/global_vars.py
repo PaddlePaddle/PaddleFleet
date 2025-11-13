@@ -26,7 +26,7 @@ def get_args():
     return _GLOBAL_ARGS
 
 
-def get_timers():
+def get_timers() -> Timers:
     """Return timers."""
     _ensure_var_is_initialized(_GLOBAL_TIMERS, "timers")
     return _GLOBAL_TIMERS

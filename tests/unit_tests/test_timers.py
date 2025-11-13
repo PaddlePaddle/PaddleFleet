@@ -19,6 +19,7 @@ import paddle
 
 from fleet.core import Timers
 from fleet.core.timers import DummyTimer
+from fleet.training import get_timers
 from fleet.training.initialize import initialize_fleet
 
 strategy = paddle.distributed.fleet.DistributedStrategy()
@@ -58,6 +59,11 @@ class TestTimers(unittest.TestCase):
         time.sleep(0.1)
         timer1.stop()
         timers.log(["operation1"])
+
+    def test_global_timers(self):
+        timers = get_timers()
+        self.assertEqual(timers._log_level, 0)
+        self.assertEqual(timers._log_option, "max")
 
 
 if __name__ == "__main__":
