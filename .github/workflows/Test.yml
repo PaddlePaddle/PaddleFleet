@@ -73,7 +73,6 @@ jobs:
       - name: Clone PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
-          set -x
           rm -rf * .[^.]*
           set -e
           source /root/proxy
@@ -81,7 +80,6 @@ jobs:
           git config --global --add safe.directory /paddle
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          echo "pipcache"
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
@@ -119,14 +117,14 @@ jobs:
           exit_code=0
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo "single_card_exit_code=$single_card_exit_code"
-            echo "Single card test failed, please check the 'Single card test' step."
+            echo -e "Single card test failed, please check the '\033[34mSingle card test\033[0m' step."
             exit_code=1
           else
             echo "Single card test succeeded."
           fi
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo "multi_card_exit_code=$multi_card_exit_code"
-            echo "Multi card test failed, please check the 'Multi card test' step."
+            echo -e "Multi card test failed, please check the '\033[34mMulti card test\033[0m' step."
             exit_code=1
           else
             echo "Multi card test succeeded."
