@@ -566,7 +566,7 @@ class MultiTokenPredictionLayer(FleetLayer):
 
     def _checkpointed_forward(self, forward_func, *args, **kwargs):
         def checkpoint_handler():
-            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
+            """Determines whether to use the `tensor_parallel.checkpoint`"""
             return tensor_parallel.checkpoint(
                 forward_func,
                 self.config.distribute_saved_activations,

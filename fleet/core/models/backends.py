@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import warnings
 from abc import abstractmethod
 from typing import Protocol
 
@@ -113,10 +112,6 @@ class LocalSpecProvider(BackendSpecProvider):
     ) -> tuple[type, MLPSublayers | None]:
         """Which layer and sublayers to use for grouped mlp"""
         if moe_use_grouped_gemm:
-            warnings.warn(
-                "The legacy GroupedMLP will be deprecated in fleet-Core v0.12.0. "
-                "Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP."
-            )
             return GroupedMLP, None
         else:
             return SequentialMLP, MLPSublayers(
