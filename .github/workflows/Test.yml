@@ -72,6 +72,7 @@ jobs:
       - name: Clone PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
+          set -x
           rm -rf * .[^.]*
           set -e
           source /root/proxy
@@ -80,6 +81,7 @@ jobs:
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
           echo "pipcache"
+          mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
           pip install -q uv
