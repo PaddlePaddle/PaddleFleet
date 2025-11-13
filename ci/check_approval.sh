@@ -86,7 +86,7 @@ CHECKREQ_APPROVERS="risemeup1 swgu98"
 files=$(git diff --name-status upstream/$BRANCH)
 while read -r status file; do
     if [[ "$status" == "A" ]] && [[ "$(basename "$file")" == "requirements.txt" ]]; then
-        echo_line="You must be approved by one of ${CHECKREQ_APPROVERS} for newly added $file.\n"
+        echo_line="You must be approved by one of ${CHECKREQ_APPROVERS} for newly added \"$file\".\n"
         APPROVER_LIST=(${CHECKREQ_APPROVERS})
         check_approval 1 "${APPROVER_LIST[@]}"
     fi
