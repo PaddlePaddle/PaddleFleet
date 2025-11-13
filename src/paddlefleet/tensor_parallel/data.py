@@ -101,7 +101,7 @@ def broadcast_data(keys, data, datatype, tp_group=None):
             [data[key].cuda().contiguous().view(-1) for key in keys], dim=0
         )
     else:
-        flatten_data = paddle.empty(total_numel, dtype=datatype)
+        flatten_data = paddle.empty([total_numel], dtype=datatype)
 
     # Broadcast
     group_ranks = tp_group.ranks

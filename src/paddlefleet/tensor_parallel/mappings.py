@@ -585,7 +585,7 @@ def all_to_all_sp2hp(input_, group=None):
         input_ (paddle.Tensor):
             The input tensor which has been distributed along the sequence
             dimension.
-        group (paddle.distributed.communication.group.Group, optional):
+        group (paddle.distributed.ProcessGroup, optional):
             The process group to work on. If None, the tensor model parallel group
             will be used.
 
@@ -595,10 +595,12 @@ def all_to_all_sp2hp(input_, group=None):
     """
     group = get_tensor_model_parallel_group_if_none(group)
 
-    world_size = group.size()
+    world_size = group.world_size
     input_ = input_.reshape(-1, input_.shape[-1])
+    assert input_.shape[-1] % world_size, f"input last dim ({input_.shape[-1]}) must be divisible by world size ({world_size})"
+
     split_tensors = paddle.split(
-        input_, split_size_or_sections=input_.shape[-1] // world_size, dim=1
+        input_, num_or_sections = world_size, dim=1
     )
     concat_tensor = paddle.cat(split_tensors, dim=0)
     output = all_to_all(group, concat_tensor)
@@ -614,7 +616,7 @@ def all_to_all_hp2sp(input_, group=None):
         input_ (paddle.Tensor):
             The input tensor which has been distributed along the hidden
             dimension.
-        group (paddle.distributed.communication.group.Group, optional):
+        group (paddle.distributed.ProcessGroup, optional):
             The process group to work on. If None, the tensor model parallel group
             will be used.
 
@@ -623,14 +625,13 @@ def all_to_all_hp2sp(input_, group=None):
     """
     group = get_tensor_model_parallel_group_if_none(group)
 
-    world_size = group.size()
+    world_size = group.world_size
     input_ = input_.reshape(-1, input_.shape[-1])
     input_exchanged = all_to_all(group, input_)
     input_reshaped = input_exchanged.reshape(-1, input_exchanged.shape[-1])
+    assert input_reshaped.shape[0] % world_size == 0, f"input first dim ({input_reshaped.shape[0]}) must be divisible by world size ({world_size})"
     split_tensors = paddle.split(
-        input_reshaped,
-        split_size_or_sections=input_reshaped.shape[0] // world_size,
-        dim=0,
+        input_reshaped, num_or_sections = world_size, dim=0
     )
     output = paddle.concat(split_tensors, dim=-1)
     return output
