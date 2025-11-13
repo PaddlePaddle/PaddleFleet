@@ -96,7 +96,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           uv run pytest tests/single_card_tests
           single_card_exit_code=$?
-          echo "single_card_exit_code=$single_card_exit_code" >> ${github.env}
+          echo "single_card_exit_code=$single_card_exit_code" >> ${{ github.env }}
           '
 
       - name: Multi-card test
@@ -106,7 +106,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           bash ci/test.sh
           multi_card_exit_code=$?
-          echo "multi_card_exit_code=$multi_card_exit_code" >> ${github.env}
+          echo "multi_card_exit_code=$multi_card_exit_code" >> ${{ github.env }}
           '
 
       - name: Test summary
@@ -115,17 +115,21 @@ jobs:
           single_card_exit_code: ${{ env.single_card_exit_code }}
           multi_card_exit_code: ${{ env.multi_card_exit_code }}
         run: |
+          exit_code=0
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo "Single card test failed, please check the 'Single card test' step."
+            exit_code=1
           else
             echo "Single card test succeeded."
           fi
 
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo "Multi card test failed, please check the 'Multi card test' step."
+            exit_code=1
           else
             echo "Multi card test succeeded."
           fi
+          exit $exit_code
 
       - name: Terminate and delete the container
         if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
