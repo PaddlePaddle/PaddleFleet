@@ -113,6 +113,15 @@ jobs:
             echo -e "\033[32mSingle card test succeeded.\033[0m"
           fi
           '
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: ${{ github.workspace }}/coveragedata/coverage.xml
+          flags: single-card
+          name: "${{ env.TASK }}-${{ github.run_id }}"
+          fail_ci_if_error: false
+          verbose: true
 
       - name: Terminate and delete the container
         if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
@@ -196,6 +205,15 @@ jobs:
             echo -e "\033[32mMulti card test succeeded.\033[0m"
           fi
           '
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: ${{ github.workspace }}/coveragedata/coverage.xml
+          flags: multi-card
+          name: "${{ env.TASK }}-${{ github.run_id }}"
+          fail_ci_if_error: false
+          verbose: true
 
       - name: Terminate and delete the container
         if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
