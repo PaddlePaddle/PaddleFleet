@@ -242,39 +242,21 @@ jobs:
           fi
           '
 
-      - name: Multi-card Coverage Upload to BOS
+      - name: Multi-card Coverage Upload
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          source $HOME/.local/bin/env
-          export COVERAGE_FILE=/paddle/coveragedata/.coverage
-          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
-          export WITH_COVERAGE=ON
-
-          wget -q --no-proxy --no-check-certificate \
-            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
-            -O bos_tools.py
-          push_file=$(realpath bos_tools.py)
-          cp /paddle/coveragedata/coverage.xml coverage.xml
-
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${GITHUB_EVENT_PULL_REQUEST_NUMBER}/${GITHUB_SHA}/multi-card"
-          uv run ${push_file} coverage.xml ${target_path}
-          '
-
-      # - name: Multi-card Coverage Upload
-      #   if: steps.check-bypass.outputs.can-skip != 'true'
-      #   run: |
-      #     export PATH=/home/paddle-1/miniconda3/bin:${PATH}
-      #     echo $PATH
-      #     /home/paddle-1/miniconda3/bin/python --version
-      #     python --version
-      #     python -m pip install codecov-cli
-
-      #     export COVERAGE_FILE=${{ github.workspace }}/coveragedata/.coverage
-      #     export COVERAGE_RCFILE=${{ github.workspace }}/ci/.coveragerc
-      #     codecov-cli upload-process \
-      #       --file ${{ github.workspace }}/coveragedata/coverage.xml \
-      #       --flag multi-card
+          export PATH=/home/paddle-1/miniconda3/bin:${PATH}
+          python --version
+          python -m pip install codecov-cli
+          codecov-cli upload-process \
+          --file ${{ github.workspace }}/coveragedata/coverage.xml \
+          --slug "${{ github.repository }}" \
+          --commit-sha "${{ github.event.pull_request.head.sha }}" \
+          --branch "${{ github.head_ref }}" \
+          --parent "${{ github.base_ref }}" \
+          --pr "${{ github.event.pull_request.number }}" \
+          --flag multi-card \
+          --verbose
 
       - name: Terminate and delete the container
         if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
@@ -282,29 +264,3 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
-
-
-  codecov_use:
-    name: Upload Multi-card Coverage to Codecov
-    needs: multi-card_test
-    runs-on: ubuntu-latest
-      env:
-        GITHUB_REPO_NAME: ${{ github.repository }}
-        GITHUB_EVENT_PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
-        GITHUB_SHA: ${{ github.event.pull_request.head.sha }}
-    steps:
-      - name: coverage file download
-        shell: bash
-        run: |
-          cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${GITHUB_EVENT_PULL_REQUEST_NUMBER}/${GITHUB_SHA}/multi-card/coverage.xml"
-          wget "${cov_file_url}" --no-proxy
-
-      - name: Upload coverage to Codecov
-        if: always()
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage.xml
-          flags: single-card
-          name: "${{ env.TASK }}-${{ github.run_id }}"
-          fail_ci_if_error: true
-          verbose: true
