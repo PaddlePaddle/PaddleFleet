@@ -121,7 +121,7 @@ jobs:
           files: ${{ github.workspace }}/coveragedata/coverage.xml
           flags: single-card
           name: "${{ env.TASK }}-${{ github.run_id }}"
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           verbose: true
 
       - name: Terminate and delete the container
