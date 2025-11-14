@@ -162,7 +162,7 @@ jobs:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
-      group: CI-H
+      group: Fleet-H
     env:
       PIP_CACHE_DIR: /root/.cache/pip
     steps:
