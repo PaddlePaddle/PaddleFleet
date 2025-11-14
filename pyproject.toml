@@ -82,7 +82,10 @@ build = [
 linting = [
     "ruff~=0.14.0",
 ]
-ci = ["coverage"]
+ci = [
+    "coverage",
+    "codecov-cli"
+    ]
 
 [tool.uv]
 default-groups = ["build", "test"]

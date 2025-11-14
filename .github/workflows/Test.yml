@@ -68,6 +68,10 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
+            -e GITHUB_SHA="${{ github.sha }}" \
+            -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
+            -e GITHUB_BASE_REF="${{ github.base_ref }}" \
+            -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
@@ -114,15 +118,32 @@ jobs:
             echo -e "\033[32mSingle card test succeeded.\033[0m"
           fi
           '
-      - name: Upload coverage to Codecov
-        if: always()
-        uses: codecov/codecov-action@v4
-        with:
-          files: ${{ github.workspace }}/coveragedata/coverage.xml
-          flags: single-card
-          name: "${{ env.TASK }}-${{ github.run_id }}"
-          fail_ci_if_error: true
-          verbose: true
+      # - name: Upload coverage to Codecov
+      #   if: always()
+      #   uses: codecov/codecov-action@v4
+      #   with:
+      #     files: ${{ github.workspace }}/coveragedata/coverage.xml
+      #     flags: single-card
+      #     name: "${{ env.TASK }}-${{ github.run_id }}"
+      #     fail_ci_if_error: true
+      #     verbose: true
+
+      - name: Multi-card test
+        if: steps.check-bypass.outputs.can-skip != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+
+          uv run codecov-cli upload-process \
+            --file /paddle/coveragedata/coverage.xml \
+            --slug ${GITHUB_REPO_NAME} \
+            --commit-sha ${GITHUB_SHA} \
+            --branch ${GITHUB_HEAD_REF} \
+            --parent ${GITHUB_BASE_REF} \
+            --flag single-card
+          '
 
       - name: Terminate and delete the container
         if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
@@ -161,6 +182,10 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
+            -e GITHUB_SHA="${{ github.sha }}" \
+            -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
+            -e GITHUB_BASE_REF="${{ github.base_ref }}" \
+            -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
@@ -207,15 +232,23 @@ jobs:
             echo -e "\033[32mMulti card test succeeded.\033[0m"
           fi
           '
-      - name: Upload coverage to Codecov
-        if: always()
-        uses: codecov/codecov-action@v4
-        with:
-          files: ${{ github.workspace }}/coveragedata/coverage.xml
-          flags: multi-card
-          name: "${{ env.TASK }}-${{ github.run_id }}"
-          fail_ci_if_error: false
-          verbose: true
+
+      - name: Multi-card test
+        if: steps.check-bypass.outputs.can-skip != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+
+          uv run codecov-cli upload-process \
+            --file /paddle/coveragedata/coverage.xml \
+            --slug ${GITHUB_REPO_NAME} \
+            --commit-sha ${GITHUB_SHA} \
+            --branch ${GITHUB_HEAD_REF} \
+            --parent ${GITHUB_BASE_REF} \
+            --flag multi-card
+          '
 
       - name: Terminate and delete the container
         if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
