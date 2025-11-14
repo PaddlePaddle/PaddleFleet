@@ -22,7 +22,7 @@ from fleet.training import get_timers
 from fleet.training.initialize import initialize_fleet
 
 strategy = paddle.distributed.fleet.DistributedStrategy()
-initialize_fleet(strategy=strategy)
+initialize_fleet(strategy=strategy, ignore_unknown_args=True)
 
 
 class TestTimers(unittest.TestCase):

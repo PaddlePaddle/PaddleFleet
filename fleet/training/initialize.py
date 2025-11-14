@@ -23,10 +23,11 @@ from fleet.training.global_vars import set_global_variables
 def initialize_fleet(
     strategy: fleet.DistributedStrategy,
     parsed_args=None,
+    **kwargs,
 ):
     # Parse arguments
     if parsed_args is None:
-        args = parse_args()
+        args = parse_args(**kwargs)
     else:
         args = parsed_args
 
