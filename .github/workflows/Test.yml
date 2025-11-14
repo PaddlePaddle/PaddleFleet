@@ -248,6 +248,7 @@ jobs:
           export PATH=/home/paddle-1/miniconda3/bin:${PATH}
           python --version
           python -m pip install codecov-cli
+          codecov-cli --version
           codecov-cli upload-process \
           --auto-load-params-from github \
           --file ${{ github.workspace }}/coveragedata/coverage.xml \
