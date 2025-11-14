@@ -70,7 +70,7 @@ jobs:
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-            -e GITHUB_BASE_REF="${{ github.base_ref }}" \
+            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
@@ -144,8 +144,7 @@ jobs:
             --file /paddle/coveragedata/coverage.xml \
             --slug ${GITHUB_REPO_NAME} \
             --commit-sha ${GITHUB_SHA} \
-            --branch ${GITHUB_HEAD_REF} \
-            --parent-sha ${GITHUB_BASE_REF} \
+            --parent-sha ${GITHUB_BASE_SHA} \
             -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
             --pr "${GITHUB_EVENT_PULL_REQUEST_NUMBER}" \
             --flag single-card
@@ -190,7 +189,7 @@ jobs:
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-            -e GITHUB_BASE_REF="${{ github.base_ref }}" \
+            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
@@ -274,8 +273,7 @@ jobs:
             --file /paddle/coveragedata/coverage.xml \
             --slug ${GITHUB_REPO_NAME} \
             --commit-sha ${GITHUB_SHA} \
-            --branch ${GITHUB_HEAD_REF} \
-            --parent-sha ${GITHUB_BASE_REF} \
+            --parent-sha ${GITHUB_BASE_SHA} \
             --pr "${GITHUB_EVENT_PULL_REQUEST_NUMBER}" \
             --flag multi-card
           '
