@@ -128,7 +128,7 @@ jobs:
       #     fail_ci_if_error: true
       #     verbose: true
 
-      - name: Multi-card test
+      - name: Single-card Coverage Upload
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -142,7 +142,7 @@ jobs:
             --slug ${GITHUB_REPO_NAME} \
             --commit-sha ${GITHUB_SHA} \
             --branch ${GITHUB_HEAD_REF} \
-            --parent ${GITHUB_BASE_REF} \
+            --parent-sha ${GITHUB_BASE_REF} \
             --flag single-card
           '
 
@@ -234,7 +234,7 @@ jobs:
           fi
           '
 
-      - name: Multi-card test
+      - name: Multi-card Coverage Upload
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -248,7 +248,7 @@ jobs:
             --slug ${GITHUB_REPO_NAME} \
             --commit-sha ${GITHUB_SHA} \
             --branch ${GITHUB_HEAD_REF} \
-            --parent ${GITHUB_BASE_REF} \
+            --parent-sha ${GITHUB_BASE_REF} \
             --flag multi-card
           '
 
