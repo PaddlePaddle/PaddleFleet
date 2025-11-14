@@ -249,12 +249,8 @@ jobs:
           python --version
           python -m pip install codecov-cli
           codecov-cli upload-process \
+          --auto-load-params-from github \
           --file ${{ github.workspace }}/coveragedata/coverage.xml \
-          --slug "${{ github.repository }}" \
-          --commit-sha "${{ github.event.pull_request.head.sha }}" \
-          --branch "${{ github.head_ref }}" \
-          --parent "${{ github.base_ref }}" \
-          --pr "${{ github.event.pull_request.number }}" \
           --flag multi-card \
           --verbose
 
