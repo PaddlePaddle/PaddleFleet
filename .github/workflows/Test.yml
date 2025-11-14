@@ -250,7 +250,7 @@ jobs:
           python -m pip install codecov-cli
           codecov-cli --version
           codecov-cli upload-process \
-          --auto-load-params-from github \
+          --auto-load-params-from GithubActions \
           --file ${{ github.workspace }}/coveragedata/coverage.xml \
           --flag multi-card \
           --verbose
