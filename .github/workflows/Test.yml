@@ -143,6 +143,7 @@ jobs:
             --commit-sha ${GITHUB_SHA} \
             --branch ${GITHUB_HEAD_REF} \
             --parent-sha ${GITHUB_BASE_REF} \
+            -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
             --flag single-card
           '
 
@@ -187,6 +188,7 @@ jobs:
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_REF="${{ github.base_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
+            -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
