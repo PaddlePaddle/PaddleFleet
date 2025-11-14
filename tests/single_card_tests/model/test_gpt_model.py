@@ -12,15 +12,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import unittest
 
+from paddle.distributed import fleet
+
+# from tests.unit_tests.test_utilities import Utils
+import fleet.core.parallel_state as ps
+
+# from fleet.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from fleet.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from fleet.core.models.gpt.gpt_model import GPTModel
 from fleet.core.transformer.transformer_config import TransformerConfig
 
 
-class TestFleetLayer(unittest.TestCase):
+class TestGPTModel(unittest.TestCase):
     def setUp(self):
+        strategy = fleet.DistributedStrategy()
+        strategy.hybrid_configs = {
+            "dp_degree": 1,
+            "mp_degree": 1,
+            "pp_degree": 1,
+            "sharding_degree": 1,
+            "sep_degree": 1,
+            "cp_degree": 1,
+            "ep_degree": 1,
+            "moe_sharding_degree": 1,
+            "order": [
+                "sharding",
+                "moe_sharding",
+                "pp",
+                "sep",
+                "cp",
+                "dp",
+                "ep",
+                "mp",
+            ],
+        }
+        fleet.init(is_collective=True, strategy=strategy)
+        hcg = fleet.get_hybrid_communicate_group()
+        ps.initialize_model_parallel(hcg)
         config = TransformerConfig(
             num_layers=2, hidden_size=12, num_attention_heads=4
         )
@@ -38,8 +69,8 @@ class TestFleetLayer(unittest.TestCase):
         self.model = GPTModel(
             config=config,
             transformer_layer_spec=transformer_layer_spec,
-            vocab_size=32000,
-            max_sequence_length=4096,
+            vocab_size=100,
+            max_sequence_length=64,
             pre_process=pre_process,
             post_process=post_process,
             fp16_lm_cross_entropy=False,

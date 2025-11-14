@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import functools
 import inspect
+import operator
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -310,6 +312,42 @@ def get_tensor_model_parallel_group_if_none(
                 check_initialized=check_initialized
             )
     return tp_group
+
+
+class GlobalMemoryBuffer:
+    """Global buffer to avoid dynamic memory allocations.
+    Caller should ensure that buffers of the same name
+    are not used concurrently."""
+
+    def __init__(self):
+        self.buffer = {}
+
+    def get_tensor(
+        self,
+        tensor_shape,
+        dtype,
+        name,
+        mem_alloc_context: Callable | None = None,
+    ):
+        """
+        Returns (potentially) a sub-tensor from the self.buffer for the given shape.
+        """
+        required_len = functools.reduce(operator.mul, tensor_shape, 1)
+        if (
+            self.buffer.get((name, dtype), None) is None
+            or self.buffer[(name, dtype)].numel() < required_len
+        ):
+            mem_alloc_context = (
+                mem_alloc_context if mem_alloc_context else nullcontext
+            )
+            with mem_alloc_context():
+                self.buffer[(name, dtype)] = paddle.empty(
+                    required_len,
+                    dtype=dtype,
+                    requires_grad=False,
+                )
+
+        return self.buffer[(name, dtype)][0:required_len].view(*tensor_shape)
 
 
 def _kernel_make_viewless_tensor(inp, requires_grad):

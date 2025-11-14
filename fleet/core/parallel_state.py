@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     import paddle.distributed.fleet.base.topology as tp
 import warnings
 
+from fleet.core.utils import GlobalMemoryBuffer
+
 # Intra-layer model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
 _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = None
@@ -81,6 +83,10 @@ _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
 _MPU_TENSOR_MODEL_PARALLEL_RANK = None
 
 
+# Memory buffers to avoid dynamic memory allocation
+_GLOBAL_MEMORY_BUFFER = None
+
+
 def initialize_model_parallel(
     hcg: tp.EPHybridCommunicateGroup | tp.HybridCommunicateGroup,
     virtual_pipeline_model_parallel_size: int | None = None,
@@ -117,6 +123,12 @@ def initialize_model_parallel(
         _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = (
             virtual_pipeline_model_parallel_size
         )
+
+    # Initialize global memory buffer
+    # This isn't really "parallel state" but there isn't another good place to
+    # put this. If we end up with a more generic initialization of fleet-core
+    # we could stick it there
+    _set_global_memory_buffer()
 
 
 def get_tensor_model_parallel_group(check_initialized=True):
@@ -315,3 +327,29 @@ def get_expert_tensor_and_model_parallel_rank():
         return get_expert_tensor_and_model_parallel_group().rank()
     else:
         return 0
+
+
+### End of expert-related functions region
+
+
+def _set_global_memory_buffer():
+    """Initialize global buffer."""
+    global _GLOBAL_MEMORY_BUFFER
+    assert _GLOBAL_MEMORY_BUFFER is None, (
+        "global memory buffer is already initialized"
+    )
+    _GLOBAL_MEMORY_BUFFER = GlobalMemoryBuffer()
+
+
+def get_global_memory_buffer():
+    """Return the global GlobalMemoryBuffer object"""
+    assert _GLOBAL_MEMORY_BUFFER is not None, (
+        "global memory buffer is not initialized"
+    )
+    return _GLOBAL_MEMORY_BUFFER
+
+
+def destroy_global_memory_buffer():
+    """Sets the global memory buffer to None"""
+    global _GLOBAL_MEMORY_BUFFER
+    _GLOBAL_MEMORY_BUFFER = None

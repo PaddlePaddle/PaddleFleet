@@ -18,13 +18,33 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Protocol
 
-from fleet.core.tensor_parallel.layers import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
+# from fleet.core.tensor_parallel.layers import (
+#    ColumnParallelLinear,
+#    RowParallelLinear,
+# )
+
+
+class ColumnParallelLinear:
+    pass
+
+
+class RowParallelLinear:
+    pass
+
+
 from fleet.core.transformer.dot_product_attention import DotProductAttention
 from fleet.core.transformer.mlp import MLPSublayers
-from fleet.core.transformer.moe.experts import GroupedMLP, SequentialMLP
+
+
+# from fleet.core.transformer.moe.experts import GroupedMLP, SequentialMLP
+class GroupedMLP:
+    pass
+
+
+class SequentialMLP:
+    pass
+
+
 from fleet.core.transformer.paddle_norm import WrappedPaddleNorm
 
 LNImpl = WrappedPaddleNorm
@@ -96,7 +116,12 @@ class LocalSpecProvider(BackendSpecProvider):
         return None
 
     def layer_norm(self, rms_norm: bool = False, for_qk: bool = False) -> type:
-        assert rms_norm, "Only support rms norm."
+        """Which module to use for layer norm"""
+        if rms_norm:
+            # Matching get_gpt_layer_local_spec.
+            # Why does the global need to be updated?
+            global LNImpl
+            LNImpl = WrappedPaddleNorm
         return LNImpl
 
     def core_attention(self) -> type:

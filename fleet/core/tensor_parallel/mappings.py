@@ -18,11 +18,11 @@ import paddle
 import paddle.distributed as dist
 import torch
 
-from ..parallel_state import get_global_memory_buffer
-from ..utils import (
+from fleet.core.parallel_state import get_global_memory_buffer
+from fleet.core.tensor_parallel.utils import split_tensor_along_last_dim
+from fleet.core.utils import (
     get_tensor_model_parallel_group_if_none,
 )
-from .utils import split_tensor_along_last_dim
 
 
 def _reduce(input_, group):

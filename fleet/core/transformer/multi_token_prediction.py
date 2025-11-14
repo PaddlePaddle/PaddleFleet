@@ -27,7 +27,7 @@ from fleet.core import parallel_state, tensor_parallel
 from fleet.core.models.backends import BackendSpecProvider, LocalSpecProvider
 from fleet.core.pipeline_parallel.utils import is_vp_last_stage
 from fleet.core.process_groups_config import ProcessGroupCollection
-from fleet.core.tensor_parallel import (
+from fleet.core.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )

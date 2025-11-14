@@ -35,6 +35,7 @@ except ImportError:
         return parameter
 
 
+from fleet.core.jit import jit_fuser
 from fleet.core.transformer import TransformerConfig
 
 
@@ -119,3 +120,51 @@ class WrappedPaddleNorm:
             norm_eps=eps,
             input_is_parallel=input_is_parallel,
         )
+
+
+class L2Norm(paddle.nn.Layer):
+    """
+    Applies L2 normalization to the input tensor along the last dimension.
+
+    This layer normalizes the input tensor such that the mean of the squared values
+    along the last dimension is 1 (within a small epsilon for numerical stability).
+
+    Args:
+        hidden_size (int): Expected input shape for normalization (not used internally).
+        eps (float, optional): A small value added to the denominator for numerical stability.
+            Default: 1e-6.
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6, **kwargs):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+
+    @jit_fuser
+    def _norm(self, x):
+        """
+        Performs the actual L2 normalization.
+
+        Args:
+            x (paddle.Tensor): The input tensor to normalize.
+
+        Returns:
+            paddle.Tensor: The L2-normalized tensor.
+        """
+        x_float = x.float()
+        return (
+            x_float
+            * paddle.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)
+        ).astype(x.dtype)
+
+    def forward(self, x):
+        """
+        Forward pass of the L2Norm module.
+
+        Args:
+            x (paddle.Tensor): Input tensor.
+
+        Returns:
+            paddle.Tensor: L2-normalized tensor with the same dtype as input.
+        """
+        return self._norm(x)

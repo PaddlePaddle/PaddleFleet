@@ -61,10 +61,10 @@ class AttnMaskType(enum.Enum):
 
     padding = 1
     causal = 2
-    no_mask = 3  # only used for TE
-    padding_causal = 4  # only used for thd attention
+    no_mask = 3
+    padding_causal = 4
     arbitrary = 5
-    causal_bottom_right = 6  # only used for TE
+    causal_bottom_right = 6
 
 
 class AttnBackend(enum.Enum):

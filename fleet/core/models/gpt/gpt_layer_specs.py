@@ -19,7 +19,8 @@ from typing import TYPE_CHECKING
 
 from fleet.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from fleet.core.models.backends import BackendSpecProvider, LocalSpecProvider
-from fleet.core.models.gpt.moe_layer_specs import get_moe_layer_spec_for_backend
+
+# from fleet.core.models.gpt.moe_layer_specs import get_moe_layer_spec_for_backend
 from fleet.core.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayers,
@@ -33,7 +34,7 @@ from fleet.core.transformer.multi_token_prediction import (
     get_mtp_layer_spec_for_backend,
     get_mtp_num_layers_to_build,
 )
-from fleet.core.transformer.norm import L2Norm
+from fleet.core.transformer.paddle_norm import L2Norm
 from fleet.core.transformer.spec_utils import LayerSpec
 from fleet.core.transformer.transformer_block import (
     TransformerBlockSublayers,
@@ -153,11 +154,12 @@ def get_mlp_layer_spec_for_backend(
         )
     else:
         # Mixture of experts with layers in fleet core.
-        return get_moe_layer_spec_for_backend(
-            backend=backend,
-            num_experts=num_experts,
-            moe_grouped_gemm=moe_grouped_gemm,
-        )
+        pass
+        # return get_moe_layer_spec_for_backend(
+        #    backend=backend,
+        #    num_experts=num_experts,
+        #    moe_grouped_gemm=moe_grouped_gemm,
+        # )
 
 
 def get_gpt_decoder_block_spec(
