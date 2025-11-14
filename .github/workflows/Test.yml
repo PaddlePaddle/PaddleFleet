@@ -249,11 +249,13 @@ jobs:
           python --version
           python -m pip install codecov-cli
           codecov-cli --version
+          set -x
           codecov-cli --auto-load-params-from GithubActions \
           upload-process \
-          --file ${{ github.workspace }}/coveragedata/coverage.xml \
+          --file "${{ github.workspace }}/coveragedata/coverage.xml" \
           --flag multi-card \
           --verbose
+
 
       - name: Terminate and delete the container
         if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
