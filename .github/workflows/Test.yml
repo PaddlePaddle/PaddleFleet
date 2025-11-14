@@ -68,7 +68,7 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
-            -e GITHUB_SHA="${{ github.sha }}" \
+            -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_REF="${{ github.base_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -188,7 +188,7 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
-            -e GITHUB_SHA="${{ github.sha }}" \
+            -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_REF="${{ github.base_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -242,6 +242,23 @@ jobs:
             echo -e "\033[32mMulti card test succeeded.\033[0m"
           fi
           '
+
+      # - name: Multi-card Coverage Upload to BOS
+      #   if: steps.check-bypass.outputs.can-skip != 'true'
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -xc '
+      #     source $HOME/.local/bin/env
+      #     export COVERAGE_FILE=/paddle/coveragedata/.coverage
+      #     export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+      #     export WITH_COVERAGE=ON
+
+      #     wget -q --no-proxy --no-check-certificate \
+      #       https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+      #       -O bos_tools.py
+          
+      #     target_path="${GITHUB_REPO_NAME}/pull/${GITHUB_EVENT_PULL_REQUEST_NUMBER}/multi-card"
+      #     uv run bos_tools.py upload 
+      #     '
 
       - name: Multi-card Coverage Upload
         if: steps.check-bypass.outputs.can-skip != 'true'

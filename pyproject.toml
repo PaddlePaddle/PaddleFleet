@@ -84,7 +84,8 @@ linting = [
 ]
 ci = [
     "coverage",
-    "codecov-cli"
+    "codecov-cli",
+    "bce-python-sdk"
     ]
 
 [tool.uv]
