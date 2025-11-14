@@ -253,8 +253,7 @@ jobs:
           codecov-cli --auto-load-params-from GithubActions \
           upload-coverage \
           --file "${{ github.workspace }}/coveragedata/coverage.xml" \
-          --flag multi-card \
-          --verbose
+          --flag multi-card
 
 
       - name: Terminate and delete the container
