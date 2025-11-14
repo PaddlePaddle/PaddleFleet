@@ -59,7 +59,6 @@ CODESTYLE_FILES=(
     ".yamlfmt"
     "pyproject.toml"
 )
-
 for FILE in "${CODESTYLE_FILES[@]}"; do
     HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "^${FILE}" || true)
     if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
@@ -81,6 +80,17 @@ for file in $files; do
         fi
     fi
 done
+
+
+CHECKREQ_APPROVERS="risemeup1 swgu98"
+files=$(git diff --name-status upstream/$BRANCH)
+while read -r status file; do
+    if [[ "$status" == "A" ]] && [[ "$(basename "$file")" == "requirements.txt" ]]; then
+        echo_line="You must be approved by one of ${CHECKREQ_APPROVERS} for newly added \"$file\".\n"
+        APPROVER_LIST=(${CHECKREQ_APPROVERS})
+        check_approval 1 "${APPROVER_LIST[@]}"
+    fi
+done <<< "$files"
 
 
 if [ -n "${echo_list}" ];then

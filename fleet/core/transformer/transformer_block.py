@@ -201,9 +201,9 @@ def get_num_layers_to_build(
 
 
 @dataclass
-class TransformerBlockSublayers:
+class TransformerBlockSublayersSpec:
     """
-    Dataclass for specifying the sublayers of a transformer block.
+    Dataclass for specifying the sublayers_spec of a transformer block.
 
     This class defines the structure for configuring the layers and normalization
     within a transformer block, allowing for flexible and customizable architecture designs.
@@ -220,28 +220,28 @@ class TransformerBlockSublayers:
     layer_norm: LayerSpec | paddle.nn.Layer | None = None
 
 
-def _get_block_sublayers(
+def _get_block_sublayers_spec(
     config: TransformerConfig,
-    spec: TransformerBlockSublayers | LayerSpec,
+    spec: TransformerBlockSublayersSpec | LayerSpec,
     vp_stage: int | None = None,
     pp_rank: int | None = None,
-) -> TransformerBlockSublayers:
+) -> TransformerBlockSublayersSpec:
     """
-    Retrieve or construct TransformerBlockSublayers based on the provided specification.
+    Retrieve or construct TransformerBlockSublayersSpec based on the provided specification.
 
     Args:
         config (TransformerConfig): Configuration object for the transformer model.
-        spec (TransformerBlockSublayers | LayerSpec): Specification for the
-            transformer block sublayers. Can be either a TransformerBlockSublayers
+        spec (TransformerBlockSublayersSpec | LayerSpec): Specification for the
+            transformer block sublayers_spec. Can be either a TransformerBlockSublayersSpec
             instance or a LayerSpec.
         vp_stage (int | None): Virtual pipeline stage number.
 
     Returns:
-        TransformerBlockSublayers: The sublayers for the transformer block.
+        TransformerBlockSublayersSpec: The sublayers_spec for the transformer block.
     """
 
-    # Transformer block sublayers.
-    if isinstance(spec, TransformerBlockSublayers):
+    # Transformer block sublayers_spec.
+    if isinstance(spec, TransformerBlockSublayersSpec):
         return spec
 
     # LayerSpec here is generally assumed to be for a transformer layer that
@@ -249,10 +249,10 @@ def _get_block_sublayers(
     # `TransformerLayer` from the `transformer_layer.py` file.
     elif isinstance(spec, LayerSpec):
         if issubclass(spec.layer, TransformerBlock):
-            return spec.sublayers
+            return spec.sublayers_spec
         elif issubclass(spec.layer, TransformerLayer):
             num_layers = get_num_layers_to_build(config, vp_stage, pp_rank)
-            return TransformerBlockSublayers(
+            return TransformerBlockSublayersSpec(
                 layer_specs=[spec] * num_layers, layer_norm=LayerNormImpl
             )
         else:
@@ -267,7 +267,7 @@ class TransformerBlock(FleetLayer):
     def __init__(
         self,
         config: TransformerConfig,
-        spec: TransformerBlockSublayers | LayerSpec,
+        spec: TransformerBlockSublayersSpec | LayerSpec,
         post_layer_norm: bool = True,
         pre_process: bool = True,
         post_process: bool = True,
@@ -285,7 +285,9 @@ class TransformerBlock(FleetLayer):
         )
         pp_rank = get_pg_rank(pp_group)
 
-        self.sublayers = _get_block_sublayers(config, spec, vp_stage, pp_rank)
+        self.sublayers_spec = _get_block_sublayers_spec(
+            config, spec, vp_stage, pp_rank
+        )
         self.post_layer_norm = post_layer_norm
         self.pre_process = pre_process
         self.post_process = post_process
@@ -332,19 +334,19 @@ class TransformerBlock(FleetLayer):
         self.layers = paddle.nn.LayerList(
             [
                 _build_layer(layer_spec, i + 1)
-                for i, layer_spec in enumerate(self.sublayers.layer_specs)
+                for i, layer_spec in enumerate(self.sublayers_spec.layer_specs)
             ]
         )
 
         # In pipeline parallelism, we want to add this LN only to the last stage of the pipeline
         # self.post_process and self.post_layer_norm guide this behavior
         if (
-            self.sublayers.layer_norm
+            self.sublayers_spec.layer_norm
             and self.post_process
             and self.post_layer_norm
         ):
             self.final_layernorm = build_layer(
-                self.sublayers.layer_norm,
+                self.sublayers_spec.layer_norm,
                 config=self.config,
                 hidden_size=self.config.hidden_size,
                 eps=self.config.layernorm_epsilon,

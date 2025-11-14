@@ -16,7 +16,6 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reservede
 import paddle
 import paddle.distributed as dist
-import torch
 
 from fleet.core.parallel_state import get_global_memory_buffer
 from fleet.core.tensor_parallel.utils import split_tensor_along_last_dim
@@ -127,14 +126,14 @@ def _gather_along_first_dim(
     """Gather tensors and concatenate along the first dimension.
 
     Args:
-        input_tensor (torch.Tensor):
+        input_tensor (paddle.Tensor):
             A tensor to be gathered.
         output_split_sizes (List[int], optional):
             A list specifying the sizes of the output splits along the first dimension.
             If None, equal splitting is assumed. Default: None.
 
     Returns:
-        torch.Tensor: Gathered tensor.
+        paddle.Tensor: Gathered tensor.
     """
 
     assert group is not None, "group should not be None"
@@ -156,7 +155,7 @@ def _reduce_scatter_along_first_dim(
     """Reduce-scatter the input tensor across model parallel group.
 
     Args:
-        input_ (torch.Tensor): The input tensor to be reduce-scattered.
+        input_ (paddle.Tensor): The input tensor to be reduce-scattered.
         input_split_sizes (List[int], optional): A list specifying the sizes of
             the input splits along the first dimension for each rank. If None,
             equal splitting is assumed. Default: None.
@@ -583,25 +582,25 @@ def all_to_all_sp2hp(input_, group=None):
     [num_tokens/TP, H] to [num_tokens, H/TP].
 
     Args:
-        input_ (torch.Tensor):
+        input_ (paddle.Tensor):
             The input tensor which has been distributed along the sequence
             dimension.
-        group (torch.distributed.ProcessGroup, optional):
+        group (paddle.distributed.communication.group.ProcessGroup, optional):
             The process group to work on. If None, the tensor model parallel group
             will be used.
 
     Returns:
-        torch.Tensor: The output tensor with shape [num_tokens, H/TP].
+        paddle.Tensor: The output tensor with shape [num_tokens, H/TP].
 
     """
     group = get_tensor_model_parallel_group_if_none(group)
 
     world_size = group.size()
     input_ = input_.reshape(-1, input_.shape[-1])
-    split_tensors = torch.split(
+    split_tensors = paddle.split(
         input_, split_size_or_sections=input_.shape[-1] // world_size, dim=1
     )
-    concat_tensor = torch.cat(split_tensors, dim=0)
+    concat_tensor = paddle.cat(split_tensors, dim=0)
     output = all_to_all(group, concat_tensor)
     return output
 
@@ -612,15 +611,15 @@ def all_to_all_hp2sp(input_, group=None):
     [num_tokens, H/TP] to [num_tokens/TP, H].
 
     Args:
-        input_ (torch.Tensor):
+        input_ (paddle.Tensor):
             The input tensor which has been distributed along the hidden
             dimension.
-        group (torch.distributed.ProcessGroup, optional):
+        group (paddle.distributed.communication.group.ProcessGroup, optional):
             The process group to work on. If None, the tensor model parallel group
             will be used.
 
     Returns:
-        torch.Tensor: The output tensor with shape [num_tokens/TP, H].
+        paddle.Tensor: The output tensor with shape [num_tokens/TP, H].
     """
     group = get_tensor_model_parallel_group_if_none(group)
 

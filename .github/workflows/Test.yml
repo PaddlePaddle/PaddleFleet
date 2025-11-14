@@ -54,9 +54,9 @@ jobs:
           docker run -d -t --gpus all --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
             -v "/home/data/cfs:/home/data/cfs" \
+            -v "/home/data/cfs/.cache:/root/.cache" \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v ${{ github.workspace }}/../../../.cache:/root/.cache \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
@@ -78,12 +78,15 @@ jobs:
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
-          pip install -q uv
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          source $HOME/.local/bin/env
           echo "uv sync"
           uv sync > /dev/null 2>&1
           '
@@ -92,6 +95,7 @@ jobs:
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
+          source $HOME/.local/bin/env
           bash ci/single_card_test.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
@@ -149,12 +153,15 @@ jobs:
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
-          pip install -q uv
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          source $HOME/.local/bin/env
           echo "uv sync"
           uv sync > /dev/null 2>&1
           '
@@ -163,6 +170,7 @@ jobs:
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
+          source $HOME/.local/bin/env
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
           if [[ "$multi_card_exit_code" != "0" ]]; then

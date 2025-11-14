@@ -24,6 +24,7 @@ from typing import Protocol
 # )
 
 
+# HACK(Guoxia Wang): need remove later
 class ColumnParallelLinear:
     pass
 
@@ -33,10 +34,11 @@ class RowParallelLinear:
 
 
 from fleet.core.transformer.dot_product_attention import DotProductAttention
-from fleet.core.transformer.mlp import MLPSublayers
+from fleet.core.transformer.mlp import MLPSublayersSpec
 
 
 # from fleet.core.transformer.moe.experts import GroupedMLP, SequentialMLP
+# HACK(Guoxia Wang): need remove later
 class GroupedMLP:
     pass
 
@@ -51,7 +53,7 @@ LNImpl = WrappedPaddleNorm
 
 
 class BackendSpecProvider(Protocol):
-    """A protocol for providing the sublayers used in Spec building."""
+    """A protocol for providing the sublayers_spec used in Spec building."""
 
     @abstractmethod
     def column_parallel_linear(self) -> type:
@@ -86,8 +88,8 @@ class BackendSpecProvider(Protocol):
     @abstractmethod
     def grouped_mlp_layers(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool
-    ) -> tuple[type, MLPSublayers | None]:
-        """Which layer and sublayers to use for grouped mlp"""
+    ) -> tuple[type, MLPSublayersSpec | None]:
+        """Which layer and sublayers_spec to use for grouped mlp"""
         ...
 
     @abstractmethod
@@ -97,7 +99,7 @@ class BackendSpecProvider(Protocol):
 
 
 class LocalSpecProvider(BackendSpecProvider):
-    """A protocol for providing Local sublayers used in Spec building."""
+    """A protocol for providing Local sublayers_spec used in Spec building."""
 
     def column_parallel_linear(self) -> type:
         """Which column parallel linear layer the backend uses"""
@@ -130,12 +132,12 @@ class LocalSpecProvider(BackendSpecProvider):
 
     def grouped_mlp_layers(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool
-    ) -> tuple[type, MLPSublayers | None]:
-        """Which layer and sublayers to use for grouped mlp"""
+    ) -> tuple[type, MLPSublayersSpec | None]:
+        """Which layer and sublayers_spec to use for grouped mlp"""
         if moe_use_grouped_gemm:
             return GroupedMLP, None
         else:
-            return SequentialMLP, MLPSublayers(
+            return SequentialMLP, MLPSublayersSpec(
                 linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
             )
 

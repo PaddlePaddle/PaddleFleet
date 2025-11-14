@@ -16,4 +16,29 @@ extend-ignore-re = [
 
 [default.extend-words]
 # FleetCore specific words
-# arange = "arange" #  Example
+arange = "arange"
+astroid = 'astroid'
+cacl = 'cacl'
+CANN = 'CANN'
+Clas = 'Clas'
+clen = 'clen'
+datas = 'datas'
+dota = 'dota'
+dout = "dout"
+entrys = 'entrys'
+feeded = 'feeded'
+grad = "grad"
+Halfs = 'Halfs'
+kinf = 'kinf'
+operants = 'operants'
+Optin = 'Optin'
+padd = 'padd'
+pash = 'pash'
+setp = 'setp'
+splited = 'splited'
+splitted = 'splitted'
+statis = 'statis'
+UNEXPECT = 'UNEXPECT'
+tood = 'tood'
+unpacket = "unpacket"
+vaccum = 'vaccum'

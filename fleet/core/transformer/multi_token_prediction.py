@@ -38,7 +38,7 @@ from fleet.core.transformer.spec_utils import LayerSpec, build_layer
 if TYPE_CHECKING:
     from fleet.core.packed_seq_params import PackedSeqParams
     from fleet.core.transformer.transformer_block import (
-        TransformerBlockSublayers,
+        TransformerBlockSublayersSpec,
     )
     from fleet.core.transformer.transformer_config import TransformerConfig
 
@@ -237,9 +237,9 @@ class MTPLossLoggingHelper:
 
 
 @dataclass
-class MultiTokenPredictionLayerSublayers:
+class MultiTokenPredictionLayerSublayersSpec:
     """
-    Dataclass for specifying the sublayers of a MultiTokenPrediction layer.
+    Dataclass for specifying the sublayers_spec of a MultiTokenPrediction layer.
 
     Args:
         hnorm (Union[LayerSpec, type]): Specification or instance of the
@@ -283,7 +283,7 @@ def get_mtp_layer_spec_for_backend(
     layer_norm_impl: type = backend.layer_norm()
     mtp_layer_spec = LayerSpec(
         layer=MultiTokenPredictionLayer,
-        sublayers=MultiTokenPredictionLayerSublayers(
+        sublayers_spec=MultiTokenPredictionLayerSublayersSpec(
             enorm=layer_norm_impl,
             hnorm=layer_norm_impl,
             eh_proj=column_parallel_linear_impl,
@@ -391,20 +391,20 @@ class MultiTokenPredictionLayer(FleetLayer):
     def __init__(
         self,
         config: TransformerConfig,
-        sublayers: MultiTokenPredictionLayerSublayers,
+        sublayers_spec: MultiTokenPredictionLayerSublayersSpec,
         layer_number: int = 1,
         vp_stage: int | None = None,
         pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__(config=config)
         self.sequence_parallel = config.sequence_parallel
-        self.sublayers = sublayers
+        self.sublayers_spec = sublayers_spec
         self.layer_number = layer_number
         self.vp_stage = vp_stage
         self.cp_group = pg_collection.cp
 
         self_attention_spec = (
-            self.sublayers.transformer_layer.sublayers.self_attention
+            self.sublayers_spec.transformer_layer.sublayers_spec.self_attention
         )
         attn_mask_type = self_attention_spec.params.get("attn_mask_type", "")
         assert attn_mask_type in SUPPORTED_ATTN_MASK, (
@@ -414,14 +414,14 @@ class MultiTokenPredictionLayer(FleetLayer):
         )
 
         self.enorm = build_layer(
-            self.sublayers.enorm,
+            self.sublayers_spec.enorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
         )
 
         self.hnorm = build_layer(
-            self.sublayers.hnorm,
+            self.sublayers_spec.hnorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
@@ -433,7 +433,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         # The output will be send to the following transformer layer,
         # so the output's shape should be [s, b, h].
         self.eh_proj = build_layer(
-            self.sublayers.eh_proj,
+            self.sublayers_spec.eh_proj,
             self.config.hidden_size * 2,
             self.config.hidden_size,
             config=self.config,
@@ -444,13 +444,13 @@ class MultiTokenPredictionLayer(FleetLayer):
             is_expert=False,
         )
         self.transformer_layer = build_layer(
-            self.sublayers.transformer_layer,
+            self.sublayers_spec.transformer_layer,
             config=self.config,
             vp_stage=vp_stage,
         )
 
         self.final_layernorm = build_layer(
-            self.sublayers.layer_norm,
+            self.sublayers_spec.layer_norm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
@@ -680,9 +680,9 @@ class MultiTokenPredictionLayer(FleetLayer):
 
 
 @dataclass
-class MultiTokenPredictionBlockSublayers:
+class MultiTokenPredictionBlockSublayersSpec:
     """
-    Dataclass for specifying the sublayers of a multi token prediction block.
+    Dataclass for specifying the sublayers_spec of a multi token prediction block.
 
     This class defines the structure for configuring the layers, allowing for
     flexible and customizable architecture designs.
@@ -697,29 +697,29 @@ class MultiTokenPredictionBlockSublayers:
     layer_specs: list[LayerSpec] = None
 
 
-def _get_mtp_block_sublayers(
+def _get_mtp_block_sublayers_spec(
     config: TransformerConfig,
-    spec: MultiTokenPredictionBlockSublayers | LayerSpec,
-) -> MultiTokenPredictionBlockSublayers:
+    spec: MultiTokenPredictionBlockSublayersSpec | LayerSpec,
+) -> MultiTokenPredictionBlockSublayersSpec:
     """
-    Retrieve or construct MultiTokenPredictionBlockSublayers based on the provided specification.
+    Retrieve or construct MultiTokenPredictionBlockSublayersSpec based on the provided specification.
 
     Args:
         config (TransformerConfig): Configuration object for the transformer model.
-        spec (MultiTokenPredictionBlockSublayers | LayerSpec): Specification for the
-            multi token prediction block sublayers.
-            Can be either a MultiTokenPredictionBlockSublayers instance or a LayerSpec.
+        spec (MultiTokenPredictionBlockSublayersSpec | LayerSpec): Specification for the
+            multi token prediction block sublayers_spec.
+            Can be either a MultiTokenPredictionBlockSublayersSpec instance or a LayerSpec.
 
     Returns:
-        MultiTokenPredictionBlockSublayers: The sublayers for the multi token prediction block.
+        MultiTokenPredictionBlockSublayersSpec: The sublayers_spec for the multi token prediction block.
     """
 
-    # Transformer block sublayers.
-    if isinstance(spec, MultiTokenPredictionBlockSublayers):
+    # Transformer block sublayers_spec.
+    if isinstance(spec, MultiTokenPredictionBlockSublayersSpec):
         return spec
     elif isinstance(spec, LayerSpec):
         if issubclass(spec.layer, MultiTokenPredictionBlock):
-            return spec.sublayers
+            return spec.sublayers_spec
         else:
             raise Exception(f"specialize for {spec.layer.__name__}.")
     else:
@@ -749,12 +749,12 @@ class MultiTokenPredictionBlock(FleetLayer):
     def __init__(
         self,
         config: TransformerConfig,
-        spec: TransformerBlockSublayers | LayerSpec,
+        spec: TransformerBlockSublayersSpec | LayerSpec,
         vp_stage: int | None = None,
         pg_collection: ProcessGroupCollection = None,
     ):
         super().__init__(config=config)
-        self.sublayers = _get_mtp_block_sublayers(config, spec)
+        self.sublayers_spec = _get_mtp_block_sublayers_spec(config, spec)
         self.mtp_loss_scaling_factor = config.mtp_loss_scaling_factor
         self.vp_stage = vp_stage
 
@@ -792,7 +792,7 @@ class MultiTokenPredictionBlock(FleetLayer):
         self.layers = paddle.nn.LayerList(
             [
                 _build_layer(layer_spec, i + 1)
-                for i, layer_spec in enumerate(self.sublayers.layer_specs)
+                for i, layer_spec in enumerate(self.sublayers_spec.layer_specs)
             ]
         )
 

@@ -13,6 +13,9 @@
 # limitations under the License.
 
 import argparse
+import dataclasses
+
+from fleet.core.transformer import TransformerConfig
 
 
 def parse_args(extra_args_provider=None, ignore_unknown_args=False):
@@ -39,3 +42,21 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
         args = load_yaml(args.configs)
 
     return args
+
+
+def core_transformer_config_from_args(args, config_class=None):
+    config_class = config_class or TransformerConfig
+
+    kw_args = {}
+
+    for f in dataclasses.fields(config_class):
+        if hasattr(args, f.name):
+            kw_args[f.name] = getattr(args, f.name)
+
+    # Translate args to core transformer configuration
+    # such as: rename, invert bool value, etc.
+    # kw_args["use_xxx"] = args.use_x
+    # kw_args["close_offload"] = not args.open_offload
+
+    # Return config.
+    return config_class(**kw_args)

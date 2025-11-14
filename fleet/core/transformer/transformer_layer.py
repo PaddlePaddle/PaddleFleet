@@ -211,9 +211,9 @@ def get_transformer_layer_offset(
 
 
 @dataclass
-class TransformerLayerSublayers:
+class TransformerLayerSublayersSpec:
     """
-    Configuration class for specifying the sublayers of a transformer layer.
+    Configuration class for specifying the sublayers_spec of a transformer layer.
 
     This class defines the structure and default implementations for various
     components of a transformer layer, allowing for flexible customization
@@ -264,7 +264,7 @@ class TransformerLayer(paddle.nn.Layer):
     def __init__(
         self,
         config: TransformerConfig,
-        sublayers: TransformerLayerSublayers,
+        sublayers_spec: TransformerLayerSublayersSpec,
         layer_number: int = 1,
         hidden_dropout: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
@@ -276,7 +276,6 @@ class TransformerLayer(paddle.nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
-        self.sublayers_config = sublayers
         self.layer_number = layer_number + get_transformer_layer_offset(
             self.config, vp_stage, get_pg_rank(pg_collection.pp)
         )
@@ -286,7 +285,7 @@ class TransformerLayer(paddle.nn.Layer):
 
         # [Layer 1: Input Layernorm] Optional Layernorm on the input data
         self.input_layernorm = build_layer(
-            sublayers.input_layernorm,
+            sublayers_spec.input_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
@@ -305,18 +304,18 @@ class TransformerLayer(paddle.nn.Layer):
 
         # [Layer 2: SelfAttention]
         self.self_attention = build_layer(
-            sublayers.self_attention,
+            sublayers_spec.self_attention,
             config=self.config,
             layer_number=self.layer_number,
             **attention_optional_kwargs,
         )
 
         # [Layer 3: BiasDropoutFusion]
-        self.self_attn_bda = build_layer(sublayers.self_attn_bda)
+        self.self_attn_bda = build_layer(sublayers_spec.self_attn_bda)
 
         # [Layer 4: Post SelfAttention] Optional Layernorm after self-attn
         self.pre_cross_attn_layernorm = build_layer(
-            sublayers.pre_cross_attn_layernorm,
+            sublayers_spec.pre_cross_attn_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
@@ -324,7 +323,7 @@ class TransformerLayer(paddle.nn.Layer):
 
         # [Layer 5: CrossAttention]
         self.cross_attention = build_layer(
-            sublayers.cross_attention,
+            sublayers_spec.cross_attention,
             config=self.config,
             layer_number=self.layer_number,
             **attention_optional_kwargs,
@@ -332,12 +331,12 @@ class TransformerLayer(paddle.nn.Layer):
 
         # [Layer 6: BiasDropoutFusion]
         self.cross_attn_bda = build_layer(
-            sublayers.cross_attn_bda, config=self.config
+            sublayers_spec.cross_attn_bda, config=self.config
         )
 
         # [Layer 7: Pre MLP] Optional Layernorm before MLP
         self.pre_mlp_layernorm = build_layer(
-            sublayers.pre_mlp_layernorm,
+            sublayers_spec.pre_mlp_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.layernorm_epsilon,
@@ -349,11 +348,11 @@ class TransformerLayer(paddle.nn.Layer):
         # MLP expects tp_group but MoELayer expects pg_collection to be passed in.
         # We can change MLP to accept pg_collection but it makes the logic implicit
         # The conditional below is to make the logic explicit
-        # if sublayers.mlp is not a LayerSpec,we dont have to handle passing additional kwargs
-        if isinstance(sublayers.mlp, LayerSpec):
-            if sublayers.mlp.layer == MoELayer:
+        # if sublayers_spec.mlp is not a LayerSpec,we dont have to handle passing additional kwargs
+        if isinstance(sublayers_spec.mlp, LayerSpec):
+            if sublayers_spec.mlp.layer == MoELayer:
                 additional_mlp_kwargs["pg_collection"] = pg_collection
-            elif sublayers.mlp.layer == MLP:
+            elif sublayers_spec.mlp.layer == MLP:
                 assert hasattr(pg_collection, "tp"), (
                     "TP process group is required for MLP in TransformerLayer"
                 )
@@ -362,16 +361,16 @@ class TransformerLayer(paddle.nn.Layer):
                 log_single_rank(
                     logger,
                     logging.WARNING,
-                    f"Unknown MLP type: {type(sublayers.mlp)}. Using default kwargs.",
+                    f"Unknown MLP type: {type(sublayers_spec.mlp)}. Using default kwargs.",
                 )
         self.mlp = build_layer(
-            sublayers.mlp, config=self.config, **additional_mlp_kwargs
+            sublayers_spec.mlp, config=self.config, **additional_mlp_kwargs
         )
         if hasattr(self.mlp, "set_layer_number"):
             self.mlp.set_layer_number(self.layer_number)
 
         # [Layer 9: BiasDropoutFusion]
-        self.mlp_bda = build_layer(sublayers.mlp_bda)
+        self.mlp_bda = build_layer(sublayers_spec.mlp_bda)
 
         self.recompute_input_layernorm = False
         self.recompute_pre_mlp_layernorm = False

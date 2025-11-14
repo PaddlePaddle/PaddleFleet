@@ -57,9 +57,9 @@ logger = logging.getLogger(__name__)
 
 # pylint: disable=missing-class-docstring
 @dataclass
-class MLPSublayers:
+class MLPSublayersSpec:
     """
-    The dataclass for LayerSpecs of MLP sublayers
+    The dataclass for LayerSpecs of MLP sublayers_spec
     including  linear fc1, activation function, linear fc2.
     """
 
@@ -88,7 +88,7 @@ class MLP(FleetLayer):
     def __init__(
         self,
         config: TransformerConfig,
-        sublayers: MLPSublayers,
+        sublayers_spec: MLPSublayersSpec,
         is_expert: bool = False,
         input_size: int | None = None,
         ffn_hidden_size: int | None = None,
@@ -122,9 +122,9 @@ class MLP(FleetLayer):
         # see https://arxiv.org/pdf/2002.05202.pdf
         if self.config.gated_linear_unit:
             ffn_hidden_size *= 2
-        print("sublayers", sublayers, sublayers.linear_fc1)
+        print("sublayers_spec", sublayers_spec, sublayers_spec.linear_fc1)
         self.linear_fc1 = build_layer(
-            sublayers.linear_fc1,
+            sublayers_spec.linear_fc1,
             self.input_size,
             ffn_hidden_size,
             config=self.config,
@@ -140,7 +140,7 @@ class MLP(FleetLayer):
         self.activation_func = self.config.activation_func
 
         self.linear_fc2 = build_layer(
-            sublayers.linear_fc2,
+            sublayers_spec.linear_fc2,
             self.config.ffn_hidden_size,
             self.config.hidden_size,
             config=self.config,

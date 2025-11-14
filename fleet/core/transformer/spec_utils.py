@@ -38,7 +38,7 @@ class LayerSpec:
 
     layer: tuple | type
     params: dict = field(default_factory=lambda: {})
-    sublayers: type = None
+    sublayers_spec: type = None
 
 
 def import_layer(layer_path: tuple[str]):
@@ -101,13 +101,13 @@ def build_layer(spec_or_layer: LayerSpec | type, *args, **kwargs):
     # Finally return the initialized layer with params from the spec as well
     # as those passed as **kwargs from the code
 
-    # Add the `sublayers` argument to the layer init call if it exists in the
+    # Add the `sublayers_spec` argument to the layer init call if it exists in the
     # spec.
     if (
-        hasattr(spec_or_layer, "sublayers")
-        and spec_or_layer.sublayers is not None
+        hasattr(spec_or_layer, "sublayers_spec")
+        and spec_or_layer.sublayers_spec is not None
     ):
-        kwargs["sublayers"] = spec_or_layer.sublayers
+        kwargs["sublayers_spec"] = spec_or_layer.sublayers_spec
     try:
         return layer(
             *args,

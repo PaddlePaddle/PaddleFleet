@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import paddle
 
-from fleet.core.transformer.mlp import MLP, MLPSublayers
+from fleet.core.transformer.mlp import MLP, MLPSublayersSpec
 
 # (TODO): need add tp case
 # from fleet.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
@@ -72,9 +72,12 @@ class TestParallelMLP:
         # (TODO): need replace with gpt_model.mlp later,now temp use a simple mlp
         # mlp_spec =  get_gpt_layer_local_spec().submodules.mlp.submodules
         mlp_spec = LayerSpec(
-            MLP, sublayers=MLPSublayers(linear_fc1=Linear, linear_fc2=Linear)
+            MLP,
+            sublayers_spec=MLPSublayersSpec(
+                linear_fc1=Linear, linear_fc2=Linear
+            ),
         )
-        self.mlp = MLP(transformer_config, mlp_spec.sublayers)
+        self.mlp = MLP(transformer_config, mlp_spec.sublayers_spec)
 
     def teardown_method(self, method):
         # Utils.destroy_model_parallel()
