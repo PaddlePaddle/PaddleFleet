@@ -132,7 +132,7 @@ jobs:
       - name: Single-card Coverage Upload
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
           source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
@@ -242,7 +242,7 @@ jobs:
       - name: Multi-card Coverage Upload
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
           source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
