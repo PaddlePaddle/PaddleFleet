@@ -106,6 +106,7 @@ jobs:
           ls -a /paddle/coveragedata/
           uv run coverage combine
           uv run coverage report -m
+          uv run coverage xml -o /paddle/coveragedata/coverage.xml
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
             exit 1
@@ -196,6 +197,7 @@ jobs:
           multi_card_exit_code=$?
           ls -a /paddle/coveragedata/
           uv run coverage combine
+          uv run coverage xml -o /paddle/coveragedata/coverage.xml
           uv run coverage report -m
 
           if [[ "$multi_card_exit_code" != "0" ]]; then
