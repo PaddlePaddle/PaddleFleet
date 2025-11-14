@@ -1,0 +1,6 @@
+[run]
+branch = True
+source = fleet
+concurrency = multiprocessing
+patch = subprocess
+parallel = True

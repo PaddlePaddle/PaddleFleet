@@ -24,5 +24,8 @@ if [ -f "$disable_file" ]; then
 fi
 
 echo -e "\033[34mDisabled tests:\033[0m ${disabled[@]}"
-
-uv run pytest tests/single_card_tests $(sed 's/^/--ignore=/' tests/single_card_tests/disable_single_card_uts.txt)
+if [[ "${WITH_COVERAGE:-OFF}" == "ON" ]];then
+    uv run -m coverage run -m pytest tests/single_card_tests $(sed 's/^/--ignore=/' tests/single_card_tests/disable_single_card_uts.txt)
+else
+    uv run pytest tests/single_card_tests $(sed 's/^/--ignore=/' tests/single_card_tests/disable_single_card_uts.txt)
+fi
