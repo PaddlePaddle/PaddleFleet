@@ -149,17 +149,21 @@ def get_pipeline_model_parallel_group(check_initialized=True):
     return _PIPELINE_MODEL_PARALLEL_GROUP
 
 
-def get_data_parallel_group(with_context_parallel=False):
+def get_data_parallel_group(
+    check_initialized=True, with_context_parallel=False
+):
     """Get the data-parallel group the caller rank belongs to."""
     if with_context_parallel:
-        assert _DATA_PARALLEL_GROUP_WITH_CP is not None, (
-            "data parallel group with context parallel combined is not initialized"
-        )
+        if check_initialized:
+            assert _DATA_PARALLEL_GROUP_WITH_CP is not None, (
+                "data parallel group with context parallel combined is not initialized"
+            )
         return _DATA_PARALLEL_GROUP_WITH_CP
     else:
-        assert _DATA_PARALLEL_GROUP is not None, (
-            "data parallel group is not initialized"
-        )
+        if check_initialized:
+            assert _DATA_PARALLEL_GROUP is not None, (
+                "data parallel group is not initialized"
+            )
         return _DATA_PARALLEL_GROUP
 
 

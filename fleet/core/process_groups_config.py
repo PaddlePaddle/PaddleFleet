@@ -122,9 +122,13 @@ class ProcessGroupCollection:
                 parallel_state.get_expert_model_parallel_group,
                 check_initialized=False,
             ),
-            "dp": parallel_state.get_data_parallel_group,
+            "dp": partial(
+                parallel_state.get_data_parallel_group,
+                check_initialized=False,
+            ),
             "cp_dp": partial(
                 parallel_state.get_data_parallel_group,
+                check_initialized=False,
                 with_context_parallel=True,
             ),
             "expt_dp": partial(
