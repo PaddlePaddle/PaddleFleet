@@ -45,7 +45,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-dependencies = ["wrapt", "paddlepaddle-gpu==3.2.2"]
+dependencies = ["paddlepaddle-gpu==3.2.2"]
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
