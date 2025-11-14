@@ -66,7 +66,7 @@ def roll_tensor(tensor, shifts=-1, dims=-1, cp_group=None):
         tensor (Tensor): The input tensor to roll.
         shifts (int): The shift of the tensor (typically -1 for MTP).
         dims (int): The dimension to roll (typically -1 for sequence dimension).
-        cp_group (ProcessGroup): The context parallelism process group. If None or size=1,
+        cp_group (Group): The context parallelism process group. If None or size=1,
                                falls back to standard rolling behavior.
     Returns:
         tuple: (rolled_tensor, sum_of_rolled_tensor)
@@ -161,16 +161,17 @@ class MTPLossLoggingHelper:
         loss: paddle.Tensor,
         layer_number: int,
         num_layers: int,
-        reduce_group: paddle.distributed.ProcessGroup | None = None,
-        avg_group: paddle.distributed.ProcessGroup | None = None,
+        reduce_group: paddle.distributed.communication.group.Group
+        | None = None,
+        avg_group: paddle.distributed.communication.group.Group | None = None,
     ):
         """Save the mtp loss for logging.
         Args:
             loss (paddle.Tensor): The loss tensor.
             layer_number (int): Layer index of the loss.
             num_layers (int): The number of total layers.
-            reduce_group (paddle.distributed.ProcessGroup): The group for reducing the loss.
-            mean_group (paddle.distributed.ProcessGroup): The group for averaging the loss.
+            reduce_group (paddle.distributed.communication.group.Group): The group for reducing the loss.
+            mean_group (paddle.distributed.communication.group.Group): The group for averaging the loss.
         """
         # Skip mtp loss logging if layer_number is None.
         if layer_number is None:

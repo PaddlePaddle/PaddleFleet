@@ -68,7 +68,7 @@ class LanguageLayer(FleetLayer):
 
         self.ignored_index = -100
         self.enable_parallel_cross_entropy = (
-            config.tensor_parallel_degree > 1 and config.tensor_parallel_output
+            config.tensor_model_parallel_size > 1 and config.parallel_output
         )
 
         if (

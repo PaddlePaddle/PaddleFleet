@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .layer import FleetLayer as FleetLayer, GraphableFleetLayer
-from .transformer_config import TransformerConfig as TransformerConfig
+from .layers import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 
 __all__ = [
-    "FleetLayer",
-    "GraphableFleetLayer",
-    "TransformerConfig",
+    "ColumnParallelLinear",
+    "RowParallelLinear",
 ]

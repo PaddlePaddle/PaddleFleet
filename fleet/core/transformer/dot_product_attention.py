@@ -90,7 +90,7 @@ class DotProductAttention(FleetLayer):
             )
 
         world_size = (
-            pg_collection.tp.size() if pg_collection.tp is not None else 1
+            pg_collection.tp.world_size if pg_collection.tp is not None else 1
         )
         self.hidden_size_per_partition = divide(projection_size, world_size)
         self.hidden_size_per_attention_head = divide(

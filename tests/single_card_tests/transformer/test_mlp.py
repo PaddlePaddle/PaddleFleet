@@ -45,7 +45,6 @@ class Linear(paddle.nn.Linear):
         embedding_activation_buffer=None,
         grad_output_buffer=None,
         is_expert: bool = False,
-        tp_comm_buffer_name: str | None = None,  # Not used
         disable_grad_reduce: bool = False,
         tp_group: None,
     ):

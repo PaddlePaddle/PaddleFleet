@@ -167,7 +167,6 @@ class GPTModel(LanguageLayer):
                 rotary_base=rotary_base,
                 rope_scaling=rope_scaling,
                 rope_scaling_factor=rope_scaling_factor,
-                use_cpu_initialization=self.config.use_cpu_initialization,
                 cp_group=self.pg_collection.cp,
             )
 

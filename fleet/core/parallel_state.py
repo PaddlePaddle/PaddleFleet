@@ -29,6 +29,10 @@ from fleet.core.utils import GlobalMemoryBuffer
 _TENSOR_MODEL_PARALLEL_GROUP = None
 _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = None
 
+# Model parallel group (both intra-, pipeline, and expert) that the current rank belongs to.
+# Embedding group.
+_EMBEDDING_GROUP = None
+
 ### Expert-related parallel states
 # Naming convention:
 # _EXPERT prefix in group name means it's used for expert layer in MoE models.
@@ -124,6 +128,10 @@ def initialize_model_parallel(
             virtual_pipeline_model_parallel_size
         )
 
+    # NOTE(GuoxiaWang): need to create group contains pp first and last rank.
+    global _EMBEDDING_GROUP
+    assert _EMBEDDING_GROUP is None, "embedding group is already initialized"
+
     # Initialize global memory buffer
     # This isn't really "parallel state" but there isn't another good place to
     # put this. If we end up with a more generic initialization of fleet-core
@@ -192,6 +200,15 @@ def get_context_parallel_group(check_initialized=True):
             "context parallel group is not initialized"
         )
     return _CONTEXT_PARALLEL_GROUP
+
+
+def get_embedding_group(check_initialized=True):
+    """Get the embedding group the caller rank belongs to."""
+    if check_initialized:
+        assert _EMBEDDING_GROUP is not None, (
+            "embedding group is not initialized"
+        )
+    return _EMBEDDING_GROUP
 
 
 def get_pipeline_model_parallel_world_size():

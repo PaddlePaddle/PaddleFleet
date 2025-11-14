@@ -1,3 +1,3 @@
 tests/single_card_tests/transformer/test_attention.py
-tests/single_card_tests/model/test_gpt_model.py
 tests/single_card_tests/transformer/test_mlp.py
+tests/single_card_tests/model/test_gpt_model.py

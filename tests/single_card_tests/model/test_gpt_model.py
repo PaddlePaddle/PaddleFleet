@@ -56,7 +56,7 @@ class TestGPTModel(unittest.TestCase):
             num_layers=2, hidden_size=12, num_attention_heads=4
         )
         transformer_layer_spec = get_gpt_layer_local_spec(
-            num_experts=4,
+            num_experts=None,
             moe_grouped_gemm=False,
             qk_layernorm=True,
             multi_latent_attention=False,

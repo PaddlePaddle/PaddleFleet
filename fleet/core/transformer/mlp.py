@@ -133,7 +133,6 @@ class MLP(FleetLayer):
             bias=self.config.add_bias_linear,
             skip_bias_add=True,
             is_expert=is_expert,
-            tp_comm_buffer_name="fc1",
             tp_group=tp_group,
         )
 
@@ -149,7 +148,6 @@ class MLP(FleetLayer):
             input_is_parallel=True,
             skip_bias_add=True,
             is_expert=is_expert,
-            tp_comm_buffer_name="fc2",
             tp_group=tp_group,
         )
 

@@ -18,21 +18,10 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Protocol
 
-# from fleet.core.tensor_parallel.layers import (
-#    ColumnParallelLinear,
-#    RowParallelLinear,
-# )
-
-
-# HACK(Guoxia Wang): need remove later
-class ColumnParallelLinear:
-    pass
-
-
-class RowParallelLinear:
-    pass
-
-
+from fleet.core.tensor_parallel.layers import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 from fleet.core.transformer.dot_product_attention import DotProductAttention
 from fleet.core.transformer.mlp import MLPSublayersSpec
 

@@ -154,7 +154,6 @@ class Attention(FleetLayer, ABC):
             input_is_parallel=True,
             skip_bias_add=True,
             is_expert=False,
-            tp_comm_buffer_name="proj",
             tp_group=self.pg_collection.tp,
         )
 
@@ -405,7 +404,6 @@ class SelfAttention(Attention):
             bias=self.config.add_bias_linear or self.config.add_qkv_bias,
             skip_bias_add=False,
             is_expert=False,
-            tp_comm_buffer_name="qkv",
             tp_group=self.pg_collection.tp,
         )
 

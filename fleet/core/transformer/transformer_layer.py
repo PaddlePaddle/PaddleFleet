@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+from abc import ABC
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,7 @@ from fleet.core import parallel_state, tensor_parallel
 from fleet.core.process_groups_config import ProcessGroupCollection
 from fleet.core.transformer.enums import LayerType
 from fleet.core.transformer.identity_op import IdentityFuncOp, IdentityOp
+from fleet.core.transformer.layer import GraphableFleetLayer
 from fleet.core.transformer.mlp import MLP
 from fleet.core.transformer.spec_utils import LayerSpec, build_layer
 from fleet.core.utils import get_pg_rank, log_single_rank
@@ -254,7 +256,23 @@ class TransformerLayerSublayersSpec:
     sharded_state_dict_keys_map: dict[str, str] = field(default_factory=dict)
 
 
-class TransformerLayer(paddle.nn.Layer):
+class BaseTransformerLayer(ABC):
+    """A common parent class for `TransformerLayer` like implementations.
+
+    A dummy class that is subclassed by similar `TransformerLayer`s e.g. the
+    `TransformerLayer` in this file and possibly other `TransformerLayer`
+    implementations that aim to use `TransformerBlock` as the base module.
+    The main purpose is to check if any layer (or module) provided in the spec
+    is a subclass of this class to allow fanning-out of that spec for all the
+    layers in the `TransformerBlock`. See `_get_block_submodules` method
+    implementation in `transformer_block.py` file for more details.
+    """
+
+    def __init__(self):
+        pass
+
+
+class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
     """A single transformer layer.
 
     Transformer layer takes input with size [s, b, h] and returns an
@@ -343,7 +361,10 @@ class TransformerLayer(paddle.nn.Layer):
         )
         # [Layer 8: MLP block]
         additional_mlp_kwargs = {}
-        from fleet.core.transformer.moe.moe_layer import MoELayer
+
+        # from fleet.core.transformer.moe.moe_layer import MoELayer
+        class MoELayer:
+            pass
 
         # MLP expects tp_group but MoELayer expects pg_collection to be passed in.
         # We can change MLP to accept pg_collection but it makes the logic implicit
@@ -363,6 +384,7 @@ class TransformerLayer(paddle.nn.Layer):
                     logging.WARNING,
                     f"Unknown MLP type: {type(sublayers_spec.mlp)}. Using default kwargs.",
                 )
+        print("sublayers_spec", sublayers_spec)
         self.mlp = build_layer(
             sublayers_spec.mlp, config=self.config, **additional_mlp_kwargs
         )

@@ -585,7 +585,7 @@ def all_to_all_sp2hp(input_, group=None):
         input_ (paddle.Tensor):
             The input tensor which has been distributed along the sequence
             dimension.
-        group (paddle.distributed.communication.group.ProcessGroup, optional):
+        group (paddle.distributed.communication.group.Group, optional):
             The process group to work on. If None, the tensor model parallel group
             will be used.
 
@@ -614,7 +614,7 @@ def all_to_all_hp2sp(input_, group=None):
         input_ (paddle.Tensor):
             The input tensor which has been distributed along the hidden
             dimension.
-        group (paddle.distributed.communication.group.ProcessGroup, optional):
+        group (paddle.distributed.communication.group.Group, optional):
             The process group to work on. If None, the tensor model parallel group
             will be used.
 

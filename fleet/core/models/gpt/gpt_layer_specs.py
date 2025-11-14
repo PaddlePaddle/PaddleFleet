@@ -154,6 +154,7 @@ def get_mlp_layer_spec_for_backend(
         )
     else:
         # Mixture of experts with layers in fleet core.
+        assert 0, "KKKKKKK"
         pass
         # return get_moe_layer_spec_for_backend(
         #    backend=backend,

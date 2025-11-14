@@ -27,6 +27,8 @@ import math
 import paddle
 from paddle import Tensor, nn
 
+from fleet.core import parallel_state
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,8 @@ class RotaryEmbedding(nn.Layer):
             10000.
         rope_scaling (bool, optional): Apply rope scaling as used in llama 3.x.
         rope_scaling_factor (float, optional): rope scaling factor in llama 3.x. Defaults to 8.
+        cp_group (paddle.distributed.communication.group.Group, optional): Process group for context parallel.
+            Defaults to None.
     """
 
     def __init__(
@@ -60,6 +64,7 @@ class RotaryEmbedding(nn.Layer):
         rotary_base: int = 10000,
         rope_scaling: bool = False,
         rope_scaling_factor: float = 8.0,
+        cp_group: paddle.distributed.communication.group.Group | None = None,
     ) -> None:
         super().__init__()
 
@@ -83,6 +88,14 @@ class RotaryEmbedding(nn.Layer):
             self.inv_freq = self._apply_scaling(
                 self.inv_freq, factor=rope_scaling_factor
             )
+
+        self.cp_group = (
+            cp_group
+            if cp_group is not None
+            else parallel_state.get_context_parallel_group(
+                check_initialized=False
+            )
+        )
 
     def _apply_scaling(
         self,

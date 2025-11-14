@@ -40,6 +40,10 @@ class ModelParallelConfig:
     tensor_model_parallel_size: int = 1
     """Intra-layer model parallelism. Splits tensors across GPU ranks."""
 
+    parallel_output: bool = True
+    """Do not gather the outputs, keep them split across tensor
+    parallel ranks. Defaults to True."""
+
     pipeline_model_parallel_comm_backend: str = None
     """Configuring backend option of pipeline parallel communication (e.g., nccl, ucc)
        If None, the default backend will be used.

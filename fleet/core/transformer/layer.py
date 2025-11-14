@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import paddle
 
 from fleet.core.transformer.transformer_config import TransformerConfig
@@ -26,3 +28,19 @@ class FleetLayer(paddle.nn.Layer):
     def __init__(self, config: TransformerConfig):
         super().__init__()
         self.config = config
+
+
+class GraphableFleetLayer(FleetLayer):
+    """Fleet layer that can be used to capture and replay CUDA graphs.
+    Now only TransformerLayer and MambaLayer are graphable.
+
+    Args:
+        config (TransformerConfig): Transformer config
+    """
+
+    def __init__(self, config: TransformerConfig, vp_stage: int | None = None):
+        super().__init__(config)
+
+        assert isinstance(config, TransformerConfig), (
+            "config must be a TransformerConfig"
+        )

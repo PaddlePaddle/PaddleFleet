@@ -16,7 +16,6 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reservede
 
 import paddle
-import torch
 
 from ..utils import get_tensor_model_parallel_group_if_none
 
@@ -83,7 +82,7 @@ def broadcast_data(keys, data, datatype, tp_group=None):
     Args:
         keys: list of keys in the data dictionary to be broadcasted
         data: data dictionary of string keys and cpu tensor values.
-        datatype: torch data type of all tensors in data associated
+        datatype: paddle data type of all tensors in data associated
                   with keys.
         tp_group: the tensor model parallel group to broadcast to.
     """
@@ -102,9 +101,7 @@ def broadcast_data(keys, data, datatype, tp_group=None):
             [data[key].cuda().contiguous().view(-1) for key in keys], dim=0
         )
     else:
-        flatten_data = paddle.empty(
-            total_numel, device=torch.cuda.current_device(), dtype=datatype
-        )
+        flatten_data = paddle.empty(total_numel, dtype=datatype)
 
     # Broadcast
     group_ranks = tp_group.ranks
