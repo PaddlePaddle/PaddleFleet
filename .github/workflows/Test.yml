@@ -251,7 +251,7 @@ jobs:
           codecov-cli --version
           set -x
           codecov-cli --auto-load-params-from GithubActions \
-          upload-process \
+          upload-coverage \
           --file "${{ github.workspace }}/coveragedata/coverage.xml" \
           --flag multi-card \
           --verbose
