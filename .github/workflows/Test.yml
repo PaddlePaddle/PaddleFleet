@@ -137,7 +137,7 @@ jobs:
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
-
+          uv run codecov-cli detect
           uv run codecov-cli upload-process \
             --file /paddle/coveragedata/coverage.xml \
             --slug ${GITHUB_REPO_NAME} \
@@ -248,6 +248,7 @@ jobs:
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
 
+          uv run codecov-cli detect
           uv run codecov-cli upload-process \
             --file /paddle/coveragedata/coverage.xml \
             --slug ${GITHUB_REPO_NAME} \
