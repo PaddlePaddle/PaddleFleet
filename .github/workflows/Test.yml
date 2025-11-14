@@ -73,6 +73,8 @@ jobs:
             -e GITHUB_BASE_REF="${{ github.base_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
@@ -192,6 +194,8 @@ jobs:
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
