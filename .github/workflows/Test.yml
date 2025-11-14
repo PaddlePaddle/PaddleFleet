@@ -263,6 +263,8 @@ jobs:
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           export PATH=/home/paddle-1/miniconda3/bin:${PATH}
+          echo $PATH
+          /home/paddle-1/miniconda3/bin/python --version
           python --version
           python -m pip install codecov-cli
 
