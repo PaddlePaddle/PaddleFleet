@@ -286,8 +286,8 @@ jobs:
           wget "${multi_card_cov_file_url}" -O multi_coverage.xml --no-proxy
           single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
           wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
-          sed -i 's|<source>/paddle/fleet</source>|<source>fleet</source>|' multi_coverage.xml
-          sed -i 's|<source>/paddle/fleet</source>|<source>fleet</source>|' single_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
           git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
