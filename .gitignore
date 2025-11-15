@@ -1,6 +1,7 @@
 __pycache__
 *.so
 build
+uv.lock
 .coverage_*
 *.egg-info
 *~
