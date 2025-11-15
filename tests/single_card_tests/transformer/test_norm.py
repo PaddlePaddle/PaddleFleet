@@ -16,8 +16,8 @@ import unittest
 
 import paddle
 
-from fleet.core.transformer.paddle_norm import RMSNorm, WrappedPaddleNorm
-from fleet.core.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformer.paddle_norm import RMSNorm, WrappedPaddleNorm
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class TestFleetLayer(unittest.TestCase):

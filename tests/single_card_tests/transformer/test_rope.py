@@ -16,7 +16,7 @@ import unittest
 
 import paddle
 
-from fleet.core.models.common.embeddings import (
+from paddlefleet.models.common.embeddings import (
     RotaryEmbedding,
     YarnRotaryEmbedding,
 )

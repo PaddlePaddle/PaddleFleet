@@ -17,9 +17,9 @@ import unittest
 import paddle
 from paddle.distributed import fleet
 
-from fleet.core.models.common.embeddings import LanguageModelEmbedding
-from fleet.core.transformer.transformer_config import TransformerConfig
-from fleet.core.utils import init_method_normal
+from paddlefleet.models.common.embeddings import LanguageModelEmbedding
+from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.utils import init_method_normal
 
 
 class TestBaseEmbedding(unittest.TestCase):

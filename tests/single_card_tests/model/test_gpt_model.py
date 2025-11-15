@@ -18,12 +18,12 @@ import unittest
 from paddle.distributed import fleet
 
 # from tests.unit_tests.test_utilities import Utils
-import fleet.core.parallel_state as ps
+import paddlefleet.parallel_state as ps
 
-# from fleet.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-from fleet.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
-from fleet.core.models.gpt.gpt_model import GPTModel
-from fleet.core.transformer.transformer_config import TransformerConfig
+# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
+from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+from paddlefleet.models.gpt.gpt_model import GPTModel
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class TestGPTModel(unittest.TestCase):

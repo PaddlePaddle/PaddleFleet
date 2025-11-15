@@ -17,8 +17,8 @@ import unittest
 import paddle.distributed as dist
 from paddle.distributed import fleet
 
-from fleet.core import parallel_state as ps
-from fleet.training.initialize import initialize_fleet
+from paddlefleet import parallel_state as ps
+from paddlefleet.training.initialize import initialize_fleet
 
 
 class TestParallelState(unittest.TestCase):

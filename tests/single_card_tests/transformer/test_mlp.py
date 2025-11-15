@@ -17,14 +17,14 @@ from __future__ import annotations
 
 import paddle
 
-from fleet.core.transformer.mlp import MLP, MLPSublayersSpec
+from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 
 # (TODO): need add tp case
-# from fleet.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
-# from fleet.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+# from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 # from tests.unit_tests.test_utilities import Utils
-from fleet.core.transformer.spec_utils import LayerSpec
-from fleet.core.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformer.spec_utils import LayerSpec
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class Linear(paddle.nn.Linear):

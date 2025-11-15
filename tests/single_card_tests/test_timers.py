@@ -17,9 +17,9 @@ import unittest
 
 import paddle
 
-from fleet.core.timers import RuntimeTimer
-from fleet.training import get_timers
-from fleet.training.initialize import initialize_fleet
+from paddlefleet.timers import RuntimeTimer
+from paddlefleet.training import get_timers
+from paddlefleet.training.initialize import initialize_fleet
 
 strategy = paddle.distributed.fleet.DistributedStrategy()
 initialize_fleet(strategy=strategy, ignore_unknown_args=True)

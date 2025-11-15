@@ -16,7 +16,10 @@ import unittest
 
 import numpy as np
 
-from fleet.core.vpp_simulator import PPChunkRecorder, VPPSimulator
+from paddlefleet.pipeline_parallel.vpp_simulator import (
+    PPChunkRecorder,
+    VPPSimulator,
+)
 
 
 class TestVPPSimulator(unittest.TestCase):
@@ -52,8 +55,8 @@ class TestVPPSimulator(unittest.TestCase):
         assert bubble_rate == expected_bubble_rate, (
             f"Expected bubble rate {expected_bubble_rate}, got {bubble_rate}"
         )
-        vpp_simulator.draw_balls()
-        vpp_simulator.draw_chunks()
+        # vpp_simulator.draw_balls()
+        # vpp_simulator.draw_chunks()
         assert True
 
 

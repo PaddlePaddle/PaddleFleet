@@ -18,8 +18,8 @@ import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
 
-import fleet.core.pipeline_parallel.schedules as schedule
-from fleet.training.initialize import initialize_fleet
+import paddlefleet.pipeline_parallel.schedules as schedule
+from paddlefleet.training.initialize import initialize_fleet
 
 
 class TestParallelState(unittest.TestCase):

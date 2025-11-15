@@ -13,6 +13,10 @@
 # limitations under the License.
 
 
+# Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
+# Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+
+
 import importlib
 import inspect
 import os
@@ -22,7 +26,7 @@ import traceback
 import paddle
 import wrapt
 
-from fleet.core.transformer.layer import FleetLayer
+from paddlefleet.transformer.layer import FleetLayer
 
 
 def import_class_by_path(path: str):
@@ -35,7 +39,7 @@ def import_class_by_path(path: str):
 
 
 def _build_import_path(subdomains: list, imp):
-    import_path = ["fleet", "core"]
+    import_path = ["paddlefleet"]
     import_path.extend(subdomains)
     import_path.append(imp)
     path = ".".join(import_path)
@@ -70,7 +74,7 @@ def _test_domain_module_imports(module, subdomains: list):
     error = None
     if len(subdomains) > 0:
         basepath = module.__path__[0]
-        fleet_index = basepath.rfind("fleet")
+        fleet_index = basepath.rfind("paddlefleet")
         basepath = basepath[fleet_index:].replace(os.path.sep, ".")
         new_path = ".".join([basepath, *subdomains])
 
@@ -100,7 +104,7 @@ def _test_domain_module_imports(module, subdomains: list):
     print()
     for module in failed_list:
         print(
-            "Module did not match a valid signature of fleet core Model (hence ignored):",
+            "Module did not match a valid signature of paddlefleet Model (hence ignored):",
             module,
         )
 
@@ -126,9 +130,11 @@ def _test_domain_module_imports(module, subdomains: list):
 
 
 def test_domain_core():
-    from fleet import core
+    import paddlefleet
 
-    all_passed = _test_domain_module_imports(core, subdomains=["transformer"])
+    all_passed = _test_domain_module_imports(
+        paddlefleet, subdomains=["transformer"]
+    )
 
     if not all_passed:
         sys.exit(1)

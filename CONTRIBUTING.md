@@ -26,7 +26,8 @@ cd PaddleFleet/                                                         # cd 到
 git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git     # 将原分支绑定在 upstream
 uv sync # 本地构建环境
 uv build # 构建wheel包
-uv run pytest #跑单卡单测
-uv run python -m paddle.distributed.launch --nnodes=1 --log_dir=log --devices=0,1,2,3,4,5,6,7 tests/unit_tests/test_parallel_states.py #跑多卡单测
-
+uv run pytest tess/_card_tests/test_imports.py #跑指定的单卡单测
+uv run python -m paddle.distributed.launch --nnodes=1 --log_dir=log --devices=0,1,2,3,4,5,6,7 tests/unit_tests/test_parallel_states.py #跑指定的多卡单测
+bash ci/single_card_test.sh  #跑所有单卡单测
+bash ci/multi-card_test.sh  #跑所有多卡单测
 ```

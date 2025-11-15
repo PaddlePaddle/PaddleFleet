@@ -13,7 +13,7 @@
 # limitations under the License.
 
 [project]
-name = "fleet-core"
+name = "paddlefleet"
 dynamic = ["version", "readme"]
 description = "Fleet Core - Core Functional Library for Large Scale Distributed Training"
 requires-python = ">=3.10"
@@ -65,7 +65,7 @@ include-package-data = true
 exclude = ["tests", "docs", "examples", "build"]
 
 [tool.setuptools.dynamic]
-version = { attr = "fleet.core.package_info.__version__" }
+version = { attr = "paddlefleet.package_info.__version__" }
 readme = { file = "README.md", content-type = "text/markdown" }
 
 [dependency-groups]

@@ -14,19 +14,21 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 
 from megatron.training import get_args
+from paddlefleet.models.gpt.heterogeneous.heterogeneous_layer_specs import (
+    get_gpt_heterogeneous_layer_spec,
+)
 
-from fleet.core.models.gpt import GPTModel
-from fleet.core.models.gpt.gpt_layer_specs import (
+from paddlefleet.models.gpt import GPTModel
+from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_block_spec,
     get_gpt_layer_local_spec,
     get_gpt_mtp_block_spec,
 )
-from fleet.core.models.gpt.heterogeneous.heterogeneous_layer_specs import (
-    get_gpt_heterogeneous_layer_spec,
+from paddlefleet.training.arguments import core_transformer_config_from_args
+from paddlefleet.training.yaml_arguments import (
+    core_transformer_config_from_yaml,
 )
-from fleet.core.transformer.spec_utils import import_module
-from fleet.training.arguments import core_transformer_config_from_args
-from fleet.training.yaml_arguments import core_transformer_config_from_yaml
+from paddlefleet.transformer.spec_utils import import_module
 
 
 def gpt_builder(args, pre_process, post_process, vp_stage=None, config=None):

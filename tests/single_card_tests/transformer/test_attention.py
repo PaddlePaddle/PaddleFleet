@@ -16,13 +16,13 @@ import unittest
 
 import paddle
 
-from fleet.core.transformer.attention import (
+from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
 )
-from fleet.core.transformer.dot_product_attention import DotProductAttention
-from fleet.core.transformer.transformer_config import TransformerConfig
-from fleet.core.utils import (
+from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.utils import (
     init_method_normal,
     scaled_init_method_normal,
 )

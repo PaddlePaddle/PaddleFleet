@@ -16,8 +16,8 @@ import unittest
 
 import paddle
 
-from fleet.core.transformer.layer import FleetLayer
-from fleet.core.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class DummyLayer(FleetLayer):
