@@ -221,6 +221,9 @@ class Attention(FleetLayer, ABC):
         attention_mask: Tensor,
         key_value_states: Tensor | None = None,
         rotary_pos_emb: Tensor | tuple[Tensor, Tensor] | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        rotary_pos_cos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
@@ -242,11 +245,13 @@ class Attention(FleetLayer, ABC):
         """
         # Check if we need to skip RoPE
         # no_rope is 0-indexed array and self.layer_number is 1-indexed
-        no_rope = (
-            self.config.no_rope_freq[self.layer_number - 1]
-            if self.config.no_rope_freq
-            else False
-        )
+        # no_rope = (
+        #    self.config.no_rope_freq[self.layer_number - 1]
+        #    if self.config.no_rope_freq
+        #    else False
+        # )
+        no_rope = False
+
         if no_rope:
             rotary_pos_emb = None
 
@@ -261,10 +266,10 @@ class Attention(FleetLayer, ABC):
         # =====================
         # Check if fused_single_qkv_rope is requested but either unavailable or not
         # supported for the current use case.
-        if self.attention_type != "cross":
-            assert not (self.config.fused_single_qkv_rope), (
-                "fused_single_qkv_rope requested but not available/supported for the config."
-            )
+        # if self.attention_type != "cross":
+        #   assert not (self.config.fused_single_qkv_rope), (
+        #        "fused_single_qkv_rope requested but not available/supported for the config."
+        #    )
 
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
@@ -439,7 +444,7 @@ class SelfAttention(Attention):
 
         # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
         new_tensor_shape = (
-            *mixed_qkv.size()[:-1],
+            *mixed_qkv.shape[:-1],
             self.num_query_groups_per_partition,
             (
                 (
@@ -472,8 +477,8 @@ class SelfAttention(Attention):
 
         # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
         query = query.reshape(
-            query.size(0),
-            query.size(1),
+            query.shape[0],
+            query.shape[1],
             -1,
             self.hidden_size_per_attention_head,
         )

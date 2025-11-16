@@ -67,7 +67,7 @@ class ProcessGroupCollection:
     ep: paddle.distributed.communication.group.Group = field(init=False)
 
     # _EMBEDDING_GROUP
-    embd: paddle.distributed.communication.group.Group = field(init=False)
+    # embd: paddle.distributed.communication.group.Group = field(init=False)
 
     # _DATA_PARALLEL_GROUP
     dp: paddle.distributed.communication.group.Group = field(init=False)
@@ -125,9 +125,9 @@ class ProcessGroupCollection:
                 parallel_state.get_expert_model_parallel_group,
                 check_initialized=False,
             ),
-            "embd": partial(
-                parallel_state.get_embedding_group, check_initialized=False
-            ),
+            # "embd": partial(
+            #    parallel_state.get_embedding_group, check_initialized=False
+            # ),
             "dp": partial(
                 parallel_state.get_data_parallel_group,
                 check_initialized=False,

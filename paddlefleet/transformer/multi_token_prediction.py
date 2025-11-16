@@ -74,7 +74,10 @@ def roll_tensor(tensor, shifts=-1, dims=-1, cp_group=None):
     # Standard rolling behavior when CP is not enabled (cp_group is None or size=1)
     if cp_group is None or cp_group.size() == 1:
         rolled_tensor = paddle.roll(tensor, shifts=shifts, dims=dims)
-        rolled_tensor.select(dims, shifts).fill_(0)
+        # rolled_tensor.select(dims, shifts).fill_(0)
+        rolled_tensor = paddle.index_select(
+            rolled_tensor, paddle.to_tensor(dims, dtype="int32"), shifts
+        ).fill_(0)
         return rolled_tensor, rolled_tensor.sum()
 
     # CP-enabled rolling: Split tensor into chunks and handle boundary communication
@@ -810,6 +813,7 @@ class MultiTokenPredictionBlock(FleetLayer):
         rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
+        sequence_len_offset: Tensor = None,
         extra_block_kwargs: dict | None = None,
         embedding=None,
     ) -> Tensor:

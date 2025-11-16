@@ -314,6 +314,56 @@ def get_tensor_model_parallel_group_if_none(
     return tp_group
 
 
+def get_attr_wrapped_model(
+    model, attr, allow_none=True, return_model_obj=False
+):
+    """Get an attribute from a wrapped model.
+    If return_model_obj is true, return the object that has the 'attr' attribute;
+    otherwise, return the attribute directly."""
+    if isinstance(model, list):
+        raise RuntimeError("_get_attr_wrapped_model given a list of models")
+
+    if allow_none:
+
+        def condition(model, attr):
+            return not hasattr(model, attr)
+
+    else:
+
+        def condition(model, attr):
+            return getattr(model, attr, None) is None
+
+    while condition(model, attr):
+        if not hasattr(model, "module"):
+            raise RuntimeError(
+                f"_get_attr_wrapped_model couldn't find attribute {attr}"
+            )
+
+        model = model.module
+
+    if return_model_obj:
+        return model
+    return getattr(model, attr)
+
+
+def get_model_type(model):
+    """Returns model_type attribute"""
+    return get_attr_wrapped_model(model, "model_type")
+
+
+def get_model_xattn(model):
+    """Returns whether the model has the xattn_needed attribute"""
+    try:
+        return get_attr_wrapped_model(model, "xattn_needed")
+    except RuntimeError:
+        return False
+
+
+def get_model_config(model):
+    """Returns the config attribute, allowed to return None"""
+    return get_attr_wrapped_model(model, "config", allow_none=False)
+
+
 class GlobalMemoryBuffer:
     """Global buffer to avoid dynamic memory allocations.
     Caller should ensure that buffers of the same name

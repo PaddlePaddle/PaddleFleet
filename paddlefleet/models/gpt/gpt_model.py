@@ -366,8 +366,8 @@ class GPTModel(LanguageLayer):
     def forward(
         self,
         input_ids: Tensor,
-        position_ids: Tensor,
-        attention_mask: Tensor,
+        position_ids: Tensor = None,
+        attention_mask: Tensor = None,
         decoder_input: Tensor = None,
         labels: Tensor = None,
         packed_seq_params: PackedSeqParams = None,
@@ -386,6 +386,14 @@ class GPTModel(LanguageLayer):
             runtime_gather_output (bool): Gather output at runtime. Default None means
                 `parallel_output` arg in the constructor will be used.
         """
+
+        if position_ids is None:
+            batch_size, seq_length = input_ids.shape[0], input_ids.shape[1]
+            position_ids = paddle.arange(seq_length, dtype="int64").expand(
+                (batch_size, seq_length)
+            )
+        if attention_mask is None:
+            attention_mask = paddle.ones_like(input_ids, dtype="int64")
 
         preproc_output = self._preprocess(
             input_ids=input_ids,
@@ -498,7 +506,7 @@ class GPTModel(LanguageLayer):
                 mtp_logits, _ = self.output_layer(
                     hidden_states_list[mtp_layer_number + 1],
                     weight=output_weight,
-                    runtime_gather_output=runtime_gather_output,
+                    # runtime_gather_output=runtime_gather_output,
                 )
                 # Calc loss for the current Multi-Token Prediction (MTP) layers.
                 mtp_labels, _ = roll_tensor(
@@ -537,8 +545,13 @@ class GPTModel(LanguageLayer):
         logits, _ = self.output_layer(
             hidden_states,
             weight=output_weight,
-            runtime_gather_output=runtime_gather_output,
+            # runtime_gather_output=runtime_gather_output,
         )
+
+        # NOTE(Ruibiao): the following code is a hack to make the output of the model match the label shape.
+        logits = logits.transpose(
+            [1, 0, 2]
+        )  # [s, b, vocab_size] -> [b, s, vocab_size]
 
         loss = self.compute_language_model_loss(labels, logits)
 
@@ -618,3 +631,6 @@ class GPTModel(LanguageLayer):
             runtime_gather_output,
             loss_mask,
         )
+
+    def get_hardware_flops(self):
+        return 989e3
