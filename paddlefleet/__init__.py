@@ -30,9 +30,12 @@ from paddlefleet.timers import Timers
 
 from . import training as training
 
+from . import extentions as extentions
+
 mpu = parallel_state
 
 __all__ = [
+    "extentions",
     "training",
     "parallel_state",
     "Timers",

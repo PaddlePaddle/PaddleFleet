@@ -1,0 +1,3 @@
+include paddlefleet/extentions/*.h
+include paddlefleet/extentions/*.cu
+recursive-include third_party/cutlass *
