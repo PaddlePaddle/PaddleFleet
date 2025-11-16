@@ -28,9 +28,7 @@ from paddlefleet.package_info import (
 )
 from paddlefleet.timers import Timers
 
-from . import training as training
-
-from . import extentions as extentions
+from . import extentions as extentions, training as training
 
 mpu = parallel_state
 

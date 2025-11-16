@@ -161,10 +161,10 @@ template void  print_to_screen1(const int64_t* result, const int size, const int
 
 template<typename T>
 __global__ void cal_expert_size_and_filter(
-    T* expert_id, 
+    T* expert_id,
     const int64_t* expert_offset,
-    int64_t len, 
-    int64_t num_experts, 
+    int64_t len,
+    int64_t num_experts,
     int64_t capcity,
     int64_t expert_start_index,
     int64_t expert_end_index,
@@ -177,12 +177,12 @@ __global__ void cal_expert_size_and_filter(
         for (int64_t i = expert_end_index - 1; i >= expert_start_index; --i){
             if (idx >= expert_offset[i])
                 break;
-            off = expert_offset[i];  
+            off = expert_offset[i];
         }
     }else{
         for (int64_t i = expert_start_index; i != expert_end_index; ++i){
             if (idx < expert_offset[i])
-                break;            
+                break;
             off = expert_offset[i];
         }
     }
@@ -198,20 +198,20 @@ __global__ void cal_expert_size_and_filter(
 }
 
 template<typename T>
-void cal_expert_size_and_filter_launcher(T* expert_id, 
+void cal_expert_size_and_filter_launcher(T* expert_id,
         const int64_t* expert_offset,
-        int64_t len, 
+        int64_t len,
         int64_t num_experts,
-        int64_t capcity, 
+        int64_t capcity,
         int64_t expert_start_index,
         int64_t expert_end_index,
         bool reverse,
         const cudaStream_t& stream){
     if (len <= 0)
-        return;            
+        return;
     const int64_t threads = std::min(static_cast<int64_t>(1024), len);
-    const int64_t blocks = (len + threads - 1) / threads;    
-    cal_expert_size_and_filter<T><<<blocks, threads, 0, stream>>>( 
+    const int64_t blocks = (len + threads - 1) / threads;
+    cal_expert_size_and_filter<T><<<blocks, threads, 0, stream>>>(
         expert_id,
         expert_offset,
         len,
@@ -232,7 +232,7 @@ __global__ void modify_expert_id(const T*  expert_id,
                                 const int64_t num_experts){
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= k * num_rows)
-        return;    
+        return;
     int ik = idx % k;
     int irow = idx / k;
     // const T mask = (~0) >> (8*sizeof(T)-ik); // 最后 ik 位为 1 其他位为 0
@@ -244,7 +244,7 @@ __global__ void modify_expert_id(const T*  expert_id,
 }
 
 template<typename T>
-void modify_expert_id_launcher(const T* expert_id, 
+void modify_expert_id_launcher(const T* expert_id,
         T* expert_id_out,
         const int k,
         const int num_rows,
@@ -253,11 +253,11 @@ void modify_expert_id_launcher(const T* expert_id,
     int max = 1024;
     const int threads = std::min(max, num_rows * k);
     const int blocks = (num_rows * k + threads - 1) / threads;
-    
+
     modify_expert_id<T><<<blocks, threads, 0, stream>>>(
-        expert_id, 
+        expert_id,
         expert_id_out,
-        k, 
+        k,
         num_rows,
         num_experts
     );
@@ -274,7 +274,7 @@ __global__ void modify_and_mask_expert_id(const T*  expert_id,
                             ){
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= k * num_rows)
-        return;    
+        return;
     int ik = idx % k;
     int irow = idx / k;
     // const T mask = (~0) >> (8*sizeof(T)-ik); // 最后 ik 位为 1 其他位为 0
@@ -290,7 +290,7 @@ __global__ void modify_and_mask_expert_id(const T*  expert_id,
 }
 
 template<typename T>
-void modify_and_mask_expert_id_launcher(const T* expert_id, 
+void modify_and_mask_expert_id_launcher(const T* expert_id,
         T* expert_id_out,
         const int k,
         const int num_rows,
@@ -301,11 +301,11 @@ void modify_and_mask_expert_id_launcher(const T* expert_id,
     int max = 1024;
     const int threads = std::min(max, num_rows * k);
     const int blocks = (num_rows * k + threads - 1) / threads;
-    
+
     modify_and_mask_expert_id<T><<<blocks, threads, 0, stream>>>(
-        expert_id, 
+        expert_id,
         expert_id_out,
-        k, 
+        k,
         num_rows,
         num_experts,
         expert_start_index,
@@ -314,7 +314,7 @@ void modify_and_mask_expert_id_launcher(const T* expert_id,
 }
 
 template<typename T>
-__global__ void 
+__global__ void
 unmodify_expert_id(const T*  expert_id,
                                 T*         expert_id_out,
                                 const int k,
@@ -322,7 +322,7 @@ unmodify_expert_id(const T*  expert_id,
                                 const int64_t num_experts){
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= k * num_rows)
-        return;    
+        return;
     int ik = idx % k;
     int irow = idx / k;
     int offset = log2(k) + 1;
@@ -330,7 +330,7 @@ unmodify_expert_id(const T*  expert_id,
 }
 
 template<typename T>
-void unmodify_expert_id_launcher(const T* expert_id, 
+void unmodify_expert_id_launcher(const T* expert_id,
         T* expert_id_out,
         const int k,
         const int num_rows,
@@ -339,25 +339,25 @@ void unmodify_expert_id_launcher(const T* expert_id,
     int max = 1024;
     const int threads = std::min(max, num_rows * k);
     const int blocks = (num_rows * k + threads - 1) / threads;
-    
+
     unmodify_expert_id<T><<<blocks, threads, 0, stream>>>(
-        expert_id, 
+        expert_id,
         expert_id_out,
-        k, 
+        k,
         num_rows,
         num_experts
     );
 }
 
 template<typename T>
-__global__ void 
+__global__ void
 build_src_row(T* output,
             const int64_t k,
             const int64_t num_rows,
             const int64_t num_experts){
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= k * num_rows)
-        return;    
+        return;
     int64_t ik = idx / num_rows;
     int64_t irow = idx % num_rows;
     output[idx] = static_cast<int>(ik * num_rows + irow);
@@ -372,10 +372,10 @@ void build_src_row_launcher(T* output,
     int64_t max = 1024;
     const int64_t threads = std::min(max, num_rows * k);
     const int64_t blocks = (num_rows * k + threads - 1) / threads;
-    
+
     build_src_row<T><<<blocks, threads, 0, stream>>>(
         output,
-        k, 
+        k,
         num_rows,
         num_experts
     );
@@ -388,12 +388,12 @@ __global__ void pad_data_to_capcity(T* permuted_data,
                       int* expanded_dest_row_to_expanded_source_row,
                       int* expanded_source_row_to_expanded_dest_row, //output, aka scatter-idx
                       float* combine_weights, //output
-                      int64_t* expert_offset, 
+                      int64_t* expert_offset,
                       const int* permuted_experts,
-                      int64_t num_rows, 
-                      int64_t k,                      
+                      int64_t num_rows,
+                      int64_t k,
                       int64_t num_experts,
-                      int64_t capacity, 
+                      int64_t capacity,
                       int64_t hidden_size,
                       int64_t expert_start_index, // for partial expert-out
                       int64_t num_active
@@ -412,7 +412,7 @@ __global__ void pad_data_to_capcity(T* permuted_data,
             expanded_source_row_to_expanded_dest_row[src_idx] = 0; // unset scatter-idx
             auto ik = src_idx / num_rows;
             auto isent = src_idx % num_rows; // transpose
-            combine_weights[isent * k + ik] = 0.f; //unset combine-weight            
+            combine_weights[isent * k + ik] = 0.f; //unset combine-weight
         }
         return;
     }
@@ -422,12 +422,12 @@ __global__ void pad_data_to_capcity(T* permuted_data,
 
     for (int tid = threadIdx.x; tid < hidden_size; tid += blockDim.x) {
         tgt_ptr[tid] = src_ptr[tid]; // copy
-    }    
+    }
 
     if (threadIdx.x == 0) {
-        // auto expanded_source_row = expanded_dest_row_to_expanded_source_row[irow];        
+        // auto expanded_source_row = expanded_dest_row_to_expanded_source_row[irow];
         expanded_source_row_to_expanded_dest_row[src_idx] = irow + num_padded;
-    }    
+    }
 }
 
 template<typename T>
@@ -440,31 +440,31 @@ void pad_data_to_capcity_launcher(T* permuted_data,
                       int* permuted_exerts,
                       int64_t num_rows,
                       int64_t k,
-                      int64_t num_experts, 
-                      int64_t capacity, 
-                      int64_t hidden_size, 
+                      int64_t num_experts,
+                      int64_t capacity,
+                      int64_t hidden_size,
                       int64_t expert_start_index,
                       int64_t num_active,
                       const cudaStream_t& stream){
-    
+
     const int blocks  = num_rows * k;
     int64_t max = 1024;
     const int threads = std::min(hidden_size, max);
-    pad_data_to_capcity<T><<<blocks, threads, 0, stream>>>(permuted_data, 
-        y, 
+    pad_data_to_capcity<T><<<blocks, threads, 0, stream>>>(permuted_data,
+        y,
         expanded_dest_row_to_expanded_source_row,
         expanded_source_row_to_expanded_dest_row,
         combine_weights,
-        expert_offset, 
+        expert_offset,
         permuted_exerts,
-        num_rows, 
+        num_rows,
         k,
-        num_experts, 
-        capacity, 
+        num_experts,
+        capacity,
         hidden_size,
         expert_start_index,
         num_active > 0 ? num_active : k * num_rows
-    );                        
+    );
 }
 
 template<typename T, int TPB>
@@ -535,12 +535,12 @@ __launch_bounds__(TPB) __global__ void moe_top_k(const T*    inputs_after_softma
 
 template<typename T, int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__ void topk_gating_softmax(
-    const T* input, 
-    const bool* finished, 
-    T* output, 
-    const int num_rows, 
-    int* indices, 
-    int* source_rows, 
+    const T* input,
+    const bool* finished,
+    T* output,
+    const int num_rows,
+    int* indices,
+    int* source_rows,
     const int k)
 {
     // We begin by enforcing compile time assertions and setting up compile time constants.
@@ -695,7 +695,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__ void topk_gating_softmax(
                 expert  = other_expert;
             }
         }
-        
+
         // Write the max for this k iteration to global memory.
         if (thread_group_idx == 0) {
             // The lead thread from each sub-group will write out the final results to global memory. (This will be a
@@ -781,7 +781,7 @@ void topk_gating_softmax_kernelLauncher(const T*     input,
     static constexpr int WARPS_PER_TB = 4;
     static constexpr int TPB = 256;
     moe_top_k<T, TPB><<<num_rows, TPB, 0, stream>>>(
-        input, bias, output, indices, source_row, num_experts, k);    
+        input, bias, output, indices, source_row, num_experts, k);
 }
 
 template<typename T, int VecSize>
@@ -800,7 +800,7 @@ __global__ void initialize_moe_routing_old_kernel(const T*   unpermuted_input,
     // reverse map for that reduction to allow each threadblock to do 1 k-way reduce without atomics later in MoE. 1
     // thread block will be responsible for all k summations.
     using LoadT = phi::AlignedVector<T, VecSize>;
-    LoadT src_vec;    
+    LoadT src_vec;
     const int expanded_dest_row   = blockIdx.x;
     const int expanded_source_row = expanded_dest_row_to_expanded_source_row[expanded_dest_row];
     if (threadIdx.x == 0) {
@@ -855,7 +855,7 @@ void initialize_moe_routing_old_kernelLauncher(const T*     unpermuted_input,
                                                                     cols,
                                                                     k * num_rows
                                                                     );
- 
+
     }
 }
 
@@ -893,7 +893,7 @@ __global__ void initialize_moe_routing_kernel(const T*   unpermuted_input,
     // reverse map for that reduction to allow each threadblock to do 1 k-way reduce without atomics later in MoE. 1
     // thread block will be responsible for all k summations.
     using LoadT = phi::AlignedVector<T, VecSize>;
-    LoadT src_vec;    
+    LoadT src_vec;
     const int64_t expanded_dest_row   = blockIdx.x;
     const int64_t expanded_source_row = expanded_dest_row_to_expanded_source_row[expanded_dest_row];
     const int64_t iexpert = permuted_experts[expanded_dest_row];
@@ -904,7 +904,7 @@ __global__ void initialize_moe_routing_kernel(const T*   unpermuted_input,
             expanded_source_row_to_expanded_dest_row[expanded_source_row] = 0; // unset scatter-idx
             auto ik = expanded_source_row / num_rows;
             auto isent = expanded_source_row % num_rows; // transpose
-            combine_weights[isent * k + ik] = 0.f; //unset combine-weight            
+            combine_weights[isent * k + ik] = 0.f; //unset combine-weight
         }
         return;
     }
@@ -926,8 +926,8 @@ __global__ void initialize_moe_routing_kernel(const T*   unpermuted_input,
     const T* source_row_ptr = unpermuted_input + source_row * cols;
     T* dest_row_ptr;
     if (use_pad){
-        dest_row_ptr = permuted_output + 
-                       iexpert * capacity * cols + 
+        dest_row_ptr = permuted_output +
+                       iexpert * capacity * cols +
                        row_in_expert * cols;
     }else{
         dest_row_ptr = permuted_output + expanded_dest_row * cols;
@@ -945,7 +945,7 @@ __global__ void initialize_moe_routing_kernel(const T*   unpermuted_input,
  * R0E1
  * R1E0
  * R1E1
- * 
+ *
  * 我们想对all2all和专家gemm做overlap, 所以需要将all2all拆成流水线, 为了便于后续计算, 此kernel的output:
  * R0E0
  * R1E0
@@ -975,7 +975,7 @@ __global__ void initialize_moe_routing_permute_kernel(const T*   unpermuted_inpu
 #pragma unroll
     for (int i = 0; i < LoopSize; i++) {
         using LoadT = phi::AlignedVector<T, VecSize>;
-        LoadT src_vec;    
+        LoadT src_vec;
         const int expanded_dest_row   = blockIdx.x + i * gridDim.x;
         const int expanded_source_row = expanded_dest_row_to_expanded_source_row[expanded_dest_row];
         const int64_t iexpert = permuted_experts[expanded_dest_row];
@@ -986,7 +986,7 @@ __global__ void initialize_moe_routing_permute_kernel(const T*   unpermuted_inpu
                 expanded_source_row_to_expanded_dest_row[expanded_source_row] = 0; // unset scatter-idx
                 auto ik = expanded_source_row / num_rows;
                 auto isent = expanded_source_row % num_rows; // transpose
-                combine_weights[isent * k + ik] = 0.f; //unset combine-weight            
+                combine_weights[isent * k + ik] = 0.f; //unset combine-weight
             }
             continue;
         }
@@ -1040,7 +1040,7 @@ void initialize_moe_routing_permute_kernelLauncher(const T*     unpermuted_input
                                                                     expanded_source_row_to_expanded_dest_row,
                                                                     permuted_experts,
                                                                     expert_offset,
-                                                                    combine_weights,                                                                    
+                                                                    combine_weights,
                                                                     num_rows,
                                                                     cols,
                                                                     k,
@@ -1055,7 +1055,7 @@ void initialize_moe_routing_permute_kernelLauncher(const T*     unpermuted_input
                                                                     expanded_source_row_to_expanded_dest_row,
                                                                     permuted_experts,
                                                                     expert_offset,
-                                                                    combine_weights,                                                                    
+                                                                    combine_weights,
                                                                     num_rows,
                                                                     cols,
                                                                     k,
@@ -1091,7 +1091,7 @@ void initialize_moe_routing_kernelLauncher(const T*     unpermuted_input,
                                                                     expanded_source_row_to_expanded_dest_row,
                                                                     permuted_experts,
                                                                     expert_offset,
-                                                                    combine_weights,                                                                    
+                                                                    combine_weights,
                                                                     num_rows,
                                                                     cols,
                                                                     k,
@@ -1105,7 +1105,7 @@ void initialize_moe_routing_kernelLauncher(const T*     unpermuted_input,
                                                                     expanded_source_row_to_expanded_dest_row,
                                                                     permuted_experts,
                                                                     expert_offset,
-                                                                    combine_weights,                                                                    
+                                                                    combine_weights,
                                                                     num_rows,
                                                                     cols,
                                                                     k,
@@ -1146,7 +1146,7 @@ __global__ void copy_unpermuted_to_permuted_kernel(const T*   unpermuted_input,
     for (int tid = threadIdx.x * VecSize; tid < cols; tid += blockDim.x* VecSize) {
         phi::Load<T, VecSize>(&source_row_ptr[tid], &src_vec);
         phi::Store<T, VecSize>(src_vec, &padded_dest_row_ptr[tid]);
-    }  
+    }
     PADDLE_ENFORCE((padded_dest_row < padded_len)&&(source_row_expanded < num_rows * k),
     "The index is out of bounds, "
     "origin_input[%d] -> distributed_input:[%d], should < [%ld],[%ld] \n",
@@ -1154,7 +1154,7 @@ __global__ void copy_unpermuted_to_permuted_kernel(const T*   unpermuted_input,
 
     // for (int tid = threadIdx.x; tid < cols; tid += blockDim.x) {
     //     padded_dest_row_ptr[tid] = source_row_ptr[tid]; // copy
-    // }        
+    // }
 }
 
 template<typename T>
@@ -1178,7 +1178,7 @@ void copy_unpermuted_to_permuted_kernelLauncher(const T*   unpermuted_input,
             permuted_output,
             padded_out_to_unpermuted_input,
             padded_out_to_expanded_input,
-            expanded_input_to_padded_out,     
+            expanded_input_to_padded_out,
             padded_len,
             num_rows,
             k,
@@ -1189,11 +1189,11 @@ void copy_unpermuted_to_permuted_kernelLauncher(const T*   unpermuted_input,
             permuted_output,
             padded_out_to_unpermuted_input,
             padded_out_to_expanded_input,
-            expanded_input_to_padded_out,    
-            padded_len,            
+            expanded_input_to_padded_out,
+            padded_len,
             num_rows,
             k,
-            num_cols);        
+            num_cols);
     }
 }
 
@@ -1215,7 +1215,7 @@ __global__ void build_seqsort_kv_pairs_kernel( T*  seqsort_key,
     const int expanded_dest_row   = blockIdx.x * blockDim.x + threadIdx.x;
     if (expanded_dest_row >= num_rows * k){
         return;
-    }    
+    }
     const int expanded_source_row = expanded_dest_row_to_expanded_source_row[expanded_dest_row];
     const int64_t iexpert = permuted_experts[expanded_dest_row];
     const int64_t offset = iexpert == 0 ? 0 : (expert_offset[iexpert - 1]);
@@ -1227,14 +1227,14 @@ __global__ void build_seqsort_kv_pairs_kernel( T*  seqsort_key,
         // expanded_source_row_to_expanded_dest_row[expanded_source_row] = 0; // unset scatter-idx
         auto ik = expanded_source_row / num_rows;
         auto isent = expanded_source_row % num_rows; // transpose
-        combine_weights[isent * k + ik] = 0.f; //unset combine-weight            
+        combine_weights[isent * k + ik] = 0.f; //unset combine-weight
         return;
     }
-    
+
     // auto num_padded = use_pad ? (iexpert - expert_start_index) * capacity - offset : 0;
     // expanded_source_row_to_expanded_dest_row[expanded_source_row] = expanded_dest_row + num_padded;
 
-    // Duplicate and permute rows   
+    // Duplicate and permute rows
     T source_row = expanded_source_row % num_rows;
 
     if (use_pad){
@@ -1242,8 +1242,8 @@ __global__ void build_seqsort_kv_pairs_kernel( T*  seqsort_key,
         seqsort_key  [(iexpert - expert_start_index) * capacity + row_in_expert] = source_row; // 为保证 padding 位置(0)在最后, 所以对 pos-id 取减去其最大值
         seqsort_value[(iexpert - expert_start_index) * capacity + row_in_expert] = expanded_source_row;
     }else{
-        seqsort_key[expanded_dest_row] = source_row; 
-        seqsort_value[expanded_dest_row] = expanded_source_row; 
+        seqsort_key[expanded_dest_row] = source_row;
+        seqsort_value[expanded_dest_row] = expanded_source_row;
     }
 }
 
@@ -1274,7 +1274,7 @@ void build_seqsort_kv_pairs_kernel_launcher(T*           seqsort_key, // 实现�
                                                                 // expanded_source_row_to_expanded_dest_row,
                                                                 permuted_experts,
                                                                 expert_offset,
-                                                                combine_weights,                                                                    
+                                                                combine_weights,
                                                                 num_rows,
                                                                 k,
                                                                 num_active,
@@ -1282,7 +1282,7 @@ void build_seqsort_kv_pairs_kernel_launcher(T*           seqsort_key, // 实现�
                                                                 expert_start_index,
                                                                 use_pad
                                                             );
- 
+
 }
 
 template<typename T>
@@ -1296,7 +1296,7 @@ __global__ void combine_moe_kernel(const T*   x,
                                    const int64_t n)
 {
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
-        int64_t row_i = i / hidden_size;     
+        int64_t row_i = i / hidden_size;
         int64_t slice_i = i - row_i * hidden_size;
         const int * scatter_index_start = scatter_index + row_i * k;
         T* dest_ptr = y + i;
@@ -1306,7 +1306,7 @@ __global__ void combine_moe_kernel(const T*   x,
             const T* x_ptr = x +  static_cast<int64_t>(*(scatter_index_start + ki)) * hidden_size + slice_i;
             *(dest_ptr) += (*w_ptr) * (*x_ptr);
         }
-    } 
+    }
 }
 
 
@@ -1323,7 +1323,7 @@ __global__ void combine_moe_bwd_kernel(const T*   x,
                                    const int64_t n)
 {
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
-        int64_t row_i = i / hidden_size;     
+        int64_t row_i = i / hidden_size;
         int64_t slice_i = i - row_i * hidden_size;
         const int* scatter_index_start = scatter_index + row_i * k;
         const T grad_y_i = * (grad_y + i);
@@ -1342,7 +1342,7 @@ __global__ void combine_moe_bwd_kernel(const T*   x,
             }
             *(grad_cw_ptr + ki * hidden_size) = grad_y_i * (*x_ptr);
         }
-    } 
+    }
 }
 
 
@@ -1392,7 +1392,7 @@ void combine_moe_bwd_kernelLauncher(const T*         x,
     // y is [seqlen, hidden_size]
     // for kk in k:
     //     y[i][j] += x[scatter_index[i][kk]][j] * combine_weights[i][kk]
-    
+
     const int64_t n = hidden_size * seqlen;
 
     const int64_t threads = 1024;
@@ -1444,7 +1444,7 @@ __global__ void compute_total_rows_before_expert_kernel(const T*    sorted_exper
     const int expert = blockIdx.x * blockDim.x + threadIdx.x;
     if (expert >= num_experts)
         return;
-    
+
 
     // This should construct the last index where each expert occurs.
     total_rows_before_expert[expert] = find_total_elts_leq_target<T>(sorted_experts, sorted_experts_len, expert);
@@ -1471,7 +1471,7 @@ __global__ void compute_total_rows_before_expert_kernel(const T*    sorted_exper
 //     auto this_expert = sorted_experts[x];
 //     if (this_expert == num_experts)
 //         return;
-    
+
 //     auto diff = x == (len - 1)? 1: this_expert - static_cast<T>(sorted_experts[x+1]);
 //     if (diff != 0){
 //         expert_offset[this_expert] = x+1;
@@ -1483,7 +1483,7 @@ void compute_global_expert_offset(const T* expert_id, //[len]
                            T* sort_buffer,  //[len]
                            int64_t* expert_offset,//[num_experts]
                            const int64_t len,
-                           const int64_t num_experts, 
+                           const int64_t num_experts,
                            const int64_t capacity,
                            const cudaStream_t& stream,
                            const phi::memory_utils::ThrustAllocator<cudaStream_t>& allocator){
@@ -1494,14 +1494,14 @@ void compute_global_expert_offset(const T* expert_id, //[len]
     thrust::copy(exec_policy, ptr, ptr + len, outptr);
     thrust::sort(exec_policy, outptr, outptr + len);
     const int threads = std::min(static_cast<int64_t>(1024), num_experts);
-    const int blocks  = (num_experts + threads - 1) / threads;    
-   
+    const int blocks  = (num_experts + threads - 1) / threads;
+
     compute_total_rows_before_expert_kernel<T><<<blocks, threads, 0, stream>>>(
-        sort_buffer, len, num_experts, expert_offset); 
+        sort_buffer, len, num_experts, expert_offset);
     thrust::adjacent_difference(exec_policy, offsetptr, offsetptr + num_experts, offsetptr);
-    // thrust::transform(offsetptr, 
-    //     offsetptr + num_experts, 
-    //     thrust::constant_iterator<int64_t>(capacity), 
+    // thrust::transform(offsetptr,
+    //     offsetptr + num_experts,
+    //     thrust::constant_iterator<int64_t>(capacity),
     //     offsetptr,
     //     thrust::minimum<int64_t>()
     // );
@@ -1513,7 +1513,7 @@ void compute_local_expert_offset(const T* sorted_expert_id, //[len]
                            int64_t* expert_offset,//[num_experts]
                            int64_t* expert_num,
                            const int64_t len,
-                           const int64_t num_experts, 
+                           const int64_t num_experts,
                            const int64_t capacity,
                            const cudaStream_t& stream,
                            const phi::memory_utils::ThrustAllocator<cudaStream_t>& allocator){
@@ -1523,13 +1523,13 @@ void compute_local_expert_offset(const T* sorted_expert_id, //[len]
     thrust::fill(exec_policy, offset_ptr, offset_ptr + num_experts, static_cast<T>(0));
 
     const int threads = std::min(static_cast<int64_t>(1024), num_experts);
-    const int blocks  = (num_experts + threads - 1) / threads;    
-   
+    const int blocks  = (num_experts + threads - 1) / threads;
+
     compute_total_rows_before_expert_kernel<T><<<blocks, threads, 0, stream>>>(
-        sorted_expert_id, len, num_experts, expert_offset);    
+        sorted_expert_id, len, num_experts, expert_offset);
     // 不考虑 capcity 影响
     thrust::adjacent_difference(exec_policy, offset_ptr, offset_ptr + num_experts, expert_num_ptr);
-    
+
 }
 
 
@@ -1542,8 +1542,8 @@ void compute_total_rows_before_expert(const T*   sorted_indices,
 {
     const int threads = std::min(static_cast<int64_t>(1024), num_experts);
     const int blocks  = (num_experts + threads - 1) / threads;
-    
-    
+
+
     compute_total_rows_before_expert_kernel<T><<<blocks, threads, 0, stream>>>(
         sorted_indices, total_indices, num_experts, total_rows_before_expert);
 }
@@ -1636,43 +1636,43 @@ template void topk_gating_softmax_kernelLauncher(const __nv_bfloat16*,
                                                  cudaStream_t);
 // ===================== Specializations for init routing =========================
 template void initialize_moe_routing_kernelLauncher(
-    const float*, float*, 
-    const int*, 
+    const float*, float*,
+    const int*,
     int*,
     const int*,
     const int64_t*,
     float*,
-    const int,    
-    const int, 
+    const int,
+    const int,
     const int,
     const int64_t,
-    bool, 
+    bool,
     cudaStream_t);
 template void initialize_moe_routing_kernelLauncher(
     const half*, half*,
-    const int*, 
+    const int*,
     int*,
     const int*,
     const int64_t*,
     float*,
-    const int,    
-    const int, 
+    const int,
+    const int,
     const int,
     const int64_t,
-    bool, 
+    bool,
     cudaStream_t);
 template void initialize_moe_routing_kernelLauncher(
-    const __nv_bfloat16*, __nv_bfloat16*, 
-    const int*, 
+    const __nv_bfloat16*, __nv_bfloat16*,
+    const int*,
     int*,
     const int*,
     const int64_t*,
     float*,
-    const int,    
-    const int, 
+    const int,
+    const int,
     const int,
     const int64_t,
-    bool, 
+    bool,
     cudaStream_t);
 // ==================== Specializations for final routing ===================================
 template void finalize_moe_routing_kernelLauncher(const float*,
@@ -1734,9 +1734,9 @@ template void initialize_moe_routing_old_kernelLauncher(
 template void initialize_moe_routing_old_kernelLauncher(
     const half*, half*, const int*, int*, const int, const int, const int, cudaStream_t);
 template void initialize_moe_routing_old_kernelLauncher(
-    const __nv_bfloat16*, __nv_bfloat16*, const int*, int*, const int, const int, const int, cudaStream_t);    
-     
-// template void compute_total_rows_before_expert(int*,           
+    const __nv_bfloat16*, __nv_bfloat16*, const int*, int*, const int, const int, const int, cudaStream_t);
+
+// template void compute_total_rows_before_expert(int*,
 //                                       half*,
 //                                       const int,
 //                                       const int,

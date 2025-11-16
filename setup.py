@@ -16,6 +16,7 @@
 import multiprocessing
 import os
 
+
 def run(func):
     """run"""
     p = multiprocessing.Process(target=func)
@@ -33,8 +34,11 @@ def change_pwd():
 def setup_moe_ops():
     """setup_moe_op"""
     from paddle.utils.cpp_extension import CUDAExtension, setup_bdist_whl
+
     change_pwd()
-    cutlass_include_dir = os.path.join(os.getcwd(), "third_party/cutlass/include")
+    cutlass_include_dir = os.path.join(
+        os.getcwd(), "third_party/cutlass/include"
+    )
     setup_bdist_whl(
         name="paddlefleet.extentions.moe_ops_fp8",
         ext_modules=CUDAExtension(
@@ -43,7 +47,7 @@ def setup_moe_ops():
             ],
             include_dirs=[
                 cutlass_include_dir,
-                os.path.join(os.getcwd(), "paddlefleet/extentions")
+                os.path.join(os.getcwd(), "paddlefleet/extentions"),
             ],
             extra_compile_args={
                 "cxx": ["-O3"],
@@ -63,5 +67,5 @@ def setup_moe_ops():
         ),
     )
 
-setup_moe_ops()
 
+setup_moe_ops()

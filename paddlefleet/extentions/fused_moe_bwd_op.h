@@ -76,7 +76,7 @@ __global__ void topk_grad_with_mask(const T* dy, // [s, k]
 // y=zero_part(topk(x)) 的反向过程
 // x:  [s,e]
 // dy: [s,k]
-// X: [s, e] -(topk)-> Y:[s, k] - (越界设置为0)-> conbine_weights: [s, k] 
+// X: [s, e] -(topk)-> Y:[s, k] - (越界设置为0)-> conbine_weights: [s, k]
 template<typename T>
 void topk_grad_with_mask_launcher(
         const T* dy, // [s, k]
@@ -91,7 +91,7 @@ void topk_grad_with_mask_launcher(
     int blocks = num_rows;
     int threads = 1024;
 
-    topk_grad_with_mask<T><<<blocks, threads, 0, stream>>>(dy, 
+    topk_grad_with_mask<T><<<blocks, threads, 0, stream>>>(dy,
                                                             topk_idx,
                                                             combine_weights,
                                                             dx,
@@ -136,7 +136,7 @@ __global__ void gather_with_mask_permute_kernel(const T* dy, // [s*k, d]
         combine_weights_shared[i] = combine_weights[si_shared_begin * k + i];
       }
       __syncthreads();
-      
+
       phi::AlignedVector<T, vec_size> in_vec;
       phi::AlignedVector<T, vec_size> out_vec;
       for (int ii = 0; ii < vec_size; ++ii) {
@@ -200,7 +200,7 @@ __global__ void gather_with_mask_kernel(const T* dy, // [s*k, d]
         combine_weights_shared[i] = combine_weights[si_shared_begin * k + i];
       }
       __syncthreads();
-      
+
       phi::AlignedVector<T, vec_size> in_vec;
       phi::AlignedVector<T, vec_size> out_vec;
       for (int ii = 0; ii < vec_size; ++ii) {
@@ -269,7 +269,7 @@ void gather_with_mask_launcher(const T* dy, // [s*k, d]
     int64_t threads = 512;
     if (dim % 4 == 0) {
       int64_t blocks = DivUp<int64_t>(DivUp<int64_t>(numel, 4), threads);
-      int64_t s_shared_num = max_shared_s_num(num_rows, dim, threads, 4); 
+      int64_t s_shared_num = max_shared_s_num(num_rows, dim, threads, 4);
       size_t shared_size = k * s_shared_num * (sizeof(int) + sizeof(float));
 
 #ifdef DEBUG_MOE_OP
@@ -306,7 +306,7 @@ void gather_with_mask_launcher(const T* dy, // [s*k, d]
       }
     } else {
       int64_t blocks = DivUp<int64_t>(DivUp<int64_t>(numel, 1), threads);
-      int64_t s_shared_num = max_shared_s_num(num_rows, dim, threads, 1); 
+      int64_t s_shared_num = max_shared_s_num(num_rows, dim, threads, 1);
       size_t shared_size = k * s_shared_num * (sizeof(int) + sizeof(float));
 
 #ifdef DEBUG_MOE_OP

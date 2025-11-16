@@ -60,7 +60,7 @@ class CubKeyValueSorter {
 // ===== CUB Sorting things =====
 CubKeyValueSorter::CubKeyValueSorter()
     : num_experts_(0), num_bits_(sizeof(int) * 8) {}
-  
+
 CubKeyValueSorter::CubKeyValueSorter(cudaStream_t stream)
       : num_experts_(0), num_bits_(sizeof(int) * 8), stream_(stream) {}
 

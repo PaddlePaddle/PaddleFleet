@@ -151,7 +151,7 @@ __device__ void ComputeScaleAndWrite(
     __nv_bfloat16 val = __habs(data[i]);
     if (__hgt(val, local_max)) local_max = val;
   }
- 
+
   // step2: reduce per TileSize
   // 目的是: 每个线程持有VecSize个元素, warp内部, 在连续的TileSize个元素中求max
   // 做法是: 通过分组shfl进行规约
@@ -214,10 +214,10 @@ __global__ void initialize_moe_routing_kernel(const phi::dtype::bfloat16*   unpe
     // reverse map for that reduction to allow each threadblock to do 1 k-way reduce without atomics later in MoE. 1
     // thread block will be responsible for all k summations.
     using LoadT = phi::AlignedVector<phi::dtype::bfloat16, VecSize>;
-    LoadT src_vec;    
+    LoadT src_vec;
     using StoreT = phi::AlignedVector<phi::dtype::float8_e4m3fn, VecSize>;
     StoreT dest_vec;
-  
+
     const int64_t expanded_dest_row   = blockIdx.x;
     const int64_t expanded_source_row = expanded_dest_row_to_expanded_source_row[expanded_dest_row];
     const int64_t iexpert = permuted_experts[expanded_dest_row];
@@ -228,7 +228,7 @@ __global__ void initialize_moe_routing_kernel(const phi::dtype::bfloat16*   unpe
             expanded_source_row_to_expanded_dest_row[expanded_source_row] = 0; // unset scatter-idx
             auto ik = expanded_source_row / num_rows;
             auto isent = expanded_source_row % num_rows; // transpose
-            combine_weights[isent * k + ik] = 0.f; //unset combine-weight            
+            combine_weights[isent * k + ik] = 0.f; //unset combine-weight
         }
         return;
     }
@@ -289,7 +289,7 @@ void initialize_moe_routing_kernelLauncher(const phi::dtype::bfloat16*  unpermut
                                            bool use_pad,
                                            bool use_pow2_scale,
                                            cudaStream_t stream)
-{   
+{
     const int blocks  = num_rows * k;
     if (use_pow2_scale) {
       if (cols % 2048 == 0) {
@@ -394,7 +394,7 @@ void apply_moe_dispatch_fwd(
   fc1_result_ = reinterpret_cast<phi::dtype::bfloat16 *>(expert_id_ + num_moe_inputs);
   softmax_out_ = nullptr;
 
-  topk_gating_softmax_kernelLauncher<float>(gate_logits, 
+  topk_gating_softmax_kernelLauncher<float>(gate_logits,
                                             corr_bias,
                                             combine_weights, // output
                                             softmax_out_,    // no use
@@ -418,8 +418,8 @@ void apply_moe_dispatch_fwd(
              k * num_rows,      // num_rows
              false,
              stream);
-    
-  if (use_pad)  
+
+  if (use_pad)
     unmodify_expert_id_launcher(permuted_experts_, permuted_experts_, k, num_rows, num_experts, stream);
 
   compute_total_rows_before_expert(
@@ -429,7 +429,7 @@ void apply_moe_dispatch_fwd(
       expert_offset,
       stream);
 
-  
+
   initialize_moe_routing_kernelLauncher(x,
                                         out_fp8,
                                         out_scale,
@@ -437,10 +437,10 @@ void apply_moe_dispatch_fwd(
                                         scatter_index,
                                         permuted_experts_,
                                         expert_offset,
-                                        combine_weights,                                        
+                                        combine_weights,
                                         static_cast<int>(num_rows),
                                         static_cast<int>(hidden_size),
-                                        static_cast<int>(k),                                        
+                                        static_cast<int>(k),
                                         capacity,
                                         num_experts,
                                         use_pad,

@@ -1,3 +1,17 @@
+// Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #pragma once
 
 #include "paddle/extension.h"
@@ -20,7 +34,7 @@ namespace internal {
 template <typename T>
 struct TensorHasStrideImpl {
 private:
-    struct YesType {};   
+    struct YesType {};
     struct NoType {};
 
     template <typename U>
@@ -36,16 +50,16 @@ private:
 public:
     static constexpr bool kValue =
         std::is_same<YesType, decltype(Check<::phi::DenseTensorMeta>(false))>::value;
-}; 
+};
 
 
-template <typename DenseT, typename PaddleT, bool _SupportStride> 
+template <typename DenseT, typename PaddleT, bool _SupportStride>
 struct ContiguousTensorHelperImpl {
-    static_assert(_SupportStride, "_SupportStride should be true");  
+    static_assert(_SupportStride, "_SupportStride should be true");
 
     static bool IsContiguousTensor(const DenseT &t) {
       return t.meta().is_contiguous();
-    } 
+    }
 
     static typename std::enable_if<_SupportStride, void>::type TensorTrans2Contiguous(DenseT *t) {
       if (t != nullptr && t->initialized() && !t->meta().is_contiguous()) {
@@ -53,12 +67,12 @@ struct ContiguousTensorHelperImpl {
         auto is_gpu_place = place.GetType() == phi::AllocationType::GPU;
         PD_CHECK(is_gpu_place, "Only support GPU place");
         auto dev_ctx = paddle::experimental::DeviceContextPool::Instance().Get(place);
-        auto gpu_ctx = reinterpret_cast<const phi::GPUContext *>(dev_ctx); 
-        auto dtype = t->dtype(); 
+        auto gpu_ctx = reinterpret_cast<const phi::GPUContext *>(dev_ctx);
+        auto dtype = t->dtype();
 
         PD_DISPATCH_FLOATING_AND_INTEGRAL_AND_COMPLEX_TYPES(dtype, "contiguous_kernel", ([&] {
           DenseT out;
-          phi::ContiguousKernel<data_t, phi::GPUContext>(*gpu_ctx, *t, &out); 
+          phi::ContiguousKernel<data_t, phi::GPUContext>(*gpu_ctx, *t, &out);
           *t = out;
         }));
       }
@@ -69,7 +83,7 @@ struct ContiguousTensorHelperImpl {
         if (!t->is_dense_tensor()) {
           PD_THROW("Trans2Contiguous only supports DenseTensor");
         }
-        auto *dense_t = static_cast<DenseT *>(t->impl().get()); 
+        auto *dense_t = static_cast<DenseT *>(t->impl().get());
         TensorTrans2Contiguous(dense_t);
       }
     }
@@ -89,13 +103,13 @@ struct ContiguousTensorHelperImpl<DenseT, PaddleT, false> {
 
 inline constexpr bool SupportStride() {
     return internal::TensorHasStrideImpl<phi::DenseTensorMeta>::kValue;
-} 
+}
 
 using ContiguousTensorHelper = internal::ContiguousTensorHelperImpl<phi::DenseTensor, paddle::Tensor, SupportStride()>;
 
 inline bool IsContiguousTensor(const phi::DenseTensor &t) {
     return ContiguousTensorHelper::IsContiguousTensor(t);
-} 
+}
 
 inline void TensorTrans2Contiguous(phi::DenseTensor *t) {
     return ContiguousTensorHelper::TensorTrans2Contiguous(t);
