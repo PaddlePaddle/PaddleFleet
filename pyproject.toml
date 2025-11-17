@@ -62,7 +62,7 @@ build-backend = "setuptools.build_meta"
 include-package-data = true
 
 [tool.setuptools.packages.find]
-exclude = ["tests", "docs", "examples", "build"]
+exclude = ["tests", "docs", "examples", "build", "third_party"]
 
 [tool.setuptools.dynamic]
 version = { attr = "paddlefleet.package_info.__version__" }

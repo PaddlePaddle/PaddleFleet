@@ -33,24 +33,30 @@ def change_pwd():
 
 def setup_moe_ops():
     """setup_moe_op"""
-    from paddle.utils.cpp_extension import CUDAExtension, setup_bdist_whl
+    from paddle.utils.cpp_extension import CUDAExtension, setup
 
     change_pwd()
     cutlass_include_dir = os.path.join(
         os.getcwd(), "third_party/cutlass/include"
     )
-    setup_bdist_whl(
-        name="paddlefleet.extentions.moe_ops_fp8",
+    setup(
+        name="paddlefleet.extentions.ops",
         ext_modules=CUDAExtension(
             sources=[
                 "./paddlefleet/extentions/moe_ops_fp8.cu",
+                "./paddlefleet/extentions/topk_to_multihot.cu",
+                "./paddlefleet/extentions/topk_to_multihot_grad.cu",
+                "./paddlefleet/extentions/tokens_unzip_and_zip.cu",
+                "./paddlefleet/extentions/tokens_stable_unzip.cu",
+                "./paddlefleet/extentions/tokens_guided_unzip.cu",
+                "./paddlefleet/extentions/regroup_tokens.cu",
             ],
             include_dirs=[
                 cutlass_include_dir,
                 os.path.join(os.getcwd(), "paddlefleet/extentions"),
             ],
             extra_compile_args={
-                "cxx": ["-O3"],
+                "cxx": ["-O3", "-w", "-Wno-abi", "-fPIC", "-std=c++17"],
                 "nvcc": [
                     "-O3",
                     "-U__CUDA_NO_HALF_OPERATORS__",
@@ -61,7 +67,11 @@ def setup_moe_ops():
                     "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
                     "--expt-relaxed-constexpr",
                     "--expt-extended-lambda",
-                    "-maxrregcount=50",
+                    "-maxrregcount=32",
+                    "-lineinfo",
+                    "-DCUTLASS_DEBUG_TRACE_LEVEL=0",
+                    "-gencode=arch=compute_90a,code=sm_90a",
+                    "-DNDEBUG",
                 ],
             },
         ),
