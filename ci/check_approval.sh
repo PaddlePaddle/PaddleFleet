@@ -70,6 +70,8 @@ done
 
 
 CHECKTORCH_APPROVERS="risemeup1 swgu98"
+pyproject_modified=false
+uvlock_modified=false
 files=$(git diff --name-only upstream/$BRANCH)
 for file in $files; do
     if [ -f "$file" ]; then
@@ -88,8 +90,19 @@ for file in $files; do
             APPROVER_LIST=(${CHECKMEGATRON_APPROVERS})
             check_approval 1 "${APPROVER_LIST[@]}"
         fi
+        if [ "$file" = "pyproject.toml" ]; then
+            pyproject_modified=true
+        fi
+        if [ "$file" = "uv.lock" ]; then
+            uvlock_modified=true
+        fi
     fi
 done
+if $pyproject_modified && ! $uvlock_modified; then
+    echo_line="pyproject.toml was modified but uv.lock was not updated. Please update uv.lock together with pyproject.toml."
+    check_approval 1 "${APPROVER_LIST[@]}"
+fi
+
 
 
 CHECKREQ_APPROVERS="risemeup1 swgu98"
