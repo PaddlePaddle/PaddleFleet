@@ -15,9 +15,9 @@
 import paddle.distributed as dist
 from paddle.distributed import fleet
 
-from paddlefleet import parallel_state as ps
-from paddlefleet.training.arguments import parse_args
-from paddlefleet.training.global_vars import set_global_variables
+from .. import parallel_state as ps
+from .arguments import parse_args
+from .global_vars import set_global_variables
 
 
 def initialize_fleet(

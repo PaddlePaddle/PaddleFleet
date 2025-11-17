@@ -28,7 +28,7 @@ import warnings
 
 import paddle
 
-from paddlefleet import parallel_state
+from . import parallel_state
 
 try:
     from packaging.version import Version as PkgVersion

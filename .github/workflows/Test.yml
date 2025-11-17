@@ -20,7 +20,7 @@ env:
   ci_scripts: /paddle/ci
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   CI_name: test
-  no_proxy: "bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
+  no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
 
 defaults:
@@ -95,7 +95,7 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           source $HOME/.local/bin/env
           echo "uv sync"
-          uv sync --group ci> /dev/null 2>&1
+          uv sync --group ci -v > /dev/null
           '
 
       - name: Single card test
@@ -122,7 +122,7 @@ jobs:
           fi
           '
 
-      - name: Multi-card Coverage Upload to BOS
+      - name: Single card Coverage Upload to BOS
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
@@ -206,7 +206,7 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           source $HOME/.local/bin/env
           echo "uv sync"
-          uv sync --group ci > /dev/null 2>&1
+          uv sync --group ci -v > /dev/null
           '
 
       - name: Multi-card test

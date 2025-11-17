@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from paddlefleet import parallel_state as parallel_state
-from paddlefleet.package_info import (
+from . import parallel_state as parallel_state, training as training
+from .package_info import (
     __contact_emails__,
     __contact_names__,
     __description__,
@@ -23,12 +23,9 @@ from paddlefleet.package_info import (
     __license__,
     __package_name__,
     __repository_url__,
-    __shortversion__,
     __version__,
 )
-from paddlefleet.timers import Timers
-
-from . import training as training
+from .timers import Timers
 
 mpu = parallel_state
 
