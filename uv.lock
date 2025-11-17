@@ -320,7 +320,7 @@ name = "exceptiongroup"
 version = "1.3.0"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu126/" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 wheels = [
     { url = "https://paddle-whl.bj.bcebos.com/nightly/cu126/exceptiongroup/exceptiongroup-1.3.0-py3-none-any.whl" },
