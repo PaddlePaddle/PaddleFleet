@@ -1,3 +1,2 @@
 test_utilities.py
-# test_attention.py
 test_gpt_model.py
