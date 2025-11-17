@@ -65,7 +65,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.dynamic]
-version = { attr = "src.paddlefleet.package_info.__version__" }
+version = { attr = "paddlefleet.package_info.__version__" }
 readme = { file = "README.md", content-type = "text/markdown" }
 
 [dependency-groups]

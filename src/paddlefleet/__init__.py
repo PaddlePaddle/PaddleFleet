@@ -23,7 +23,6 @@ from .package_info import (
     __license__,
     __package_name__,
     __repository_url__,
-    __shortversion__,
     __version__,
 )
 from .timers import Timers
