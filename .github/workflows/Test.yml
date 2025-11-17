@@ -210,7 +210,7 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           source $HOME/.local/bin/env
           echo "uv sync"
-          uv sync --group ci -v" > /dev/null
+          uv sync --group ci -v > /dev/null
           '
 
       - name: Multi-card test
