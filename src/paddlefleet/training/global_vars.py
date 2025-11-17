@@ -14,7 +14,7 @@
 
 """PaddleFleet global variables."""
 
-from paddlefleet.timers import Timers
+from ..timers import Timers
 
 _GLOBAL_ARGS = None
 _GLOBAL_TIMERS = None

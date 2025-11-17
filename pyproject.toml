@@ -45,7 +45,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-dependencies = ["paddlepaddle-gpu==3.2.2"]
+dependencies = ["paddlepaddle-gpu>=3.3.0.dev"]
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
@@ -55,17 +55,17 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/fleet/core"
 
 
 [build-system]
-requires = ["setuptools>=61.0.0,<80.0.0", "pybind11", "packaging>=24.2"]
+requires = ["setuptools>=61.0.0,<80.0.0", "pybind11", "packaging>=24.2","paddlepaddle-gpu>=3.3.0.dev"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-exclude = ["tests", "docs", "examples", "build"]
+where = ["src"]
 
 [tool.setuptools.dynamic]
-version = { attr = "paddlefleet.package_info.__version__" }
+version = { attr = "src.paddlefleet.package_info.__version__" }
 readme = { file = "README.md", content-type = "text/markdown" }
 
 [dependency-groups]
@@ -85,13 +85,16 @@ linting = [
 ci = [
     "coverage",
     "bce-python-sdk"
-    ]
+]
 
 [tool.uv]
 default-groups = ["build", "test"]
 link-mode = "copy"
-extra-index-url = ["https://www.paddlepaddle.org.cn/packages/stable/cu129/"]
+extra-index-url = ["https://www.paddlepaddle.org.cn/packages/nightly/cu126/"]
 index-strategy = "unsafe-best-match"
+
+[tool.uv.pip]
+prerelease = "allow"
 
 
 [tool.ruff]

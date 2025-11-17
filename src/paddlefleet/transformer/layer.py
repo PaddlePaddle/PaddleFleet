@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import paddle
 
-from paddlefleet.transformer.transformer_config import TransformerConfig
+from .transformer_config import TransformerConfig
 
 
 class FleetLayer(paddle.nn.Layer):

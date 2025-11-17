@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     import paddle.distributed.fleet.base.topology as tp
 import warnings
 
-from paddlefleet.utils import GlobalMemoryBuffer
+from .utils import GlobalMemoryBuffer
 
 # Intra-layer model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None

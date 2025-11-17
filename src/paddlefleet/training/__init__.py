@@ -26,7 +26,7 @@
 # limitations under the License.
 
 
-from paddlefleet.training.initialize import initialize_fleet as initialize_fleet
+from .initialize import initialize_fleet as initialize_fleet
 
 from .global_vars import get_args, get_timers
 

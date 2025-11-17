@@ -15,7 +15,7 @@
 import argparse
 import dataclasses
 
-from paddlefleet.transformer import TransformerConfig
+from ..transformer import TransformerConfig
 
 
 def parse_args(extra_args_provider=None, ignore_unknown_args=False):
