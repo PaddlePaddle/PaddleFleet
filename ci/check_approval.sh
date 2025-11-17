@@ -78,19 +78,6 @@ for file in $files; do
             APPROVER_LIST=(${CHECKTORCH_APPROVERS})
             check_approval 1 "${APPROVER_LIST[@]}"
         fi
-    fi
-done
-
-
-CHECKTORCH_APPROVERS="risemeup1 swgu98"
-files=$(git diff --name-only upstream/$BRANCH)
-for file in $files; do
-    if [ -f "$file" ]; then
-        if git diff upstream/$BRANCH -- "$file" | grep -E '^\+[^\+]' | grep -q 'torch'; then
-            echo_line="You must be approved by one of ${CHECKTORCH_APPROVERS} for changes in ${file} which include \"torch\" in added lines.\n"
-            APPROVER_LIST=(${CHECKTORCH_APPROVERS})
-            check_approval 1 "${APPROVER_LIST[@]}"
-        fi
         if git diff upstream/$BRANCH -- "$file" | grep -E '^\+[^\+]' | grep -i -q 'nemo'; then
             echo_line="You must be approved by one of ${CHECKNEMO_APPROVERS} for changes in ${file} which include \"nemo\" in added lines.\n"
             APPROVER_LIST=(${CHECKNEMO_APPROVERS})
