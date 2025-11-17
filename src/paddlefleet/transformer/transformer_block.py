@@ -459,8 +459,10 @@ class TransformerBlock(FleetLayer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
+        rotary_pos_cos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
+        sequence_len_offset: Tensor | None = None,
     ):
         """
         Perform the forward pass through the transformer block.

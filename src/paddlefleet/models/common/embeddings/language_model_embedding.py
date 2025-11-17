@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 import paddle
 from paddle import Tensor
-from paddle.distributed.fleet.meta_parallel import VocabParallelEmbedding
+from paddle.nn import Embedding
 
 from paddlefleet import tensor_parallel
 from paddlefleet.transformer.layer import FleetLayer
@@ -77,6 +77,7 @@ class LanguageModelEmbedding(FleetLayer):
             "Currently reduce_scatter_embeddings is not supported."
         )
 
+        """ TODO: Support TP embedding
         # Word embeddings (parallel).
         self.word_embeddings = VocabParallelEmbedding(
             num_embeddings=self.vocab_size,
@@ -85,6 +86,11 @@ class LanguageModelEmbedding(FleetLayer):
             # reduce_scatter_embeddings=self.reduce_scatter_embeddings,
             # deterministic_mode=self.config.deterministic_mode,
             mp_group=self.tp_group,
+        )
+        """
+        self.word_embeddings = Embedding(
+            num_embeddings=self.vocab_size,
+            embedding_dim=self.config.hidden_size,
         )
 
         # Position embedding (serial).
@@ -163,8 +169,8 @@ class LanguageModelEmbedding(FleetLayer):
             assert self.tokentype_embeddings is None
 
         # If the input flag for fp32 residual connection is set, convert for float.
-        if self.config.fp32_residual_connection:
-            embeddings = embeddings.float()
+        # if self.config.fp32_residual_connection:
+        #    embeddings = embeddings.float()
 
         # Dropout.
         if self.config.sequence_parallel:

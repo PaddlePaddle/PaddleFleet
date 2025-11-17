@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable
 
 import paddle
+import paddle.nn.functional as F
 
 if TYPE_CHECKING:
     from paddlefleet.model_parallel_config import ModelParallelConfig
@@ -90,8 +91,19 @@ class ColumnParallelLinear(paddle.nn.Layer):
         tp_group: paddle.distributed.communication.group.Group | None = None,
     ):
         super().__init__()
-
         self.weight = None
+
+        # TODO: Support ColumnParallelLinear?
+        self.linear = paddle.nn.Linear(
+            input_size,
+            output_size,
+        )
+
+    def forward(self, input_, weight=None):
+        if weight is None:
+            return self.linear(input_), None
+        else:
+            return F.linear(input_, weight), None
 
 
 class RowParallelLinear(paddle.nn.Layer):
@@ -145,3 +157,15 @@ class RowParallelLinear(paddle.nn.Layer):
     ):
         super().__init__()
         self.weight = None
+
+        # TODO: Support ROWParallelLinear?
+        self.linear = paddle.nn.Linear(
+            input_size,
+            output_size,
+        )
+
+    def forward(self, input_, weight=None):
+        if weight is None:
+            return self.linear(input_), None
+        else:
+            return F.linear(input_, weight), None

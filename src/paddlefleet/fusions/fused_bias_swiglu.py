@@ -205,10 +205,11 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
                 - Gradient with respect to the input tensor
                 - None for fp8_input_store parameter
         """
-        input = ctx.saved_tensors[0]
+        input = ctx.saved_tensor()[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
         tmp = swiglu_back(grad_output, input)
-        return tmp, None, None
+        # return tmp, None, None
+        return tmp
 
 
 class WeightedSwiGLUFunction(paddle.autograd.PyLayer):

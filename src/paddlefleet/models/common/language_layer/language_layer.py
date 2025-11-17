@@ -55,6 +55,7 @@ class LanguageLayer(FleetLayer):
         self.pg_collection = pg_collection
         self.cp_group = pg_collection.cp
         self.pp_group = pg_collection.pp
+        """
         assert hasattr(self.pg_collection, "embd"), (
             "pg_collection must have a embd. In previous version, it used default "
             "`parallel_state.default_embedding_ranks` to create the process group."
@@ -63,6 +64,7 @@ class LanguageLayer(FleetLayer):
             "If you don't need embd_group, you need to explicitly set it to None."
         )
         self.embd_group = pg_collection.embd
+        """
         self.vp_stage = None
         self.vp_size = self.config.virtual_pipeline_model_parallel_size
 

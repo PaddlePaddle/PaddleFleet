@@ -418,9 +418,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         # runners in the cuda graph manager
         kwargs.pop("dynamic_inference_decode_only", None)
         hidden_states, context = self._forward_attention(*args, **kwargs)
-        output = self._forward_mlp(
-            hidden_states, kwargs.get("inference_context", None)
-        )
+        output = self._forward_mlp(hidden_states)
         return output, context
 
     def _forward_attention(

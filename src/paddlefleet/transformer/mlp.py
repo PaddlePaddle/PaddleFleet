@@ -203,6 +203,7 @@ class MLP(FleetLayer):
                     self.activation_func == F.silu
                     and self.config.gated_linear_unit
                 ):
+                    """
                     intermediate_parallel = bias_swiglu_impl(
                         intermediate_parallel,
                         bias_parallel,
@@ -210,6 +211,10 @@ class MLP(FleetLayer):
                         self.config.cpu_offloading
                         and self.config.cpu_offloading_activations
                         and False,
+                    )
+                    """
+                    intermediate_parallel = bias_swiglu_impl(
+                        intermediate_parallel, bias_parallel
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")

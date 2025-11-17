@@ -12,13 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .layer import FleetLayer as FleetLayer, GraphableFleetLayer
-from .spec_utils import LayerSpec
-from .transformer_config import TransformerConfig as TransformerConfig
+from .gpt_model import GPTModel
 
 __all__ = [
-    "FleetLayer",
-    "GraphableFleetLayer",
-    "LayerSpec",
-    "TransformerConfig",
+    "GPTModel",
 ]

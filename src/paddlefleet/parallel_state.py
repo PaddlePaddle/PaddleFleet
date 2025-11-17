@@ -196,6 +196,9 @@ def get_context_parallel_group(check_initialized=True):
 
 def get_pipeline_model_parallel_world_size():
     """Return world size for the pipeline-model-parallel group."""
+    # TODO: Support get_pipeline_model_parallel_world_size
+    return 1
+
     global _PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     if _PIPELINE_MODEL_PARALLEL_WORLD_SIZE is not None:
         return _PIPELINE_MODEL_PARALLEL_WORLD_SIZE
@@ -206,6 +209,46 @@ def set_pipeline_model_parallel_world_size(world_size):
     """Set the pipeline-model-parallel size"""
     global _PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
+
+
+def get_pipeline_model_parallel_rank():
+    # TODO: Support get_pipeline_model_parallel_rank
+    warnings.warn(
+        "get_pipeline_model_parallel_rank is not implemented yet, always returns 0 for now. "
+    )
+    return 0
+
+
+def is_pipeline_first_stage(ignore_virtual=True, vp_stage=None):
+    """Return True if in the first pipeline model-parallel stage, False otherwise."""
+    if (
+        not ignore_virtual
+        and get_virtual_pipeline_model_parallel_world_size() is not None
+    ):
+        assert vp_stage is not None, (
+            "vp_stage must be passed if virtual pipeline is enabled"
+        )
+
+        if vp_stage != 0:
+            return False
+    return get_pipeline_model_parallel_rank() == 0
+
+
+def is_pipeline_last_stage(ignore_virtual=True, vp_stage=None):
+    """Return True if in the last pipeline-model-parallel stage, False otherwise."""
+    if (
+        not ignore_virtual
+        and get_virtual_pipeline_model_parallel_world_size() is not None
+    ):
+        assert vp_stage is not None, (
+            "vp_stage must be passed if virtual pipeline is enabled"
+        )
+
+        if vp_stage != (get_virtual_pipeline_model_parallel_world_size() - 1):
+            return False
+    return get_pipeline_model_parallel_rank() == (
+        get_pipeline_model_parallel_world_size() - 1
+    )
 
 
 def get_virtual_pipeline_model_parallel_rank():
@@ -254,6 +297,16 @@ def get_virtual_pipeline_model_parallel_world_size():
     """Return the virtual pipeline-parallel world size."""
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     return _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+
+
+def get_embedding_group(check_initialized=True):
+    raise NotImplementedError("Not supported get_embedding_group yet.")
+    '''
+    """Get the embedding group the caller rank belongs to."""
+    if check_initialized:
+        assert _EMBEDDING_GROUP is not None, "embedding group is not initialized"
+    return _EMBEDDING_GROUP
+    '''
 
 
 def get_expert_tensor_parallel_group(check_initialized=True):

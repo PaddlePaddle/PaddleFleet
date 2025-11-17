@@ -114,7 +114,7 @@ class FusedScaleMaskSoftmax(nn.Layer):
             input = input * self.scale
 
         # Generate causal mask if not given
-        sq, sk = input.size(2), input.size(3)
+        sq, sk = input.shape[2], input.shape[3]
         if self.window_size is not None:
             mask = get_sliding_window_causal_mask(sq, sk, self.window_size)
         elif (

@@ -218,9 +218,9 @@ class RotaryEmbedding(nn.Layer):
             )
         else:
             if transformer is not None and transformer.input_tensor is not None:
-                rotary_seq_len = transformer.input_tensor.size(0)
+                rotary_seq_len = transformer.input_tensor.shape[0]
             else:
-                rotary_seq_len = transformer_input.size(0)
+                rotary_seq_len = transformer_input.shape[0]
 
             if transformer_config.sequence_parallel:
                 rotary_seq_len *= transformer_config.tensor_model_parallel_size

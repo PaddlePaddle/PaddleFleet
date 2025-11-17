@@ -211,7 +211,12 @@ class DotProductAttention(FleetLayer):
             )
 
         # [b, np, sq, sk]
-        output_size = (query.size(1), query.size(2), query.size(0), key.size(0))
+        output_size = (
+            query.shape[1],
+            query.shape[2],
+            query.shape[0],
+            key.shape[0],
+        )
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
         # This will be a simple view when doing normal attention, but in group query attention
@@ -263,14 +268,14 @@ class DotProductAttention(FleetLayer):
 
         # context layer shape: [b, np, sq, hn]
         output_size = (
-            value.size(1),
-            value.size(2),
-            query.size(0),
-            value.size(3),
+            value.shape[1],
+            value.shape[2],
+            query.shape[0],
+            value.shape[3],
         )
 
         # change view [sk, b * np, hn]
-        value = value.view(value.size(0), output_size[0] * output_size[1], -1)
+        value = value.view(value.shape[0], output_size[0] * output_size[1], -1)
 
         # change view [b * np, sq, sk]
         attention_probs = attention_probs.view(
@@ -288,7 +293,7 @@ class DotProductAttention(FleetLayer):
 
         # [sq, b, np, hn] --> [sq, b, hp]
         new_context_shape = (
-            *context.size()[:-2],
+            *context.shape[:-2],
             self.hidden_size_per_partition,
         )
         context = context.view(*new_context_shape)
