@@ -90,7 +90,7 @@ ci = [
 [tool.uv]
 default-groups = ["build", "test"]
 link-mode = "copy"
-extra-index-url = ["https://www.paddlepaddle.org.cn/packages/stable/cu129/"]
+extra-index-url = ["https://www.paddlepaddle.org.cn/packages/stable/cu126/"]
 index-strategy = "unsafe-best-match"
 
 
