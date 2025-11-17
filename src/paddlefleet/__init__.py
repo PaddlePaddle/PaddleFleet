@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import parallel_state as parallel_state
+from . import parallel_state as parallel_state, training as training
 from .package_info import (
     __contact_emails__,
     __contact_names__,
@@ -27,8 +27,6 @@ from .package_info import (
     __version__,
 )
 from .timers import Timers
-
-from . import training as training
 
 mpu = parallel_state
 
