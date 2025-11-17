@@ -96,7 +96,6 @@ jobs:
           source $HOME/.local/bin/env
           echo "uv sync"
           uv sync --group ci > /dev/null
-          uv run pip install paddlepaddle-gpu --pre paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           '
 
       - name: Single card test
