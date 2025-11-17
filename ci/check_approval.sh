@@ -99,7 +99,7 @@ for file in $files; do
     fi
 done
 if $pyproject_modified && ! $uvlock_modified; then
-    echo_line="pyproject.toml was modified but uv.lock was not updated. Please update uv.lock together with pyproject.toml."
+    echo_line="\"pyproject.toml\" was modified but uv.lock was not updated. Please update \"uv.lock\" together with pyproject.toml. Run \"uv sync\" to update it."
     check_approval 1 "${APPROVER_LIST[@]}"
 fi
 

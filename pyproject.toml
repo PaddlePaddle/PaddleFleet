@@ -45,7 +45,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-dependencies = ["paddlepaddle-gpu==3.2.1"]
+dependencies = ["paddlepaddle-gpu==3.2.2"]
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
@@ -225,7 +225,7 @@ ignore = [
     "UP015",
     # collections.namedtuple can be quickly created a inlined class
     "PYI024",
-    # `__all__.append` is a common pattern in Paddle
+    # `__all__.append` is a common pattern in Paddl
     "PYI056",
 ]
 
