@@ -12,16 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-MAJOR = 0
-MINOR = 0
-PATCH = 0
-PRE_RELEASE = "rc0"
-
-# Use the following formatting: (major, minor, patch, pre-release)
-VERSION = (MAJOR, MINOR, PATCH, PRE_RELEASE)
-
-__shortversion__ = ".".join(map(str, VERSION[:3]))
-__version__ = ".".join(map(str, VERSION[:3])) + "".join(VERSION[3:])
+__version__ = "0.0.1a0"
 __package_name__ = "fleet_core"
 __contact_names__ = "PadldePaddle"
 __contact_emails__ = "Paddle-better@baidu.com"

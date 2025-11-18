@@ -13,6 +13,7 @@
 # limitations under the License.
 
 disable_file="$work_dir/tests/multi_card_tests/disable_multi-card_uts.txt"
+test_dir="tests/multi_card_tests"
 
 disabled=()
 if [ -f "$disable_file" ]; then
@@ -34,8 +35,9 @@ is_disabled() {
     return 1
 }
 
+run_count=0
 failed_tests=()
-for test_file in tests/multi_card_tests/*.py; do
+for test_file in $(find $test_dir -type f -name "test_*.py"); do
     filename=$(basename "$test_file")
     if is_disabled "$filename"; then
         echo "Skipping disabled test: $filename"
@@ -43,6 +45,7 @@ for test_file in tests/multi_card_tests/*.py; do
     fi
 
     echo "Running multi-card test: $test_file"
+    run_count=$((run_count + 1))
     uv run -m paddle.distributed.launch --gpus "0,1,2,3,4,5,6,7" "$test_file"
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
@@ -54,6 +57,7 @@ for test_file in tests/multi_card_tests/*.py; do
 done
 
 echo "======================================"
+echo -e "\033[34mTests executed: $run_count\033[0m"
 if [ ${#failed_tests[@]} -eq 0 ]; then
     echo -e "\033[32mAll multi-card tests passed!\033[0m"
     echo "======================================"
