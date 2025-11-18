@@ -79,9 +79,8 @@ jobs:
 
       - name: Clone PaddleFleet
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
-          set -e
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
@@ -101,7 +100,7 @@ jobs:
       - name: Single card test
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source $HOME/.local/bin/env
           pwd
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
@@ -128,7 +127,7 @@ jobs:
       - name: Single card Coverage Upload to BOS
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
@@ -194,9 +193,8 @@ jobs:
 
       - name: Clone PaddleFleet
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
-          set -e
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
@@ -216,7 +214,7 @@ jobs:
       - name: Multi-card test
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
@@ -243,7 +241,7 @@ jobs:
       - name: Multi-card Coverage Upload to BOS
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
