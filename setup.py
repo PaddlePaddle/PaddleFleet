@@ -44,12 +44,7 @@ def setup_moe_ops():
         ext_modules=CUDAExtension(
             sources=[
                 "./paddlefleet/extentions/moe_ops_fp8.cu",
-                "./paddlefleet/extentions/topk_to_multihot.cu",
-                "./paddlefleet/extentions/topk_to_multihot_grad.cu",
-                "./paddlefleet/extentions/tokens_unzip_and_zip.cu",
                 "./paddlefleet/extentions/tokens_stable_unzip.cu",
-                "./paddlefleet/extentions/tokens_guided_unzip.cu",
-                "./paddlefleet/extentions/regroup_tokens.cu",
             ],
             include_dirs=[
                 cutlass_include_dir,
