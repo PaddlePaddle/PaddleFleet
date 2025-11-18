@@ -116,13 +116,17 @@ class MLP(FleetLayer):
                 DeprecationWarning,
                 stacklevel=2,
             )
+            if self.config.ffn_hidden_size is None:
+                raise ValueError(
+                    "MLP requires `config.ffn_hidden_size` is not None, but it got None."
+                )
+
             ffn_hidden_size = self.config.ffn_hidden_size
 
         # If this is a gated linear unit we double the output width
         # see https://arxiv.org/pdf/2002.05202.pdf
         if self.config.gated_linear_unit:
             ffn_hidden_size *= 2
-        print("sublayers_spec", sublayers_spec, sublayers_spec.linear_fc1)
         self.linear_fc1 = build_layer(
             sublayers_spec.linear_fc1,
             self.input_size,

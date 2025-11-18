@@ -53,7 +53,10 @@ class TestGPTModel(unittest.TestCase):
         hcg = fleet.get_hybrid_communicate_group()
         ps.initialize_model_parallel(hcg)
         config = TransformerConfig(
-            num_layers=2, hidden_size=12, num_attention_heads=4
+            num_layers=2,
+            hidden_size=12,
+            num_attention_heads=4,
+            ffn_hidden_size=16,
         )
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=None,
