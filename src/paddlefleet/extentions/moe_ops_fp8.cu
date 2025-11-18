@@ -531,7 +531,7 @@ std::vector<paddle::Tensor> MoEDispatchFwd(const paddle::Tensor &x,
   return {out_fp8, scale, combine_weights, scatter_index, expert_offset, expert_id};
 }
 
-PD_BUILD_OP(moe_gate_dispatch_and_quant1)
+PD_BUILD_OP(moe_gate_dispatch_and_quant)
     .Inputs({"x", "gate_logtis", paddle::Optional("corr_bias")})
     .Outputs({"out_fp8", "scale", "combine_weights", "scatter_index", "expert_offset", "expert_id"})
     .Attrs({"k: int64_t", "capacity: int64_t", "use_pad: bool", "use_pow2_scale: bool"})
