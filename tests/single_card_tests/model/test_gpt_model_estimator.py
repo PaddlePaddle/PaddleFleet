@@ -51,22 +51,19 @@ class TestEstimatorForGLM45Air(unittest.TestCase):
             self.estimator.estimate_num_parameters()
         )
         flops_per_token = self.estimator.estimate_flops_per_token()
-        flops_per_step = self.estimator.estimate_flops_per_step(batch_size=8)
 
-        print(f"\n{'=' * 30} {self.model_name} {'=' * 30}")
+        batch_size = 32
+        flops_per_step = self.estimator.estimate_flops_per_step(batch_size)
+
+        print(f"\n{'=' * 110}")
         print(
-            f"{'Total Parameters:':<28} {total_params:>12,.0f} ({total_params / 1e9:.2f} B)"
+            f"{self.model_name:<18} | "
+            f"Params: {total_params / 1e9:7.2f}B | "
+            f"Act: {activated_params / 1e9:7.2f}B | "
+            f" {flops_per_token / 1e9:8.2f} GFLOPs/Token |"
+            f" (bs={batch_size}) {flops_per_step / 1e12:8.2f} TFLOPs/Step"
         )
-        print(
-            f"{'Activated per Forward:':<28} {activated_params:>12,.0f} ({activated_params / 1e9:.2f} B)"
-        )
-        print(
-            f"{'FLOPs per Token:':<28} {flops_per_token:>12,.0f} ({flops_per_token / 1e9:.2f} GFLOPs)"
-        )
-        print(
-            f"{'FLOPs per Step (bs=8):':<28} {flops_per_step:>12,.0f} ({flops_per_step / 1e12:.2f} TFLOPs)"
-        )
-        print(f"{'=' * 80}")
+        print(f"{'=' * 110}")
 
 
 class TestEstimatorForDeepSeekV3(TestEstimatorForGLM45Air):
@@ -83,33 +80,30 @@ class TestEstimatorForDeepSeekV3(TestEstimatorForGLM45Air):
             hidden_size=7168,
             ffn_hidden_size=18432,
             gated_linear_unit=True,  # hidden_act: "silu"
+            num_attention_heads=128,
             causal_mask=True,
-            # MLA config
             multi_latent_attention=True,
             q_lora_rank=1536,
             kv_lora_rank=512,
             qk_head_dim=128,  # qk_nope_head_dim
             qk_pos_emb_head_dim=64,  # qk_rope_head_dim
             v_head_dim=128,
-            # MoE config
             moe_layer_freq=[0] * 3 + [1] * 58,  # first_k_dense_replace: 3
             num_moe_experts=256,
             moe_ffn_hidden_size=2048,
             moe_shared_expert_intermediate_size=2048,
             moe_topk=8,
-            # MTP config
             mtp_num_layers=1,  # num_nextn_predict_layers: 1
         )
 
 
-class TestEstimatorForQwen3_30BA3B(unittest.TestCase):
+class TestEstimatorForQwen3_30BA3B(TestEstimatorForGLM45Air):
     def create_estimator(self):
         """
         Reference: https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json
         """
         self.model_name = "Qwen3-30B-A3B"
         self.estimator = GPTModelEstimator(
-            # Model config
             seq_length=4096,
             vocab_size=151936,
             untie_embeddings_and_output_weights=True,  # tie_word_embeddings: false
