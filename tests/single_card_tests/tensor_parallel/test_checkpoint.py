@@ -20,18 +20,6 @@ from paddlefleet.tensor_parallel.random import (
 )
 
 
-class SimpleNet(paddle.nn.layer):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = paddle.nn.Linear(16, 16)
-        self.fc2 = paddle.nn.Linear(16, 16)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.fc2(x)
-        return x
-
-
 def test_checkpoint():
     def test_forward(*input):
         return input[0] + input[1]
