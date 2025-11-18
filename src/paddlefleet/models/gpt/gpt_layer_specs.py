@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING
 
 from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
 from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
-
-# from paddlefleet.models.gpt.moe_layer_specs import get_moe_layer_spec_for_backend
+from paddlefleet.models.gpt.moe_layer_specs import (
+    get_moe_layer_spec_for_backend,
+)
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
@@ -153,14 +154,11 @@ def get_mlp_layer_spec_for_backend(
             ),
         )
     else:
-        # Mixture of experts with layers in fleet core.
-        assert 0, "KKKKKKK"
-        pass
-        # return get_moe_layer_spec_for_backend(
-        #    backend=backend,
-        #    num_experts=num_experts,
-        #    moe_grouped_gemm=moe_grouped_gemm,
-        # )
+        return get_moe_layer_spec_for_backend(
+            backend=backend,
+            num_experts=num_experts,
+            moe_grouped_gemm=moe_grouped_gemm,
+        )
 
 
 def get_gpt_decoder_block_spec(

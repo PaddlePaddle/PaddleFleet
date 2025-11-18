@@ -362,9 +362,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         # [Layer 8: MLP block]
         additional_mlp_kwargs = {}
 
-        # from paddlefleet.transformer.moe.moe_layer import MoELayer
-        class MoELayer:
-            pass
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         # MLP expects tp_group but MoELayer expects pg_collection to be passed in.
         # We can change MLP to accept pg_collection but it makes the logic implicit
@@ -384,7 +382,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
                     logging.WARNING,
                     f"Unknown MLP type: {type(sublayers_spec.mlp)}. Using default kwargs.",
                 )
-        print("sublayers_spec", sublayers_spec)
+        print("sublayers_spec.mlp", sublayers_spec.mlp)
         self.mlp = build_layer(
             sublayers_spec.mlp, config=self.config, **additional_mlp_kwargs
         )
