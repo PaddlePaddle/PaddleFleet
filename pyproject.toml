@@ -49,7 +49,7 @@ dependencies = ["paddlepaddle-gpu>=3.3.0.dev"]
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
-Homepage = "https://github.com/PaddlePaddle/PaddleFleet/paddlefleet"
+Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 [project.optional-dependencies]
 
