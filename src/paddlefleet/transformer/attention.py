@@ -195,7 +195,6 @@ class Attention(FleetLayer, ABC):
         )
         hidden_states = tensor_parallel.checkpoint(
             custom_forward,
-            False,
             query,
             key,
             value,

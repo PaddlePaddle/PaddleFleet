@@ -229,6 +229,20 @@ class TransformerConfig(ModelParallelConfig):
     the number of transformer layers to recompute within each pipeline stage.  Must be None for
     'selective' activation checkpointing."""
 
+    recompute_modules: list[str] = ["core_attn"]
+    """The submodules to recompute.
+    choices: "core_attn", "moe_act", "layernorm", "mlp", "moe", "shared_experts".
+    default: ["core_attn"].
+    "core_attn": recompute the core attention part of the transformer layer.
+    "moe_act": recompute the MoE MLP activation function.
+    "layernorm": recompute the input_layernorm and pre_mlp_layernorm.
+    "mlp": recompute the dense MLP submodule.
+    "moe": recompute the MoE layer.
+    "shared_experts": recompute the shared experts in the MoE layer.
+    "moe_act", "layernorm", and "mla_up_proj" use output-discarding checkpointing,
+    "core_attn", "mlp", "moe", and "shared_experts" use normal checkpointing.
+    """
+
     ####################
     # MoE related
     ####################

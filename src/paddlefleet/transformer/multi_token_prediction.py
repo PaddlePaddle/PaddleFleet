@@ -579,7 +579,6 @@ class MultiTokenPredictionLayer(FleetLayer):
             """Determines whether to use the `tensor_parallel.checkpoint`"""
             return tensor_parallel.checkpoint(
                 forward_func,
-                self.config.distribute_saved_activations,
                 *args,
                 *kwargs.values(),
             )

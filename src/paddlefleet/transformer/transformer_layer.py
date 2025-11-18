@@ -397,11 +397,18 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         self.recompute_pre_mlp_layernorm = False
         self.recompute_mlp = False
         if self.config.recompute_granularity == "selective":
-            if "layernorm" in self.config.recompute_layers:
+            if "layernorm" in self.config.recompute_modules:
+                if (
+                    not isinstance(self.input_layernorm, IdentityOp)
+                    # and self.config.cuda_graph_impl == "none"
+                ):
+                    self.recompute_input_layernorm = True
+                    # if self.config.fp8:
+                    #     self.self_attention.set_for_recompute_input_layernorm()
                 if not isinstance(self.pre_mlp_layernorm, IdentityOp):
                     self.recompute_pre_mlp_layernorm = True
 
-            if "mlp" in self.config.recompute_layers:
+            if "mlp" in self.config.recompute_modules:
                 if not isinstance(self.mlp, MoELayer):
                     self.recompute_mlp = True
 
@@ -460,10 +467,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
 
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
-            self.input_layernorm_checkpoint = (
-                tensor_parallel.CheckpointWithoutOutput()
-            )
-            input_layernorm_output = self.input_layernorm_checkpoint.checkpoint(
+            input_layernorm_output = tensor_parallel.checkpoint(
                 self.input_layernorm, hidden_states
             )
         else:
@@ -479,13 +483,6 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
         )
-
-        if self.recompute_input_layernorm:
-            # discard the output of the input layernorm and register the recompute
-            # as a gradient hook of attention_output_with_bias[0]
-            self.input_layernorm_checkpoint.discard_output_and_register_recompute(
-                attention_output_with_bias[0]
-            )
 
         with paddle.enable_grad():
             hidden_states = self.self_attn_bda(
@@ -536,28 +533,30 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
 
         # Optional Layer norm post the cross-attention.
         if self.recompute_pre_mlp_layernorm:
-            self.pre_mlp_norm_checkpoint = (
-                tensor_parallel.CheckpointWithoutOutput()
-            )
-            pre_mlp_layernorm_output = self.pre_mlp_norm_checkpoint.checkpoint(
+            pre_mlp_layernorm_output = tensor_parallel.checkpoint(
                 self.pre_mlp_layernorm, hidden_states
             )
         else:
             pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
         if self.recompute_mlp:
+
+            def checkout_handler(pre_mlp_layernorm_output):
+                mlp_output, bias = self.mlp(pre_mlp_layernorm_output)
+                if bias is None:
+                    return mlp_output
+                return mlp_output, bias
+
             mlp_output_with_bias = tensor_parallel.checkpoint(
-                self.mlp, False, pre_mlp_layernorm_output
+                checkout_handler, pre_mlp_layernorm_output
             )
+            if not isinstance(mlp_output_with_bias, tuple):
+                mlp_output_with_bias = (
+                    mlp_output_with_bias,
+                    None,
+                )  # bias is None
         else:
             mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
-
-        if self.recompute_pre_mlp_layernorm:
-            # discard the output of the pre-mlp layernorm and register the recompute
-            # as a gradient hook of mlp_output_with_bias[0]
-            self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(
-                mlp_output_with_bias[0]
-            )
 
         with paddle.enable_grad():
             hidden_states = self.mlp_bda(

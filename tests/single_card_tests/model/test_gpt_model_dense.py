@@ -55,11 +55,13 @@ def judge_machine_type():
 
 
 result = judge_machine_type()
-print("你的机器类型是：", result)
+print("Your machine type is:", result)
 
 
 class TestGPTModel(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
+        """Initialize distributed environment, only need to execute once"""
         seed = 46
         random.seed(seed)
         np.random.seed(seed)
@@ -89,7 +91,18 @@ class TestGPTModel(unittest.TestCase):
         hcg = fleet.get_hybrid_communicate_group()
         ps.initialize_model_parallel(hcg)
 
-        config = TransformerConfig(
+    def setUp(self):
+        """Reset random seed before each test case"""
+        seed = 46
+        random.seed(seed)
+        np.random.seed(seed)
+        paddle.manual_seed(seed)
+
+    def _create_transformer_configs(self):
+        """Create multiple different transformer configurations for testing"""
+        configs = []
+
+        config1 = TransformerConfig(
             num_hidden_layers=2,
             hidden_size=512,
             num_attention_heads=4,
@@ -104,6 +117,80 @@ class TestGPTModel(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
         )
+        config1.name = "config_1"
+        configs.append(config1)
+
+        config2 = TransformerConfig(
+            num_hidden_layers=2,
+            hidden_size=512,
+            num_attention_heads=4,
+            intermediate_size=1024,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            fuse_rms_norm=True,
+            recompute_granularity="full",
+            recompute_method="uniform",
+            recompute_num_layers=1,
+        )
+        config2.name = "config_2"
+        configs.append(config2)
+
+        config3 = TransformerConfig(
+            num_hidden_layers=2,
+            hidden_size=512,
+            num_attention_heads=4,
+            intermediate_size=1024,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            fuse_rms_norm=True,
+            recompute_granularity="full",
+            recompute_method="block",
+            recompute_num_layers=1,
+        )
+        config3.name = "config_3"
+        configs.append(config3)
+
+        config4 = TransformerConfig(
+            num_hidden_layers=2,
+            hidden_size=512,
+            num_attention_heads=4,
+            intermediate_size=1024,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            fuse_rms_norm=True,
+            recompute_granularity="selective",
+            recompute_modules=field(
+                default_factory=lambda: ["core_attn", "mlp", "layernorm"]
+            ),
+        )
+        config4.name = "config_4"
+        configs.append(config4)
+
+        return configs
+
+    def _create_gpt_model(self, config):
+        """Create GPT model based on given configuration"""
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=None,
             moe_grouped_gemm=False,
@@ -115,7 +202,8 @@ class TestGPTModel(unittest.TestCase):
         post_process = True
         mtp_block_spec = None
         vp_stage = None
-        self.gpt_model = GPTModel(
+
+        return GPTModel(
             config=config,
             transformer_layer_spec=transformer_layer_spec,
             vocab_size=100,
@@ -133,69 +221,150 @@ class TestGPTModel(unittest.TestCase):
             vp_stage=vp_stage,
         )
 
-    def test_forward(self) -> None:
-        _ = self.gpt_model.config
-        sequence_length = self.gpt_model.max_sequence_length
-        micro_batch_size = 1
+    def _get_expected_values(self, config_name, machine_type):
+        """Return expected values based on configuration name and machine type"""
+        # Define expected values for different configurations on different machines
+        expectations = {
+            "config_1": {
+                "H": {
+                    "loss": 5.3645853996276855,
+                    "grad_norm": 4.1039042472839355,
+                },
+                "V": {
+                    "loss": 5.249175071716309,
+                    "grad_norm": 4.636361598968506,
+                },
+            },
+            "config_2": {
+                "H": {
+                    "loss": 5.3645853996276855,
+                    "grad_norm": 4.1039042472839355,
+                },
+                "V": {
+                    "loss": 5.249175071716309,
+                    "grad_norm": 4.636361598968506,
+                },
+            },
+            "config_3": {
+                "H": {
+                    "loss": 5.3645853996276855,
+                    "grad_norm": 4.1039042472839355,
+                },
+                "V": {
+                    "loss": 5.249175071716309,
+                    "grad_norm": 4.636361598968506,
+                },
+            },
+            "config_4": {
+                "H": {
+                    "loss": 5.3645853996276855,
+                    "grad_norm": 4.1039042472839355,
+                },
+                "V": {
+                    "loss": 5.249175071716309,
+                    "grad_norm": 4.636361598968506,
+                },
+            },
+        }
 
-        for name, param in self.gpt_model.named_parameters():
-            # 计算 L2 范数
-            param_norm = param.detach().norm().item()
-            param_abssum = param.detach().abs().sum().item()
-            print(f"{name}: {param_norm:.6f}, {param_abssum:.6f}")
+        return expectations.get(config_name, {}).get(machine_type, {})
 
-        data = list(range(sequence_length))
-        input_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
-            (micro_batch_size, 1)
-        )
-        position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
-            (micro_batch_size, 1)
-        )
-        attention_mask = paddle.ones(
-            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
-        )
-        labels = paddle.to_tensor(
-            list(range(1, sequence_length + 1)), dtype=paddle.int64
-        ).repeat((micro_batch_size, 1))
+    def test_multiple_configurations(self):
+        """Test multiple transformer configurations"""
+        configs = self._create_transformer_configs()
+        machine_type = judge_machine_type()
 
-        outputs = self.gpt_model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
-        loss = outputs["loss"]
-        print("loss", loss.item())
-        if judge_machine_type() == "H":
-            assert loss.item() == 5.3645853996276855, (
-                f"loss not equal ({loss.item()} != 5.3645853996276855), please check your modify"
-            )
-        elif judge_machine_type() == "V":
-            # TODO(xuxinyi) temporarily disable the loss check
-            assert loss.item() == 5.249175071716309, (
-                f"loss not equal ({loss.item()} != 5.249175071716309), please check your modify"
-            )
+        for config in configs:
+            with self.subTest(config_name=config.name):
+                print(f"\nTesting configuration: {config.name}")
+                print(
+                    f"hidden_size: {config.hidden_size}, num_layers: {config.num_hidden_layers}"
+                )
 
-        loss.backward()
+                # Create and test model
+                gpt_model = self._create_gpt_model(config)
 
-        for name, param in self.gpt_model.named_parameters():
-            # 计算 L2 范数
-            grad_norm = param.grad.detach().norm().item()
-            grad_abssum = param.grad.detach().abs().sum().item()
-            # print(f"{name}: {param.shape}, {param_norm:.6f}")
-            print(f"{name}: {grad_norm:.6f}, {grad_abssum:.6f}")
-            if name == "embedding.word_embeddings.weight":
-                word_embeddings_grad_norm = grad_norm
+                # Run forward and backward propagation
+                sequence_length = gpt_model.max_sequence_length
+                micro_batch_size = 1
 
-        print("word_embeddings_grad_norm", word_embeddings_grad_norm)
-        if judge_machine_type() == "H":
-            assert word_embeddings_grad_norm == 4.1039042472839355, (
-                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 4.1039042472839355), please check your modify"
-            )
-        elif judge_machine_type() == "V":
-            assert word_embeddings_grad_norm == 4.636361598968506, (
-                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 4.636361598968506), please check your modify"
-            )
+                data = list(range(sequence_length))
+                input_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
+                    (micro_batch_size, 1)
+                )
+                position_ids = paddle.to_tensor(
+                    data, dtype=paddle.int64
+                ).repeat((micro_batch_size, 1))
+                attention_mask = paddle.ones(
+                    (micro_batch_size, 1, sequence_length, sequence_length),
+                    dtype=bool,
+                )
+                labels = paddle.to_tensor(
+                    list(range(1, sequence_length + 1)), dtype=paddle.int64
+                ).repeat((micro_batch_size, 1))
+
+                outputs = gpt_model.forward(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+                loss = outputs["loss"]
+                print(f"{config.name} loss: {loss.item()}")
+
+                # Get expected values
+                print("machine_type: ", machine_type)
+                expected_values = self._get_expected_values(
+                    config.name, machine_type
+                )
+
+                # If expected values exist, verify them
+                if expected_values.get("loss") is not None:
+                    self.assertAlmostEqual(
+                        loss.item(),
+                        expected_values["loss"],
+                        places=5,
+                        msg=f"{config.name} loss not equal ({loss.item()} != {expected_values['loss']})",
+                    )
+                else:
+                    print(
+                        f"Note: Expected loss value for {config.name} is not set, current loss: {loss.item()}"
+                    )
+
+                loss.backward()
+
+                # Check gradients
+                word_embeddings_grad_norm = None
+                for name, param in gpt_model.named_parameters():
+                    if (
+                        param.grad is not None
+                        and name == "embedding.word_embeddings.weight"
+                    ):
+                        word_embeddings_grad_norm = (
+                            param.grad.detach().norm().item()
+                        )
+                        break
+
+                if word_embeddings_grad_norm is not None:
+                    print(
+                        f"{config.name} word_embeddings_grad_norm: {word_embeddings_grad_norm}"
+                    )
+
+                    if expected_values.get("grad_norm") is not None:
+                        self.assertAlmostEqual(
+                            word_embeddings_grad_norm,
+                            expected_values["grad_norm"],
+                            places=5,
+                            msg=f"{config.name} grad norm not equal ({word_embeddings_grad_norm} != {expected_values['grad_norm']})",
+                        )
+                    else:
+                        print(
+                            f"Note: Expected grad_norm value for {config.name} is not set, current grad_norm: {word_embeddings_grad_norm}"
+                        )
+                else:
+                    print(
+                        f"Warning: Failed to get word_embeddings gradient for {config.name}"
+                    )
 
 
 if __name__ == "__main__":

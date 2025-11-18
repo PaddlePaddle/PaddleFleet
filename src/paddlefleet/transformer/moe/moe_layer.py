@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from paddlefleet.spec_utils import LayerSpec
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
-from paddlefleet import utils
+from paddlefleet import tensor_parallel, utils
 
 from .moe_communication import AllToAllMoECommunication, DeepEPMoECommunication
 from .moe_expert import StandardMLPExpert
@@ -114,6 +114,21 @@ class MoELayer(nn.Layer):
 
         # MoE-Related Configs
         self.expert_dropout = config.get("expert_dropout", 0.0)
+
+        # TODO(Xiangzhe): add logs
+        # Recompute Configs
+        self.recompute_granularity = config.get("recompute_granularity", None)
+        self.recompute_modules = config.get("recompute_modules", [])
+        self.checkpoint_moe = (
+            self.recompute_granularity == "selective"
+            and "moe" in self.recompute_modules
+        )
+        self.checkpoint_shared_experts = (
+            self.recompute_granularity == "selective"
+            and "shared_experts" in self.recompute_modules
+        )
+        if self.checkpoint_moe:
+            self.checkpoint_shared_experts = False
 
         self._init_expert_parallel()
         self.router = StandardMoERouter(
@@ -271,7 +286,7 @@ class MoELayer(nn.Layer):
 
         return paddle.concat(outputs, axis=0)
 
-    def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
+    def forward_impl(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         """
         Args:
             hidden_states: Shape: [batch_size, seq_len, hidden_size]
@@ -328,13 +343,34 @@ class MoELayer(nn.Layer):
         output = output.reshape(orig_shape)
 
         if self.shared_experts is not None:
-            shared_output = self.shared_experts(residuals)[0]
+            if self.checkpoint_shared_experts:
+
+                def checkpoint_handler(residuals):
+                    return self.shared_experts(residuals)[0]
+
+                shared_output = tensor_parallel.checkpoint(
+                    checkpoint_handler, residuals
+                )
+            else:
+                shared_output = self.shared_experts(residuals)[0]
             output = output + shared_output
 
         if self.expert_parallel_degree <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)
 
         return output, None  # None is bias
+
+    def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
+        if self.checkpoint_moe:
+
+            def checkpoint_handler(hidden_states):
+                output, _ = self.forward_impl(hidden_states)
+                return output
+
+            return tensor_parallel.checkpoint(
+                checkpoint_handler, hidden_states
+            ), None
+        return self.forward_impl(hidden_states)
 
     def _forward_traditional_moe(
         self,

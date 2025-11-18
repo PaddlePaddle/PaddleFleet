@@ -300,7 +300,7 @@ class TransformerBlock(FleetLayer):
 
         self.checkpoint_core_attention = (
             self.config.recompute_granularity == "selective"
-            and "core_attn" in self.config.recompute_layers
+            and "core_attn" in self.config.recompute_modules
         )
 
         assert self.config.cpu_offloading is False
@@ -391,6 +391,8 @@ class TransformerBlock(FleetLayer):
                         attention_bias=attention_bias,
                         packed_seq_params=packed_seq_params,
                     )
+                if context is None:
+                    return hidden_states
                 return hidden_states, context
 
             return custom_forward
@@ -399,7 +401,6 @@ class TransformerBlock(FleetLayer):
             """Determines whether to use the `tensor_parallel.checkpoint`"""
             return tensor_parallel.checkpoint(
                 forward_func,
-                self.config.distribute_saved_activations,
                 hidden_states,
                 attention_mask,
                 context,
@@ -413,11 +414,17 @@ class TransformerBlock(FleetLayer):
             # A method to further reduce memory usage reducing checkpoints.
             layer_idx = 0
             while layer_idx < self.num_layers_per_pipeline_rank:
-                hidden_states, context = checkpoint_handler(
+                outputs = checkpoint_handler(
                     custom(
                         layer_idx, layer_idx + self.config.recompute_num_layers
                     )
                 )
+                if isinstance(outputs, tuple):
+                    hidden_states = outputs[0]
+                    context = outputs[1]
+                else:
+                    hidden_states = outputs
+                    context = None
 
                 layer_idx += self.config.recompute_num_layers
 
@@ -425,18 +432,34 @@ class TransformerBlock(FleetLayer):
             # Checkpoint the input activation of only a set number of individual
             # Transformer layers and skip the rest.
             # A method fully use the device memory removing redundant re-computation.
-            recompute_skip_num_layers = 0
             for layer_idx in range(self.num_layers_per_pipeline_rank):
                 # Skip recomputation when input grad computation is not needed.
                 # Need to have at least one input tensor with gradient computation
-                # for re-enterant autograd engine.
-                hidden_states, context = custom(layer_idx, layer_idx + 1)(
-                    hidden_states,
-                    attention_mask,
-                    context,
-                    context_mask,
-                    rotary_pos_emb,
-                )
+                if layer_idx < self.config.recompute_num_layers:
+                    outputs = checkpoint_handler(
+                        custom(layer_idx, layer_idx + 1)
+                    )
+                else:
+                    outputs = custom(layer_idx, layer_idx + 1)(
+                        hidden_states,
+                        attention_mask,
+                        context,
+                        context_mask,
+                        rotary_pos_emb,
+                    )
+                # outputs = custom(layer_idx, layer_idx + 1)(
+                #     hidden_states,
+                #     attention_mask,
+                #     context,
+                #     context_mask,
+                #     rotary_pos_emb,
+                # )
+                if isinstance(outputs, tuple):
+                    hidden_states = outputs[0]
+                    context = outputs[1]
+                else:
+                    hidden_states = outputs
+                    context = None
         else:
             raise ValueError("Invalid activation recompute method.")
 
