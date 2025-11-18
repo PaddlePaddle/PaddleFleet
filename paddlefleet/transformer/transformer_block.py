@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
+from paddle.distributed.fleet.utils import recompute
 LayerNormImpl = WrappedPaddleNorm
 
 logger = logging.getLogger(__name__)
@@ -389,6 +390,8 @@ class TransformerBlock(FleetLayer):
                         attention_bias=attention_bias,
                         packed_seq_params=packed_seq_params,
                     )
+                if context is None:
+                    return hidden_states
                 return hidden_states, context
 
             return custom_forward
@@ -411,11 +414,17 @@ class TransformerBlock(FleetLayer):
             # A method to further reduce memory usage reducing checkpoints.
             layer_idx = 0
             while layer_idx < self.num_layers_per_pipeline_rank:
-                hidden_states, context = checkpoint_handler(
+                outputs = checkpoint_handler(
                     custom(
                         layer_idx, layer_idx + self.config.recompute_num_layers
                     )
                 )
+                if isinstance(outputs, tuple):
+                    hidden_states = outputs[0]
+                    context = outputs[1]
+                else:
+                    hidden_states = outputs
+                    context = None
 
                 layer_idx += self.config.recompute_num_layers
 

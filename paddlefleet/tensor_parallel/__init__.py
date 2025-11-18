@@ -16,8 +16,12 @@ from .layers import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
+from .random import (
+    checkpoint,
+)
 
 __all__ = [
     "ColumnParallelLinear",
     "RowParallelLinear",
+    "checkpoint",
 ]
