@@ -36,7 +36,6 @@ if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -417,7 +416,11 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         # this is only used to uniquely identify decode and non-decode cuda graph
         # runners in the cuda graph manager
         kwargs.pop("dynamic_inference_decode_only", None)
+        print("_forward_attention 420")
+        # traceback.print_stack()
         hidden_states, context = self._forward_attention(*args, **kwargs)
+        print("_forward_mlp 422")
+        # traceback.print_stack()
         output = self._forward_mlp(hidden_states)
         return output, context
 

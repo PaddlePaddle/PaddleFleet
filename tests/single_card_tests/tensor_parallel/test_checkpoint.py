@@ -12,32 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
-import paddle
 import numpy as np
+import paddle
 
 from paddlefleet.tensor_parallel.random import (
     checkpoint,
 )
+
 
 class SimpleNet(paddle.nn.layer):
     def __init__(self):
         super().__init__()
         self.fc1 = paddle.nn.Linear(16, 16)
         self.fc2 = paddle.nn.Linear(16, 16)
-    
+
     def forward(self, x):
         x = self.fc1(x)
         x = self.fc2(x)
         return x
 
+
 def test_checkpoint():
     def test_forward(*input):
         return input[0] + input[1]
+
     res_ref = paddle.ones(16) * 3
     res = checkpoint(test_forward, None, paddle.ones(16), paddle.ones(16) * 2)
-    np.testing.assert_allclose(res_ref.numpy(), res.numpy()) 
+    np.testing.assert_allclose(res_ref.numpy(), res.numpy())
 
     input1 = paddle.ones((4, 4))
     checkpoint(test_forward, True, input1, paddle.ones((4, 4)) * 2)
-    np.testing.assert_allclose(paddle.ones(input1.shape).numpy(), input1.numpy())
+    np.testing.assert_allclose(
+        paddle.ones(input1.shape).numpy(), input1.numpy()
+    )
