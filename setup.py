@@ -43,12 +43,12 @@ def setup_moe_ops():
         name="paddlefleet.extentions.ops",
         ext_modules=CUDAExtension(
             sources=[
-                "./paddlefleet/extentions/moe_ops_fp8.cu",
-                "./paddlefleet/extentions/tokens_stable_unzip.cu",
+                "./src/paddlefleet/extentions/moe_ops_fp8.cu",
+                "./src/paddlefleet/extentions/tokens_stable_unzip.cu",
             ],
             include_dirs=[
                 cutlass_include_dir,
-                os.path.join(os.getcwd(), "paddlefleet/extentions"),
+                os.path.join(os.getcwd(), "src/paddlefleet/extentions"),
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-w", "-Wno-abi", "-fPIC", "-std=c++17"],
