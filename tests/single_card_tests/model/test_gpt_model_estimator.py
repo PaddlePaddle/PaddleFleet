@@ -52,8 +52,8 @@ class TestEstimatorForGLM45Air(unittest.TestCase):
         )
         flops_per_token = self.estimator.estimate_flops_per_token()
 
-        batch_size = 32
-        flops_per_step = self.estimator.estimate_flops_per_step(batch_size)
+        gbs = 1
+        flops_per_step = self.estimator.estimate_flops_per_step(gbs)
 
         print(f"\n{'=' * 110}")
         print(
@@ -61,7 +61,7 @@ class TestEstimatorForGLM45Air(unittest.TestCase):
             f"Params: {total_params / 1e9:7.2f}B | "
             f"Act: {activated_params / 1e9:7.2f}B | "
             f" {flops_per_token / 1e9:8.2f} GFLOPs/Token |"
-            f" (bs={batch_size}) {flops_per_step / 1e12:8.2f} TFLOPs/Step"
+            f" (gbs={gbs}) {flops_per_step / 1e12:8.2f} TFLOPs/Step"
         )
         print(f"{'=' * 110}")
 

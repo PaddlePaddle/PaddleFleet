@@ -122,8 +122,8 @@ class GPTModelEstimator:
                         * (self.qk_head_dim + self.qk_pos_emb_head_dim)
                     )
                 else:
-                    params_down_q_proj = self.hidden_size * self.q_lora_rank
-                    params_q_lora_proj = (
+                    params_q_down_proj = self.hidden_size * self.q_lora_rank
+                    params_q_up_proj = (
                         self.q_lora_rank
                         * self.num_attention_heads
                         * self.qk_head_dim
@@ -134,27 +134,19 @@ class GPTModelEstimator:
                         * self.qk_pos_emb_head_dim
                     )
                     params_q_proj = (
-                        params_down_q_proj + params_q_lora_proj + params_q_rope
+                        params_q_down_proj + params_q_up_proj + params_q_rope
                     )
                 params += params_q_proj
                 # KV projection
-                params_down_kv_proj = self.hidden_size * self.kv_lora_rank
-                params_k_lora_proj = (
+                params_kv_down_proj = self.hidden_size * self.kv_lora_rank
+                params_kv_up_proj = (
                     self.kv_lora_rank
                     * self.num_attention_heads
-                    * self.qk_head_dim
+                    * (self.qk_head_dim + self.v_head_dim)
                 )
                 params_k_rope = self.hidden_size * self.qk_pos_emb_head_dim
-                params_v_lora_proj = (
-                    self.kv_lora_rank
-                    * self.num_attention_heads
-                    * self.v_head_dim
-                )
                 params += (
-                    params_down_kv_proj
-                    + params_k_lora_proj
-                    + params_k_rope
-                    + params_v_lora_proj
+                    params_kv_down_proj + params_kv_up_proj + params_k_rope
                 )
                 # Output projection
                 params += (
@@ -260,23 +252,22 @@ class GPTModelEstimator:
                     )
                 else:
                     q_term = (
-                        # q_lora_proj
+                        # q_down_proj
                         self.hidden_size * self.q_lora_rank
-                        # q_proj + q_rope
+                        # q_up_proj + q_rope
                         + self.q_lora_rank
                         * self.num_attention_heads
                         * (self.qk_head_dim + self.qk_pos_emb_head_dim)
                     )
                 # KV projection
                 kv_term = (
-                    # kv_lora_proj
-                    self.hidden_size * self.kv_lora_rank
-                    # kv_proj
+                    # kv_down_proj + k_rope
+                    self.hidden_size
+                    * (self.kv_lora_rank + self.qk_pos_emb_head_dim)
+                    # kv_up_proj
                     + self.kv_lora_rank
                     * self.num_attention_heads
                     * (self.qk_head_dim + self.v_head_dim)
-                    # k_rope
-                    + self.hidden_size * self.qk_pos_emb_head_dim
                 )
                 # Output projection
                 out_term = (
@@ -289,8 +280,10 @@ class GPTModelEstimator:
                     self.seq_length
                     * self.num_attention_heads
                     * (
+                        # QK^T
                         self.qk_head_dim
                         + self.qk_pos_emb_head_dim
+                        # Attn@V
                         + self.v_head_dim
                     )
                 )
@@ -336,7 +329,10 @@ class GPTModelEstimator:
 
         # 4. MTP (Multi-Token Prediction) Layers
         def mtp_flops() -> float:
-            """Calculate FLOPs of one token for MTP layers."""
+            """
+            Calculate FLOPs of one token for MTP layers.
+            Note: attention and mlp block in mtp layer have been already accounted above
+            """
             if self.mtp_num_layers is None:
                 return 0.0
             return (
