@@ -899,6 +899,7 @@ wheels = [
 name = "paddlefleet"
 source = { editable = "." }
 dependencies = [
+    { name = "colorlog" },
     { name = "paddlepaddle-gpu" },
 ]
 
@@ -923,7 +924,10 @@ test = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "paddlepaddle-gpu", specifier = ">=3.3.0.dev0" }]
+requires-dist = [
+    { name = "colorlog", specifier = ">=6.10.1" },
+    { name = "paddlepaddle-gpu", specifier = ">=3.3.0.dev0" },
+]
 
 [package.metadata.requires-dev]
 build = [
