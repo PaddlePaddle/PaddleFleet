@@ -1,3 +1,2 @@
 include src/paddlefleet/extentions/*.h
 include src/paddlefleet/extentions/*.cu
-recursive-include third_party/cutlass/include *.hpp

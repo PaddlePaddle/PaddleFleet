@@ -36,18 +36,13 @@ def setup_moe_ops():
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
     change_pwd()
-    cutlass_include_dir = os.path.join(
-        os.getcwd(), "third_party/cutlass/include"
-    )
     setup(
         name="paddlefleet.extentions.ops",
         ext_modules=CUDAExtension(
             sources=[
-                "./src/paddlefleet/extentions/moe_ops_fp8.cu",
                 "./src/paddlefleet/extentions/tokens_stable_unzip.cu",
             ],
             include_dirs=[
-                cutlass_include_dir,
                 os.path.join(os.getcwd(), "src/paddlefleet/extentions"),
             ],
             extra_compile_args={
