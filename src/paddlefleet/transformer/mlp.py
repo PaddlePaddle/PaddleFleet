@@ -95,6 +95,7 @@ class MLP(FleetLayer):
         tp_group=None,
     ):
         super().__init__(config=config)
+
         self.config: TransformerConfig = config
 
         self.input_size = (

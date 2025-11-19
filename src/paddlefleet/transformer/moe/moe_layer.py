@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from typing import Optional, Union
+from typing import Optional, Union, TYPE_CHECKING
 
 import paddle
 import paddle.distributed as dist
@@ -27,9 +27,10 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
 )
 
-from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.transformer.spec_utils import LayerSpec
-from paddlefleet.transformer.transformer_config import TransformerConfig
+if TYPE_CHECKING:
+    from paddlefleet.process_groups_config import ProcessGroupCollection
+    from paddlefleet.transformer.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from .moe_communication import AllToAllMoECommunication, DeepEPMoECommunication
 from .moe_expert import StandardMLPExpert
@@ -177,11 +178,6 @@ class MoELayer(nn.Layer):
                 p.expert = not self.is_mp_moe
                 if self.is_mp_moe or self.is_ep_moe:
                     p.is_distributed = True
-
-        print("\n=== Initialized Variables for MoELayer ===")
-        for k, v in vars(self).items():
-            print(f"{k}: {v}")
-        print("============================\n")
 
     def _init_expert_parallel(self):
         def _parse_moe_expert_parallel(

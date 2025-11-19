@@ -16,7 +16,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 
 import paddle
 import paddle.distributed as dist
@@ -24,8 +24,9 @@ import paddle.nn.functional as F
 from paddle import nn
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
-from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.transformer.transformer_config import TransformerConfig
+if TYPE_CHECKING:
+    from paddlefleet.process_groups_config import ProcessGroupCollection
+    from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class StandardMoERouter(nn.Layer):
@@ -127,11 +128,6 @@ class StandardMoERouter(nn.Layer):
                 dtype=paddle.int64,
             )  # Used in MoECorrectionBiasAdjustCallback
             self.expert_usage.stop_gradient = True
-
-        print("\n=== Initialized Variables for MoERouter ===")
-        for k, v in vars(self).items():
-            print(f"{k}: {v}")
-        print("============================\n")
 
     def gate_score_func(self, logits: paddle.Tensor) -> paddle.Tensor:
         # [..., hidden_dim] -> [..., num_experts]
