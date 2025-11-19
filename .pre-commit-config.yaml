@@ -47,7 +47,7 @@ repos:
       - id: clang-format
         name: clang-format
         description: Format files with ClangFormat.
-        entry: bash ./tools/codestyle/clang-format.sh -i
+        entry: bash ./ci/hooks/clang-format.sh -i
         language: system
         files: \.(c|cc|cxx|cpp|cu|h|cuh|hpp|hxx|xpu|kps)$
   - repo: local
