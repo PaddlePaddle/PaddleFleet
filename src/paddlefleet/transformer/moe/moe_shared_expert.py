@@ -13,7 +13,9 @@
 # limitations under the License.
 
 
-from paddlefleet.transformer.mlp import MLP
+from copy import deepcopy
+
+from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -23,10 +25,26 @@ class StandardMLPSharedExpert(MLP):
         config: TransformerConfig,
         moe_intermediate_size: int,
         fuse_up_gate: bool,
+        is_expert: bool,
+        mlp_spec: MLPSublayersSpec,
     ):
-        super().__init__(
-            config,
-            ffn_hidden_size=moe_intermediate_size,
-            is_expert=True,
-            # tp_group=pg_collection.expt_tp,
-        )
+        if moe_intermediate_size == config.ffn_hidden_size:
+            super().__init__(
+                config,
+                mlp_spec,
+                is_expert=is_expert,
+                ffn_hidden_size=moe_intermediate_size,
+                # tp_group=pg_collection.expt_tp,
+            )
+        else:
+            # Local SequentialMLP can still be used here by overriding the ffn_hidden_size
+            # with a deepcopied config.
+            sequential_mlp_config = deepcopy(config)
+            sequential_mlp_config.ffn_hidden_size = moe_intermediate_size
+            super().__init__(
+                sequential_mlp_config,
+                mlp_spec,
+                is_expert=is_expert,
+                ffn_hidden_size=moe_intermediate_size,
+                # tp_group=pg_collection.expt_tp,
+            )

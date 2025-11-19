@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from typing import Optional, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Union
 
 import paddle
 import paddle.distributed as dist
@@ -68,11 +68,15 @@ class MoELayer(nn.Layer):
             "num_moe_experts",
             config.get("n_routed_experts", config.get("moe_num_experts", -1)),
         )
+        self.num_shared_experts = config.get("moe_num_shared_experts", 0)
+        self.moe_shared_expert_intermediate_size = config.get(
+            "moe_shared_expert_intermediate_size",
+            self.moe_intermediate_size * self.num_shared_experts,
+        )
         self.num_experts_per_tok = config.get(
             "moe_router_topk",
             config.get("num_experts_per_tok", config.get("moe_k", -1)),
         )
-        self.num_shared_experts = config.get("moe_num_shared_experts", 0)
         self.expert_activation = config.get(
             "hidden_act", config.get("expert_activation", "silu")
         )
@@ -102,7 +106,7 @@ class MoELayer(nn.Layer):
         self.expert_dropout = config.get("expert_dropout", 0.0)
 
         self._init_expert_parallel()
-        self.gate = StandardMoERouter(
+        self.router = StandardMoERouter(
             config=config, pg_collection=pg_collection
         )
 
@@ -136,7 +140,7 @@ class MoELayer(nn.Layer):
 
         shared_expert_args = deepcopy(expert_args)
         shared_expert_args["moe_intermediate_size"] = (
-            self.moe_intermediate_size * self.num_shared_experts
+            self.moe_shared_expert_intermediate_size
         )
         shared_expert_args["is_expert"] = False
         if self.num_shared_experts > 0:
@@ -276,7 +280,7 @@ class MoELayer(nn.Layer):
             priorities,
             aux_loss,
             z_loss,
-        ) = self.gate(hidden_states)
+        ) = self.router(hidden_states)
         # topk_weights, topk_indices will be used in AllToAllMoECommunication
         # gates_masked, mask will be used in DeepEPMoECommunication
         # capacity, priorities are not used currently
@@ -310,8 +314,8 @@ class MoELayer(nn.Layer):
             output = AddAuxiliaryLoss.apply(output, aux_loss)
 
         if self.shared_experts is not None:
-            shared_output = self.shared_experts(residuals)
-            output = output + shared_output
+            shared_output = self.shared_experts(residuals)[0]
+            output = output.unsqueeze(1) + shared_output
 
         output = output.reshape(orig_shape)
 

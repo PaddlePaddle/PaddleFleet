@@ -16,7 +16,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import paddle
 import paddle.distributed as dist
@@ -37,7 +37,7 @@ class StandardMoERouter(nn.Layer):
     ):
         super(StandardMoERouter, self).__init__()
 
-        self.expert_hidden_size = config["hidden_size"]
+        self.hidden_size = config["hidden_size"]
         self.num_experts = config.get(
             "num_moe_experts",
             config.get("n_routed_experts", config.get("moe_num_experts", -1)),
@@ -106,13 +106,13 @@ class StandardMoERouter(nn.Layer):
         # According to the shape of gate weights in model checkpoint
         if not self.transpose_gate_weight:
             self.weight = paddle.create_parameter(
-                shape=[self.expert_hidden_size, self.num_experts],
+                shape=[self.hidden_size, self.num_experts],
                 dtype="float32",
                 default_initializer=paddle.nn.initializer.Uniform(),
             )
         else:
             self.weight = paddle.create_parameter(
-                shape=[self.num_experts, self.expert_hidden_size],
+                shape=[self.num_experts, self.hidden_size],
                 dtype="float32",
                 default_initializer=paddle.nn.initializer.Uniform(),
             )
@@ -504,7 +504,7 @@ class StandardMoERouter(nn.Layer):
 
     def forward(
         self,
-        gates: paddle.Tensor,
+        hidden_states: paddle.Tensor,
     ) -> Tuple[
         int,
         paddle.Tensor,
@@ -522,7 +522,7 @@ class StandardMoERouter(nn.Layer):
             token_priority,
             l_aux,
             l_zloss,
-        ) = self.topkgating(gates)
+        ) = self.topkgating(hidden_states)
         exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
         if self.topk_method == "noaux_tc":
             with paddle.no_grad():
@@ -540,7 +540,7 @@ class StandardMoERouter(nn.Layer):
 
     def topkgating(
         self,
-        gates: paddle.Tensor,
+        hidden_states: paddle.Tensor,
     ) -> Tuple[
         int,
         paddle.Tensor,
@@ -551,21 +551,22 @@ class StandardMoERouter(nn.Layer):
     ]:
         """Implements TopKGating on logits."""
 
-        if len(gates.shape) == 3:
-            batch_size, seq_len, d_model = gates.shape
-            gates = gates.reshape([-1, d_model])
-        elif len(gates.shape) == 2:
-            batch_size_seq_len, d_model = gates.shape
-
+        if len(hidden_states.shape) == 3:
+            batch_size, seq_len, d_model = hidden_states.shape
+            hidden_states = hidden_states.reshape([-1, d_model])
+        elif len(hidden_states.shape) == 2:
+            batch_size_seq_len, d_model = hidden_states.shape
         with paddle.amp.auto_cast(False):
-            gates = gates.cast(self.weight.dtype)
+            hidden_states = hidden_states.cast(self.weight.dtype)
+
             if not self.transpose_gate_weight:
                 logits = F.linear(
-                    gates.cast("float32"), self.weight.cast("float32")
+                    hidden_states.cast("float32"), self.weight.cast("float32")
                 )
             else:
                 logits = F.linear(
-                    gates.cast("float32"), self.weight.cast("float32").t()
+                    hidden_states.cast("float32"),
+                    self.weight.cast("float32").t(),
                 )
             gates = self.gate_score_func(logits=logits)
             gates = gates.cast(paddle.float32)
