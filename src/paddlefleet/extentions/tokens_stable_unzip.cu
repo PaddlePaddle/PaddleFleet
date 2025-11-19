@@ -30,8 +30,8 @@ static paddle::DataType TransToDataType(int64_t dtype) {
   }
 }
 
-#define CUMSUM_BLOCK_SIZE 48  
-#define CUMSUM_INVALID_TAG -1 
+#define CUMSUM_BLOCK_SIZE 48
+#define CUMSUM_INVALID_TAG -1
 
 template <int MAX_NUM_EXPERTS>
 struct __align__(16) expert_base_offset {
@@ -40,7 +40,7 @@ struct __align__(16) expert_base_offset {
 
 
 // Multi-stage algorithm: controls the number of rows processed per block to trade off overhead.
-// First, parse the routemap to update the count of tokens received by the current expert, 
+// First, parse the routemap to update the count of tokens received by the current expert,
 // then check the prefix sum from the previous block and update it for the next block.
 // Subsequently, once the destination row indices are obtained, start data transfer immediately until the task is fully completed.
 template <typename X_T,
@@ -74,7 +74,7 @@ __global__ void tokens_unzip_stable_kernel(
     cumsum_offset[i] =
         (blockIdx.x == 0)
             ? 0
-            : CUMSUM_INVALID_TAG;  
+            : CUMSUM_INVALID_TAG;
     local_expert_offsets[i] = expert_base_offset.data[i];
     local_cumsum[i] = 0;
   }
@@ -83,7 +83,7 @@ __global__ void tokens_unzip_stable_kernel(
   __shared__ probs_T
       shared_expert_probmap[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
 
-  
+
   if (threadIdx.x == 0) [[unlikely]] {
     int local_expert_rowmap[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
     probs_T local_expert_probs[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
@@ -92,7 +92,7 @@ __global__ void tokens_unzip_stable_kernel(
 #pragma unroll
       for (int j = 0; j < num_experts; j++) {
         local_expert_rowmap[i][j] =
-            -1;  
+            -1;
         local_expert_probs[i][j] = (probs_T)0;
       }
     }
@@ -124,7 +124,7 @@ __global__ void tokens_unzip_stable_kernel(
       const int proposed_offset = cumsum_offset[i] + local_cumsum[i];
       global_expertwise_block_cumsum[(blockIdx.x + 1) * num_experts + i] =
           proposed_offset;
-    } 
+    }
 
 
 #pragma unroll
@@ -139,8 +139,8 @@ __global__ void tokens_unzip_stable_kernel(
         shared_expert_probmap[i][j] = local_expert_probs[i][j];
       }
     }
-  } 
-  __syncthreads();  
+  }
+  __syncthreads();
 
   for (int row = block_row_base; row < block_row_base + CUMSUM_BLOCK_SIZE;
        row++) {
@@ -324,11 +324,11 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
         const int output_rows = tokens_cumulated;
         const int topk_calculated = expert_routemap_topk.shape()[1];
 
- 
+
         if (XScale && fill_x) {
           XScale_unzipped = paddle::empty(
               {output_rows, quanted_cols}, XScale->dtype(), XScale->place());
-        } else { 
+        } else {
           XScale_unzipped =
               paddle::empty({0}, paddle::DataType::FLOAT32, X.place());
         }
