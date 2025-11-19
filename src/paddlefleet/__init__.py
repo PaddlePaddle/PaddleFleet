@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import parallel_state as parallel_state, training as training
+from paddlefleet import parallel_state as parallel_state, training as training
+
 from .package_info import (
     __contact_emails__,
     __contact_names__,

@@ -79,9 +79,8 @@ jobs:
 
       - name: Clone PaddleFleet
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
-          set -e
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
@@ -101,13 +100,16 @@ jobs:
       - name: Single card test
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source $HOME/.local/bin/env
           pwd
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
-
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
+          export UV_HTTP_TIMEOUT=300
+          uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda126-Cudnn95-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           bash ci/single_card_test.sh
           single_card_exit_code=$?
           ls -a /paddle/coveragedata/
@@ -125,12 +127,13 @@ jobs:
       - name: Single card Coverage Upload to BOS
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
-
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
@@ -190,9 +193,8 @@ jobs:
 
       - name: Clone PaddleFleet
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
-          set -e
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
@@ -212,12 +214,15 @@ jobs:
       - name: Multi-card test
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
-
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
+          export UV_HTTP_TIMEOUT=300
+          uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
           ls -a /paddle/coveragedata/
@@ -236,12 +241,13 @@ jobs:
       - name: Multi-card Coverage Upload to BOS
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
-
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
