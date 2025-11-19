@@ -30,8 +30,8 @@ static paddle::DataType TransToDataType(int64_t dtype) {
   }
 }
 
-#define CUMSUM_BLOCK_SIZE 48  // cumsum开销和并行度之间的tradeoff的结果，勿动
-#define CUMSUM_INVALID_TAG -1  // 用于标记无效的cumsum，尝试过-114514但失败了
+#define CUMSUM_BLOCK_SIZE 48  
+#define CUMSUM_INVALID_TAG -1 
 
 template <int MAX_NUM_EXPERTS>
 struct __align__(16) expert_base_offset {
@@ -39,9 +39,10 @@ struct __align__(16) expert_base_offset {
 };
 
 
-// 多阶段算法，控制每block处理的行数来权衡额外开销
-//  首先解析routemap来更新专家当前所收到的token数，然后check前一个block给的前缀和并更新给下一个block
-//  随后，目的行号的信息已获取，立即开始搬运工作，直至任务完全完成
+// Multi-stage algorithm: controls the number of rows processed per block to trade off overhead.
+// First, parse the routemap to update the count of tokens received by the current expert, 
+// then check the prefix sum from the previous block and update it for the next block.
+// Subsequently, once the destination row indices are obtained, start data transfer immediately until the task is fully completed.
 template <typename X_T,
           typename routemap_T,
           typename probs_T,
@@ -73,7 +74,7 @@ __global__ void tokens_unzip_stable_kernel(
     cumsum_offset[i] =
         (blockIdx.x == 0)
             ? 0
-            : CUMSUM_INVALID_TAG;  // 除了第0个block，其他的都以非法值初始化,因为atomic忙等要用
+            : CUMSUM_INVALID_TAG;  
     local_expert_offsets[i] = expert_base_offset.data[i];
     local_cumsum[i] = 0;
   }
@@ -82,7 +83,7 @@ __global__ void tokens_unzip_stable_kernel(
   __shared__ probs_T
       shared_expert_probmap[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
 
-  // --------------------- thread0 单线程任务传递 -------------------------
+  
   if (threadIdx.x == 0) [[unlikely]] {
     int local_expert_rowmap[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
     probs_T local_expert_probs[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
@@ -91,11 +92,11 @@ __global__ void tokens_unzip_stable_kernel(
 #pragma unroll
       for (int j = 0; j < num_experts; j++) {
         local_expert_rowmap[i][j] =
-            -1;  // 以非法值初始化，方便后续shared mem写入
+            -1;  
         local_expert_probs[i][j] = (probs_T)0;
       }
     }
-    // 将乱序访存限制在寄存器级别，后续shared_mem规整写入
+
     for (int row = block_row_base; row < block_row_base + CUMSUM_BLOCK_SIZE;
          row++) {
       if (row >= total_zipped_tokens_num) break;
@@ -110,7 +111,7 @@ __global__ void tokens_unzip_stable_kernel(
         local_cumsum[expert] += 1;
       }
     }
-// -------------------------- 块间通信逻辑 -----------------------------
+
 #pragma unroll
     for (int i = 0; i < num_experts; i++) {
       if (blockIdx.x != 0) [[likely]] {
@@ -123,9 +124,9 @@ __global__ void tokens_unzip_stable_kernel(
       const int proposed_offset = cumsum_offset[i] + local_cumsum[i];
       global_expertwise_block_cumsum[(blockIdx.x + 1) * num_experts + i] =
           proposed_offset;
-    }  // 至此，给下一个block的cumsum已经更新完毕，下一个block可以开始cumsum的计算了
+    } 
 
-// -------------------------- 块内通信逻辑 -----------------------------
+
 #pragma unroll
     for (int i = 0; i < CUMSUM_BLOCK_SIZE; i++) {
 #pragma unroll
@@ -138,9 +139,9 @@ __global__ void tokens_unzip_stable_kernel(
         shared_expert_probmap[i][j] = local_expert_probs[i][j];
       }
     }
-  }  // 至此，本线程块内的shared_mem已经规整完毕，接下来是向量化的数据搬运
-  __syncthreads();  // 其余线程等到了thread0，工作安排在shared_mem上
-  // ------------------------- 所有block内线程 -------------------------
+  } 
+  __syncthreads();  
+
   for (int row = block_row_base; row < block_row_base + CUMSUM_BLOCK_SIZE;
        row++) {
     if (row >= total_zipped_tokens_num) return;
@@ -152,7 +153,7 @@ __global__ void tokens_unzip_stable_kernel(
         zipped_expertwise_rowmap[row * num_experts + expert] = unzipped_row_idx;
       }
       if (unzipped_row_idx == -1) continue;
-      // 更新三个核心数据结构
+
       if (threadIdx.x == 0) {
         probs_unzipped[unzipped_row_idx] =
             shared_expert_probmap[internal_row][expert];
@@ -198,11 +199,10 @@ void dispatch_tokens_unzip_stable(
 
   if (grid.x <= 0) return;
 
-// 定义类型获取宏
 #define DTYPE_CASE(dtype, type) dtype == paddle::DataType::type
 #define GET_DATA(tensor, type) tensor.data<type>()
 
-// 分发处理不同的类型组合
+
 #define DISPATCH_CASE_IMPL(TOKEN_T, PROB_T, INT_T, HAS_SCALE, FILL_X) \
   do {                                                                \
     auto kernel = tokens_unzip_stable_kernel<TOKEN_T,                 \
@@ -260,7 +260,7 @@ void dispatch_tokens_unzip_stable(
     }                                                           \
   } while (0)
 
-  // 可扩展：根据整型类型控制派发，未来可支持int8，但int64不行，因为下标开销太重了，建议在外面直接cast到int32
+
   if (DTYPE_CASE(zipped_expertwise_rowmap.dtype(), INT32)) {
     HANDLE_PROB_TYPE(int);
   }
@@ -284,7 +284,7 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
     const std::vector<int> &tokens_per_expert,
     const int padding_multiplex,
     const bool fill_x) {
-  // --------------------- 输入检查与解析 --------------------
+
   PD_CHECK(X.dtype() == paddle::DataType::BFLOAT16 ||
            X.dtype() == paddle::DataType::FLOAT8_E4M3FN);
   PD_CHECK(expert_routemap_topk.dtype() == paddle::DataType::INT32);
@@ -293,8 +293,8 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
   if (XScale) {
     PD_CHECK(XScale->dtype() == paddle::DataType::FLOAT32);
   }
-  const int rows = X.shape()[0];  // 一般为seqlen
-  const int cols = X.shape()[1];  // 一般为7168
+  const int rows = X.shape()[0];
+  const int cols = X.shape()[1];
   const int quanted_cols = (XScale) ? XScale->shape()[1] : 0;
   /*
   const int max_tokens_per_expert =
@@ -324,11 +324,11 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
         const int output_rows = tokens_cumulated;
         const int topk_calculated = expert_routemap_topk.shape()[1];
 
-        // FP8 scale unziped缓冲区分配
+ 
         if (XScale && fill_x) {
           XScale_unzipped = paddle::empty(
               {output_rows, quanted_cols}, XScale->dtype(), XScale->place());
-        } else {  // 让输出时不报错，但实际不会用到
+        } else { 
           XScale_unzipped =
               paddle::empty({0}, paddle::DataType::FLOAT32, X.place());
         }
@@ -343,7 +343,7 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
         token_prob_unzipped = paddle::empty(
             {output_rows}, expert_prob_topk.dtype(), expert_prob_topk.place());
 
-        // ------------------------ 缓冲区初始化（适配padding）----------------
+
         if (fill_x) {
           if (X.dtype() == paddle::DataType::BFLOAT16) {
             auto X_unzipped_ptr =
@@ -384,8 +384,7 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
                           sizeof(float) * output_rows,
                           token_prob_unzipped.stream());
         }
-        // ------------ 前缀和辅助数组相关逻辑，“推”式block通信
-        // -------------------
+
         const int cumsum_blocknum =
             (rows + CUMSUM_BLOCK_SIZE - 1) / CUMSUM_BLOCK_SIZE;
         auto global_expertwise_block_cumsum =
@@ -394,7 +393,7 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
                           X.place());
         auto global_expertwise_block_cumsum_ptr = reinterpret_cast<void *>(
             global_expertwise_block_cumsum.data<int>());
-        // 设置为非法值CUMSUM_INVALID_TAG，用于线程块等待时使用
+
         cudaMemsetAsync(global_expertwise_block_cumsum_ptr,
                         CUMSUM_INVALID_TAG,
                         sizeof(int) * (cumsum_blocknum + 1) * num_experts,
