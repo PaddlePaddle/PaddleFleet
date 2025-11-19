@@ -81,13 +81,13 @@ for file in $files; do
             check_approval 1 "${APPROVER_LIST[@]}"
         fi
         if git diff upstream/$BRANCH -- "$file" | grep -E '^\+[^\+]' | grep -i -q 'nemo'; then
-            echo_line="You must be approved by one of ${CHECKNEMO_APPROVERS} for changes in ${file} which include \"nemo\" in added lines.\n"
-            APPROVER_LIST=(${CHECKNEMO_APPROVERS})
+            echo_line="You must be approved by one of ${CHECKTORCH_APPROVERS} for changes in ${file} which include \"nemo\" in added lines.\n"
+            APPROVER_LIST=(${CHECKTORCH_APPROVERS})
             check_approval 1 "${APPROVER_LIST[@]}"
         fi
         if git diff upstream/$BRANCH -- "$file" | grep -E '^\+[^\+]' | grep -i -q 'megatron'; then
-            echo_line="You must be approved by one of ${CHECKMEGATRON_APPROVERS} for changes in ${file} which include \"megatron\" in added lines.\n"
-            APPROVER_LIST=(${CHECKMEGATRON_APPROVERS})
+            echo_line="You must be approved by one of ${CHECKTORCH_APPROVERS} for changes in ${file} which include \"megatron\" in added lines.\n"
+            APPROVER_LIST=(${CHECKTORCH_APPROVERS})
             check_approval 1 "${APPROVER_LIST[@]}"
         fi
         if [ "$file" = "pyproject.toml" ]; then
