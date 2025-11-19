@@ -9,7 +9,7 @@ resolution-markers = [
 [[package]]
 name = "anyio"
 version = "4.11.0"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
     { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
     { name = "idna" },
@@ -17,7 +17,7 @@ dependencies = [
     { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/anyio/anyio-4.11.0-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/anyio/anyio-4.11.0-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -37,10 +37,9 @@ wheels = [
 [[package]]
 name = "certifi"
 version = "2025.11.12"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a2/8c/58f469717fa48465e4a50c014a0400602d3c437d7c0c468e17ada824da3a/certifi-2025.11.12.tar.gz", hash = "sha256:d8ab5478f2ecd78af242878415affce761ca6bc54a22a27e026d7c25357c3316", size = 160538, upload-time = "2025-11-12T02:54:51.517Z" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/70/7d/9bc192684cea499815ff478dfcdc13835ddf401365057044fb721ec6bddb/certifi-2025.11.12-py3-none-any.whl", hash = "sha256:97de8790030bbd5c2d96b7ec782fc2f7820ef8dba6db909ccf95449f2d062d4b", size = 159438, upload-time = "2025-11-12T02:54:49.735Z" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/certifi/certifi-2025.11.12-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -60,7 +59,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }, marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/54/eb9bfc647b19f2009dd5c7f5ec51c4e6ca831725f1aea7a993034f483147/contourpy-1.3.2.tar.gz", hash = "sha256:b6945942715a034c671b7fc54f9588126b0b8bf23db2696e3ca8328f3ff0ab54", size = 13466130, upload-time = "2025-04-15T17:47:53.79Z" }
 wheels = [
@@ -318,12 +317,12 @@ wheels = [
 [[package]]
 name = "exceptiongroup"
 version = "1.3.0"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/exceptiongroup/exceptiongroup-1.3.0-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/exceptiongroup/exceptiongroup-1.3.0-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -395,27 +394,27 @@ wheels = [
 [[package]]
 name = "h11"
 version = "0.16.0"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/h11/h11-0.16.0-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/h11/h11-0.16.0-py3-none-any.whl" },
 ]
 
 [[package]]
 name = "httpcore"
 version = "1.0.9"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
     { name = "certifi" },
     { name = "h11" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/httpcore/httpcore-1.0.9-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/httpcore/httpcore-1.0.9-py3-none-any.whl" },
 ]
 
 [[package]]
 name = "httpx"
 version = "0.28.1"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
     { name = "anyio" },
     { name = "certifi" },
@@ -423,15 +422,15 @@ dependencies = [
     { name = "idna" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/httpx/httpx-0.28.1-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/httpx/httpx-0.28.1-py3-none-any.whl" },
 ]
 
 [[package]]
 name = "idna"
 version = "3.11"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/idna/idna-3.11-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/idna/idna-3.11-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -561,7 +560,7 @@ dependencies = [
     { name = "cycler" },
     { name = "fonttools" },
     { name = "kiwisolver" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "packaging" },
     { name = "pillow" },
@@ -629,21 +628,20 @@ wheels = [
 [[package]]
 name = "networkx"
 version = "3.4.2"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/networkx/networkx-3.4.2-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/networkx/networkx-3.4.2-py3-none-any.whl" },
 ]
 
 [[package]]
 name = "numpy"
 version = "2.2.6"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 resolution-markers = [
     "python_full_version < '3.11'",
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/numpy/numpy-2.2.6-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/numpy/numpy-2.2.6-cp310-cp310-win_amd64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/numpy/numpy-2.2.6-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" },
 ]
 
 [[package]]
@@ -733,147 +731,147 @@ wheels = [
 [[package]]
 name = "nvidia-cublas-cu12"
 version = "12.9.0.13"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cublas-cu12/nvidia_cublas_cu12-12.9.0.13-py3-none-manylinux_2_27_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cublas-cu12/nvidia_cublas_cu12-12.9.0.13-py3-none-manylinux_2_27_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cuda-cccl-cu12"
 version = "12.9.27"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cuda-cccl-cu12/nvidia_cuda_cccl_cu12-12.9.27-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cuda-cccl-cu12/nvidia_cuda_cccl_cu12-12.9.27-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cuda-cupti-cu12"
 version = "12.9.19"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cuda-cupti-cu12/nvidia_cuda_cupti_cu12-12.9.19-py3-none-manylinux_2_25_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cuda-cupti-cu12/nvidia_cuda_cupti_cu12-12.9.19-py3-none-manylinux_2_25_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cuda-nvrtc-cu12"
 version = "12.9.41"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cuda-nvrtc-cu12/nvidia_cuda_nvrtc_cu12-12.9.41-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cuda-nvrtc-cu12/nvidia_cuda_nvrtc_cu12-12.9.41-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cuda-runtime-cu12"
 version = "12.9.37"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cuda-runtime-cu12/nvidia_cuda_runtime_cu12-12.9.37-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cuda-runtime-cu12/nvidia_cuda_runtime_cu12-12.9.37-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cudnn-cu12"
 version = "9.9.0.52"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
     { name = "nvidia-cublas-cu12" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cudnn-cu12/nvidia_cudnn_cu12-9.9.0.52-py3-none-manylinux_2_27_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cudnn-cu12/nvidia_cudnn_cu12-9.9.0.52-py3-none-manylinux_2_27_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cufft-cu12"
 version = "11.4.0.6"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
     { name = "nvidia-nvjitlink-cu12" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cufft-cu12/nvidia_cufft_cu12-11.4.0.6-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cufft-cu12/nvidia_cufft_cu12-11.4.0.6-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cufile-cu12"
 version = "1.14.0.30"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cufile-cu12/nvidia_cufile_cu12-1.14.0.30-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cufile-cu12/nvidia_cufile_cu12-1.14.0.30-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-curand-cu12"
 version = "10.3.10.19"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-curand-cu12/nvidia_curand_cu12-10.3.10.19-py3-none-manylinux_2_27_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-curand-cu12/nvidia_curand_cu12-10.3.10.19-py3-none-manylinux_2_27_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cusolver-cu12"
 version = "11.7.4.40"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
     { name = "nvidia-cublas-cu12" },
     { name = "nvidia-cusparse-cu12" },
     { name = "nvidia-nvjitlink-cu12" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cusolver-cu12/nvidia_cusolver_cu12-11.7.4.40-py3-none-manylinux_2_27_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cusolver-cu12/nvidia_cusolver_cu12-11.7.4.40-py3-none-manylinux_2_27_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cusparse-cu12"
 version = "12.5.9.5"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
     { name = "nvidia-nvjitlink-cu12" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cusparse-cu12/nvidia_cusparse_cu12-12.5.9.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cusparse-cu12/nvidia_cusparse_cu12-12.5.9.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-cusparselt-cu12"
 version = "0.7.1"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-cusparselt-cu12/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-cusparselt-cu12/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-nccl-cu12"
 version = "2.27.3"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-nccl-cu12/nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-nccl-cu12/nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-nvjitlink-cu12"
 version = "12.9.41"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-nvjitlink-cu12/nvidia_nvjitlink_cu12-12.9.41-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-nvjitlink-cu12/nvidia_nvjitlink_cu12-12.9.41-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl" },
 ]
 
 [[package]]
 name = "nvidia-nvtx-cu12"
 version = "12.9.19"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/nvidia-nvtx-cu12/nvidia_nvtx_cu12-12.9.19-py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/nvidia-nvtx-cu12/nvidia_nvtx_cu12-12.9.19-py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl" },
 ]
 
 [[package]]
 name = "opt-einsum"
 version = "3.3.0"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/opt-einsum/opt_einsum-3.3.0-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/opt-einsum/opt_einsum-3.3.0-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -889,12 +887,13 @@ wheels = [
 name = "paddlefleet"
 source = { editable = "." }
 dependencies = [
-    { name = "paddlepaddle-gpu", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "paddlepaddle-gpu" },
 ]
 
 [package.dev-dependencies]
 build = [
     { name = "packaging" },
+    { name = "pip" },
     { name = "setuptools" },
 ]
 ci = [
@@ -912,12 +911,13 @@ test = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "paddlepaddle-gpu", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==3.2.2" }]
+requires-dist = [{ name = "paddlepaddle-gpu", specifier = ">=3.3.0.dev0" }]
 
 [package.metadata.requires-dev]
 build = [
     { name = "packaging", specifier = ">=24.2" },
-    { name = "setuptools", specifier = "<80.0.0" },
+    { name = "pip" },
+    { name = "setuptools", specifier = ">=61.0.0" },
 ]
 ci = [
     { name = "bce-python-sdk" },
@@ -933,12 +933,12 @@ test = [
 
 [[package]]
 name = "paddlepaddle-gpu"
-version = "3.2.2"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+version = "3.3.0.dev20251119"
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 dependencies = [
     { name = "httpx" },
     { name = "networkx" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "nvidia-cublas-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "nvidia-cuda-cccl-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -962,21 +962,24 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.2.2-cp310-cp310-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.2.2-cp311-cp311-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.2.2-cp312-cp312-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.2.2-cp313-cp313-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0.dev20251119-cp310-cp310-linux_x86_64.whl" },
 ]
 
 [[package]]
 name = "pillow"
 version = "12.0.0"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/pillow/pillow-12.0.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/pillow/pillow-12.0.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/pillow/pillow-12.0.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/pillow/pillow-12.0.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/pillow/pillow-12.0.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
+]
+
+[[package]]
+name = "pip"
+version = "25.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fe/6e/74a3f0179a4a73a53d66ce57fdb4de0080a8baa1de0063de206d6167acc2/pip-25.3.tar.gz", hash = "sha256:8d0538dbbd7babbd207f261ed969c65de439f6bc9e5dbd3b3b9a77f25d95f343", size = 1803014, upload-time = "2025-10-25T00:55:41.394Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/3c/d717024885424591d5376220b5e836c2d5293ce2011523c9de23ff7bf068/pip-25.3-py3-none-any.whl", hash = "sha256:9655943313a94722b7774661c21049070f6bbb0a1516bf02f7c8d5d9201514cd", size = 1778622, upload-time = "2025-10-25T00:55:39.247Z" },
 ]
 
 [[package]]
@@ -991,12 +994,9 @@ wheels = [
 [[package]]
 name = "protobuf"
 version = "6.33.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0a/03/a1440979a3f74f16cab3b75b0da1a1a7f922d56a8ddea96092391998edc0/protobuf-6.33.1.tar.gz", hash = "sha256:97f65757e8d09870de6fd973aeddb92f85435607235d20b2dfed93405d00c85b", size = 443432, upload-time = "2025-11-13T16:44:18.895Z" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8e/d0/d796e419e2ec93d2f3fa44888861c3f88f722cde02b7c3488fcc6a166820/protobuf-6.33.1-cp39-abi3-manylinux2014_s390x.whl", hash = "sha256:0f4cf01222c0d959c2b399142deb526de420be8236f22c71356e2a544e153c53", size = 339161, upload-time = "2025-11-13T16:44:12.778Z" },
-    { url = "https://files.pythonhosted.org/packages/1d/2a/3c5f05a4af06649547027d288747f68525755de692a26a7720dced3652c0/protobuf-6.33.1-cp39-abi3-manylinux2014_x86_64.whl", hash = "sha256:8fd7d5e0eb08cd5b87fd3df49bc193f5cfd778701f47e11d127d0afc6c39f1d1", size = 323171, upload-time = "2025-11-13T16:44:14.035Z" },
-    { url = "https://files.pythonhosted.org/packages/08/b4/46310463b4f6ceef310f8348786f3cff181cea671578e3d9743ba61a459e/protobuf-6.33.1-py3-none-any.whl", hash = "sha256:d595a9fd694fdeb061a62fbe10eb039cc1e444df81ec9bb70c7fc59ebcb1eafa", size = 170477, upload-time = "2025-11-13T16:44:17.633Z" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/protobuf/protobuf-6.33.1-cp39-abi3-manylinux2014_x86_64.whl" },
 ]
 
 [[package]]
@@ -1175,9 +1175,9 @@ wheels = [
 [[package]]
 name = "safetensors"
 version = "0.6.2"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/safetensors/safetensors-0.6.2-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/safetensors/safetensors-0.6.2-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" },
 ]
 
 [[package]]
@@ -1201,9 +1201,9 @@ wheels = [
 [[package]]
 name = "sniffio"
 version = "1.3.1"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/sniffio/sniffio-1.3.1-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/sniffio/sniffio-1.3.1-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -1258,9 +1258,9 @@ wheels = [
 [[package]]
 name = "typing-extensions"
 version = "4.15.0"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/stable/cu129/" }
+source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cu129/typing-extensions/typing_extensions-4.15.0-py3-none-any.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129_debug/typing-extensions/typing_extensions-4.15.0-py3-none-any.whl" },
 ]
 
 [[package]]

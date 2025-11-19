@@ -13,7 +13,12 @@
 # limitations under the License.
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+
+import paddle
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,6 +69,11 @@ class GPTModelEstimator:
 
     # MTP
     mtp_num_layers: int | None = None
+
+    # Training dtypes
+    bf16: bool = False
+    fp16: bool = False
+    fp8: bool = False
 
     def estimate_num_parameters(self) -> tuple[int, int]:
         """Estimate total number of model parameters."""
@@ -354,3 +364,81 @@ class GPTModelEstimator:
     def estimate_flops_per_step(self, batch_size: int) -> float:
         """Estimate FLOPs per training step (batch_size tokens)."""
         return batch_size * self.seq_length * self.estimate_flops_per_token()
+
+    def estimate_mfu(self, tokens_per_second_per_gpu: float) -> float:
+        """Estimate MFU (Model FLOPs Utilization)"""
+        device_peak_tflops = self._get_device_peak_tflops()
+        if device_peak_tflops is None:
+            return 0
+        return (
+            tokens_per_second_per_gpu
+            * self.estimate_flops_per_token()
+            / 1e12  # convert to TFLOPS
+            / device_peak_tflops
+        )
+
+    def _get_device_peak_tflops(self):
+        """Get the peak FLOPS on the current device"""
+        if not paddle.device.is_compiled_with_cuda():
+            return None
+
+        device_name = paddle.device.cuda.get_device_name().upper()
+        dtype_key = "FP32_TFLOPS"
+        if self.bf16:
+            dtype_key = "BF16_TFLOPS"
+        elif self.fp16:
+            dtype_key = "FP16_TFLOPS"
+        elif self.fp8:
+            dtype_key = "FP8_TFLOPS"
+
+        for spec in GPU_SPECIFICATIONS_REGISTRATION:
+            if any(n in device_name for n in spec.names):
+                return getattr(spec, dtype_key, None)
+        logger.warning(
+            f"{device_name} is not supported yet. "
+            "Please register it in GPU_SPECIFICATIONS_REGISTRATION."
+        )
+        return None
+
+
+@dataclass
+class GPUSpecifications:
+    """GPU specifications used for estimating mfu"""
+
+    names: list[str]
+    FP32_TFLOPS: float
+    BF16_TFLOPS: float
+    FP16_TFLOPS: float
+    FP8_TFLOPS: float | None
+
+
+GPU_SPECIFICATIONS_REGISTRATION = [
+    GPUSpecifications(
+        names=["A100", "A800"],
+        FP32_TFLOPS=19.5,
+        BF16_TFLOPS=312,
+        FP16_TFLOPS=312,
+        FP8_TFLOPS=None,
+    ),
+    GPUSpecifications(
+        names=["H100", "H200", "H800"],
+        FP32_TFLOPS=67,
+        BF16_TFLOPS=989,
+        FP16_TFLOPS=989,
+        FP8_TFLOPS=1979,
+    ),
+    GPUSpecifications(
+        names=["B200", "B300"],
+        FP32_TFLOPS=75,
+        BF16_TFLOPS=2200,
+        FP16_TFLOPS=2200,
+        FP8_TFLOPS=4500,
+    ),
+    GPUSpecifications(
+        names=["GB200", "GB300"],
+        FP32_TFLOPS=80,
+        BF16_TFLOPS=2500,
+        FP16_TFLOPS=2500,
+        FP8_TFLOPS=5000,
+    ),
+]

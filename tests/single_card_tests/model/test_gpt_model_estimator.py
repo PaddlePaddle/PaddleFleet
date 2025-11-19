@@ -44,6 +44,7 @@ class TestEstimatorForGLM45Air(unittest.TestCase):
             moe_shared_expert_intermediate_size=1408,
             moe_topk=8,
             mtp_num_layers=1,  # num_nextn_predict_layers: 1
+            bf16=True,
         )
 
     def test_estimator(self):
@@ -55,15 +56,19 @@ class TestEstimatorForGLM45Air(unittest.TestCase):
         gbs = 1
         flops_per_step = self.estimator.estimate_flops_per_step(gbs)
 
-        print(f"\n{'=' * 110}")
+        tokens_per_second_per_gpu = 1000
+        mfu = self.estimator.estimate_mfu(tokens_per_second_per_gpu)
+
+        print(f"\n{'=' * 150}")
         print(
-            f"{self.model_name:<18} | "
+            f"{self.model_name:<14} | "
             f"Params: {total_params / 1e9:7.2f}B | "
-            f"Act: {activated_params / 1e9:7.2f}B | "
-            f" {flops_per_token / 1e9:8.2f} GFLOPs/Token |"
-            f" (gbs={gbs}) {flops_per_step / 1e12:8.2f} TFLOPs/Step"
+            f"Act: {activated_params / 1e9:6.2f}B | "
+            f"{flops_per_token / 1e9:8.2f} GFLOPs/Token | "
+            f"{flops_per_step / 1e12:8.2f} TFLOPs/Step (gbs={gbs}) | "
+            f"MFU: {mfu * 100:.2f}% (tokens_per_second_per_gpu={tokens_per_second_per_gpu})"
         )
-        print(f"{'=' * 110}")
+        print(f"{'=' * 150}")
 
 
 class TestEstimatorForDeepSeekV3(TestEstimatorForGLM45Air):
@@ -94,6 +99,7 @@ class TestEstimatorForDeepSeekV3(TestEstimatorForGLM45Air):
             moe_shared_expert_intermediate_size=2048,
             moe_topk=8,
             mtp_num_layers=1,  # num_nextn_predict_layers: 1
+            fp8=True,
         )
 
 
@@ -120,6 +126,7 @@ class TestEstimatorForQwen3_30BA3B(TestEstimatorForGLM45Air):
             moe_shared_expert_intermediate_size=0,
             moe_topk=8,
             mtp_num_layers=None,
+            fp16=True,
         )
 
 
