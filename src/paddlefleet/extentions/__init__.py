@@ -15,7 +15,6 @@
 try:
     from . import ops
 except ImportError as e:
-    # 打印错误或跳过，以防某些环境没有编译该扩展
     import warnings
 
     warnings.warn(f"Could not import ops extension: {e}")
