@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import paddle
 import paddle.distributed as dist
@@ -44,15 +44,15 @@ from .token_dispatcher import MoEFlexTokenDispatcher
 class MoESublayers:
     """MoE Layer Sublayers spec"""
 
-    mlp_spec: Union[LayerSpec, type] = None  # Used by experts
+    mlp_spec: LayerSpec | type = None  # Used by experts
 
 
 class MoELayer(nn.Layer):
     def __init__(
         self,
         config: TransformerConfig,
-        sublayers: Optional[MoESublayers] = None,
-        pg_collection: Optional[ProcessGroupCollection] = None,
+        sublayers: MoESublayers | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__()
         self.sublayers = sublayers

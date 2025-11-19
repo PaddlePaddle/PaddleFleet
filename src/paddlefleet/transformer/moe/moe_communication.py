@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Tuple
 
 import numpy as np
 import paddle
@@ -40,7 +39,7 @@ class MoECommunicationInterface(ABC):
         hidden_states: paddle.Tensor,
         gates_masked: paddle.Tensor,
         mask: paddle.Tensor,
-    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
         """
         Dispatch and permute input tensors based on the provided mask.
 
@@ -92,7 +91,7 @@ class AllToAllMoECommunication(MoECommunicationInterface, nn.Layer):
         hidden_states: paddle.Tensor,
         gates_masked: paddle.Tensor,
         mask: paddle.Tensor,
-    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
         self.gates_masked = gates_masked
         if self.expert_parallel_degree <= 1:
             return hidden_states

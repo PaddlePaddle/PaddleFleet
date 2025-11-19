@@ -13,12 +13,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING
 
 import paddle
-from paddle.distributed.communication.group import Group
+
+if TYPE_CHECKING:
+    from paddle.distributed.communication.group import Group
 
 from .fused_a2a import fused_combine, fused_dispatch
 from .moe_utils import permute, unpermute
@@ -97,8 +100,8 @@ class _DeepepManager(_DispatchManager):
         self,
         group: Group,
         router_topk: int,
-        num_experts: int = None,
-        num_local_experts: int = None,
+        num_experts: int | None = None,
+        num_local_experts: int | None = None,
     ):
         self.group = group
         self.router_topk = router_topk
@@ -150,7 +153,7 @@ class _DeepepManager(_DispatchManager):
             probs (paddle.Tensor): [num_tokens, topk] token probabilities.
 
         Returns:
-            Tuple[paddle.Tensor, paddle.Tensor]:
+            tuple[paddle.Tensor, paddle.Tensor]:
                 - routing_map: Multihot vector.
                 - probs: Multihot probabilities.
         """
@@ -304,7 +307,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
-    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
         self.hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
 
@@ -320,8 +323,8 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         return global_input_tokens, tokens_per_expert
 
     def token_unpermutation(
-        self, hidden_states: paddle.Tensor, bias: Optional[paddle.Tensor] = None
-    ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor]]:
+        self, hidden_states: paddle.Tensor, bias: paddle.Tensor | None = None
+    ) -> tuple[paddle.Tensor, paddle.Tensor | None]:
         assert bias is None, "Bias is not supported in MoEFlexTokenDispatcher"
         hidden_states = (
             self._comm_manager.get_restored_hidden_states_by_experts(

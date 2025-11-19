@@ -12,27 +12,78 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING
+"""
+MoE (Mixture of Experts) module for PaddleFleet.
 
-import_structure = {
-    "moe_layer": ["MoELayer"],
-    "moe_communication": [
-        "MoECommunicationInterface",
-        "AllToAllMoECommunication",
-        "DeepEPMoECommunication",
-    ],
-    "moe_expert": ["StandardMoEExpert"],
-    "moe_shared_expert": ["StandardMoESharedExpert"],
-    "moe_router": ["StandardMoERouter"],
-}
+This module provides implementations for Mixture of Experts layers,
+including communication mechanisms, routers, experts, and dispatchers.
+"""
 
-if TYPE_CHECKING:
-    from .moe_communication import (
-        AllToAllMoECommunication,
-        DeepEPMoECommunication,
-        MoECommunicationInterface,
-    )
-    from .moe_expert import StandardMLPExpert
-    from .moe_layer import MoELayer
-    from .moe_router import StandardMoERouter
-    from .moe_shared_expert import StandardMoESharedExpert
+# Fused A2A operations
+from .fused_a2a import (
+    CombineNode,
+    DispatchNode,
+    FusedCombine,
+    FusedDispatch,
+    fused_combine,
+    fused_dispatch,
+)
+
+# MoE communication interfaces
+from .moe_communication import (
+    AllToAllMoECommunication,
+    DeepEPMoECommunication,
+    MoECommunicationInterface,
+)
+
+# MoE experts
+from .moe_expert import StandardMLPExpert
+
+# MoE layer and router
+from .moe_layer import MoELayer, MoESublayers
+from .moe_router import StandardMoERouter
+from .moe_shared_expert import StandardMLPSharedExpert
+
+# MoE utilities
+from .moe_utils import (
+    AddAuxiliaryLoss,
+    _AllToAll,
+)
+
+# MoE token dispatcher
+from .token_dispatcher import (
+    MoEFlexTokenDispatcher,
+    MoETokenDispatcher,
+    _DeepepManager,
+    _DispatchManager,
+)
+
+__all__ = [
+    # Fused A2A
+    "FusedDispatch",
+    "FusedCombine",
+    "DispatchNode",
+    "CombineNode",
+    "fused_dispatch",
+    "fused_combine",
+    # Communication
+    "MoECommunicationInterface",
+    "AllToAllMoECommunication",
+    "DeepEPMoECommunication",
+    # Experts
+    "StandardMLPExpert",
+    "StandardMLPSharedExpert",
+    # Layer and sublayers
+    "MoELayer",
+    "MoESublayers",
+    # Router
+    "StandardMoERouter",
+    # Utilities
+    "AddAuxiliaryLoss",
+    "_AllToAll",
+    # Token Dispatcher
+    "MoETokenDispatcher",
+    "MoEFlexTokenDispatcher",
+    "_DispatchManager",
+    "_DeepepManager",
+]

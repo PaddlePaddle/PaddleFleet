@@ -16,7 +16,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import paddle
 import paddle.distributed as dist
@@ -33,9 +33,9 @@ class StandardMoERouter(nn.Layer):
     def __init__(
         self,
         config: TransformerConfig,
-        pg_collection: Optional[ProcessGroupCollection] = None,
+        pg_collection: ProcessGroupCollection | None = None,
     ):
-        super(StandardMoERouter, self).__init__()
+        super().__init__()
 
         self.hidden_size = config["hidden_size"]
         self.num_experts = config.get(
@@ -243,7 +243,7 @@ class StandardMoERouter(nn.Layer):
         else:
             # [B, S, E]
             if len(probs.shape) == 2:
-                probs = probs.reshape([1] + probs.shape)
+                probs = probs.reshape([1, *probs.shape])
             batch_size, local_seq_len, _ = probs.shape
             all_probs = probs
             routing_map = routing_map.reshape([batch_size, local_seq_len, -1])
@@ -386,7 +386,7 @@ class StandardMoERouter(nn.Layer):
 
     def _topk_greedy(
         self, scores: paddle.Tensor, k: int
-    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
         """_summary_
 
         Args:
@@ -394,7 +394,7 @@ class StandardMoERouter(nn.Layer):
             k (int): select the top k experts
 
         Returns:
-            Tuple[paddle.Tensor, paddle.Tensor]: topk_weight, topk_idx
+            tuple[paddle.Tensor, paddle.Tensor]: topk_weight, topk_idx
             topk_weight: [bsz*seq_len, k]
             topk_idx: [bsz*seq_len, k]
         """
@@ -404,7 +404,7 @@ class StandardMoERouter(nn.Layer):
 
     def _topk_group_limited_greedy(
         self, scores: paddle.Tensor, k: int, n_group: int, topk_group: int
-    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
         """_summary_
 
         Args:
@@ -414,7 +414,7 @@ class StandardMoERouter(nn.Layer):
             topk_group (int): the number of groups selected
 
         Returns:
-            Tuple[paddle.Tensor, paddle.Tensor]: topk_weight, topk_idx
+            tuple[paddle.Tensor, paddle.Tensor]: topk_weight, topk_idx
             topk_weight: [bsz*seq_len, k]
             topk_idx: [bsz*seq_len, k]
 
@@ -446,7 +446,7 @@ class StandardMoERouter(nn.Layer):
 
     def _topk_noaux_tc(
         self, scores: paddle.Tensor, k: int, n_group: int, topk_group: int
-    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
         """_summary_
 
         Args:
@@ -456,7 +456,7 @@ class StandardMoERouter(nn.Layer):
             topk_group (int): the number of groups selected
 
         Returns:
-            Tuple[paddle.Tensor, paddle.Tensor]: topk_weight, topk_idx
+            tuple[paddle.Tensor, paddle.Tensor]: topk_weight, topk_idx
             topk_weight: [bsz*seq_len, k]
             topk_idx: [bsz*seq_len, k]
 
@@ -505,7 +505,7 @@ class StandardMoERouter(nn.Layer):
     def forward(
         self,
         hidden_states: paddle.Tensor,
-    ) -> Tuple[
+    ) -> tuple[
         int,
         paddle.Tensor,
         paddle.Tensor,
@@ -541,7 +541,7 @@ class StandardMoERouter(nn.Layer):
     def topkgating(
         self,
         hidden_states: paddle.Tensor,
-    ) -> Tuple[
+    ) -> tuple[
         int,
         paddle.Tensor,
         paddle.Tensor,

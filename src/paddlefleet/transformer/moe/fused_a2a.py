@@ -132,7 +132,7 @@ def fused_dispatch_forward_func(
         allocate_on_comm_stream=allocate_on_comm_stream,
     )
 
-    states = dict()
+    states = {}
     states["dispatched_indices"] = recv_token_indices
     states["tokens_per_expert"] = num_recv_tokens_per_expert_list
     states["handle"] = handle
@@ -314,7 +314,7 @@ if HAVE_DEEP_EP:
         Returns:
             Result of FusedCombine
         """
-        states = dict()
+        states = {}
         states["handle"] = handle
         return FusedCombine.apply(x, group, states, previous_event)
 
@@ -398,7 +398,7 @@ class CombineNode:
         allocate_on_comm_stream=False,
     ):
         """Forward pass of fused combine."""
-        states = dict()
+        states = {}
         states["handle"] = handle
         combined_x = fused_combine_forward_func(
             x,

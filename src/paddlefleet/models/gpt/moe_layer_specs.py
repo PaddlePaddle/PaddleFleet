@@ -1,6 +1,17 @@
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
-
-from typing import Optional
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from __future__ import annotations
 
 from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
 from paddlefleet.transformer.mlp import MLPSublayersSpec
@@ -9,9 +20,9 @@ from paddlefleet.transformer.spec_utils import LayerSpec
 
 
 def get_moe_layer_spec(
-    use_te: Optional[bool] = True,
-    num_experts: Optional[int] = None,
-    moe_grouped_gemm: Optional[bool] = False,
+    use_te: bool | None = True,
+    num_experts: int | None = None,
+    moe_grouped_gemm: bool | None = False,
 ) -> LayerSpec:
     """Helper function to get layer spec for MoE"""
     backend = LocalSpecProvider()
@@ -24,8 +35,8 @@ def get_moe_layer_spec(
 
 def get_moe_layer_spec_for_backend(
     backend: BackendSpecProvider,
-    num_experts: Optional[int] = None,
-    moe_grouped_gemm: Optional[bool] = False,
+    num_experts: int | None = None,
+    moe_grouped_gemm: bool | None = False,
 ) -> LayerSpec:
     """Helper function to get layer spec for MoE"""
     assert num_experts is not None

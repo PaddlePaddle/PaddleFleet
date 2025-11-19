@@ -13,8 +13,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 import paddle
 from paddle import Tensor
@@ -24,13 +25,15 @@ try:
 except ImportError:
     scatter_add_ = None
 import paddle.distributed as dist
-from paddle.distributed.communication.group import Group
+
+if TYPE_CHECKING:
+    from paddle.distributed.communication.group import Group
 
 
 def permute(
     tokens,
     routing_map,
-    num_out_tokens: Optional[int] = None,
+    num_out_tokens: int | None = None,
     drop_and_pad: bool = False,
 ):
     """Permute the tokens and probs based on the mask.
@@ -144,20 +147,20 @@ class _AllToAll(paddle.autograd.PyLayer):
     @staticmethod
     def forward(
         ctx: Any,
-        output_shape: List,
+        output_shape: list,
         input: Tensor,
-        out_split_sizes: List = None,
-        in_split_sizes: List = None,
+        out_split_sizes: list | None = None,
+        in_split_sizes: list | None = None,
         group: Group = None,
     ) -> Tensor:  # type: ignore
         """
         All-to-all communication in the group.
         Args:
             ctx (Any): Context object.
-            output_shape (List): Output shape.
+            output_shape (list): Output shape.
             input (Tensor): Input tensor.
-            out_split_sizes (List): Output split sizes.
-            in_split_sizes (List): Input split sizes.
+            out_split_sizes (list): Output split sizes.
+            in_split_sizes (list): Input split sizes.
             group (Group): The group object.
         Returns:
             Tensor: Output tensor.
@@ -186,14 +189,14 @@ class _AllToAll(paddle.autograd.PyLayer):
         return output
 
     @staticmethod
-    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[Tensor]:
+    def backward(ctx: Any, *grad_output: Tensor) -> tuple[Tensor]:
         """
         Aggregates gradient information from all input tensors into a single tensor.
         Args:
             ctx (Any): The context object used to store information that needs to be passed.
             *grad_output (Tensor): A list of input tensors whose gradients are to be aggregated.
         Returns:
-            Tuple[Tensor]: A tuple containing a tensor that holds the gradients of all input tensors.
+            tuple[Tensor]: A tuple containing a tensor that holds the gradients of all input tensors.
         """
         # return grad_output
         return _AllToAll.apply(
