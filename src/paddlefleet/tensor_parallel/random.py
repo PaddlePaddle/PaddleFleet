@@ -15,9 +15,10 @@
 # Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+from __future__ import annotations
+
 import contextlib
 import logging
-from typing import Optional, Union
 
 import paddle
 
@@ -26,18 +27,14 @@ from ..parallel_state import (
     get_expert_tensor_parallel_rank,
     get_tensor_model_parallel_rank,
 )
-from ..utils import is_te_min_version, safely_set_viewless_tensor_data
-
-from .utils import gather_split_1d_tensor, split_tensor_into_1d_equal_chunks
-
 
 HAVE_TE = False
 
 
 # Default name for the model parallel rng tracker.
-_MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
-_EXPERT_PARALLEL_RNG_TRACKER_NAME = 'expert-parallel-rng'
-_DATA_PARALLEL_RNG_TRACKER_NAME = 'data-parallel-rng'
+_MODEL_PARALLEL_RNG_TRACKER_NAME = "model-parallel-rng"
+_EXPERT_PARALLEL_RNG_TRACKER_NAME = "expert-parallel-rng"
+_DATA_PARALLEL_RNG_TRACKER_NAME = "data-parallel-rng"
 
 
 def _get_cuda_rng_state(
@@ -46,7 +43,7 @@ def _get_cuda_rng_state(
     """Return the random number generator state of the specified GPU.
 
     Arguments:
-        device (int): The device id to retrieve the rng state, 
+        device (int): The device id to retrieve the rng state,
             If None, use current device, specified by ``set_device``
             function.
         clone (bool): Whether to also clone the retrieved RNG state
@@ -60,12 +57,14 @@ def _get_cuda_rng_state(
         return paddle.cuda.get_rng_state(device)
 
 
-def _set_cuda_rng_state(new_state, device: int | None = None, graph_safe: bool = False):
+def _set_cuda_rng_state(
+    new_state, device: int | None = None, graph_safe: bool = False
+):
     """Sets the random number generator state of the current GPU.
 
     Arguments:
         new_state (GeneratorState): The desired state
-        device (int): The device id to retrieve the rng state, 
+        device (int): The device id to retrieve the rng state,
             If None, use current device, specified by ``set_device``
             function.
         graph_safe (bool): Set the rng state in a graph safe manner.
@@ -74,6 +73,7 @@ def _set_cuda_rng_state(new_state, device: int | None = None, graph_safe: bool =
     assert graph_safe is False, "graph_safe is not supported yet"
     with paddle.LazyGuard():
         paddle.cuda.set_rng_state(new_state, device=device)
+
 
 def get_expert_parallel_rng_tracker_name():
     """Get the expert parallel rng tracker name"""
@@ -96,14 +96,18 @@ class CudaRNGStatesTracker:
     cuda state.
     """
 
-    def __init__(self, use_cudagraphable_rng=False, is_inference_rng_tracker=False):
-        assert use_cudagraphable_rng is False, "use_cudagraphable_rng is not supported yet"
+    def __init__(
+        self, use_cudagraphable_rng=False, is_inference_rng_tracker=False
+    ):
+        assert use_cudagraphable_rng is False, (
+            "use_cudagraphable_rng is not supported yet"
+        )
         self.reset()
         self.use_cudagraphable_rng = use_cudagraphable_rng
         self.is_inference_rng_tracker = is_inference_rng_tracker
 
     def is_initialized(self):
-        """Checks if the internal RNG state has been set wirth set_states()."""
+        """Checks if the internal RNG state has been set with set_states()."""
         return self._is_initialized
 
     def reset(self):
@@ -137,11 +141,11 @@ class CudaRNGStatesTracker:
         self._is_initialized = True
         # Check seed is not already used.
         if seed in self.seeds_:
-            raise Exception('seed {} already exists'.format(seed))
+            raise Exception(f"seed {seed} already exists")
         self.seeds_.add(seed)
         # Check that state is not already defined.
         if name in self.states_:
-            raise Exception('cuda rng state {} already exists'.format(name))
+            raise Exception(f"cuda rng state {name} already exists")
 
         # If available, create the state in a graph safe manner
         if self.use_cudagraphable_rng:
@@ -163,11 +167,15 @@ class CudaRNGStatesTracker:
         the original state."""
         # Check if we have added the state
         if name not in self.states_:
-            raise Exception('cuda rng state {} is not added'.format(name))
+            raise Exception(f"cuda rng state {name} is not added")
         # Store current rng state.
-        orig_cuda_rng_state = _get_cuda_rng_state(graph_safe=self.use_cudagraphable_rng)
+        orig_cuda_rng_state = _get_cuda_rng_state(
+            graph_safe=self.use_cudagraphable_rng
+        )
         # Set rng state to the desired one
-        _set_cuda_rng_state(self.states_[name], graph_safe=self.use_cudagraphable_rng)
+        _set_cuda_rng_state(
+            self.states_[name], graph_safe=self.use_cudagraphable_rng
+        )
         # Record cpu RNG state
         cpu_rng_state = paddle.get_rng_state("cpu")
         # Do the stuff we wanted to do.
@@ -175,12 +183,20 @@ class CudaRNGStatesTracker:
             yield
         finally:
             # Throw a warning if cpu RNG state changed
-            if not paddle.all(cpu_rng_state == paddle.get_rng_state("cpu")).item():
-                logging.getLogger(__name__).warning('CPU RNG state changed within GPU RNG context')
+            if not paddle.all(
+                cpu_rng_state == paddle.get_rng_state("cpu")
+            ).item():
+                logging.getLogger(__name__).warning(
+                    "CPU RNG state changed within GPU RNG context"
+                )
             # Update the current rng state for later use.
-            self.states_[name] = _get_cuda_rng_state(graph_safe=self.use_cudagraphable_rng)
+            self.states_[name] = _get_cuda_rng_state(
+                graph_safe=self.use_cudagraphable_rng
+            )
             # And set the state to the original state we started with.
-            _set_cuda_rng_state(orig_cuda_rng_state, graph_safe=self.use_cudagraphable_rng)
+            _set_cuda_rng_state(
+                orig_cuda_rng_state, graph_safe=self.use_cudagraphable_rng
+            )
 
 
 # RNG tracker object.
@@ -198,8 +214,12 @@ def initialize_rng_tracker(
     Megatron or TransformerEngine's implementation.
     In particular, TransformerEngine's implementation is cudagraphable and supports FP8.
     """
-    assert use_cudagraphable_rng is False, "use_cudagraphable_rng is not supported yet"
-    assert use_te_rng_tracker is False, "use_te_rng_tracker is not supported yet"
+    assert use_cudagraphable_rng is False, (
+        "use_cudagraphable_rng is not supported yet"
+    )
+    assert use_te_rng_tracker is False, (
+        "use_te_rng_tracker is not supported yet"
+    )
     global _CUDA_RNG_STATE_TRACKER
     global _CUDA_RNG_STATE_TRACKER_INITIALIZED
     if force_reset:
@@ -255,19 +275,25 @@ def get_cuda_rng_tracker(
     inference_rng_tracker: bool = False,
     use_cudagraphable_rng: bool = False,
 ):
-    assert use_cudagraphable_rng is False, "use_cudagraphable_rng is not supported yet"
-    assert use_te_rng_tracker is False, "use_te_rng_tracker is not supported yet"
+    assert use_cudagraphable_rng is False, (
+        "use_cudagraphable_rng is not supported yet"
+    )
+    assert use_te_rng_tracker is False, (
+        "use_te_rng_tracker is not supported yet"
+    )
     """Get cuda rng tracker."""
-    initialize_rng_tracker(use_te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng)
+    initialize_rng_tracker(
+        use_te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng
+    )
     return _CUDA_RNG_STATE_TRACKER
 
 
 def get_all_rng_states():
     """Returns all generator states used by the current `CudaRNGStatesTracker`."""
 
-    assert (
-        _CUDA_RNG_STATE_TRACKER_INITIALIZED
-    ), "Tried getting all rng states but RNG Tracker has not been initalized!"
+    assert _CUDA_RNG_STATE_TRACKER_INITIALIZED, (
+        "Tried getting all rng states but RNG Tracker has not been initialized!"
+    )
 
     if isinstance(_CUDA_RNG_STATE_TRACKER, CudaRNGStatesTracker):
         return _CUDA_RNG_STATE_TRACKER.states_
@@ -280,9 +306,9 @@ def model_parallel_cuda_manual_seed(
     te_rng_tracker: bool = False,
     inference_rng_tracker: bool = False,
     use_cudagraphable_rng: bool = False,
-    tp_rank: Optional[int] = None,
-    ep_rank: Optional[int] = None,
-    etp_rank: Optional[int] = None,
+    tp_rank: int | None = None,
+    ep_rank: int | None = None,
+    etp_rank: int | None = None,
 ):
     """Initialize model parallel cuda seed.
 
@@ -302,7 +328,9 @@ def model_parallel_cuda_manual_seed(
     across expert-data parallel groups.
     """
     assert te_rng_tracker is False, "te_rng_tracker is not supported yet"
-    assert use_cudagraphable_rng is False, "use_cudagraphable_rng is not supported yet"
+    assert use_cudagraphable_rng is False, (
+        "use_cudagraphable_rng is not supported yet"
+    )
     if tp_rank is None:
         tp_rank = get_tensor_model_parallel_rank()
     if ep_rank is None:
@@ -315,17 +343,25 @@ def model_parallel_cuda_manual_seed(
     # Data parallel gets the original seed.
     data_parallel_seed = seed
 
-    initialize_rng_tracker(te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng)
+    initialize_rng_tracker(
+        te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng
+    )
     _CUDA_RNG_STATE_TRACKER.reset()
     # Set the default state.
     paddle.cuda.manual_seed(data_parallel_seed)
-    _CUDA_RNG_STATE_TRACKER.add(_DATA_PARALLEL_RNG_TRACKER_NAME, data_parallel_seed)
+    _CUDA_RNG_STATE_TRACKER.add(
+        _DATA_PARALLEL_RNG_TRACKER_NAME, data_parallel_seed
+    )
 
     # and model parallel state.
-    _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME, tensor_model_parallel_seed)
+    _CUDA_RNG_STATE_TRACKER.add(
+        _MODEL_PARALLEL_RNG_TRACKER_NAME, tensor_model_parallel_seed
+    )
 
     expert_parallel_seed = seed + 1024 + 100 * ep_rank + etp_rank
-    _CUDA_RNG_STATE_TRACKER.add(_EXPERT_PARALLEL_RNG_TRACKER_NAME, expert_parallel_seed)
+    _CUDA_RNG_STATE_TRACKER.add(
+        _EXPERT_PARALLEL_RNG_TRACKER_NAME, expert_parallel_seed
+    )
 
 
 def _get_all_rng_states():
@@ -360,38 +396,40 @@ class CheckpointFunction(paddle.autograd.Function):
     @staticmethod
     def forward(ctx, run_function, distribute_saved_activations, *args):
         """Forward pass."""
-        pass 
+        pass
 
     # pylint: disable=missing-function-docstring
     @staticmethod
     def backward(ctx, *args):
         """Backward pass."""
-        pass 
+        pass
 
 
 def checkpoint(function, distribute_saved_activations, *args):
     """Checkpoint a model or part of the model."""
-    return CheckpointFunction.apply(function, distribute_saved_activations, *args)
+    return CheckpointFunction.apply(
+        function, distribute_saved_activations, *args
+    )
 
 
 class CheckpointWithoutOutputFunction(paddle.autograd.Function):
     """
-    Checkpoint Function Helper for CheckpointWithouOutput.
+    Checkpoint Function Helper for CheckpointWithoutOutput.
     Save context for recompute.
     """
 
     @staticmethod
     def forward(ctx, run_function, checkpoint_without_output_obj, *args):
         """Forward pass."""
-        pass 
+        pass
 
     @staticmethod
     def backward(ctx, *args):
         """Backward pass."""
-        pass 
+        pass
 
 
-class CheckpointWithoutOutput(object):
+class CheckpointWithoutOutput:
     """
     Checkpoint a model or part of the model and release the output.
 
@@ -413,11 +451,11 @@ class CheckpointWithoutOutput(object):
 
     def checkpoint(self, run_function, *args):
         """Checkpoint function."""
-        pass 
+        pass
 
     def _recompute(self, _):
         """Used as a hook to recompute the output."""
-        pass 
+        pass
 
     def discard_output_and_register_recompute(self, hook_tensor):
         """
@@ -428,4 +466,4 @@ class CheckpointWithoutOutput(object):
         in the forward pass and the gradient of the hook_tensor is computed before the recomputed
         tensors are used.
         """
-        pass 
+        pass

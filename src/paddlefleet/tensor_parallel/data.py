@@ -38,7 +38,7 @@ def _build_key_size_numel_dictionaries(keys, data, tp_group=None):
     sizes = [0 for _ in range(max_dim) for _ in keys]
 
     # Pack the sizes on rank zero.
-    if tp_group.rank() == 0:
+    if tp_group.rank == 0:
         offset = 0
         for key in keys:
             assert data[key].dim() < max_dim, "you should increase MAX_DATA_DIM"
@@ -49,8 +49,10 @@ def _build_key_size_numel_dictionaries(keys, data, tp_group=None):
 
     # Move to GPU and broadcast.
     sizes_cuda = paddle.tensor(sizes, dtype=paddle.int32)
-    group_ranks = tp_group.ranks
-    paddle.distributed.broadcast(sizes_cuda, group_ranks[0], group=tp_group)
+    global_ranks_in_group = tp_group.ranks
+    paddle.distributed.broadcast(
+        sizes_cuda, global_ranks_in_group[0], group=tp_group
+    )
 
     # Move back to cpu and unpack.
     sizes_cpu = sizes_cuda.cpu()
@@ -93,7 +95,7 @@ def broadcast_data(keys, data, datatype, tp_group=None):
     )
     tp_group = get_tensor_model_parallel_group_if_none(tp_group)
     # Pack on rank zero.
-    if tp_group.rank() == 0:
+    if tp_group.rank == 0:
         # Check that all keys have the same data type.
         _check_data_types(keys, data, datatype)
         # Flatten the data associated with the keys
@@ -104,8 +106,10 @@ def broadcast_data(keys, data, datatype, tp_group=None):
         flatten_data = paddle.empty([total_numel], dtype=datatype)
 
     # Broadcast
-    group_ranks = tp_group.ranks
-    paddle.distributed.broadcast(flatten_data, group_ranks[0], group=tp_group)
+    global_ranks_in_group = tp_group.ranks
+    paddle.distributed.broadcast(
+        flatten_data, global_ranks_in_group[0], group=tp_group
+    )
 
     # Unpack
     output = {}

@@ -18,6 +18,7 @@
 
 import paddle
 import paddle.distributed as dist
+from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
 
 from paddlefleet.parallel_state import get_global_memory_buffer
 from paddlefleet.tensor_parallel.utils import split_tensor_along_last_dim
@@ -45,7 +46,7 @@ def _split_along_last_dim(input_, group):
     corresponding slice."""
     assert group is not None, "group should not be None"
 
-    world_size = group.world_size
+    world_size = len(group.ranks)
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
         return input_
@@ -139,7 +140,7 @@ def _gather_along_first_dim(
     """
 
     assert group is not None, "group should not be None"
-    world_size = group.size()
+    world_size = group.world_size
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
         return input_
@@ -182,9 +183,7 @@ def _reduce_scatter_along_first_dim(
             )
         else:
             output = paddle.empty(dim_size, dtype=input_.dtype)
-        dist.communication._reduce_scatter_base(
-            output, input_.contiguous(), group=group
-        )
+        _reduce_scatter_base(output, input_.contiguous(), group=group)
     else:
         rank = group.rank
         input_tensor_list = list(paddle.split(input_, input_split_sizes, dim=0))
@@ -218,7 +217,7 @@ class _CopyToModelParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
-        return _reduce(grad_output, ctx.group), None
+        return _reduce(grad_output, ctx.group)
 
 
 class _ReduceFromModelParallelRegion(paddle.autograd.Function):
@@ -237,7 +236,7 @@ class _ReduceFromModelParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
-        return grad_output, None
+        return grad_output
 
 
 class _ScatterToModelParallelRegion(paddle.autograd.Function):
@@ -257,7 +256,7 @@ class _ScatterToModelParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
-        return _gather_along_last_dim(grad_output, ctx.group), None
+        return _gather_along_last_dim(grad_output, ctx.group)
 
 
 class _GatherFromModelParallelRegion(paddle.autograd.Function):
@@ -277,7 +276,7 @@ class _GatherFromModelParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
-        return _split_along_last_dim(grad_output, ctx.group), None
+        return _split_along_last_dim(grad_output, ctx.group)
 
 
 class _ScatterToSequenceParallelRegion(paddle.autograd.Function):
@@ -297,7 +296,7 @@ class _ScatterToSequenceParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
-        return _gather_along_first_dim(grad_output, ctx.group), None
+        return _gather_along_first_dim(grad_output, ctx.group)
 
 
 class _GatherFromSequenceParallelRegion(paddle.autograd.Function):
@@ -345,27 +344,15 @@ class _GatherFromSequenceParallelRegion(paddle.autograd.Function):
         # scattered and whereas if the computation is duplicated,
         # output gradients need to be scattered.
         if tensor_parallel_output_grad:
-            return (
-                _reduce_scatter_along_first_dim(
-                    grad_output,
-                    ctx.group,
-                    ctx.output_split_sizes,
-                    ctx.use_global_buffer,
-                ),
-                None,
-                None,
-                None,
-                None,
+            return _reduce_scatter_along_first_dim(
+                grad_output,
+                ctx.group,
+                ctx.output_split_sizes,
+                ctx.use_global_buffer,
             )
         else:
             assert ctx.output_split_sizes is None
-            return (
-                _split_along_first_dim(grad_output, ctx.group),
-                None,
-                None,
-                None,
-                None,
-            )
+            return _split_along_first_dim(grad_output, ctx.group)
 
 
 class _ReduceScatterToSequenceParallelRegion(paddle.autograd.Function):
@@ -397,13 +384,8 @@ class _ReduceScatterToSequenceParallelRegion(paddle.autograd.Function):
         """Backward function."""
         input_split_sizes = ctx.input_split_sizes
         use_global_buffer = ctx.use_global_buffer
-        return (
-            _gather_along_first_dim(
-                grad_output, ctx.group, input_split_sizes, use_global_buffer
-            ),
-            None,
-            None,
-            None,
+        return _gather_along_first_dim(
+            grad_output, ctx.group, input_split_sizes, use_global_buffer
         )
 
 
@@ -424,7 +406,7 @@ class _AllGatherFromTensorParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
-        return _reduce_scatter_along_last_dim(grad_output, ctx.group), None
+        return _reduce_scatter_along_last_dim(grad_output, ctx.group)
 
 
 class _ReduceScatterToTensorParallelRegion(paddle.autograd.Function):
@@ -444,7 +426,7 @@ class _ReduceScatterToTensorParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
-        return _gather_along_last_dim(grad_output, ctx.group), None
+        return _gather_along_last_dim(grad_output, ctx.group)
 
 
 class _AllToAll(paddle.autograd.Function):
@@ -599,11 +581,11 @@ def all_to_all_sp2hp(input_, group=None):
 
     world_size = group.world_size
     input_ = input_.reshape(-1, input_.shape[-1])
-    assert input_.shape[-1] % world_size, f"input last dim ({input_.shape[-1]}) must be divisible by world size ({world_size})"
-
-    split_tensors = paddle.split(
-        input_, num_or_sections = world_size, dim=1
+    assert input_.shape[-1] % world_size, (
+        f"input last dim ({input_.shape[-1]}) must be divisible by world size ({world_size})"
     )
+
+    split_tensors = paddle.split(input_, num_or_sections=world_size, dim=1)
     concat_tensor = paddle.cat(split_tensors, dim=0)
     output = all_to_all(group, concat_tensor)
     return output
@@ -631,9 +613,11 @@ def all_to_all_hp2sp(input_, group=None):
     input_ = input_.reshape(-1, input_.shape[-1])
     input_exchanged = all_to_all(group, input_)
     input_reshaped = input_exchanged.reshape(-1, input_exchanged.shape[-1])
-    assert input_reshaped.shape[0] % world_size == 0, f"input first dim ({input_reshaped.shape[0]}) must be divisible by world size ({world_size})"
+    assert input_reshaped.shape[0] % world_size == 0, (
+        f"input first dim ({input_reshaped.shape[0]}) must be divisible by world size ({world_size})"
+    )
     split_tensors = paddle.split(
-        input_reshaped, num_or_sections = world_size, dim=0
+        input_reshaped, num_or_sections=world_size, dim=0
     )
     output = paddle.concat(split_tensors, dim=-1)
     return output
