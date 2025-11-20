@@ -18,15 +18,15 @@
 import paddle
 import pytest
 
-import fleet.core.parallel_state as ps
-from fleet.core.tensor_parallel.layers import (
+import paddlefleet.parallel_state as ps
+from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
     VocabParallelEmbedding,
 )
-from fleet.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-from fleet.core.transformer.transformer_config import TransformerConfig
-from tests.unit_tests.test_utilities import Utils
+from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
+from paddlefleet.transformer.transformer_config import TransformerConfig
+from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
 
 
 class Test:

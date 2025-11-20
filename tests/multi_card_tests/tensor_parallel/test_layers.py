@@ -18,20 +18,20 @@
 import paddle
 import paddle.distributed as dist
 
-import fleet.core.parallel_state as ps
-from fleet.core.tensor_parallel.layers import (
+import paddlefleet.parallel_state as ps
+from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
     VocabParallelEmbedding,
     linear_with_frozen_weight,
 )
-from fleet.core.tensor_parallel.mappings import (
+from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_tensor_model_parallel_region,
 )
-from fleet.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-from fleet.core.transformer.transformer_config import TransformerConfig
-from tests.unit_tests.test_utilities import Utils
+from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
+from paddlefleet.transformer.transformer_config import TransformerConfig
+from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
 
 
 def test_LinearWithFrozenWeight(tensor_parallel, allreduce_dgrad):
@@ -134,8 +134,6 @@ def test_ColumnParallelLinear(
         gather_output=True,
     )
 
-    # Input is an 8x8 identity matrix.
-    # input_data = paddle.eye(8).cuda()
     input_data = paddle.arange(64).reshape((8, 8)) * 0.1
     input_data.requires_grad = True
 
@@ -174,7 +172,6 @@ def row_parallel_baseline():
         tp_group=tp1_group,
     )
 
-    # Input is an 8x8 identity matrix.
     input_data = paddle.arange(64).reshape((8, 8)) * 0.1
     input_data.requires_grad = True
 
@@ -211,8 +208,6 @@ def test_RowParallelLinear(
         input_is_parallel=True,
     )
 
-    # Input is an 8x8 identity matrix.
-    # input_data = paddle.eye(8).cuda()
     input_data = paddle.arange(64).reshape((8, 8)) * 0.1
     input_data.requires_grad = True
     rank = ps.get_tensor_model_parallel_rank()

@@ -141,11 +141,11 @@ class CudaRNGStatesTracker:
         self._is_initialized = True
         # Check seed is not already used.
         if seed in self.seeds_:
-            raise Exception(f"seed {seed} already exists")
+            raise ValueError(f"seed {seed} already exists")
         self.seeds_.add(seed)
         # Check that state is not already defined.
         if name in self.states_:
-            raise Exception(f"cuda rng state {name} already exists")
+            raise ValueError(f"cuda rng state {name} already exists")
 
         # If available, create the state in a graph safe manner
         if self.use_cudagraphable_rng:
@@ -210,8 +210,7 @@ def initialize_rng_tracker(
     use_cudagraphable_rng: bool = False,
     force_reset: bool = False,
 ):
-    """Create the RNG tracker. 'use_te_rng_tracker' determines whether to use
-    Megatron or TransformerEngine's implementation.
+    """Create the RNG tracker.
     In particular, TransformerEngine's implementation is cudagraphable and supports FP8.
     """
     assert use_cudagraphable_rng is False, (

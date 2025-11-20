@@ -18,12 +18,12 @@
 import paddle
 import pytest
 
-from fleet.core.tensor_parallel.random import (
+from paddlefleet.tensor_parallel.random import (
     CudaRNGStatesTracker,
     get_cuda_rng_tracker,
     model_parallel_cuda_manual_seed,
 )
-from tests.unit_tests.test_utilities import Utils
+from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
 
 
 def test_cuda_rng_states_tracker():
@@ -34,13 +34,11 @@ def test_cuda_rng_states_tracker():
     assert rng_tracker.get_states() == {}
     seed = 1111
     rng_tracker.add("state2", seed)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         assert rng_tracker.add("state3", seed)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         assert rng_tracker.add("state2", 111)
     assert rng_tracker.get_states()["state2"] is not None
-    with pytest.raises(Exception):
-        assert ()
 
     rng_tracker.fork("state2")
     paddle.cuda.manual_seed(seed)
@@ -52,7 +50,7 @@ def test_cuda_rng_states_tracker():
 
 
 def test_model_parallel_cuda_manual_seed():
-    Utils.initialize_model_parallel(4, 2)
+    Utils.initialize_model_parallel(4, 1)
     model_parallel_cuda_manual_seed(0)
     rng_tracker = get_cuda_rng_tracker()
     assert rng_tracker.get_states()["model-parallel-rng"] is not None

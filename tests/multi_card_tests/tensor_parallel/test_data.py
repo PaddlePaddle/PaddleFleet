@@ -14,12 +14,12 @@
 
 import paddle
 
-from fleet.core.tensor_parallel.data import broadcast_data
-from tests.unit_tests.test_utilities import Utils
+from paddlefleet.tensor_parallel.data import broadcast_data
+from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
 
 
 def test_broadcast_data():
-    Utils.initialize_model_parallel(2, 4)
+    Utils.initialize_model_parallel(2, 2)
     input_data = {
         0: paddle.ones((8, 8)).cuda() * 0.0,
         1: paddle.ones((8, 8)).cuda() * 1.0,

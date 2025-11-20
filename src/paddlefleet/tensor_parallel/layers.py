@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import paddle
 import paddle.distributed as dist
@@ -59,12 +59,8 @@ try:
 except ImportError:
     _grad_accum_fusion_available = False
 
-try:
-    import transformer_engine  # pylint: disable=unused-import
 
-    HAVE_TE = True
-except ImportError:
-    HAVE_TE = False
+HAVE_TE = False
 
 if TYPE_CHECKING:
     from ..fleet_config import FleetConfig
@@ -277,7 +273,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         """Forward.
 
         Args:
-            input_ (torch.Tensor): Input tensor.
+            input_ (paddle.Tensor): Input tensor.
         """
         if self.tp_group.world_size > 1:
             # Build the mask.
@@ -756,7 +752,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
 linear_with_grad_accumulation_and_async_allreduce.warned = False
 
 
-class ColumnParallelLinear(paddle.nn.Linear):
+class ColumnParallelLinear(paddle.nn.Layer):
     """Linear layer with column parallelism.
 
     The linear layer is defined as Y = XA + b. A is parallelized along
@@ -1089,7 +1085,7 @@ class ColumnParallelLinear(paddle.nn.Linear):
         )
 
 
-class RowParallelLinear(paddle.nn.Linear):
+class RowParallelLinear(paddle.nn.Layer):
     """Linear layer with row parallelism.
 
     The linear layer is defined as Y = XA + b. A is parallelized along its first dimension and X

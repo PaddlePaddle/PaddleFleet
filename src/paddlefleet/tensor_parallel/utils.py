@@ -47,7 +47,6 @@ def split_tensor_along_last_dim(
     last_dim_size = divide(tensor.shape[last_dim], num_partitions)
 
     tensor_list = paddle.split(tensor, num_partitions, axis=last_dim)
-    # Note: torch.split does not create contiguous tensors by default.
     if contiguous_split_chunks:
         return tuple(chunk.contiguous() for chunk in tensor_list)
 

@@ -17,10 +17,10 @@
 
 import paddle
 
-from fleet.core.tensor_parallel.cross_entropy import (
+from paddlefleet.tensor_parallel.cross_entropy import (
     vocab_parallel_cross_entropy,
 )
-from tests.unit_tests.test_utilities import Utils
+from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
 
 
 def test_vocab_parallel_cross_entropy():

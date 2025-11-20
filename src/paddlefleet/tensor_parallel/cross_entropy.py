@@ -117,7 +117,7 @@ class VocabParallelCrossEntropy:
     ) -> tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor, paddle.Tensor]:
         """Prepare gradient calculation operands."""
 
-        # All the inputs have softmax as thier gradient.
+        # All the inputs have softmax as their gradient.
         grad_input = softmax
         # For simplicity, work with the 2D gradient.
         partition_vocab_size = softmax.shape[-1]

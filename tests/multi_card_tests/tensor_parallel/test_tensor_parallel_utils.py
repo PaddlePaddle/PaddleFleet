@@ -17,8 +17,8 @@
 
 import paddle
 
-import fleet.core.tensor_parallel.utils as util
-from tests.unit_tests.test_utilities import Utils
+import paddlefleet.tensor_parallel.utils as util
+from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
 
 
 def test_split_tensor_along_last_dim():
@@ -83,7 +83,7 @@ def test_vocab():
 
 if __name__ == "__main__":
     Utils.initialize_model_parallel(
-        tensor_parallel_size=2, pipeline_parallel_size=4
+        tensor_parallel_size=2, pipeline_parallel_size=2
     )
     test_split_tensor_along_last_dim()
     test_split_tensor_into_1d_equal_chunks()

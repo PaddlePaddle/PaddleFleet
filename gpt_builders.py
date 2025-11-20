@@ -13,7 +13,6 @@
 # limitations under the License.
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 
-from megatron.training import get_args
 from paddlefleet.models.gpt.heterogeneous.heterogeneous_layer_specs import (
     get_gpt_heterogeneous_layer_spec,
 )
@@ -24,6 +23,7 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_mtp_block_spec,
 )
+from paddlefleet.training import get_args
 from paddlefleet.training.arguments import core_transformer_config_from_args
 from paddlefleet.training.yaml_arguments import (
     core_transformer_config_from_yaml,
