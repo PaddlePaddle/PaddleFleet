@@ -220,6 +220,8 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.ffn_hidden_size is None:
+            self.ffn_hidden_size = 4 * self.hidden_size
 
         if self.kv_channels is None:
             self.kv_channels = self.hidden_size // self.num_attention_heads

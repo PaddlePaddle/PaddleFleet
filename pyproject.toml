@@ -45,7 +45,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-dependencies = ["paddlepaddle-gpu==3.2.2"]
+dependencies = ["paddlepaddle-gpu>=3.3.0.dev"]
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
@@ -55,7 +55,7 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/fleet/core"
 
 
 [build-system]
-requires = ["setuptools>=61.0.0,<80.0.0", "pybind11", "packaging>=24.2","paddlepaddle-gpu==3.2.2"]
+requires = ["setuptools>=61.0.0", "pybind11", "packaging>=24.2","paddlepaddle-gpu>=3.3.0.dev"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -76,7 +76,8 @@ test = [
     "pyyaml",
 ]
 build = [
-    "setuptools<80.0.0",
+    "pip",
+    "setuptools>=61.0.0",
     "packaging>=24.2"
 ]
 linting = [
@@ -90,7 +91,7 @@ ci = [
 [tool.uv]
 default-groups = ["build", "test"]
 link-mode = "copy"
-extra-index-url = ["https://www.paddlepaddle.org.cn/packages/stable/cu129/"]
+extra-index-url = ["https://www.paddlepaddle.org.cn/packages/nightly/cu129_debug/"]
 index-strategy = "unsafe-best-match"
 
 [tool.uv.pip]

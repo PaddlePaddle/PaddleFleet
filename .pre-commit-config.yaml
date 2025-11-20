@@ -47,7 +47,7 @@ repos:
       - id: clang-format
         name: clang-format
         description: Format files with ClangFormat.
-        entry: bash ./tools/codestyle/clang-format.sh -i
+        entry: bash ./ci/hooks/clang-format.sh -i
         language: system
         files: \.(c|cc|cxx|cpp|cu|h|cuh|hpp|hxx|xpu|kps)$
   - repo: local
@@ -81,3 +81,10 @@ repos:
           (?x)^(
             \.clang-format
           )$
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    # uv version.
+    rev: 0.9.10
+    hooks:
+      # Update the uv lockfile
+      - id: uv-lock

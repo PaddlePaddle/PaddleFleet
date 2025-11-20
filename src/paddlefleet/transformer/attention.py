@@ -255,7 +255,7 @@ class Attention(FleetLayer, ABC):
         if no_rope:
             rotary_pos_emb = None
 
-        # hidden_states: [sq, b, h]
+        # hidden_states: [b, sq, h]
 
         # For self attention we just duplicate the rotary_pos_emb if it isn't already
         if rotary_pos_emb is not None and not isinstance(rotary_pos_emb, tuple):

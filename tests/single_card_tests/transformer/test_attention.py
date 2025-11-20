@@ -21,6 +21,7 @@ from paddlefleet.transformer.attention import (
     SelfAttentionSublayersSpec,
 )
 from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import (
     init_method_normal,
@@ -67,7 +68,7 @@ class TestSelfAttention(unittest.TestCase):
         self.config.recompute_granularity = None
         self.config.fused_single_qkv_rope = False
         self.config.rotary_interleaved = False
-        self.config.multi_latent_attention = True
+        self.config.multi_latent_attention = False
         self.config.init_method = init_method_normal(0.02)
         self.config.output_layer_init_method = scaled_init_method_normal(
             0.02, 1, 2.0
@@ -93,6 +94,7 @@ class TestSelfAttention(unittest.TestCase):
                 q_layernorm=RMSNorm,
                 k_layernorm=RMSNorm,
             ),
+            attn_mask_type=AttnMaskType.causal,
             layer_number=1,
         )
 
@@ -103,10 +105,10 @@ class TestSelfAttention(unittest.TestCase):
         hidden_size = self.self_attention.config.hidden_size
 
         hidden_states = paddle.randn(
-            (sequence_length, micro_batch_size, hidden_size),
+            (micro_batch_size, sequence_length, hidden_size),
         )
         rotary_pos_emb = paddle.randn(
-            (sequence_length, 1, 1, self.config.kv_channels)
+            (1, sequence_length, 1, self.config.kv_channels)
         )
 
         output, bias = self.self_attention(
@@ -114,8 +116,8 @@ class TestSelfAttention(unittest.TestCase):
         )
 
         # Check if output and bias have the correct shape
-        assert output.shape[0] == sequence_length
-        assert output.shape[1] == micro_batch_size
+        assert output.shape[0] == micro_batch_size
+        assert output.shape[1] == sequence_length
         assert output.shape[2] == config.hidden_size
         assert bias.shape[0] == config.hidden_size
 
