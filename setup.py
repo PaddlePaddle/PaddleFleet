@@ -13,15 +13,7 @@
 # limitations under the License.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
-import multiprocessing
 import os
-
-
-def run(func):
-    """run"""
-    p = multiprocessing.Process(target=func)
-    p.start()
-    p.join()
 
 
 def change_pwd():
@@ -31,8 +23,8 @@ def change_pwd():
         os.chdir(path)
 
 
-def setup_moe_ops():
-    """setup_moe_op"""
+def setup_ops_extension():
+    """setup_ops_extension"""
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
     change_pwd()
@@ -68,4 +60,4 @@ def setup_moe_ops():
     )
 
 
-setup_moe_ops()
+setup_ops_extension()

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 try:
-    from . import ops
+    from . import ops as ops
 except ImportError as e:
     import warnings
 

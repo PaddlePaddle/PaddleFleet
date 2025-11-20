@@ -17,7 +17,7 @@
 #include "paddle/common/flags.h"
 #include "paddle/phi/core/utils/data_type.h"
 #include "paddle/phi/kernels/funcs/aligned_vector.h"
-#include "utils.h"
+#include "utils.h"  // NOLINT
 
 COMMON_DECLARE_bool(enable_pir_api);
 
@@ -39,10 +39,6 @@ struct __align__(16) expert_base_offset {
 };
 
 
-// Multi-stage algorithm: controls the number of rows processed per block to trade off overhead.
-// First, parse the routemap to update the count of tokens received by the current expert,
-// then check the prefix sum from the previous block and update it for the next block.
-// Subsequently, once the destination row indices are obtained, start data transfer immediately until the task is fully completed.
 template <typename X_T,
           typename routemap_T,
           typename probs_T,
@@ -84,7 +80,7 @@ __global__ void tokens_unzip_stable_kernel(
       shared_expert_probmap[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
 
 
-  if (threadIdx.x == 0) [[unlikely]] {
+  if (threadIdx.x == 0) [[unlikely]] {  // NOLINT
     int local_expert_rowmap[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
     probs_T local_expert_probs[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
 #pragma unroll
@@ -114,7 +110,7 @@ __global__ void tokens_unzip_stable_kernel(
 
 #pragma unroll
     for (int i = 0; i < num_experts; i++) {
-      if (blockIdx.x != 0) [[likely]] {
+      if (blockIdx.x != 0) [[likely]] {  // NOLINT
         while (cumsum_offset[i] == CUMSUM_INVALID_TAG) [[likely]] {
             cumsum_offset[i] = atomicExch(
                 &global_expertwise_block_cumsum[blockIdx.x * num_experts + i],
@@ -181,11 +177,11 @@ void dispatch_tokens_unzip_stable(
     const paddle::Tensor &expert_prob_topk,
     const paddle::optional<paddle::Tensor> &XScale,
     const expert_base_offset<MAX_NUM_EXPERTS_C> &expert_offsets,
-    paddle::Tensor &X_unzipped,
-    paddle::Tensor &zipped_expertwise_rowmap,
-    paddle::Tensor &token_prob_unzipped,
-    paddle::Tensor &XScale_unzipped,
-    paddle::Tensor &global_expertwise_block_cumsum,
+    paddle::Tensor &X_unzipped,                       // NOLINT
+    paddle::Tensor &zipped_expertwise_rowmap,         // NOLINT
+    paddle::Tensor &token_prob_unzipped,              // NOLINT
+    paddle::Tensor &XScale_unzipped,                  // NOLINT
+    paddle::Tensor &global_expertwise_block_cumsum,   // NOLINT
     const int total_zipped_tokens_num,
     const int token_length,
     const int topk,  // deprecated
@@ -1209,7 +1205,6 @@ __global__ void tokens_unzip_slice_kernel(
     int64_t out = static_cast<int64_t>(u) - start_idx;
     index_out[out] = row;
   }
-  // TODO: thread_level memcpy elements
 }
 
 std::vector<paddle::Tensor> tokens_unzip_slice(
