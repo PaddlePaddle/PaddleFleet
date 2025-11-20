@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 import paddle.distributed as dist
 from paddle.distributed import fleet
 
@@ -32,6 +34,8 @@ def initialize_fleet(
         args = parsed_args
 
     set_global_variables(args)
+    set_logging(args)
+
     fleet.init(is_collective=True, strategy=strategy)
     hcg = fleet.get_hybrid_communicate_group()
     rank = dist.get_rank()
@@ -39,3 +43,21 @@ def initialize_fleet(
 
     ps.initialize_model_parallel(hcg)
     print(f"fleet initialize successfully: {rank=} {world_size=}")
+
+
+def set_logging(args):
+    """Set the logging level and logging format"""
+    logger = logging.getLogger("paddlefleet")
+
+    # set logging level
+    logging_level = getattr(args, "logging_level", None)
+    if logging_level is not None:
+        logger.setLevel(logging_level)
+
+    # set logging format
+    import colorlog
+
+    format_string = "%(log_color)s[%(asctime)-15s] [%(levelname)8s] %(filename)s:%(lineno)d%(reset)s - %(message)s"
+    handler = colorlog.StreamHandler()
+    handler.setFormatter(colorlog.ColoredFormatter(format_string))
+    logger.addHandler(handler)

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 
 import paddle
 from paddle import Tensor
@@ -27,11 +26,11 @@ from paddlefleet.pipeline_parallel.utils import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.utils import get_logger
 
 # from paddlefleet.utils import make_tp_sharded_tensor_for_checkpoint
 
-
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class LanguageLayer(FleetLayer):
@@ -211,7 +210,7 @@ class LanguageLayer(FleetLayer):
                 paddle.distributed.all_reduce(weight, group=self.embd_group)
 
         elif not getattr(LanguageLayer, "embedding_warning_printed", False):
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "Distributed processes aren't initialized, so the output layer "
                 "is not initialized with weights from the word embeddings. "
                 "If you are just manipulating a model this is fine, but "

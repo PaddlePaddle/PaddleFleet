@@ -45,7 +45,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-dependencies = ["paddlepaddle-gpu>=3.3.0.dev"]
+dependencies = [
+    "colorlog>=6.10.1",
+    "paddlepaddle-gpu>=3.3.0.dev",
+]
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
@@ -101,7 +104,7 @@ prerelease = "allow"
 [tool.ruff]
 exclude = []
 line-length = 80
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.format]
 

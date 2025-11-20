@@ -60,8 +60,8 @@ class TestBaseEmbedding(unittest.TestCase):
         position_ids = paddle.arange(4).repeat((2, 1))
         embeddings = self.base_embedding(input_ids, position_ids)
         assert embeddings.place.is_gpu_place()
-        assert embeddings.shape[0] == self.base_embedding.max_sequence_length
-        assert embeddings.shape[1] == input_ids.shape[0]
+        assert embeddings.shape[0] == input_ids.shape[0]
+        assert embeddings.shape[1] == self.base_embedding.max_sequence_length
         assert embeddings.shape[2] == self.base_embedding.config.hidden_size
 
 

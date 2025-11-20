@@ -30,14 +30,14 @@ from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.layer import GraphableFleetLayer
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
-from paddlefleet.utils import get_pg_rank, log_single_rank
+from paddlefleet.utils import get_logger, get_pg_rank, log_single_rank
 
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def get_transformer_layer_offset(

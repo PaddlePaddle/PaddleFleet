@@ -21,15 +21,15 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_block import TransformerBlock
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
-import logging
 import math
 
 import paddle
 from paddle import Tensor, nn
 
 from paddlefleet import parallel_state
+from paddlefleet.utils import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 __all__ = ["RotaryEmbedding"]

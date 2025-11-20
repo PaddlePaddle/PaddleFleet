@@ -20,13 +20,12 @@ if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
     from paddlefleet.transformer.transformer_config import TransformerConfig
-
-import logging
-
 import paddle
 from paddle import Tensor
 
-logger = logging.getLogger(__name__)
+from paddlefleet.utils import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = [
     "apply_rotary_pos_emb",

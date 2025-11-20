@@ -17,14 +17,12 @@ from __future__ import annotations
 
 import functools
 import inspect
-import operator
-from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Callable
-
-if TYPE_CHECKING:
-    import logging
+import logging
 import math
+import operator
 import warnings
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any
 
 import paddle
 
@@ -49,6 +47,9 @@ try:
 except Exception:
     # This is a WAR for building docs, where paddle is not actually imported
     _paddle_version = PkgVersion("0.0.0") if HAVE_PACKAGING else "0.0.0"
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class WrappedTensor:
@@ -162,6 +163,10 @@ def is_paddle_min_version(version, check_equality=True):
     if check_equality:
         return get_paddle_version() >= PkgVersion(version)
     return get_paddle_version() > PkgVersion(version)
+
+
+def get_logger(name: str):
+    return logging.getLogger("paddlefleet." + name)
 
 
 ######################

@@ -90,7 +90,9 @@ class DotProductAttention(FleetLayer):
             )
 
         world_size = (
-            pg_collection.tp.world_size if pg_collection.tp is not None else 1
+            pg_collection.tp.world_size
+            if pg_collection.tp is not None and pg_collection.tp.world_size >= 1
+            else 1
         )
         self.hidden_size_per_partition = divide(projection_size, world_size)
         self.hidden_size_per_attention_head = divide(
@@ -256,6 +258,7 @@ class DotProductAttention(FleetLayer):
         attention_probs: Tensor = self.scale_mask_softmax(
             attention_scores, attention_mask, self.softmax_offset
         )
+
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
 
