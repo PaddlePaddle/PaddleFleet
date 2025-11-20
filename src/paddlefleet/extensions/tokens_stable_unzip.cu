@@ -21,7 +21,6 @@
 
 COMMON_DECLARE_bool(enable_pir_api);
 
-
 static paddle::DataType TransToDataType(int64_t dtype) {
   if (FLAGS_enable_pir_api) {
     return static_cast<paddle::DataType>(dtype);
@@ -37,7 +36,6 @@ template <int MAX_NUM_EXPERTS>
 struct __align__(16) expert_base_offset {
   int data[MAX_NUM_EXPERTS];
 };
-
 
 template <typename X_T,
           typename routemap_T,
@@ -67,10 +65,7 @@ __global__ void tokens_unzip_stable_kernel(
   int local_cumsum[MAX_NUM_EXPERTS_C];
 #pragma unroll
   for (int i = 0; i < num_experts; i++) {
-    cumsum_offset[i] =
-        (blockIdx.x == 0)
-            ? 0
-            : CUMSUM_INVALID_TAG;
+    cumsum_offset[i] = (blockIdx.x == 0) ? 0 : CUMSUM_INVALID_TAG;
     local_expert_offsets[i] = expert_base_offset.data[i];
     local_cumsum[i] = 0;
   }
@@ -79,7 +74,6 @@ __global__ void tokens_unzip_stable_kernel(
   __shared__ probs_T
       shared_expert_probmap[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
 
-
   if (threadIdx.x == 0) [[unlikely]] {  // NOLINT
     int local_expert_rowmap[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
     probs_T local_expert_probs[CUMSUM_BLOCK_SIZE][MAX_NUM_EXPERTS_C];
@@ -87,8 +81,7 @@ __global__ void tokens_unzip_stable_kernel(
     for (int i = 0; i < CUMSUM_BLOCK_SIZE; i++) {
 #pragma unroll
       for (int j = 0; j < num_experts; j++) {
-        local_expert_rowmap[i][j] =
-            -1;
+        local_expert_rowmap[i][j] = -1;
         local_expert_probs[i][j] = (probs_T)0;
       }
     }
@@ -121,7 +114,6 @@ __global__ void tokens_unzip_stable_kernel(
       global_expertwise_block_cumsum[(blockIdx.x + 1) * num_experts + i] =
           proposed_offset;
     }
-
 
 #pragma unroll
     for (int i = 0; i < CUMSUM_BLOCK_SIZE; i++) {
@@ -177,11 +169,11 @@ void dispatch_tokens_unzip_stable(
     const paddle::Tensor &expert_prob_topk,
     const paddle::optional<paddle::Tensor> &XScale,
     const expert_base_offset<MAX_NUM_EXPERTS_C> &expert_offsets,
-    paddle::Tensor &X_unzipped,                       // NOLINT
-    paddle::Tensor &zipped_expertwise_rowmap,         // NOLINT
-    paddle::Tensor &token_prob_unzipped,              // NOLINT
-    paddle::Tensor &XScale_unzipped,                  // NOLINT
-    paddle::Tensor &global_expertwise_block_cumsum,   // NOLINT
+    paddle::Tensor &X_unzipped,                      // NOLINT
+    paddle::Tensor &zipped_expertwise_rowmap,        // NOLINT
+    paddle::Tensor &token_prob_unzipped,             // NOLINT
+    paddle::Tensor &XScale_unzipped,                 // NOLINT
+    paddle::Tensor &global_expertwise_block_cumsum,  // NOLINT
     const int total_zipped_tokens_num,
     const int token_length,
     const int topk,  // deprecated
@@ -197,7 +189,6 @@ void dispatch_tokens_unzip_stable(
 
 #define DTYPE_CASE(dtype, type) dtype == paddle::DataType::type
 #define GET_DATA(tensor, type) tensor.data<type>()
-
 
 #define DISPATCH_CASE_IMPL(TOKEN_T, PROB_T, INT_T, HAS_SCALE, FILL_X) \
   do {                                                                \
@@ -256,7 +247,6 @@ void dispatch_tokens_unzip_stable(
     }                                                           \
   } while (0)
 
-
   if (DTYPE_CASE(zipped_expertwise_rowmap.dtype(), INT32)) {
     HANDLE_PROB_TYPE(int);
   }
@@ -269,7 +259,6 @@ void dispatch_tokens_unzip_stable(
 #undef HANDLE_PROB_TYPE
 }
 
-
 std::vector<paddle::Tensor> tokens_unzip_stable(
     const paddle::Tensor &X,
     const paddle::optional<paddle::Tensor> &XScale,
@@ -280,7 +269,6 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
     const std::vector<int> &tokens_per_expert,
     const int padding_multiplex,
     const bool fill_x) {
-
   PD_CHECK(X.dtype() == paddle::DataType::BFLOAT16 ||
            X.dtype() == paddle::DataType::FLOAT8_E4M3FN);
   PD_CHECK(expert_routemap_topk.dtype() == paddle::DataType::INT32);
@@ -320,7 +308,6 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
         const int output_rows = tokens_cumulated;
         const int topk_calculated = expert_routemap_topk.shape()[1];
 
-
         if (XScale && fill_x) {
           XScale_unzipped = paddle::empty(
               {output_rows, quanted_cols}, XScale->dtype(), XScale->place());
@@ -338,7 +325,6 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
             {rows, num_experts}, paddle::DataType::INT32, X.place());
         token_prob_unzipped = paddle::empty(
             {output_rows}, expert_prob_topk.dtype(), expert_prob_topk.place());
-
 
         if (fill_x) {
           if (X.dtype() == paddle::DataType::BFLOAT16) {
@@ -436,14 +422,11 @@ PD_BUILD_OP(tokens_unzip_stable)
             "fill_output: bool"})
     .SetKernelFn(PD_KERNEL(tokens_unzip_stable));
 
-
 #undef CUMSUM_BLOCK_SIZE
-
 
 static int LimitGridDim(int64_t n) {
   return static_cast<int>(std::min<int64_t>(n, 1024 * 1024));
 }
-
 
 template <typename T, bool has_scale>
 __global__ void tokens_unzip_gather_kernel(
@@ -604,7 +587,6 @@ __global__ void tokens_zip_unique_add_kernel(
   }
 }
 
-
 template <typename T>
 T **GetTensorDevicePtrs(const std::vector<paddle::Tensor> &tensors,
                         paddle::Tensor *ptr_tensor,
@@ -628,7 +610,6 @@ T **GetTensorDevicePtrs(const std::vector<paddle::Tensor> &tensors,
            cudaGetErrorString(err));
   return device_ptrs;
 }
-
 
 std::vector<paddle::Tensor> tokens_zip_unique_add_impl(
     const std::vector<paddle::Tensor> &zipped_origin,
@@ -723,7 +704,6 @@ std::vector<paddle::Tensor> tokens_zip_unique_add_impl(
                                               hidden_size);                   \
   } while (0)
 
-
 #define LAUNCH_TOKENS_ZIP_UNIQUE_ADD_FIX_CASE(__ZipT, __UnzipT, __num_split) \
   if (num_split <= __num_split) {                                            \
     phi::Array<__ZipT *, __num_split> array;                                 \
@@ -734,14 +714,12 @@ std::vector<paddle::Tensor> tokens_zip_unique_add_impl(
     break;                                                                   \
   }
 
-
 #define LAUNCH_TOKENS_ZIP_UNIQUE_ADD_DYNAMIC_CASE(__ZipT, __UnzipT)      \
   paddle::Tensor ptr_tensor;                                             \
   auto device_ptrs =                                                     \
       GetTensorDevicePtrs<__ZipT>(zipped, &ptr_tensor, stream, place);   \
   LAUNCH_TOKENS_ZIP_UNIQUE_ADD_CASE_IMPL(__ZipT, __UnzipT, device_ptrs); \
   break
-
 
 #define LAUNCH_TOKENS_ZIP_UNIQUE_ADD(__ZipT, __UnzipT)           \
   do {                                                           \
@@ -752,7 +730,6 @@ std::vector<paddle::Tensor> tokens_zip_unique_add_impl(
     LAUNCH_TOKENS_ZIP_UNIQUE_ADD_FIX_CASE(__ZipT, __UnzipT, 16); \
     LAUNCH_TOKENS_ZIP_UNIQUE_ADD_DYNAMIC_CASE(__ZipT, __UnzipT); \
   } while (0)
-
 
   if (grid > 0) {
     if (out_dtype == paddle::DataType::FLOAT32 &&
@@ -876,7 +853,6 @@ std::vector<paddle::Tensor> tokens_zip_prob_impl(
   return {zipped_probs};
 }
 
-
 std::vector<paddle::Tensor> tokens_zip_prob(
     const std::vector<paddle::Tensor> &unzipped_probs,
     const paddle::Tensor &zipped_expertwise_rowmap,
@@ -895,7 +871,6 @@ std::vector<paddle::Tensor> tokens_zip_prob(
     PD_THROW("Unsupported data type: %s", dtype);
   }
 }
-
 
 template <typename T, typename UnZipProbPtrsT>
 __global__ void tokens_zip_prob_seq_subbatch_kernel(
@@ -1020,7 +995,6 @@ std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch_impl(
   return {zipped_probs};
 }
 
-
 std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch(
     const std::vector<paddle::Tensor> &unzipped_probs,
     const paddle::Tensor &zipped_expertwise_rowmap,
@@ -1048,7 +1022,6 @@ std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch(
   }
 }
 
-
 template <typename InT, typename OutT, typename InPtrsT, int VecSize>
 __global__ void merge_subbatch_cast_kernel(const InPtrsT in_ptrs,
                                            OutT *__restrict__ out,
@@ -1075,7 +1048,6 @@ __global__ void merge_subbatch_cast_kernel(const InPtrsT in_ptrs,
     idx += stride;
   }
 }
-
 
 std::vector<paddle::Tensor> merge_subbatch_cast(
     const std::vector<paddle::Tensor> &x, int64_t int_dtype) {
@@ -1148,7 +1120,6 @@ std::vector<paddle::Tensor> merge_subbatch_cast(
   LAUNCH_MERGE_SUBBATCH_CAST_CASE_IMPL(__InT, __OutT, device_ptrs); \
   break
 
-
 #define LAUNCH_MERGE_SUBBATCH_CAST(__InT, __OutT)           \
   do {                                                      \
     LAUNCH_MERGE_SUBBATCH_CAST_FIX_CASE(__InT, __OutT, 1);  \
@@ -1158,7 +1129,6 @@ std::vector<paddle::Tensor> merge_subbatch_cast(
     LAUNCH_MERGE_SUBBATCH_CAST_FIX_CASE(__InT, __OutT, 16); \
     LAUNCH_MERGE_SUBBATCH_CAST_DYNAMIC_CASE(__InT, __OutT); \
   } while (0)
-
 
   if (grid > 0) {
     if (in_dtype == paddle::DataType::FLOAT32 &&
@@ -1180,7 +1150,6 @@ std::vector<paddle::Tensor> merge_subbatch_cast(
 
   return {output};
 }
-
 
 template <typename T>
 __global__ void tokens_unzip_slice_kernel(
@@ -1259,7 +1228,6 @@ PD_BUILD_OP(tokens_unzip_slice)
             "end_idx: int"})
     .SetKernelFn(PD_KERNEL(tokens_unzip_slice));
 
-
 PD_BUILD_OP(tokens_unzip_gather)
     .Inputs({"x", paddle::Optional("x_scale"), "zipped_expertwise_rowmap"})
     .Outputs({"x_unzipped",
@@ -1269,7 +1237,6 @@ PD_BUILD_OP(tokens_unzip_gather)
             "tokens_per_expert: std::vector<int64_t>",
             "padding_multiplex: int"})
     .SetKernelFn(PD_KERNEL(tokens_unzip_gather));
-
 
 PD_BUILD_OP(tokens_zip_unique_add)
     .Inputs({"x_zipped", "x_unzipped", "idx_unzipped"})
@@ -1283,7 +1250,6 @@ PD_BUILD_OP(tokens_zip_unique_add_subbatch)
     .SetInplaceMap({{paddle::Vec("x_zipped"), paddle::Vec("y_zipped")}})
     .Attrs({"zipped_rows: int64_t", "subbatch_rows: int64_t"})
     .SetKernelFn(PD_KERNEL(tokens_zip_unique_add_subbatch));
-
 
 PD_BUILD_OP(tokens_zip_prob)
     .Inputs({paddle::Vec("unzipped_prob"),
