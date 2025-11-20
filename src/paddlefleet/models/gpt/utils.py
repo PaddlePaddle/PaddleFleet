@@ -13,12 +13,13 @@
 # limitations under the License.
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 
 import paddle
 
-logger = logging.getLogger(__name__)
+from paddlefleet.utils import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
