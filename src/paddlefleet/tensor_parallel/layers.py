@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from paddlefleet.model_parallel_config import ModelParallelConfig
 
 
-class ColumnParallelLinear(paddle.nn.Layer):
+class ColumnParallelLinear(paddle.nn.Linear):
     """Linear layer with column parallelism.
 
     The linear layer is defined as Y = XA + b. A is parallelized along
@@ -90,23 +90,26 @@ class ColumnParallelLinear(paddle.nn.Layer):
         disable_grad_reduce: bool = False,
         tp_group: paddle.distributed.communication.group.Group | None = None,
     ):
-        super().__init__()
-        self.weight = None
+        super().__init__(input_size, output_size, bias_attr=bias)
+        self.skip_bias_add = skip_bias_add
+        if skip_weight_param_allocation:
+            self.weight = None
 
-        # TODO: Support ColumnParallelLinear?
-        self.linear = paddle.nn.Linear(
-            input_size,
-            output_size,
-        )
-
-    def forward(self, input_, weight=None):
-        if weight is None:
-            return self.linear(input_), None
+    def forward(
+        self,
+        input_: paddle.Tensor,
+        weight: paddle.Tensor | None = None,
+        runtime_gather_output: bool | None = None,
+    ):
+        if weight is not None:
+            output = F.linear(x=input_, weight=weight)
         else:
-            return F.linear(input_, weight), None
+            output = super().forward(input_)
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
 
 
-class RowParallelLinear(paddle.nn.Layer):
+class RowParallelLinear(paddle.nn.Linear):
     """Linear layer with row parallelism.
 
     The linear layer is defined as Y = XA + b. A is parallelized along its first dimension and X
@@ -155,17 +158,15 @@ class RowParallelLinear(paddle.nn.Layer):
         is_expert: bool = False,
         tp_group: paddle.distributed.communication.group.Group | None = None,
     ):
-        super().__init__()
-        self.weight = None
+        super().__init__(input_size, output_size, bias_attr=bias)
+        self.skip_bias_add = skip_bias_add
 
-        # TODO: Support ROWParallelLinear?
-        self.linear = paddle.nn.Linear(
-            input_size,
-            output_size,
-        )
-
-    def forward(self, input_, weight=None):
-        if weight is None:
-            return self.linear(input_), None
+    def forward(self, input_):
+        output_ = super().forward(input_)
+        if not self.skip_bias_add:
+            output = (output_ + self.bias) if self.bias is not None else output_
+            output_bias = None
         else:
-            return F.linear(input_, weight), None
+            output = output_
+            output_bias = self.bias
+        return output, output_bias
