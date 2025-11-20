@@ -55,19 +55,13 @@ def set_logging(args):
         logger.setLevel(logging_level)
 
     # set logging format
-    format_string = "[%(asctime)-15s] [%(levelname)8s] %(filename)s:%(lineno)d"
-    try:
-        import colorlog
+    import colorlog
 
-        handler = colorlog.StreamHandler()
-        handler.setFormatter(
-            colorlog.ColoredFormatter(
-                "%(log_color)s" + format_string + "%(reset)s - %(message)s"
-            )
+    format_string = "[%(asctime)-15s] [%(levelname)8s] %(filename)s:%(lineno)d"
+    handler = colorlog.StreamHandler()
+    handler.setFormatter(
+        colorlog.ColoredFormatter(
+            "%(log_color)s" + format_string + "%(reset)s - %(message)s"
         )
-    except ImportError:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter(format_string + " - %(message)s")
-        )
+    )
     logger.addHandler(handler)
