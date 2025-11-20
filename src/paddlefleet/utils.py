@@ -23,9 +23,10 @@ import logging
 import math
 import operator
 import warnings
+from collections.abc import Callable
 from contextlib import nullcontext
 from functools import reduce
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import paddle
 

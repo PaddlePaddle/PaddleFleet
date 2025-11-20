@@ -217,6 +217,8 @@ class _CopyToModelParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
+        if ctx.group is None:
+            return grad_output
         return _reduce(grad_output, ctx.group)
 
 
@@ -231,6 +233,8 @@ class _ReduceFromModelParallelRegion(paddle.autograd.Function):
     @staticmethod
     def forward(ctx, input_, group):
         """Forward function."""
+        if group is None:
+            return input_
         return _reduce(input_, group)
 
     @staticmethod
@@ -251,11 +255,15 @@ class _ScatterToModelParallelRegion(paddle.autograd.Function):
     def forward(ctx, input_, group):
         """Forward function."""
         ctx.group = group
+        if group is None:
+            return input_
         return _split_along_last_dim(input_, group)
 
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
+        if ctx.group is None:
+            return grad_output
         return _gather_along_last_dim(grad_output, ctx.group)
 
 
@@ -271,11 +279,15 @@ class _GatherFromModelParallelRegion(paddle.autograd.Function):
     def forward(ctx, input_, group):
         """Forward function."""
         ctx.group = group
+        if group is None:
+            return input_
         return _gather_along_last_dim(input_, group)
 
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
+        if ctx.group is None:
+            return grad_output
         return _split_along_last_dim(grad_output, ctx.group)
 
 
@@ -291,11 +303,15 @@ class _ScatterToSequenceParallelRegion(paddle.autograd.Function):
     def forward(ctx, input_, group):
         """Forward function."""
         ctx.group = group
+        if group is None:
+            return input_
         return _split_along_first_dim(input_, group)
 
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
+        if ctx.group is None:
+            return grad_output
         return _gather_along_first_dim(grad_output, ctx.group)
 
 
@@ -330,6 +346,8 @@ class _GatherFromSequenceParallelRegion(paddle.autograd.Function):
         ctx.group = group
         ctx.output_split_sizes = output_split_sizes
         ctx.use_global_buffer = use_global_buffer
+        if group is None:
+            return input_
         return _gather_along_first_dim(
             input_, group, output_split_sizes, use_global_buffer
         )
@@ -337,6 +355,8 @@ class _GatherFromSequenceParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
+        if ctx.group is None:
+            return grad_output
         tensor_parallel_output_grad = ctx.tensor_parallel_output_grad
 
         # If the computation graph after the gather operation is
@@ -373,6 +393,8 @@ class _ReduceScatterToSequenceParallelRegion(paddle.autograd.Function):
     ):
         """Forward function."""
         ctx.group = group
+        if group is None:
+            return input_
         ctx.input_split_sizes = input_split_sizes
         ctx.use_global_buffer = use_global_buffer
         return _reduce_scatter_along_first_dim(
@@ -382,6 +404,8 @@ class _ReduceScatterToSequenceParallelRegion(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
+        if ctx.group is None:
+            return grad_output
         input_split_sizes = ctx.input_split_sizes
         use_global_buffer = ctx.use_global_buffer
         return _gather_along_first_dim(
@@ -401,11 +425,15 @@ class _AllGatherFromTensorParallelRegion(paddle.autograd.Function):
     def forward(ctx, input_, group):
         """Forward function."""
         ctx.group = group
+        if group is None:
+            return input_
         return _gather_along_last_dim(input_, group)
 
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
+        if ctx.group is None:
+            return grad_output
         return _reduce_scatter_along_last_dim(grad_output, ctx.group)
 
 
@@ -421,11 +449,15 @@ class _ReduceScatterToTensorParallelRegion(paddle.autograd.Function):
     def forward(ctx, input_, group):
         """Forward function."""
         ctx.group = group
+        if group is None:
+            return input_
         return _reduce_scatter_along_last_dim(input_, group)
 
     @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
+        if ctx.group is None:
+            return grad_output
         return _gather_along_last_dim(grad_output, ctx.group)
 
 

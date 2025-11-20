@@ -125,13 +125,19 @@ def _initialize_affine_weight_gpu(
     )
 
     if not is_expert:
-        with get_cuda_rng_tracker().fork():
+        if dist.get_world_size() <= 1:
             init_method(weight)
+        else:
+            with get_cuda_rng_tracker().fork():
+                init_method(weight)
     else:
-        with get_cuda_rng_tracker().fork(
-            get_expert_parallel_rng_tracker_name()
-        ):
+        if dist.get_world_size() <= 1:
             init_method(weight)
+        else:
+            with get_cuda_rng_tracker().fork(
+                get_expert_parallel_rng_tracker_name()
+            ):
+                init_method(weight)
 
 
 def _initialize_affine_weight_cpu(
@@ -916,7 +922,8 @@ class ColumnParallelLinear(paddle.nn.Layer):
                     self.bias.zero_()
             self.bias.allreduce = not (self.is_expert and self.expert_parallel)
         else:
-            self.register_parameter("bias", None)
+            self.bias = None
+            # self.register_parameter("bias", None)
 
         self.sequence_parallel = config.sequence_parallel
         if self.sequence_parallel and world_size <= 1:
@@ -1232,7 +1239,8 @@ class RowParallelLinear(paddle.nn.Layer):
             self.bias.allreduce = not (self.is_expert and self.expert_parallel)
             self.bias.sequence_parallel = self.sequence_parallel
         else:
-            self.register_parameter("bias", None)
+            self.bias = None
+            # self.register_parameter("bias", None)
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
 
