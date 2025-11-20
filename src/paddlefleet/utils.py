@@ -109,7 +109,7 @@ def get_pg_size(group=None):
     """
     if not paddle.distributed.is_initialized() or group is None:
         return 1
-    return group.size()
+    return group.nranks
 
 
 def get_pg_rank(group=None):
@@ -123,7 +123,7 @@ def get_pg_rank(group=None):
     """
     if not paddle.distributed.is_initialized() or group is None:
         return 0
-    return group.rank()
+    return group.rank
 
 
 def log_single_rank(
@@ -309,9 +309,10 @@ def get_tensor_model_parallel_group_if_none(
                 stacklevel=2,
             )
         if is_expert:
-            tp_group = parallel_state.get_expert_tensor_parallel_group(
-                check_initialized=check_initialized
-            )
+            # tp_group = parallel_state.get_expert_tensor_parallel_group(
+            #     check_initialized=check_initialized
+            # )
+            return None  # TODO: Currently not support expert TP
         else:
             tp_group = parallel_state.get_tensor_model_parallel_group(
                 check_initialized=check_initialized

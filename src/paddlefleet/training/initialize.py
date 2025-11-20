@@ -29,7 +29,7 @@ def initialize_fleet(
 ):
     # Parse arguments
     if parsed_args is None:
-        args = parse_args(**kwargs)
+        args = parse_args(**kwargs, ignore_unknown_args=True)
     else:
         args = parsed_args
 

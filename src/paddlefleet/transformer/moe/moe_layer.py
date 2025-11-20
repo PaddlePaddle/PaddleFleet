@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING
 import paddle
 import paddle.distributed as dist
 from paddle import nn
-from paddle.distributed import fleet
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
     ScatterOp,
@@ -59,7 +58,7 @@ class MoELayer(nn.Layer):
         routed_expert_config = deepcopy(config)
         shared_expert_config = deepcopy(config)
         config = asdict(config)
-
+        self.pg_collection = pg_collection
         self.hidden_size = config["hidden_size"]
         self.moe_intermediate_size = config.get(
             "moe_intermediate_size", config.get("moe_ffn_hidden_size", -1)
@@ -92,14 +91,10 @@ class MoELayer(nn.Layer):
         self.aux_loss_alpha = config.get(
             "moe_aux_loss_coeff", config.get("aux_loss_alpha", 0.0)
         )
-        try:
-            moe_group = (
-                fleet.get_hybrid_communicate_group().get_expert_parallel_group()
-            )
-        except Exception:
-            moe_group = None
+
+        self.moe_group = pg_collection.ep
         self.expert_parallel_degree = (
-            dist.get_world_size(moe_group) if moe_group is not None else 1
+            self.moe_group.nranks if self.moe_group is not None else 1
         )
 
         # MoE-Related Configs
@@ -148,25 +143,30 @@ class MoELayer(nn.Layer):
         else:
             self.shared_experts = None
 
-        if self.moe_token_dispatcher_type == "deepep":
-            self.token_dispatcher = MoEFlexTokenDispatcher(
-                self.num_experts_per_device,
-                self.num_experts_per_tok,
-                self.num_experts,
-                self.moe_group,
-            )
-            self.communication = DeepEPMoECommunication(
-                self.moe_group,
-                self.expert_parallel_degree,
-                self.num_experts_per_device,
-                self.token_dispatcher,
-            )
-        elif self.moe_token_dispatcher_type == "alltoall":
-            self.communication = AllToAllMoECommunication(
-                self.moe_group,
-                self.expert_parallel_degree,
-                self.num_experts_per_device,
-            )
+        if self.expert_parallel_degree > 1:
+            if self.moe_token_dispatcher_type == "deepep":
+                self.token_dispatcher = MoEFlexTokenDispatcher(
+                    self.num_experts_per_device,
+                    self.num_experts_per_tok,
+                    self.num_experts,
+                    self.moe_group,
+                )
+                self.communication = DeepEPMoECommunication(
+                    self.moe_group,
+                    self.expert_parallel_degree,
+                    self.num_experts_per_device,
+                    self.token_dispatcher,
+                )
+            elif self.moe_token_dispatcher_type == "alltoall":
+                self.communication = AllToAllMoECommunication(
+                    self.moe_group,
+                    self.expert_parallel_degree,
+                    self.num_experts_per_device,
+                )
+            else:
+                raise NotImplementedError(
+                    f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
+                )
 
         if (
             hasattr(dist, "fleet")
@@ -212,8 +212,7 @@ class MoELayer(nn.Layer):
             is_fleet_init = False
 
         if is_fleet_init and self.expert_parallel_degree > 1:
-            self.moe_group = dist.fleet.get_hybrid_communicate_group().get_expert_parallel_group()
-            self.moe_grad_group = dist.fleet.get_hybrid_communicate_group().get_moe_sharding_parallel_group()
+            self.moe_grad_group = self.pg_collection.expt_dp
             self.moe_rank = dist.get_rank(self.moe_group)
             self.moe_rank = max(self.moe_rank, 0)
             new_expert_parallel_degree = dist.get_world_size(self.moe_group)
@@ -252,10 +251,19 @@ class MoELayer(nn.Layer):
             dispatched_input, num_or_sections=tokens_per_expert, axis=0
         )
         for i, chunk in enumerate(chunks):
+            if tokens_per_expert[i] == 0:
+                continue
             chunk = chunk.contiguous()
             current_expert_idx = i + moe_rank * num_experts_per_device
             expert = experts[current_expert_idx]
             outputs += [expert(chunk)[0]]
+
+        if not outputs:
+            return paddle.empty(
+                [0, dispatched_input.shape[-1]],
+                dtype=dispatched_input.dtype,
+                requires_grad=True,
+            )
 
         return paddle.concat(outputs, axis=0)
 
@@ -313,11 +321,11 @@ class MoELayer(nn.Layer):
             aux_loss = aux_loss * self.aux_loss_alpha
             output = AddAuxiliaryLoss.apply(output, aux_loss)
 
+        output = output.reshape(orig_shape)
+
         if self.shared_experts is not None:
             shared_output = self.shared_experts(residuals)[0]
-            output = output.unsqueeze(1) + shared_output
-
-        output = output.reshape(orig_shape)
+            output = output + shared_output
 
         if self.expert_parallel_degree <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)
