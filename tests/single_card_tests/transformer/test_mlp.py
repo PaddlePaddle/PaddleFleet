@@ -73,7 +73,7 @@ class TestParallelMLP:
         mlp_spec = LayerSpec(
             MLP,
             sublayers_spec=MLPSublayersSpec(
-                linear_fc1=Linear, linear_fc2=Linear
+                up_gate_proj=Linear, down_proj=Linear
             ),
         )
         self.mlp = MLP(transformer_config, mlp_spec.sublayers_spec)

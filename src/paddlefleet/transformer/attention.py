@@ -45,9 +45,9 @@ class SelfAttentionSublayersSpec:
     Configuration class for specifying the sublayers_spec of a self-attention.
     """
 
-    linear_qkv: LayerSpec | type = None
+    qkv_proj: LayerSpec | type = None
     core_attention: LayerSpec | type = None
-    linear_proj: LayerSpec | type = None
+    o_proj: LayerSpec | type = None
     q_layernorm: LayerSpec | type = None
     k_layernorm: LayerSpec | type = None
 
@@ -61,7 +61,7 @@ class CrossAttentionSublayersSpec:
     linear_q: LayerSpec | type = None
     linear_kv: LayerSpec | type = None
     core_attention: LayerSpec | type = None
-    linear_proj: LayerSpec | type = None
+    o_proj: LayerSpec | type = None
 
 
 class Attention(FleetLayer, ABC):
@@ -144,8 +144,8 @@ class Attention(FleetLayer, ABC):
         )
 
         # Output.
-        self.linear_proj = build_layer(
-            sublayers_spec.linear_proj,
+        self.o_proj = build_layer(
+            sublayers_spec.o_proj,
             self.query_projection_size,
             self.config.hidden_size,
             config=self.config,
@@ -362,7 +362,7 @@ class Attention(FleetLayer, ABC):
         # Output. [sq, b, h]
         # =================
 
-        output, bias = self.linear_proj(core_attn_out)
+        output, bias = self.o_proj(core_attn_out)
 
         return output, bias
 
@@ -399,8 +399,8 @@ class SelfAttention(Attention):
             pg_collection=pg_collection,
         )
 
-        self.linear_qkv = build_layer(
-            sublayers_spec.linear_qkv,
+        self.qkv_proj = build_layer(
+            sublayers_spec.qkv_proj,
             self.config.hidden_size,
             self.query_projection_size + 2 * self.kv_projection_size,
             config=self.config,
@@ -440,7 +440,7 @@ class SelfAttention(Attention):
         the unsplit mixed_qkv tensor is returned.
         """
         # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
-        mixed_qkv, _ = self.linear_qkv(hidden_states)
+        mixed_qkv, _ = self.qkv_proj(hidden_states)
 
         # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
         new_tensor_shape = (
@@ -498,11 +498,11 @@ class SelfAttention(Attention):
 
     def _backward_qkv_proj(self):
         """Update weights for QKV projection layer"""
-        self.linear_qkv.backward_dw()
+        self.qkv_proj.backward_dw()
 
     def _backward_output_proj(self):
         """Update weights for output projection layer"""
-        self.linear_proj.backward_dw()
+        self.o_proj.backward_dw()
 
 
 class CrossAttention(Attention):

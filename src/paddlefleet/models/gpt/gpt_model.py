@@ -368,6 +368,7 @@ class GPTModel(LanguageLayer):
         input_ids: Tensor,
         position_ids: Tensor = None,
         attention_mask: Tensor = None,
+        attn_mask_startend_row_indices: Tensor = None,
         decoder_input: Tensor = None,
         labels: Tensor = None,
         packed_seq_params: PackedSeqParams = None,

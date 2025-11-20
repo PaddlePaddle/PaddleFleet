@@ -223,7 +223,7 @@ class TransformerLayerSublayersSpec:
 
     Args:
         input_layernorm (LayerSpec | type): Specification for the input layer normalization.
-        self_attention (LayerSpec | type): Specification for the self-attention mechanism.
+        self_attn (LayerSpec | type): Specification for the self-attention mechanism.
         self_attn_bda (LayerSpec | type): Specification for the bias-dropout-add operation
             after self-attention.
         pre_cross_attn_layernorm (LayerSpec | type): Specification for the layer
@@ -241,7 +241,7 @@ class TransformerLayerSublayersSpec:
     """
 
     input_layernorm: LayerSpec | type = IdentityOp
-    self_attention: LayerSpec | type = IdentityOp
+    self_attn: LayerSpec | type = IdentityOp
     self_attn_bda: LayerSpec | type = IdentityFuncOp
 
     pre_cross_attn_layernorm: LayerSpec | type = IdentityOp
@@ -321,8 +321,8 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         attention_optional_kwargs["pg_collection"] = pg_collection
 
         # [Layer 2: SelfAttention]
-        self.self_attention = build_layer(
-            sublayers_spec.self_attention,
+        self.self_attn = build_layer(
+            sublayers_spec.self_attn,
             config=self.config,
             layer_number=self.layer_number,
             **attention_optional_kwargs,
@@ -471,7 +471,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
             input_layernorm_output = self.input_layernorm(hidden_states)
 
         # Self attention.
-        attention_output_with_bias = self.self_attention(
+        attention_output_with_bias = self.self_attn(
             input_layernorm_output,
             attention_mask=attention_mask,
             rotary_pos_emb=rotary_pos_emb,

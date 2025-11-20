@@ -95,13 +95,13 @@ def get_gpt_layer_local_spec(
         layer=TransformerLayer,
         sublayers_spec=TransformerLayerSublayersSpec(
             input_layernorm=layer_norm,
-            self_attention=LayerSpec(
+            self_attn=LayerSpec(
                 layer=SelfAttention,
                 params={"attn_mask_type": AttnMaskType.causal},
                 sublayers_spec=SelfAttentionSublayersSpec(
-                    linear_qkv=backend.column_parallel_linear(),
+                    qkv_proj=backend.column_parallel_linear(),
                     core_attention=backend.core_attention(),
-                    linear_proj=backend.row_parallel_linear(),
+                    o_proj=backend.row_parallel_linear(),
                     q_layernorm=(
                         L2Norm
                         if qk_l2_norm
@@ -119,8 +119,8 @@ def get_gpt_layer_local_spec(
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
             sharded_state_dict_keys_map={
-                "input_layernorm.": "self_attention.linear_qkv.layer_norm_",
-                "pre_mlp_layernorm.": "mlp.linear_fc1.layer_norm_",
+                "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
+                "pre_mlp_layernorm.": "mlp.up_gate_proj.layer_norm_",
             },
         ),
     )
@@ -133,23 +133,23 @@ def get_mlp_layer_spec_for_backend(
 ) -> LayerSpec:
     """Helper function to get layer spec for MLP/MoE"""
 
-    linear_fc2 = backend.row_parallel_linear()
-    activation_func = None
+    down_proj = backend.row_parallel_linear()
+    act_fn = None
 
     if num_experts is None:
         # Dense MLP w/ or w/o TE layers.
         layer = MLP
         if backend.fuse_layernorm_and_linear():
-            linear_fc1 = backend.column_parallel_layer_norm_linear()
-            assert linear_fc1 is not None
+            up_gate_proj = backend.column_parallel_layer_norm_linear()
+            assert up_gate_proj is not None
         else:
-            linear_fc1 = backend.column_parallel_linear()
+            up_gate_proj = backend.column_parallel_linear()
         return LayerSpec(
             layer=layer,
             sublayers_spec=MLPSublayersSpec(
-                linear_fc1=linear_fc1,
-                linear_fc2=linear_fc2,
-                activation_func=activation_func,
+                up_gate_proj=up_gate_proj,
+                down_proj=down_proj,
+                act_fn=act_fn,
             ),
         )
     else:
