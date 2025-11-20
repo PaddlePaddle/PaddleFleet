@@ -15,6 +15,7 @@
 
 import unittest
 
+import paddle
 from paddle.distributed import fleet
 
 # from tests.unit_tests.test_utilities import Utils
@@ -52,11 +53,12 @@ class TestGPTModel(unittest.TestCase):
         fleet.init(is_collective=True, strategy=strategy)
         hcg = fleet.get_hybrid_communicate_group()
         ps.initialize_model_parallel(hcg)
+
         config = TransformerConfig(
             num_layers=2,
-            hidden_size=12,
+            hidden_size=512,
             num_attention_heads=4,
-            ffn_hidden_size=16,
+            ffn_hidden_size=1024,
         )
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=None,
@@ -69,7 +71,7 @@ class TestGPTModel(unittest.TestCase):
         post_process = True
         mtp_block_spec = None
         vp_stage = None
-        self.model = GPTModel(
+        self.gpt_model = GPTModel(
             config=config,
             transformer_layer_spec=transformer_layer_spec,
             vocab_size=100,
@@ -87,8 +89,40 @@ class TestGPTModel(unittest.TestCase):
             vp_stage=vp_stage,
         )
 
-    def test_gpt_model(self):
-        print(self.model)
+    def test_forward(self) -> None:
+        _ = self.gpt_model.config
+        sequence_length = self.gpt_model.max_sequence_length
+        micro_batch_size = 2
+
+        for name, param in self.gpt_model.named_parameters():
+            # 计算 L2 范数
+            param_norm = param.detach().norm().item()
+            print(f"{name}: {param.shape}, {param_norm:.6f}")
+
+        data = list(range(sequence_length))
+        input_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
+            (micro_batch_size, 1)
+        )
+        position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
+            (micro_batch_size, 1)
+        )
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+        labels = paddle.to_tensor(
+            list(range(1, sequence_length + 1)), dtype=paddle.int64
+        ).repeat((micro_batch_size, 1))
+
+        loss = self.gpt_model.forward(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+        assert loss.item() == 5.51837492, (
+            "loss not equal, please check your modify"
+        )
+        print("loss", loss)
 
 
 if __name__ == "__main__":
