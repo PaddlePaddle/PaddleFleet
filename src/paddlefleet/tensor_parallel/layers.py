@@ -15,12 +15,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from paddlefleet.model_parallel_config import ModelParallelConfig
 
 

@@ -22,7 +22,7 @@ import math
 import operator
 import warnings
 from contextlib import nullcontext
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import paddle
 
@@ -47,6 +47,9 @@ try:
 except Exception:
     # This is a WAR for building docs, where paddle is not actually imported
     _paddle_version = PkgVersion("0.0.0") if HAVE_PACKAGING else "0.0.0"
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class WrappedTensor:

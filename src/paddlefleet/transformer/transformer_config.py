@@ -15,11 +15,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
 
 from ..model_parallel_config import ModelParallelConfig
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @dataclass
