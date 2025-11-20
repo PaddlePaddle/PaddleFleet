@@ -183,8 +183,11 @@ class TransformerConfig(ModelParallelConfig):
     normalization: str = "RMSNorm"
     """Norm type"""
 
-    layernorm_epsilon: float = (1e-5,)
+    layernorm_epsilon: float = 1e-5
     """Epsilon value for norm."""
+
+    bias_dropout_fusion: bool = False
+    """If True, uses bias dropout fusion."""
 
     ####################
     # activation recomputation

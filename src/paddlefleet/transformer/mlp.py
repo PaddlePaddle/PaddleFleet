@@ -116,13 +116,17 @@ class MLP(FleetLayer):
                 DeprecationWarning,
                 stacklevel=2,
             )
+            if self.config.ffn_hidden_size is None:
+                raise ValueError(
+                    "MLP requires `config.ffn_hidden_size` is not None, but it got None."
+                )
+
             ffn_hidden_size = self.config.ffn_hidden_size
 
         # If this is a gated linear unit we double the output width
         # see https://arxiv.org/pdf/2002.05202.pdf
         if self.config.gated_linear_unit:
             ffn_hidden_size *= 2
-        print("sublayers_spec", sublayers_spec, sublayers_spec.up_gate_proj)
         self.up_gate_proj = build_layer(
             sublayers_spec.up_gate_proj,
             self.input_size,
@@ -161,10 +165,7 @@ class MLP(FleetLayer):
         nvtx_range_push(suffix="activation")
         if self.config.bias_activation_fusion:
             if per_token_scale is not None:
-                if (
-                    self.act_fn == F.silu
-                    and self.config.gated_linear_unit
-                ):
+                if self.act_fn == F.silu and self.config.gated_linear_unit:
                     # dtype is handled inside the fused kernel
                     intermediate_parallel = weighted_bias_swiglu_impl(
                         intermediate_parallel,
@@ -173,8 +174,7 @@ class MLP(FleetLayer):
                         self.config.activation_func_fp8_input_store,
                     )
                 elif (
-                    self.act_fn == quick_gelu
-                    and self.config.gated_linear_unit
+                    self.act_fn == quick_gelu and self.config.gated_linear_unit
                 ):
                     intermediate_parallel = weighted_bias_quick_geglu_impl(
                         intermediate_parallel,
@@ -199,10 +199,7 @@ class MLP(FleetLayer):
                         intermediate_parallel = bias_gelu_impl(
                             intermediate_parallel, bias_parallel
                         )
-                elif (
-                    self.act_fn == F.silu
-                    and self.config.gated_linear_unit
-                ):
+                elif self.act_fn == F.silu and self.config.gated_linear_unit:
                     """
                     intermediate_parallel = bias_swiglu_impl(
                         intermediate_parallel,
@@ -236,9 +233,7 @@ class MLP(FleetLayer):
 
                 intermediate_parallel = glu(intermediate_parallel)
             else:
-                intermediate_parallel = self.act_fn(
-                    intermediate_parallel
-                )
+                intermediate_parallel = self.act_fn(intermediate_parallel)
 
             if per_token_scale is not None:
                 original_dtype = intermediate_parallel.dtype

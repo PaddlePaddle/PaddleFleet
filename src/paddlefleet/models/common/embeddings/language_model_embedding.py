@@ -154,16 +154,9 @@ class LanguageModelEmbedding(FleetLayer):
         else:
             embeddings = word_embeddings
 
-        if not self.reduce_scatter_embeddings:
-            # Data format change to avoid explicit transposes : [b s h] --> [s b h].
-            embeddings = embeddings.transpose(0, 1).contiguous()
-
         if tokentype_ids is not None:
             assert self.tokentype_embeddings is not None
-            # [b s h] -> [s b h] (So that it can be added with embeddings)
-            tokentype_embedding = self.tokentype_embeddings(
-                tokentype_ids
-            ).permute(1, 0, 2)
+            tokentype_embedding = self.tokentype_embeddings(tokentype_ids)
             embeddings = embeddings + tokentype_embedding
         else:
             assert self.tokentype_embeddings is None
