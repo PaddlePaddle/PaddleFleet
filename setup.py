@@ -37,13 +37,13 @@ def setup_moe_ops():
 
     change_pwd()
     setup(
-        name="paddlefleet.extentions.ops",
+        name="paddlefleet.extensions.ops",
         ext_modules=CUDAExtension(
             sources=[
-                "./src/paddlefleet/extentions/tokens_stable_unzip.cu",
+                "./src/paddlefleet/extensions/tokens_stable_unzip.cu",
             ],
             include_dirs=[
-                os.path.join(os.getcwd(), "src/paddlefleet/extentions"),
+                os.path.join(os.getcwd(), "src/paddlefleet/extensions"),
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-w", "-Wno-abi", "-fPIC", "-std=c++17"],

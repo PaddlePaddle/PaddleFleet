@@ -1,2 +1,2 @@
-include src/paddlefleet/extentions/*.h
-include src/paddlefleet/extentions/*.cu
+include src/paddlefleet/extensions/*.h
+include src/paddlefleet/extensions/*.cu

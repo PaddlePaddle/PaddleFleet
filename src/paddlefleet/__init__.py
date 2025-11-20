@@ -13,11 +13,10 @@
 # limitations under the License.
 
 from . import (
-    extentions as extentions,
+    extensions as extensions,
     parallel_state as parallel_state,
     training as training,
 )
-
 from .package_info import (
     __contact_emails__,
     __contact_names__,
@@ -35,7 +34,7 @@ from .timers import Timers
 mpu = parallel_state
 
 __all__ = [
-    "extentions",
+    "extensions",
     "training",
     "parallel_state",
     "Timers",
