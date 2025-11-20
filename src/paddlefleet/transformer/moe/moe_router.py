@@ -27,6 +27,7 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet import utils
 
 
 class StandardMoERouter(nn.Layer):
@@ -101,7 +102,11 @@ class StandardMoERouter(nn.Layer):
             assert self.group is not None, (
                 "group is required when global_aux_loss is True"
             )
-            self.rank = dist.get_rank(self.group)
+            self.rank = (
+                utils.get_pg_rank(pg_collection.ep)
+                if pg_collection.ep is not None
+                else 0
+            )
 
         # According to the shape of gate weights in model checkpoint
         if not self.transpose_gate_weight:

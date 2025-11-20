@@ -19,7 +19,6 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 import paddle
-import paddle.distributed as dist
 from paddle import nn
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
@@ -30,6 +29,8 @@ if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.spec_utils import LayerSpec
     from paddlefleet.transformer.transformer_config import TransformerConfig
+
+from paddlefleet import utils
 
 from .moe_communication import AllToAllMoECommunication, DeepEPMoECommunication
 from .moe_expert import StandardMLPExpert
@@ -94,7 +95,9 @@ class MoELayer(nn.Layer):
 
         self.moe_group = pg_collection.ep
         self.expert_parallel_degree = (
-            self.moe_group.nranks if self.moe_group is not None else 1
+            utils.get_pg_size(self.moe_group)
+            if self.moe_group is not None
+            else 1
         )
 
         # MoE-Related Configs
@@ -168,11 +171,7 @@ class MoELayer(nn.Layer):
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
                 )
 
-        if (
-            hasattr(dist, "fleet")
-            and dist.is_initialized()
-            and self.expert_parallel_degree > 1
-        ):
+        if self.expert_parallel_degree > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
             for p in self.experts.parameters():
@@ -205,25 +204,10 @@ class MoELayer(nn.Layer):
             moe_num_experts_per_device = num_experts // expert_parallel_degree
             return moe_num_experts_per_device
 
-        try:
-            dist.fleet.get_hybrid_communicate_group()
-            is_fleet_init = True
-        except AttributeError:
-            is_fleet_init = False
-
-        if is_fleet_init and self.expert_parallel_degree > 1:
+        if self.expert_parallel_degree > 1:
             self.moe_grad_group = self.pg_collection.expt_dp
-            self.moe_rank = dist.get_rank(self.moe_group)
+            self.moe_rank = utils.get_pg_rank(self.moe_group)
             self.moe_rank = max(self.moe_rank, 0)
-            new_expert_parallel_degree = dist.get_world_size(self.moe_group)
-            assert self.expert_parallel_degree == new_expert_parallel_degree, (
-                f"self.expert_parallel_degree={self.expert_parallel_degree} != moe_world_size={new_expert_parallel_degree}"
-            )
-            self.expert_parallel_degree = (
-                1
-                if new_expert_parallel_degree < 0
-                else new_expert_parallel_degree
-            )
             self.num_experts_per_device = _parse_moe_expert_parallel(
                 self.num_experts, self.expert_parallel_degree
             )
