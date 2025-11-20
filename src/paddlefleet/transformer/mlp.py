@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import logging
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -47,12 +46,13 @@ from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import (
+    get_logger,
     get_tensor_model_parallel_group_if_none,
     nvtx_range_pop,
     nvtx_range_push,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # pylint: disable=missing-class-docstring

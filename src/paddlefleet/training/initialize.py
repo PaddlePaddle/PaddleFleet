@@ -46,8 +46,8 @@ def initialize_fleet(
 
 
 def set_logging(args):
-    """Set the logging level and logging format for the root logger"""
-    logger = logging.getLogger()
+    """Set the logging level and logging format"""
+    logger = logging.getLogger("paddlefleet")
 
     # set logging level
     logging_level = getattr(args, "logging_level", None)
@@ -57,11 +57,7 @@ def set_logging(args):
     # set logging format
     import colorlog
 
-    format_string = "[%(asctime)-15s] [%(levelname)8s] %(filename)s:%(lineno)d"
+    format_string = "%(log_color)s[%(asctime)-15s] [%(levelname)8s] %(filename)s:%(lineno)d%(reset)s - %(message)s"
     handler = colorlog.StreamHandler()
-    handler.setFormatter(
-        colorlog.ColoredFormatter(
-            "%(log_color)s" + format_string + "%(reset)s - %(message)s"
-        )
-    )
+    handler.setFormatter(colorlog.ColoredFormatter(format_string))
     logger.addHandler(handler)

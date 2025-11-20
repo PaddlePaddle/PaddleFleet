@@ -17,14 +17,12 @@ from __future__ import annotations
 
 import functools
 import inspect
-import operator
-from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Callable
-
-if TYPE_CHECKING:
-    import logging
+import logging
 import math
+import operator
 import warnings
+from contextlib import nullcontext
+from typing import Any, Callable
 
 import paddle
 
@@ -162,6 +160,10 @@ def is_paddle_min_version(version, check_equality=True):
     if check_equality:
         return get_paddle_version() >= PkgVersion(version)
     return get_paddle_version() > PkgVersion(version)
+
+
+def get_logger(name: str):
+    return logging.getLogger("paddlefleet." + name)
 
 
 ######################
