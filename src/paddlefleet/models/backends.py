@@ -82,7 +82,7 @@ class BackendSpecProvider(Protocol):
         ...
 
     @abstractmethod
-    def activation_func(self) -> type:
+    def act_fn(self) -> type:
         """Which layer to use for activation function"""
         ...
 
@@ -127,9 +127,9 @@ class LocalSpecProvider(BackendSpecProvider):
             return GroupedMLP, None
         else:
             return SequentialMLP, MLPSublayersSpec(
-                linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear
+                up_gate_proj=ColumnParallelLinear, down_proj=RowParallelLinear
             )
 
-    def activation_func(self) -> type:
+    def act_fn(self) -> type:
         """Which layer to use for activation function"""
         return None

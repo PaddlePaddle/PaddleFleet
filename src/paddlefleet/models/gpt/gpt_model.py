@@ -368,6 +368,7 @@ class GPTModel(LanguageLayer):
         input_ids: Tensor,
         position_ids: Tensor = None,
         attention_mask: Tensor = None,
+        attn_mask_startend_row_indices: Tensor = None,
         decoder_input: Tensor = None,
         labels: Tensor = None,
         packed_seq_params: PackedSeqParams = None,
@@ -549,8 +550,8 @@ class GPTModel(LanguageLayer):
         )
 
         loss = self.compute_language_model_loss(labels, logits)
-
-        return loss
+        outputs = {"loss": loss, "logits": logits}
+        return outputs
 
     def shared_embedding_or_output_weight(self) -> Tensor:
         """Gets the embedding weight or output logit weights when share input embedding and

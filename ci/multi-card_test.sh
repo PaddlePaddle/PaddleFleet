@@ -13,7 +13,8 @@
 # limitations under the License.
 
 disable_file="$work_dir/tests/multi_card_tests/disable_multi-card_uts.txt"
-test_dir="tests/multi_card_tests"
+test_dir="$work_dir/tests/multi_card_tests"
+yaml_config="$work_dir/tests/test_configs.yaml"
 
 disabled=()
 if [ -f "$disable_file" ]; then
@@ -35,18 +36,56 @@ is_disabled() {
     return 1
 }
 
+shopt -s extglob
+shopt -s globstar
+
+parse_yaml_patterns() {
+    local yaml="$1"
+    # pattern|num_gpus
+    yq -r '.tests[] | .test_case[] as $pat | .products[] | "\($pat)|\(.num_gpus)"' "$yaml"
+}
+
+get_num_gpus_for_test() {
+    local filepath=$1    # "tests/multi_card_tests/xxx/yy.py"
+    local pattern num
+
+    while IFS='|' read -r pattern num; do
+        if [[ "$filepath" == $pattern ]]; then
+            echo "$num"
+            return 0
+        fi
+    done < <(parse_yaml_patterns "$yaml_config")
+    echo "8"
+}
+
+gen_gpus_arg() {
+    local num_gpus=$1
+    local gpus=""
+    for ((i=0; i<num_gpus; i++)); do
+        if [[ $i -ne 0 ]]; then
+            gpus+=","
+        fi
+        gpus+="$i"
+    done
+    echo "$gpus"
+}
+
 run_count=0
 failed_tests=()
 for test_file in $(find $test_dir -type f -name "test_*.py"); do
+    rel_path="${test_file#$work_dir/}"
     filename=$(basename "$test_file")
     if is_disabled "$filename"; then
         echo "Skipping disabled test: $filename"
         continue
     fi
 
-    echo "Running multi-card test: $test_file"
+    num_gpus=$(get_num_gpus_for_test "$rel_path")
+    gpus_arg=$(gen_gpus_arg "$num_gpus")
+    echo "Running multi-card test: $test_file with $num_gpus GPUs ($gpus_arg)"
+
     run_count=$((run_count + 1))
-    uv run -m paddle.distributed.launch --gpus "0,1,2,3,4,5,6,7" "$test_file"
+    uv run -m paddle.distributed.launch --gpus "$gpus_arg" "$test_file"
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo "Test FAILED: $test_file"

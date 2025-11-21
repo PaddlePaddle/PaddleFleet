@@ -63,9 +63,9 @@ class MLPSublayersSpec:
     including  linear fc1, activation function, linear fc2.
     """
 
-    linear_fc1: LayerSpec | type = None
-    activation_func: LayerSpec | type = None
-    linear_fc2: LayerSpec | type = None
+    up_gate_proj: LayerSpec | type = None
+    act_fn: LayerSpec | type = None
+    down_proj: LayerSpec | type = None
 
 
 class MLP(FleetLayer):
@@ -127,8 +127,8 @@ class MLP(FleetLayer):
         # see https://arxiv.org/pdf/2002.05202.pdf
         if self.config.gated_linear_unit:
             ffn_hidden_size *= 2
-        self.linear_fc1 = build_layer(
-            sublayers_spec.linear_fc1,
+        self.up_gate_proj = build_layer(
+            sublayers_spec.up_gate_proj,
             self.input_size,
             ffn_hidden_size,
             config=self.config,
@@ -140,10 +140,10 @@ class MLP(FleetLayer):
             tp_group=tp_group,
         )
 
-        self.activation_func = self.config.activation_func
+        self.act_fn = self.config.act_fn
 
-        self.linear_fc2 = build_layer(
-            sublayers_spec.linear_fc2,
+        self.down_proj = build_layer(
+            sublayers_spec.down_proj,
             self.config.ffn_hidden_size,
             self.config.hidden_size,
             config=self.config,
@@ -158,17 +158,14 @@ class MLP(FleetLayer):
     def forward(self, hidden_states, per_token_scale=None):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
-        nvtx_range_push(suffix="linear_fc1")
-        intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
-        nvtx_range_pop(suffix="linear_fc1")
+        nvtx_range_push(suffix="up_gate_proj")
+        intermediate_parallel, bias_parallel = self.up_gate_proj(hidden_states)
+        nvtx_range_pop(suffix="up_gate_proj")
 
         nvtx_range_push(suffix="activation")
         if self.config.bias_activation_fusion:
             if per_token_scale is not None:
-                if (
-                    self.activation_func == F.silu
-                    and self.config.gated_linear_unit
-                ):
+                if self.act_fn == F.silu and self.config.gated_linear_unit:
                     # dtype is handled inside the fused kernel
                     intermediate_parallel = weighted_bias_swiglu_impl(
                         intermediate_parallel,
@@ -177,8 +174,7 @@ class MLP(FleetLayer):
                         self.config.activation_func_fp8_input_store,
                     )
                 elif (
-                    self.activation_func == quick_gelu
-                    and self.config.gated_linear_unit
+                    self.act_fn == quick_gelu and self.config.gated_linear_unit
                 ):
                     intermediate_parallel = weighted_bias_quick_geglu_impl(
                         intermediate_parallel,
@@ -193,7 +189,7 @@ class MLP(FleetLayer):
                         "Only support fusion of swiglu and quick_gelu with per_token_scale in MLP."
                     )
             else:
-                if self.activation_func == F.gelu:
+                if self.act_fn == F.gelu:
                     if self.config.gated_linear_unit:
                         intermediate_parallel = bias_geglu_impl(
                             intermediate_parallel, bias_parallel
@@ -203,10 +199,7 @@ class MLP(FleetLayer):
                         intermediate_parallel = bias_gelu_impl(
                             intermediate_parallel, bias_parallel
                         )
-                elif (
-                    self.activation_func == F.silu
-                    and self.config.gated_linear_unit
-                ):
+                elif self.act_fn == F.silu and self.config.gated_linear_unit:
                     """
                     intermediate_parallel = bias_swiglu_impl(
                         intermediate_parallel,
@@ -234,15 +227,13 @@ class MLP(FleetLayer):
                     ) is not None:
                         x_glu = x_glu.clamp(min=None, max=val)
                         x_linear = x_linear.clamp(min=-val, max=val)
-                    return self.config.activation_func(x_glu) * (
+                    return self.config.act_fn(x_glu) * (
                         x_linear + self.config.glu_linear_offset
                     )
 
                 intermediate_parallel = glu(intermediate_parallel)
             else:
-                intermediate_parallel = self.activation_func(
-                    intermediate_parallel
-                )
+                intermediate_parallel = self.act_fn(intermediate_parallel)
 
             if per_token_scale is not None:
                 original_dtype = intermediate_parallel.dtype
@@ -253,9 +244,9 @@ class MLP(FleetLayer):
         nvtx_range_pop(suffix="activation")
 
         # [s, b, h]
-        nvtx_range_push(suffix="linear_fc2")
-        output, output_bias = self.linear_fc2(intermediate_parallel)
-        nvtx_range_pop(suffix="linear_fc2")
+        nvtx_range_push(suffix="down_proj")
+        output, output_bias = self.down_proj(intermediate_parallel)
+        nvtx_range_pop(suffix="down_proj")
 
         if per_token_scale is not None and output_bias is not None:
             # if this MLP is an expert, and bias is required, we add the bias to output directly
@@ -277,8 +268,8 @@ class MLP(FleetLayer):
         pass
 
     def backward_dw(self):
-        self.linear_fc2.backward_dw()
-        self.linear_fc1.backward_dw()
+        self.down_proj.backward_dw()
+        self.up_gate_proj.backward_dw()
 
 
 # (TODO): need to adapt flex_checkpoint logic

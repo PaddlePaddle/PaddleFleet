@@ -85,12 +85,12 @@ class TestSelfAttention(unittest.TestCase):
         self.config.attention_dropout = 0.1
         self.config.softmax_type = "vanilla"
 
-        self.self_attention = SelfAttention(
+        self.self_attn = SelfAttention(
             self.config,
             SelfAttentionSublayersSpec(
-                linear_qkv=BiasedLinear,
+                qkv_proj=BiasedLinear,
                 core_attention=DotProductAttention,
-                linear_proj=BiasedLinear,
+                o_proj=BiasedLinear,
                 q_layernorm=RMSNorm,
                 k_layernorm=RMSNorm,
             ),
@@ -99,10 +99,10 @@ class TestSelfAttention(unittest.TestCase):
         )
 
     def test_self_attention(self):
-        config = self.self_attention.config
+        config = self.self_attn.config
         sequence_length = 127
         micro_batch_size = 2
-        hidden_size = self.self_attention.config.hidden_size
+        hidden_size = self.self_attn.config.hidden_size
 
         hidden_states = paddle.randn(
             (micro_batch_size, sequence_length, hidden_size),
@@ -111,7 +111,7 @@ class TestSelfAttention(unittest.TestCase):
             (1, sequence_length, 1, self.config.kv_channels)
         )
 
-        output, bias = self.self_attention(
+        output, bias = self.self_attn(
             hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb
         )
 

@@ -129,7 +129,7 @@ class TransformerConfig(ModelParallelConfig):
     gated_linear_unit: bool = False
     """Use a gated linear unit for the first linear layer in the MLP."""
 
-    activation_func: Callable = F.gelu
+    act_fn: Callable = F.gelu
     """Activation function to use for the non-linearity in the MLP."""
 
     add_bias_linear: bool = True

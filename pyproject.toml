@@ -52,7 +52,7 @@ dependencies = [
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
-Homepage = "https://github.com/PaddlePaddle/PaddleFleet/fleet/core"
+Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 [project.optional-dependencies]
 

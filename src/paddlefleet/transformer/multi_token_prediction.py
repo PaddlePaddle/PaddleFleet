@@ -410,7 +410,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         self.cp_group = pg_collection.cp
 
         self_attention_spec = (
-            self.sublayers_spec.transformer_layer.sublayers_spec.self_attention
+            self.sublayers_spec.transformer_layer.sublayers_spec.self_attn
         )
         attn_mask_type = self_attention_spec.params.get("attn_mask_type", "")
         assert attn_mask_type in SUPPORTED_ATTN_MASK, (
