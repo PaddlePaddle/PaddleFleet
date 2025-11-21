@@ -256,8 +256,6 @@ class MLP(FleetLayer):
 
         return output, output_bias
 
-
     def backward_dw(self):
         self.down_proj.backward_dw()
         self.up_gate_proj.backward_dw()
-
