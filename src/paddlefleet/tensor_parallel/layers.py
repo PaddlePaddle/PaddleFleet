@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import paddle
 import paddle.distributed as dist
@@ -63,6 +63,8 @@ except ImportError:
 HAVE_TE = False
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ..fleet_config import FleetConfig
 
 _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
@@ -978,7 +980,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             weight = self.weight
         else:
             # Check the weight passed in is the correct shape
-            expected_shape = (self.output_size_per_partition, self.input_size)
+            expected_shape = [self.output_size_per_partition, self.input_size]
             if weight.shape != expected_shape:
                 raise RuntimeError(
                     f"supplied weight's shape is {tuple(weight.shape)}, "

@@ -1,7 +1,7 @@
 # Special unit test configuration file, defaults to 8 GPUs.
 # If you have special requirements, refer to the example and add them to this file.
 tests:
-  - test_case: [tests/multi_card_tests/example.py]
+  - test_case: [tests/multi_card_tests/tensor_parallel/*.py]
     products:
       - num_gpus: 4
   - test_case: [tests/test/*.py]

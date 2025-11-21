@@ -567,8 +567,12 @@ class GPTModel(LanguageLayer):
             assert hasattr(self, "embedding"), (
                 "embedding is needed in this pipeline stage, but it is not initialized."
             )
-            return self.embedding.word_embeddings.weight.T
+            print("==== word_embeddings.weight ====")
+            print(self.embedding.word_embeddings.weight)
+            return self.embedding.word_embeddings.weight
         elif self.post_process:
+            print("==== output_layer.weight ====")
+            print(self.output_layer.weight)
             return self.output_layer.weight
         return None
 

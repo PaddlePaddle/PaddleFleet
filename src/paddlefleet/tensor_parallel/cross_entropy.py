@@ -41,7 +41,7 @@ class VocabParallelCrossEntropy:
 
         vocab_parallel_logits = vocab_parallel_logits.float()
         # Maximum value along vocab dimension across all GPUs.
-        logits_max = paddle.max(vocab_parallel_logits, dim=-1)[0]
+        logits_max = paddle.max(vocab_parallel_logits, axis=-1)[0]
 
         return vocab_parallel_logits, logits_max
 
@@ -241,7 +241,7 @@ class _VocabParallelCrossEntropy(paddle.autograd.Function):
         """Vocab parallel cross entropy backward function."""
 
         # Retrieve tensors from the forward path.
-        softmax, target_mask, masked_target_1d = ctx.saved_tensors
+        softmax, target_mask, masked_target_1d = ctx.saved_tensor()
         label_smoothing, vocab_size = ctx.label_smoothing, ctx.vocab_size
 
         (grad_2d, arange_1d, softmax_update, grad_input) = (

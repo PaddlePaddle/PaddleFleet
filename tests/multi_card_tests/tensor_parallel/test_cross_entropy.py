@@ -15,6 +15,7 @@
 # Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+import numpy as np
 import paddle
 
 from paddlefleet.tensor_parallel.cross_entropy import (
@@ -25,10 +26,15 @@ from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
 
 def test_vocab_parallel_cross_entropy():
     Utils.initialize_model_parallel(4, 1)
-    vocab_parallel_logits = (
-        paddle.arange(0, 7).repeat_interleave([16, 4]).cuda()
-    )
+    np_vocab_parallel_logits = (np.arange(32)).reshape((1, 32)) % 8
+    np_vocab_parallel_logits = np.repeat(np_vocab_parallel_logits, 16, 0)
+    vocab_parallel_logits = paddle.tensor(np_vocab_parallel_logits)
+    print(vocab_parallel_logits)
+    # vocab_parallel_logits = (
+    #     paddle.arange(0, 8).repeat_interleave(paddle.tensor([16, 4])).cuda()
+    # )
     target = paddle.arange(0, 32, 2).cuda()
+    print("==== in test ======")
     output = vocab_parallel_cross_entropy(vocab_parallel_logits, target)
     expected_output = paddle.tensor(
         [
@@ -52,3 +58,7 @@ def test_vocab_parallel_cross_entropy():
     ).cuda()
     output.backward()
     assert paddle.equal_all(paddle.round(expected_output), paddle.round(output))
+
+
+if __name__ == "__main__":
+    test_vocab_parallel_cross_entropy()

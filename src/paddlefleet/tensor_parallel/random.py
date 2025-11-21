@@ -183,9 +183,7 @@ class CudaRNGStatesTracker:
             yield
         finally:
             # Throw a warning if cpu RNG state changed
-            if not paddle.all(
-                cpu_rng_state == paddle.get_rng_state("cpu")
-            ).item():
+            if not cpu_rng_state == paddle.get_rng_state("cpu"):
                 logging.getLogger(__name__).warning(
                     "CPU RNG state changed within GPU RNG context"
                 )
