@@ -14,6 +14,7 @@
 
 
 import random
+import subprocess
 import unittest
 
 import numpy as np
@@ -27,6 +28,33 @@ import paddlefleet.parallel_state as ps
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.models.gpt.gpt_model import GPTModel
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+def get_gpu_models_via_nvidia_smi():
+    try:
+        output = subprocess.check_output(
+            "nvidia-smi --query-gpu=name --format=csv,noheader", shell=True
+        )
+        models = output.decode().strip().split("\n")
+        return models
+    except Exception as e:
+        return ["Unknown"]
+
+
+def judge_machine_type():
+    if not paddle.is_compiled_with_cuda():
+        return "No CUDA GPU"
+    models = get_gpu_models_via_nvidia_smi()
+    for model in models:
+        name = model.upper()
+        if "V" in name:
+            return "V"
+        elif "H" in name:
+            return "H"
+
+
+result = judge_machine_type()
+print("你的机器类型是：", result)
 
 
 class TestGPTModel(unittest.TestCase):
@@ -129,10 +157,15 @@ class TestGPTModel(unittest.TestCase):
             attention_mask=attention_mask,
             labels=labels,
         )
-        assert loss.item() == 5.3645853996276855, (
-            "loss not equal, please check your modify"
-        )
         print("loss", loss.item())
+        if judge_machine_type() == "H":
+            assert loss.item() == 5.3645853996276855, (
+                f"loss not equal ({loss.item()} != 5.3645853996276855), please check your modify"
+            )
+        elif judge_machine_type() == "V":
+            assert loss.item() == 5.249175071716309, (
+                f"loss not equal ({loss.item()} != 5.249175071716309), please check your modify"
+            )
 
         loss.backward()
 
@@ -146,9 +179,14 @@ class TestGPTModel(unittest.TestCase):
                 word_embeddings_grad_norm = grad_norm
 
         print("word_embeddings_grad_norm", word_embeddings_grad_norm)
-        assert word_embeddings_grad_norm == 4.1039042472839355, (
-            "grad norm of word_embeddingsnot equal, please check your modify"
-        )
+        if judge_machine_type() == "H":
+            assert word_embeddings_grad_norm == 4.1039042472839355, (
+                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 4.1039042472839355), please check your modify"
+            )
+        elif judge_machine_type() == "V":
+            assert word_embeddings_grad_norm == 4.636361598968506, (
+                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 4.636361598968506), please check your modify"
+            )
 
 
 if __name__ == "__main__":

@@ -550,8 +550,8 @@ class GPTModel(LanguageLayer):
         )
 
         loss = self.compute_language_model_loss(labels, logits)
-
-        return loss
+        outputs = {"loss": loss, "logits": logits}
+        return outputs
 
     def shared_embedding_or_output_weight(self) -> Tensor:
         """Gets the embedding weight or output logit weights when share input embedding and

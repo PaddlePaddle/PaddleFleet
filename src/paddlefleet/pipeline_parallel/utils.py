@@ -16,11 +16,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Callable
+from typing import TYPE_CHECKING
 
 import paddle
 
 from paddlefleet.utils import get_pg_rank, get_pg_size, make_viewless_tensor
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def is_pp_first_stage(pp_group: paddle.distributed.communication.group.Group):

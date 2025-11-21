@@ -18,7 +18,7 @@ from __future__ import annotations
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor
@@ -36,6 +36,8 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_block import (
         TransformerBlockSublayersSpec,
