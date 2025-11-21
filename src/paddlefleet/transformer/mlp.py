@@ -256,28 +256,8 @@ class MLP(FleetLayer):
 
         return output, output_bias
 
-    # (TODO): need to adapt flex_checkpoint logic
-    # pylint: disable=missing-function-docstring
-    def sharded_state_dict(
-        self,
-        prefix: str = "",
-        sharded_offsets: tuple = (),
-        metadata: dict | None = None,
-    ):
-        """Return the sharded state dictionary of the module."""
-        pass
 
     def backward_dw(self):
         self.down_proj.backward_dw()
         self.up_gate_proj.backward_dw()
 
-
-# (TODO): need to adapt flex_checkpoint logic
-# pylint: disable=missing-function-docstring
-def apply_swiglu_sharded_factory(
-    original_sh_ten, sharded_offsets, singleton_local_shards: bool = False
-):
-    # We must split the tensor into 2 parts, each sharded separately.
-    # This requires a ShardedTensorFactory which `chunk`s during saving
-    # and `cat`s during loading
-    pass
