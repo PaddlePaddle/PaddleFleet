@@ -151,12 +151,13 @@ class TestGPTModel(unittest.TestCase):
             list(range(1, sequence_length + 1)), dtype=paddle.int64
         ).repeat((micro_batch_size, 1))
 
-        loss = self.gpt_model.forward(
+        outputs = self.gpt_model.forward(
             input_ids=input_ids,
             position_ids=position_ids,
             attention_mask=attention_mask,
             labels=labels,
         )
+        loss = outputs["loss"]
         print("loss", loss.item())
         if judge_machine_type() == "H":
             assert loss.item() == 5.3645853996276855, (
