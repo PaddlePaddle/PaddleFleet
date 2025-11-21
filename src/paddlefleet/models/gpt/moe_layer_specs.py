@@ -13,24 +13,13 @@
 # limitations under the License.
 from __future__ import annotations
 
-from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from paddlefleet.models.backends import BackendSpecProvider
 from paddlefleet.transformer.mlp import MLPSublayersSpec
 from paddlefleet.transformer.moe.moe_layer import MoELayer, MoESublayers
 from paddlefleet.transformer.spec_utils import LayerSpec
-
-
-def get_moe_layer_spec(
-    use_te: bool | None = True,
-    num_experts: int | None = None,
-    moe_grouped_gemm: bool | None = False,
-) -> LayerSpec:
-    """Helper function to get layer spec for MoE"""
-    backend = LocalSpecProvider()
-    return get_moe_layer_spec_for_backend(
-        backend=backend,
-        num_experts=num_experts,
-        moe_grouped_gemm=moe_grouped_gemm,
-    )
 
 
 def get_moe_layer_spec_for_backend(
@@ -43,12 +32,12 @@ def get_moe_layer_spec_for_backend(
 
     linear_fc1 = backend.column_parallel_linear()
     linear_fc2 = backend.row_parallel_linear()
-    activation_func = backend.activation_func()
+    activation_func = backend.act_fn()
 
     mlp_spec = MLPSublayersSpec(
-        linear_fc1=linear_fc1,
-        linear_fc2=linear_fc2,
-        activation_func=activation_func,
+        up_gate_proj=linear_fc1,
+        down_proj=linear_fc2,
+        act_fn=activation_func,
     )
 
     moe_layer_spec = LayerSpec(
