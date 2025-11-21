@@ -70,8 +70,6 @@ done
 
 
 CHECKTORCH_APPROVERS="risemeup1 swgu98"
-pyproject_modified=false
-uvlock_modified=false
 files=$(git diff --name-only upstream/$BRANCH)
 for file in $files; do
     if [ -f "$file" ]; then
@@ -90,18 +88,22 @@ for file in $files; do
             APPROVER_LIST=(${CHECKTORCH_APPROVERS})
             check_approval 1 "${APPROVER_LIST[@]}"
         fi
-        if [ "$file" = "pyproject.toml" ]; then
-            pyproject_modified=true
-        fi
-        if [ "$file" = "uv.lock" ]; then
-            uvlock_modified=true
-        fi
     fi
 done
-if $pyproject_modified && ! $uvlock_modified; then
-    echo_line="\"pyproject.toml\" was modified but uv.lock was not updated. Please update \"uv.lock\" together with pyproject.toml. Run \"uv sync\" to update it."
-    check_approval 1 "${APPROVER_LIST[@]}"
-fi
+
+MODELCONFIG_APPROVERS="sneaxiy From00 ForFishes Hz188 Waynezee"
+MODELCONFIG_FILES=(
+    "src/paddlefleet/model_parallel_config.py"
+    "src/paddlefleet/transformer/transformer_config.py"
+)
+for FILE in "${MODELCONFIG_FILES[@]}"; do
+    HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "^${FILE}" || true)
+    if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
+        echo_line="You must be approved by two of ${MODELCONFIG_APPROVERS} for changes in ${FILE}.\n"
+        APPROVER_LIST=(${MODELCONFIG_APPROVERS})
+        check_approval 2 "${APPROVER_LIST[@]}"
+    fi
+done
 
 
 
