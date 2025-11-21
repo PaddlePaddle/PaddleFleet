@@ -13,7 +13,7 @@
 # limitations under the License.
 
 disable_file="$work_dir/tests/multi_card_tests/disable_multi-card_uts.txt"
-test_dir="tests/multi_card_tests"
+test_dir="$work_dir/tests/multi_card_tests"
 yaml_config="$work_dir/tests/test_configs.yaml"
 
 disabled=()
