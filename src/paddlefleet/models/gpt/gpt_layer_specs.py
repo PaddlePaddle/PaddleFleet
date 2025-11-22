@@ -179,7 +179,7 @@ def get_gpt_decoder_block_spec(
         qk_l2_norm=qk_l2_norm,
     )
     moe_layer_spec = get_gpt_layer_local_spec(
-        num_experts=config.num_moe_experts,
+        num_experts=config.moe_num_experts,
         moe_grouped_gemm=config.moe_grouped_gemm,
         qk_layernorm=config.qk_layernorm,
         multi_latent_attention=config.multi_latent_attention,

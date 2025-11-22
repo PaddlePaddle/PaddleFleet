@@ -96,10 +96,10 @@ class TestGPTModel(unittest.TestCase):
             normalization="RMSNorm",
             hidden_dropout=0.0,
             attention_dropout=0.0,
-            num_moe_experts=8,
-            add_bias_linear=False,
-            moe_ffn_hidden_size=1024,
-            moe_token_dispatcher_type="alltoall",
+            moe_num_experts=8,
+            use_bias=False,
+            moe_intermediate_size=1024,
+            topk_method="alltoall",
             moe_shared_expert_intermediate_size=1024,
         )
         transformer_layer_spec = get_gpt_layer_local_spec(

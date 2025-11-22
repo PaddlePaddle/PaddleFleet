@@ -287,8 +287,8 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
     def __init__(
         self,
         num_local_experts: int,
-        moe_router_topk: int,
-        num_moe_experts: int,
+        num_experts_per_tok: int,
+        moe_num_experts: int,
         ep_group: Group,
     ):
         super().__init__(ep_group)
@@ -298,7 +298,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         self._comm_manager = _DeepepManager(
             group=self.ep_group,
             router_topk=moe_router_topk,
-            num_experts=num_moe_experts,
+            num_experts=moe_num_experts,
             num_local_experts=self.num_local_experts,
         )
 

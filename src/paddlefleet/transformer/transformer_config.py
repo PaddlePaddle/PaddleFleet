@@ -132,20 +132,11 @@ class TransformerConfig(ModelParallelConfig):
     act_fn: Callable = F.gelu
     """Activation function to use for the non-linearity in the MLP."""
 
-    add_bias_linear: bool = True
+    use_bias: bool = True
     """Include a bias term in all linear layers (QKV projections, after core attention, and two in
     MLP layer)."""
 
-    add_qkv_bias: bool = False
-    """Add a bias term only for QKV projections."""
-
     output_layer_init_method: Callable | None = None
-
-    moe_router_topk: int = 2
-    """Number of experts to route to for each token."""
-    """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
-    will be set to megatron.core.utils.scaled_init_method_normal(init_method_std) which is paddle nn
-    init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""
 
     rotary_interleaved: bool = False
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
@@ -240,15 +231,22 @@ class TransformerConfig(ModelParallelConfig):
     This makes the gradients from the router and the shared experts added in
     different orders to the hidden_states, causing minor numerical differences
     in the hidden_states gradient."""
+    
 
-    num_moe_experts: int | None = None
+    num_experts_per_tok: int = 2
+    """Number of experts to route to for each token."""
+    """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
+    will be set to megatron.core.utils.scaled_init_method_normal(init_method_std) which is paddle nn
+    init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""
+
+    moe_num_experts: int | None = None
     """Number of experts to use for MoE layer. When set, it replaces MLP with MoE layer. Set to None
     for no MoE."""
 
-    moe_ffn_hidden_size: int | None = None
+    moe_intermediate_size: int | None = None
     """MoE Feed-Forward Network hidden size"""
 
-    moe_token_dispatcher_type: str = "allgather"
+    topk_method: str = "allgather"
     """The type of token dispatcher to use. The default is 'allgather'.
     Options are 'allgather','alltoall' and 'flex'."""
 

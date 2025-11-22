@@ -76,7 +76,7 @@ class MLP(FleetLayer):
 
 
     Returns an output and a bias to be added to the output.
-    If config.add_bias_linear is False, the bias returned is None.
+    If config.use_bias is False, the bias returned is None.
 
     We use the following notation:
      h: hidden size
@@ -134,7 +134,7 @@ class MLP(FleetLayer):
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
-            bias=self.config.add_bias_linear,
+            bias=self.config.use_bias,
             skip_bias_add=True,
             is_expert=is_expert,
             tp_group=tp_group,
@@ -148,7 +148,7 @@ class MLP(FleetLayer):
             self.config.hidden_size,
             config=self.config,
             init_method=self.config.output_layer_init_method,
-            bias=self.config.add_bias_linear,
+            bias=self.config.use_bias,
             input_is_parallel=True,
             skip_bias_add=True,
             is_expert=is_expert,
@@ -195,7 +195,7 @@ class MLP(FleetLayer):
                             intermediate_parallel, bias_parallel
                         )
                     else:
-                        assert self.config.add_bias_linear is True
+                        assert self.config.use_bias is True
                         intermediate_parallel = bias_gelu_impl(
                             intermediate_parallel, bias_parallel
                         )
