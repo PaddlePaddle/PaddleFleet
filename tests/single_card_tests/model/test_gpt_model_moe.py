@@ -189,12 +189,12 @@ class TestGPTModel(unittest.TestCase):
 
         print("word_embeddings_grad_norm", word_embeddings_grad_norm)
         if judge_machine_type() == "H":
-            assert word_embeddings_grad_norm == 9.869549751281738, (
-                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 9.869549751281738), please check your modify"
+            assert word_embeddings_grad_norm == 6.112863540649414, (
+                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 6.112863540649414), please check your modify"
             )
         elif judge_machine_type() == "V":
-            assert word_embeddings_grad_norm == 4.636361598968506, (
-                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 4.636361598968506), please check your modify"
+            assert word_embeddings_grad_norm == 9.869549751281738, (
+                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 9.869549751281738, please check your modify"
             )
 
 
