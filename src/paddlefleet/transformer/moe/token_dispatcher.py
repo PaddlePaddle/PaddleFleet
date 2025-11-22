@@ -297,7 +297,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         assert self.ep_size > 1, "Flex token dispatcher requires EP > 1"
         self._comm_manager = _DeepepManager(
             group=self.ep_group,
-            router_topk=moe_router_topk,
+            router_topk=num_experts_per_tok,
             num_experts=moe_num_experts,
             num_local_experts=self.num_local_experts,
         )

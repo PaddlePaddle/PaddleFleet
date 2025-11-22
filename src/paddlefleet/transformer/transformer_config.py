@@ -231,7 +231,6 @@ class TransformerConfig(ModelParallelConfig):
     This makes the gradients from the router and the shared experts added in
     different orders to the hidden_states, causing minor numerical differences
     in the hidden_states gradient."""
-    
 
     num_experts_per_tok: int = 2
     """Number of experts to route to for each token."""
