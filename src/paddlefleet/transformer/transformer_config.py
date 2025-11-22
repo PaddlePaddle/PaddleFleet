@@ -136,7 +136,13 @@ class TransformerConfig(ModelParallelConfig):
     """Include a bias term in all linear layers (QKV projections, after core attention, and two in
     MLP layer)."""
 
+    add_qkv_bias: bool = False
+    """Add a bias term only for QKV projections."""
+
     output_layer_init_method: Callable | None = None
+
+    moe_router_topk: int = 2
+    """Number of experts to route to for each token."""
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
     will be set to megatron.core.utils.scaled_init_method_normal(init_method_std) which is paddle nn
     init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""
@@ -219,6 +225,37 @@ class TransformerConfig(ModelParallelConfig):
     each uniformly divided recompute unit.  When recompute_method is block, recompute_num_layers is
     the number of transformer layers to recompute within each pipeline stage.  Must be None for
     'selective' activation checkpointing."""
+
+    ####################
+    # MoE related
+    ####################
+    moe_shared_expert_intermediate_size: int | None = None
+    """Shared expert total ffn hidden size.
+    It should be equal to 'num_shared_experts * ffn_size_of_each_shared_expert' if
+    there are multiple shared experts.
+    None means no shared expert.
+    By default, the shared experts execute before the router. However, when
+    moe_shared_expert_overlap or overlap_moe_expert_parallel_comm is set,
+    the shared experts execute after the router, before the routed experts.
+    This makes the gradients from the router and the shared experts added in
+    different orders to the hidden_states, causing minor numerical differences
+    in the hidden_states gradient."""
+
+    num_moe_experts: int | None = None
+    """Number of experts to use for MoE layer. When set, it replaces MLP with MoE layer. Set to None
+    for no MoE."""
+
+    moe_ffn_hidden_size: int | None = None
+    """MoE Feed-Forward Network hidden size"""
+
+    moe_token_dispatcher_type: str = "allgather"
+    """The type of token dispatcher to use. The default is 'allgather'.
+    Options are 'allgather','alltoall' and 'flex'."""
+
+    moe_layer_freq: int | list[int] = 1
+    """Frequency between MoE layers and Dense layers. Accepts either:
+    - An integer N: Represents a 1:N ratio, meaning one expert layer for every N-1 dense layers.
+    - A list that defines a custom pattern, e.g.: [1,1,1,0,1,1,1,0,1,1,1,0]"""
 
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.

@@ -60,7 +60,7 @@ def _bias_dropout_add_func(x_with_bias, residual, prob, training):
         if inplace:
             out.add_(residual)
         else:
-            out = residual + out
+            out = out + residual
         return out
 
 

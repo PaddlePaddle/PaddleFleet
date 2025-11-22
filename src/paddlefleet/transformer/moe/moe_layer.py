@@ -73,6 +73,17 @@ class MoELayer(nn.Layer):
             "moe_shared_expert_intermediate_size",
             self.moe_intermediate_size * self.num_shared_experts,
         )
+        assert (
+            self.moe_shared_expert_intermediate_size
+            % self.moe_intermediate_size
+            == 0
+        ), (
+            "moe_shared_expert_intermediate_size must be divisible by moe_intermediate_size"
+        )
+        self.num_shared_experts = (
+            self.moe_shared_expert_intermediate_size
+            // self.moe_intermediate_size
+        )
         self.num_experts_per_tok = config.get(
             "moe_router_topk",
             config.get("num_experts_per_tok", config.get("moe_k", -1)),
