@@ -144,8 +144,8 @@ def _initialize_affine_weight_gpu(
 
 def _initialize_affine_weight_cpu(
     weight,
-    output_size,
     input_size,
+    output_size,
     per_partition_size,
     partition_dim,
     init_method,
@@ -169,7 +169,7 @@ def _initialize_affine_weight_cpu(
 
     # Initialize master weight
     master_weight = paddle.empty(
-        [output_size, input_size], dtype=paddle.float, requires_grad=False
+        [input_size, output_size], dtype=paddle.float, requires_grad=False
     )
     init_method(master_weight)
     master_weight = master_weight.to(dtype=params_dtype)
@@ -352,7 +352,7 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
         ctx.save_for_backward(weight)
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.tp_group = tp_group
-        output = paddle.matmul(input, weight.t())
+        output = paddle.matmul(input, weight)
 
         if bias is not None:
             output = output + bias
@@ -362,7 +362,7 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
     def backward(ctx, grad_output):
         """Backward with frozen weight."""
         (weight,) = ctx.saved_tensor()
-        grad_input = grad_output.matmul(weight)
+        grad_input = grad_output.matmul(weight.t())
 
         if ctx.allreduce_dgrad:
             # All-reduce. Note: here async and sync are effectively the same.
@@ -501,7 +501,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         else:
             total_input = input
 
-        output = paddle.matmul(total_input, weight.t())
+        output = paddle.matmul(total_input, weight)
         if bias is not None:
             output = output + bias
         return output
@@ -546,7 +546,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 total_input = all_gather_buffer
             else:
                 total_input = input
-        grad_input = grad_output.matmul(weight)
+        grad_input = grad_output.matmul(weight.t())
 
         if ctx.sequence_parallel and wgrad_compute:
             # pylint: disable=possibly-used-before-assignment
@@ -863,17 +863,17 @@ class ColumnParallelLinear(paddle.nn.Layer):
             if config.use_cpu_initialization:
                 self.weight = Parameter(
                     paddle.empty(
-                        [self.output_size_per_partition, self.input_size],
+                        [self.input_size, self.output_size_per_partition],
                         dtype=config.params_dtype,
                     )
                 )
                 if config.perform_initialization:
                     self.master_weight = _initialize_affine_weight_cpu(
                         self.weight,
-                        self.output_size,
                         self.input_size,
+                        self.output_size,
                         self.output_size_per_partition,
-                        0,
+                        1,
                         init_method,
                         stride=stride,
                         return_master_weight=keep_master_weight_for_test,
@@ -883,7 +883,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             else:
                 self.weight = Parameter(
                     paddle.empty(
-                        [self.output_size_per_partition, self.input_size],
+                        [self.input_size, self.output_size_per_partition],
                         dtype=config.params_dtype,
                     )
                 )
@@ -980,7 +980,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             weight = self.weight
         else:
             # Check the weight passed in is the correct shape
-            expected_shape = [self.output_size_per_partition, self.input_size]
+            expected_shape = [self.input_size, self.output_size_per_partition]
             if weight.shape != expected_shape:
                 raise RuntimeError(
                     f"supplied weight's shape is {tuple(weight.shape)}, "
@@ -1186,17 +1186,17 @@ class RowParallelLinear(paddle.nn.Layer):
         if config.use_cpu_initialization:
             self.weight = Parameter(
                 paddle.empty(
-                    [self.output_size, self.input_size_per_partition],
+                    [self.input_size_per_partition, self.output_size],
                     dtype=config.params_dtype,
                 )
             )
             if config.perform_initialization:
                 self.master_weight = _initialize_affine_weight_cpu(
                     self.weight,
-                    self.output_size,
                     self.input_size,
+                    self.output_size,
                     self.input_size_per_partition,
-                    1,
+                    0,
                     init_method,
                     stride=stride,
                     return_master_weight=keep_master_weight_for_test,
@@ -1207,7 +1207,7 @@ class RowParallelLinear(paddle.nn.Layer):
         else:
             self.weight = Parameter(
                 paddle.empty(
-                    [self.output_size, self.input_size_per_partition],
+                    [self.input_size_per_partition, self.output_size],
                     dtype=config.params_dtype,
                 )
             )

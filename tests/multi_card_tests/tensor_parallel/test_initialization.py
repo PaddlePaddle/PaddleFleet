@@ -117,11 +117,11 @@ class Test:
         assert vocab_tp4.shape[0] * 4 == vocab_tp1.shape[0]
         assert paddle.equal_all(vocab_tp1[rank * 4 : (rank + 1) * 4], vocab_tp4)
 
-        assert row_tp4.shape[1] * 4 == row_tp1.shape[1]
-        assert paddle.equal_all(row_tp1[:, rank * 4 : (rank + 1) * 4], row_tp4)
+        assert row_tp4.shape[0] * 4 == row_tp1.shape[0]
+        assert paddle.equal_all(row_tp1[rank * 4 : (rank + 1) * 4, :], row_tp4)
 
-        assert col_tp4.shape[0] * 4 == col_tp1.shape[0]
-        assert paddle.equal_all(col_tp1[rank * 4 : (rank + 1) * 4], col_tp4)
+        assert col_tp4.shape[1] * 4 == col_tp1.shape[1]
+        assert paddle.equal_all(col_tp1[:, rank * 4 : (rank + 1) * 4], col_tp4)
 
 
 if __name__ == "__main__":

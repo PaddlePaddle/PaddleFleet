@@ -42,7 +42,7 @@ def test_LinearWithFrozenWeight(tensor_parallel, allreduce_dgrad):
     input_data.requires_grad = True
 
     # Weight is an 8x8 matrix of all ones. If tensor parallelism > 1, the weight is partitioned evenly across GPUs.
-    weight = paddle.ones((size_per_partition, 8)).cuda()
+    weight = paddle.ones((8, size_per_partition)).cuda()
 
     # Bias is a vector of length 8 of all zeros. If tensor parallelism > 1, the bias is partitioned evenly across GPUs
     bias = paddle.zeros(size_per_partition).cuda()

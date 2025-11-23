@@ -29,12 +29,7 @@ def test_vocab_parallel_cross_entropy():
     np_vocab_parallel_logits = (np.arange(32)).reshape((1, 32)) % 8
     np_vocab_parallel_logits = np.repeat(np_vocab_parallel_logits, 16, 0)
     vocab_parallel_logits = paddle.tensor(np_vocab_parallel_logits)
-    print(vocab_parallel_logits)
-    # vocab_parallel_logits = (
-    #     paddle.arange(0, 8).repeat_interleave(paddle.tensor([16, 4])).cuda()
-    # )
     target = paddle.arange(0, 32, 2).cuda()
-    print("==== in test ======")
     output = vocab_parallel_cross_entropy(vocab_parallel_logits, target)
     expected_output = paddle.tensor(
         [

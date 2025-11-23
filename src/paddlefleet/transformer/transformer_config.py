@@ -110,13 +110,9 @@ class TransformerConfig(ModelParallelConfig):
 
     init_method: Callable | None = None
     """Method to initialize weights. Note that bias is always set to zero. Should be a function that
-<<<<<<< HEAD
-    takes a single Tensor and initializes it. """
-=======
     takes a single Tensor and initializes it. If None, will be set to
     paddlefleet.utils.init_method_normal(init_method_std) which is paddle nn init normal with
     mean=0.0 and std=init_method_std."""
->>>>>>> resolve conflicts
 
     kv_channels: int = None
     """Projection weights dimension in multi-head attention. This is set to hidden_size //
@@ -189,7 +185,7 @@ class TransformerConfig(ModelParallelConfig):
     masked_softmax_fusion: bool = False
     """If True, uses softmax fusion."""
 
-    fuse_rms_norm: bool = True
+    fuse_rms_norm: bool = False
     """Fused rms norm or not"""
 
     normalization: str = "RMSNorm"
@@ -230,7 +226,6 @@ class TransformerConfig(ModelParallelConfig):
     'selective' activation checkpointing."""
 
     ####################
-<<<<<<< HEAD
     # MoE related
     ####################
     moe_shared_expert_intermediate_size: int | None = None
@@ -263,7 +258,8 @@ class TransformerConfig(ModelParallelConfig):
     """Frequency between MoE layers and Dense layers. Accepts either:
     - An integer N: Represents a 1:N ratio, meaning one expert layer for every N-1 dense layers.
     - A list that defines a custom pattern, e.g.: [1,1,1,0,1,1,1,0,1,1,1,0]"""
-=======
+
+    ####################
     # initialization
     ####################
     init_method: callable = None
@@ -291,7 +287,6 @@ class TransformerConfig(ModelParallelConfig):
 
     is_hybrid_model: bool = False
     """ Indicates whether this is a hybrid model. """
->>>>>>> resolve conflicts
 
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.
