@@ -57,7 +57,7 @@ class GeLUFunction(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, bias = ctx.saved_tensors
+        input, bias = ctx.saved_tensor()
         tmp = bias_gelu_back(grad_output, bias, input)
         return tmp, tmp
 

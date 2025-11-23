@@ -130,7 +130,7 @@ class BiasGeGLUFunction(paddle.autograd.PyLayer):
         Returns:
             tuple: Tuple containing gradients with respect to the input and bias tensors.
         """
-        input, bias = ctx.saved_tensors
+        input, bias = ctx.saved_tensor()
         tmp = bias_geglu_back(grad_output, input, bias)
         return tmp, tmp
 
@@ -380,7 +380,7 @@ class WeightedQuickGeGLUFunction(paddle.autograd.PyLayer):
             tuple: Gradients with respect to (input, weights, fp8_input_store, linear_offset).
                 The latter two gradients are None.
         """
-        input, weights, linear_offset = ctx.saved_tensors
+        input, weights, linear_offset = ctx.saved_tensor()
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
         input_grad, wgrad = weighted_quick_geglu_back(
             grad_output, input, weights, linear_offset
@@ -438,7 +438,7 @@ class WeightedBiasQuickGeGLUFunction(paddle.autograd.PyLayer):
             tuple: Gradients with respect to (input, bias, weights, fp8_input_store, linear_offset).
                 The latter two gradients are None.
         """
-        input, bias, weights, linear_offset = ctx.saved_tensors
+        input, bias, weights, linear_offset = ctx.saved_tensor()
 
         # Restore original input dtype if it was stored in FP8.
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input

@@ -356,7 +356,7 @@ class MTPLossAutoScaler(paddle.autograd.PyLayer):
             Tuple[paddle.Tensor, paddle.Tensor]: The gradient of the output, scaled mtp loss
                                                gradient.
         """
-        (mtp_loss,) = ctx.saved_tensors
+        (mtp_loss,) = ctx.saved_tensor()
         mtp_loss_backward_scale = MTPLossAutoScaler.main_loss_backward_scale
         scaled_mtp_loss_grad = (
             paddle.ones_like(mtp_loss) * mtp_loss_backward_scale

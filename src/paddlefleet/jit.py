@@ -16,3 +16,6 @@
 import paddle
 
 jit_fuser = paddle.jit.to_static(backend="CINN")
+
+# TODO(Ruibiao): enable to_static later
+paddle.jit.enable_to_static(False)
