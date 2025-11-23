@@ -514,15 +514,17 @@ class _AllToAll(paddle.autograd.Function):
 # -----------------
 
 
-def copy_to_tensor_model_parallel_region(input_, group=None):
+def copy_to_tensor_model_parallel_region(input_, group=None, is_expert=False):
     """Wrapper for autograd function: forward: copy, backward allreduce"""
-    group = get_tensor_model_parallel_group_if_none(group)
+    group = get_tensor_model_parallel_group_if_none(group, is_expert)
     return _CopyToModelParallelRegion.apply(input_, group)
 
 
-def reduce_from_tensor_model_parallel_region(input_, group=None):
+def reduce_from_tensor_model_parallel_region(
+    input_, group=None, is_expert=False
+):
     """Wrapper for autograd function: forward: all reduce, backward copy"""
-    group = get_tensor_model_parallel_group_if_none(group)
+    group = get_tensor_model_parallel_group_if_none(group, is_expert)
     return _ReduceFromModelParallelRegion.apply(input_, group)
 
 

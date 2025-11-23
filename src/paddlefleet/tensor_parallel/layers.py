@@ -617,7 +617,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 grad_weight = None
         else:
-            grad_weight = grad_output.t().matmul(total_input)
+            grad_weight = total_input.t().matmul(grad_output)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:
@@ -999,7 +999,9 @@ class ColumnParallelLinear(paddle.nn.Layer):
             input_parallel = input_
         else:
             input_parallel = copy_to_tensor_model_parallel_region(
-                input_, group=self.tp_group
+                input_,
+                group=self.tp_group,
+                is_expert=self.is_expert,
             )
 
         if self.config.defer_embedding_wgrad_compute:
@@ -1314,7 +1316,7 @@ class RowParallelLinear(paddle.nn.Layer):
             )
         else:
             output_ = reduce_from_tensor_model_parallel_region(
-                output_parallel, group=self.tp_group
+                output_parallel, group=self.tp_group, is_expert=self.is_expert
             )
         if not self.skip_bias_add:
             output = (output_ + self.bias) if self.bias is not None else output_

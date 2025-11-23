@@ -16,6 +16,8 @@
 import paddle
 from paddle import Tensor
 
+from paddlefleet import tensor_parallel
+
 # from paddlefleet.dist_checkpointing.mapping import ShardedStateDict
 from paddlefleet.pipeline_parallel.utils import (
     is_pp_first_stage,
@@ -119,10 +121,10 @@ class LanguageLayer(FleetLayer):
         Returns:
             Tensor: Loss tensor of dimensions [batch size, sequence_length]
         """
-        loss = self.loss_func(logits.cast("float32"), labels)
-        # loss = tensor_parallel.vocab_parallel_cross_entropy(
-        #     logits.cast("float32"), labels
-        # )
+        # loss = self.loss_func(logits.cast("float32"), labels)
+        loss = tensor_parallel.vocab_parallel_cross_entropy(
+            logits.cast("float32"), labels
+        )
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():  # empty span
