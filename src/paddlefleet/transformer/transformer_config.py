@@ -105,9 +105,7 @@ class TransformerConfig(ModelParallelConfig):
 
     init_method: Callable | None = None
     """Method to initialize weights. Note that bias is always set to zero. Should be a function that
-    takes a single Tensor and initializes it. If None, will be set to
-    megatron.core.utils.init_method_normal(init_method_std) which is paddle nn init normal with
-    mean=0.0 and std=init_method_std."""
+    takes a single Tensor and initializes it. """
 
     kv_channels: int = None
     """Projection weights dimension in multi-head attention. This is set to hidden_size //
@@ -137,6 +135,7 @@ class TransformerConfig(ModelParallelConfig):
     MLP layer)."""
 
     output_layer_init_method: Callable | None = None
+    """Method to initialize weights of the output layer of both attention and MLP blocks. """
 
     rotary_interleaved: bool = False
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
@@ -234,9 +233,6 @@ class TransformerConfig(ModelParallelConfig):
 
     num_experts_per_tok: int = 2
     """Number of experts to route to for each token."""
-    """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
-    will be set to megatron.core.utils.scaled_init_method_normal(init_method_std) which is paddle nn
-    init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""
 
     moe_num_experts: int | None = None
     """Number of experts to use for MoE layer. When set, it replaces MLP with MoE layer. Set to None
