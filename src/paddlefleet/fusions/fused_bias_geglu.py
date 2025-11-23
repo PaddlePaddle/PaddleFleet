@@ -164,7 +164,7 @@ class GeGLUFunction(paddle.autograd.PyLayer):
         Returns:
             paddle.Tensor: Gradient with respect to the input tensor.
         """
-        input = ctx.saved_tensors
+        input = ctx.saved_tensor()
         tmp = geglu_back(grad_output, input[0])
         return tmp
 
