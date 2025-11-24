@@ -15,9 +15,12 @@
 import paddle
 from paddle import nn
 
+from .pp_layers import PipelineLayer
+
 
 class NoPipelineParallel(nn.Layer):
     def __init__(self, layers, strategy):
+        assert isinstance(layers, PipelineLayer)
         super().__init__()
         self._layers = layers
         self._strategy = strategy
@@ -41,8 +44,12 @@ class NoPipelineParallel(nn.Layer):
 
 
 class PipelineParallel(nn.Layer):
-    def __init__(self, layer, hcg, strategy):
-        pass
+    def __init__(self, layers, hcg, strategy):
+        assert isinstance(layers, PipelineLayer)
+        super().__init__()
+        self._layers = layers
+        self._strategy = strategy
+        self._hcg = hcg
 
     def forward(self, data, scaler=None, return_micro_batch_loss=False):
         pass

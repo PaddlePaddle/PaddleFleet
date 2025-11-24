@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .pipeline_parallel import NoPipelineParallel
+from .pipeline_parallel import NoPipelineParallel, PipelineParallel
 from .pp_layers import LayerDesc, PipelineLayer, SharedLayerDesc
 
 __all__ = [
@@ -20,4 +20,5 @@ __all__ = [
     "SharedLayerDesc",
     "PipelineLayer",
     "NoPipelineParallel",
+    "PipelineParallel",
 ]
