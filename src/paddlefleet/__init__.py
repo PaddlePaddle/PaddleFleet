@@ -29,6 +29,7 @@ from .package_info import (
     __repository_url__,
     __version__,
 )
+from .spec_utils import LayerSpec
 from .timers import Timers
 
 mpu = parallel_state
@@ -38,6 +39,7 @@ __all__ = [
     "training",
     "parallel_state",
     "Timers",
+    "LayerSpec",
     "__contact_emails__",
     "__contact_names__",
     "__description__",

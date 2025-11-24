@@ -27,13 +27,13 @@ from paddlefleet import parallel_state, tensor_parallel
 from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
 from paddlefleet.pipeline_parallel.utils import is_vp_last_stage
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -412,7 +412,9 @@ class MultiTokenPredictionLayer(FleetLayer):
         self_attention_spec = (
             self.sublayers_spec.transformer_layer.sublayers_spec.self_attn
         )
-        attn_mask_type = self_attention_spec.params.get("attn_mask_type", "")
+        attn_mask_type = self_attention_spec.extra_kwargs.get(
+            "attn_mask_type", ""
+        )
         assert attn_mask_type in SUPPORTED_ATTN_MASK, (
             "Multi-Token Prediction (MTP) is not jet supported with "
             + f"{attn_mask_type} attention mask type."

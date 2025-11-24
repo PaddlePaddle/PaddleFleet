@@ -25,11 +25,11 @@ from paddle import Tensor
 
 from paddlefleet import parallel_state, tensor_parallel
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.enums import LayerType
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.layer import GraphableFleetLayer
 from paddlefleet.transformer.mlp import MLP
-from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 from paddlefleet.utils import get_logger, get_pg_rank, log_single_rank
 
 if TYPE_CHECKING:

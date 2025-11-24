@@ -17,9 +17,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from paddlefleet.models.backends import BackendSpecProvider
+from paddlefleet.spec_utils import LayerSpec
 from paddlefleet.transformer.mlp import MLPSublayersSpec
 from paddlefleet.transformer.moe.moe_layer import MoELayer, MoESublayers
-from paddlefleet.transformer.spec_utils import LayerSpec
 
 
 def get_moe_layer_spec_for_backend(
@@ -41,6 +41,7 @@ def get_moe_layer_spec_for_backend(
     )
 
     moe_layer_spec = LayerSpec(
-        layer=MoELayer, params={"sublayers": MoESublayers(mlp_spec=mlp_spec)}
+        layer=MoELayer,
+        extra_kwargs={"sublayers": MoESublayers(mlp_spec=mlp_spec)},
     )
     return moe_layer_spec

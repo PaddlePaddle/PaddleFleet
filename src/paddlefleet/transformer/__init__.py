@@ -13,12 +13,10 @@
 # limitations under the License.
 
 from .layer import FleetLayer as FleetLayer, GraphableFleetLayer
-from .spec_utils import LayerSpec
 from .transformer_config import TransformerConfig as TransformerConfig
 
 __all__ = [
     "FleetLayer",
     "GraphableFleetLayer",
-    "LayerSpec",
     "TransformerConfig",
 ]

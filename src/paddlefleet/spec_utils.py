@@ -24,7 +24,7 @@ class LayerSpec:
     """This is a Layer Specification dataclass.
 
     Specification defines the location of the layer (to import dynamically)
-    or the imported layer itself. It also defines the params that need to be
+    or the imported layer itself. It also defines the extra_kwargs that need to be
     passed to initialize the layer.
 
     Args:
@@ -32,12 +32,12 @@ class LayerSpec:
             layer class e.g. `(layer.location, LayerClass)` or the imported
             layer class itself e.g. `LayerClass` (which is already imported
             using `from layer.location import LayerClass`).
-        params (dict): A dictionary of params that need to be passed while init.
+        extra_kwargs (dict): A dictionary of extra_kwargs that need to be passed while init.
 
     """
 
     layer: tuple | type
-    params: dict = field(default_factory=lambda: {})
+    extra_kwargs: dict = field(default_factory=lambda: {})
     sublayers_spec: type = None
 
 
@@ -98,7 +98,7 @@ def build_layer(spec_or_layer: LayerSpec | type, *args, **kwargs):
     if isinstance(layer, types.FunctionType):
         return layer
 
-    # Finally return the initialized layer with params from the spec as well
+    # Finally return the initialized layer with extra_kwargs from the spec as well
     # as those passed as **kwargs from the code
 
     # Add the `sublayers_spec` argument to the layer init call if it exists in the
@@ -111,7 +111,9 @@ def build_layer(spec_or_layer: LayerSpec | type, *args, **kwargs):
     try:
         return layer(
             *args,
-            **spec_or_layer.params if hasattr(spec_or_layer, "params") else {},
+            **spec_or_layer.extra_kwargs
+            if hasattr(spec_or_layer, "extra_kwargs")
+            else {},
             **kwargs,
         )
     except Exception as e:
