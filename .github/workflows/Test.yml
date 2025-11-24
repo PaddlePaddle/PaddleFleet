@@ -345,9 +345,10 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e DOWNLOAD_SOURCE=modelscope \
             -w /workspace --network host ${docker_image}
 
-      - name: Clone PaddleFleet
+      - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
@@ -361,10 +362,12 @@ jobs:
           git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
           pip cache dir
+          pip install --upgrade pip
           pip install uv
+          uv sync -v
           '
 
-      - name: Clone PaddleFormers
+      - name: Install PaddleFormers
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -374,6 +377,8 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          source ../PaddleFleet/.venv/bin/activate
+          pip install -e .
           '
 
       - name: Integration test (GLM4.5)

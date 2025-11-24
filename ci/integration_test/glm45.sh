@@ -14,14 +14,9 @@
 
 root_dir=$(pwd)
 
-cd PaddleFleet
-uv sync -v
 source .venv/bin/activate
 
-pip install --upgrade pip
-cd ../PaddleFormers
-pip install -e .
-cd examples/experiments/paddlefleet
+cd PaddleFormers/examples/experiments/paddlefleet
 
 wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45_dataset/data.tar --no-check-certificate
 tar -xf data.tar
