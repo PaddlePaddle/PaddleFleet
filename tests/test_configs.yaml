@@ -4,6 +4,9 @@ tests:
   - test_case: [tests/multi_card_tests/tensor_parallel/*.py]
     products:
       - num_gpus: 4
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_pp_layer.py]
+    products:
+      - num_gpus: 2
   - test_case: [tests/test/*.py]
     products:
       - num_gpus: 2

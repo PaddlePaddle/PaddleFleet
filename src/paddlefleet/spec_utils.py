@@ -40,6 +40,15 @@ class LayerSpec:
     extra_kwargs: dict = field(default_factory=lambda: {})
     sublayers_spec: type = None
 
+    def __repr__(self):
+        rst = ""
+        if isinstance(self.layer, tuple):
+            for sub_layer in self.layer:
+                rst = rst + repr(sub_layer) + ","
+        else:
+            rst = repr(self.layer) + repr(self.extra_kwargs)
+        return rst
+
 
 def import_layer(layer_path: tuple[str]):
     """Import a named object from a layer in the context of this function."""
