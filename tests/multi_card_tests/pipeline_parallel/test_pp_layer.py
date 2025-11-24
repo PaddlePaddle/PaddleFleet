@@ -170,6 +170,11 @@ class TestPipeLayerAPI(unittest.TestCase):
         )
         np.testing.assert_array_equal(len(pipe_model.parameters()), 6)
 
+    def test_pipelayer_desc_single(self):
+        alex_desc = get_alex_spec()
+        pipe_model = build_layer(alex_desc, num_stages=1)
+        np.testing.assert_array_equal(len(pipe_model.parameters()), 12)
+
     def test_pipelayer_segment_method_list(self):
         alex_desc = get_alex_spec()
         pipe_model = build_layer(
