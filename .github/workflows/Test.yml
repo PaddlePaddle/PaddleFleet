@@ -345,7 +345,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -e DOWNLOAD_SOURCE=modelscope \
+            -e DOWNLOAD_SOURCE=aistudio \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -383,9 +383,9 @@ jobs:
 
       - name: Integration test (GLM4.5)
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -cxe '
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash PaddleFleet/ci/integration_test/glm45.sh
+          bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"

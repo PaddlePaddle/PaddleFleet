@@ -50,8 +50,6 @@ rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
-unset http_proxy
-unset https_proxy
 python -m paddle.distributed.launch \
    --log_dir ./log \
    --master $master:$port \
