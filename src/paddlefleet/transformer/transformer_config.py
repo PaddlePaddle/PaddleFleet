@@ -137,7 +137,7 @@ class TransformerConfig(ModelParallelConfig):
     act_fn: Callable = F.gelu
     """Activation function to use for the non-linearity in the MLP."""
 
-    use_bias: bool = False
+    use_bias: bool = True
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
     MLP layer)."""
 
