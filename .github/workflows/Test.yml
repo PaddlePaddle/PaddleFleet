@@ -91,8 +91,7 @@ jobs:
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          source $HOME/.local/bin/env
+          pip install uv
           echo "uv sync"
           uv sync --group ci -v > /dev/null
           '
@@ -100,7 +99,6 @@ jobs:
       - name: Single card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source $HOME/.local/bin/env
           pwd
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
@@ -126,7 +124,6 @@ jobs:
       - name: Single card Coverage Upload to BOS
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -204,8 +201,7 @@ jobs:
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          source $HOME/.local/bin/env
+          pip install uv
           echo "uv sync"
           uv sync --group ci -v > /dev/null
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -215,7 +211,6 @@ jobs:
       - name: Multi-card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -241,7 +236,6 @@ jobs:
       - name: Multi-card Coverage Upload to BOS
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -364,6 +358,7 @@ jobs:
           git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
           pip cache dir
+          pip install uv
           '
 
       - name: Clone PaddleFormers
@@ -380,9 +375,9 @@ jobs:
 
       - name: Integration test (GLM4.5)
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -cxe '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/glm45.sh
+          bash PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
