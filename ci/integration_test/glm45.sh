@@ -26,7 +26,7 @@ wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45
 tar -xf data.tar
 
 apt-get update
-apt-get install jq
+apt-get install jq -y
 
 jq '.expert_parallel_degree = 8' glm45.json > glm45_single_node.json
 sed -i 's/from paddlefleet\.transformer import LayerSpec/from paddlefleet import LayerSpec/' glm45_provider.py
