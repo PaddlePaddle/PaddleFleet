@@ -192,7 +192,7 @@ def log_single_rank(
 
 
 def get_tensor_model_parallel_group_if_none(
-    tp_group, is_expert=False, check_initialized=False
+    tp_group, is_expert=False, check_initialized=True
 ):
     """Issue a deprecation warning if tp_group is None and return the default tp group."""
     if not paddle.distributed.is_initialized():
