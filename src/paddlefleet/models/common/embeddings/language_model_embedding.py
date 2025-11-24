@@ -118,7 +118,9 @@ class LanguageModelEmbedding(FleetLayer):
             self.tokentype_embeddings = None
 
         # Embeddings dropout
-        self.embedding_dropout = paddle.nn.Dropout(self.config.hidden_dropout)
+        self.embedding_dropout = paddle.nn.Dropout(
+            self.config.hidden_dropout_prob
+        )
 
     def zero_parameters(self):
         """Zero out all parameters in embedding."""

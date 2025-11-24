@@ -31,19 +31,19 @@ class TestEstimatorForGLM45Air(unittest.TestCase):
             seq_length=self.seq_length,
             vocab_size=151552,
             untie_embeddings_and_output_weights=True,  # tie_word_embeddings: false
-            num_layers=46,
+            num_hidden_layers=46,
             hidden_size=4096,
-            ffn_hidden_size=10944,
+            intermediate_size=10944,
             gated_linear_unit=True,  # hidden_act: "silu"
             num_attention_heads=96,
-            kv_channels=128,  # head_dim
+            head_dim=128,  # head_dim
             num_kv_heads=8,  # num_key_value_heads
             moe_layer_freq=[0] + [1] * 45,  # first_k_dense_replace: 1
             moe_num_experts=128,
             moe_intermediate_size=1408,
             moe_shared_expert_intermediate_size=1408,
             moe_topk=8,
-            mtp_num_layers=1,  # num_nextn_predict_layers: 1
+            num_nextn_predict_layers=1,  # num_nextn_predict_layers: 1
             bf16=True,
         )
 
@@ -81,9 +81,9 @@ class TestEstimatorForDeepSeekV3(TestEstimatorForGLM45Air):
             seq_length=self.seq_length,
             vocab_size=129280,
             untie_embeddings_and_output_weights=True,  # tie_word_embeddings: false
-            num_layers=61,
+            num_hidden_layers=61,
             hidden_size=7168,
-            ffn_hidden_size=18432,
+            intermediate_size=18432,
             gated_linear_unit=True,  # hidden_act: "silu"
             num_attention_heads=128,
             causal_mask=True,
@@ -98,7 +98,7 @@ class TestEstimatorForDeepSeekV3(TestEstimatorForGLM45Air):
             moe_intermediate_size=2048,
             moe_shared_expert_intermediate_size=2048,
             moe_topk=8,
-            mtp_num_layers=1,  # num_nextn_predict_layers: 1
+            num_nextn_predict_layers=1,  # num_nextn_predict_layers: 1
             fp8=True,
         )
 
@@ -113,19 +113,19 @@ class TestEstimatorForQwen3_30BA3B(TestEstimatorForGLM45Air):
             seq_length=4096,
             vocab_size=151936,
             untie_embeddings_and_output_weights=True,  # tie_word_embeddings: false
-            num_layers=48,
+            num_hidden_layers=48,
             hidden_size=2048,
-            ffn_hidden_size=6144,  # intermediate_size
+            intermediate_size=6144,  # intermediate_size
             gated_linear_unit=True,  # hidden_act: "silu"
             num_attention_heads=32,
-            kv_channels=128,  # head_dim
+            head_dim=128,  # head_dim
             num_kv_heads=4,  # num_key_value_heads
             moe_layer_freq=[1] * 48,  # decoder_sparse_step: 1
             moe_num_experts=128,
             moe_intermediate_size=768,
             moe_shared_expert_intermediate_size=0,
             moe_topk=8,
-            mtp_num_layers=None,
+            num_nextn_predict_layers=None,
             fp16=True,
         )
 

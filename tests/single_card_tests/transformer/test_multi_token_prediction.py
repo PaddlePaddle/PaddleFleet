@@ -42,8 +42,8 @@ _SEED = 42
 class TestMultiTokenPredictionLayer(unittest.TestCase):
     def _create_config_and_mtp_block_spec(self):
         config = TransformerConfig(
-            mtp_num_layers=2,
-            num_layers=4,
+            num_nextn_predict_layers=2,
+            num_hidden_layers=4,
             hidden_size=64,
             num_attention_heads=8,
             use_cpu_initialization=True,
@@ -62,8 +62,8 @@ class TestMultiTokenPredictionLayer(unittest.TestCase):
         mtp = MultiTokenPredictionBlock(config=config, spec=mtp_block_spec)
 
         assert isinstance(mtp, MultiTokenPredictionBlock)
-        assert len(mtp.layers) == config.mtp_num_layers
-        for i in range(config.mtp_num_layers):
+        assert len(mtp.layers) == config.num_nextn_predict_layers
+        for i in range(config.num_nextn_predict_layers):
             assert mtp.layers[i].layer_number == i + 1
             assert mtp.layers[i].enorm.weight.shape[0] == config.hidden_size
             assert mtp.layers[i].hnorm.weight.shape[0] == config.hidden_size
@@ -73,7 +73,7 @@ class TestMultiTokenPredictionLayer(unittest.TestCase):
             assert mtp.layers[i].eh_proj.weight.shape[1] == config.hidden_size
             assert mtp.layers[i].transformer_layer is not None
         num_weights = sum([p.size for p in mtp.parameters()])
-        assert num_weights == 58240 * config.mtp_num_layers
+        assert num_weights == 58240 * config.num_nextn_predict_layers
 
 
 class TestMultiTokenPrediction(unittest.TestCase):
@@ -82,13 +82,13 @@ class TestMultiTokenPrediction(unittest.TestCase):
 
     def model_provider(self):
         config = TransformerConfig(
-            num_layers=2,
-            mtp_num_layers=2,
+            num_hidden_layers=2,
+            num_nextn_predict_layers=2,
             hidden_size=512,
             num_attention_heads=4,
-            ffn_hidden_size=1024,
+            intermediate_size=1024,
             normalization="RMSNorm",
-            hidden_dropout=0.0,
+            hidden_dropout_prob=0.0,
             attention_dropout=0.0,
             mtp_loss_scaling_factor=0.1,
             init_method=functools.partial(
@@ -101,7 +101,7 @@ class TestMultiTokenPrediction(unittest.TestCase):
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=None,
             moe_grouped_gemm=False,
-            qk_layernorm=True,
+            use_qk_norm=True,
             multi_latent_attention=False,
             normalization="RMSNorm",
         )
@@ -175,7 +175,7 @@ class TestMultiTokenPrediction(unittest.TestCase):
 
 
 class TestMTPLossLoggingHelper(unittest.TestCase):
-    num_layers = 4
+    num_hidden_layers = 4
 
     def setUp(self):
         # Reset the tracker before each test
@@ -186,16 +186,20 @@ class TestMTPLossLoggingHelper(unittest.TestCase):
         # Create a dummy loss tensor
         loss = paddle.tensor(1.3)
         layer_number = 2
-        num_layers = self.num_layers
+        num_hidden_layers = self.num_hidden_layers
 
         # Test saving loss
         MTPLossLoggingHelper.save_loss_to_tracker(
-            loss=loss, layer_number=layer_number, num_layers=num_layers
+            loss=loss,
+            layer_number=layer_number,
+            num_hidden_layers=num_hidden_layers,
         )
 
         # Verify tracker state
         assert "values" in MTPLossLoggingHelper.tracker
-        assert MTPLossLoggingHelper.tracker["values"].shape == [num_layers]
+        assert MTPLossLoggingHelper.tracker["values"].shape == [
+            num_hidden_layers
+        ]
         assert MTPLossLoggingHelper.tracker["values"][layer_number] == loss
         assert MTPLossLoggingHelper.tracker["reduce_group"] is None
         assert MTPLossLoggingHelper.tracker["avg_group"] is None
@@ -204,10 +208,10 @@ class TestMTPLossLoggingHelper(unittest.TestCase):
         """Test tracking MTP metrics."""
         # First save some losses
         loss = paddle.tensor(2.3)
-        num_layers = self.num_layers
-        for i in range(num_layers):
+        num_hidden_layers = self.num_hidden_layers
+        for i in range(num_hidden_layers):
             MTPLossLoggingHelper.save_loss_to_tracker(
-                loss=loss, layer_number=i, num_layers=num_layers
+                loss=loss, layer_number=i, num_hidden_layers=num_hidden_layers
             )
 
         # Create dummy writer and loss dict
@@ -235,7 +239,7 @@ class TestMTPLossLoggingHelper(unittest.TestCase):
         )
 
         # Verify total_loss_dict is populated
-        for i in range(num_layers):
+        for i in range(num_hidden_layers):
             assert f"mtp_{i + 1} loss" in total_loss_dict
             assert total_loss_dict[f"mtp_{i + 1} loss"] == loss * loss_scale
 

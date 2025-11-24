@@ -89,13 +89,13 @@ class Attention(FleetLayer, ABC):
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
 
-        # For normal attention without groups, num_query_groups == num_attention_heads,
+        # For normal attention without groups, num_key_value_heads == num_attention_heads,
         # so these two will be the same
         self.query_projection_size = (
-            self.config.kv_channels * self.config.num_attention_heads
+            self.config.head_dim * self.config.num_attention_heads
         )
         self.kv_projection_size = (
-            self.config.kv_channels * self.config.num_query_groups
+            self.config.head_dim * self.config.num_key_value_heads
         )
 
         if pg_collection is None:
@@ -120,7 +120,7 @@ class Attention(FleetLayer, ABC):
             self.config.num_attention_heads, world_size
         )
         self.num_query_groups_per_partition = divide(
-            self.config.num_query_groups, world_size
+            self.config.num_key_value_heads, world_size
         )
 
         # To support both CUDA Graphs and key value with different hidden size
@@ -417,7 +417,7 @@ class SelfAttention(Attention):
                 sublayers_spec.q_layernorm,
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
-                eps=self.config.layernorm_epsilon,
+                eps=self.config.rms_norm_eps,
             )
         else:
             self.q_layernorm = None
@@ -427,7 +427,7 @@ class SelfAttention(Attention):
                 sublayers_spec.k_layernorm,
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
-                eps=self.config.layernorm_epsilon,
+                eps=self.config.rms_norm_eps,
             )
         else:
             self.k_layernorm = None
@@ -531,7 +531,7 @@ class CrossAttention(Attention):
             pg_collection=pg_collection,
         )
 
-        if self.config.num_query_groups != self.config.num_attention_heads:
+        if self.config.num_key_value_heads != self.config.num_attention_heads:
             raise ValueError(
                 "Group query attention is not currently supported in cross attention."
             )

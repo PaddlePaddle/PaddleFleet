@@ -42,14 +42,14 @@ class GPTModelEstimator:
     seq_length: int = 0
     vocab_size: int = 0
     untie_embeddings_and_output_weights: bool = False
-    num_layers: int = 0
+    num_hidden_layers: int = 0
     hidden_size: int = 0
-    ffn_hidden_size: int = 0
+    intermediate_size: int = 0
     gated_linear_unit: bool = False
 
     # Attention
     num_attention_heads: int = 0
-    kv_channels: int = 0
+    head_dim: int = 0
     num_kv_heads: int = 0
     causal_mask: bool = False
 
@@ -69,7 +69,7 @@ class GPTModelEstimator:
     moe_topk: int | None = None
 
     # MTP
-    mtp_num_layers: int | None = None
+    num_nextn_predict_layers: int | None = None
 
     # Training dtypes
     bf16: bool = False
@@ -88,7 +88,7 @@ class GPTModelEstimator:
         def dense_mlp_params() -> int:
             """Estimate MLP layer parameters."""
             scale_factor = 3 if self.gated_linear_unit else 2
-            return scale_factor * self.hidden_size * self.ffn_hidden_size
+            return scale_factor * self.hidden_size * self.intermediate_size
 
         def moe_params(only_activated: bool) -> int:
             """Estimate MoE layer parameters."""
@@ -169,33 +169,29 @@ class GPTModelEstimator:
                 ### MHA / GQA
                 # Q projections
                 params += (
-                    self.hidden_size
-                    * self.num_attention_heads
-                    * self.kv_channels
+                    self.hidden_size * self.num_attention_heads * self.head_dim
                 )
                 # K, V projections
                 params += (
-                    2 * self.num_kv_heads * self.hidden_size * self.kv_channels
+                    2 * self.num_kv_heads * self.hidden_size * self.head_dim
                 )
                 # Output projection
                 params += (
-                    self.num_attention_heads
-                    * self.kv_channels
-                    * self.hidden_size
+                    self.num_attention_heads * self.head_dim * self.hidden_size
                 )
 
             return params
 
         num_moe_layers = sum(self.moe_layer_freq)
         total_params = embedding_params + (
-            (self.num_layers - num_moe_layers) * dense_mlp_params()
+            (self.num_hidden_layers - num_moe_layers) * dense_mlp_params()
             + num_moe_layers * moe_params(only_activated=False)
-            + self.num_layers * attention_params()
+            + self.num_hidden_layers * attention_params()
         )
         activated_params = embedding_params + (
-            (self.num_layers - num_moe_layers) * dense_mlp_params()
+            (self.num_hidden_layers - num_moe_layers) * dense_mlp_params()
             + num_moe_layers * moe_params(only_activated=True)
-            + self.num_layers * attention_params()
+            + self.num_hidden_layers * attention_params()
         )
 
         return total_params, activated_params
@@ -203,15 +199,19 @@ class GPTModelEstimator:
     def estimate_flops_per_token(self) -> float:
         """Estimate FLOPs per token (forward + backward)."""
         num_moe_layers = sum(self.moe_layer_freq)
-        num_dense_layers = self.num_layers - num_moe_layers
+        num_dense_layers = self.num_hidden_layers - num_moe_layers
 
-        if self.mtp_num_layers is not None:
+        if self.num_nextn_predict_layers is not None:
             last_layer_is_moe = self.moe_layer_freq[-1]
-            num_moe_layers += last_layer_is_moe * self.mtp_num_layers
-            num_dense_layers += (1 - last_layer_is_moe) * self.mtp_num_layers
-            num_layers = self.num_layers + self.mtp_num_layers
+            num_moe_layers += last_layer_is_moe * self.num_nextn_predict_layers
+            num_dense_layers += (
+                1 - last_layer_is_moe
+            ) * self.num_nextn_predict_layers
+            num_hidden_layers = (
+                self.num_hidden_layers + self.num_nextn_predict_layers
+            )
         else:
-            num_layers = self.num_layers
+            num_hidden_layers = self.num_hidden_layers
 
         gated_linear_multiplier = 3 / 2 if self.gated_linear_unit else 1.0
 
@@ -235,7 +235,7 @@ class GPTModelEstimator:
                     * gated_linear_multiplier
                     * (
                         # dense layers
-                        (num_dense_layers * self.ffn_hidden_size)
+                        (num_dense_layers * self.intermediate_size)
                         # moe routed experts
                         + (
                             num_moe_layers
@@ -305,7 +305,7 @@ class GPTModelEstimator:
                 ### MHA / GQA
                 proj_term = (
                     self.hidden_size
-                    * self.kv_channels
+                    * self.head_dim
                     * (
                         2 * self.num_attention_heads  # q_proj + out_proj
                         + 2 * self.num_kv_heads  # k_proj + v_proj
@@ -314,14 +314,14 @@ class GPTModelEstimator:
                 attn_term = (
                     self.seq_length
                     * self.num_attention_heads
-                    * self.kv_channels
+                    * self.head_dim
                     * 2  # QK^T + Attn@V
                 )
                 attn_term //= 2 if self.causal_mask else 1
 
                 total_term = proj_term + attn_term
 
-            return 3 * 2 * num_layers * total_term
+            return 3 * 2 * num_hidden_layers * total_term
 
         # 3. Output logits computation
         def output_logits_flops() -> float:
@@ -332,8 +332,8 @@ class GPTModelEstimator:
                 * self.hidden_size
                 * self.vocab_size
                 * (
-                    1 + self.mtp_num_layers
-                    if self.mtp_num_layers is not None
+                    1 + self.num_nextn_predict_layers
+                    if self.num_nextn_predict_layers is not None
                     else 0
                 )
             )
@@ -344,12 +344,12 @@ class GPTModelEstimator:
             Calculate FLOPs of one token for MTP layers.
             Note: attention and mlp block in mtp layer have been already accounted above
             """
-            if self.mtp_num_layers is None:
+            if self.num_nextn_predict_layers is None:
                 return 0.0
             return (
                 3
                 * 2
-                * self.mtp_num_layers
+                * self.num_nextn_predict_layers
                 * 2  # input projection: 2 * hidden_size -> hidden_size
                 * self.hidden_size
                 * self.hidden_size

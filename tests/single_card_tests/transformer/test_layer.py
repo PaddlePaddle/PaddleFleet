@@ -33,7 +33,7 @@ class DummyLayer(FleetLayer):
 class TestFleetLayer(unittest.TestCase):
     def setUp(self):
         transformer_config = TransformerConfig(
-            num_layers=2, hidden_size=12, num_attention_heads=4
+            num_hidden_layers=2, hidden_size=12, num_attention_heads=4
         )
         self.fleet_layer = DummyLayer(config=transformer_config)
 

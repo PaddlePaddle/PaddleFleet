@@ -58,7 +58,7 @@ LNImpl = WrappedPaddleNorm
 def get_gpt_layer_local_spec(
     num_experts: int | None = None,
     moe_grouped_gemm: bool | None = False,
-    qk_layernorm: bool | None = False,
+    use_qk_norm: bool | None = False,
     multi_latent_attention: bool | None = False,
     normalization: str | None = None,
     qk_l2_norm: bool | None = False,
@@ -69,7 +69,7 @@ def get_gpt_layer_local_spec(
     Args:
         num_experts (int, optional): Number of experts. Defaults to None.
         moe_grouped_gemm (bool, optional): To use Grouped GEMM. Defaults to False.
-        qk_layernorm (bool, optional): To use layernorm for queries/keys. Defaults to False.
+        use_qk_norm (bool, optional): To use layernorm for queries/keys. Defaults to False.
         fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
         qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
 
@@ -106,12 +106,12 @@ def get_gpt_layer_local_spec(
                     q_layernorm=(
                         L2Norm
                         if qk_l2_norm
-                        else (qk_norm if qk_layernorm else IdentityOp)
+                        else (qk_norm if use_qk_norm else IdentityOp)
                     ),
                     k_layernorm=(
                         L2Norm
                         if qk_l2_norm
-                        else (qk_norm if qk_layernorm else IdentityOp)
+                        else (qk_norm if use_qk_norm else IdentityOp)
                     ),
                 ),
             ),
@@ -173,7 +173,7 @@ def get_gpt_decoder_block_spec(
     dense_layer_spec = get_gpt_layer_local_spec(
         num_experts=None,
         moe_grouped_gemm=False,
-        qk_layernorm=config.qk_layernorm,
+        use_qk_norm=config.use_qk_norm,
         multi_latent_attention=config.multi_latent_attention,
         normalization=normalization,
         qk_l2_norm=qk_l2_norm,
@@ -181,7 +181,7 @@ def get_gpt_decoder_block_spec(
     moe_layer_spec = get_gpt_layer_local_spec(
         num_experts=config.moe_num_experts,
         moe_grouped_gemm=config.moe_grouped_gemm,
-        qk_layernorm=config.qk_layernorm,
+        use_qk_norm=config.use_qk_norm,
         multi_latent_attention=config.multi_latent_attention,
         normalization=normalization,
         qk_l2_norm=qk_l2_norm,
@@ -194,13 +194,13 @@ def get_gpt_decoder_block_spec(
     if isinstance(config.moe_layer_freq, int):
         moe_layer_pattern = [
             1 if (i % config.moe_layer_freq == 0) else 0
-            for i in range(config.num_layers)
+            for i in range(config.num_hidden_layers)
         ]
     elif isinstance(config.moe_layer_freq, list):
         moe_layer_pattern = config.moe_layer_freq
-        assert len(moe_layer_pattern) == config.num_layers, (
+        assert len(moe_layer_pattern) == config.num_hidden_layers, (
             f"Invalid length of moe_layer_pattern: {len(moe_layer_pattern)}, "
-            f"expected {config.num_layers}, "
+            f"expected {config.num_hidden_layers}, "
             f"current moe layer pattern: {config.moe_layer_freq}"
         )
     else:
@@ -210,7 +210,7 @@ def get_gpt_decoder_block_spec(
 
     # Create the layer specs for the model.
     layer_specs = []
-    for layer_number in range(config.num_layers):
+    for layer_number in range(config.num_hidden_layers):
         if moe_layer_pattern[layer_number] == 1:
             layer_specs.append(moe_layer_spec)
         elif moe_layer_pattern[layer_number] == 0:
@@ -287,14 +287,18 @@ def get_gpt_mtp_block_spec_for_backend(
     mtp_layer_spec = get_mtp_layer_spec_for_backend(
         transformer_layer_spec=transformer_layer_spec, backend=backend
     )
-    mtp_num_layers = config.mtp_num_layers if config.mtp_num_layers else 0
-    mtp_layer_specs = [mtp_layer_spec] * mtp_num_layers
+    num_nextn_predict_layers = (
+        config.num_nextn_predict_layers
+        if config.num_nextn_predict_layers
+        else 0
+    )
+    mtp_layer_specs = [mtp_layer_spec] * num_nextn_predict_layers
 
     offset = get_mtp_layer_offset(config)
     # split the mtp layer specs to only include the layers that are built in this pipeline stage.
     mtp_layer_specs = mtp_layer_specs[offset : offset + num_layers_to_build]
     if len(mtp_layer_specs) > 0:
-        assert len(mtp_layer_specs) == config.mtp_num_layers, (
+        assert len(mtp_layer_specs) == config.num_nextn_predict_layers, (
             +"currently all of the mtp layers must stage in the same pipeline stage."
         )
         mtp_block_spec = MultiTokenPredictionBlockSublayersSpec(

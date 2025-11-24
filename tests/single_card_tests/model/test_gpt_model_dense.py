@@ -90,12 +90,12 @@ class TestGPTModel(unittest.TestCase):
         ps.initialize_model_parallel(hcg)
 
         config = TransformerConfig(
-            num_layers=2,
+            num_hidden_layers=2,
             hidden_size=512,
             num_attention_heads=4,
-            ffn_hidden_size=1024,
+            intermediate_size=1024,
             normalization="RMSNorm",
-            hidden_dropout=0.0,
+            hidden_dropout_prob=0.0,
             attention_dropout=0.0,
             init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
@@ -107,7 +107,7 @@ class TestGPTModel(unittest.TestCase):
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=None,
             moe_grouped_gemm=False,
-            qk_layernorm=True,
+            use_qk_norm=True,
             multi_latent_attention=False,
             normalization="RMSNorm",
         )

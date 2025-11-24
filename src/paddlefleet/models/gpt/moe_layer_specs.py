@@ -32,12 +32,12 @@ def get_moe_layer_spec_for_backend(
 
     linear_fc1 = backend.column_parallel_linear()
     linear_fc2 = backend.row_parallel_linear()
-    activation_func = backend.act_fn()
+    hidden_act = backend.act_fn()
 
     mlp_spec = MLPSublayersSpec(
         up_gate_proj=linear_fc1,
         down_proj=linear_fc2,
-        act_fn=activation_func,
+        act_fn=hidden_act,
     )
 
     moe_layer_spec = LayerSpec(

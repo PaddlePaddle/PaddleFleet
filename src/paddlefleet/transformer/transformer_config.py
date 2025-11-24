@@ -38,10 +38,10 @@ class TransformerConfig(ModelParallelConfig):
     # model architecture
     ####################
 
-    num_layers: int = 0
+    num_hidden_layers: int = 0
     """Number of transformer layers in a transformer block."""
 
-    mtp_num_layers: int = None
+    num_nextn_predict_layers: int = None
     """Number of Multi-Token Prediction (MTP) Layers."""
 
     mtp_loss_scaling_factor: float = None
@@ -105,8 +105,8 @@ class TransformerConfig(ModelParallelConfig):
        Supports both TE FusedAttention and local unfused attention. Supports both a fixed offset and
        and learnable offset."""
 
-    num_query_groups: int = None
-    """Number of query groups for group query attention. If None, normal attention is used."""
+    num_key_value_heads: int = None
+    """Number of key-value heads for group query attention. If None, normal attention is used."""
 
     init_method: Callable | None = None
     """Method to initialize weights. Note that bias is always set to zero. Should be a function that
@@ -114,22 +114,19 @@ class TransformerConfig(ModelParallelConfig):
     paddlefleet.utils.init_method_normal(init_method_std) which is paddle nn init normal with
     mean=0.0 and std=init_method_std."""
 
-    kv_channels: int = None
+    head_dim: int = None
     """Projection weights dimension in multi-head attention. This is set to hidden_size //
     num_attention_heads if not provided."""
 
-    hidden_dropout: float = 0.1
+    hidden_dropout_prob: float = 0.1
     """Dropout probability for transformer hidden state."""
 
     attention_dropout: float = 0.1
     """Post attention dropout probability."""
 
-    ffn_hidden_size: int | None = None
+    intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""
-
-    hidden_dropout: float = 0.1
-    """Dropout probability for transformer hidden state."""
 
     gated_linear_unit: bool = False
     """Use a gated linear unit for the first linear layer in the MLP."""
@@ -144,7 +141,7 @@ class TransformerConfig(ModelParallelConfig):
     output_layer_init_method: Callable | None = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
     will be set to paddlefleet.utils.scaled_init_method_normal(init_method_std) which is paddle nn
-    init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""
+    init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_hidden_layers)."""
 
     rotary_interleaved: bool = False
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
@@ -156,7 +153,7 @@ class TransformerConfig(ModelParallelConfig):
     heterogeneous_block_specs: bool = False
     """Whether to use heterogeneous block specs (nemotron-nas architecture)."""
 
-    window_size: tuple[int, int] = None
+    sliding_window: tuple[int, int] = None
     """If not None, then will use sliding window attention. The size of the window is specified by
     the numbers inside the tuple; -1 is special value meaning "infinite window size"."""
 
@@ -195,7 +192,10 @@ class TransformerConfig(ModelParallelConfig):
     normalization: str = "RMSNorm"
     """Norm type"""
 
-    layernorm_epsilon: float = 1e-5
+    use_qk_norm: bool = False
+    """Whether to apply `normalization` type of normalization to the query and key embeddings."""
+
+    rms_norm_eps: float = 1e-5
     """Epsilon value for norm."""
 
     bias_dropout_fusion: bool = False
@@ -275,7 +275,7 @@ class TransformerConfig(ModelParallelConfig):
     output_layer_init_method: callable = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
     will be set to paddlefleet.utils.scaled_init_method_normal(init_method_std) which is paddle nn
-    init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""
+    init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_hidden_layers)."""
 
     init_method_std: float = 0.02
     """Standard deviation of the zero mean normal for the default initialization method, not used if
@@ -298,18 +298,18 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
-        if self.ffn_hidden_size is None:
-            self.ffn_hidden_size = 4 * self.hidden_size
+        if self.intermediate_size is None:
+            self.intermediate_size = 4 * self.hidden_size
 
-        if self.kv_channels is None:
-            self.kv_channels = self.hidden_size // self.num_attention_heads
+        if self.head_dim is None:
+            self.head_dim = self.hidden_size // self.num_attention_heads
 
-        if self.num_query_groups is None:
-            self.num_query_groups = self.num_attention_heads
+        if self.num_key_value_heads is None:
+            self.num_key_value_heads = self.num_attention_heads
 
-        if self.num_query_groups % self.tensor_model_parallel_size != 0:
+        if self.num_key_value_heads % self.tensor_model_parallel_size != 0:
             raise ValueError(
-                f"num_query_groups ({self.num_query_groups}) must be a multiple of "
+                f"num_key_value_heads ({self.num_key_value_heads}) must be a multiple of "
                 f"tensor_model_parallel_size ({self.tensor_model_parallel_size})."
             )
 
@@ -322,6 +322,6 @@ class TransformerConfig(ModelParallelConfig):
         if self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
                 self.init_method_std,
-                self.num_layers,
+                self.num_hidden_layers,
                 multiplier=2.0 if not self.is_hybrid_model else 1.0,
             )

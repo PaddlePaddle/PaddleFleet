@@ -31,7 +31,7 @@ from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
 
 class Test:
     transformer_config = TransformerConfig(
-        num_layers=1,
+        num_hidden_layers=1,
         hidden_size=12,
         num_attention_heads=4,
         use_cpu_initialization=True,

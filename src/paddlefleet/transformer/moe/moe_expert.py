@@ -28,23 +28,23 @@ class StandardMLPExpert(MLP):
         is_expert: bool,
         mlp_spec: MLPSublayersSpec,
     ):
-        if moe_intermediate_size == config.ffn_hidden_size:
+        if moe_intermediate_size == config.intermediate_size:
             super().__init__(
                 config,
                 mlp_spec,
                 is_expert=is_expert,
-                ffn_hidden_size=moe_intermediate_size,
+                intermediate_size=moe_intermediate_size,
                 # tp_group=pg_collection.expt_tp,
             )
         else:
-            # Local SequentialMLP can still be used here by overriding the ffn_hidden_size
+            # Local SequentialMLP can still be used here by overriding the intermediate_size
             # with a deepcopied config.
             sequential_mlp_config = deepcopy(config)
-            sequential_mlp_config.ffn_hidden_size = moe_intermediate_size
+            sequential_mlp_config.intermediate_size = moe_intermediate_size
             super().__init__(
                 sequential_mlp_config,
                 mlp_spec,
                 is_expert=is_expert,
-                ffn_hidden_size=moe_intermediate_size,
+                intermediate_size=moe_intermediate_size,
                 # tp_group=pg_collection.expt_tp,
             )

@@ -23,7 +23,7 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 class TestFleetLayer(unittest.TestCase):
     def setUp(self):
         self.transformer_config = TransformerConfig(
-            num_layers=2,
+            num_hidden_layers=2,
             hidden_size=12,
             num_attention_heads=4,
             normalization="RMSNorm",

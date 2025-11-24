@@ -91,7 +91,7 @@ class MLP(FleetLayer):
         sublayers_spec: MLPSublayersSpec,
         is_expert: bool = False,
         input_size: int | None = None,
-        ffn_hidden_size: int | None = None,
+        intermediate_size: int | None = None,
         tp_group=None,
     ):
         super().__init__(config=config)
@@ -105,32 +105,32 @@ class MLP(FleetLayer):
         tp_group = get_tensor_model_parallel_group_if_none(
             tp_group, is_expert=is_expert
         )
-        if ffn_hidden_size is None:
+        if intermediate_size is None:
             if is_expert:
                 raise ValueError(
-                    "MoE MLP requires `ffn_hidden_size`, but it was not provided."
+                    "MoE MLP requires `intermediate_size`, but it was not provided."
                 )
             warnings.warn(
-                "MLP requires ffn_hidden_size, but it was not provided. Using \
-                    config.ffn_hidden_size by default.",
+                "MLP requires intermediate_size, but it was not provided. Using \
+                    config.intermediate_size by default.",
                 DeprecationWarning,
                 stacklevel=2,
             )
-            if self.config.ffn_hidden_size is None:
+            if self.config.intermediate_size is None:
                 raise ValueError(
-                    "MLP requires `config.ffn_hidden_size` is not None, but it got None."
+                    "MLP requires `config.intermediate_size` is not None, but it got None."
                 )
 
-            ffn_hidden_size = self.config.ffn_hidden_size
+            intermediate_size = self.config.intermediate_size
 
         # If this is a gated linear unit we double the output width
         # see https://arxiv.org/pdf/2002.05202.pdf
         if self.config.gated_linear_unit:
-            ffn_hidden_size *= 2
+            intermediate_size *= 2
         self.up_gate_proj = build_layer(
             sublayers_spec.up_gate_proj,
             self.input_size,
-            ffn_hidden_size,
+            intermediate_size,
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -144,7 +144,7 @@ class MLP(FleetLayer):
 
         self.down_proj = build_layer(
             sublayers_spec.down_proj,
-            self.config.ffn_hidden_size,
+            self.config.intermediate_size,
             self.config.hidden_size,
             config=self.config,
             init_method=self.config.output_layer_init_method,

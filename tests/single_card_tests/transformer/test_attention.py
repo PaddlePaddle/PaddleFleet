@@ -52,14 +52,14 @@ class RMSNorm(paddle.nn.Layer):
 class TestSelfAttention(unittest.TestCase):
     def setUp(self):
         self.config = TransformerConfig(
-            num_layers=1,
+            num_hidden_layers=1,
             hidden_size=128,
             num_attention_heads=4,
         )
 
         # TODO(liangshuhao): make these args formal
-        self.config.num_query_groups = self.config.num_attention_heads
-        self.config.kv_channels = (
+        self.config.num_key_value_heads = self.config.num_attention_heads
+        self.config.head_dim = (
             self.config.hidden_size // self.config.num_attention_heads
         )
         self.config.softmax_scale = None
@@ -73,10 +73,10 @@ class TestSelfAttention(unittest.TestCase):
         self.config.output_layer_init_method = scaled_init_method_normal(
             0.02, 1, 2.0
         )
-        self.config.layernorm_epsilon = 1e-5
+        self.config.rms_norm_eps = 1e-5
         self.config.context_parallel_size = 1
         self.config.apply_query_key_layer_scaling = False
-        self.config.window_size = None
+        self.config.sliding_window = None
         self.config.window_attn_skip_freq = None
         self.config.fp16 = False
         self.config.bf16 = False
@@ -108,7 +108,7 @@ class TestSelfAttention(unittest.TestCase):
             (micro_batch_size, sequence_length, hidden_size),
         )
         rotary_pos_emb = paddle.randn(
-            (1, sequence_length, 1, self.config.kv_channels)
+            (1, sequence_length, 1, self.config.head_dim)
         )
 
         output, bias = self.self_attn(

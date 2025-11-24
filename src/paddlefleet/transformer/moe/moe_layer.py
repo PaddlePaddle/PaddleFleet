@@ -61,9 +61,7 @@ class MoELayer(nn.Layer):
         config = asdict(config)
         self.pg_collection = pg_collection
         self.hidden_size = config["hidden_size"]
-        self.moe_intermediate_size = config.get(
-            "moe_intermediate_size", config.get("moe_ffn_hidden_size", -1)
-        )
+        self.moe_intermediate_size = config.get("moe_intermediate_size", -1)
         self.num_experts = config.get(
             "moe_num_experts",
             config.get("n_routed_experts", config.get("moe_num_experts", -1)),

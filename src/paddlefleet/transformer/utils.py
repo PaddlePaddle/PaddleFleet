@@ -28,11 +28,11 @@ def get_default_causal_mask(sq: int) -> paddle.Tensor:
 
 
 @lru_cache(maxsize=32)
-def get_sliding_window_causal_mask(sq, skv, window_size):
+def get_sliding_window_causal_mask(sq, skv, sliding_window):
     """Create the equivalent attention mask for SWA in [sq, skv] shape"""
     m = paddle.ones(sq, skv, dtype=paddle.bool)
-    mu = paddle.triu(m, diagonal=skv - sq - window_size[0])
-    ml = paddle.tril(mu, diagonal=skv - sq + window_size[1])
+    mu = paddle.triu(m, diagonal=skv - sq - sliding_window[0])
+    ml = paddle.tril(mu, diagonal=skv - sq + sliding_window[1])
     ml = ~ml
 
     return ml
@@ -44,12 +44,12 @@ def attention_mask_func(attention_scores, attention_mask):
 
 
 def is_layer_window_attention(
-    window_size: tuple[int, int] | None,
+    sliding_window: tuple[int, int] | None,
     window_attn_skip_freq: int | list,
     layer_number: int,
 ) -> bool:
     # layer_number is 1-indexed
-    if not window_size:
+    if not sliding_window:
         return False
     if window_attn_skip_freq is None:
         return True

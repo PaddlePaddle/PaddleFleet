@@ -36,7 +36,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
     """Yarn Rotary Embedding for language model.
 
     Args:
-        kv_channels (int): Projection weights dimension in multi-head attention. Obtained from
+        head_dim (int): Projection weights dimension in multi-head attention. Obtained from
             transformer config.
         rotary_percent (float): Percent of rotary dimension to use for rotary position embeddings.
         rotary_interleaved (bool, optional): If True, interleaved rotary position embeddings.
@@ -58,7 +58,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
 
     def __init__(
         self,
-        kv_channels: int,
+        head_dim: int,
         rotary_percent: float = 1.0,
         rotary_interleaved: bool = False,
         seq_len_interpolation_factor: float | None = None,
@@ -71,7 +71,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         mscale_all_dim: float = 0.0,
         correction_range_round_to_int: bool = True,
     ):
-        self.dim = kv_channels
+        self.dim = head_dim
         self.rotary_base = rotary_base
         self.scaling_factor = scaling_factor
         self.original_max_position_embeddings = original_max_position_embeddings
@@ -82,7 +82,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         self.correction_range_round_to_int = correction_range_round_to_int
 
         super().__init__(
-            kv_channels=kv_channels,
+            head_dim=head_dim,
             rotary_percent=rotary_percent,
             rotary_interleaved=rotary_interleaved,
             seq_len_interpolation_factor=seq_len_interpolation_factor,

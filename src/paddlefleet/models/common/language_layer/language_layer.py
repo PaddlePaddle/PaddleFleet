@@ -166,7 +166,7 @@ class LanguageLayer(FleetLayer):
         # So we need to copy embedding weights from pre processing stage as initial parameters
         # in these cases.
         if not self.share_embeddings_and_output_weights and not getattr(
-            self.config, "mtp_num_layers", 0
+            self.config, "num_nextn_predict_layers", 0
         ):
             return
 

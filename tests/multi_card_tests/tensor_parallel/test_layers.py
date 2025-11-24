@@ -79,7 +79,7 @@ def test_LinearWithFrozenWeight(tensor_parallel, allreduce_dgrad):
 
 def column_parallel_baseline():
     transformer_config = TransformerConfig(
-        num_layers=1,
+        num_hidden_layers=1,
         hidden_size=12,
         num_attention_heads=4,
         use_cpu_initialization=True,
@@ -116,7 +116,7 @@ def test_ColumnParallelLinear(
     bias_grad_baseline,
 ):
     transformer_config = TransformerConfig(
-        num_layers=1,
+        num_hidden_layers=1,
         hidden_size=12,
         num_attention_heads=4,
         use_cpu_initialization=True,
@@ -173,7 +173,7 @@ def test_ColumnParallelLinear(
 
 def row_parallel_baseline():
     transformer_config = TransformerConfig(
-        num_layers=1,
+        num_hidden_layers=1,
         hidden_size=12,
         num_attention_heads=4,
         use_cpu_initialization=True,
@@ -209,7 +209,7 @@ def test_RowParallelLinear(
     bias_grad_baseline,
 ):
     transformer_config = TransformerConfig(
-        num_layers=1,
+        num_hidden_layers=1,
         hidden_size=12,
         num_attention_heads=4,
         use_cpu_initialization=True,
@@ -265,7 +265,7 @@ def test_RowParallelLinear(
 
 def embedding_baseline():
     transformer_config = TransformerConfig(
-        num_layers=1,
+        num_hidden_layers=1,
         hidden_size=12,
         num_attention_heads=4,
         use_cpu_initialization=True,
@@ -296,7 +296,7 @@ def test_VocabParallelEmbedding(
     tensor_parallel, output_baseline, weight_grad_baseline
 ):
     transformer_config = TransformerConfig(
-        num_layers=1,
+        num_hidden_layers=1,
         hidden_size=12,
         num_attention_heads=4,
         use_cpu_initialization=True,

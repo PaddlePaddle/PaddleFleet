@@ -62,9 +62,9 @@ class TestParallelMLP:
         # Utils.initialize_model_parallel(1, 1)
         # model_parallel_cuda_manual_seed(123)
         transformer_config = TransformerConfig(
-            num_layers=2,
+            num_hidden_layers=2,
             hidden_size=12,
-            ffn_hidden_size=48,
+            intermediate_size=48,
             num_attention_heads=4,
         )
         # (TODO): need replace with gpt_model.mlp later,now temp use a simple mlp

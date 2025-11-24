@@ -24,32 +24,32 @@ from paddlefleet.models.common.embeddings import (
 
 class TestRotaryEmbedding(unittest.TestCase):
     def setUp(self):
-        self.kv_channels = 8
+        self.head_dim = 8
         self.rotary_percent = 1.0
-        self.rope = RotaryEmbedding(self.kv_channels, self.rotary_percent)
+        self.rope = RotaryEmbedding(self.head_dim, self.rotary_percent)
 
     def test_forward(self):
         output = self.rope(64)
         assert output.shape[0] == 1
         assert output.shape[1] == 64
         assert output.shape[2] == 1
-        assert output.shape[3] == self.kv_channels
+        assert output.shape[3] == self.head_dim
         assert output.dtype == paddle.float32
         assert output.place.is_gpu_place()
 
 
 class TestYarnRotaryEmbedding(unittest.TestCase):
     def setUp(self):
-        self.kv_channels = 8
+        self.head_dim = 8
         self.rotary_percent = 1.0
-        self.rope = YarnRotaryEmbedding(self.kv_channels, self.rotary_percent)
+        self.rope = YarnRotaryEmbedding(self.head_dim, self.rotary_percent)
 
     def test_forward(self):
         output, mscale = self.rope(64)
         assert output.shape[0] == 1
         assert output.shape[1] == 64
         assert output.shape[2] == 1
-        assert output.shape[3] == self.kv_channels
+        assert output.shape[3] == self.head_dim
         assert output.dtype == paddle.float32
         assert output.place.is_gpu_place()
         assert mscale == 1.0

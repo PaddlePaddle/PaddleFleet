@@ -162,7 +162,7 @@ class GPTModel(LanguageLayer):
             and not self.config.multi_latent_attention
         ):
             self.rotary_pos_emb = RotaryEmbedding(
-                kv_channels=self.config.kv_channels,
+                head_dim=self.config.head_dim,
                 rotary_percent=rotary_percent,
                 rotary_interleaved=self.config.rotary_interleaved,
                 seq_len_interpolation_factor=seq_len_interpolation_factor,
@@ -174,7 +174,7 @@ class GPTModel(LanguageLayer):
 
         # elif self.position_embedding_type == 'yarn':
         #    self.rotary_pos_emb = YarnRotaryEmbedding(
-        #        kv_channels=self.config.kv_channels,
+        #        head_dim=self.config.head_dim,
         #        rotary_percent=rotary_percent,
         #        rotary_interleaved=self.config.rotary_interleaved,
         #        seq_len_interpolation_factor=seq_len_interpolation_factor,
@@ -194,7 +194,7 @@ class GPTModel(LanguageLayer):
         #    )
         # elif self.position_embedding_type == 'mrope' and not self.config.multi_latent_attention:
         #    self.rotary_pos_emb = MultimodalRotaryEmbedding(
-        #        kv_channels=self.config.kv_channels,
+        #        head_dim=self.config.head_dim,
         #        rotary_percent=rotary_percent,
         #        rotary_interleaved=self.config.rotary_interleaved,
         #        seq_len_interpolation_factor=seq_len_interpolation_factor,
@@ -494,13 +494,13 @@ class GPTModel(LanguageLayer):
         if self.mtp_process:
             mtp_labels = labels.clone()
             hidden_states_list = paddle.chunk(
-                hidden_states, 1 + self.config.mtp_num_layers, axis=0
+                hidden_states, 1 + self.config.num_nextn_predict_layers, axis=0
             )
             hidden_states = hidden_states_list[0]
             if loss_mask is None:
                 # if loss_mask is not provided, use all ones as loss_mask
                 loss_mask = paddle.ones_like(mtp_labels)
-            for mtp_layer_number in range(self.config.mtp_num_layers):
+            for mtp_layer_number in range(self.config.num_nextn_predict_layers):
                 # output
                 mtp_logits, _ = self.output_layer(
                     hidden_states_list[mtp_layer_number + 1],
@@ -522,14 +522,14 @@ class GPTModel(LanguageLayer):
                     MTPLossLoggingHelper.save_loss_to_tracker(
                         paddle.sum(mtp_loss) / num_tokens,
                         mtp_layer_number,
-                        self.config.mtp_num_layers,
+                        self.config.num_nextn_predict_layers,
                         avg_group=parallel_state.get_data_parallel_group(
                             with_context_parallel=True
                         ),
                     )
                 mtp_loss_scale = (
                     self.config.mtp_loss_scaling_factor
-                    / self.config.mtp_num_layers
+                    / self.config.num_nextn_predict_layers
                 )
                 if self.config.calculate_per_token_loss:
                     hidden_states = MTPLossAutoScaler.apply(

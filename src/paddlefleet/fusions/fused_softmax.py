@@ -74,7 +74,7 @@ class FusedScaleMaskSoftmax(nn.Layer):
         mask_func,
         softmax_in_fp32,
         scale,
-        window_size=None,
+        sliding_window=None,
     ):
         super().__init__()
         self.input_in_fp16 = input_in_fp16
@@ -88,7 +88,7 @@ class FusedScaleMaskSoftmax(nn.Layer):
         self.mask_func = mask_func
         self.softmax_in_fp32 = softmax_in_fp32
         self.scale = scale
-        self.window_size = window_size
+        self.sliding_window = sliding_window
         assert self.scale is None or softmax_in_fp32, (
             "softmax should be in fp32 when scaled"
         )
@@ -115,8 +115,8 @@ class FusedScaleMaskSoftmax(nn.Layer):
 
         # Generate causal mask if not given
         sq, sk = input.shape[2], input.shape[3]
-        if self.window_size is not None:
-            mask = get_sliding_window_causal_mask(sq, sk, self.window_size)
+        if self.sliding_window is not None:
+            mask = get_sliding_window_causal_mask(sq, sk, self.sliding_window)
         elif (
             self.attn_mask_type == AttnMaskType.causal
             and mask is None

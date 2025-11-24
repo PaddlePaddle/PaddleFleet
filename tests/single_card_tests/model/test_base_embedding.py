@@ -29,11 +29,11 @@ class TestBaseEmbedding(unittest.TestCase):
 
     def setUp(self):
         config = TransformerConfig(
-            num_layers=2, hidden_size=12, num_attention_heads=4
+            num_hidden_layers=2, hidden_size=12, num_attention_heads=4
         )
         config.perform_initialization = True
         config.embedding_init_method = init_method_normal(1.0)
-        config.hidden_dropout = False
+        config.hidden_dropout_prob = False
         config.fp32_residual_connection = False
         config.sequence_parallel = False
         self.base_embedding = LanguageModelEmbedding(

@@ -89,7 +89,7 @@ def get_transformer_layer_offset(
             )
 
             middle_num_layers = (
-                config.num_layers
+                config.num_hidden_layers
                 - num_layers_in_first_pipeline_stage
                 - num_layers_in_last_pipeline_stage
             )
@@ -162,18 +162,18 @@ def get_transformer_layer_offset(
                         middle_pipeline_rank * num_layers_per_pipeline_rank
                     ) + num_layers_in_first_pipeline_stage
         else:
-            num_layers = config.num_layers
+            num_hidden_layers = config.num_hidden_layers
 
             # Increase the number of layers by one if we include the embedding (loss)
             # layer into pipeline parallelism partition and placement
             if config.account_for_embedding_in_pipeline_split:
-                num_layers += 1
+                num_hidden_layers += 1
 
             if config.account_for_loss_in_pipeline_split:
-                num_layers += 1
+                num_hidden_layers += 1
 
             num_layers_per_pipeline_rank = (
-                num_layers // config.pipeline_model_parallel_size
+                num_hidden_layers // config.pipeline_model_parallel_size
             )
 
             # import here to avoid circular import
@@ -189,7 +189,7 @@ def get_transformer_layer_offset(
                 num_layers_per_virtual_rank = (
                     num_layers_per_pipeline_rank // vp_size
                 )
-                total_virtual_chunks = num_layers // vp_size
+                total_virtual_chunks = num_hidden_layers // vp_size
                 offset = vp_stage * total_virtual_chunks + (
                     pp_rank * num_layers_per_virtual_rank
                 )
@@ -284,7 +284,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         config: TransformerConfig,
         sublayers_spec: TransformerLayerSublayersSpec,
         layer_number: int = 1,
-        hidden_dropout: float | None = None,
+        hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
         vp_stage: int | None = None,
     ):
@@ -297,8 +297,10 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         self.layer_number = layer_number + get_transformer_layer_offset(
             self.config, vp_stage, get_pg_rank(pg_collection.pp)
         )
-        self.hidden_dropout = (
-            config.hidden_dropout if hidden_dropout is None else hidden_dropout
+        self.hidden_dropout_prob = (
+            config.hidden_dropout_prob
+            if hidden_dropout_prob is None
+            else hidden_dropout_prob
         )
 
         # [Layer 1: Input Layernorm] Optional Layernorm on the input data
@@ -306,7 +308,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
             sublayers_spec.input_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
+            eps=self.config.rms_norm_eps,
         )
 
         attention_optional_kwargs = {}
@@ -336,7 +338,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
             sublayers_spec.pre_cross_attn_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
+            eps=self.config.rms_norm_eps,
         )
 
         # [Layer 5: CrossAttention]
@@ -357,7 +359,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
             sublayers_spec.pre_mlp_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
+            eps=self.config.rms_norm_eps,
         )
         # [Layer 8: MLP block]
         additional_mlp_kwargs = {}
@@ -489,7 +491,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         with paddle.enable_grad():
             hidden_states = self.self_attn_bda(
                 self.training, self.config.bias_dropout_fusion
-            )(attention_output_with_bias, residual, self.hidden_dropout)
+            )(attention_output_with_bias, residual, self.hidden_dropout_prob)
 
         # Residual connection.
         residual = hidden_states
@@ -515,7 +517,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         with paddle.enable_grad():
             hidden_states = self.cross_attn_bda(
                 self.training, self.config.bias_dropout_fusion
-            )(attention_output_with_bias, residual, self.hidden_dropout)
+            )(attention_output_with_bias, residual, self.hidden_dropout_prob)
 
         return hidden_states, context
 
@@ -561,6 +563,6 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         with paddle.enable_grad():
             hidden_states = self.mlp_bda(
                 self.training, self.config.bias_dropout_fusion
-            )(mlp_output_with_bias, residual, self.hidden_dropout)
+            )(mlp_output_with_bias, residual, self.hidden_dropout_prob)
 
         return hidden_states

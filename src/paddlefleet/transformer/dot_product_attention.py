@@ -75,9 +75,7 @@ class DotProductAttention(FleetLayer):
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
 
-        projection_size = (
-            self.config.kv_channels * self.config.num_attention_heads
-        )
+        projection_size = self.config.head_dim * self.config.num_attention_heads
 
         # Per attention head and per partition values.
         if pg_collection is None:
@@ -102,7 +100,7 @@ class DotProductAttention(FleetLayer):
             self.config.num_attention_heads, world_size
         )
         self.num_query_groups_per_partition = divide(
-            self.config.num_query_groups, world_size
+            self.config.num_key_value_heads, world_size
         )
 
         coeff = None
@@ -118,13 +116,13 @@ class DotProductAttention(FleetLayer):
             self.softmax_scale /= coeff
 
         if is_layer_window_attention(
-            self.config.window_size,
+            self.config.sliding_window,
             self.config.window_attn_skip_freq,
             layer_number,
         ):
-            window_size = self.config.window_size
+            sliding_window = self.config.sliding_window
         else:
-            window_size = None
+            sliding_window = None
 
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
             input_in_fp16=self.config.fp16,
@@ -134,7 +132,7 @@ class DotProductAttention(FleetLayer):
             mask_func=attention_mask_func,
             softmax_in_fp32=self.config.attention_softmax_in_fp32,
             scale=coeff,
-            window_size=window_size,
+            sliding_window=sliding_window,
         )
 
         # Dropout. Note that for a single iteration, this layer will generate

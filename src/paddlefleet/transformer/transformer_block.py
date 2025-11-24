@@ -92,7 +92,7 @@ def get_num_layers_to_build(
         Does not support standalone embedding stage and standalone loss stage with uneven pp"
         )
         # Number of layers to distribute over rest of pipeline stages
-        layers_to_distribute = config.num_layers
+        layers_to_distribute = config.num_hidden_layers
         # Number of pipeline stages left for distributing transformer layers
         pipeline_stages_left = config.pipeline_model_parallel_size
 
@@ -139,18 +139,18 @@ def get_num_layers_to_build(
             )
     else:
         # Include the embedding layer and loss layer into pipeline parallelism partition
-        num_layers = config.num_layers
+        num_hidden_layers = config.num_hidden_layers
         if config.account_for_embedding_in_pipeline_split:
-            num_layers += 1
+            num_hidden_layers += 1
 
         if config.account_for_loss_in_pipeline_split:
-            num_layers += 1
+            num_hidden_layers += 1
 
-        assert num_layers % config.pipeline_model_parallel_size == 0, (
-            "num_layers should be divisible by pipeline_model_parallel_size"
+        assert num_hidden_layers % config.pipeline_model_parallel_size == 0, (
+            "num_hidden_layers should be divisible by pipeline_model_parallel_size"
         )
         num_layers_per_pipeline_rank = (
-            num_layers // config.pipeline_model_parallel_size
+            num_hidden_layers // config.pipeline_model_parallel_size
         )
 
     vp_size = config.virtual_pipeline_model_parallel_size
@@ -251,9 +251,11 @@ def _get_block_sublayers_spec(
         if issubclass(spec.layer, TransformerBlock):
             return spec.sublayers_spec
         elif issubclass(spec.layer, TransformerLayer):
-            num_layers = get_num_layers_to_build(config, vp_stage, pp_rank)
+            num_hidden_layers = get_num_layers_to_build(
+                config, vp_stage, pp_rank
+            )
             return TransformerBlockSublayersSpec(
-                layer_specs=[spec] * num_layers, layer_norm=LayerNormImpl
+                layer_specs=[spec] * num_hidden_layers, layer_norm=LayerNormImpl
             )
         else:
             raise Exception(f"specialize for {spec.layer.__name__}.")
@@ -349,7 +351,7 @@ class TransformerBlock(FleetLayer):
                 self.sublayers_spec.layer_norm,
                 config=self.config,
                 hidden_size=self.config.hidden_size,
-                eps=self.config.layernorm_epsilon,
+                eps=self.config.rms_norm_eps,
             )
         else:
             self.final_layernorm = None  # Either this or nn.Identity

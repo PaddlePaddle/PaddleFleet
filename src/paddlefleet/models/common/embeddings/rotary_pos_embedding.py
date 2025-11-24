@@ -39,7 +39,7 @@ class RotaryEmbedding(nn.Layer):
     """Rotary Embedding for language model.
 
     Args:
-        kv_channels (int): Projection weights dimension in multi-head attention. Obtained
+        head_dim (int): Projection weights dimension in multi-head attention. Obtained
             from transformer config
         rotary_percent (float): Percent of rotary dimension to use for rotary position
             embeddings.
@@ -57,7 +57,7 @@ class RotaryEmbedding(nn.Layer):
 
     def __init__(
         self,
-        kv_channels: int,
+        head_dim: int,
         rotary_percent: float,
         rotary_interleaved: bool = False,
         seq_len_interpolation_factor: float | None = None,
@@ -68,7 +68,7 @@ class RotaryEmbedding(nn.Layer):
     ) -> None:
         super().__init__()
 
-        dim = kv_channels
+        dim = head_dim
         if rotary_percent < 1.0:
             dim = int(dim * rotary_percent)
         self.rotary_interleaved = rotary_interleaved

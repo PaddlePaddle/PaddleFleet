@@ -162,7 +162,7 @@ class MTPLossLoggingHelper:
     def save_loss_to_tracker(
         loss: paddle.Tensor,
         layer_number: int,
-        num_layers: int,
+        num_hidden_layers: int,
         reduce_group: paddle.distributed.communication.group.Group
         | None = None,
         avg_group: paddle.distributed.communication.group.Group | None = None,
@@ -171,7 +171,7 @@ class MTPLossLoggingHelper:
         Args:
             loss (paddle.Tensor): The loss tensor.
             layer_number (int): Layer index of the loss.
-            num_layers (int): The number of total layers.
+            num_hidden_layers (int): The number of total layers.
             reduce_group (paddle.distributed.communication.group.Group): The group for reducing the loss.
             mean_group (paddle.distributed.communication.group.Group): The group for averaging the loss.
         """
@@ -181,7 +181,7 @@ class MTPLossLoggingHelper:
 
         tracker = MTPLossLoggingHelper.tracker
         if "values" not in tracker:
-            tracker["values"] = paddle.zeros(num_layers)
+            tracker["values"] = paddle.zeros(num_hidden_layers)
         tracker["values"][layer_number] += loss.detach()
         tracker["reduce_group"] = reduce_group
         tracker["avg_group"] = avg_group
@@ -220,8 +220,8 @@ class MTPLossLoggingHelper:
         if "values" not in tracker:
             return
         mtp_losses = tracker["values"] * loss_scale
-        mtp_num_layers = mtp_losses.shape[0]
-        for i in range(mtp_num_layers):
+        num_nextn_predict_layers = mtp_losses.shape[0]
+        for i in range(num_nextn_predict_layers):
             name = f"mtp_{i + 1} loss"
             loss = mtp_losses[i]
             if total_loss_dict is not None:
@@ -316,7 +316,11 @@ def get_mtp_num_layers_to_build(
         is_vp_last_stage(vp_stage=vp_stage, vp_size=vp_size)
         and is_last_pp_stage
     ):
-        return config.mtp_num_layers if config.mtp_num_layers else 0
+        return (
+            config.num_nextn_predict_layers
+            if config.num_nextn_predict_layers
+            else 0
+        )
     else:
         return 0
 
@@ -420,14 +424,14 @@ class MultiTokenPredictionLayer(FleetLayer):
             self.sublayers_spec.enorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
+            eps=self.config.rms_norm_eps,
         )
 
         self.hnorm = build_layer(
             self.sublayers_spec.hnorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
+            eps=self.config.rms_norm_eps,
         )
 
         # For the linear projection at the (k - 1)-th MTP layer, the input is the concatenation
@@ -456,7 +460,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             self.sublayers_spec.layer_norm,
             config=self.config,
             hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
+            eps=self.config.rms_norm_eps,
         )
         self.offload_context = nullcontext()
 
