@@ -254,11 +254,7 @@ class MoELayer(nn.Layer):
             outputs += [expert(chunk)[0]]
 
         if not outputs:
-            return paddle.empty(
-                [0, dispatched_input.shape[-1]],
-                dtype=dispatched_input.dtype,
-                requires_grad=True,
-            )
+            return dispatched_input
 
         return paddle.concat(outputs, axis=0)
 
