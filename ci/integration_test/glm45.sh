@@ -18,6 +18,7 @@ cd PaddleFleet
 uv sync -v
 source .venv/bin/activate
 
+pip install --upgrade pip
 cd ../PaddleFormers
 pip install -e .
 cd examples/experiments/paddlefleet
@@ -35,7 +36,7 @@ sed -i '/if not int(os.getenv("test_ci_no_save_model", 0)):/s/^/# /' run_pretrai
 sed -i '/trainer.save_model()/s/^/# /' run_pretrain.py
 sed -i 's/num_layers: int = 10/num_layers: int = 5/' glm45_provider.py
 
-python3 -c "
+python -c "
 infile = '$root_dir/PaddleFormers/paddleformers/trainer/training_args.py'
 outfile = infile + '.new'
 with open(infile) as fin, open(outfile, 'w') as fout:
