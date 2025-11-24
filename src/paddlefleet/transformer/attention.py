@@ -32,8 +32,8 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_concentration_factor_from_config,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 from paddlefleet.utils import divide, get_pg_size
 
 from .enums import AttnMaskType
@@ -150,7 +150,7 @@ class Attention(FleetLayer, ABC):
             self.config.hidden_size,
             config=self.config,
             init_method=self.config.output_layer_init_method,
-            bias=self.config.add_bias_linear,
+            bias=self.config.use_bias,
             input_is_parallel=True,
             skip_bias_add=True,
             is_expert=False,
@@ -406,7 +406,7 @@ class SelfAttention(Attention):
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
-            bias=self.config.add_bias_linear or self.config.add_qkv_bias,
+            bias=self.config.use_bias,
             skip_bias_add=False,
             is_expert=False,
             tp_group=self.pg_collection.tp,
@@ -544,7 +544,7 @@ class CrossAttention(Attention):
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
-            bias=self.config.add_bias_linear,
+            bias=self.config.use_bias,
             skip_bias_add=False,
             is_expert=False,
         )
@@ -556,7 +556,7 @@ class CrossAttention(Attention):
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
-            bias=self.config.add_bias_linear,
+            bias=self.config.use_bias,
             skip_bias_add=False,
             is_expert=False,
         )

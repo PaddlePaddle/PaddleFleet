@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from typing import TYPE_CHECKING
 import paddle
 
 if TYPE_CHECKING:
-    import paddle.distributed.fleet.base.topology as tp
+    import paddle.distributed.fleet.base.topology as topo
 import warnings
 
 from .utils import GlobalMemoryBuffer
@@ -88,7 +90,7 @@ _GLOBAL_MEMORY_BUFFER = None
 
 
 def initialize_model_parallel(
-    hcg: tp.EPHybridCommunicateGroup | tp.HybridCommunicateGroup,
+    hcg: topo.EPHybridCommunicateGroup | topo.HybridCommunicateGroup,
     virtual_pipeline_model_parallel_size: int | None = None,
 ):
     global _TENSOR_MODEL_PARALLEL_GROUP
@@ -138,6 +140,22 @@ def get_tensor_model_parallel_group(check_initialized=True):
             "tensor model parallel group is not initialized"
         )
     return _TENSOR_MODEL_PARALLEL_GROUP
+
+
+def get_tensor_model_parallel_world_size():
+    """Return world size for the tensor-model-parallel group."""
+    global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+    if _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE is not None:
+        return _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+    return get_tensor_model_parallel_group().world_size
+
+
+def get_tensor_model_parallel_rank():
+    """Return caller's rank for the tensor-model-parallel group."""
+    global _MPU_TENSOR_MODEL_PARALLEL_RANK
+    if _MPU_TENSOR_MODEL_PARALLEL_RANK is not None:
+        return _MPU_TENSOR_MODEL_PARALLEL_RANK
+    return get_tensor_model_parallel_group().rank
 
 
 def get_pipeline_model_parallel_group(check_initialized=True):
@@ -279,10 +297,10 @@ def get_expert_model_parallel_rank():
     if _MPU_EXPERT_MODEL_PARALLEL_RANK is not None:
         return _MPU_EXPERT_MODEL_PARALLEL_RANK
     if (
-        paddle.distributed.is_available()
-        and paddle.distributed.is_initialized()
+        paddle.distributed.is_initialized()
+        and get_expert_model_parallel_group(False) is not None
     ):
-        return get_expert_model_parallel_group().rank()
+        return get_expert_model_parallel_group().rank
     else:
         return 0
 
@@ -309,7 +327,7 @@ def get_embedding_group(check_initialized=True):
     '''
 
 
-def get_expert_tensor_parallel_group(check_initialized=True):
+def get_expert_tensor_parallel_group(check_initialized=False):
     """Get the expert-tensor-parallel group the caller rank belongs to."""
     if check_initialized:
         assert _EXPERT_TENSOR_PARALLEL_GROUP is not None, (
@@ -341,11 +359,10 @@ def get_expert_tensor_parallel_rank():
     global _MPU_EXPERT_TENSOR_PARALLEL_RANK
     if _MPU_EXPERT_TENSOR_PARALLEL_RANK is not None:
         return _MPU_EXPERT_TENSOR_PARALLEL_RANK
-    # Use tensor parallel group rank for backward compatibility otherwise
-    if not _EXPERT_TENSOR_PARALLEL_GROUP:
+    if _EXPERT_TENSOR_PARALLEL_GROUP is not None:
         return _MPU_TENSOR_MODEL_PARALLEL_RANK
     else:
-        return get_expert_tensor_parallel_group().rank()
+        return 0
 
 
 def set_expert_tensor_parallel_rank(rank):

@@ -40,8 +40,8 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
+from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -76,7 +76,7 @@ class MLP(FleetLayer):
 
 
     Returns an output and a bias to be added to the output.
-    If config.add_bias_linear is False, the bias returned is None.
+    If config.use_bias is False, the bias returned is None.
 
     We use the following notation:
      h: hidden size
@@ -134,7 +134,7 @@ class MLP(FleetLayer):
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
-            bias=self.config.add_bias_linear,
+            bias=self.config.use_bias,
             skip_bias_add=True,
             is_expert=is_expert,
             tp_group=tp_group,
@@ -148,7 +148,7 @@ class MLP(FleetLayer):
             self.config.hidden_size,
             config=self.config,
             init_method=self.config.output_layer_init_method,
-            bias=self.config.add_bias_linear,
+            bias=self.config.use_bias,
             input_is_parallel=True,
             skip_bias_add=True,
             is_expert=is_expert,
@@ -195,7 +195,7 @@ class MLP(FleetLayer):
                             intermediate_parallel, bias_parallel
                         )
                     else:
-                        assert self.config.add_bias_linear is True
+                        assert self.config.use_bias is True
                         intermediate_parallel = bias_gelu_impl(
                             intermediate_parallel, bias_parallel
                         )
@@ -256,28 +256,6 @@ class MLP(FleetLayer):
 
         return output, output_bias
 
-    # (TODO): need to adapt flex_checkpoint logic
-    # pylint: disable=missing-function-docstring
-    def sharded_state_dict(
-        self,
-        prefix: str = "",
-        sharded_offsets: tuple = (),
-        metadata: dict | None = None,
-    ):
-        """Return the sharded state dictionary of the module."""
-        pass
-
     def backward_dw(self):
         self.down_proj.backward_dw()
         self.up_gate_proj.backward_dw()
-
-
-# (TODO): need to adapt flex_checkpoint logic
-# pylint: disable=missing-function-docstring
-def apply_swiglu_sharded_factory(
-    original_sh_ten, sharded_offsets, singleton_local_shards: bool = False
-):
-    # We must split the tensor into 2 parts, each sharded separately.
-    # This requires a ShardedTensorFactory which `chunk`s during saving
-    # and `cat`s during loading
-    pass

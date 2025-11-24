@@ -159,7 +159,7 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
                 - Gradient with respect to the bias tensor
                 - None for fp8_input_store parameter
         """
-        input, bias = ctx.saved_tensors
+        input, bias = ctx.saved_tensor()
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
         tmp = bias_swiglu_back(grad_output, input, bias)
         return tmp, tmp, None, None
@@ -226,7 +226,7 @@ class WeightedSwiGLUFunction(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, weights = ctx.saved_tensors
+        input, weights = ctx.saved_tensor()
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
         tmp, wgrad = weighted_swiglu_back(grad_output, input, weights)
         return tmp, wgrad, None

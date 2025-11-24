@@ -11,11 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
-
-import paddle
-
-jit_fuser = paddle.jit.to_static(backend="CINN")
-
-# TODO(Ruibiao): enable to_static later
-paddle.jit.enable_to_static(False)

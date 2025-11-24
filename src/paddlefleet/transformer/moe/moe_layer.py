@@ -27,7 +27,7 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
-    from paddlefleet.transformer.spec_utils import LayerSpec
+    from paddlefleet.spec_utils import LayerSpec
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils
@@ -65,7 +65,7 @@ class MoELayer(nn.Layer):
             "moe_intermediate_size", config.get("moe_ffn_hidden_size", -1)
         )
         self.num_experts = config.get(
-            "num_moe_experts",
+            "moe_num_experts",
             config.get("n_routed_experts", config.get("moe_num_experts", -1)),
         )
         self.num_shared_experts = config.get("moe_num_shared_experts", 0)
@@ -73,8 +73,19 @@ class MoELayer(nn.Layer):
             "moe_shared_expert_intermediate_size",
             self.moe_intermediate_size * self.num_shared_experts,
         )
+        assert (
+            self.moe_shared_expert_intermediate_size
+            % self.moe_intermediate_size
+            == 0
+        ), (
+            "moe_shared_expert_intermediate_size must be divisible by moe_intermediate_size"
+        )
+        self.num_shared_experts = (
+            self.moe_shared_expert_intermediate_size
+            // self.moe_intermediate_size
+        )
         self.num_experts_per_tok = config.get(
-            "moe_router_topk",
+            "num_experts_per_tok",
             config.get("num_experts_per_tok", config.get("moe_k", -1)),
         )
         self.expert_activation = config.get(

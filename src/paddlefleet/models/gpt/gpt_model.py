@@ -41,7 +41,7 @@ from paddlefleet.transformer.transformer_block import TransformerBlock
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.process_groups_config import ProcessGroupCollection
-    from paddlefleet.transformer.spec_utils import LayerSpec
+    from paddlefleet.spec_utils import LayerSpec
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -393,8 +393,6 @@ class GPTModel(LanguageLayer):
             position_ids = paddle.arange(seq_length, dtype="int64").expand(
                 (batch_size, seq_length)
             )
-        if attention_mask is None:
-            attention_mask = paddle.ones_like(input_ids, dtype="int64")
 
         preproc_output = self._preprocess(
             input_ids=input_ids,

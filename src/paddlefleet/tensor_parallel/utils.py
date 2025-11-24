@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Referred to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reservede
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 from collections.abc import Sequence
 
@@ -43,14 +43,10 @@ def split_tensor_along_last_dim(
         A list of Tensors
     """
     # Get the size and dimension.
-    last_dim = tensor.ndim() - 1
-    last_dim_size = divide(tensor.size()[last_dim], num_partitions)
-    assert last_dim_size % num_partitions == 0, (
-        f"{last_dim_size} is not divisible by {num_partitions}."
-    )
+    last_dim = tensor.ndim - 1
+    last_dim_size = divide(tensor.shape[last_dim], num_partitions)
 
-    tensor_list = paddle.split(tensor, num_partitions, dim=last_dim)
-    # Note: paddle.split does not create contiguous tensors by default.
+    tensor_list = paddle.split(tensor, num_partitions, axis=last_dim)
     if contiguous_split_chunks:
         return tuple(chunk.contiguous() for chunk in tensor_list)
 
@@ -73,16 +69,15 @@ def split_tensor_into_1d_equal_chunks(tensor, new_buffer=False, tp_group=None):
     """
     tp_group = get_tensor_model_parallel_group_if_none(tp_group)
     partition_size = paddle.numel(tensor) // tp_group.world_size
-    start_index = partition_size * tp_group.rank()
+    start_index = partition_size * tp_group.rank
     end_index = start_index + partition_size
     if new_buffer:
-        # data = paddle.empty(
-        #     partition_size,
-        #     dtype=tensor.dtype,
-        #     stop_gradient=True,
-        # )
-        # data.copy_(tensor.view(-1)[start_index:end_index])
-        data = tensor.view(-1)[start_index:end_index].clone()
+        data = paddle.empty(
+            partition_size,
+            dtype=tensor.dtype,
+            requires_grad=False,
+        )
+        data.copy_(tensor.view(-1)[start_index:end_index])
     else:
         data = tensor.view(-1)[start_index:end_index]
     return data
@@ -97,13 +92,13 @@ def gather_split_1d_tensor(tensor, tp_group=None):
     Args:
         tensor: A Tensor or view of this rank's portion of the data.
     """
-    assert tensor.ndim() == 1, (
-        f"Input tensor's rank should be 1, but got {tensor.ndim()}"
+    assert tensor.ndim == 1, (
+        f"Input tensor's rank should be 1, but got {tensor.ndim}"
     )
     tp_group = get_tensor_model_parallel_group_if_none(tp_group)
     numel_gathered = paddle.numel(tensor) * tp_group.world_size
     gathered = paddle.empty(
-        [numel_gathered], dtype=tensor.dtype, stop_gradient=True
+        [numel_gathered], dtype=tensor.dtype, requires_grad=False
     )
 
     dist.stream.all_gather(gathered, tensor, tp_group)

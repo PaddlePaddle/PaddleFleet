@@ -63,8 +63,8 @@ class GPTModelEstimator:
 
     # MoE parameters
     moe_layer_freq: list[int] = field(default_factory=list)
-    num_moe_experts: int | None = None
-    moe_ffn_hidden_size: int | None = None
+    moe_num_experts: int | None = None
+    moe_intermediate_size: int | None = None
     moe_shared_expert_intermediate_size: int | None = None
     moe_topk: int | None = None
 
@@ -94,22 +94,22 @@ class GPTModelEstimator:
             """Estimate MoE layer parameters."""
             params = 0
             # Router
-            params += self.hidden_size * self.num_moe_experts
+            params += self.hidden_size * self.moe_num_experts
             # Routed Experts
             scale_factor = 3 if self.gated_linear_unit else 2
             if only_activated:
                 params += (
                     scale_factor
                     * self.hidden_size
-                    * self.moe_ffn_hidden_size
+                    * self.moe_intermediate_size
                     * self.moe_topk
                 )
             else:
                 params += (
                     scale_factor
                     * self.hidden_size
-                    * self.moe_ffn_hidden_size
-                    * self.num_moe_experts
+                    * self.moe_intermediate_size
+                    * self.moe_num_experts
                 )
             # Shared Experts
             if self.moe_shared_expert_intermediate_size is not None:
@@ -239,14 +239,14 @@ class GPTModelEstimator:
                         # moe routed experts
                         + (
                             num_moe_layers
-                            * self.moe_ffn_hidden_size
+                            * self.moe_intermediate_size
                             * self.moe_topk
                         )
                         # moe shared experts
                         + (num_moe_layers * moe_shared_expert_intermediate_size)
                     )
                     # moe router
-                    + num_moe_layers * self.num_moe_experts
+                    + num_moe_layers * self.moe_num_experts
                 )
             )
 

@@ -40,7 +40,7 @@ class StandardMoERouter(nn.Layer):
 
         self.hidden_size = config["hidden_size"]
         self.num_experts = config.get(
-            "num_moe_experts",
+            "moe_num_experts",
             config.get("n_routed_experts", config.get("moe_num_experts", -1)),
         )
 
@@ -51,7 +51,7 @@ class StandardMoERouter(nn.Layer):
             else config.get("inference_topk_method", "greedy")
         )
         self.num_experts_per_tok = config.get(
-            "moe_router_topk",
+            "num_experts_per_tok",
             config.get("num_experts_per_tok", config.get("moe_k", -1)),
         )
         self.norm_topk_prob = config.get("norm_topk_prob", True)

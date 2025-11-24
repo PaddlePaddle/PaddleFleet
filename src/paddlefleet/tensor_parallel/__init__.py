@@ -12,12 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+
+from .cross_entropy import vocab_parallel_cross_entropy
 from .layers import (
     ColumnParallelLinear,
     RowParallelLinear,
+    VocabParallelEmbedding,
+)
+from .random import (
+    CheckpointWithoutOutput,
+    checkpoint,
+    get_cuda_rng_tracker,
+    get_expert_parallel_rng_tracker_name,
+    model_parallel_cuda_manual_seed,
 )
 
 __all__ = [
+    # cross_entropy.py
+    "vocab_parallel_cross_entropy",
+    # layers.py
     "ColumnParallelLinear",
     "RowParallelLinear",
+    "VocabParallelEmbedding",
+    # random.py
+    "checkpoint",
+    "get_cuda_rng_tracker",
+    "model_parallel_cuda_manual_seed",
+    "get_expert_parallel_rng_tracker_name",
+    "CheckpointWithoutOutput",
 ]

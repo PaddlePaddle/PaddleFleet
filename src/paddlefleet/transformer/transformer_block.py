@@ -28,10 +28,10 @@ from paddlefleet.pipeline_parallel.utils import (
     is_vp_last_stage,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.enums import LayerType
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
-from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     get_transformer_layer_offset,
@@ -217,7 +217,7 @@ class TransformerBlockSublayersSpec:
     """
 
     layer_specs: list[LayerSpec] | None = None
-    layer_norm: LayerSpec | paddle.nn.Layer | None = None
+    layer_norm: LayerSpec | None = None
 
 
 def _get_block_sublayers_spec(

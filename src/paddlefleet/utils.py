@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 from __future__ import annotations
@@ -21,7 +23,9 @@ import logging
 import math
 import operator
 import warnings
+from collections.abc import Callable
 from contextlib import nullcontext
+from functools import reduce
 from typing import TYPE_CHECKING, Any
 
 import paddle
@@ -72,6 +76,42 @@ class WrappedTensor:
         return self._wrapper.pop(0)
 
 
+class GlobalMemoryBuffer:
+    """Global buffer to avoid dynamic memory allocations.
+    Caller should ensure that buffers of the same name
+    are not used concurrently."""
+
+    def __init__(self):
+        self.buffer = {}
+
+    def get_tensor(
+        self,
+        tensor_shape,
+        dtype,
+        name,
+        mem_alloc_context: callable | None = None,
+    ):
+        """
+        Returns (potentially) a sub-tensor from the self.buffer for the given shape.
+        """
+        required_len = reduce(operator.mul, tensor_shape, 1)
+        if (
+            self.buffer.get((name, dtype), None) is None
+            or self.buffer[(name, dtype)].numel() < required_len
+        ):
+            mem_alloc_context = (
+                mem_alloc_context if mem_alloc_context else nullcontext
+            )
+            with mem_alloc_context():
+                self.buffer[(name, dtype)] = paddle.empty(
+                    [required_len],
+                    dtype=dtype,
+                    requires_grad=False,
+                )
+
+        return self.buffer[(name, dtype)][0:required_len].view(tensor_shape)
+
+
 def ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
     assert numerator % denominator == 0, (
@@ -107,7 +147,11 @@ def get_pg_size(group=None):
     Returns:
         int: World size (1 if distributed not initialized or group is None, else group.size())
     """
-    if not paddle.distributed.is_initialized() or group is None:
+    if (
+        not paddle.distributed.is_initialized()
+        or group is None
+        or len(group.ranks) == 1
+    ):
         return 1
     return group.nranks
 
@@ -145,6 +189,54 @@ def log_single_rank(
             logger.log(*args, **kwargs)
     else:
         logger.log(*args, **kwargs)
+
+
+def get_tensor_model_parallel_group_if_none(
+    tp_group, is_expert=False, check_initialized=False
+):
+    """Issue a deprecation warning if tp_group is None and return the default tp group."""
+    if not paddle.distributed.is_initialized():
+        return None
+
+    if tp_group is None:
+        if (
+            paddle.distributed.is_initialized()
+            and paddle.distributed.get_rank() == 0
+        ):
+            warnings.warn(
+                "Warning: tp_group is None, using default tp group. "
+                "Passing tp_group will be mandatory soon",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if is_expert:
+            tp_group = parallel_state.get_expert_tensor_parallel_group(
+                check_initialized=check_initialized
+            )
+        else:
+            tp_group = parallel_state.get_tensor_model_parallel_group(
+                check_initialized=check_initialized
+            )
+    return tp_group
+
+
+def prepare_input_tensors_for_wgrad_compute(grad_output, all_gathered_input):
+    """Ensure grad_output is stored in a contiguous buffer."""
+    grad_output = grad_output.contiguous()
+    all_gathered_input = all_gathered_input.contiguous()
+    # Convert the tensor shapes to 2D for execution compatibility
+    if grad_output.dim() == 3:
+        grad_output = grad_output.view(
+            [grad_output.shape[0] * grad_output.shape[1], grad_output.shape[2]]
+        )
+        all_gathered_input = all_gathered_input.view(
+            [
+                all_gathered_input.shape[0] * all_gathered_input.shape[1],
+                all_gathered_input.shape[2],
+            ]
+        )
+
+    return grad_output, all_gathered_input
 
 
 def get_paddle_version():
@@ -290,36 +382,6 @@ def nvtx_decorator(message: str | None = None, color: str | None = None):
     return decorator
 
 
-def get_tensor_model_parallel_group_if_none(
-    tp_group, is_expert=False, check_initialized=True
-):
-    """Issue a deprecation warning if tp_group is None and return the default tp group."""
-    if not paddle.distributed.is_initialized():
-        return None
-
-    if tp_group is None:
-        if (
-            paddle.distributed.is_initialized()
-            and paddle.distributed.get_rank() == 0
-        ):
-            warnings.warn(
-                "Warning: tp_group is None, using default tp group. "
-                "Passing tp_group will be mandatory soon",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        if is_expert:
-            # tp_group = parallel_state.get_expert_tensor_parallel_group(
-            #     check_initialized=check_initialized
-            # )
-            return None  # TODO: Currently not support expert TP
-        else:
-            tp_group = parallel_state.get_tensor_model_parallel_group(
-                check_initialized=check_initialized
-            )
-    return tp_group
-
-
 def get_attr_wrapped_model(
     model, attr, allow_none=True, return_model_obj=False
 ):
@@ -368,42 +430,6 @@ def get_model_xattn(model):
 def get_model_config(model):
     """Returns the config attribute, allowed to return None"""
     return get_attr_wrapped_model(model, "config", allow_none=False)
-
-
-class GlobalMemoryBuffer:
-    """Global buffer to avoid dynamic memory allocations.
-    Caller should ensure that buffers of the same name
-    are not used concurrently."""
-
-    def __init__(self):
-        self.buffer = {}
-
-    def get_tensor(
-        self,
-        tensor_shape,
-        dtype,
-        name,
-        mem_alloc_context: Callable | None = None,
-    ):
-        """
-        Returns (potentially) a sub-tensor from the self.buffer for the given shape.
-        """
-        required_len = functools.reduce(operator.mul, tensor_shape, 1)
-        if (
-            self.buffer.get((name, dtype), None) is None
-            or self.buffer[(name, dtype)].numel() < required_len
-        ):
-            mem_alloc_context = (
-                mem_alloc_context if mem_alloc_context else nullcontext
-            )
-            with mem_alloc_context():
-                self.buffer[(name, dtype)] = paddle.empty(
-                    required_len,
-                    dtype=dtype,
-                    requires_grad=False,
-                )
-
-        return self.buffer[(name, dtype)][0:required_len].view(*tensor_shape)
 
 
 def _kernel_make_viewless_tensor(inp, requires_grad):

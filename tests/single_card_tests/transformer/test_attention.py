@@ -63,7 +63,7 @@ class TestSelfAttention(unittest.TestCase):
             self.config.hidden_size // self.config.num_attention_heads
         )
         self.config.softmax_scale = None
-        self.config.add_bias_linear = True
+        self.config.use_bias = True
         self.config.no_rope_freq = None
         self.config.recompute_granularity = None
         self.config.fused_single_qkv_rope = False
