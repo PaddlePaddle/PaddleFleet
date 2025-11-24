@@ -14,7 +14,7 @@
 
 root_dir=$(pwd)
 
-source .venv/bin/activate
+source PaddleFleet/.venv/bin/activate
 
 cd PaddleFormers/examples/experiments/paddlefleet
 
@@ -25,6 +25,7 @@ apt-get update
 apt-get install jq -y
 
 jq '.expert_parallel_degree = 8' glm45.json > glm45_single_node.json
+jq '.save_steps = 100' glm45_single_node.json > glm45.json
 sed -i 's/from paddlefleet\.transformer import LayerSpec/from paddlefleet import LayerSpec/' glm45_provider.py
 sed -i 's/from paddlefleet\.transformer import LayerSpec/from paddlefleet import LayerSpec/' gpt_provider.py
 sed -i '/if not int(os.getenv("test_ci_no_save_model", 0)):/s/^/# /' run_pretrain.py
@@ -55,5 +56,5 @@ python -m paddle.distributed.launch \
    --nnodes 1 \
    --rank 0 \
    --run_mode=collective \
-   run_pretrain.py glm45_single_node.json \
+   run_pretrain.py glm45.json \
    --output_dir ./checkpoint
