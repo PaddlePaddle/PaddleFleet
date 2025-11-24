@@ -45,6 +45,9 @@ with open(infile) as fin, open(outfile, 'w') as fout:
 "
 mv $root_dir/PaddleFormers/paddleformers/trainer/training_args.py.new $root_dir/PaddleFormers/paddleformers/trainer/training_args.py
 
+mkdir -p /zai-org/GLM-4.5-Air/resolve/main
+wget -q -P /zai-org/GLM-4.5-Air/resolve/main/configjson --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/zai-org/GLM-4.5-Air/tokenizer_config.json --no-check-certificate
+
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)
