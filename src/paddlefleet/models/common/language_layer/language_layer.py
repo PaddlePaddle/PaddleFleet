@@ -17,6 +17,7 @@ import paddle
 from paddle import Tensor
 
 from paddlefleet import tensor_parallel
+from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
 
 # from paddlefleet.dist_checkpointing.mapping import ShardedStateDict
 from paddlefleet.pipeline_parallel.utils import (
@@ -70,20 +71,22 @@ class LanguageLayer(FleetLayer):
         self.vp_size = self.config.virtual_pipeline_model_parallel_size
 
         self.ignored_index = -100
+
         self.enable_parallel_cross_entropy = (
-            config.tensor_model_parallel_size > 1 and config.parallel_output
+            paddle.distributed.is_initialized()
+            and get_tensor_model_parallel_world_size() > 1
+            and config.parallel_output
         )
 
         if (
             self.enable_parallel_cross_entropy
         ):  # and False: # and lm_head is distributed
-            self.loss_func = (
-                paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
-            )
+            self.loss_func = tensor_parallel.vocab_parallel_cross_entropy
         else:
             self.loss_func = paddle.nn.CrossEntropyLoss(
                 reduction="none",
             )
+        print(f"self.loss_func: {self.loss_func}")
 
     def _is_in_embd_group(self):
         if self.embd_group is None:
@@ -121,10 +124,7 @@ class LanguageLayer(FleetLayer):
         Returns:
             Tensor: Loss tensor of dimensions [batch size, sequence_length]
         """
-        # loss = self.loss_func(logits.cast("float32"), labels)
-        loss = tensor_parallel.vocab_parallel_cross_entropy(
-            logits.cast("float32"), labels
-        )
+        loss = self.loss_func(logits.cast("float32"), labels)
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():  # empty span
