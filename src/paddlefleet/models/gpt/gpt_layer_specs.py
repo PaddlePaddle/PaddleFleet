@@ -22,6 +22,7 @@ from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
+from paddlefleet.spec_utils import LayerSpec
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
@@ -36,7 +37,6 @@ from paddlefleet.transformer.multi_token_prediction import (
     get_mtp_num_layers_to_build,
 )
 from paddlefleet.transformer.paddle_norm import L2Norm
-from paddlefleet.transformer.spec_utils import LayerSpec
 from paddlefleet.transformer.transformer_block import (
     TransformerBlockSublayersSpec,
     get_num_layers_to_build,
@@ -98,7 +98,7 @@ def get_gpt_layer_local_spec(
             input_layernorm=layer_norm,
             self_attn=LayerSpec(
                 layer=SelfAttention,
-                params={"attn_mask_type": AttnMaskType.causal},
+                extra_kwargs={"attn_mask_type": AttnMaskType.causal},
                 sublayers_spec=SelfAttentionSublayersSpec(
                     qkv_proj=backend.column_parallel_linear(),
                     core_attention=backend.core_attention(),

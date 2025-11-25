@@ -165,6 +165,10 @@ class TransformerConfig(ModelParallelConfig):
     - An integer N: Represents a (N-1):1 ratio, one full attention layer after (N-1) SWA layers.
     - A list that defines a custom pattern, e.g.: [1,1,1,1,0,0,0,0], where 1 represents SWA. """
 
+    calculate_per_token_loss: bool = False
+    """Whether cross entropy loss is calculated over the actual number of non-padded tokens in the
+    global batch, versus the default behavior of assuming all tokens are non-padded."""
+
     ####################
     # mixed-precision
     ####################

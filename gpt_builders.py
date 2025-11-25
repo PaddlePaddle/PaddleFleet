@@ -23,12 +23,12 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_mtp_block_spec,
 )
+from paddlefleet.spec_utils import import_module
 from paddlefleet.training import get_args
 from paddlefleet.training.arguments import core_transformer_config_from_args
 from paddlefleet.training.yaml_arguments import (
     core_transformer_config_from_yaml,
 )
-from paddlefleet.transformer.spec_utils import import_module
 
 
 def gpt_builder(args, pre_process, post_process, vp_stage=None, config=None):

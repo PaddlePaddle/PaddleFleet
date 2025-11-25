@@ -32,8 +32,8 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_concentration_factor_from_config,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 from paddlefleet.utils import divide, get_pg_size
 
 from .enums import AttnMaskType

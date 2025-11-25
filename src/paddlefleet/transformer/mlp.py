@@ -40,8 +40,8 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
+from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig

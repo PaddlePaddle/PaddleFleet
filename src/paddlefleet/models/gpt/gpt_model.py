@@ -41,7 +41,7 @@ from paddlefleet.transformer.transformer_block import TransformerBlock
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.process_groups_config import ProcessGroupCollection
-    from paddlefleet.transformer.spec_utils import LayerSpec
+    from paddlefleet.spec_utils import LayerSpec
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 

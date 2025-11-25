@@ -349,7 +349,7 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
     @staticmethod
     def forward(ctx, input, weight, bias, allreduce_dgrad, tp_group):
         """Forward with frozen weight."""
-        ctx.save_for_backward(weight)
+        ctx.save_for_backward(weight, bias)
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.tp_group = tp_group
         output = paddle.matmul(input, weight)
@@ -361,14 +361,16 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward with frozen weight."""
-        (weight,) = ctx.saved_tensor()
+        (weight, bias) = ctx.saved_tensor()
         grad_input = grad_output.matmul(weight.t())
 
         if ctx.allreduce_dgrad:
             # All-reduce. Note: here async and sync are effectively the same.
             dist.all_reduce(grad_input, group=ctx.tp_group)
-
-        return grad_input, None, None
+        if bias is None:
+            return grad_input, None
+        else:
+            return grad_input, None, None
 
 
 def linear_with_frozen_weight(
@@ -848,12 +850,12 @@ class ColumnParallelLinear(paddle.nn.Layer):
         self.tp_group = get_tensor_model_parallel_group_if_none(
             self.tp_group, is_expert=self.is_expert, check_initialized=False
         )
-        world_size = get_pg_size(self.tp_group)
+        self.world_size = get_pg_size(self.tp_group)
         rank = get_pg_rank(self.tp_group)
         self.explicit_expert_comm = self.is_expert and (
-            world_size > 1 or self.expert_parallel
+            self.world_size > 1 or self.expert_parallel
         )
-        self.output_size_per_partition = divide(output_size, world_size)
+        self.output_size_per_partition = divide(output_size, self.world_size)
 
         # Parameters.
         # Initialize weight.
@@ -878,7 +880,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
                         stride=stride,
                         return_master_weight=keep_master_weight_for_test,
                         rank=rank,
-                        world_size=world_size,
+                        world_size=self.world_size,
                     )
             else:
                 self.weight = Parameter(
@@ -928,15 +930,15 @@ class ColumnParallelLinear(paddle.nn.Layer):
             # self.register_parameter("bias", None)
 
         self.sequence_parallel = config.sequence_parallel
-        if self.sequence_parallel and world_size <= 1:
+        if self.sequence_parallel and self.world_size <= 1:
             warnings.warn(
                 "`sequence_parallel` is set to `True`, but tensor model parallel size "
-                f"is {world_size}. Disabling sequence parallel."
+                f"is {self.world_size}. Disabling sequence parallel."
             )
             self.sequence_parallel = False
 
         self.allreduce_dgrad = (
-            world_size > 1
+            self.world_size > 1
             and not self.sequence_parallel
             and not self.disable_grad_reduce
         )
@@ -1173,13 +1175,13 @@ class RowParallelLinear(paddle.nn.Layer):
             self.tp_group, is_expert=self.is_expert, check_initialized=False
         )
 
-        world_size = get_pg_size(self.tp_group)
+        self.world_size = get_pg_size(self.tp_group)
         rank = get_pg_rank(self.tp_group)
         self.explicit_expert_comm = self.is_expert and (
-            world_size > 1 or self.expert_parallel
+            self.world_size > 1 or self.expert_parallel
         )
 
-        self.input_size_per_partition = divide(input_size, world_size)
+        self.input_size_per_partition = divide(input_size, self.world_size)
 
         # Parameters.
         # Note: create the transposed weight here, and the weight should
@@ -1204,7 +1206,7 @@ class RowParallelLinear(paddle.nn.Layer):
                     return_master_weight=keep_master_weight_for_test,
                     params_dtype=config.params_dtype,
                     rank=rank,
-                    world_size=world_size,
+                    world_size=self.world_size,
                 )
         else:
             self.weight = Parameter(

@@ -1,4 +1,4 @@
-# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#   Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .layer import FleetLayer as FleetLayer, GraphableFleetLayer
-from .transformer_config import TransformerConfig as TransformerConfig
+from .pipeline_parallel import NoPipelineParallel, PipelineParallel
+from .pp_layers import LayerDesc, PipelineLayer, SharedLayerDesc
 
 __all__ = [
-    "FleetLayer",
-    "GraphableFleetLayer",
-    "TransformerConfig",
+    "LayerDesc",
+    "SharedLayerDesc",
+    "PipelineLayer",
+    "NoPipelineParallel",
+    "PipelineParallel",
 ]

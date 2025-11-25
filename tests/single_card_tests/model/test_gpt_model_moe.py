@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import functools
 import random
 import subprocess
 import unittest
@@ -101,6 +102,12 @@ class TestGPTModel(unittest.TestCase):
             moe_intermediate_size=1024,
             topk_method="alltoall",
             moe_shared_expert_intermediate_size=1024,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
         )
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=8,
@@ -164,14 +171,14 @@ class TestGPTModel(unittest.TestCase):
         )
         loss = outputs["loss"]
         print("loss", loss.item())
-        # if judge_machine_type() == "H":
-        #     assert loss.item() == 5.344995498657227, (
-        #         f"loss not equal ({loss.item()} != 5.344995498657227), please check your modify"
-        #     )
-        # elif judge_machine_type() == "V":
-        #     assert loss.item() == 5.566722869873047, (
-        #         f"loss not equal ({loss.item()} != 5.566722869873047), please check your modify"
-        #     )
+        if judge_machine_type() == "H":
+            assert loss.item() == 5.344995498657227, (
+                f"loss not equal ({loss.item()} != 5.344995498657227), please check your modify"
+            )
+        elif judge_machine_type() == "V":
+            assert loss.item() == 5.566722869873047, (
+                f"loss not equal ({loss.item()} != 5.566722869873047), please check your modify"
+            )
 
         loss.backward()
 
@@ -188,14 +195,14 @@ class TestGPTModel(unittest.TestCase):
                 word_embeddings_grad_norm = grad_norm
 
         print("word_embeddings_grad_norm", word_embeddings_grad_norm)
-        # if judge_machine_type() == "H":
-        #     assert word_embeddings_grad_norm == 6.112863540649414, (
-        #         f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 6.112863540649414), please check your modify"
-        #     )
-        # elif judge_machine_type() == "V":
-        #     assert word_embeddings_grad_norm == 9.869549751281738, (
-        #         f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 9.869549751281738, please check your modify"
-        #     )
+        if judge_machine_type() == "H":
+            assert word_embeddings_grad_norm == 6.112863540649414, (
+                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 6.112863540649414), please check your modify"
+            )
+        elif judge_machine_type() == "V":
+            assert word_embeddings_grad_norm == 9.869551658630371, (
+                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 9.869551658630371, please check your modify"
+            )
 
 
 if __name__ == "__main__":

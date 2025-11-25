@@ -27,13 +27,13 @@ from paddlefleet import parallel_state, tensor_parallel
 from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
 from paddlefleet.pipeline_parallel.utils import is_vp_last_stage
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.spec_utils import LayerSpec, build_layer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -74,12 +74,9 @@ def roll_tensor(tensor, shifts=-1, dims=-1, cp_group=None):
         tuple: (rolled_tensor, sum_of_rolled_tensor)
     """
     # Standard rolling behavior when CP is not enabled (cp_group is None or size=1)
-    if cp_group is None or cp_group.size() == 1:
+    if cp_group is None or cp_group.nranks == 1:
         rolled_tensor = paddle.roll(tensor, shifts=shifts, dims=dims)
-        # rolled_tensor.select(dims, shifts).fill_(0)
-        rolled_tensor = paddle.index_select(
-            rolled_tensor, paddle.to_tensor(dims, dtype="int32"), shifts
-        ).fill_(0)
+        rolled_tensor.index_fill_(paddle.to_tensor([dims]), shifts, 0)
         return rolled_tensor, rolled_tensor.sum()
 
     # CP-enabled rolling: Split tensor into chunks and handle boundary communication
@@ -184,9 +181,7 @@ class MTPLossLoggingHelper:
 
         tracker = MTPLossLoggingHelper.tracker
         if "values" not in tracker:
-            tracker["values"] = paddle.zeros(
-                num_layers, device=paddle.cuda.current_device()
-            )
+            tracker["values"] = paddle.zeros(num_layers)
         tracker["values"][layer_number] += loss.detach()
         tracker["reduce_group"] = reduce_group
         tracker["avg_group"] = avg_group
@@ -412,7 +407,9 @@ class MultiTokenPredictionLayer(FleetLayer):
         self_attention_spec = (
             self.sublayers_spec.transformer_layer.sublayers_spec.self_attn
         )
-        attn_mask_type = self_attention_spec.params.get("attn_mask_type", "")
+        attn_mask_type = self_attention_spec.extra_kwargs.get(
+            "attn_mask_type", ""
+        )
         assert attn_mask_type in SUPPORTED_ATTN_MASK, (
             "Multi-Token Prediction (MTP) is not jet supported with "
             + f"{attn_mask_type} attention mask type."

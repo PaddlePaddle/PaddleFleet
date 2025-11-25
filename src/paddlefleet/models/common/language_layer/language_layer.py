@@ -124,7 +124,12 @@ class LanguageLayer(FleetLayer):
         Returns:
             Tensor: Loss tensor of dimensions [batch size, sequence_length]
         """
+        # TODO(pkuzyc): check the difference between vocab_parallel_cross_entropy
+        # and paddle.nn.CrossEntropy, and use vocab_parallel_cross_entropy as loss func.
         loss = self.loss_func(logits.cast("float32"), labels)
+        # loss = tensor_parallel.vocab_parallel_cross_entropy(
+        #     logits.cast("float32"), labels
+        # )
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():  # empty span
