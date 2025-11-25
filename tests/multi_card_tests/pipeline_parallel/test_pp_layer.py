@@ -165,6 +165,12 @@ class TestPipeLayerAPI(unittest.TestCase):
             "mp_degree": 1,
             "pp_degree": self.pipeline_parallel_size,
         }
+        batch_size = 8
+        micro_batch_size = 2
+        strategy.pipeline_configs = {
+            "accumulate_steps": batch_size // micro_batch_size,
+            "micro_batch_size": micro_batch_size,
+        }
         self.strategy = strategy
         fleet.init(is_collective=True, strategy=strategy)
         self.hcg = fleet.get_hybrid_communicate_group()
@@ -181,10 +187,9 @@ class TestPipeLayerAPI(unittest.TestCase):
         pipe_model = build_layer(alex_desc, num_stages=1)
         np.testing.assert_array_equal(len(pipe_model.parameters()), 12)
         pipe_model = NoPipelineParallel(pipe_model, self.strategy)
-        data = {
-            "input": [paddle.randn([256, 3, 224, 224])],
-            "label": [paddle.randint(0, 10, [147, 1])],
-        }
+        input = paddle.randn([256, 3, 224, 224])
+        label = paddle.randint(0, 10, [147, 1])
+        data = [[input, input, input, input], [label, label, label, label]]
         pipe_model.forward_backward_pipeline(data)
 
     def test_pipelayer_segment_method_list(self):
