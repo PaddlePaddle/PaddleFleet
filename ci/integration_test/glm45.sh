@@ -60,7 +60,6 @@ rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
-export DOWNLOAD_SOURCE=modelscope
 unset http_proxy https_proxy
 python -m paddle.distributed.launch \
    --log_dir ./log \
