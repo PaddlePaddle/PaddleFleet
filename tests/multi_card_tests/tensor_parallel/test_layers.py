@@ -17,6 +17,7 @@
 
 import paddle
 import paddle.distributed as dist
+from paddle.distributed import ShardedWeight
 
 import paddlefleet.parallel_state as ps
 from paddlefleet.tensor_parallel.layers import (
@@ -150,6 +151,25 @@ def test_ColumnParallelLinear(
         col_tp4.bias.grad, bias_grad_baseline[rank * 2 : (rank + 1) * 2]
     )
 
+    sharded_dict = col_tp4.sharded_state_dict()
+    assert "bias" in sharded_dict
+    bias_shard = sharded_dict["bias"]
+    assert isinstance(bias_shard, ShardedWeight)
+    assert "weight" in sharded_dict
+    weight_shard = sharded_dict["weight"]
+    assert isinstance(weight_shard, ShardedWeight)
+
+    in_f, out_f = col_tp4.input_size, col_tp4.output_size
+    assert weight_shard.global_shape == (in_f, out_f)
+    assert weight_shard.local_shape == (in_f, out_f // tensor_parallel)
+    assert weight_shard.global_offset == (
+        0,
+        rank * (out_f // tensor_parallel),
+    )
+    assert bias_shard.global_shape == (out_f,)
+    assert bias_shard.local_shape == (out_f // tensor_parallel,)
+    assert bias_shard.global_offset == (rank * (out_f // tensor_parallel),)
+
 
 def row_parallel_baseline():
     transformer_config = TransformerConfig(
@@ -223,6 +243,25 @@ def test_RowParallelLinear(
     )
     assert paddle.allclose(row_tp4.bias.grad, bias_grad_baseline)
 
+    sharded_dict = row_tp4.sharded_state_dict()
+    assert "bias" in sharded_dict
+    bias_shard = sharded_dict["bias"]
+    assert isinstance(bias_shard, ShardedWeight)
+    assert "weight" in sharded_dict
+    weight_shard = sharded_dict["weight"]
+    assert isinstance(weight_shard, ShardedWeight)
+
+    in_f, out_f = row_tp4.input_size, row_tp4.output_size
+    assert weight_shard.global_shape == (in_f, out_f)
+    assert weight_shard.local_shape == (in_f // tensor_parallel, out_f)
+    assert weight_shard.global_offset == (
+        rank * (in_f // tensor_parallel),
+        0,
+    )
+    assert bias_shard.global_shape == [out_f]
+    assert bias_shard.local_shape == bias_shard.global_shape
+    assert bias_shard.global_offset == (0,)
+
 
 def embedding_baseline():
     transformer_config = TransformerConfig(
@@ -284,6 +323,24 @@ def test_VocabParallelEmbedding(
     assert paddle.equal_all(output, output_baseline)
     assert paddle.allclose(
         emb_tp4.weight.grad, weight_grad_baseline[rank * 4 : (rank + 1) * 4, :]
+    )
+
+    sharded_dict = emb_tp4.sharded_state_dict()
+    assert "bias" not in sharded_dict
+    assert "weight" in sharded_dict
+    weight_shard = sharded_dict["weight"]
+    assert isinstance(weight_shard, ShardedWeight)
+    assert weight_shard.global_shape == (
+        emb_tp4.num_embeddings,
+        emb_tp4.embedding_dim,
+    )
+    assert weight_shard.local_shape == (
+        emb_tp4.num_embeddings // tensor_parallel,
+        emb_tp4.embedding_dim,
+    )
+    assert weight_shard.global_offset == (
+        rank * (emb_tp4.num_embeddings // tensor_parallel),
+        0,
     )
 
 

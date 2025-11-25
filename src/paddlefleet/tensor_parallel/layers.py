@@ -25,6 +25,9 @@ from typing import TYPE_CHECKING
 import paddle
 import paddle.distributed as dist
 import paddle.nn.functional as F
+from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
+    build_sharded_state_dict,
+)
 from paddle.nn.parameter import Parameter
 
 from ..parallel_state import (
@@ -319,23 +322,12 @@ class VocabParallelEmbedding(paddle.nn.Layer):
 
     def sharded_state_dict(
         self,
-        prefix: str = "",
-        sharded_offsets: tuple[tuple[int, int, int]] = (),
-        metadata: dict | None = None,
-    ) -> None:
-        """Non-default implementation for embeddings due to `allow_shape_mismatch` param"""
-        return None
-        # state_dict = self.state_dict(prefix="", keep_vars=True)
-
-        # weight_prefix = f"{prefix}weight"
-        # return {
-        #     weight_prefix: make_tp_sharded_tensor_for_checkpoint(
-        #         tensor=state_dict["weight"],
-        #         key=weight_prefix,
-        #         allow_shape_mismatch=True,
-        #         prepend_offsets=sharded_offsets,
-        #     )
-        # }
+        structured_name_prefix: str = "",
+    ):
+        state_dict = self.state_dict(structured_name_prefix="")
+        return build_sharded_state_dict(
+            state_dict, {"weight": 0}, structured_name_prefix
+        )
 
 
 class LinearWithFrozenWeight(paddle.autograd.Function):
@@ -1074,13 +1066,15 @@ class ColumnParallelLinear(paddle.nn.Layer):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
-    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-        """Sharding along axis 0, bias sharded"""
-        return None
-        # state_dict = self.state_dict(prefix="", keep_vars=True)
-        # return make_sharded_tensors_for_checkpoint(
-        #     state_dict, prefix, {"weight": 0, "bias": 0}, sharded_offsets
-        # )
+    def sharded_state_dict(
+        self,
+        structured_name_prefix: str = "",
+    ):
+        """Sharding along axis 1, bias sharded"""
+        state_dict = self.state_dict(structured_name_prefix="")
+        return build_sharded_state_dict(
+            state_dict, {"weight": 1, "bias": 0}, structured_name_prefix
+        )
 
     def set_extra_state(self, state):
         """Extra state is ignored"""
@@ -1328,13 +1322,15 @@ class RowParallelLinear(paddle.nn.Layer):
             output_bias = self.bias
         return output, output_bias
 
-    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-        """Sharding along axis 1, bias not sharded"""
-        return None
-        # state_dict = self.state_dict(prefix="", keep_vars=True)
-        # return make_sharded_tensors_for_checkpoint(
-        #     state_dict, prefix, {"weight": 1}, sharded_offsets
-        # )
+    def sharded_state_dict(
+        self,
+        structured_name_prefix: str = "",
+    ):
+        """Sharding along axis 0, bias not sharded"""
+        state_dict = self.state_dict(structured_name_prefix="")
+        return build_sharded_state_dict(
+            state_dict, {"weight": 0}, structured_name_prefix
+        )
 
     def set_extra_state(self, state):
         """Extra state is ignored"""
