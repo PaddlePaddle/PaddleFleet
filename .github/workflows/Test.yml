@@ -305,7 +305,7 @@ jobs:
 
   integration-test:
     needs: check-bypass
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' || matrix.name == 'H20' }}
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (${{ matrix.name }})
     runs-on:
       group: ${{ matrix.group }}
@@ -321,6 +321,7 @@ jobs:
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test
     steps:
       - name: Check docker image and run container
+        if: ${{ matrix.name == 'H20' }}
         run: |
           export CUDA_SO="$(\ls -d /usr/lib64/libcuda* | xargs -I{} echo '-v {}:{}') $(\ls -d /usr/lib64/libnvidia* | xargs -I{} echo '-v {}:{}')"
           export DEVICES="$(\ls -d /dev/nvidia* | xargs -I{} echo "-v {}:{}") $(\ls /dev/nvidia-caps/* | xargs -I{} echo "-v {}:{}")"
@@ -355,6 +356,7 @@ jobs:
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
+        if: ${{ matrix.name == 'H20' }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
@@ -374,6 +376,7 @@ jobs:
           '
 
       - name: Install PaddleFormers
+        if: ${{ matrix.name == 'H20' }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -388,6 +391,7 @@ jobs:
           '
 
       - name: Integration test (GLM4.5)
+        if: ${{ matrix.name == 'H20' }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -402,7 +406,7 @@ jobs:
           '
 
       - name: Terminate and delete the container
-        if: ${{ always() }}
+        if: ${{ matrix.name == 'H20' && always() }}
         run: |
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
