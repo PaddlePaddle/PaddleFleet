@@ -144,7 +144,7 @@ def test_ColumnParallelLinear(
     assert paddle.equal_all(output, output_baseline)
     assert paddle.allclose(input_data.grad, input_grad_baseline)
     assert paddle.allclose(
-        col_tp4.weight.grad, weight_grad_baseline[rank * 2 : (rank + 1) * 2, :]
+        col_tp4.weight.grad, weight_grad_baseline[:, rank * 2 : (rank + 1) * 2]
     )
     assert paddle.allclose(
         col_tp4.bias.grad, bias_grad_baseline[rank * 2 : (rank + 1) * 2]
@@ -219,7 +219,7 @@ def test_RowParallelLinear(
     assert paddle.allclose(output, output_baseline, atol=1e-7)
     assert paddle.allclose(input_data.grad, input_grad_baseline)
     assert paddle.allclose(
-        row_tp4.weight.grad, weight_grad_baseline[:, rank * 2 : (rank + 1) * 2]
+        row_tp4.weight.grad, weight_grad_baseline[rank * 2 : (rank + 1) * 2, :]
     )
     assert paddle.allclose(row_tp4.bias.grad, bias_grad_baseline)
 
