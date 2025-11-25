@@ -304,13 +304,19 @@ jobs:
           verbose: true
 
   integration-test:
-    name: Integration test
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    name: Integration test ({{ matrix.name }})
     runs-on:
-      group: Distribute
+      group: {? {matrix.group: ''} : ''}
+    strategy:
+      matrix:
+        include:
+          - {name: H20, group: CI-H}
+          - {name: A100, group: Distribute}
     env:
       PIP_CACHE_DIR: /root/.cache/pip
+      CACHE_DIR: /root/.cache
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test
     steps:
       - name: Check docker image and run container
@@ -325,7 +331,7 @@ jobs:
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v ${{ github.workspace }}/../../../.cache:/root/.cache \
+            -v /ssd1/paddle-1/action_cache:/root/.cache \
             -v ${{ github.workspace }}:/workspace \
             -e BRANCH \
             -e PR_ID \
