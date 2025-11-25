@@ -86,7 +86,6 @@ class LanguageLayer(FleetLayer):
             self.loss_func = paddle.nn.CrossEntropyLoss(
                 reduction="none",
             )
-        print(f"self.loss_func: {self.loss_func}")
 
     def _is_in_embd_group(self):
         if self.embd_group is None:
