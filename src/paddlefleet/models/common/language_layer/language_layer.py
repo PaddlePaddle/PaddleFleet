@@ -16,7 +16,6 @@
 import paddle
 from paddle import Tensor
 
-from paddlefleet import tensor_parallel
 from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
 
 # from paddlefleet.dist_checkpointing.mapping import ShardedStateDict
@@ -81,7 +80,9 @@ class LanguageLayer(FleetLayer):
         if (
             self.enable_parallel_cross_entropy
         ):  # and False: # and lm_head is distributed
-            self.loss_func = tensor_parallel.vocab_parallel_cross_entropy
+            self.loss_func = (
+                paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
+            )
         else:
             self.loss_func = paddle.nn.CrossEntropyLoss(
                 reduction="none",
