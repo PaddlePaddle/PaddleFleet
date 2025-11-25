@@ -305,7 +305,7 @@ jobs:
 
   integration-test:
     needs: check-bypass
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' || matrix.name == 'H20' }}
     name: Integration test (${{ matrix.name }})
     runs-on:
       group: ${{ matrix.group }}
