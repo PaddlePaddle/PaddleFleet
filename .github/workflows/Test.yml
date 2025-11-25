@@ -310,6 +310,7 @@ jobs:
     runs-on:
       group: ${{ matrix.group }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - {name: H20, group: CI-H}
