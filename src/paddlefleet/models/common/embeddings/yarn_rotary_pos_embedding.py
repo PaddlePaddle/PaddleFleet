@@ -151,8 +151,8 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         )
 
         emb = paddle.cat((freqs, freqs), axis=-1)
-        # emb [seq_length, .., dim]
-        emb = emb[:, None, None, :]
+        # emb [1, seq_len, 1, dim]
+        emb = emb[None, :, None, :]
         return emb, _mscale
 
     def _set_cos_sin_cache(self, seq_len, offset, dtype, packed_seq=False):

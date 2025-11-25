@@ -97,6 +97,8 @@ class RotaryEmbedding(nn.Layer):
             )
         )
 
+        self._cast_to_low_precision = False
+
     def _apply_scaling(
         self,
         freqs,
@@ -186,8 +188,8 @@ class RotaryEmbedding(nn.Layer):
             emb = paddle.stack(
                 (freqs.reshape((-1, 1)), freqs.reshape((-1, 1))), axis=-1
             ).reshape((freqs.shape[0], -1))
-        # emb [seq_length, .., dim]
-        emb = emb[:, None, None, :]
+        # emb [1, seq_len, 1, dim]
+        emb = emb[None, :, None, :]
         return emb
 
     def get_rotary_seq_len(
@@ -218,9 +220,9 @@ class RotaryEmbedding(nn.Layer):
             )
         else:
             if transformer is not None and transformer.input_tensor is not None:
-                rotary_seq_len = transformer.input_tensor.shape[0]
+                rotary_seq_len = transformer.input_tensor.shape[1]
             else:
-                rotary_seq_len = transformer_input.shape[0]
+                rotary_seq_len = transformer_input.shape[1]
 
             if transformer_config.sequence_parallel:
                 rotary_seq_len *= transformer_config.tensor_model_parallel_size
