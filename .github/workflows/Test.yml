@@ -306,9 +306,9 @@ jobs:
   integration-test:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
-    name: Integration test ({{ matrix.name }})
+    name: Integration test (${{ matrix.name }})
     runs-on:
-      group: {? {matrix.group: ''} : ''}
+      group: ${{ matrix.group }}
     strategy:
       matrix:
         include:
