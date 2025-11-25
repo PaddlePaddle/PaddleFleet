@@ -15,7 +15,8 @@
 
 import paddle
 from paddle import Tensor
-from paddle.distributed import fleet
+
+from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
 
 # from paddlefleet.dist_checkpointing.mapping import ShardedStateDict
 from paddlefleet.pipeline_parallel.utils import (
@@ -69,9 +70,11 @@ class LanguageLayer(FleetLayer):
         self.vp_size = self.config.virtual_pipeline_model_parallel_size
 
         self.ignored_index = -100
-        hcg = fleet.get_hybrid_communicate_group()
+
         self.enable_parallel_cross_entropy = (
-            hcg.get_model_parallel_world_size() > 1 and config.parallel_output
+            paddle.distributed.is_initialized()
+            and get_tensor_model_parallel_world_size() > 1
+            and config.parallel_output
         )
 
         if (

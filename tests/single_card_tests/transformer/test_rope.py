@@ -30,8 +30,8 @@ class TestRotaryEmbedding(unittest.TestCase):
 
     def test_forward(self):
         output = self.rope(64)
-        assert output.shape[0] == 64
-        assert output.shape[1] == 1
+        assert output.shape[0] == 1
+        assert output.shape[1] == 64
         assert output.shape[2] == 1
         assert output.shape[3] == self.kv_channels
         assert output.dtype == paddle.float32
@@ -46,8 +46,8 @@ class TestYarnRotaryEmbedding(unittest.TestCase):
 
     def test_forward(self):
         output, mscale = self.rope(64)
-        assert output.shape[0] == 64
-        assert output.shape[1] == 1
+        assert output.shape[0] == 1
+        assert output.shape[1] == 64
         assert output.shape[2] == 1
         assert output.shape[3] == self.kv_channels
         assert output.dtype == paddle.float32

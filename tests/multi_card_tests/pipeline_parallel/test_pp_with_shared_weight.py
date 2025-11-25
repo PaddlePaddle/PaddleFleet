@@ -240,7 +240,6 @@ class TestDistEmbeddingTraining(unittest.TestCase):
             model_b_params[1].set_value(parameters[1])
 
         # enable this test when simple pp is ready
-        return
 
         for step in range(5):
             x1_data = np.random.randint(0, vocab_size, size=[batch_size, 1])
