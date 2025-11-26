@@ -16,7 +16,6 @@ env:
   COMMIT_ID: ${{ github.event.pull_request.head.sha || github.sha }}
   work_dir: /paddle
   PADDLE_ROOT: /paddle
-  TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-test
   ci_scripts: /paddle/ci
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   CI_name: test
@@ -45,6 +44,7 @@ jobs:
       group: fleet-v100
     env:
       PIP_CACHE_DIR: /root/.cache/pip
+      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-single-card-test
     steps:
       - name: Check docker image and run container
         run: |
@@ -91,17 +91,14 @@ jobs:
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          source $HOME/.local/bin/env
+          pip install uv
           echo "uv sync"
           uv sync --group ci -v > /dev/null
           '
 
       - name: Single card test
-        if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source $HOME/.local/bin/env
           pwd
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
@@ -125,10 +122,8 @@ jobs:
           '
 
       - name: Single card Coverage Upload to BOS
-        if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -145,7 +140,7 @@ jobs:
           '
 
       - name: Terminate and delete the container
-        if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
+        if: ${{ always() }}
         run: |
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
@@ -159,6 +154,7 @@ jobs:
       group: CI-H
     env:
       PIP_CACHE_DIR: /root/.cache/pip
+      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-multi-card_test
     steps:
       - name: Check docker image and run container
         run: |
@@ -205,8 +201,7 @@ jobs:
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          source $HOME/.local/bin/env
+          pip install uv
           echo "uv sync"
           uv sync --group ci -v > /dev/null
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -214,10 +209,8 @@ jobs:
           '
 
       - name: Multi-card test
-        if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -241,10 +234,8 @@ jobs:
           '
 
       - name: Multi-card Coverage Upload to BOS
-        if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source $HOME/.local/bin/env
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -261,7 +252,7 @@ jobs:
           '
 
       - name: Terminate and delete the container
-        if: ${{ steps.check-bypass.outputs.can-skip != 'true' && always() }}
+        if: ${{ always() }}
         run: |
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
@@ -311,3 +302,112 @@ jobs:
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
           verbose: true
+
+  integration-test:
+    needs: check-bypass
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    name: Integration test (${{ matrix.name }})
+    runs-on:
+      group: ${{ matrix.group }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: H20, group: CI-H}
+          - {name: A100, group: Distribute}
+    env:
+      PIP_CACHE_DIR: /root/.cache/pip
+      CACHE_DIR: /root/.cache
+      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test
+    steps:
+      - name: Check docker image and run container
+        if: ${{ matrix.name == 'H20' }}
+        run: |
+          export CUDA_SO="$(\ls -d /usr/lib64/libcuda* | xargs -I{} echo '-v {}:{}') $(\ls -d /usr/lib64/libnvidia* | xargs -I{} echo '-v {}:{}')"
+          export DEVICES="$(\ls -d /dev/nvidia* | xargs -I{} echo "-v {}:{}") $(\ls /dev/nvidia-caps/* | xargs -I{} echo "-v {}:{}")"
+          export SMI="-v /usr/bin/nvidia-smi:/usr/bin/nvidia-smi"
+          container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
+          echo "container_name=${container_name}" >> ${{ github.env }}
+          docker pull $docker_image
+          docker run -d -t --name ${container_name} ${CUDA_SO} ${DEVICES} ${SMI} --runtime=nvidia --shm-size=32G \
+            -v "/dev/shm:/dev/shm"  \
+            -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
+            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
+            -v /ssd1/paddle-1/action_cache:/root/.cache \
+            -v ${{ github.workspace }}:/workspace \
+            -e BRANCH \
+            -e PR_ID \
+            -e COMMIT_ID \
+            -e work_dir \
+            -e PADDLE_ROOT \
+            -e ci_scripts \
+            -e CACHE_DIR \
+            -e no_proxy \
+            -e CI_name \
+            -e PIP_CACHE_DIR \
+            -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
+            -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
+            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
+            -e GITHUB_REPO_NAME="${{ github.repository }}" \
+            -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
+            -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -w /workspace --network host ${docker_image}
+
+      - name: Install PaddleFleet
+        if: ${{ matrix.name == 'H20' }}
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          rm -rf * .[^.]*
+          source /root/proxy
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git
+          cd PaddleFleet
+          git config --global --add safe.directory /workspace/PaddleFleet
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
+          git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
+          mkdir -p /root/.cache/pip
+          pip cache dir
+          pip install --upgrade pip
+          pip install uv
+          uv sync -v
+          '
+
+      - name: Install PaddleFormers
+        if: ${{ matrix.name == 'H20' }}
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          git clone https://github.com/PaddlePaddle/PaddleFormers.git
+          cd PaddleFormers
+          git config --global --add safe.directory /workspace/PaddleFormers
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
+          git config pull.rebase false
+          source ../PaddleFleet/.venv/bin/activate
+          pip install -e .
+          '
+
+      - name: Integration test (GLM4.5)
+        if: ${{ matrix.name == 'H20' }}
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          bash -x PaddleFleet/ci/integration_test/glm45.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+          fi
+          '
+
+      - name: Terminate and delete the container
+        if: ${{ matrix.name == 'H20' && always() }}
+        run: |
+          set +e
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
+          docker rm -f ${{ env.container_name }}

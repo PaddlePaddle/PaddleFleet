@@ -129,6 +129,11 @@ class AllToAllMoECommunication(MoECommunicationInterface, nn.Layer):
             group=self.moe_group,
         )
 
+        if tokens_per_expert_group.sum().item() == 0:
+            self.is_empty_tokens = True
+        else:
+            self.is_empty_tokens = False
+
         tokens_per_expert_group_sum = tokens_per_expert_group.reshape(
             [self.expert_parallel_degree, -1]
         )
@@ -171,8 +176,11 @@ class AllToAllMoECommunication(MoECommunicationInterface, nn.Layer):
         expert_outs: paddle.Tensor,
     ) -> paddle.Tensor:
         # Restore the original order of tokens, prepare for the third All-to-All.
-        new_x = paddle.empty_like(expert_outs)
-        new_x[self.gatherd_idxs] = expert_outs
+        if self.is_empty_tokens:
+            new_x = expert_outs
+        else:
+            new_x = paddle.empty_like(expert_outs)
+            new_x[self.gatherd_idxs] = expert_outs
 
         # Third All-to-All: Exchange expert outputs back to original rank. `gathered_tokens` are the tokens that originally belong to current rank
         gathered_tokens = _AllToAll.apply(
