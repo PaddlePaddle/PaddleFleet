@@ -413,13 +413,10 @@ integration-test:
     - name: Check docker image and run container
       if: ${{ matrix.name == 'H20' }}
       run: |
-        export CUDA_SO="$(\ls -d /usr/lib64/libcuda* | xargs -I{} echo '-v {}:{}') $(\ls -d /usr/lib64/libnvidia* | xargs -I{} echo '-v {}:{}')"
-        export DEVICES="$(\ls -d /dev/nvidia* | xargs -I{} echo "-v {}:{}") $(\ls /dev/nvidia-caps/* | xargs -I{} echo "-v {}:{}")"
-        export SMI="-v /usr/bin/nvidia-smi:/usr/bin/nvidia-smi"
         container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
         echo "container_name=${container_name}" >> ${{ github.env }}
         docker pull $docker_image
-        docker run -d -t --name ${container_name} ${CUDA_SO} ${DEVICES} ${SMI} --runtime=nvidia --shm-size=32G \
+        docker run -d -t --name ${container_name} --gpus all --shm-size=32G \
           -v "/dev/shm:/dev/shm"  \
           -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
           -v ${{ github.workspace }}/../../../proxy:/root/proxy \
