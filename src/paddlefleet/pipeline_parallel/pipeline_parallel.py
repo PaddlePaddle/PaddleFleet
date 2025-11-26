@@ -32,7 +32,7 @@ from paddle.distributed.fleet.utils.hybrid_parallel_util import (
     broadcast_sep_parameters,
     broadcast_sharding_parameters,
 )
-from paddle.distributed.fleet.utils.log_util import get_sync_logger, logger
+from paddle.distributed.fleet.utils.log_util import logger
 from paddle.distributed.fleet.utils.tensor_fusion_helper import (
     HOOK_ACTION,
     FusedCommBuffer,
@@ -43,6 +43,11 @@ from .pipeline_hooks import (
     PipelineHook,
 )
 from .pp_layers import PipelineLayer
+from .pp_utils.utils import (
+    dict_to_tuple_helper,
+    profile_pipeline_details,
+    tuple_to_dict_helper,
+)
 
 g_profile_pipeline_details_steps = int(
     os.getenv("FLAGS_profile_pipeline_details_steps", "0")
@@ -56,18 +61,6 @@ if _use_four_directions:
     from .pp_utils import four_directions_p2p_communication as p2p
 else:
     from .pp_utils import p2p_communication as p2p
-
-
-def profile_pipeline_details(msg):
-    GB = 1024.0 * 1024.0 * 1024.0
-    if paddle.base.core.is_compiled_with_cuda():
-        memory_allocated_size = paddle.device.cuda.memory_allocated() / GB
-        memory_reserved_size = paddle.device.cuda.memory_reserved() / GB
-    else:
-        memory_allocated_size, memory_reserved_size = 0, 0
-    get_sync_logger().info(
-        f"{msg}: memory_allocated_size={memory_allocated_size:.2f}, memory_reserved_size={memory_reserved_size:.2f}"
-    )
 
 
 def get_action(is_dp, shard_split_param=False):
@@ -271,6 +264,54 @@ class NoPipelineParallel(nn.Layer):
         self.accumulate_steps = self._strategy.pipeline_configs[
             "accumulate_steps"
         ]
+        self._delay_scale_loss = self._strategy.hybrid_configs[
+            "pp_configs"
+        ].delay_scale_loss
+
+        # store total loss of entire batch. It contains the loss of each micro batch in a list, then contains many loss_fn's list in total_loss.
+        self.total_loss = None
+
+        # default loss function index
+        self.loss_fn_idx = 0
+
+    def _check_micro_batch_data_valid(self, micro_batch_data):
+        if isinstance(micro_batch_data, (tuple, list)):
+            for data in micro_batch_data:
+                self._check_micro_batch_data_valid(data)
+        elif isinstance(micro_batch_data, dict):
+            for value in micro_batch_data.values():
+                self._check_micro_batch_data_valid(value)
+        elif micro_batch_data is not None:
+            assert isinstance(micro_batch_data, paddle.Tensor)
+
+    def _prepare_training(self, data, optimizer, lr_scheduler):
+        assert framework._dygraph_tracer()._has_grad, (
+            "Please enable the generation of gradients."
+        )
+        self.optimizer = optimizer
+        self.lr_scheduler = lr_scheduler
+        self._layers.train()
+        return data
+
+    def _optimizer_step(self):
+        if self._delay_scale_loss:
+            for p in self._layers.parameters():
+                if hasattr(p, "main_grad") and p.main_grad is not None:
+                    assert p.grad is None
+                    p.main_grad = p.main_grad.scale(1.0 / self.accumulate_steps)
+                elif p.grad is not None:
+                    p.grad = p.grad.scale(1.0 / self.accumulate_steps)
+
+        if self.scaler:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            self.optimizer.step()
+
+        self.optimizer.clear_grad()
+
+        if self.lr_scheduler:
+            self.lr_scheduler.step()
 
     def forward_backward_pipeline(
         self,
@@ -278,6 +319,9 @@ class NoPipelineParallel(nn.Layer):
         scaler=None,
         return_micro_batch_loss=False,
     ):
+        self.scaler = scaler
+        self.total_loss = None
+
         micro_dataset = FakeMicroDataset(
             data,
             True,
@@ -287,15 +331,92 @@ class NoPipelineParallel(nn.Layer):
         )
         loss_list = []
         for _ in range(self.accumulate_steps):
+            # data prepare
             data_iter = next(micro_dataset)
             input_tensor = data_iter[0]
             label = data_iter[1]
-            output_tensor = self._layers.forward(input_tensor)
-            loss = self._layers._loss_fn[0](output_tensor, label)
-            loss.backward()
-            loss_list.append(loss)
+            self._check_micro_batch_data_valid(input_tensor)
+            self._check_micro_batch_data_valid(label)
 
-        return sum(loss_list) / self.accumulate_steps
+            # forward
+            output_tensor = self._layers.forward(input_tensor)
+
+            # loss is loss_fn[loss_fn_idx]'s result
+            loss = None
+            # cal loss
+            for idx, loss_fn in enumerate(self._layers._loss_fn):
+                loss_tensor = loss_fn(output_tensor, label)
+                assert isinstance(loss_tensor, paddle.Tensor), (
+                    "Currently, loss_fn should obtain Paddle.Tensor dtype"
+                )
+                with paddle.amp.auto_cast(enable=False):
+                    if self.accumulate_steps > 1 and not self._delay_scale_loss:
+                        loss_tensor = loss_tensor / self.accumulate_steps
+                if self.total_loss is None:
+                    self.total_loss = []
+                # when self.total_loss length is less than idx, append a new tensor
+                if len(self.total_loss) <= idx:
+                    self.total_loss.append([])
+
+                self.total_loss[idx].append(loss_tensor.detach())
+
+                if idx == self.loss_fn_idx:
+                    loss = loss_tensor
+
+            # backward
+            if self.scaler:
+                paddle.autograd.backward(self.scaler.scale(loss))
+            else:
+                paddle.autograd.backward(loss)
+
+            assert self.total_loss is not None, (
+                "train_batch() in last stage should obtain valid loss"
+            )
+
+        losses = []
+        for idx in range(len(self._layers._loss_fn)):
+            self.total_loss[idx] = paddle.to_tensor(self.total_loss[idx])
+            if not return_micro_batch_loss:
+                # TODO(shenliang03): it will use mean/sum to calculate loss
+                tmp = paddle.zeros_like(self.total_loss[idx][0])
+                for loss in self.total_loss[idx]:
+                    tmp += loss.detach()
+                if not self._delay_scale_loss:
+                    losses.append(tmp)
+                else:
+                    losses.append(tmp / self.accumulate_steps)
+            else:
+                losses.append(self.total_loss[idx].detach())
+        return losses[0] if len(losses) == 1 else losses
+
+    def train_batch(
+        self,
+        data,
+        optimizer,
+        lr_scheduler=None,
+        scaler=None,
+        loss_fn_idx=0,
+        return_micro_batch_loss=False,
+    ):
+        data = self._prepare_training(data, optimizer, lr_scheduler)
+
+        # check loss_fn_idx is valid and loss_fn exists
+        assert (
+            loss_fn_idx in range(len(self._layers._loss_fn))
+            and self._layers._loss_fn[loss_fn_idx] is not None
+        ), f"loss function {loss_fn_idx} should exist to compute loss"
+        self.loss_fn_idx = loss_fn_idx
+
+        # no pipeline parallel
+        train_loss = self.forward_backward_pipeline(
+            data, scaler, return_micro_batch_loss=return_micro_batch_loss
+        )
+
+        # optimizer
+        with paddle.amp.auto_cast(enable=False):
+            self._optimizer_step()
+
+        return train_loss
 
 
 class PipelineParallel(nn.Layer):
@@ -408,15 +529,6 @@ class PipelineParallel(nn.Layer):
             sharding_split_param {self._sharding_split_param};"
         )
 
-        self._records = []
-        self._record_format = (
-            '"name": "{}{}", "cat": "pipeline timeline", "ph": {}, "pid": 0, "tid": '
-            + str(self.stage_id + 1)
-            + ', "ts": {}, "cname": "{}"'
-        )
-        self._forward_color = "thread_state_running"  # RGB: 126, 200, 148
-        self._backward_color = "rail_idle"  # RGB: 238, 142, 0
-
         if self._dp_comm_overlap:
             assert self.use_data_parallel and self.num_stages > 1
 
@@ -493,6 +605,11 @@ class PipelineParallel(nn.Layer):
         # only support user hooks during training
         self.user_hooks_enabled = True
 
+    def register_hook(
+        self, location: PipelineParallelMicroStepLocations, hook: Callable
+    ):
+        self.callbacks.register_hook(location, hook)
+
     def _init_user_hooks(self):
         self._init_user_forward_backward_hooks()
         self._init_user_bubble_hooks()
@@ -521,7 +638,12 @@ class PipelineParallel(nn.Layer):
         )
 
     def _init_user_bubble_hooks(self):
+        # (TODO:gexiao) support bubble hooks if needed
+        # Bubble hooks are required for advanced pipeline parallelism features, such as custom communication or computation overlap during pipeline bubbles.
+        # Planned for implementation in future releases after design review.
         self.bubble_hooks = None
+        # self.bubble_hooks = PipelineHook()
+        # self.bubble_hooks.set_hooks_capacity(2 * self.num_stages - 2)
 
     def _reset_user_hooks_status(self):
         if self.bubble_hooks:
@@ -671,6 +793,154 @@ class PipelineParallel(nn.Layer):
 
         return train_loss
 
+    def eval_batch(
+        self, data, compute_loss=False, loss_fn_idx=0, return_host_tensor=False
+    ):
+        self.user_hooks_enabled = False
+        # reset the virtual pp rank for each run
+        self.set_virtual_pipeline_rank(0)
+
+        self._layers.eval()
+        origin_compute_loss = self._compute_loss
+        self._compute_loss = compute_loss
+        origin_return_host_tensor = self._return_host_tensor
+        self._return_host_tensor = return_host_tensor
+
+        # store data id for micro_batch
+        self.micro_batch_id = 0
+
+        # store total loss of entire batch
+        self.total_loss = None
+
+        # check loss_fn_idx is valid and loss_fn exists
+        assert (
+            loss_fn_idx in range(len(self._layers._loss_fn))
+            and self._layers._loss_fn[loss_fn_idx] is not None
+        ), f"loss function {loss_fn_idx} should exist to compute loss"
+        self.loss_fn_idx = loss_fn_idx
+
+        startup_steps = self.num_stages - self.stage_id - 1
+        startup_steps = min(startup_steps, self.accumulate_steps)
+        steady_steps = self.accumulate_steps - startup_steps
+
+        output_buffers = []
+
+        # convert to micro dataset
+        micro_dataset = self._wrap_data(data)
+
+        for step_id in range(startup_steps):
+            input_tensor = self._p2p_helper.recv_forward(
+                self.is_pipeline_first_stage(),
+                batch_p2p_comm=self._use_batch_p2p_comm,
+            )
+
+            output_tensor, _, _ = self._forward_step(
+                input_tensor, micro_dataset, step_id=None
+            )
+            self._p2p_helper.send_forward(
+                output_tensor,
+                self.is_pipeline_last_stage(),
+                skip_check_meta=True,
+                batch_p2p_comm=self._use_batch_p2p_comm,
+            )
+            if not self.is_pipeline_last_stage():
+                self._release_output(output_tensor)
+            else:
+                self._offload_tensors(output_tensor)
+
+            output_buffers.append(output_tensor)
+
+        if steady_steps > 0:
+            input_tensor = self._p2p_helper.recv_forward(
+                self.is_pipeline_first_stage(),
+                batch_p2p_comm=self._use_batch_p2p_comm,
+            )
+
+        for i in range(steady_steps):
+            last_iter = i == (steady_steps - 1)
+
+            output_tensor, _, _ = self._forward_step(
+                input_tensor, micro_dataset, step_id=None
+            )
+            self._p2p_helper.send_forward(
+                output_tensor,
+                self.is_pipeline_last_stage(),
+                skip_check_meta=True,
+                batch_p2p_comm=self._use_batch_p2p_comm,
+            )
+            if not self.is_pipeline_last_stage():
+                self._release_output(output_tensor)
+            else:
+                self._offload_tensors(output_tensor)
+
+            output_buffers.append(output_tensor)
+
+            if not last_iter:
+                input_tensor = self._p2p_helper.recv_forward(
+                    self.is_pipeline_first_stage(),
+                    batch_p2p_comm=self._use_batch_p2p_comm,
+                )
+
+        if self._compute_loss:
+            train_loss = self._broadcast_final_loss()
+        else:
+            train_loss = output_buffers
+
+        self._compute_loss = origin_compute_loss
+        self._return_host_tensor = origin_return_host_tensor
+        return train_loss
+
+    def register_bubble_pipeline_parallel_hook(
+        self, location: int, hook: Callable
+    ):
+        """
+        Registering bubble hooks for pipeline parallelism.
+        """
+        if not self.bubble_hooks:
+            raise ValueError("Bubble hooks are not supported yet.")
+        self.bubble_hooks.register_hook(location, hook)
+
+    def register_forward_pipeline_parallel_hook(
+        self, location: int, hook: Callable
+    ):
+        """
+        Registering forward hooks for pipeline parallelism.
+        """
+        if not self.forward_hooks:
+            raise ValueError("Forward hooks are not supported yet.")
+        self.forward_hooks.register_hook(location, hook)
+
+    def register_backward_pipeline_parallel_hook(
+        self, location: int, hook: Callable
+    ):
+        """
+        Registering backward hooks for pipeline parallelism.
+        """
+        if not self.backward_hooks:
+            raise ValueError("Backward hooks are not supported yet.")
+        self.backward_hooks.register_hook(location, hook)
+
+    @property
+    def bubble_pipeline_parallel_hook_capacity(self):
+        capacity = 0
+        if self.bubble_hooks:
+            capacity = self.bubble_hooks.hooks_capacity
+        return capacity
+
+    @property
+    def forward_pipeline_parallel_hook_capacity(self):
+        capacity = 0
+        if self.forward_hooks:
+            capacity = self.forward_hooks.hooks_capacity
+        return capacity
+
+    @property
+    def backward_pipeline_parallel_hook_capacity(self):
+        capacity = 0
+        if self.backward_hooks:
+            capacity = self.backward_hooks.hooks_capacity
+        return capacity
+
     def is_pipeline_first_stage(self, ignore_virtual=False):
         if not ignore_virtual:
             if self._virtual_pp_world_size is not None:
@@ -758,7 +1028,11 @@ class PipelineParallel(nn.Layer):
         scaler=None,
         return_micro_batch_loss=False,
     ):
+        # use the 1f1b scheduling strategy.
+        # this strategy is inspired by:
+        # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/schedules.py
         self._reset_user_hooks_status()
+        # no _forward_only mode
         self.user_hooks_enabled = True
 
         if self.processed_steps < g_profile_pipeline_details_steps:
@@ -934,7 +1208,9 @@ class PipelineParallel(nn.Layer):
         self._check_user_hooks_status_at_step_end()
         return train_loss
 
-    def _maybe_loss_compute(self, output_tensor, micro_dataset):
+    def _maybe_loss_compute(
+        self, output_tensor, micro_dataset, overlap_schedule_mode=False
+    ):
         backward_loss_tensor = None
         backward_loss_fn_node = None
         loss_fn_node = None
@@ -948,17 +1224,31 @@ class PipelineParallel(nn.Layer):
                 labels = next(micro_dataset)[1]
                 self._check_micro_batch_data_valid(labels)
                 for idx, loss_fn in enumerate(self._layers._loss_fn):
-                    loss_tensor = loss_fn(output_tensor, labels)
-                    assert isinstance(loss_tensor, paddle.Tensor), (
-                        "Currently, loss_fn should obtain Paddle.Tensor dtype"
-                    )
-
-                    with paddle.amp.auto_cast(enable=False):
+                    if overlap_schedule_mode:
+                        loss_fn_node = loss_fn.build_schedule_node()
+                        loss_fn_node.labels = labels
                         if (
                             self.accumulate_steps > 1
                             and not self._delay_scale_loss
                         ):
-                            loss_tensor = loss_tensor / self.accumulate_steps
+                            loss_fn_node.scale_loss_factor = (
+                                self.accumulate_steps
+                            )
+                        loss_tensor = loss_fn_node.forward(output_tensor)
+                    else:
+                        loss_tensor = loss_fn(output_tensor, labels)
+                        assert isinstance(loss_tensor, paddle.Tensor), (
+                            "Currently, loss_fn should obtain Paddle.Tensor dtype"
+                        )
+
+                        with paddle.amp.auto_cast(enable=False):
+                            if (
+                                self.accumulate_steps > 1
+                                and not self._delay_scale_loss
+                            ):
+                                loss_tensor = (
+                                    loss_tensor / self.accumulate_steps
+                                )
 
                     if self.total_loss is None:
                         self.total_loss = []
@@ -978,6 +1268,7 @@ class PipelineParallel(nn.Layer):
         micro_dataset,
         chunk_id=None,
         step_id=None,
+        overlap_schedule_mode=False,
     ):
         if self.user_hooks_enabled:
             self.forward_hooks.run_hook()
@@ -1000,7 +1291,13 @@ class PipelineParallel(nn.Layer):
         )
 
         schedule_chunk = None
-        output_tensor = self._layers.forward(input_tensor, chunk_id=chunk_id)
+        if overlap_schedule_mode:
+            schedule_chunk = self._layers.get_schedule_chunk(chunk_id=chunk_id)
+            output_tensor = schedule_chunk.forward(input_tensor)
+        else:
+            output_tensor = self._layers.forward(
+                input_tensor, chunk_id=chunk_id
+            )
 
         self.callbacks.on_location(
             PipelineParallelMicroStepLocations.FORWARD_END,
@@ -1010,7 +1307,7 @@ class PipelineParallel(nn.Layer):
         )
 
         backward_loss_tensor, backward_loss_fn_node = self._maybe_loss_compute(
-            output_tensor, micro_dataset
+            output_tensor, micro_dataset, overlap_schedule_mode
         )
 
         if self.is_pipeline_first_stage() or self.is_pipeline_last_stage():
@@ -1034,6 +1331,7 @@ class PipelineParallel(nn.Layer):
         output_tensor_grad,
         chunk_id=None,
         step_id=None,
+        overlap_schedule_mode=False,
         schedule_chunk=None,
         loss_fn_node=None,
     ):
@@ -1055,13 +1353,28 @@ class PipelineParallel(nn.Layer):
             )
             if self.is_pipeline_last_stage():
                 assert output_tensor_grad is None
-                # In align mode, we scale the grad directly after forward
-                if paddle.distributed.in_auto_parallel_align_mode():
-                    output_tensor = output_tensor / _get_align_mode_scale()
-                if self.scaler:
-                    paddle.autograd.backward(self.scaler.scale(output_tensor))
+                if overlap_schedule_mode:
+                    assert (
+                        loss_fn_node is not None and schedule_chunk is not None
+                    ), (
+                        "loss_fn_node and schedule_chunk should not be None in overlap_schedule_mode"
+                    )
+                    input_tensor_grad = loss_fn_node.backward(
+                        scaler=self.scaler
+                    )
+                    input_tensor_grad = schedule_chunk.backward(
+                        input_tensor_grad
+                    )
                 else:
-                    paddle.autograd.backward(output_tensor)
+                    # In align mode, we scale the grad directly after forward
+                    if paddle.distributed.in_auto_parallel_align_mode():
+                        output_tensor = output_tensor / _get_align_mode_scale()
+                    if self.scaler:
+                        paddle.autograd.backward(
+                            self.scaler.scale(output_tensor)
+                        )
+                    else:
+                        paddle.autograd.backward(output_tensor)
             else:
                 if isinstance(output_tensor, tuple):
                     outputs = [t for t in output_tensor if not t.stop_gradient]
@@ -1071,19 +1384,32 @@ class PipelineParallel(nn.Layer):
                     outputs = [output_tensor]
                     grad_tensors = [output_tensor_grad]
 
-                paddle.autograd.backward(
-                    tensors=outputs,
-                    grad_tensors=grad_tensors,
-                )
-
-            input_tensor_grad = None
-            if input_tensor is not None:
-                if isinstance(input_tensor, tuple):
-                    input_tensor_grad = tuple(
-                        [t.grad for t in input_tensor if not t.stop_gradient]
+                if overlap_schedule_mode:
+                    assert schedule_chunk is not None, (
+                        "schedule_chunk should not be None in overlap_schedule_mode"
                     )
+                    input_tensor_grad = schedule_chunk.backward(grad_tensors)
                 else:
-                    input_tensor_grad = input_tensor.grad
+                    paddle.autograd.backward(
+                        tensors=outputs,
+                        grad_tensors=grad_tensors,
+                    )
+
+            if not overlap_schedule_mode:
+                # Extract input_tensor_grad from the input tensor. In overlap_schedule_mode,
+                # the input_tensor_grad is extracted inside the schedule_chunk.
+                input_tensor_grad = None
+                if input_tensor is not None:
+                    if isinstance(input_tensor, tuple):
+                        input_tensor_grad = tuple(
+                            [
+                                t.grad
+                                for t in input_tensor
+                                if not t.stop_gradient
+                            ]
+                        )
+                    else:
+                        input_tensor_grad = input_tensor.grad
             if self._enable_timer:
                 self.timers("backward_step").stop()
             self.callbacks.on_location(
@@ -1204,6 +1530,27 @@ class PipelineParallel(nn.Layer):
         if self.lr_scheduler:
             self.lr_scheduler.step()
 
+    def _offload_tensors(self, output_tensor):
+        if not self._return_host_tensor:
+            return
+        if isinstance(output_tensor, (tuple, list)):
+            for t in output_tensor:
+                if not isinstance(t, paddle.Tensor):
+                    continue
+                host_tensor = (
+                    t.pin_memory() if hasattr(t, "pin_memory") else t.cpu()
+                )
+                host_tensor._share_buffer_to(t)
+        else:
+            if not isinstance(output_tensor, paddle.Tensor):
+                return
+            host_tensor = (
+                output_tensor.pin_memory()
+                if hasattr(output_tensor, "pin_memory")
+                else output_tensor.cpu()
+            )
+            host_tensor._share_buffer_to(output_tensor)
+
     def _release_output(self, output):
         def can_free(t):
             return (
@@ -1220,55 +1567,3 @@ class PipelineParallel(nn.Layer):
 
         elif can_free(output):
             output._clear_dataptr()
-
-
-def tuple_to_dict_helper(input_tensor):
-    # recv tuple -> fwd input dict
-    use_dict = False
-    if isinstance(input_tensor, tuple):
-        use_dict = hasattr(input_tensor[0], "key")
-    else:  # single tensor
-        use_dict = hasattr(input_tensor, "key")
-    if use_dict:
-        input_tensor = convert_tensor_tuple_to_dict(input_tensor)
-    return input_tensor, use_dict
-
-
-def dict_to_tuple_helper(output_tensor):
-    if isinstance(output_tensor, dict):
-        output_tensor_tuple = convert_tensor_dict_to_tuple(
-            output_tensor_dict=output_tensor
-        )
-    else:  # single tensor or tensor tuple
-        output_tensor_tuple = output_tensor
-    return output_tensor_tuple
-
-
-def convert_tensor_dict_to_tuple(output_tensor_dict):
-    output_tensor = []
-    for key, tensor in output_tensor_dict.items():
-        if isinstance(tensor, (list, tuple)):
-            for idx, t in enumerate(tensor):
-                t.key = key + " " + str(idx)
-                output_tensor.append(t)
-        else:  # single tensor
-            tensor.key = key
-            output_tensor.append(tensor)
-
-    return tuple(output_tensor)
-
-
-def convert_tensor_tuple_to_dict(input_tensor_tuple):
-    input_tensor_dict = {}
-    for tensor in input_tensor_tuple:
-        key = tensor.key
-        if " " in key:
-            real_key, _ = key.split(" ")
-            if real_key in input_tensor_dict.keys():
-                input_tensor_dict[real_key].append(tensor)
-            else:
-                input_tensor_dict[real_key] = [tensor]
-        else:
-            input_tensor_dict[key] = tensor
-        delattr(tensor, "key")
-    return input_tensor_dict

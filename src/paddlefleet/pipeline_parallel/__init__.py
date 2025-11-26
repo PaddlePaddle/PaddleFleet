@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .pipeline_parallel import NoPipelineParallel, PipelineParallel
+from .pipeline_parallel_withinterleave import PipelineParallelWithInterleave
 from .pp_layers import LayerDesc, PipelineLayer, SharedLayerDesc
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "PipelineLayer",
     "NoPipelineParallel",
     "PipelineParallel",
+    "PipelineParallelWithInterleave",
 ]
