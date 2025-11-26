@@ -36,8 +36,6 @@ jq '.expert_parallel_degree = 8' glm45.json > glm45_single_node.json
 jq '.save_steps = 100' glm45_single_node.json > glm45.json
 jq --arg dir "1.0 $CACHE_DIR/glm45/data/pre-training/llama_openwebtext_100k" '.input_dir = $dir' glm45.json > glm45_single_node.json
 jq --arg dir "$CACHE_DIR/glm45/GLM-4.5-Air" '.model_name_or_path = $dir' glm45_single_node.json > glm45.json
-sed -i 's/from paddlefleet\.transformer import LayerSpec/from paddlefleet import LayerSpec/' glm45_provider.py
-sed -i 's/from paddlefleet\.transformer import LayerSpec/from paddlefleet import LayerSpec/' gpt_provider.py
 sed -i '/if not int(os.getenv("test_ci_no_save_model", 0)):/s/^/# /' run_pretrain.py
 sed -i '/trainer.save_model()/s/^/# /' run_pretrain.py
 # sed -i 's/num_layers: int = 10/num_layers: int = 5/' glm45_provider.py
