@@ -17,7 +17,7 @@ permissions: read-all
 
 defaults:
   run:
-    shell: bash -x
+    shell: bash
 
 jobs:
   publish-wheel:
