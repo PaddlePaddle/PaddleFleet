@@ -271,7 +271,6 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             self.weight = Parameter(
                 paddle.empty(
                     [self.num_embeddings_per_partition, self.embedding_dim],
-                    device=paddle.cuda.current_device(),
                     dtype=config.params_dtype,
                 )
             )
@@ -286,7 +285,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         Args:
             input_ (paddle.Tensor): Input tensor.
         """
-        if self.tp_group.world_size > 1:
+        if get_pg_size(self.tp_group) > 1:
             # Build the mask.
             input_mask = (input_ < self.vocab_start_index) | (
                 input_ >= self.vocab_end_index
@@ -303,7 +302,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             # F.embedding currently has a non-deterministic backward function
             output_parallel = F.embedding(masked_input, self.weight)
         # Mask the output embedding.
-        if self.tp_group.world_size > 1:
+        if get_pg_size(self.tp_group) > 1:
             output_parallel[input_mask, :] = 0.0
 
         if self.reduce_scatter_embeddings:
