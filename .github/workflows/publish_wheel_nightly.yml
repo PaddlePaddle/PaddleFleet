@@ -1,4 +1,4 @@
-name: publish wheel nightly
+name: Publish wheel nightly
 
 on:
   pull_request:
@@ -17,7 +17,7 @@ permissions: read-all
 
 defaults:
   run:
-    shell: bash
+    shell: bash -x
 
 jobs:
   publish-wheel:
@@ -32,7 +32,7 @@ jobs:
           - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129}
           - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
     env:
-      TASK: PaddleFleet-nightly(${{ matrix.CUDA_VERSION }})
+      TASK: PaddleFleet-nightly-${{ matrix.CUDA_VERSION }}
       PIP_CACHE_DIR: /root/.cache/pip
       CACHE_DIR: /root/.cache
       no_proxy: "bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
