@@ -23,7 +23,7 @@ jobs:
   publish-wheel:
     name: Publish wheel nightly (${{ matrix.CUDA_VERSION }})
     runs-on:
-      group: GZ_BD-CPU
+      group: cpu-test
     strategy:
       fail-fast: false
       matrix:
@@ -57,8 +57,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
+          echo 'export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}' >> /root/.bashrc
+          echo 'export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}' >> /root/.bashrc
+          source /root/.bashrc
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /workspace
@@ -79,7 +80,9 @@ jobs:
       - name: Build wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          python --version || true
           source /root/proxy
+          source /root/.bashrc
           uv build
           '
 
@@ -89,6 +92,7 @@ jobs:
           SK: ${{ secrets.BOS_CREDENTIAL_SK }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          source /root/.bashrc
           wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
