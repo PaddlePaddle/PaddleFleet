@@ -57,8 +57,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
-          echo 'export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}' >> /root/.bashrc
-          echo 'export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}' >> /root/.bashrc
+          echo "export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/: \${LD_LIBRARY_PATH}" >> /root/.bashrc
+          echo "export PATH=/opt/_internal/cpython-3.10.0/bin/: \${PATH}" >> /root/.bashrc
+          cat /root/.bashrc
           source /root/.bashrc
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
@@ -81,8 +82,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           python --version || true
-          source /root/proxy
           source /root/.bashrc
+          source /root/proxy
           uv build
           '
 
