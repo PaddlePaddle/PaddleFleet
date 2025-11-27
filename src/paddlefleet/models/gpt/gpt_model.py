@@ -547,11 +547,7 @@ class GPTModel(LanguageLayer):
             # runtime_gather_output=runtime_gather_output,
         )
 
-        # NOTE(Ruibiao): the following code is a hack to make the output of the model match the label shape.
-        logits = logits.transpose(
-            [1, 0, 2]
-        )  # [s, b, vocab_size] -> [b, s, vocab_size]
-        if labels:
+        if labels is not None:
             loss = self.compute_language_model_loss(labels, logits)
             return loss
         else:
