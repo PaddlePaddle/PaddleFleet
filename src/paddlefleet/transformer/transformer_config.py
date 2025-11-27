@@ -259,7 +259,7 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "allgather"
     """The type of token dispatcher to use. The default is 'allgather'.
-    Options are 'allgather','alltoall' and 'flex'."""
+    Options are 'allgather','alltoall' and 'deepep'."""
 
     moe_router_load_balancing_type: str = "aux_loss"
     """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn"""
