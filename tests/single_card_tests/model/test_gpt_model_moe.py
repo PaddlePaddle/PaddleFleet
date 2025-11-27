@@ -100,7 +100,7 @@ class TestGPTModel(unittest.TestCase):
             moe_num_experts=8,
             use_bias=False,
             moe_intermediate_size=1024,
-            topk_method="alltoall",
+            moe_token_dispatcher_type="alltoall",
             moe_shared_expert_intermediate_size=1024,
             init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
