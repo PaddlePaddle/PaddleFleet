@@ -76,7 +76,7 @@ class TestLLaVAModel(unittest.TestCase):
         vision_projection_config = TransformerConfig(
             num_hidden_layers=2,
             hidden_size=self.language_hidden_size,
-            ffn_hidden_size=32,
+            intermediate_size=32,
             num_attention_heads=1,
             use_cpu_initialization=False,
         )
@@ -385,7 +385,7 @@ class TestLLaVAModelVisionEncoders(unittest.TestCase):
         vision_projection_config = TransformerConfig(
             num_hidden_layers=2,
             hidden_size=128,
-            ffn_hidden_size=72,
+            intermediate_size=72,
             num_attention_heads=1,
             use_cpu_initialization=False,
         )

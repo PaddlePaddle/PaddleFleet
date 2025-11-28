@@ -166,14 +166,14 @@ class RADIOViTModel(VisionLayer):
                 ln_pre_impl,
                 config=transformer_config,
                 hidden_size=self.visual_hidden_size,
-                eps=transformer_config.layernorm_epsilon,
+                eps=transformer_config.rms_norm_eps,
             )
         if ln_post_impl is not None:
             self.ln_post = build_layer(
                 ln_post_impl,
                 config=transformer_config,
                 hidden_size=self.visual_hidden_size,
-                eps=transformer_config.layernorm_epsilon,
+                eps=transformer_config.rms_norm_eps,
             )
 
         self.decoder = TransformerBlock(

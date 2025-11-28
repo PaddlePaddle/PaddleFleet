@@ -116,7 +116,7 @@ class CLIPViTModel(VisionLayer):
             self.ln_pre = build_layer(
                 ln_pre_impl,
                 normalized_shape=self.visual_hidden_size,
-                epsilon=transformer_config.layernorm_epsilon,
+                epsilon=transformer_config.rms_norm_eps,
                 **kwargs,
             )
             conv_bias = False
@@ -125,7 +125,7 @@ class CLIPViTModel(VisionLayer):
             self.ln_post = build_layer(
                 ln_post_impl,
                 normalized_shape=self.visual_hidden_size,
-                epsilon=transformer_config.layernorm_epsilon,
+                epsilon=transformer_config.rms_norm_eps,
                 **kwargs,
             )
             conv_bias = True
