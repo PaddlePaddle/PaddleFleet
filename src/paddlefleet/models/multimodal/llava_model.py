@@ -518,9 +518,7 @@ class LLaVAModel(FleetLayer):
             ):
                 max_seq_len = self._language_max_sequence_length
 
-            batch_indices, non_image_indices = paddle.where(
-                image_token_mask is not True
-            )
+            batch_indices, non_image_indices = paddle.where(~image_token_mask)
 
             # New position ids for the text tokens, shifted by the image sequence length.
             # E.g. for input_ids = [-200, 1, 2, 3] and img_seq_len = 576, we get
