@@ -1,7 +1,6 @@
 name: Publish wheel nightly
 
 on:
-  pull_request:
   workflow_dispatch:
     inputs:
       job-name:
