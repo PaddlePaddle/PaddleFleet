@@ -56,6 +56,8 @@ jobs:
             -e CACHE_DIR \
             -e PIP_CACHE_DIR \
             -e UV_HTTP_TIMEOUT \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -w /workspace --network=host $docker_image
 
       - name: Install PaddleFleet
@@ -69,9 +71,6 @@ jobs:
           git config --global --add safe.directory /workspace
           sed -i "s#packages/nightly/cu129_debug#packages/nightly/${{ matrix.bos_CUDA }}#g" pyproject.toml
           cat pyproject.toml
-          # if [[ "${{ matrix.CUDA_VERSION }}" == "CUDA12.6" ]]; then
-          #   sed -i "/-gencode=arch=compute_100,code=sm_100/s/^/# /" setup.py
-          # fi
           mkdir -p /root/.cache/pip
           pip cache dir
           pip install --upgrade pip
@@ -90,9 +89,6 @@ jobs:
           '
 
       - name: Upload wheel
-        env:
-          AK: ${{ secrets.BOS_CREDENTIAL_AK }}
-          SK: ${{ secrets.BOS_CREDENTIAL_SK }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}

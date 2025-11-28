@@ -32,24 +32,21 @@ def setup_ops_extension():
 
     nvcc_path = shutil.which("nvcc")
     if nvcc_path is None:
-        raise RuntimeError(
-            "nvcc not found. Please make sure CUDA toolkit is installed and nvcc is in PATH."
+        raise FileNotFoundError(
+            "nvcc command not found. Please make sure CUDA toolkit is installed and nvcc is in PATH."
         )
 
-    try:
-        result = subprocess.run(
-            ["nvcc", "--version"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        version_output = result.stdout
-    except Exception as e:
-        raise RuntimeError(f"Failed to run nvcc: {e}")
+    result = subprocess.run(
+        ["nvcc", "--version"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    version_output = result.stdout
 
     match = re.search(r"release (\d+)\.(\d+)", version_output)
     if not match:
-        raise RuntimeError(
+        raise ValueError(
             f"Cannot parse CUDA version from nvcc output:\n{version_output}"
         )
     cuda_major = int(match.group(1))
@@ -73,8 +70,11 @@ def setup_ops_extension():
         "-gencode=arch=compute_100,code=sm_100",
         "-DNDEBUG",
     ]
-
-    if (cuda_major < 12) or (cuda_major == 12 and cuda_minor < 8):
+    if cuda_major < 12:
+        raise ValueError(
+            f"CUDA version must be >= 12. Detected version: {cuda_major}.{cuda_minor}"
+        )
+    if cuda_major == 12 and cuda_minor < 8:
         nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
 
     change_pwd()
