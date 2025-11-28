@@ -57,8 +57,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
-          echo "export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/: \${LD_LIBRARY_PATH}" >> /root/.bashrc
-          echo "export PATH=/opt/_internal/cpython-3.10.0/bin/: \${PATH}" >> /root/.bashrc
+          echo "export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:\${LD_LIBRARY_PATH}" >> /root/.bashrc
+          echo "export PATH=/opt/_internal/cpython-3.10.0/bin/:\${PATH}" >> /root/.bashrc
           cat /root/.bashrc
           source /root/.bashrc
           source /root/proxy
@@ -69,7 +69,6 @@ jobs:
           if [[ "${{ matrix.CUDA_VERSION }}" == "CUDA12.6" ]]; then
             sed -i "/-gencode=arch=compute_100,code=sm_100/s/^/# /" setup.py
           fi
-          cat setup.py
           mkdir -p /root/.cache/pip
           pip cache dir
           pip install --upgrade pip
@@ -81,7 +80,6 @@ jobs:
       - name: Build wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          python --version || true
           source /root/.bashrc
           source /root/proxy
           uv build
