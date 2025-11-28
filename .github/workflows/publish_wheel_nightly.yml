@@ -29,8 +29,8 @@ jobs:
       matrix:
         include:
           - {CUDA_VERSION: CUDA12.6, IMAGE_TAG: cuda12.6-cudnn9.5-trt10.5-gcc11, bos_CUDA: cu126}
-          - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129}
-          - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
+          - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129,}
+          # - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
     env:
       TASK: PaddleFleet-nightly-${{ matrix.CUDA_VERSION }}
       PIP_CACHE_DIR: /root/.cache/pip
@@ -59,9 +59,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
-          echo "export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:\${LD_LIBRARY_PATH}" >> /root/.bashrc
-          echo "export PATH=/opt/_internal/cpython-3.10.0/bin/:\${PATH}" >> /root/.bashrc
-          source /root/.bashrc
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /workspace
@@ -81,7 +80,8 @@ jobs:
       - name: Build wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          source /root/.bashrc
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
           source /root/proxy
           uv build
           '
@@ -92,14 +92,15 @@ jobs:
           SK: ${{ secrets.BOS_CREDENTIAL_SK }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          source /root/.bashrc
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
           wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           export AK=${{ env.AK }}
           export SK=${{ env.SK }}
           cd dist
-          python bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.bos_CUDA }}/paddlefleet
+          python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.bos_CUDA }}/paddlefleet
           '
 
       - name: Cleanup
