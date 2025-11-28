@@ -29,34 +29,35 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 class TestLLaVAModel(unittest.TestCase):
     def setUp(self):
-        seed = 46
-        random.seed(seed)
-        np.random.seed(seed)
-        paddle.manual_seed(seed)
-        strategy = fleet.DistributedStrategy()
-        strategy.hybrid_configs = {
-            "dp_degree": 1,
-            "mp_degree": 1,
-            "pp_degree": 1,
-            "sharding_degree": 1,
-            "sep_degree": 1,
-            "cp_degree": 1,
-            "ep_degree": 1,
-            "moe_sharding_degree": 1,
-            "order": [
-                "sharding",
-                "moe_sharding",
-                "pp",
-                "sep",
-                "cp",
-                "dp",
-                "ep",
-                "mp",
-            ],
-        }
-        fleet.init(is_collective=True, strategy=strategy)
-        hcg = fleet.get_hybrid_communicate_group()
-        ps.initialize_model_parallel(hcg)
+        if not ps.have_global_memory_buffer():
+            seed = 46
+            random.seed(seed)
+            np.random.seed(seed)
+            paddle.manual_seed(seed)
+            strategy = fleet.DistributedStrategy()
+            strategy.hybrid_configs = {
+                "dp_degree": 1,
+                "mp_degree": 1,
+                "pp_degree": 1,
+                "sharding_degree": 1,
+                "sep_degree": 1,
+                "cp_degree": 1,
+                "ep_degree": 1,
+                "moe_sharding_degree": 1,
+                "order": [
+                    "sharding",
+                    "moe_sharding",
+                    "pp",
+                    "sep",
+                    "cp",
+                    "dp",
+                    "ep",
+                    "mp",
+                ],
+            }
+            fleet.init(is_collective=True, strategy=strategy)
+            hcg = fleet.get_hybrid_communicate_group()
+            ps.initialize_model_parallel(hcg)
 
         self.language_hidden_size = 64
         self.language_num_attention_heads = 4

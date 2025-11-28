@@ -34,34 +34,35 @@ class TestCLIPViTModel(unittest.TestCase):
     """Test CLIP ViT model."""
 
     def setUp(self):
-        seed = 46
-        random.seed(seed)
-        np.random.seed(seed)
-        paddle.manual_seed(seed)
-        strategy = fleet.DistributedStrategy()
-        strategy.hybrid_configs = {
-            "dp_degree": 1,
-            "mp_degree": 1,
-            "pp_degree": 1,
-            "sharding_degree": 1,
-            "sep_degree": 1,
-            "cp_degree": 1,
-            "ep_degree": 1,
-            "moe_sharding_degree": 1,
-            "order": [
-                "sharding",
-                "moe_sharding",
-                "pp",
-                "sep",
-                "cp",
-                "dp",
-                "ep",
-                "mp",
-            ],
-        }
-        fleet.init(is_collective=True, strategy=strategy)
-        hcg = fleet.get_hybrid_communicate_group()
-        ps.initialize_model_parallel(hcg)
+        if not ps.have_global_memory_buffer():
+            seed = 46
+            random.seed(seed)
+            np.random.seed(seed)
+            paddle.manual_seed(seed)
+            strategy = fleet.DistributedStrategy()
+            strategy.hybrid_configs = {
+                "dp_degree": 1,
+                "mp_degree": 1,
+                "pp_degree": 1,
+                "sharding_degree": 1,
+                "sep_degree": 1,
+                "cp_degree": 1,
+                "ep_degree": 1,
+                "moe_sharding_degree": 1,
+                "order": [
+                    "sharding",
+                    "moe_sharding",
+                    "pp",
+                    "sep",
+                    "cp",
+                    "dp",
+                    "ep",
+                    "mp",
+                ],
+            }
+            fleet.init(is_collective=True, strategy=strategy)
+            hcg = fleet.get_hybrid_communicate_group()
+            ps.initialize_model_parallel(hcg)
 
         transformer_config = TransformerConfig(
             num_hidden_layers=2,
