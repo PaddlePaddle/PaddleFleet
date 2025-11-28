@@ -160,6 +160,7 @@ class MoELayer(nn.Layer):
 
         if (
             self.moe_token_dispatcher_type == "deepep"
+            and not paddle.device.current_device_is_cpu
             and paddle.device.get_device_capability()[0] < 9
         ):
             # TODO: Support Ampere architecture after upgrade deepep in paddlepaddle

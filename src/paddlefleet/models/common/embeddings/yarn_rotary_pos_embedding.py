@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -27,9 +28,8 @@ from paddle import Tensor
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,
 )
-from paddlefleet.utils import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class YarnRotaryEmbedding(RotaryEmbedding):
