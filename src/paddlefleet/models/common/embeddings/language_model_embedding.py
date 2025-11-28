@@ -78,7 +78,7 @@ class LanguageModelEmbedding(FleetLayer):
         )
 
         # Word embeddings (parallel).
-        self.word_embeddings = tensor_parallel.VocabParallelEmbedding(
+        self.embed_tokens = tensor_parallel.VocabParallelEmbedding(
             num_embeddings=self.vocab_size,
             embedding_dim=self.config.hidden_size,
             init_method=self.config.embedding_init_method,
@@ -147,12 +147,12 @@ class LanguageModelEmbedding(FleetLayer):
         Returns:
             Tensor: The output embeddings
         """
-        embed_tokens = self.embed_tokens(input_ids)
+        word_embeddings = self.embed_tokens(input_ids)
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
-            embeddings = embed_tokens + position_embeddings
+            embeddings = word_embeddings + position_embeddings
         else:
-            embeddings = embed_tokens
+            embeddings = word_embeddings
 
         # if not self.reduce_scatter_embeddings:
         #     # Data format change to avoid explicit transposes : [b s h] --> [s b h].
