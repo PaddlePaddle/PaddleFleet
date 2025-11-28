@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
@@ -38,6 +39,8 @@ from .moe_router import StandardMoERouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
 from .token_dispatcher import MoEFlexTokenDispatcher
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -154,6 +157,17 @@ class MoELayer(nn.Layer):
             self.shared_experts = self.shared_expert_class(**shared_expert_args)
         else:
             self.shared_experts = None
+
+        if (
+            self.moe_token_dispatcher_type == "deepep"
+            and paddle.device.get_device_capability()[0] < 9
+        ):
+            # TODO: Support Ampere architecture after upgrade deepep in paddlepaddle
+            logger.info(
+                "deepep in paddlepaddle does not support compute capability < 9.0, "
+                "fallback to alltoall token dispatcher."
+            )
+            self.moe_token_dispatcher_type = "alltoall"
 
         if self.expert_parallel_degree > 1:
             if self.moe_token_dispatcher_type == "deepep":
