@@ -61,14 +61,11 @@ jobs:
           rm -rf * .[^.]*
           echo "export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:\${LD_LIBRARY_PATH}" >> /root/.bashrc
           echo "export PATH=/opt/_internal/cpython-3.10.0/bin/:\${PATH}" >> /root/.bashrc
-          cat /root/.bashrc
           source /root/.bashrc
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /workspace
-          if [[ "${{ matrix.CUDA_VERSION }}" != "CUDA12.9" ]]; then
-            sed -i "s#packages/nightly/cu129_debug#packages/nightly/${{ matrix.bos_CUDA }}_debug#g" pyproject.toml
-          fi
+          sed -i "s#packages/nightly/cu129_debug#packages/nightly/${{ matrix.bos_CUDA }}#g" pyproject.toml
           cat pyproject.toml
           if [[ "${{ matrix.CUDA_VERSION }}" == "CUDA12.6" ]]; then
             sed -i "/-gencode=arch=compute_100,code=sm_100/s/^/# /" setup.py
