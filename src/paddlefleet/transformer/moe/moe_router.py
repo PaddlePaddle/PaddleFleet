@@ -113,13 +113,13 @@ class StandardMoERouter(nn.Layer):
             self.weight = paddle.create_parameter(
                 shape=[self.hidden_size, self.num_experts],
                 dtype="float32",
-                default_initializer=paddle.nn.initializer.Uniform(),
+                default_initializer=paddle.nn.initializer.XavierUniform(),
             )
         else:
             self.weight = paddle.create_parameter(
                 shape=[self.num_experts, self.hidden_size],
                 dtype="float32",
-                default_initializer=paddle.nn.initializer.Uniform(),
+                default_initializer=paddle.nn.initializer.XavierUniform(),
             )
 
         if self.topk_method == "noaux_tc":
