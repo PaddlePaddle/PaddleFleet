@@ -38,7 +38,7 @@ class TransformerConfig(ModelParallelConfig):
     # model architecture
     ####################
 
-    num_hidden_layers: int = 0
+    num_hidden_layers: int = 1
     """Number of transformer layers in a transformer block."""
 
     num_nextn_predict_layers: int = None
