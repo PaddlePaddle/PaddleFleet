@@ -14,6 +14,10 @@ on:
 
 permissions: read-all
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 defaults:
   run:
     shell: bash
@@ -65,9 +69,9 @@ jobs:
           git config --global --add safe.directory /workspace
           sed -i "s#packages/nightly/cu129_debug#packages/nightly/${{ matrix.bos_CUDA }}#g" pyproject.toml
           cat pyproject.toml
-          if [[ "${{ matrix.CUDA_VERSION }}" == "CUDA12.6" ]]; then
-            sed -i "/-gencode=arch=compute_100,code=sm_100/s/^/# /" setup.py
-          fi
+          # if [[ "${{ matrix.CUDA_VERSION }}" == "CUDA12.6" ]]; then
+          #   sed -i "/-gencode=arch=compute_100,code=sm_100/s/^/# /" setup.py
+          # fi
           mkdir -p /root/.cache/pip
           pip cache dir
           pip install --upgrade pip

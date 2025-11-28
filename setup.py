@@ -14,6 +14,9 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 import os
+import re
+import shutil
+import subprocess
 
 
 def change_pwd():
@@ -27,6 +30,53 @@ def setup_ops_extension():
     """setup_ops_extension"""
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path is None:
+        raise RuntimeError(
+            "nvcc not found. Please make sure CUDA toolkit is installed and nvcc is in PATH."
+        )
+
+    try:
+        result = subprocess.run(
+            ["nvcc", "--version"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        version_output = result.stdout
+    except Exception as e:
+        raise RuntimeError(f"Failed to run nvcc: {e}")
+
+    match = re.search(r"release (\d+)\.(\d+)", version_output)
+    if not match:
+        raise RuntimeError(
+            f"Cannot parse CUDA version from nvcc output:\n{version_output}"
+        )
+    cuda_major = int(match.group(1))
+    cuda_minor = int(match.group(2))
+
+    nvcc_args = [
+        "-O3",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "-maxrregcount=32",
+        "-lineinfo",
+        "-DCUTLASS_DEBUG_TRACE_LEVEL=0",
+        "-gencode=arch=compute_80,code=sm_80",
+        "-gencode=arch=compute_90a,code=sm_90a",
+        "-gencode=arch=compute_100,code=sm_100",
+        "-DNDEBUG",
+    ]
+
+    if (cuda_major < 12) or (cuda_major == 12 and cuda_minor < 8):
+        nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
+
     change_pwd()
     setup(
         name="paddlefleet.extensions.ops",
@@ -39,24 +89,7 @@ def setup_ops_extension():
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-w", "-Wno-abi", "-fPIC", "-std=c++17"],
-                "nvcc": [
-                    "-O3",
-                    "-U__CUDA_NO_HALF_OPERATORS__",
-                    "-U__CUDA_NO_HALF_CONVERSIONS__",
-                    "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-                    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                    "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                    "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-                    "--expt-relaxed-constexpr",
-                    "--expt-extended-lambda",
-                    "-maxrregcount=32",
-                    "-lineinfo",
-                    "-DCUTLASS_DEBUG_TRACE_LEVEL=0",
-                    "-gencode=arch=compute_80,code=sm_80",
-                    "-gencode=arch=compute_90a,code=sm_90a",
-                    "-gencode=arch=compute_100,code=sm_100",
-                    "-DNDEBUG",
-                ],
+                "nvcc": nvcc_args,
             },
         ),
     )
