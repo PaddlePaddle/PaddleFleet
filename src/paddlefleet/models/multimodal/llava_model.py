@@ -489,7 +489,7 @@ class LLaVAModel(FleetLayer):
         # Create indices for new text and label positions.
         with paddle.no_grad():
             image_token_mask = input_ids == image_token_index
-            num_images_per_sample = paddle.sum(image_token_mask, dim=-1)
+            num_images_per_sample = paddle.sum(image_token_mask, axis=-1)
 
             # Number of tiles per sample.
             num_image_tiles_batch = num_image_tiles.split(

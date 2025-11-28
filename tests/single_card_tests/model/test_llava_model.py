@@ -132,7 +132,7 @@ class TestLLaVAModel(unittest.TestCase):
         ).reshape(577, 7, hidden_size)
 
         image_token_index = self.model.image_token_index
-        input_ids = paddle.arange(1024).expand(5, 1024)
+        input_ids = paddle.arange(1024).expand(5, 1024).contiguous()
         input_ids[0, 0] = image_token_index  # image before text
         input_ids[1, 100] = image_token_index  # image in between
         input_ids[2, -1] = image_token_index  # image at the end
@@ -146,7 +146,11 @@ class TestLLaVAModel(unittest.TestCase):
         ).reshape(5, 1024, hidden_size)
 
         # Labels are input_ids shifted to left by one.
-        labels = paddle.arange(1, 1025, dtype=paddle.int).expand(5, 1024)
+        labels = (
+            paddle.arange(1, 1025, dtype=paddle.int)
+            .expand(5, 1024)
+            .contiguous()
+        )
         # labels[0] - image token got dropped by shift to left by one.
         labels[1, 99] = image_token_index
         labels[2, -2] = image_token_index
@@ -181,7 +185,9 @@ class TestLLaVAModel(unittest.TestCase):
         # The fifth sample has 2 images with 3 tiles and 1024 text tokens.
         max_seq_len = 3 * img_seq_len - 2 + 1024
 
-        assert embeddings.shape == [max_seq_len, 5, hidden_size]
+        assert embeddings.shape == [max_seq_len, 5, hidden_size], (
+            f"{embeddings.shape} "
+        )
         assert labels.shape == [5, max_seq_len]
         assert loss_mask.shape == labels.shape
 
@@ -317,7 +323,11 @@ class TestLLaVAModel(unittest.TestCase):
         input_ids[4, 50] = image_token_index
         input_ids[4, 150] = image_token_index
 
-        position_ids = paddle.arange(0, 1024, dtype=paddle.int).expand(5, 1024)
+        position_ids = (
+            paddle.arange(0, 1024, dtype=paddle.int)
+            .expand(5, 1024)
+            .contiguous()
+        )
 
         loss_mask = paddle.ones((5, 1024))
 
