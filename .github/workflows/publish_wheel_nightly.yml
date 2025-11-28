@@ -96,8 +96,6 @@ jobs:
           wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
-          export AK=${{ env.AK }}
-          export SK=${{ env.SK }}
           cd dist
           python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.bos_CUDA }}/paddlefleet
           '
