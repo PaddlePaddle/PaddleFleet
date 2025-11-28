@@ -13,11 +13,15 @@
 # limitations under the License.
 
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+import random
 import unittest
 
+import numpy as np
 import paddle
 import pytest
+from paddle.distributed import fleet
 
+import paddlefleet.parallel_state as ps
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.models.vision.clip_vit_model import (
     CLIPViTModel,
@@ -30,8 +34,37 @@ class TestCLIPViTModel(unittest.TestCase):
     """Test CLIP ViT model."""
 
     def setUp(self):
+        seed = 46
+        random.seed(seed)
+        np.random.seed(seed)
+        paddle.manual_seed(seed)
+        strategy = fleet.DistributedStrategy()
+        strategy.hybrid_configs = {
+            "dp_degree": 1,
+            "mp_degree": 1,
+            "pp_degree": 1,
+            "sharding_degree": 1,
+            "sep_degree": 1,
+            "cp_degree": 1,
+            "ep_degree": 1,
+            "moe_sharding_degree": 1,
+            "order": [
+                "sharding",
+                "moe_sharding",
+                "pp",
+                "sep",
+                "cp",
+                "dp",
+                "ep",
+                "mp",
+            ],
+        }
+        fleet.init(is_collective=True, strategy=strategy)
+        hcg = fleet.get_hybrid_communicate_group()
+        ps.initialize_model_parallel(hcg)
+
         transformer_config = TransformerConfig(
-            num_layers=2,
+            num_hidden_layers=2,
             hidden_size=64,
             num_attention_heads=4,
             use_cpu_initialization=True,
