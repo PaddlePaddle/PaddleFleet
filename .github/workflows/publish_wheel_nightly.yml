@@ -103,6 +103,7 @@ jobs:
           '
 
       - name: Cleanup
+        if: ${{ always() }}
         run: |
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
