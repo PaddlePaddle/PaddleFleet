@@ -365,10 +365,14 @@ class MoELayer(nn.Layer):
             expert_out = expert_layer(current_state)[0]
             current_weight = topk_weights[idx, top_x].unsqueeze(-1)
             current_hidden_states = expert_out * current_weight
-            final_hidden_states.index_add_(
-                index=idx.reshape([-1]),
-                axis=0,
-                value=current_hidden_states.to(hidden_states.dtype),
-            )
 
+            # use scatter to replace index_add
+            final_hidden_states_tmp = paddle.zeros_like(final_hidden_states)
+            final_hidden_states_tmp = paddle.scatter(
+                final_hidden_states_tmp,
+                idx.reshape([-1]),
+                current_hidden_states.to(hidden_states.dtype),
+                overwrite=False,
+            )
+            final_hidden_states = final_hidden_states + final_hidden_states_tmp
         return final_hidden_states.cast(hidden_states.dtype)
