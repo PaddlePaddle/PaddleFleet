@@ -118,10 +118,10 @@ class TransformerConfig(ModelParallelConfig):
     """Projection weights dimension in multi-head attention. This is set to hidden_size //
     num_attention_heads if not provided."""
 
-    hidden_dropout_prob: float = 0.1
+    hidden_dropout_prob: float = 0.0
     """Dropout probability for transformer hidden state."""
 
-    attention_dropout: float = 0.1
+    attention_dropout: float = 0.0
     """Post attention dropout probability."""
 
     intermediate_size: int | None = None
@@ -301,8 +301,16 @@ class TransformerConfig(ModelParallelConfig):
 
 
     def register_attributes(self, config):
+        transform_rules = None
+        if hasattr(self, "transform_rules"):
+            transform_rules = self.transform_rules
+
         for key, value in config.__dict__.items():
-            self._process_attribute(key, value)
+            if transform_rules and key in transform_rules:
+                self._process_attribute(transform_rules[key], value)
+            else:
+                self._process_attribute(key, value)
+
 
     def _process_attribute(self, key, value):
         if not isinstance(key, str) or not key.isidentifier():

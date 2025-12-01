@@ -67,9 +67,10 @@ class MoELayer(nn.Layer):
             config.get("n_routed_experts", config.get("moe_num_experts", -1)),
         )
         self.num_shared_experts = config.get("moe_num_shared_experts", 0)
-        self.moe_shared_expert_intermediate_size = config.get(
-            "moe_shared_expert_intermediate_size",
-            self.moe_intermediate_size * self.num_shared_experts,
+        self.moe_shared_expert_intermediate_size = (
+            config.get("moe_shared_expert_intermediate_size")
+            if config.get("moe_shared_expert_intermediate_size") is not None
+            else self.moe_intermediate_size * self.num_shared_experts
         )
         assert (
             self.moe_shared_expert_intermediate_size
