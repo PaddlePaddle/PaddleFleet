@@ -27,7 +27,9 @@ from paddlefleet.pipeline_parallel import (
     NoPipelineParallel,
     PipelineLayer,
     PipelineParallelWithInterleave,
+    PipelineParallelWithInterleaveFthenB,
     SharedLayerDesc,
+    VPPFhenBInBalancedMemory,
 )
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.identity_op import IdentityOp
@@ -166,6 +168,26 @@ def get_simple_spec(num_classes=10):
     return spec
 
 
+layer_name_proj = {
+    "_layers.shared_layers.shared.shared_net.weight": "_layers.shared_layers.shared.shared_net.weight",
+    "_layers.shared_layers.shared.shared_net.bias": "_layers.shared_layers.shared.shared_net.bias",
+    "_layers.1.0.weight": "_layers.1.weight",
+    "_layers.1.0.bias": "_layers.1.bias",
+    "_layers.2.0.weight": "_layers.2.weight",
+    "_layers.2.0.bias": "_layers.2.bias",
+    "_layers.3.0.weight": "_layers.3.weight",
+    "_layers.3.0.bias": "_layers.3.bias",
+    "_layers.4.0.weight": "_layers.4.weight",
+    "_layers.4.0.bias": "_layers.4.bias",
+    "_layers.5.0.weight": "_layers.5.weight",
+    "_layers.5.0.bias": "_layers.5.bias",
+    "_layers.6.0.weight": "_layers.6.weight",
+    "_layers.6.0.bias": "_layers.6.bias",
+    "_layers.7.2.classify_net.weight": "_layers.9.classify_net.weight",
+    "_layers.7.2.classify_net.bias": "_layers.9.classify_net.bias",
+}
+
+
 class TestDistVppTraining(unittest.TestCase):
     def setUp(self):
         strategy = fleet.DistributedStrategy()
@@ -187,24 +209,28 @@ class TestDistVppTraining(unittest.TestCase):
         self.strategy = strategy
         fleet.init(is_collective=True, strategy=strategy)
 
+        set_random_seed(1024)
+        self.simple_spec = get_simple_spec()
+        self.nopp_model = build_layer(self.simple_spec, num_stages=1)
+        self.nopp_model = NoPipelineParallel(self.nopp_model, self.strategy)
+        self.nopp_scheduler = paddle.optimizer.lr.PiecewiseDecay(
+            boundaries=[2, 3, 4], values=[0.01, 0.02, 0.03, 0.04], verbose=True
+        )
+        self.nopp_optimizer = paddle.optimizer.SGD(
+            learning_rate=self.nopp_scheduler,
+            parameters=self.nopp_model.parameters(),
+        )
+
+        self.nopp_model_param = {}
+        for name, param in self.nopp_model.named_parameters():
+            self.nopp_model_param[name] = param
+
     def test_vpp_model(self):
         hcg = fleet.get_hybrid_communicate_group()
 
-        set_random_seed(1024)
-        simple_spec = get_simple_spec()
-
-        nopp_model = build_layer(simple_spec, num_stages=1)
-        nopp_model = NoPipelineParallel(nopp_model, self.strategy)
-        nopp_scheduler = paddle.optimizer.lr.PiecewiseDecay(
-            boundaries=[2, 3, 4], values=[0.01, 0.02, 0.03, 0.04], verbose=True
-        )
-        nopp_optimizer = paddle.optimizer.SGD(
-            learning_rate=nopp_scheduler, parameters=nopp_model.parameters()
-        )
-
         seg_method = "layer:Linear"
         vpp_model = build_layer(
-            simple_spec,
+            self.simple_spec,
             topology=hcg.topology(),
             seg_method=seg_method,
             num_stages=self.pipeline_parallel_size,
@@ -222,31 +248,8 @@ class TestDistVppTraining(unittest.TestCase):
         )
         vpp_optimizer = fleet.distributed_optimizer(vpp_optimizer)
 
-        layer_name_proj = {
-            "_layers.shared_layers.shared.shared_net.weight": "_layers.shared_layers.shared.shared_net.weight",
-            "_layers.shared_layers.shared.shared_net.bias": "_layers.shared_layers.shared.shared_net.bias",
-            "_layers.1.0.weight": "_layers.1.weight",
-            "_layers.1.0.bias": "_layers.1.bias",
-            "_layers.2.0.weight": "_layers.2.weight",
-            "_layers.2.0.bias": "_layers.2.bias",
-            "_layers.3.0.weight": "_layers.3.weight",
-            "_layers.3.0.bias": "_layers.3.bias",
-            "_layers.4.0.weight": "_layers.4.weight",
-            "_layers.4.0.bias": "_layers.4.bias",
-            "_layers.5.0.weight": "_layers.5.weight",
-            "_layers.5.0.bias": "_layers.5.bias",
-            "_layers.6.0.weight": "_layers.6.weight",
-            "_layers.6.0.bias": "_layers.6.bias",
-            "_layers.7.2.classify_net.weight": "_layers.9.classify_net.weight",
-            "_layers.7.2.classify_net.bias": "_layers.9.classify_net.bias",
-        }
-
-        nopp_model_param = {}
-        for name, param in nopp_model.named_parameters():
-            nopp_model_param[name] = param
-
         for name, param in vpp_model.named_parameters():
-            param.set_value(nopp_model_param[layer_name_proj[name]])
+            param.set_value(self.nopp_model_param[layer_name_proj[name]])
 
         train_loader = paddle.io.DataLoader(
             RandomDataset(),
@@ -262,8 +265,112 @@ class TestDistVppTraining(unittest.TestCase):
             img.stop_gradient = True
             label.stop_gradient = True
 
-            nopp_loss = nopp_model.train_batch(
-                [img, label], nopp_optimizer, nopp_scheduler
+            nopp_loss = self.nopp_model.train_batch(
+                [img, label], self.nopp_optimizer, self.nopp_scheduler
+            )
+
+            vpp_loss = vpp_model.train_batch(
+                [img, label], vpp_optimizer, vpp_scheduler
+            )
+
+            print("loss:", nopp_loss.numpy(), vpp_loss.numpy())
+            np.testing.assert_allclose(
+                nopp_loss.numpy(), vpp_loss.numpy(), rtol=1e-6, atol=1e-8
+            )
+
+    def test_vpp_fthenb_model(self):
+        hcg = fleet.get_hybrid_communicate_group()
+
+        seg_method = "layer:Linear"
+        vpp_model = build_layer(
+            self.simple_spec,
+            topology=hcg.topology(),
+            seg_method=seg_method,
+            num_stages=self.pipeline_parallel_size,
+            num_virtual_pipeline_stages=self.num_virtual_pipeline_stages,
+        )
+
+        vpp_scheduler = paddle.optimizer.lr.PiecewiseDecay(
+            boundaries=[2, 3, 4], values=[0.01, 0.02, 0.03, 0.04], verbose=True
+        )
+        vpp_optimizer = paddle.optimizer.SGD(
+            learning_rate=vpp_scheduler, parameters=vpp_model.parameters()
+        )
+        vpp_model = PipelineParallelWithInterleaveFthenB(
+            vpp_model, hcg, self.strategy
+        )
+        vpp_optimizer = fleet.distributed_optimizer(vpp_optimizer)
+
+        for name, param in vpp_model.named_parameters():
+            param.set_value(self.nopp_model_param[layer_name_proj[name]])
+
+        train_loader = paddle.io.DataLoader(
+            RandomDataset(),
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=True,
+            num_workers=0,
+        )
+
+        for step_id, data in enumerate(train_loader()):
+            img = paddle.to_tensor(data[0])
+            label = paddle.to_tensor(data[1])
+            img.stop_gradient = True
+            label.stop_gradient = True
+
+            nopp_loss = self.nopp_model.train_batch(
+                [img, label], self.nopp_optimizer, self.nopp_scheduler
+            )
+
+            vpp_loss = vpp_model.train_batch(
+                [img, label], vpp_optimizer, vpp_scheduler
+            )
+
+            print("loss:", nopp_loss.numpy(), vpp_loss.numpy())
+            np.testing.assert_allclose(
+                nopp_loss.numpy(), vpp_loss.numpy(), rtol=1e-6, atol=1e-8
+            )
+
+    def test_vpp_balanced_memory_model(self):
+        hcg = fleet.get_hybrid_communicate_group()
+
+        seg_method = "layer:Linear"
+        vpp_model = build_layer(
+            self.simple_spec,
+            topology=hcg.topology(),
+            seg_method=seg_method,
+            num_stages=self.pipeline_parallel_size,
+            num_virtual_pipeline_stages=self.num_virtual_pipeline_stages,
+        )
+
+        vpp_scheduler = paddle.optimizer.lr.PiecewiseDecay(
+            boundaries=[2, 3, 4], values=[0.01, 0.02, 0.03, 0.04], verbose=True
+        )
+        vpp_optimizer = paddle.optimizer.SGD(
+            learning_rate=vpp_scheduler, parameters=vpp_model.parameters()
+        )
+        vpp_model = VPPFhenBInBalancedMemory(vpp_model, hcg, self.strategy)
+        vpp_optimizer = fleet.distributed_optimizer(vpp_optimizer)
+
+        for name, param in vpp_model.named_parameters():
+            param.set_value(self.nopp_model_param[layer_name_proj[name]])
+
+        train_loader = paddle.io.DataLoader(
+            RandomDataset(),
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=True,
+            num_workers=0,
+        )
+
+        for step_id, data in enumerate(train_loader()):
+            img = paddle.to_tensor(data[0])
+            label = paddle.to_tensor(data[1])
+            img.stop_gradient = True
+            label.stop_gradient = True
+
+            nopp_loss = self.nopp_model.train_batch(
+                [img, label], self.nopp_optimizer, self.nopp_scheduler
             )
 
             vpp_loss = vpp_model.train_batch(

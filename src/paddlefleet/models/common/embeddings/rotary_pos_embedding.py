@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -27,9 +28,8 @@ import paddle
 from paddle import Tensor, nn
 
 from paddlefleet import parallel_state
-from paddlefleet.utils import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 __all__ = ["RotaryEmbedding"]
