@@ -105,8 +105,8 @@ class MoELayer(nn.Layer):
         self.moe_token_dispatcher_type = "deepep"
         self.fp8 = config.get("fp8", False)
         self.moe_use_fusion_node = config.get("moe_use_fusion_node", False)
-        self.fp8 = True
-        self.moe_use_fusion_node = True
+        # self.fp8 = True
+        # self.moe_use_fusion_node = True
         if self.fp8:
             assert self.moe_use_fusion_node, "fp8 can only be used when moe_use_fusion_node = True."
         
