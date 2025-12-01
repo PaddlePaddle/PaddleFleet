@@ -285,8 +285,6 @@ def get_num_image_embeddings(
     if use_tile_tags:
         if tokenizer_type in ("llama3p1", "chatml", "qwen2p0", "qwen2p5"):
             num_image_embeddings_per_tile += 5
-        elif tokenizer_type.startswith("nemotron5"):
-            num_image_embeddings_per_tile += 6
         else:
             raise ValueError("tokenizer type not defined")
 

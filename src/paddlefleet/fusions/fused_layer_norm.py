@@ -117,7 +117,7 @@ class FusedLayerNorm(paddle.nn.Layer):
             hidden_size = (hidden_size,)
         self.hidden_size = paddle.shape(hidden_size)
         self.eps = eps
-        # Parameters need to be initialized with paddle.empty rather than paddle.Tensor for correct device placement with nemo2.
+        # Parameters need to be initialized with paddle.empty rather than paddle.Tensor for correct device placement .
         self.weight = Parameter(paddle.empty(*hidden_size))
         self.bias = Parameter(paddle.empty(*hidden_size))
         self.reset_parameters()

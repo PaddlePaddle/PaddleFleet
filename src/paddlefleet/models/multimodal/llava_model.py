@@ -194,8 +194,6 @@ class LLaVAModel(FleetLayer):
                 self.language_model = build_hf_model(
                     language_transformer_config
                 )
-            elif language_model_type.startswith("nemotron5-hybrid"):
-                AssertionError("now not support mamba model Temporarily")
             else:
                 self.language_model = GPTModel(
                     config=language_transformer_config,
