@@ -383,7 +383,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
                     logging.WARNING,
                     f"Unknown MLP type: {type(sublayers_spec.mlp)}. Using default kwargs.",
                 )
-        print("sublayers_spec", sublayers_spec)
+
         self.mlp = build_layer(
             sublayers_spec.mlp, config=self.config, **additional_mlp_kwargs
         )

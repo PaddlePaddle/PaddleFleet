@@ -25,10 +25,10 @@ from paddle import nn
 from paddle.distributed import fleet
 from paddle.nn import Layer
 
+from paddlefleet.distributed.model import distributed_model
 from paddlefleet.pipeline_parallel import (
     LayerDesc,
     PipelineLayer,
-    PipelineParallel,
     SharedLayerDesc,
 )
 from paddlefleet.spec_utils import LayerSpec, build_layer
@@ -222,7 +222,8 @@ class TestDistEmbeddingTraining(unittest.TestCase):
         optimizer_b = paddle.optimizer.SGD(
             learning_rate=scheduler_b, parameters=model_b.parameters()
         )
-        model_b = PipelineParallel(model_b, hcg, self.strategy)
+        model_b = distributed_model(model_b)
+
         optimizer_b = fleet.distributed_optimizer(optimizer_b)
 
         parameters = []

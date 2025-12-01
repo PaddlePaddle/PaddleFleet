@@ -28,12 +28,12 @@ from tests.multi_card_tests.pipeline_parallel.test_distribute_model import (
     get_simple_spec,
 )
 
-batch_size = 16
+batch_size = 8
 micro_batch_size = 2
 
 
 class RandomDataset(paddle.io.Dataset):
-    def __init__(self, num_samples=80, shape=(64, 256)):
+    def __init__(self, num_samples=40, shape=(64, 256)):
         self.num_samples = num_samples
         self.shape = shape
 
@@ -64,6 +64,7 @@ class TestDistVppTraining(unittest.TestCase):
             "dp_degree": self.data_parallel_size,
             "mp_degree": self.model_parallel_size,
             "pp_degree": self.pipeline_parallel_size,
+            "pp_configs": {"best_unbalanced_scheduler": True},
         }
         strategy.pipeline_configs = {
             "accumulate_steps": batch_size // micro_batch_size,
@@ -72,7 +73,6 @@ class TestDistVppTraining(unittest.TestCase):
         strategy.hybrid_configs["pp_configs"].sync_moment = True
         strategy.hybrid_configs["pp_configs"].sync_param = True
         self.strategy = strategy
-
         fleet.init(is_collective=True, strategy=strategy)
 
     def test_vpp_model(self):

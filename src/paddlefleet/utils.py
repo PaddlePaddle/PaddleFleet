@@ -476,7 +476,7 @@ def make_viewless_tensor(inp, requires_grad, keep_graph):
     """
 
     # return tensor as-is, if not a 'view'
-    if inp._base is None:
+    if not inp._is_view():
         return inp
 
     # create viewless tensor
@@ -484,3 +484,14 @@ def make_viewless_tensor(inp, requires_grad, keep_graph):
         return MakeViewlessTensor.apply(inp, requires_grad)
     else:
         return _kernel_make_viewless_tensor(inp, requires_grad)
+
+
+def deprecate_inference_params(inference_context, inference_params):
+    """Print warning for deprecated `inference_params`."""
+    if inference_context is None and inference_params is not None:
+        warnings.warn(
+            "`inference_params` renamed to `inference_context`, and will be "
+            "removed in `paddlefleet`"
+        )
+        return inference_params
+    return inference_context

@@ -278,6 +278,18 @@ class TransformerConfig(ModelParallelConfig):
     paddlefleet.utils.init_method_normal(init_method_std) which is paddle nn init normal with
     mean=0.0 and std=init_method_std."""
 
+    embedding_init_method: Callable | None = None
+    """
+    Method to initialize weights of the embedding layer. If None, will be set as described
+    in init_method above.
+    """
+
+    embedding_init_method_std: float | None = None
+    """
+    Standard deviation of the zero mean normal for the default initialization method for the
+    embedding layer. If None, will be set to init_method_std.
+    """
+
     output_layer_init_method: callable = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
     will be set to paddlefleet.utils.scaled_init_method_normal(init_method_std) which is paddle nn
@@ -331,3 +343,24 @@ class TransformerConfig(ModelParallelConfig):
                 self.num_hidden_layers,
                 multiplier=2.0 if not self.is_hybrid_model else 1.0,
             )
+
+        # Set the embedding init method
+        if self.embedding_init_method_std is None:
+            # By default, use the same init std as you use for every other non-output layer.
+            self.embedding_init_method_std = self.init_method_std
+
+        if self.embedding_init_method is None:
+            if self.init_method is None or (
+                self.embedding_init_method_std != self.init_method_std
+            ):
+                # In this case, we set both the init method and the embedding init method to
+                #  whatever std value requested (or defaulted) for the embedding_init_layer
+                self.embedding_init_method = init_method_normal(
+                    self.embedding_init_method_std
+                )
+            else:
+                # Replicate the current behavior where if you are not changing the std of the
+                #  embedding init differently and the init method is set, we fallback to the
+                #  init method for this layer. Since we are here after an OR we know that
+                #  init_method is not None
+                self.embedding_init_method = self.init_method

@@ -388,7 +388,7 @@ class GPTModel(LanguageLayer):
                 `parallel_output` arg in the constructor will be used.
         """
 
-        if position_ids is None:
+        if position_ids is None and input_ids is not None:
             batch_size, seq_length = input_ids.shape[0], input_ids.shape[1]
             position_ids = paddle.arange(seq_length, dtype="int64").expand(
                 (batch_size, seq_length)

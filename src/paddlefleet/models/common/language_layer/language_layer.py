@@ -126,6 +126,10 @@ class LanguageLayer(FleetLayer):
         """
         # TODO(pkuzyc): check the difference between vocab_parallel_cross_entropy
         # and paddle.nn.CrossEntropy, and use vocab_parallel_cross_entropy as loss func.
+
+        # logits: [s,b,h] labels: [b,s] -> logits: [s,b,h] labels: [s,b]
+        if labels.shape[-1] == logits.shape[0]:
+            labels = labels.transpose(0, 1).contiguous()
         loss = self.loss_func(logits.cast("float32"), labels)
         # loss = tensor_parallel.vocab_parallel_cross_entropy(
         #     logits.cast("float32"), labels
