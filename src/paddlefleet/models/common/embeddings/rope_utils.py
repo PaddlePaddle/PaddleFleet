@@ -268,6 +268,8 @@ def apply_rotary_pos_emb(
                 "cu_seqlens or cp_group not be supported when using fused_rope"
             )
         else:
+            if isinstance(t, tuple):
+                return fused_rope(*t, rotary_emb_base=config.rope_theta)
             return fused_rope(t, rotary_emb_base=config.rope_theta)[0]
 
     # use unfused implementation

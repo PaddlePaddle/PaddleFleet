@@ -298,29 +298,43 @@ class Attention(FleetLayer, ABC):
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
 
-            if q_pos_emb is not None:
-                query = apply_rotary_pos_emb(
-                    query,
-                    q_pos_emb,
+            if (
+                self.config.apply_rope_fusion
+                and q_pos_emb is not None
+                and k_pos_emb is not None
+            ):
+                query, key, _ = apply_rotary_pos_emb(
+                    (query, key),
+                    None,
                     config=self.config,
                     cu_seqlens=cu_seqlens_q,
-                    mscale=_yarn_get_concentration_factor_from_config(
-                        self.config
-                    ),
+                    mscale=None,
                     cp_group=self.pg_collection.cp,
                 )
+            else:
+                if q_pos_emb is not None:
+                    query = apply_rotary_pos_emb(
+                        query,
+                        q_pos_emb,
+                        config=self.config,
+                        cu_seqlens=cu_seqlens_q,
+                        mscale=_yarn_get_concentration_factor_from_config(
+                            self.config
+                        ),
+                        cp_group=self.pg_collection.cp,
+                    )
 
-            if k_pos_emb is not None:
-                key = apply_rotary_pos_emb(
-                    key,
-                    k_pos_emb,
-                    config=self.config,
-                    cu_seqlens=cu_seqlens_kv,
-                    mscale=_yarn_get_concentration_factor_from_config(
-                        self.config
-                    ),
-                    cp_group=self.pg_collection.cp,
-                )
+                if k_pos_emb is not None:
+                    key = apply_rotary_pos_emb(
+                        key,
+                        k_pos_emb,
+                        config=self.config,
+                        cu_seqlens=cu_seqlens_kv,
+                        mscale=_yarn_get_concentration_factor_from_config(
+                            self.config
+                        ),
+                        cp_group=self.pg_collection.cp,
+                    )
 
         # ==================================
         # core attention computation
