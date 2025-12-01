@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 import paddle
 from paddle import Tensor
+from paddle.incubate.nn.functional import (
+    fused_rotary_position_embedding as fused_rope,
+)
 
 from paddlefleet.utils import get_logger
 
@@ -258,6 +261,16 @@ def apply_rotary_pos_emb(
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
     """
 
+    if config.apply_rope_fusion:
+        # Paddle fused_rope not support cu_seqlens or cp_group
+        if cu_seqlens or cp_group.nranks > 1:
+            raise NotImplementedError(
+                "cu_seqlens or cp_group not be supported when using fused_rope"
+            )
+        else:
+            return fused_rope(t, rotary_emb_base=config.rope_theta)[0]
+
+    # use unfused implementation
     if cu_seqlens is None:
         return _apply_rotary_pos_emb_bshd(
             t,
