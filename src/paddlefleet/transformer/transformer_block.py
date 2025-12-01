@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -38,7 +39,6 @@ from paddlefleet.transformer.transformer_layer import (
 )
 from paddlefleet.utils import (
     WrappedTensor,
-    get_logger,
     get_pg_rank,
 )
 
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
 LayerNormImpl = WrappedPaddleNorm
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def get_num_layers_to_build(

@@ -893,6 +893,29 @@ class PipelineLayer(nn.Layer):
             # But for interleave, self.run_function will keep updating to the target functions at every run.
             self.run_function = model_chunk.get_run_function()
 
+    def get_schedule_chunk(self, chunk_id):
+        """
+        Get the schedule chunk for the specified chunk_id and build schedule nodes.
+
+        This method is used in pipeline parallel to retrieve the model chunk
+        (run_function) corresponding to the chunk_id and build schedule nodes for that chunk.
+
+        Args:
+            chunk_id (int): The ID of the virtual pipeline chunk to retrieve
+
+        Returns:
+            list: The built schedule nodes list
+
+        Raises:
+            AssertionError: If recompute_interval is not 0, as overlap schedule mode requires recompute_interval to be 0
+        """
+        self.update_run_function(chunk_id)
+
+        assert self._recompute_interval == 0, (
+            "overlap_schedule_mode requires recompute_interval==0."
+        )
+        return self.build_schedule_nodes(0, len(self.run_function))
+
     def forward(self, input, chunk_id=None):
         self.update_run_function(chunk_id)
 

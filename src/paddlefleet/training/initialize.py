@@ -50,9 +50,8 @@ def set_logging(args):
     logger = logging.getLogger("paddlefleet")
 
     # set logging level
-    logging_level = getattr(args, "logging_level", None)
-    if logging_level is not None:
-        logger.setLevel(logging_level)
+    logging_level = getattr(args, "logging_level", logging.INFO)
+    logger.setLevel(logging_level)
 
     # set logging format
     import colorlog

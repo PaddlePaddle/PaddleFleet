@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import functools
 import inspect
-import logging
 import math
 import operator
 import warnings
@@ -53,6 +52,7 @@ except Exception:
     _paddle_version = PkgVersion("0.0.0") if HAVE_PACKAGING else "0.0.0"
 
 if TYPE_CHECKING:
+    import logging
     from collections.abc import Callable
 
 
@@ -255,10 +255,6 @@ def is_paddle_min_version(version, check_equality=True):
     if check_equality:
         return get_paddle_version() >= PkgVersion(version)
     return get_paddle_version() > PkgVersion(version)
-
-
-def get_logger(name: str):
-    return logging.getLogger("paddlefleet." + name)
 
 
 ######################
