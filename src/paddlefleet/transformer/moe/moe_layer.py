@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 from paddlefleet import utils
 
+from .fusion_layer_utils import FusionMoePyLayer
 from .moe_communication import AllToAllMoECommunication, DeepEPMoECommunication
 from .moe_expert import StandardMLPExpert
 from .moe_router import StandardMoERouter
@@ -82,10 +83,10 @@ class MoELayer(nn.Layer):
             self.moe_shared_expert_intermediate_size
             // self.moe_intermediate_size
         )
-        self.num_experts_per_tok = config.get(
-            "num_experts_per_tok",
-            config.get("num_experts_per_tok", config.get("moe_k", -1)),
+        self.moe_router_topk = config.get(
+            "moe_router_topk", config.get("moe_k", -1)
         )
+        
         self.expert_activation = config.get(
             "hidden_act", config.get("expert_activation", "silu")
         )
@@ -98,6 +99,14 @@ class MoELayer(nn.Layer):
         self.moe_token_dispatcher_type = config.get(
             "moe_token_dispatcher_type", "deepep"
         )
+        self.moe_token_dispatcher_type = "deepep"
+        self.fp8 = config.get("fp8", False)
+        self.moe_use_fusion_node = config.get("moe_use_fusion_node", False)
+        self.fp8 = True
+        self.moe_use_fusion_node = True
+        if self.fp8:
+            assert self.moe_use_fusion_node, "fp8 can only be used when moe_use_fusion_node = True."
+        
         self.aux_loss_alpha = config.get(
             "moe_aux_loss_coeff", config.get("aux_loss_alpha", 0.0)
         )
@@ -159,7 +168,7 @@ class MoELayer(nn.Layer):
             if self.moe_token_dispatcher_type == "deepep":
                 self.token_dispatcher = MoEFlexTokenDispatcher(
                     self.num_experts_per_device,
-                    self.num_experts_per_tok,
+                    self.moe_router_topk,
                     self.num_experts,
                     self.moe_group,
                 )
@@ -230,9 +239,6 @@ class MoELayer(nn.Layer):
         self,
         dispatched_input,
         tokens_per_expert,
-        experts,
-        moe_rank,
-        num_experts_per_device,
     ):
         outputs = []
         tokens_per_expert = (
@@ -247,14 +253,86 @@ class MoELayer(nn.Layer):
             if tokens_per_expert[i] == 0:
                 continue
             chunk = chunk.contiguous()
-            current_expert_idx = i + moe_rank * num_experts_per_device
-            expert = experts[current_expert_idx]
+            current_expert_idx = i + self.moe_rank * self.num_experts_per_device
+            expert = self.experts[current_expert_idx]
             outputs += [expert(chunk)[0]]
 
         if not outputs:
             return dispatched_input
 
         return paddle.concat(outputs, axis=0)
+
+    def dispatch(self,
+        hidden_states: paddle.Tensor,
+        probs: paddle.Tensor,
+        routing_map: paddle.Tensor,
+    ):
+        hidden_states = self.token_dispatcher.dispatch_preprocess(
+            hidden_states, probs, routing_map
+        )
+        hidden_states = self.token_dispatcher.token_dispatch(hidden_states)
+        return hidden_states
+    
+
+    def permute(self, hidden_states: paddle.Tensor):
+        global_input_tokens, tokens_per_expert = self.token_dispatcher.dispatch_postprocess(hidden_states)
+        return global_input_tokens, tokens_per_expert
+    
+    def unpermute(self, hidden_states: paddle.Tensor):
+        return self.token_dispatcher.combine_preprocess(hidden_states)
+
+    def combine(self, hidden_states: paddle.Tensor):
+        hidden_states = self.token_dispatcher.token_combine(hidden_states)
+        return self.token_dispatcher.combine_postprocess(hidden_states)
+
+    def routed_experts_compute(
+        self,
+        hidden_states: paddle.Tensor,
+    ):
+        global_input_tokens, tokens_per_expert = self.permute(hidden_states)
+        expert_outs = self.expert_forward(
+            global_input_tokens,
+            tokens_per_expert,
+        )
+        return self.unpermute(expert_outs)
+        
+
+    # MoE forward: dispatch -> permute -> compute ->unpermute -> combine
+    def custom_forward(self,
+        hidden_states: paddle.Tensor,
+        probs: paddle.Tensor,
+        routing_map: paddle.Tensor
+    ):
+        hidden_states = self.dispatch(hidden_states, probs, routing_map)
+        hidden_states = self.routed_experts_compute(hidden_states)
+        return self.combine(hidden_states)
+        
+
+    def fusion_moe_forward(
+        self,
+        hidden_states: paddle.Tensor,
+        probs: paddle.Tensor,
+        routing_map: paddle.Tensor,
+    ):
+        print("call fusion_moe_forward", flush=True)
+        # TODO(deepllz): add fp8 dispatch config && implementation
+        dispatched_hidden_states = self.dispatch(hidden_states, probs, routing_map)
+        dispatched_indices = self.token_dispatcher._comm_manager.dispatched_indices
+        dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
+        
+        hidden_states = FusionMoePyLayer.apply(
+            dispatched_hidden_states,
+            dispatched_probs,
+            dispatched_indices,
+            self,
+            self.moe_router_topk,
+            use_fp8_mlp=self.fp8,
+        )
+        hidden_states = self.token_dispatcher._comm_manager.combine(
+            hidden_states,
+        )
+        return hidden_states      
+        
 
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         """
@@ -283,19 +361,10 @@ class MoELayer(nn.Layer):
         # capacity, priorities are not used currently
 
         if self.expert_parallel_degree > 1:
-            sorted_tokens, tokens_per_expert_current_rank = (
-                self.communication.dispatch_and_permute(
-                    hidden_states, gates_masked, mask
-                )
-            )
-            expert_outs = self.expert_forward(
-                sorted_tokens,
-                tokens_per_expert_current_rank,
-                self.experts,
-                self.moe_rank,
-                self.num_experts_per_device,
-            )
-            output = self.communication.combine_and_unpermute(expert_outs)
+            if self.moe_use_fusion_node:
+                output = self.fusion_moe_forward(hidden_states, gates_masked, mask)
+            else:
+                output = self.custom_forward(hidden_states, gates_masked, mask)
         else:
             if len(hidden_states.shape) == 3:
                 batch_size, seq_len, d_model = hidden_states.shape
@@ -332,8 +401,8 @@ class MoELayer(nn.Layer):
 
         Args:
             hidden_states: Input hidden states, shape: [batch_size*seq_len, hidden_size]
-            selected_experts: TopK experts indices, shape: [seq_len, num_experts_per_tok]
-            topk_weights: TopK weights, shape: [seq_len, num_experts_per_tok]
+            selected_experts: TopK experts indices, shape: [seq_len, moe_router_topk]
+            topk_weights: TopK weights, shape: [seq_len, moe_router_topk]
 
         Returns:
             output: Output hidden states, shape: [seq_len, hidden_size]
