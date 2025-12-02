@@ -328,6 +328,13 @@ class TransformerConfig(ModelParallelConfig):
     is_hybrid_model: bool = False
     """ Indicates whether this is a hybrid model. """
 
+    ####################
+    # miscellaneous
+    ####################
+    clone_scatter_output_in_embedding: bool = True
+    """When set to True, clone the output of scatter_to_sequence_parallel_region in embedding layer
+    to facilitate garbage collection of input."""
+
     @classmethod
     def from_config(cls, config_dict):
         instance = cls()
