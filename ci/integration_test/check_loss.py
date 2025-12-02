@@ -72,7 +72,10 @@ def main():
         "--gt_file", type=str, help="Path to the ground truth file."
     )
     parser.add_argument(
-        "--tolerance", type=float, help="Tolerance for loss comparison."
+        "--tolerance",
+        type=float,
+        default=0.0,
+        help="Tolerance for loss comparison.",
     )
     args = parser.parse_args()
 

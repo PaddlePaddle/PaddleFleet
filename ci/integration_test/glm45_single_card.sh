@@ -50,4 +50,4 @@ cat "
 " > ./glm45_gt_loss.txt
 
 SCRIPT_DIR=`dirname $(readlink -f $0)`
-python $SCRIPT_DIR/check_loss.py --log_file ./glm45.log --gt_file ./glm45_gt_loss.txt --tolerance 1e-2
+python $SCRIPT_DIR/check_loss.py --log_file ./glm45.log --gt_file ./glm45_gt_loss.txt
