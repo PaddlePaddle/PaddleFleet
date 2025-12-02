@@ -44,4 +44,6 @@ python -m paddle.distributed.launch \
    --rank 0 \
    --run_mode=collective \
    run_pretrain.py $config_json \
-   --output_dir ./checkpoint
+   --output_dir ./checkpoint | tee ./glm45_a100.log
+
+tail -10 ./glm45_a100.log

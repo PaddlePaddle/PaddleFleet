@@ -26,7 +26,7 @@ jq --arg cache "$CACHE_DIR" \
    $config_json > $config_json.tmp
 mv $config_json.tmp $config_json
 
-ll $CACHE_DIR/qwen/Qwen3-30B-A3B-Base
+ls -lah $CACHE_DIR/qwen/Qwen3-30B-A3B-Base
 cat $config_json
 
 rm -rf checkpoint/
@@ -38,4 +38,6 @@ export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
-python run_pretrain.py $config_json
+python run_pretrain.py $config_json | tee ./qwen3_single_card.log
+
+tail -10 ./qwen3_single_card.log

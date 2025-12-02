@@ -34,4 +34,6 @@ export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
-python run_pretrain.py $config_json
+python run_pretrain.py $config_json | tee ./glm45_single_card.log
+
+tail -10 ./glm45_single_card.log
