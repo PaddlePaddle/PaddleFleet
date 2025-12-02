@@ -313,15 +313,13 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         self._comm_manager.setup_metadata(routing_map, probs)
         return hidden_states
 
-
     def token_dispatch(self, hidden_states: paddle.Tensor):
         return self._comm_manager.dispatch(hidden_states)
-
 
     def dispatch_postprocess(
         self,
         hidden_states: paddle.Tensor,
-    ):  
+    ):
         global_input_tokens = (
             self._comm_manager.get_permuted_hidden_states_by_experts(
                 hidden_states
@@ -331,18 +329,16 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
 
         return global_input_tokens, tokens_per_expert
 
-
     def combine_preprocess(self, hidden_states: paddle.Tensor):
-        return self._comm_manager.get_restored_hidden_states_by_experts(hidden_states)
-
+        return self._comm_manager.get_restored_hidden_states_by_experts(
+            hidden_states
+        )
 
     def token_combine(self, hidden_states: paddle.Tensor):
         return self._comm_manager.combine(hidden_states)
 
-
     def combine_postprocess(self, hidden_states: paddle.Tensor):
         return hidden_states.reshape(self.hidden_shape)
-        
 
     def token_permutation(
         self,

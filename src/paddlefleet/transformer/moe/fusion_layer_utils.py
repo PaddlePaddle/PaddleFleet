@@ -1,7 +1,21 @@
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import paddle
-from paddlefleet.transformer.moe.fp8_utils import (
-    ExpertsGroupGemmContiguousNode
-)
+
+from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
+
 from .fp8_utils import FP8_ALIGN
 
 
@@ -71,29 +85,28 @@ class UnZipNode:
             tuple: 返回解压后的令牌、压缩后的专家行映射、解压后的概率。
         """
         if isinstance(hs_2d_dispatched, tuple):
-            assert (
-                len(hs_2d_dispatched) == 2
-            ), f"hs_2d_dispatched should has at most 2 tensors, but bot {len(hs_2d_dispatched)}"
+            assert len(hs_2d_dispatched) == 2, (
+                f"hs_2d_dispatched should has at most 2 tensors, but bot {len(hs_2d_dispatched)}"
+            )
             hidden_states, scale = hs_2d_dispatched
         else:
             hidden_states, scale = hs_2d_dispatched, None
 
-        
         with paddle.amp.auto_cast(False):
-                (
-                    unzipped_tokens,
-                    zipped_expertwise_rowmap,
-                    unzipped_probs,
-                    unzipped_scale,
-                ) = paddle.nn.functional.moe_permute(
-                    hidden_states,
-                    scale,
-                    dispatched_indices,
-                    dispatched_probs,
-                    num_experts=num_experts,
-                    tokens_per_expert=tokens_per_expert,
-                    padding_alignment=FP8_ALIGN,
-                )
+            (
+                unzipped_tokens,
+                zipped_expertwise_rowmap,
+                unzipped_probs,
+                unzipped_scale,
+            ) = paddle.nn.functional.moe_permute(
+                hidden_states,
+                scale,
+                dispatched_indices,
+                dispatched_probs,
+                num_experts=num_experts,
+                tokens_per_expert=tokens_per_expert,
+                padding_alignment=FP8_ALIGN,
+            )
 
         if scale is None:
             # NOTE: 由于自定义算子不能返回None, 所以scale为None时
@@ -111,15 +124,24 @@ class UnZipNode:
         )
 
     @paddle.no_grad()
-    def backward(self, dx, hidden_states_out_grad_shape, probs_grad, dispatched_indices, num_experts):
+    def backward(
+        self,
+        dx,
+        hidden_states_out_grad_shape,
+        probs_grad,
+        dispatched_indices,
+        num_experts,
+    ):
         with paddle.amp.auto_cast(False):
-            weighted_zipped_tokens, probs_grad_zipped = paddle.nn.functional.moe_unpermute(
-                dx,
-                self.zipped_expertwise_rowmap,
-                dispatched_indices,
-                probs_grad,
-                total_zipped_tokens=hidden_states_out_grad_shape[0],
-                num_experts=num_experts,
+            weighted_zipped_tokens, probs_grad_zipped = (
+                paddle.nn.functional.moe_unpermute(
+                    dx,
+                    self.zipped_expertwise_rowmap,
+                    dispatched_indices,
+                    probs_grad,
+                    total_zipped_tokens=hidden_states_out_grad_shape[0],
+                    num_experts=num_experts,
+                )
             )
         self.reset_state()
         return weighted_zipped_tokens, probs_grad_zipped
@@ -154,11 +176,24 @@ class ZipNode:
 
     @paddle.no_grad()
     def forward(
-        self, expert_out, zipped_expertwise_rowmap, routemap_topk, unzipped_probs, total_zipped_tokens, num_experts
+        self,
+        expert_out,
+        zipped_expertwise_rowmap,
+        routemap_topk,
+        unzipped_probs,
+        total_zipped_tokens,
+        num_experts,
     ):
         with paddle.amp.auto_cast(False):
-            expert_out_zipped, zipped_probs_topk = paddle.nn.functional.moe_unpermute(
-                expert_out, zipped_expertwise_rowmap, routemap_topk, unzipped_probs, total_zipped_tokens, num_experts
+            expert_out_zipped, zipped_probs_topk = (
+                paddle.nn.functional.moe_unpermute(
+                    expert_out,
+                    zipped_expertwise_rowmap,
+                    routemap_topk,
+                    unzipped_probs,
+                    total_zipped_tokens,
+                    num_experts,
+                )
             )
         return expert_out_zipped
 
@@ -217,31 +252,56 @@ class MlpNode:
         self.use_expert_subbatch = use_expert_subbatch
         self.experts = custom_map.experts
         if recompute_unzipped:
-            assert use_expert_subbatch, "use_expert_subbatch must be enabled when recompute_unzipped = True"
-            assert recompute_fwd_gate_up, "recompute_fwd_gate_up must be enabled when recompute_unzipped = True"
-            assert dequant_input, "dequant_input must be enabled with recompute_unzipped = True"
+            assert use_expert_subbatch, (
+                "use_expert_subbatch must be enabled when recompute_unzipped = True"
+            )
+            assert recompute_fwd_gate_up, (
+                "recompute_fwd_gate_up must be enabled when recompute_unzipped = True"
+            )
+            assert dequant_input, (
+                "dequant_input must be enabled with recompute_unzipped = True"
+            )
         self.recompute_unzipped = recompute_unzipped
 
         self.use_forward_subbatch = use_forward_subbatch
-        self.tokens_zip_unique_add_subbatch_rows = tokens_zip_unique_add_subbatch_rows
-        if self.tokens_zip_unique_add_subbatch_rows is not None and self.tokens_zip_unique_add_subbatch_rows > 0:
-            assert self.tokens_zip_unique_add_subbatch_rows % FP8_ALIGN == 0, self.tokens_zip_unique_add_subbatch_rows
+        self.tokens_zip_unique_add_subbatch_rows = (
+            tokens_zip_unique_add_subbatch_rows
+        )
+        if (
+            self.tokens_zip_unique_add_subbatch_rows is not None
+            and self.tokens_zip_unique_add_subbatch_rows > 0
+        ):
+            assert self.tokens_zip_unique_add_subbatch_rows % FP8_ALIGN == 0, (
+                self.tokens_zip_unique_add_subbatch_rows
+            )
         else:
-            assert (
-                not self.use_forward_subbatch
-            ), "tokens_zip_unique_add_subbatch_rows must be set when use_forward_subbatch = True"
+            assert not self.use_forward_subbatch, (
+                "tokens_zip_unique_add_subbatch_rows must be set when use_forward_subbatch = True"
+            )
 
         if backward_subbatch_rows is not None and backward_subbatch_rows > 0:
-            assert use_expert_subbatch, "use_expert_subbatch must be enabled when backward_subbatch_rows > 0"
-            assert backward_subbatch_rows % FP8_ALIGN == 0, backward_subbatch_rows
+            assert use_expert_subbatch, (
+                "use_expert_subbatch must be enabled when backward_subbatch_rows > 0"
+            )
+            assert backward_subbatch_rows % FP8_ALIGN == 0, (
+                backward_subbatch_rows
+            )
 
         if self.use_forward_subbatch:
-            assert use_expert_subbatch, "use_expert_subbatch must be enabled when use_forward_subbatch = True"
-            assert recompute_fwd_gate_up, "recompute_fwd_gate_up must be enabled when use_forward_subbatch = True"
-            assert dequant_input, "dequant_input must be enabled when use_forward_subbatch = True"
+            assert use_expert_subbatch, (
+                "use_expert_subbatch must be enabled when use_forward_subbatch = True"
+            )
+            assert recompute_fwd_gate_up, (
+                "recompute_fwd_gate_up must be enabled when use_forward_subbatch = True"
+            )
+            assert dequant_input, (
+                "dequant_input must be enabled when use_forward_subbatch = True"
+            )
 
         if self.use_expert_subbatch:
-            raise NotImplementedError("use_expert_subbatch = True is not supported currently")
+            raise NotImplementedError(
+                "use_expert_subbatch = True is not supported currently"
+            )
         else:
             self.experts_group_gemm_node = ExpertsGroupGemmContiguousNode(
                 custom_map,
@@ -258,8 +318,13 @@ class MlpNode:
         self.dispatched_indices = None
         self.dispatched_probs = None
         self.unzipped_probs = None
-        self.tokens_per_expert = self.token_dispatcher._comm_manager.tokens_per_expert
-        self.padding_token_per_experts = [(x + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN for x in self.tokens_per_expert]
+        self.tokens_per_expert = (
+            self.token_dispatcher._comm_manager.tokens_per_expert
+        )
+        self.padding_token_per_experts = [
+            (x + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
+            for x in self.tokens_per_expert
+        ]
         self.token_offsets = [0]
         for padding_token in self.padding_token_per_experts:
             self.token_offsets.append(self.token_offsets[-1] + padding_token)
@@ -276,7 +341,9 @@ class MlpNode:
                 for gemm_node in self.experts_group_gemm_node:
                     gemm_node_tensors.extend(gemm_node.cached_tensors())
             else:
-                gemm_node_tensors = self.experts_group_gemm_node.cached_tensors()
+                gemm_node_tensors = (
+                    self.experts_group_gemm_node.cached_tensors()
+                )
         else:
             gemm_node_tensors = []
 
@@ -302,13 +369,17 @@ class MlpNode:
         idx = 0
         if self.experts_group_gemm_node is not None:
             if self.use_expert_subbatch:
-                for expert_id, gemm_node in enumerate(self.experts_group_gemm_node):
+                for expert_id, gemm_node in enumerate(
+                    self.experts_group_gemm_node
+                ):
                     num = len(gemm_node.cached_tensors())
                     gemm_node.set_cached_tensors(tensors[idx : idx + num])
                     idx += num
             else:
                 num = len(self.experts_group_gemm_node.cached_tensors())
-                self.experts_group_gemm_node.set_cached_tensors(tensors[idx : idx + num])
+                self.experts_group_gemm_node.set_cached_tensors(
+                    tensors[idx : idx + num]
+                )
                 idx += num
 
         num = len(self.unzip_node.cached_tensors())
@@ -372,7 +443,6 @@ class MlpNode:
             self.experts_group_gemm_node.reset_state()
         self.experts_group_gemm_node = None
 
-
     @paddle.no_grad()
     def forward(self, hs_2d_dispatched, dispatched_indices, dispatched_probs):
         """
@@ -392,7 +462,12 @@ class MlpNode:
         num_experts = len(self.tokens_per_expert)
         # 1 unzip
         self.dispatched_indices = dispatched_indices.to(paddle.int32)
-        (unzipped_tokens, zipped_expertwise_rowmap, unzipped_probs, unzipped_scale) = self.unzip_node.forward(
+        (
+            unzipped_tokens,
+            zipped_expertwise_rowmap,
+            unzipped_probs,
+            unzipped_scale,
+        ) = self.unzip_node.forward(
             hs_2d_dispatched,
             self.dispatched_indices,
             dispatched_probs,
@@ -420,7 +495,9 @@ class MlpNode:
             dispatched_indices._clear_to_zero_allocation()
 
         if self.use_expert_subbatch:
-            raise NotImplementedError("use_expert_subbatch = True is not supported currently")
+            raise NotImplementedError(
+                "use_expert_subbatch = True is not supported currently"
+            )
         else:
             if not use_fp8_dispatch_a2a:
                 hs_2d_dispatched._clear_to_zero_allocation()
@@ -479,20 +556,26 @@ class MlpNode:
         hidden_states_out_grad._record_stream()
 
         if self.use_expert_subbatch:
-            raise NotImplementedError("use_expert_subbatch = True is not supported currently")
+            raise NotImplementedError(
+                "use_expert_subbatch = True is not supported currently"
+            )
         else:
             hidden_states_out_grad._clear_to_zero_allocation()
 
             # expert_grad
-            expert_out, probs_grad = self.experts_group_gemm_node.backward(unzipped_grad, self.unzipped_probs)
+            expert_out, probs_grad = self.experts_group_gemm_node.backward(
+                unzipped_grad, self.unzipped_probs
+            )
             del unzipped_grad
 
-            hs_fp8_dispatched_grad, dispatched_probs_grad = self.unzip_node.backward(
-                expert_out,
-                hidden_states_out_grad_shape,
-                probs_grad,
-                self.dispatched_indices,
-                num_experts=len(self.tokens_per_expert),
+            hs_fp8_dispatched_grad, dispatched_probs_grad = (
+                self.unzip_node.backward(
+                    expert_out,
+                    hidden_states_out_grad_shape,
+                    probs_grad,
+                    self.dispatched_indices,
+                    num_experts=len(self.tokens_per_expert),
+                )
             )
         self.reset_state()
         return hs_fp8_dispatched_grad, dispatched_probs_grad
@@ -554,7 +637,9 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             scale = fp8_dispatched_handle["scale"]
             hidden_states = (hidden_states, scale)
 
-        out = ctx.node.forward(hidden_states, dispatched_indices, dispatched_probs)
+        out = ctx.node.forward(
+            hidden_states, dispatched_indices, dispatched_probs
+        )
 
         if is_first_fwd:
             ctx.node.release_mem()
@@ -579,5 +664,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         """
         (cached_tensors,) = ctx.saved_tensor()
         ctx.node.set_cached_tensors(cached_tensors)
-        hidden_states_grad, dispatched_probs_grad = ctx.node.backward(output_grad)
+        hidden_states_grad, dispatched_probs_grad = ctx.node.backward(
+            output_grad
+        )
         return hidden_states_grad, dispatched_probs_grad, None
