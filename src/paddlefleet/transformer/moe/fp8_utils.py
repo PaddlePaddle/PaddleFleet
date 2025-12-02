@@ -92,9 +92,7 @@ def _get_fp8_weight_and_scale(weight, transpose=False):
                     .contiguous()
                 )
 
-            fp8_weight, fp8_scale = map(
-                lambda x: transpose_tensor(x), [fp8_weight, fp8_scale]
-            )
+            fp8_weight, fp8_scale = transpose_tensor(fp8_weight), transpose_tensor(fp8_scale)
 
     return fp8_weight, fp8_scale
 
@@ -584,7 +582,7 @@ class ExpertsGroupGemmContiguousNode:
             do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        # recomput o2
+        # recompute o2
         o2 = self.fwd_swiglu(o1)
         o2_s = (o2 * unzipped_probs).cast(paddle.bfloat16)
         # do2: 前向从bfloat16-->float32，反向从float32-->bfloat16,do2 需要保持 bfloat16（因为 o2 是 bfloat16)
