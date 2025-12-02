@@ -272,6 +272,9 @@ class TransformerConfig(ModelParallelConfig):
     - An integer N: Represents a 1:N ratio, meaning one expert layer for every N-1 dense layers.
     - A list that defines a custom pattern, e.g.: [1,1,1,0,1,1,1,0,1,1,1,0]"""
 
+    moe_router_score_function: str = "softmax"
+    """The router score function to use. Options are softmax, sigmoid, and tanh."""
+
     ####################
     # initialization
     ####################

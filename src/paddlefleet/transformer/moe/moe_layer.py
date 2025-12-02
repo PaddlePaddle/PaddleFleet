@@ -35,7 +35,7 @@ from paddlefleet import utils
 
 from .fusion_layer_utils import FusionMoePyLayer
 from .moe_communication import AllToAllMoECommunication, DeepEPMoECommunication
-from .moe_expert import StandardMLPExpert
+from .moe_expert import StandardMLPExpert, GroupedMLPExpert
 from .moe_router import StandardMoERouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
@@ -43,6 +43,7 @@ from .token_dispatcher import MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
 
+from .moe_utils import permute, unpermute
 
 @dataclass
 class MoESublayers:
@@ -65,7 +66,7 @@ class MoELayer(nn.Layer):
         config = asdict(config)
         self.pg_collection = pg_collection
         self.hidden_size = config["hidden_size"]
-        self.moe_intermediate_size = config.get("moe_intermediate_size", -1)
+        self.moe_intermediate_size = config.get("moe_ffn_hidden_size", -1)
         self.num_experts = config.get(
             "moe_num_experts",
             config.get("n_routed_experts", config.get("moe_num_experts", -1)),
@@ -76,19 +77,12 @@ class MoELayer(nn.Layer):
             if config.get("moe_shared_expert_intermediate_size") is not None
             else self.moe_intermediate_size * self.num_shared_experts
         )
-        assert (
-            self.moe_shared_expert_intermediate_size
-            % self.moe_intermediate_size
-            == 0
-        ), (
-            "moe_shared_expert_intermediate_size must be divisible by moe_intermediate_size"
-        )
-        self.num_shared_experts = (
-            self.moe_shared_expert_intermediate_size
-            // self.moe_intermediate_size
-        )
         self.moe_router_topk = config.get(
             "moe_router_topk", config.get("moe_k", -1)
+        )
+        self.num_experts_per_tok = config.get(
+            "num_experts_per_tok",
+            config.get("num_experts_per_tok", config.get("moe_k", -1)),
         )
 
         self.expert_activation = config.get(
@@ -117,16 +111,17 @@ class MoELayer(nn.Layer):
             "moe_aux_loss_coeff", config.get("aux_loss_alpha", 0.0)
         )
 
-        self.moe_group = pg_collection.ep
+        self.moe_group = pg_collection.ep if pg_collection else None
         self.expert_parallel_degree = (
             utils.get_pg_size(self.moe_group)
             if self.moe_group is not None
             else 1
         )
+        self.num_local_experts = self.num_experts // self.expert_parallel_degree
 
         # MoE-Related Configs
         self.expert_dropout = config.get("expert_dropout", 0.0)
-
+        self.moe_grouped_gemm = config.get("moe_grouped_gemm", False)
         self._init_expert_parallel()
         self.router = StandardMoERouter(
             config=config, pg_collection=pg_collection
@@ -154,11 +149,14 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
         self.experts = nn.LayerList([])
+
         for i in range(self.num_experts):
             if i // self.num_experts_per_device == self.moe_rank:
                 self.experts.append(self.expert_class(**expert_args))
             else:
                 self.experts.append(None)
+        
+        self.grouped_gemm_experts = GroupedMLPExpert(self.num_local_experts, routed_expert_config, self.experts, pg_collection)
 
         shared_expert_args = deepcopy(expert_args)
         shared_expert_args["moe_intermediate_size"] = (
@@ -398,6 +396,13 @@ class MoELayer(nn.Layer):
             output = self._forward_traditional_moe(
                 reshaped_input, topk_indices, topk_weights
             )
+            output_grouped_gemm = self._forward_traditional_grouped_gemm_moe(
+                reshaped_input, mask, gates_masked
+            )
+            assert output.shape == output_grouped_gemm.shape
+            sim0 = paddle.nn.functional.cosine_similarity(output, output_grouped_gemm, axis=0)
+            sim1 = paddle.nn.functional.cosine_similarity(output, output_grouped_gemm, axis=1)
+            print("DEBUG:: Similarity between output and output_grouped_gemm:", (sim0.mean().item() + sim1.mean().item()) / 2, flush=True)
 
         if self.training and self.aux_loss_alpha > 0.0:
             aux_loss = aux_loss * self.aux_loss_alpha
@@ -445,6 +450,7 @@ class MoELayer(nn.Layer):
         tokens_per_expert = expert_mask.reshape([expert_mask.shape[0], -1]).sum(
             axis=-1
         )
+        print("_forward_traditional_moe tokens_per_expert:", tokens_per_expert)
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.num_experts):
             expert_layer = self.experts[expert_idx]
@@ -468,4 +474,47 @@ class MoELayer(nn.Layer):
                 overwrite=False,
             )
             final_hidden_states = final_hidden_states + final_hidden_states_tmp
+        return final_hidden_states.cast(hidden_states.dtype)
+
+
+    def _forward_traditional_grouped_gemm_moe(
+        self,
+        hidden_states: paddle.Tensor,
+        routing_map: paddle.Tensor,
+        probs: paddle.Tensor,
+    ) -> paddle.Tensor:
+        """
+        Forward without expert parallelism
+
+        Args:
+            hidden_states: Input hidden states, shape: [batch_size*seq_len, hidden_size]
+            routing_map: Routing map, shape: [seq_len, num_experts]
+            probs: Probabilities of selecting each expert, shape: [seq_len, num_experts]
+
+        Returns:
+            output: Output hidden states, shape: [seq_len, hidden_size]
+        """
+        print("Using traditional GroupedGEMM MoE, hidden_states.shape", hidden_states.shape)
+
+        _, d_model = hidden_states.shape
+
+        tokens_per_expert = routing_map.sum(axis=0)
+        print("grouped_gemm_moe tokens_per_expert:", tokens_per_expert)
+
+        permuted_local_hidden_states, sorted_indices = permute(hidden_states, routing_map, tokens_per_expert)
+        print("grouped_gemm_moe permuted_local_hidden_states.shape:", permuted_local_hidden_states.shape)
+        print("grouped_gemm_moe sorted_indices.shape:", sorted_indices.shape)
+
+        grouped_expert_out = self.grouped_gemm_experts(permuted_local_hidden_states, tokens_per_expert)[0]
+        print("grouped_expert_out.shape:", grouped_expert_out.shape)
+
+        final_hidden_states = unpermute(
+            grouped_expert_out,
+            sorted_indices,
+            restore_shape=hidden_states.shape,
+            probs=probs,
+            routing_map=routing_map,
+        )
+        print("grouped_gemm_moe final_hidden_states.shape:", final_hidden_states.shape)
+
         return final_hidden_states.cast(hidden_states.dtype)
