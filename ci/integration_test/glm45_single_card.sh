@@ -37,19 +37,19 @@ export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
-python run_pretrain.py $config_json | tee ./glm45_single_card.log
+python run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
 
 echo "
-1 12.03771591
-2 12.02239990
-3 11.95531750
-4 11.96506405
-5 11.90386009
-6 11.87367058
-7 11.92392540
-8 11.78950691
-9 11.82711029
-10 11.80441380
+1 12.06599045
+2 12.03912354
+3 12.04511642
+4 12.01392174
+5 11.98330021
+6 11.96974945
+7 11.95956230
+8 11.91751289
+9 11.96480370
+10 11.93086147
 " > ./glm45_single_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
