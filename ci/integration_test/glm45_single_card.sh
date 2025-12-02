@@ -36,7 +36,7 @@ export FLAGS_cudnn_deterministic=1
 unset http_proxy https_proxy
 python run_pretrain.py $config_json | tee ./glm45_single_card.log
 
-cat "
+echo "
 1 12.03771591
 2 12.02239990
 3 11.95531750
