@@ -166,6 +166,9 @@ class TransformerConfig(ModelParallelConfig):
     """Whether cross entropy loss is calculated over the actual number of non-padded tokens in the
     global batch, versus the default behavior of assuming all tokens are non-padded."""
 
+    rope_theta: float = 10000
+    """Rotary base for the rotary embeddings, used by rope and yarn."""
+
     ####################
     # mixed-precision
     ####################
