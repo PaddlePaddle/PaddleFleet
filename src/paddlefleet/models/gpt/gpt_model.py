@@ -553,7 +553,6 @@ class GPTModel(LanguageLayer):
         else:
             return logits
 
-
     def shared_embedding_or_output_weight(self) -> Tensor:
         """Gets the embedding weight or output logit weights when share input embedding and
         output weights set to True or when use Multi-Token Prediction (MTP) feature.

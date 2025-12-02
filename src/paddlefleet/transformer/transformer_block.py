@@ -506,7 +506,11 @@ class TransformerBlock(FleetLayer):
 
         with rng_context:
             # Forward pass.
-            if self.config.recompute_granularity == "full" and self.training and self.config.recompute:
+            if (
+                self.config.recompute_granularity == "full"
+                and self.training
+                and self.config.recompute
+            ):
                 hidden_states = self._checkpointed_forward(
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,

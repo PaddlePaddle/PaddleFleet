@@ -305,7 +305,6 @@ class TransformerConfig(ModelParallelConfig):
         instance.__post_init__()
         return instance
 
-
     def register_attributes(self, config):
         transform_rules = None
         if hasattr(self, "transform_rules"):
@@ -317,10 +316,9 @@ class TransformerConfig(ModelParallelConfig):
             else:
                 self._process_attribute(key, value)
 
-
     def _process_attribute(self, key, value):
         if not isinstance(key, str) or not key.isidentifier():
-            print(f"invaild key name: {key}")
+            print(f"invalid key name: {key}")
             return
 
         if key == "activation_func":
@@ -330,14 +328,14 @@ class TransformerConfig(ModelParallelConfig):
             elif callable(value):
                 setattr(self, key, value)
             else:
-                raise TypeError(f"activation_func must be str or callable, but get {type(value)}")
+                raise TypeError(
+                    f"activation_func must be str or callable, but get {type(value)}"
+                )
         else:
             setattr(self, key, value)
 
-
     def get(self, key: str, default=None):
         return getattr(self, key, default)
-
 
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.
