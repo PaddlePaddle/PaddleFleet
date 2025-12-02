@@ -418,6 +418,7 @@ jobs:
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
           fi
+          '
 
       - name: Integration test (Qwen3-30B-A3B single-card)
         run: |
@@ -431,6 +432,7 @@ jobs:
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
+          '
 
       - name: Terminate and delete the container
         if: ${{ always() }}
