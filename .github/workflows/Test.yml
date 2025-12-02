@@ -340,7 +340,10 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           pwd
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
-          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          ls -l /paddle/ci/.coveragerc
+          cat /paddle/ci/.coveragerc
+          cp /paddle/ci/.coveragerc /workspace/PaddleFleet/.coveragerc
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/.coveragerc
           export WITH_COVERAGE=ON
           source /root/proxy
           bash -x PaddleFleet/ci/integration_test/glm45.sh
