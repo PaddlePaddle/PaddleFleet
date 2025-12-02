@@ -26,6 +26,9 @@ jq --arg cache "$CACHE_DIR" \
    $config_json > $config_json.tmp
 mv $config_json.tmp $config_json
 
+ll $CACHE_DIR/qwen/Qwen3-30B-A3B-Base
+cat $config_json
+
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)
