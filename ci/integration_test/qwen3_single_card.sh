@@ -14,7 +14,8 @@
 
 source PaddleFleet/.venv/bin/activate
 
-cd $ROOT_DIR/PaddleFormers/examples/experiments/paddlefleet
+export root_dir=$(pwd)
+cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 
 jq --arg cache "$CACHE_DIR" \
    '.save_steps = 100

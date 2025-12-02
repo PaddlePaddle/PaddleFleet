@@ -30,8 +30,9 @@ sed -i '/if not int(os.getenv("test_ci_no_save_model", 0)):/s/^/# /' run_pretrai
 sed -i '/trainer.save_model()/s/^/# /' run_pretrain.py
 # sed -i 's/num_layers: int = 10/num_layers: int = 5/' glm45_provider.py
 
+export root_dir=$(pwd)
 python -c "
-infile = '$ROOT_DIR/PaddleFormers/paddleformers/trainer/training_args.py'
+infile = '$root_dir/PaddleFormers/paddleformers/trainer/training_args.py'
 outfile = infile + '.new'
 with open(infile) as fin, open(outfile, 'w') as fout:
     for line in fin:
@@ -41,4 +42,4 @@ with open(infile) as fin, open(outfile, 'w') as fout:
             fout.write(pad + 'import paddlefleet\n')
             fout.write(pad + 'paddlefleet.training.initialize.initialize_fleet(strategy)\n')
 "
-mv $ROOT_DIR/PaddleFormers/paddleformers/trainer/training_args.py.new $ROOT_DIR/PaddleFormers/paddleformers/trainer/training_args.py
+mv $root_dir/PaddleFormers/paddleformers/trainer/training_args.py.new $root_dir/PaddleFormers/paddleformers/trainer/training_args.py
