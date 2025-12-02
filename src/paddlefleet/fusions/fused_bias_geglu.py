@@ -132,7 +132,7 @@ class BiasGeGLUFunction(paddle.autograd.PyLayer):
         """
         input, bias = ctx.saved_tensor()
         tmp = bias_geglu_back(grad_output, input, bias)
-        return tmp, tmp
+        return tmp, tmp.reduce_as(bias)
 
 
 class GeGLUFunction(paddle.autograd.PyLayer):

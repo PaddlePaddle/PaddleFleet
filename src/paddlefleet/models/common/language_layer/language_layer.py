@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 
 import paddle
 from paddle import Tensor
@@ -28,11 +29,10 @@ from paddlefleet.pipeline_parallel.utils import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.utils import get_logger
 
 # from paddlefleet.utils import make_tp_sharded_tensor_for_checkpoint
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class LanguageLayer(FleetLayer):
@@ -126,6 +126,10 @@ class LanguageLayer(FleetLayer):
         """
         # TODO(pkuzyc): check the difference between vocab_parallel_cross_entropy
         # and paddle.nn.CrossEntropy, and use vocab_parallel_cross_entropy as loss func.
+
+        # logits: [s,b,h] labels: [b,s] -> logits: [s,b,h] labels: [s,b]
+        if labels.shape[-1] == logits.shape[0]:
+            labels = labels.transpose(0, 1).contiguous()
         loss = self.loss_func(logits.cast("float32"), labels)
         # loss = tensor_parallel.vocab_parallel_cross_entropy(
         #     logits.cast("float32"), labels

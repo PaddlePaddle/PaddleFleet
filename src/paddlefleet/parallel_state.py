@@ -415,6 +415,11 @@ def _set_global_memory_buffer():
     _GLOBAL_MEMORY_BUFFER = GlobalMemoryBuffer()
 
 
+def have_global_memory_buffer():
+    global _GLOBAL_MEMORY_BUFFER
+    return _GLOBAL_MEMORY_BUFFER is not None
+
+
 def get_global_memory_buffer():
     """Return the global GlobalMemoryBuffer object"""
     global _GLOBAL_MEMORY_BUFFER

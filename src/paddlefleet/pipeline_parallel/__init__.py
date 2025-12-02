@@ -13,7 +13,12 @@
 # limitations under the License.
 
 from .pipeline_parallel import NoPipelineParallel, PipelineParallel
+from .pipeline_parallel_withinterleave import PipelineParallelWithInterleave
+from .pipeline_parallel_withinterleave_fthenb import (
+    PipelineParallelWithInterleaveFthenB,
+)
 from .pp_layers import LayerDesc, PipelineLayer, SharedLayerDesc
+from .vpp_balanced_memory import VPPFhenBInBalancedMemory
 
 __all__ = [
     "LayerDesc",
@@ -21,4 +26,7 @@ __all__ = [
     "PipelineLayer",
     "NoPipelineParallel",
     "PipelineParallel",
+    "PipelineParallelWithInterleave",
+    "PipelineParallelWithInterleaveFthenB",
+    "VPPFhenBInBalancedMemory",
 ]

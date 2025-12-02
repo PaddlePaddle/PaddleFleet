@@ -46,7 +46,7 @@ class StandardMoERouter(nn.Layer):
 
         self.drop_tokens = config.get("drop_tokens", False)
         self.topk_method = (
-            config.get("train_topk_method", "greedy")
+            config.get("topk_method", "greedy")
             if self.training
             else config.get("inference_topk_method", "greedy")
         )

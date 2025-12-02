@@ -213,11 +213,11 @@ class AllToAllMoECommunication(MoECommunicationInterface, nn.Layer):
             :, 0:1
         ].squeeze()  # shape [batch_size * seq_len * num_experts_per_token, 1]
 
-        final_output = paddle.index_add(
+        final_output = paddle.scatter(
             final_output_empty,
-            index=token_indices_for_scatter_single,
-            axis=0,
-            value=weighted_gathered_tokens,
+            token_indices_for_scatter_single,
+            weighted_gathered_tokens,
+            overwrite=False,
         )
 
         return final_output

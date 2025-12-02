@@ -30,14 +30,13 @@ from paddlefleet.transformer.enums import LayerType
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.layer import GraphableFleetLayer
 from paddlefleet.transformer.mlp import MLP
-from paddlefleet.utils import get_logger, get_pg_rank, log_single_rank
+from paddlefleet.utils import get_pg_rank, log_single_rank
 
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
-
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def get_transformer_layer_offset(
@@ -384,7 +383,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
                     logging.WARNING,
                     f"Unknown MLP type: {type(sublayers_spec.mlp)}. Using default kwargs.",
                 )
-        print("sublayers_spec", sublayers_spec)
+
         self.mlp = build_layer(
             sublayers_spec.mlp, config=self.config, **additional_mlp_kwargs
         )
