@@ -149,12 +149,12 @@ class LanguageModelEmbedding(FleetLayer):
         Returns:
             Tensor: The output embeddings
         """
-        word_embeddings = self.embed_tokens(input_ids)
+        embed_tokens = self.embed_tokens(input_ids)
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
-            embeddings = word_embeddings + position_embeddings
+            embeddings = embed_tokens + position_embeddings
         else:
-            embeddings = word_embeddings
+            embeddings = embed_tokens
 
         if tokentype_ids is not None:
             assert self.tokentype_embeddings is not None
