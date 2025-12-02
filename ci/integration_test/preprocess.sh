@@ -25,7 +25,7 @@ if [ ! -f $CACHE_DIR/glm45/GLM-4.5-Air.tar ]; then
   tar -xf GLM-4.5-Air.tar
 fi
 
-cd $root_dir
+cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 
 apt-get update
 apt-get install jq -y
