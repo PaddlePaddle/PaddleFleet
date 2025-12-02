@@ -514,6 +514,20 @@ jobs:
           pip install -e .
           '
 
+      - name: Proprocess for integration test
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          bash -x PaddleFleet/ci/integration_test/preprocess.sh
+          preprocess_exit_code=$?
+          if [[ "$preprocess_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mPreprocess failed.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mPreprocess succeeded.\033[0m"
+          fi
+          '
+
       - name: Integration test (GLM4.5)
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
