@@ -352,17 +352,35 @@ class ExpertsGroupGemmContiguousNode:
             x = self.input
 
         if numpy.prod(x.shape) != 0:
-            expert_output_list = []
-            start_idx = 0
-            for i, token_num in enumerate(self.tokens_per_expert):
-                if token_num == 0:
-                    continue
-                end_idx = start_idx + token_num
-                x_i = x[start_idx:end_idx].contiguous()
-                expert_w1_i = expert_w1[i]
-                expert_output_list.append(F.linear(x=x_i, weight=expert_w1_i))
-                start_idx = end_idx
-            o1 = paddle.concat(expert_output_list, axis=0)
+            # expert_output_list = []
+            # start_idx = 0
+            # for i, token_num in enumerate(self.tokens_per_expert):
+            #     if token_num == 0:
+            #         continue
+            #     end_idx = start_idx + token_num
+            #     x_i = x[start_idx:end_idx].contiguous()
+            #     expert_w1_i = expert_w1[i]
+            #     expert_output_list.append(F.linear(x=x_i, weight=expert_w1_i))
+            #     start_idx = end_idx
+            # o1 = paddle.concat(expert_output_list, axis=0)
+
+            expert_w1 = paddle.stack(expert_w1, axis=0)
+            # print debug shape info
+            print(
+                "fwd_gate_up_bf16 expert_w1.shape: ",
+                expert_w1.shape,
+                "x.shape: ",
+                x.shape,
+                "tokens_per_expert: ",
+                self.tokens_per_expert,
+            )
+            o1 = paddle.incubate.nn.functional.legacy_batched_gemm(
+                x,
+                expert_w1,
+                self.tokens_per_expert,
+            )
+
+            print("fwd_gate_up_bf16")
         else:
             o1 = paddle.empty(
                 [x.shape[0], expert_w1[0].shape[1]], dtype=expert_w1[0].dtype
@@ -483,17 +501,34 @@ class ExpertsGroupGemmContiguousNode:
 
         # down proj
         if numpy.prod(o2.shape) != 0:
-            expert_output_list = []
-            start_idx = 0
-            for i, token_num in enumerate(self.tokens_per_expert):
-                if token_num == 0:
-                    continue
-                end_idx = start_idx + token_num
-                o1_i = o2[start_idx:end_idx].contiguous()
-                expert_w2_i = expert_w2[i]
-                expert_output_list.append(F.linear(x=o1_i, weight=expert_w2_i))
-                start_idx = end_idx
-            o3 = paddle.concat(expert_output_list, axis=0)
+            # expert_output_list = []
+            # start_idx = 0
+            # for i, token_num in enumerate(self.tokens_per_expert):
+            #     if token_num == 0:
+            #         continue
+            #     end_idx = start_idx + token_num
+            #     o1_i = o2[start_idx:end_idx].contiguous()
+            #     expert_w2_i = expert_w2[i]
+            #     expert_output_list.append(F.linear(x=o1_i, weight=expert_w2_i))
+            #     start_idx = end_idx
+            # o3 = paddle.concat(expert_output_list, axis=0)
+
+            expert_w2 = paddle.stack(expert_w2, axis=0)
+            print(
+                "fwd_down_bf16 expert_w2.shape: ",
+                expert_w2.shape,
+                "o2.shape: ",
+                o2.shape,
+                "tokens_per_expert: ",
+                self.tokens_per_expert,
+            )
+            o3 = paddle.incubate.nn.functional.legacy_batched_gemm(
+                o2,
+                expert_w2,
+                self.tokens_per_expert,
+            )
+
+            print("fwd_down_bf16")
         else:
             o3_shape = [o2.shape[0], expert_w2[0].shape[1]]
             o3 = paddle.empty(o3_shape, dtype=o1.dtype)
@@ -568,19 +603,35 @@ class ExpertsGroupGemmContiguousNode:
         """
 
         if numpy.prod(unzipped_grad.shape) != 0:
-            do2_s_list = []
-            start_idx = 0
-            for i, token_num in enumerate(self.tokens_per_expert):
-                if token_num == 0:
-                    continue
-                end_idx = start_idx + token_num
-                unzipped_grad_i = unzipped_grad[start_idx:end_idx].contiguous()
-                expert_w2_i = expert_w2[i].T.contiguous()
-                do2_s_list.append(
-                    F.linear(x=unzipped_grad_i, weight=expert_w2_i)
-                )
-                start_idx = end_idx
-            do2_s = paddle.concat(do2_s_list, axis=0)
+            # do2_s_list = []
+            # start_idx = 0
+            # for i, token_num in enumerate(self.tokens_per_expert):
+            #     if token_num == 0:
+            #         continue
+            #     end_idx = start_idx + token_num
+            #     unzipped_grad_i = unzipped_grad[start_idx:end_idx].contiguous()
+            #     expert_w2_i = expert_w2[i].T.contiguous()
+            #     do2_s_list.append(
+            #         F.linear(x=unzipped_grad_i, weight=expert_w2_i)
+            #     )
+            #     start_idx = end_idx
+            # do2_s = paddle.concat(do2_s_list, axis=0)
+
+            expert_w2 = paddle.stack([t.T for t in expert_w2], axis=0)
+            print(
+                "bwd_down_input_bf16 expert_w2.shape: ",
+                expert_w2.shape,
+                "unzipped_grad.shape: ",
+                unzipped_grad.shape,
+                "tokens_per_expert: ",
+                self.tokens_per_expert,
+            )
+            do2_s = paddle.incubate.nn.functional.legacy_batched_gemm(
+                unzipped_grad,
+                expert_w2,
+                self.tokens_per_expert,
+            )
+
         else:
             do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
@@ -684,17 +735,33 @@ class ExpertsGroupGemmContiguousNode:
         bwd_gate_up_input_bf16
         """
         if numpy.prod(do1.shape) != 0:
-            dx_list = []
-            start_idx = 0
-            for i, token_num in enumerate(self.tokens_per_expert):
-                if token_num == 0:
-                    continue
-                end_idx = start_idx + token_num
-                do1_i = do1[start_idx:end_idx].contiguous()
-                expert_w1_i = expert_w1[i].T.contiguous()
-                dx_list.append(F.linear(x=do1_i, weight=expert_w1_i))
-                start_idx = end_idx
-            dx = paddle.concat(dx_list, axis=0)
+            # dx_list = []
+            # start_idx = 0
+            # for i, token_num in enumerate(self.tokens_per_expert):
+            #     if token_num == 0:
+            #         continue
+            #     end_idx = start_idx + token_num
+            #     do1_i = do1[start_idx:end_idx].contiguous()
+            #     expert_w1_i = expert_w1[i].T.contiguous()
+            #     dx_list.append(F.linear(x=do1_i, weight=expert_w1_i))
+            #     start_idx = end_idx
+            # dx = paddle.concat(dx_list, axis=0)
+
+            expert_w1 = paddle.stack([t.T for t in expert_w1], axis=0)
+            print(
+                "bwd_gate_up_input_bf16 expert_w1.shape: ",
+                expert_w1.shape,
+                "do1.shape: ",
+                do1.shape,
+                "tokens_per_expert: ",
+                self.tokens_per_expert,
+            )
+            dx = paddle.incubate.nn.functional.legacy_batched_gemm(
+                do1,
+                expert_w1,
+                self.tokens_per_expert,
+            )
+
         else:
             dx_shape = [do1.shape[0], expert_w1[0].shape[0]]
             dx = paddle.empty(shape=dx_shape, dtype=do1.dtype)
