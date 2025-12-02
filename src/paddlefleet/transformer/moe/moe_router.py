@@ -90,7 +90,7 @@ class StandardMoERouter(nn.Layer):
             "moe_token_drop_policy", config.get("drop_policy", "probs")
         )
         self.routing_type = config.get(
-            "moe_router_load_balancing_type", "aux_loss"
+            "topk_method", "aux_loss"
         )  # One of "aux_loss", "seq_aux_loss", "global_aux_loss", "sinkhorn"
 
         if self.routing_type != "seq_aux_loss" and config.get("seq_aux", False):

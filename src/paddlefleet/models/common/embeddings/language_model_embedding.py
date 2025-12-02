@@ -79,7 +79,7 @@ class LanguageModelEmbedding(FleetLayer):
 
         """ TODO: Support TP embedding
         # Word embeddings (parallel).
-        self.word_embeddings = VocabParallelEmbedding(
+        self.embed_tokens = VocabParallelEmbedding(
             num_embeddings=self.vocab_size,
             embedding_dim=self.config.hidden_size,
             # init_method=self.config.embedding_init_method,
@@ -88,7 +88,7 @@ class LanguageModelEmbedding(FleetLayer):
             mp_group=self.tp_group,
         )
         """
-        self.word_embeddings = Embedding(
+        self.embed_tokens = Embedding(
             num_embeddings=self.vocab_size,
             embedding_dim=self.config.hidden_size,
         )
@@ -124,8 +124,8 @@ class LanguageModelEmbedding(FleetLayer):
 
     def zero_parameters(self):
         """Zero out all parameters in embedding."""
-        self.word_embeddings.weight.data.fill_(0)
-        self.word_embeddings.weight.shared = True
+        self.embed_tokens.weight.data.fill_(0)
+        self.embed_tokens.weight.shared = True
         self.position_embeddings.weight.data.fill_(0)
         self.position_embeddings.weight.shared = True
         if self.num_tokentypes > 0:
@@ -149,12 +149,12 @@ class LanguageModelEmbedding(FleetLayer):
         Returns:
             Tensor: The output embeddings
         """
-        word_embeddings = self.word_embeddings(input_ids)
+        embed_tokens = self.embed_tokens(input_ids)
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
-            embeddings = word_embeddings + position_embeddings
+            embeddings = embed_tokens + position_embeddings
         else:
-            embeddings = word_embeddings
+            embeddings = embed_tokens
 
         if tokentype_ids is not None:
             assert self.tokentype_embeddings is not None

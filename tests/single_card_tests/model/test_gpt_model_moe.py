@@ -191,7 +191,7 @@ class TestGPTModel(unittest.TestCase):
             grad_abssum = param.grad.detach().abs().sum().item()
             # print(f"{name}: {param.shape}, {param_norm:.6f}")
             print(f"{name}: {grad_norm:.6f}, {grad_abssum:.6f}")
-            if name == "embedding.word_embeddings.weight":
+            if name == "embedding.embed_tokens.weight":
                 word_embeddings_grad_norm = grad_norm
 
         print("word_embeddings_grad_norm", word_embeddings_grad_norm)

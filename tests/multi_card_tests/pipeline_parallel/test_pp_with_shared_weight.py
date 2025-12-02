@@ -25,10 +25,10 @@ from paddle import nn
 from paddle.distributed import fleet
 from paddle.nn import Layer
 
+from paddlefleet.distributed.model import distributed_model
 from paddlefleet.pipeline_parallel import (
     LayerDesc,
     PipelineLayer,
-    PipelineParallel,
     SharedLayerDesc,
 )
 from paddlefleet.spec_utils import LayerSpec, build_layer
@@ -50,7 +50,7 @@ hidden_size = 16
 class SimpleNetBase(Layer):
     def __init__(self):
         super().__init__()
-        self.word_embeddings = nn.Embedding(vocab_size, hidden_size)
+        self.embed_tokens = nn.Embedding(vocab_size, hidden_size)
 
         self.softmax_weight = self.create_parameter(
             shape=[hidden_size, vocab_size]
@@ -60,12 +60,12 @@ class SimpleNetBase(Layer):
         )
 
     def forward(self, x1, x2, y1):
-        x_emb = self.word_embeddings(x1)
+        x_emb = self.embed_tokens(x1)
         fc = paddle.matmul(x_emb, self.softmax_weight)
         fc = paddle.add(fc, self.softmax_bias)
         projection = paddle.reshape(fc, shape=[-1, vocab_size])
 
-        projection = paddle.matmul(projection, self.word_embeddings.weight)
+        projection = paddle.matmul(projection, self.embed_tokens.weight)
 
         loss = paddle.nn.functional.softmax_with_cross_entropy(
             logits=projection, label=y1, soft_label=False
@@ -76,15 +76,15 @@ class SimpleNetBase(Layer):
 class EmbeddingPipe(Layer):
     def __init__(self):
         super().__init__()
-        self.word_embeddings = nn.Embedding(vocab_size, hidden_size)
+        self.embed_tokens = nn.Embedding(vocab_size, hidden_size)
 
     @property
     def embedding_weight(self):
-        return self.word_embeddings.weight
+        return self.embed_tokens.weight
 
     def forward(self, args):
         x1, x2 = args
-        x_emb = self.word_embeddings(x1)
+        x_emb = self.embed_tokens(x1)
         return x_emb, x2
 
 
@@ -128,7 +128,7 @@ class LossNet(Layer):
 
 @dataclass
 class SimpleNetSpec:
-    word_embeddings: LayerSpec
+    embed_tokens: LayerSpec
     matmul_net: LayerSpec
     bias_net: LayerSpec
 
@@ -147,14 +147,14 @@ class SimpleNet(PipelineLayer):
         layers = [
             SharedLayerDesc(
                 "embed",
-                spec.word_embeddings,
+                spec.embed_tokens,
                 shared_weight_attr="embedding_weight",
             ),
             LayerDesc(spec.matmul_net),
             LayerDesc(spec.bias_net),
             SharedLayerDesc(
                 "embed",
-                spec.word_embeddings,
+                spec.embed_tokens,
                 forward_func=_logits_helper,
                 shared_weight_attr="embedding_weight",
             ),
@@ -166,7 +166,7 @@ def get_simple_net_spec():
     spec = LayerSpec(
         layer=SimpleNet,
         sublayers_spec=SimpleNetSpec(
-            word_embeddings=LayerSpec(layer=EmbeddingPipe),
+            embed_tokens=LayerSpec(layer=EmbeddingPipe),
             matmul_net=LayerSpec(layer=MatmulNet),
             bias_net=LayerSpec(layer=BiasNet),
         ),
@@ -222,7 +222,8 @@ class TestDistEmbeddingTraining(unittest.TestCase):
         optimizer_b = paddle.optimizer.SGD(
             learning_rate=scheduler_b, parameters=model_b.parameters()
         )
-        model_b = PipelineParallel(model_b, hcg, self.strategy)
+        model_b = distributed_model(model_b)
+
         optimizer_b = fleet.distributed_optimizer(optimizer_b)
 
         parameters = []

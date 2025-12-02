@@ -7,6 +7,12 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_vpp_with_shared_weight.py]
     products:
       - num_gpus: 4
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_vpp_fthenb_with_shared_weight.py]
+    products:
+      - num_gpus: 4
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_vpp_balanced_memory_with_shared_weight.py]
+    products:
+      - num_gpus: 4
   - test_case: [tests/multi_card_tests/pipeline_parallel/*.py]
     products:
       - num_gpus: 2
