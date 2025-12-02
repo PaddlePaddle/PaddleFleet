@@ -479,7 +479,7 @@ jobs:
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
           '
-      
+
       - name: Integration-test-A100 Coverage Upload to BOS
         if: ${{ matrix.name == 'H20' }}
         run: |
@@ -505,7 +505,7 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
-  
+
   coverage_check:
     name: Coverage Upload And Check
     needs: [multi-card_test, single_card_test, integration-test-H20, integration-test-a100, check-bypass]
