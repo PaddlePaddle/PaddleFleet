@@ -92,7 +92,10 @@ def _get_fp8_weight_and_scale(weight, transpose=False):
                     .contiguous()
                 )
 
-            fp8_weight, fp8_scale = transpose_tensor(fp8_weight), transpose_tensor(fp8_scale)
+            fp8_weight, fp8_scale = (
+                transpose_tensor(fp8_weight),
+                transpose_tensor(fp8_scale),
+            )
 
     return fp8_weight, fp8_scale
 
