@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -ex
+
 source PaddleFleet/.venv/bin/activate
 
 config_json="glm45.json"
