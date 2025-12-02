@@ -251,9 +251,6 @@ class TransformerConfig(ModelParallelConfig):
     """Number of experts to use for MoE layer. When set, it replaces MLP with MoE layer. Set to None
     for no MoE."""
 
-    moe_num_shared_experts: int | None = None
-    """Number of shared experts to use for MoE layer. When set, it replaces MLP with MoE layer. Set to None"""
-
     moe_intermediate_size: int | None = None
     """MoE Feed-Forward Network hidden size"""
 
