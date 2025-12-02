@@ -347,14 +347,14 @@ class TransformerBlock(FleetLayer):
             and self.post_process
             and self.post_layer_norm
         ):
-            self.final_layernorm = build_layer(
+            self.norm = build_layer(
                 self.sublayers_spec.layer_norm,
                 config=self.config,
                 hidden_size=self.config.hidden_size,
                 eps=self.config.rms_norm_eps,
             )
         else:
-            self.final_layernorm = None  # Either this or nn.Identity
+            self.norm = None  # Either this or nn.Identity
 
     def _get_layer(self, layer_number: int):
         return self.layers[layer_number]
@@ -531,16 +531,12 @@ class TransformerBlock(FleetLayer):
                     )
 
         # Final layer norm.
-        if self.final_layernorm is not None:
-            hidden_states = self.final_layernorm(hidden_states)
+        if self.norm is not None:
+            hidden_states = self.norm(hidden_states)
 
         # If this TransformerBlock is empty, input and output hidden states will be the same node
         # on the computational graph and will lead to unexpected errors in pipeline schedules.
-        if (
-            not self.pre_process
-            and len(self.layers) == 0
-            and not self.final_layernorm
-        ):
+        if not self.pre_process and len(self.layers) == 0 and not self.norm:
             hidden_states = hidden_states.clone()
 
         return hidden_states

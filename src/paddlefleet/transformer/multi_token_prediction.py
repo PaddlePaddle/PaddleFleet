@@ -456,7 +456,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             vp_stage=vp_stage,
         )
 
-        self.final_layernorm = build_layer(
+        self.norm = build_layer(
             self.sublayers_spec.layer_norm,
             config=self.config,
             hidden_size=self.config.hidden_size,
@@ -570,7 +570,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         """
 
         # Layer norm before shared head layer.
-        hidden_states = self.final_layernorm(hidden_states)
+        hidden_states = self.norm(hidden_states)
 
         return hidden_states
 

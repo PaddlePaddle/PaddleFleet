@@ -161,7 +161,7 @@ class GPTModel(LanguageLayer):
             self.position_embedding_type == "rope"
             and not self.config.multi_latent_attention
         ):
-            self.rotary_pos_emb = RotaryEmbedding(
+            self.rotary_emb = RotaryEmbedding(
                 head_dim=self.config.head_dim,
                 rotary_percent=rotary_percent,
                 rotary_interleaved=self.config.rotary_interleaved,
@@ -173,7 +173,7 @@ class GPTModel(LanguageLayer):
             )
 
         # elif self.position_embedding_type == 'yarn':
-        #    self.rotary_pos_emb = YarnRotaryEmbedding(
+        #    self.rotary_emb = YarnRotaryEmbedding(
         #        head_dim=self.config.head_dim,
         #        rotary_percent=rotary_percent,
         #        rotary_interleaved=self.config.rotary_interleaved,
@@ -193,7 +193,7 @@ class GPTModel(LanguageLayer):
         #        use_cpu_initialization=self.config.use_cpu_initialization,
         #    )
         # elif self.position_embedding_type == 'mrope' and not self.config.multi_latent_attention:
-        #    self.rotary_pos_emb = MultimodalRotaryEmbedding(
+        #    self.rotary_emb = MultimodalRotaryEmbedding(
         #        head_dim=self.config.head_dim,
         #        rotary_percent=rotary_percent,
         #        rotary_interleaved=self.config.rotary_interleaved,
@@ -206,7 +206,7 @@ class GPTModel(LanguageLayer):
         #    ), "mrope require mrope_section setting, but we got None from TransformerConfig"
 
         # Cache for RoPE tensors which do not change between iterations.
-        self.rotary_pos_emb_cache = {}
+        self.rotary_emb_cache = {}
 
         # Transformer.
         self.decoder = TransformerBlock(
@@ -240,7 +240,7 @@ class GPTModel(LanguageLayer):
                 self.embedding_activation_buffer = None
                 self.grad_output_buffer = None
 
-            self.output_layer = tensor_parallel.ColumnParallelLinear(
+            self.lm_head = tensor_parallel.ColumnParallelLinear(
                 config.hidden_size,
                 self.vocab_size,
                 config=config,
@@ -315,20 +315,20 @@ class GPTModel(LanguageLayer):
             self.position_embedding_type == "rope"
             and not self.config.multi_latent_attention
         ):
-            rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
+            rotary_seq_len = self.rotary_emb.get_rotary_seq_len(
                 self.decoder, decoder_input, self.config, packed_seq_params
             )
-            rotary_pos_emb = self.rotary_pos_emb(
+            rotary_pos_emb = self.rotary_emb(
                 rotary_seq_len,
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
             )
         # elif self.position_embedding_type == 'yarn':
         #    if self.training or not self.config.flash_decode:
-        #        rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
+        #        rotary_seq_len = self.rotary_emb.get_rotary_seq_len(
         #            inference_context, self.decoder, decoder_input, self.config, packed_seq_params
         #        )
-        #        rotary_pos_emb, _ = self.rotary_pos_emb(rotary_seq_len)
+        #        rotary_pos_emb, _ = self.rotary_emb(rotary_seq_len)
         #    else:
         #        raise NotImplementedError(
         #            "Flash decoding uses precomputed cos and sin for RoPE, not implemented in "
@@ -336,7 +336,7 @@ class GPTModel(LanguageLayer):
         #        )
         # elif self.position_embedding_type == 'mrope' and not self.config.multi_latent_attention:
         #    if self.training or not self.config.flash_decode:
-        #        rotary_pos_emb = self.rotary_pos_emb(position_ids, self.mrope_section)
+        #        rotary_pos_emb = self.rotary_emb(position_ids, self.mrope_section)
         #    else:
         #        # Flash decoding uses precomputed cos and sin for RoPE
         #        raise NotImplementedError(
@@ -502,7 +502,7 @@ class GPTModel(LanguageLayer):
                 loss_mask = paddle.ones_like(mtp_labels)
             for mtp_layer_number in range(self.config.num_nextn_predict_layers):
                 # output
-                mtp_logits, _ = self.output_layer(
+                mtp_logits, _ = self.lm_head(
                     hidden_states_list[mtp_layer_number + 1],
                     weight=output_weight,
                     # runtime_gather_output=runtime_gather_output,
@@ -541,7 +541,7 @@ class GPTModel(LanguageLayer):
                     )
         sequence_parallel_override = False
 
-        logits, _ = self.output_layer(
+        logits, _ = self.lm_head(
             hidden_states,
             weight=output_weight,
             # runtime_gather_output=runtime_gather_output,
@@ -567,9 +567,9 @@ class GPTModel(LanguageLayer):
             assert hasattr(self, "embedding"), (
                 "embedding is needed in this pipeline stage, but it is not initialized."
             )
-            return self.embedding.word_embeddings.weight.T
+            return self.embedding.embed_tokens.weight.T
         elif self.post_process:
-            return self.output_layer.weight
+            return self.lm_head.weight
         return None
 
     def build_schedule_plan(
