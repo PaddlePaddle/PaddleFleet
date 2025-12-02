@@ -24,6 +24,11 @@ if [ ! -f $CACHE_DIR/glm45/GLM-4.5-Air.tar ]; then
   wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/zai-org/GLM-4.5-Air.tar --no-check-certificate
   tar -xf GLM-4.5-Air.tar
 fi
+if [ ! -f $CACHE_DIR/glm45/GLM-4.5-Air.tar ]; then
+  mkdir -p $CACHE_DIR/qwen && cd $CACHE_DIR/qwen
+  wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/Qwen/Qwen3-30B-A3B-Base.tar --no-check-certificate
+  tar -xf Qwen3-30B-A3B-Base.tar
+fi
 
 cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 

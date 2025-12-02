@@ -14,6 +14,8 @@
 
 source PaddleFleet/.venv/bin/activate
 
+config_json="glm45.json"
+
 export root_dir=$(pwd)
 cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 
@@ -23,13 +25,19 @@ jq --arg cache "$CACHE_DIR" \
     | .save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
     | .model_name_or_path = "\($cache)/glm45/GLM-4.5-Air"' \
-   glm45.json > glm45_tmp.json
-mv glm45_tmp.json glm45.json
+   $config_json > $config_json.tmp
+mv $config_json.tmp $config_json
+
+echo "run config: $config_json"
+cat $config_json
 
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)
 port=36677
+
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
 python -m paddle.distributed.launch \
@@ -38,5 +46,5 @@ python -m paddle.distributed.launch \
    --nnodes 1 \
    --rank 0 \
    --run_mode=collective \
-   run_pretrain.py glm45.json \
+   run_pretrain.py $config_json \
    --output_dir ./checkpoint

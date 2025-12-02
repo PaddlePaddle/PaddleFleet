@@ -17,17 +17,25 @@ source PaddleFleet/.venv/bin/activate
 export root_dir=$(pwd)
 cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 
+config_json="qwen_single_card.json"
+
 jq --arg cache "$CACHE_DIR" \
    '.save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
     | .model_name_or_path = "\($cache)/glm45/GLM-4.5-Air"' \
-   qwen_single_card.json > qwen_single_card.json
-mv qwen_single_card.json glm45.json
+   $config_json > $config_json.tmp
+mv $config_json.tmp $config_json
+
+echo "run config: $config_json"
+cat $config_json
 
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
+
 unset http_proxy https_proxy
-python run_pretrain.py qwen_single_card.json
+python run_pretrain.py $config_json
