@@ -47,7 +47,7 @@ cat "
 8 11.78950691
 9 11.82711029
 10 11.80441380
-" > ./glm45_gt_loss.txt
+" > ./glm45_single_card_gt_loss.txt
 
 SCRIPT_DIR=`dirname $(readlink -f $0)`
-python $SCRIPT_DIR/check_loss.py --log_file ./glm45.log --gt_file ./glm45_gt_loss.txt
+python $SCRIPT_DIR/check_loss.py --log_file ./glm45_single_card.log --gt_file ./glm45_single_card_gt_loss.txt
