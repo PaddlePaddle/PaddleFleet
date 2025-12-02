@@ -61,6 +61,7 @@ class RMSNorm(paddle.nn.Layer):
             default_initializer=paddle.nn.initializer.Constant(1.0),
         )
         self.config = config
+        self.config.fuse_rms_norm = True
 
         if input_is_parallel:
             self.enable_sequence_parallel()

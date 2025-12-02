@@ -131,9 +131,13 @@ class LanguageLayer(FleetLayer):
         if labels.shape[-1] == logits.shape[0]:
             labels = labels.transpose(0, 1).contiguous()
         loss = self.loss_func(logits.cast("float32"), labels)
-        # loss = tensor_parallel.vocab_parallel_cross_entropy(
-        #     logits.cast("float32"), labels
-        # )
+        # loss = []
+        # for subbatch_logits, subbatch_labels in zip(logits, labels):
+        #     subbatch_loss = self.loss_func(
+        #         subbatch_logits[None], subbatch_labels[None]
+        #     )
+        #     loss.append(subbatch_loss)
+        # loss = paddle.cat(loss, axis=0)
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():  # empty span
