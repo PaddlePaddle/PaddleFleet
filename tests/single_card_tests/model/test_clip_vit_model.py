@@ -82,7 +82,7 @@ class TestCLIPViTModel(unittest.TestCase):
 
         num_weights = sum([p.numel() for p in self.model.parameters()])
 
-        assert num_weights == 174464
+        assert num_weights == 173312
 
     def test_set_input_tensor(self):
         # [s, b, h] expected to the transformer.

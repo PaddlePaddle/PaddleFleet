@@ -164,7 +164,7 @@ class TestGPTModel(unittest.TestCase):
             attention_mask=attention_mask,
             labels=labels,
         )
-        loss = outputs["loss"]
+        loss = outputs[0]
         print("loss", loss.item())
         if judge_machine_type() == "H":
             assert loss.item() == 5.3645853996276855, (

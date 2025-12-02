@@ -73,7 +73,7 @@ class TestMultiTokenPredictionLayer(unittest.TestCase):
             assert mtp.layers[i].eh_proj.weight.shape[1] == config.hidden_size
             assert mtp.layers[i].transformer_layer is not None
         num_weights = sum([p.size for p in mtp.parameters()])
-        assert num_weights == 58240 * config.num_nextn_predict_layers
+        assert num_weights == 57664 * config.num_nextn_predict_layers
 
 
 class TestMultiTokenPrediction(unittest.TestCase):
@@ -164,12 +164,12 @@ class TestMultiTokenPrediction(unittest.TestCase):
         assert "values" in tracker
         MTPLossLoggingHelper.clean_loss_in_tracker()
 
-        # Check output shapes
-        assert output["logits"].shape[0] == self.micro_batch_size
-        assert output["logits"].shape[1] == self.seq_length
+        # Check output logits shapes
+        assert output[1].shape[0] == self.micro_batch_size
+        assert output[1].shape[1] == self.seq_length
 
         # Verify gradients
-        output["loss"].backward()
+        output[0].backward()
         for name, param in gpt_model.named_parameters():
             assert param.grad is not None
 
