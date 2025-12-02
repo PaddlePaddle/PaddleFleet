@@ -201,7 +201,7 @@ class TransformerConfig(ModelParallelConfig):
     bias_dropout_fusion: bool = False
     """If True, uses bias dropout fusion."""
 
-    apply_rope_fusion: bool = False
+    apply_rope_fusion: bool = True
     """If True, use fused RoPE kernel."""
 
     ####################
