@@ -49,5 +49,5 @@ cat "
 10 11.80441380
 " > ./glm45_gt_loss.txt
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_DIR=`dirname $(readlink -f $0)`
 python $SCRIPT_DIR/check_loss.py --log_file ./glm45.log --gt_file ./glm45_gt_loss.txt --tolerance 1e-2
