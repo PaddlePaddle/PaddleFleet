@@ -49,5 +49,6 @@ cat "
 10 11.80441380
 " > ./glm45_single_card_gt_loss.txt
 
-SCRIPT_DIR=`dirname $0`
-python $SCRIPT_DIR/check_loss.py --log_file ./glm45_single_card.log --gt_file ./glm45_single_card_gt_loss.txt
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --log_file ./glm45_single_card.log \
+   --gt_file ./glm45_single_card_gt_loss.txt
