@@ -299,7 +299,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -w /workspace --network host ${docker_image}
+            -w /paddle --network host ${docker_image}
 
       - name: Install PaddleFleet
         run: |
@@ -317,7 +317,6 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          pip install coverage
           uv sync -v
           '
 
@@ -340,10 +339,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           pwd
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
-          ls -l /paddle/ci/.coveragerc
-          cat /paddle/ci/.coveragerc
-          cp /paddle/ci/.coveragerc /workspace/PaddleFleet/.coveragerc
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/.coveragerc
+          export COVERAGE_RCFILE=/paddle/.coveragerc
           export WITH_COVERAGE=ON
           source /root/proxy
           bash -x PaddleFleet/ci/integration_test/glm45.sh
@@ -425,7 +421,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -w /workspace --network host ${docker_image}
+            -w /paddle --network host ${docker_image}
 
       - name: Install PaddleFleet
         if: ${{ matrix.name == 'H20' }}
@@ -444,7 +440,6 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          pip install coverage
           uv sync -v
           '
 
