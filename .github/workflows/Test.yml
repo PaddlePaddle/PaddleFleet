@@ -533,17 +533,17 @@ jobs:
           single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
           wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
           glm45-h20_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/glm45-h20/coverage.xml"
-          wget "${glm45-h20_cov_file_url}" -O multi_coverage.xml --no-proxy
+          wget "${glm45-h20_cov_file_url}" -O glm45-h20_converage.xml --no-proxy
           glm45-a100_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/glm45-a100/coverage.xml"
-          wget "${glm45-a100_cov_file_url}" -O single_coverage.xml --no-proxy
+          wget "${glm45-a100_cov_file_url}" -O glm45-a100_converage.xml --no-proxy
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' glm45-h20.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' glm45-a100.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' glm45-h20_converage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' glm45-a100_converage.xml
           git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
-          diff-cover multi_coverage.xml single_coverage.xml glm45-h20.xml glm45-a100.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
+          diff-cover multi_coverage.xml single_coverage.xml glm45-h20_converage.xml glm45-a100_converage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
 
       - name: Upload coverage to Codecov
