@@ -22,12 +22,9 @@ config_json="qwen_single_card.json"
 jq --arg cache "$CACHE_DIR" \
    '.save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
-    | .model_name_or_path = "\($cache)/glm45/GLM-4.5-Air"' \
+    | .model_name_or_path = "\($cache)/qwen/Qwen3-30B-A3B-Base"' \
    $config_json > $config_json.tmp
 mv $config_json.tmp $config_json
-
-echo "run config: $config_json"
-cat $config_json
 
 rm -rf checkpoint/
 rm -rf outputs/
