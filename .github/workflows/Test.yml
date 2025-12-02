@@ -259,50 +259,6 @@ jobs:
           docker rm -f ${{ env.container_name }}
 
 
-  coverage_check:
-    name: Coverage Upload And Check
-    needs: [multi-card_test, single_card_test, check-bypass]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
-    runs-on: ubuntu-latest
-    env:
-      GITHUB_REPO_NAME: ${{ github.repository }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Fetch base branch
-        run: |
-          echo "Fetching base branch: ${{ github.event.pull_request.base.ref }}"
-          git fetch origin ${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}
-      - name: coverage file download
-        shell: bash
-        run: |
-          multi_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/multi-card/coverage.xml"
-          wget "${multi_card_cov_file_url}" -O multi_coverage.xml --no-proxy
-          single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
-          wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
-          git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
-          python -m pip install diff-cover
-          COVERAGE_EXIT_CODE=0
-          diff-cover multi_coverage.xml single_coverage.xml  --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
-          exit ${COVERAGE_EXIT_CODE}
-
-      - name: Upload coverage to Codecov
-        if: always()
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./multi_coverage.xml, ./single_coverage.xml
-          flags: coverage_combine
-          name: "${{ env.TASK }}-${{ github.run_id }}"
-          fail_ci_if_error: true
-          verbose: true
-
   integration-test-H20:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
@@ -381,15 +337,40 @@ jobs:
       - name: Integration test (GLM4.5)
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          pwd
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
           source /root/proxy
           bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
+          ls -a /paddle/coveragedata/
+          uv run coverage combine
+          uv run coverage report -m
+          uv run coverage xml -o /paddle/coveragedata/coverage.xml
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
+          '
+      - name: Integration-test-H20 Coverage Upload to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/coveragedata/coverage.xml coverage.xml
+
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/glm45-h20"
+          uv run ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
@@ -481,15 +462,41 @@ jobs:
         if: ${{ matrix.name == 'H20' }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
           source /root/proxy
           bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
+          ls -a /paddle/coveragedata/
+          uv run coverage combine
+          uv run coverage xml -o /paddle/coveragedata/coverage.xml
+          uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
+          '
+      
+      - name: Integration-test-A100 Coverage Upload to BOS
+        if: ${{ matrix.name == 'H20' }}
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/coveragedata/coverage.xml coverage.xml
+
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/glm45-a100"
+          uv run ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
@@ -498,3 +505,53 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
+  
+  coverage_check:
+    name: Coverage Upload And Check
+    needs: [multi-card_test, single_card_test, integration-test-H20, integration-test-a100, check-bypass]
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_REPO_NAME: ${{ github.repository }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Fetch base branch
+        run: |
+          echo "Fetching base branch: ${{ github.event.pull_request.base.ref }}"
+          git fetch origin ${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}
+      - name: coverage file download
+        shell: bash
+        run: |
+          multi_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/multi-card/coverage.xml"
+          wget "${multi_card_cov_file_url}" -O multi_coverage.xml --no-proxy
+          single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
+          wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
+          glm45-h20_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/glm45-h20/coverage.xml"
+          wget "${glm45-h20_cov_file_url}" -O multi_coverage.xml --no-proxy
+          glm45-a100_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/glm45-a100/coverage.xml"
+          wget "${glm45-a100_cov_file_url}" -O single_coverage.xml --no-proxy
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' glm45-h20.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' glm45-a100.xml
+          git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
+          python -m pip install diff-cover
+          COVERAGE_EXIT_CODE=0
+          diff-cover multi_coverage.xml single_coverage.xml glm45-h20.xml glm45-a100.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
+          exit ${COVERAGE_EXIT_CODE}
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./multi_coverage.xml, ./single_coverage.xml, ./glm45-h20.xml, ./glm45-a100.xml
+          flags: coverage_combine
+          name: "${{ env.TASK }}-${{ github.run_id }}"
+          fail_ci_if_error: true
+          verbose: true
