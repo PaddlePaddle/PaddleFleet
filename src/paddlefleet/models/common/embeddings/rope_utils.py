@@ -263,7 +263,7 @@ def apply_rotary_pos_emb(
 
     if config.apply_rope_fusion:
         # Paddle fused_rope not support cu_seqlens or cp_group
-        if cu_seqlens or cp_group.nranks > 1:
+        if cu_seqlens or (cp_group and cp_group.nranks > 1):
             raise NotImplementedError(
                 "cu_seqlens or cp_group not be supported when using fused_rope"
             )
