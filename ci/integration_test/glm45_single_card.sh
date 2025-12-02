@@ -36,4 +36,18 @@ export FLAGS_cudnn_deterministic=1
 unset http_proxy https_proxy
 python run_pretrain.py $config_json | tee ./glm45_single_card.log
 
-tail -10 ./glm45_single_card.log
+cat "
+1 12.03771591
+2 12.02239990
+3 11.95531750
+4 11.96506405
+5 11.90386009
+6 11.87367058
+7 11.92392540
+8 11.78950691
+9 11.82711029
+10 11.80441380
+" > ./glm45_gt_loss.txt
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+python $SCRIPT_DIR/check_loss.py --log_file ./glm45.log --gt_file ./glm45_gt_loss.txt --tolerance 1e-2

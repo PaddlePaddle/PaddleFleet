@@ -39,5 +39,3 @@ export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
 python run_pretrain.py $config_json | tee ./qwen3_single_card.log
-
-tail -10 ./qwen3_single_card.log
