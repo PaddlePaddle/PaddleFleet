@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+export root_dir=$(pwd)
+
 if [ ! -f $CACHE_DIR/glm45/data.tar ]; then
   mkdir -p $CACHE_DIR/glm45 && cd $CACHE_DIR/glm45
   wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45_dataset/data.tar --no-check-certificate
@@ -23,6 +25,8 @@ if [ ! -f $CACHE_DIR/glm45/GLM-4.5-Air.tar ]; then
   tar -xf GLM-4.5-Air.tar
 fi
 
+cd $root_dir
+
 apt-get update
 apt-get install jq -y
 
@@ -30,7 +34,6 @@ sed -i '/if not int(os.getenv("test_ci_no_save_model", 0)):/s/^/# /' run_pretrai
 sed -i '/trainer.save_model()/s/^/# /' run_pretrain.py
 # sed -i 's/num_layers: int = 10/num_layers: int = 5/' glm45_provider.py
 
-export root_dir=$(pwd)
 python -c "
 infile = '$root_dir/PaddleFormers/paddleformers/trainer/training_args.py'
 outfile = infile + '.new'
