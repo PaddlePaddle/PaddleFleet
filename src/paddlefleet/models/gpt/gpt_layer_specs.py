@@ -116,12 +116,12 @@ def get_gpt_layer_local_spec(
                 ),
             ),
             self_attn_bda=get_bias_dropout_add,
-            pre_mlp_layernorm=layer_norm,
+            post_attention_layernorm=layer_norm,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
             sharded_state_dict_keys_map={
                 "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
-                "pre_mlp_layernorm.": "mlp.up_gate_proj.layer_norm_",
+                "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
             },
         ),
     )
