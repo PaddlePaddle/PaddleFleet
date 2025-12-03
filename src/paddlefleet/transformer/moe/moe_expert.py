@@ -42,11 +42,11 @@ class GroupedMLPExpert(FleetLayer):
         self.config: TransformerConfig = config
         self.config.hidden_act = F.silu
         self.num_local_experts = num_local_experts
-        assert not config.add_bias_linear, (
-            "bias not supported in Grouped GEMM yet, please set '--disable-bias-linear' instead."
+        assert not config.use_bias, (
+            "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
         )
 
-        self.ep_group = pg_collection.ep
+        self.ep_group = pg_collection.ep if pg_collection else None
         self.expert_parallel = (
             utils.get_pg_size(self.ep_group) > 1 if self.ep_group else False
         )
@@ -75,7 +75,7 @@ class GroupedMLPExpert(FleetLayer):
 
         # No tensor parallel - full sizes
         fc1_output_size = (
-            self.config.moe_ffn_hidden_size * self.num_local_experts
+            self.config.moe_intermediate_size * self.num_local_experts
         )
         if config.gated_linear_unit:
             # Project to 4h. If using swiglu double the output width,
@@ -83,7 +83,7 @@ class GroupedMLPExpert(FleetLayer):
             fc1_output_size *= 2
 
         fc2_input_size = (
-            self.config.moe_ffn_hidden_size * self.num_local_experts
+            self.config.moe_intermediate_size * self.num_local_experts
         )
 
         weight1_list = [x.up_gate_proj.weight for x in experts if x is not None]

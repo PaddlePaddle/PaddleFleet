@@ -67,7 +67,7 @@ class MoELayer(nn.Layer):
         config = asdict(config)
         self.pg_collection = pg_collection
         self.hidden_size = config["hidden_size"]
-        self.moe_intermediate_size = config.get("moe_ffn_hidden_size", -1)
+        self.moe_intermediate_size = config.get("moe_intermediate_size", -1)
         self.num_experts = config.get(
             "moe_num_experts",
             config.get("n_routed_experts", config.get("moe_num_experts", -1)),
@@ -78,9 +78,7 @@ class MoELayer(nn.Layer):
             if config.get("moe_shared_expert_intermediate_size") is not None
             else self.moe_intermediate_size * self.num_shared_experts
         )
-        self.moe_router_topk = config.get(
-            "moe_router_topk", config.get("moe_k", -1)
-        )
+        self.moe_router_topk = config.get("num_experts_per_tok", -1)
 
         self.expert_activation = config.get(
             "hidden_act", config.get("expert_activation", "silu")
