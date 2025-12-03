@@ -234,7 +234,7 @@ class MlpNode:
     def __init__(
         self,
         custom_map,
-        moe_router_topk,
+        num_experts_per_tok,
         recompute_fwd_gate_up=False,
         dequant_input=False,
         use_expert_subbatch=False,
@@ -328,7 +328,7 @@ class MlpNode:
         self.token_offsets = [0]
         for padding_token in self.padding_token_per_experts:
             self.token_offsets.append(self.token_offsets[-1] + padding_token)
-        self.router_topk = moe_router_topk
+        self.router_topk = num_experts_per_tok
         self.use_fp8_mlp = use_fp8_mlp
 
     def cached_tensors(self):
@@ -593,7 +593,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         dispatched_probs,
         dispatched_indices,
         custom_map,
-        moe_router_topk,
+        num_experts_per_tok,
         use_fp8_mlp=True,
         recompute_fwd_gate_up=False,
         dequant_input=True,
@@ -613,14 +613,14 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             hidden_states (tensor): 输入的隐藏状态张量。
             dispatched_probs (tensor): 分派概率张量。
             dispatched_indices (tensor): 分派索引张量。
-            moe_router_topk (int): topk。
+            num_experts_per_tok (int): topk。
 
         Returns:
             tensor: 前向传播的结果张量。
         """
         ctx.node = MlpNode(
             custom_map,
-            moe_router_topk,
+            num_experts_per_tok,
             recompute_fwd_gate_up=recompute_fwd_gate_up,
             dequant_input=dequant_input,
             use_expert_subbatch=use_expert_subbatch,

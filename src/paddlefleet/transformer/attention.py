@@ -420,7 +420,7 @@ class SelfAttention(Attention):
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
-            bias=self.config.use_bias,
+            bias=self.config.use_bias or self.config.attention_bias,
             skip_bias_add=False,
             is_expert=False,
             tp_group=self.pg_collection.tp,

@@ -97,11 +97,11 @@ class TestGPTModel(unittest.TestCase):
             normalization="RMSNorm",
             hidden_dropout_prob=0.0,
             attention_dropout=0.0,
-            moe_num_experts=8,
+            n_routed_experts=8,
             use_bias=False,
             moe_intermediate_size=1024,
             moe_token_dispatcher_type="alltoall",
-            moe_shared_expert_intermediate_size=1024,
+            n_shared_experts=1,
             init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
