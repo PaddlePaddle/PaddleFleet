@@ -69,6 +69,8 @@ def setup_ops_extension():
         "-gencode=arch=compute_90a,code=sm_90a",
         "-gencode=arch=compute_100,code=sm_100",
         "-DNDEBUG",
+        "-DPADDLE_NO_PYTHON",
+        "-DPy_LIMITED_API=0x030A0000",
     ]
     if cuda_major < 12:
         raise ValueError(
@@ -88,7 +90,14 @@ def setup_ops_extension():
                 os.path.join(os.getcwd(), "src/paddlefleet/extensions"),
             ],
             extra_compile_args={
-                "cxx": ["-O3", "-w", "-Wno-abi", "-fPIC", "-std=c++17"],
+                "cxx": [
+                    "-O3",
+                    "-w",
+                    "-Wno-abi",
+                    "-fPIC",
+                    "-std=c++17",
+                    "-DPy_LIMITED_API=0x03090000",
+                ],
                 "nvcc": nvcc_args,
             },
         ),
