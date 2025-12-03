@@ -18,7 +18,10 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Protocol
 
-from paddlefleet.parallel_state import get_context_parallel_world_size
+from paddlefleet.parallel_state import (
+    get_context_parallel_group,
+    get_context_parallel_world_size,
+)
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -121,7 +124,10 @@ class LocalSpecProvider(BackendSpecProvider):
 
     def core_attention(self) -> type:
         """Which layer to use for attention"""
-        if get_context_parallel_world_size() > 1:
+        if (
+            get_context_parallel_group() is not None
+            and get_context_parallel_world_size() > 1
+        ):
             return FlashDotProductAttention
         else:
             return DotProductAttention
