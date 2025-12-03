@@ -323,6 +323,10 @@ class GPTModel(LanguageLayer):
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
             )
+            if self.config.sequence_parallel:
+                rotary_pos_emb = rotary_pos_emb.transpose(
+                    [1, 0, 2, 3]
+                ).contiguous()
         # elif self.position_embedding_type == 'yarn':
         #    if self.training or not self.config.flash_decode:
         #        rotary_seq_len = self.rotary_emb.get_rotary_seq_len(
@@ -546,6 +550,12 @@ class GPTModel(LanguageLayer):
             weight=output_weight,
             # runtime_gather_output=runtime_gather_output,
         )
+
+        if (
+            self.config.sequence_parallel
+            and self.config.scatter_embedding_sequence_parallel
+        ):
+            logits = logits.transpose([1, 0, 2]).contiguous()
 
         if labels is not None:
             loss = self.compute_language_model_loss(labels, logits)
