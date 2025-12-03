@@ -23,10 +23,10 @@ if TYPE_CHECKING:
 
 import paddle
 from paddle import Tensor
-from paddle.nn import Embedding
 
 from paddlefleet import tensor_parallel
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import get_tensor_model_parallel_group_if_none
 
 
 class LanguageModelEmbedding(FleetLayer):
@@ -66,32 +66,27 @@ class LanguageModelEmbedding(FleetLayer):
         )
         self.num_tokentypes = num_tokentypes
         self.scatter_to_sequence_parallel = scatter_to_sequence_parallel
-        self.tp_group = tp_group
+        self.tp_group = get_tensor_model_parallel_group_if_none(tp_group)
         self.reduce_scatter_embeddings = (
             (not self.add_position_embedding)
             and self.num_tokentypes <= 0
             and self.config.sequence_parallel
             and self.scatter_to_sequence_parallel
         )
-        assert not self.reduce_scatter_embeddings, (
-            "Currently reduce_scatter_embeddings is not supported."
-        )
 
-        """ TODO: Support TP embedding
         # Word embeddings (parallel).
-        self.embed_tokens = VocabParallelEmbedding(
+        self.embed_tokens = tensor_parallel.VocabParallelEmbedding(
             num_embeddings=self.vocab_size,
             embedding_dim=self.config.hidden_size,
-            # init_method=self.config.embedding_init_method,
-            # reduce_scatter_embeddings=self.reduce_scatter_embeddings,
-            # deterministic_mode=self.config.deterministic_mode,
-            mp_group=self.tp_group,
+            init_method=self.config.embedding_init_method,
+            reduce_scatter_embeddings=self.reduce_scatter_embeddings,
+            config=self.config,
+            tp_group=self.tp_group,
         )
-        """
-        self.embed_tokens = Embedding(
-            num_embeddings=self.vocab_size,
-            embedding_dim=self.config.hidden_size,
-        )
+        # self.word_embeddings = Embedding(
+        #     num_embeddings=self.vocab_size,
+        #     embedding_dim=self.config.hidden_size,
+        # )
 
         # Position embedding (serial).
         if self.add_position_embedding:
@@ -149,23 +144,40 @@ class LanguageModelEmbedding(FleetLayer):
         Returns:
             Tensor: The output embeddings
         """
-        embed_tokens = self.embed_tokens(input_ids)
+        word_embeddings = self.embed_tokens(input_ids)
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
-            embeddings = embed_tokens + position_embeddings
+            embeddings = word_embeddings + position_embeddings
         else:
-            embeddings = embed_tokens
+            embeddings = word_embeddings
+
+        if (
+            not self.reduce_scatter_embeddings
+            and self.config.sequence_parallel
+            and self.config.scatter_to_sequence_parallel_region
+        ):
+            # Data format change to avoid explicit transposes : [b s h] --> [s b h].
+            embeddings = embeddings.transpose([1, 0, 2]).contiguous()
 
         if tokentype_ids is not None:
             assert self.tokentype_embeddings is not None
+            # [b s h] -> [s b h] (So that it can be added with embeddings)
+            # tokentype_embedding = self.tokentype_embeddings(tokentype_ids).permute(1, 0, 2)
             tokentype_embedding = self.tokentype_embeddings(tokentype_ids)
+            if (
+                self.config.sequence_parallel
+                and self.config.scatter_to_sequence_parallel_region
+            ):
+                tokentype_embedding = tokentype_embedding.permute(
+                    1, 0, 2
+                ).contiguous()
             embeddings = embeddings + tokentype_embedding
         else:
             assert self.tokentype_embeddings is None
 
         # If the input flag for fp32 residual connection is set, convert for float.
-        # if self.config.fp32_residual_connection:
-        #    embeddings = embeddings.float()
+        if self.config.fp32_residual_connection:
+            embeddings = embeddings.float()
 
         # Dropout.
         if self.config.sequence_parallel:

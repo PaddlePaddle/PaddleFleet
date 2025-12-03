@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 import paddle
 import paddle.distributed as dist
 import paddle.nn.functional as F
+from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
@@ -68,7 +69,7 @@ HAVE_TE = False
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ..fleet_config import FleetConfig
+    from ..transformer.transformer_config import TransformerConfig
 
 _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
     "tensor_model_parallel": False,
@@ -221,7 +222,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         *,
         init_method: callable,
         reduce_scatter_embeddings: bool = False,
-        config: FleetConfig,
+        config: TransformerConfig,
         tp_group: paddle.distributed.ProcessGroup | None = None,
     ):
         super().__init__()
@@ -271,7 +272,6 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             self.weight = Parameter(
                 paddle.empty(
                     [self.num_embeddings_per_partition, self.embedding_dim],
-                    device=paddle.cuda.current_device(),
                     dtype=config.params_dtype,
                 )
             )
@@ -286,7 +286,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         Args:
             input_ (paddle.Tensor): Input tensor.
         """
-        if self.tp_group.world_size > 1:
+        if get_pg_size(self.tp_group) > 1:
             # Build the mask.
             input_mask = (input_ < self.vocab_start_index) | (
                 input_ >= self.vocab_end_index
@@ -303,7 +303,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             # F.embedding currently has a non-deterministic backward function
             output_parallel = F.embedding(masked_input, self.weight)
         # Mask the output embedding.
-        if self.tp_group.world_size > 1:
+        if get_pg_size(self.tp_group) > 1:
             output_parallel[input_mask, :] = 0.0
 
         if self.reduce_scatter_embeddings:
@@ -564,10 +564,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 dim_size, dtype=input.dtype, requires_grad=False
             )
             # reduce_scatter
-            handle = (
-                dist.communication.stream.reduce_scatter._reduce_scatter_base(
-                    sub_grad_input, grad_input, group=tp_group, sync_op=False
-                )
+            handle = _reduce_scatter_base(
+                sub_grad_input, grad_input, group=tp_group, sync_op=False
             )
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
             # reduce scatter is scheduled before the weight gradient computation
@@ -618,7 +616,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             handle.wait()
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
-            return sub_grad_input, grad_weight, grad_bias
+            if use_bias:
+                return sub_grad_input, grad_weight, grad_bias
+            else:
+                return sub_grad_input, grad_weight
 
         if ctx.allreduce_dgrad:
             handle.wait()
@@ -626,7 +627,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         # PyLayer requires the number of output in backward
         # function matches the number of Tensors in forward's
         # input args
-        if grad_bias is not None:
+        if use_bias:
             return grad_input, grad_weight, grad_bias
         else:
             return grad_input, grad_weight
@@ -808,7 +809,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
         input_size,
         output_size,
         *,
-        config: FleetConfig,
+        config: TransformerConfig,
         init_method: Callable,
         bias=True,
         gather_output=False,
@@ -1133,7 +1134,7 @@ class RowParallelLinear(paddle.nn.Layer):
         input_size: int,
         output_size: int,
         *,
-        config: FleetConfig,
+        config: TransformerConfig,
         init_method: Callable,
         bias: bool,
         input_is_parallel: bool,

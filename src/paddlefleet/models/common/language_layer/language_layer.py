@@ -17,9 +17,9 @@ import logging
 import paddle
 from paddle import Tensor
 
-from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
-
 # from paddlefleet.dist_checkpointing.mapping import ShardedStateDict
+from paddlefleet import tensor_parallel
+from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
 from paddlefleet.pipeline_parallel.utils import (
     is_pp_first_stage,
     is_pp_last_stage,
@@ -124,16 +124,10 @@ class LanguageLayer(FleetLayer):
         Returns:
             Tensor: Loss tensor of dimensions [batch size, sequence_length]
         """
-        # TODO(pkuzyc): check the difference between vocab_parallel_cross_entropy
-        # and paddle.nn.CrossEntropy, and use vocab_parallel_cross_entropy as loss func.
-
-        # logits: [s,b,h] labels: [b,s] -> logits: [s,b,h] labels: [s,b]
-        if labels.shape[-1] == logits.shape[0]:
-            labels = labels.transpose(0, 1).contiguous()
-        loss = self.loss_func(logits.cast("float32"), labels)
-        # loss = tensor_parallel.vocab_parallel_cross_entropy(
-        #     logits.cast("float32"), labels
-        # )
+        # loss = self.loss_func(logits.cast("float32"), labels)
+        loss = tensor_parallel.vocab_parallel_cross_entropy(
+            logits.cast("float32"), labels
+        )
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():  # empty span

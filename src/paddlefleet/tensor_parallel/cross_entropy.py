@@ -41,7 +41,7 @@ class VocabParallelCrossEntropy:
 
         vocab_parallel_logits = vocab_parallel_logits.float()
         # Maximum value along vocab dimension across all GPUs.
-        logits_max = paddle.max(vocab_parallel_logits, axis=-1)[0]
+        logits_max = paddle.max(vocab_parallel_logits, axis=-1)
 
         return vocab_parallel_logits, logits_max
 

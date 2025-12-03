@@ -166,6 +166,9 @@ class TransformerConfig(ModelParallelConfig):
     """Whether cross entropy loss is calculated over the actual number of non-padded tokens in the
     global batch, versus the default behavior of assuming all tokens are non-padded."""
 
+    fp32_residual_connection: bool = False
+    """If true, move residual connections to fp32."""
+
     ####################
     # mixed-precision
     ####################
@@ -308,6 +311,18 @@ class TransformerConfig(ModelParallelConfig):
     """Standard deviation of the zero mean normal for the default initialization method, not used if
     init_method and output_layer_init_method are provided."""
 
+    embedding_init_method: callable = None
+    """
+    Method to initialize weights of the embedding layer. If None, will be set as described
+    in init_method above.
+    """
+
+    embedding_init_method_std: float = None
+    """
+    Standard deviation of the zero mean normal for the default initialization method for the
+    embedding layer. If None, will be set to init_method_std.
+    """
+
     init_model_with_meta_device: bool = False
     """
     If True, initializes the model with the meta device. This is helpful for
@@ -318,6 +333,13 @@ class TransformerConfig(ModelParallelConfig):
 
     is_hybrid_model: bool = False
     """ Indicates whether this is a hybrid model. """
+
+    ####################
+    # miscellaneous
+    ####################
+    clone_scatter_output_in_embedding: bool = True
+    """When set to True, clone the output of scatter_to_sequence_parallel_region in embedding layer
+    to facilitate garbage collection of input."""
 
     @classmethod
     def from_config(cls, config_dict):
@@ -381,6 +403,27 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.apply_query_key_layer_scaling:
             self.attention_softmax_in_fp32 = True
+
+        # Set the embedding init method
+        if self.embedding_init_method_std is None:
+            # By default, use the same init std as you use for every other non-output layer.
+            self.embedding_init_method_std = self.init_method_std
+
+        if self.embedding_init_method is None:
+            if self.init_method is None or (
+                self.embedding_init_method_std != self.init_method_std
+            ):
+                # In this case, we set both the init method and the embedding init method to
+                #  whatever std value requested (or defaulted) for the embedding_init_layer
+                self.embedding_init_method = init_method_normal(
+                    self.embedding_init_method_std
+                )
+            else:
+                # Replicate the current behavior where if you are not changing the std of the
+                #  embedding init differently and the init method is set, we fallback to the
+                #  init method for this layer. Since we are here after an OR we know that
+                #  init_method is not None
+                self.embedding_init_method = self.init_method
 
         if self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)

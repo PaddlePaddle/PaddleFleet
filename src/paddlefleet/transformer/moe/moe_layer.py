@@ -124,7 +124,7 @@ class MoELayer(nn.Layer):
         self.expert_dropout = config.get("expert_dropout", 0.0)
         self.moe_grouped_gemm = config.get("moe_grouped_gemm", False)
         self._init_expert_parallel()
-        self.router = StandardMoERouter(
+        self.gate = StandardMoERouter(
             config=config, pg_collection=pg_collection
         )
 
@@ -380,7 +380,7 @@ class MoELayer(nn.Layer):
             priorities,
             aux_loss,
             z_loss,
-        ) = self.router(hidden_states)
+        ) = self.gate(hidden_states)
         # topk_weights, topk_indices: Shape is [seq_len, num_experts_per_token]
         # gates_masked, mask: Shape is [seq_len, num_experts], sometimes their names are "probs" and "routing_map"
         # capacity, priorities are used for dropping tokens, currently they are not used
