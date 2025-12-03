@@ -341,11 +341,13 @@ jobs:
           pwd
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          cat /workspace/PaddleFleet/ci/.coveragerc
           export WITH_COVERAGE=ON
           source /root/proxy
           bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata
+          cat /workspace/PaddleFleet/ci/.coveragerc
+          ls -a /workspace/PaddleFleet/coveragedata/
           uv run coverage combine
           uv run coverage report -m
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
