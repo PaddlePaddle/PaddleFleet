@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 import paddle
 from paddle import Tensor
+from paddle.nn.functional.flash_attention import flashmask_attention
 
 from paddlefleet.context_parallel_utils import flashmask_attention_cp
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
@@ -40,14 +41,6 @@ from paddlefleet.transformer.utils import (
     is_layer_window_attention,
 )
 from paddlefleet.utils import divide
-
-try:
-    from paddle.nn.functional.flash_attention import flashmask_attention
-except (ImportError, ModuleNotFoundError):
-    logger.warning(
-        "flashmask_attention not found. Use the latest version of FleetY10 instead."
-    )
-    flashmask_attention = None
 
 
 class DotProductAttention(FleetLayer):
