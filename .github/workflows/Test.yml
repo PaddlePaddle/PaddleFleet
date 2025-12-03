@@ -336,7 +336,8 @@ jobs:
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           pip install coverage==5.5
-          pip install uv-cli
+          pip install uv
+          uv sync -v
           '
 
       - name: Integration test (GLM4.5)
