@@ -1255,7 +1255,6 @@ class RowParallelLinear(paddle.nn.Layer):
             - output
             - bias
         """
-
         # Set up backprop all-reduce.
         if (
             self.input_is_parallel
@@ -1291,7 +1290,6 @@ class RowParallelLinear(paddle.nn.Layer):
                     input_parallel.activation_offloading = (
                         self.config.cpu_offloading_activations
                     )
-
         output_parallel = self._forward_impl(
             input=input_parallel,
             weight=self.weight,
@@ -1302,7 +1300,6 @@ class RowParallelLinear(paddle.nn.Layer):
             tp_group=None,
             grad_output_buffer=None,
         )
-
         # All-reduce across all the partitions.
         if self.explicit_expert_comm:
             assert self.skip_bias_add

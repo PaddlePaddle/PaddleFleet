@@ -96,7 +96,9 @@ class MoELayer(nn.Layer):
         )
         self.transpose_gate_weight = config.get("transpose_gate_weight", False)
         self.sequence_parallel = config.get("sequence_parallel", False)
-        self.tensor_parallel_degree = config.get("tensor_parallel_degree", 1)
+        self.tensor_model_parallel_size = config.get(
+            "tensor_model_parallel_size", 1
+        )
         self.fuse_up_gate = config.get(
             "fuse_attention_ffn", config.get("fuse_up_gate", False)
         )
@@ -118,7 +120,7 @@ class MoELayer(nn.Layer):
         )
 
         self.moe_group = pg_collection.ep
-        self.expert_parallel_degree = (
+        self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
             if self.moe_group is not None
             else 1
@@ -136,16 +138,17 @@ class MoELayer(nn.Layer):
         self.shared_expert_class = StandardMLPSharedExpert
 
         if (
-            self.expert_parallel_degree <= 1
+            self.expert_model_parallel_size <= 1
             and self.sequence_parallel
-            and self.tensor_parallel_degree > 1
+            and self.tensor_model_parallel_size > 1
         ):
             routed_expert_config.sequence_parallel = False
             shared_expert_config.sequence_parallel = False
         elif (
-            self.expert_parallel_degree > 1 and self.tensor_parallel_degree >= 1
+            self.expert_model_parallel_size > 1
+            and self.tensor_model_parallel_size >= 1
         ):
-            routed_expert_config.tensor_parallel_degree = 1
+            routed_expert_config.tensor_model_parallel_size = 1
 
         expert_args = {}
         expert_args["config"] = routed_expert_config
@@ -182,7 +185,7 @@ class MoELayer(nn.Layer):
             )
             self.moe_token_dispatcher_type = "alltoall"
 
-        if self.expert_parallel_degree > 1:
+        if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
                 self.token_dispatcher = MoEFlexTokenDispatcher(
                     self.num_experts_per_device,
@@ -192,14 +195,14 @@ class MoELayer(nn.Layer):
                 )
                 self.communication = DeepEPMoECommunication(
                     self.moe_group,
-                    self.expert_parallel_degree,
+                    self.expert_model_parallel_size,
                     self.num_experts_per_device,
                     self.token_dispatcher,
                 )
             elif self.moe_token_dispatcher_type == "alltoall":
                 self.communication = AllToAllMoECommunication(
                     self.moe_group,
-                    self.expert_parallel_degree,
+                    self.expert_model_parallel_size,
                     self.num_experts_per_device,
                 )
             else:
@@ -207,7 +210,7 @@ class MoELayer(nn.Layer):
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
                 )
 
-        if self.expert_parallel_degree > 1:
+        if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
             for p in self.experts.parameters():
@@ -220,37 +223,39 @@ class MoELayer(nn.Layer):
 
     def _init_expert_parallel(self):
         def _parse_moe_expert_parallel(
-            num_experts: int, expert_parallel_degree: int
+            num_experts: int, expert_model_parallel_size: int
         ) -> int:
             """
             Args:
                 num_experts: Total number of experts
-                expert_parallel_degree: Expert parallel groups
+                expert_model_parallel_size: Expert parallel groups
 
             Returns:
                 moe_num_experts_per_device: Number of experts per device
             """
-            assert num_experts >= expert_parallel_degree, (
-                f"expert num_experts={num_experts} >= moe_world_size={expert_parallel_degree}"
+            assert num_experts >= expert_model_parallel_size, (
+                f"expert num_experts={num_experts} >= moe_world_size={expert_model_parallel_size}"
             )
-            assert num_experts % expert_parallel_degree == 0, (
-                f"expert num_experts={num_experts} % moe_world_size={expert_parallel_degree} == 0"
+            assert num_experts % expert_model_parallel_size == 0, (
+                f"expert num_experts={num_experts} % moe_world_size={expert_model_parallel_size} == 0"
             )
 
-            moe_num_experts_per_device = num_experts // expert_parallel_degree
+            moe_num_experts_per_device = (
+                num_experts // expert_model_parallel_size
+            )
             return moe_num_experts_per_device
 
-        if self.expert_parallel_degree > 1:
+        if self.expert_model_parallel_size > 1:
             self.moe_grad_group = self.pg_collection.expt_dp
             self.moe_rank = utils.get_pg_rank(self.moe_group)
             self.moe_rank = max(self.moe_rank, 0)
             self.num_experts_per_device = _parse_moe_expert_parallel(
-                self.num_experts, self.expert_parallel_degree
+                self.num_experts, self.expert_model_parallel_size
             )
         else:
             self.moe_group = None
             self.moe_rank = 0
-            self.expert_parallel_degree = 1
+            self.expert_model_parallel_size = 1
             self.num_experts_per_device = self.num_experts
 
     def expert_forward(
@@ -364,7 +369,7 @@ class MoELayer(nn.Layer):
         Returns:
             output: Shape: [batch_size, seq_len, hidden_size]
         """
-        if self.expert_parallel_degree <= 1 and self.sequence_parallel:
+        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             hidden_states = GatherOp.apply(hidden_states)
         orig_shape = hidden_states.shape
         residuals = hidden_states
@@ -382,7 +387,7 @@ class MoELayer(nn.Layer):
         # gates_masked, mask will be used in DeepEPMoECommunication
         # capacity, priorities are not used currently
 
-        if self.expert_parallel_degree > 1:
+        if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
                     hidden_states, gates_masked, mask
@@ -409,7 +414,7 @@ class MoELayer(nn.Layer):
             shared_output = self.shared_experts(residuals)[0]
             output = output + shared_output
 
-        if self.expert_parallel_degree <= 1 and self.sequence_parallel:
+        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)
 
         return output, None  # None is bias

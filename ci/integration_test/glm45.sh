@@ -32,7 +32,7 @@ cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 apt-get update
 apt-get install jq -y
 
-jq '.expert_parallel_degree = 8' glm45.json > glm45_single_node.json
+jq '.expert_model_parallel_size = 8' glm45.json > glm45_single_node.json
 jq '.save_steps = 100' glm45_single_node.json > glm45.json
 jq --arg dir "1.0 $CACHE_DIR/glm45/data/pre-training/llama_openwebtext_100k" '.input_dir = $dir' glm45.json > glm45_single_node.json
 jq --arg dir "$CACHE_DIR/glm45/GLM-4.5-Air" '.model_name_or_path = $dir' glm45_single_node.json > glm45.json

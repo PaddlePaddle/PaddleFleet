@@ -71,7 +71,9 @@ class StandardMoERouter(nn.Layer):
             config.get("routed_scaling_factor", 1.0),
         )
         self.moe_subbatch_token_num = config.get("moe_subbatch_token_num", -1)
-        self.tensor_parallel_degree = config.get("tensor_parallel_degree", 1)
+        self.tensor_model_parallel_size = config.get(
+            "tensor_model_parallel_size", 1
+        )
         self.sequence_parallel = config.get("sequence_parallel", 1)
         self.transpose_gate_weight = config.get("transpose_gate_weight", False)
 
@@ -226,16 +228,16 @@ class StandardMoERouter(nn.Layer):
             and self.moe_subbatch_token_num > 0
         ):
             sub_max_seq_len = (
-                self.moe_subbatch_token_num * self.tensor_parallel_degree
+                self.moe_subbatch_token_num * self.tensor_model_parallel_size
             )
 
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
-        if self.tensor_parallel_degree > 1:
+        if self.tensor_model_parallel_size > 1:
             assert (
                 self.sequence_parallel
-                and max_seq_len % self.tensor_parallel_degree == 0
+                and max_seq_len % self.tensor_model_parallel_size == 0
             )
-            local_seq_len = sub_max_seq_len // self.tensor_parallel_degree
+            local_seq_len = sub_max_seq_len // self.tensor_model_parallel_size
             # [B*S, E]
             all_probs = AllGatherOp.apply(probs)
             # [B, S, E]

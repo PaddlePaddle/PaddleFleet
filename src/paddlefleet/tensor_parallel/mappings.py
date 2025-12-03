@@ -171,6 +171,7 @@ def _reduce_scatter_along_first_dim(
 
     if input_split_sizes is None:
         dim_size = list(input_.shape)
+        print("debug dim_size", dim_size)
         assert dim_size[0] % world_size == 0, (
             "First dimension of the tensor should be divisible by tensor parallel size"
         )
