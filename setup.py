@@ -96,7 +96,7 @@ def setup_ops_extension():
                     "-Wno-abi",
                     "-fPIC",
                     "-std=c++17",
-                    "-DPy_LIMITED_API=0x03090000",
+                    "-DPy_LIMITED_API=0x030A0000",
                 ],
                 "nvcc": nvcc_args,
             },
