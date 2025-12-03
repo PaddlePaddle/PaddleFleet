@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet import utils
+from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
+from paddlefleet.parallel_state import get_context_parallel_world_size
 
 
 class StandardMoERouter(nn.Layer):
@@ -73,6 +75,7 @@ class StandardMoERouter(nn.Layer):
         self.moe_subbatch_token_num = config.get("moe_subbatch_token_num", -1)
         self.tensor_parallel_degree = config.get("tensor_parallel_degree", 1)
         self.sequence_parallel = config.get("sequence_parallel", 1)
+        self.context_parallel_degree = max(get_context_parallel_world_size(), 1)
         self.transpose_gate_weight = config.get("transpose_gate_weight", False)
 
         self.moe_router_score_function = config.get(
@@ -226,22 +229,40 @@ class StandardMoERouter(nn.Layer):
             and self.moe_subbatch_token_num > 0
         ):
             sub_max_seq_len = (
-                self.moe_subbatch_token_num * self.tensor_parallel_degree
+                self.moe_subbatch_token_num
+                * self.tensor_parallel_degree
+                * self.context_parallel_degree
             )
 
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
-        if self.tensor_parallel_degree > 1:
-            assert (
-                self.sequence_parallel
-                and max_seq_len % self.tensor_parallel_degree == 0
-            )
-            local_seq_len = sub_max_seq_len // self.tensor_parallel_degree
+        if self.tensor_parallel_degree > 1 or self.context_parallel_degree > 1:
+            local_seq_len = sub_max_seq_len
+            if self.sequence_parallel and self.tensor_parallel_degree > 1:
+                assert max_seq_len % self.tensor_parallel_degree == 0
+                local_seq_len = sub_max_seq_len // self.tensor_parallel_degree
+            if self.context_parallel_degree > 1:
+                assert local_seq_len % self.context_parallel_degree == 0
+                local_seq_len = local_seq_len // self.context_parallel_degree
             # [B*S, E]
-            all_probs = AllGatherOp.apply(probs)
-            # [B, S, E]
-            all_probs = all_probs.reshape(
-                [-1, sub_max_seq_len, self.num_experts]
-            )
+            if self.sequence_parallel and self.tensor_parallel_degree > 1:
+                all_probs = AllGatherOp.apply(probs)
+            else:
+                all_probs = probs
+            if self.context_parallel_degree > 1:
+                all_probs = all_probs.reshape(
+                    [
+                        -1,
+                        sub_max_seq_len // self.context_parallel_degree,
+                        self.num_experts,
+                    ]
+                )
+                # [B, S, E]
+                all_probs = ContextParallelAllGatherOp.apply(all_probs, axis=1)
+            else:
+                # [B, S, E]
+                all_probs = all_probs.reshape(
+                    [-1, sub_max_seq_len, self.num_experts]
+                )
             batch_size = all_probs.shape[0]
             # [B, S, E]
             routing_map = routing_map.reshape([batch_size, local_seq_len, -1])

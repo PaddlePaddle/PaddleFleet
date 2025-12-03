@@ -28,6 +28,7 @@ import paddle
 from paddle import Tensor, nn
 
 from paddlefleet import parallel_state
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,14 @@ class RotaryEmbedding(nn.Layer):
             ).reshape((freqs.shape[0], -1))
         # emb [1, seq_len, 1, dim]
         emb = emb[None, :, None, :]
+        if (
+            self.cp_group is not None
+            and self.cp_group.world_size > 1
+            and not packed_seq
+        ):
+            # slice rotary_pos_emb along sequence dimension and select the partition of the current
+            # CP rank
+            emb = ContextParallelScatterOp.apply(emb, axis=1)
         return emb
 
     def get_rotary_seq_len(
@@ -234,6 +243,9 @@ class RotaryEmbedding(nn.Layer):
             if transformer_config.sequence_parallel:
                 rotary_seq_len *= transformer_config.tensor_model_parallel_size
 
-        rotary_seq_len *= transformer_config.context_parallel_size
+        # TODO: self.cp_group.world_size --> transformer_config.context_parallel_size
+        # rotary_seq_len *= transformer_config.context_parallel_size
+        if self.cp_group is not None and self.cp_group.world_size > 1:
+            rotary_seq_len *= self.cp_group.world_size
 
         return rotary_seq_len
