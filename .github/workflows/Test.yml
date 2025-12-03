@@ -213,8 +213,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
-          cat /paddle/ci/.coveragerc
-          ls
           export WITH_COVERAGE=ON
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
@@ -283,7 +281,7 @@ jobs:
             -v /ssd1/paddle-1/action_cache:/root/.cache \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v /paddle:/paddle \
+            -v ${{ github.workspace }}:/workspace \
             -e BRANCH \
             -e PR_ID \
             -e COMMIT_ID \
@@ -302,7 +300,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -w /paddle --network host ${docker_image}
+            -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
         run: |
@@ -341,10 +339,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           pwd
-          cd /paddle
-          ls
-          export COVERAGE_FILE=/paddle/coveragedata/.coverage
-          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           export WITH_COVERAGE=ON
           source /root/proxy
           bash -x PaddleFleet/ci/integration_test/glm45.sh
@@ -363,8 +359,8 @@ jobs:
       - name: Integration-test-H20 Coverage Upload to BOS
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          export COVERAGE_FILE=/paddle/coveragedata/.coverage
-          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           export WITH_COVERAGE=ON
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
