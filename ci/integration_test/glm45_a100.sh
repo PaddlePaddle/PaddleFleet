@@ -39,6 +39,7 @@ with open(infile) as fin, open(outfile, 'w') as fout:
         if line.strip() == 'expert_model_parallel_size: int = 16':
             pad = line[:len(line) - len(line.lstrip())]
             fout.write(pad + 'expert_model_parallel_size: int = 4\n')
+            fout.write(pad + 'num_experts_per_tok: int = 2\n')
         else:
             fout.write(line)
 "
