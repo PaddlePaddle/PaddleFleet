@@ -357,6 +357,7 @@ class TransformerConfig(ModelParallelConfig):
         if not isinstance(key, str) or not key.isidentifier():
             print(f"invalid key name: {key}")
             return
+
         if key == "activation_func":
             if isinstance(value, str):
                 func = getattr(F, value)
