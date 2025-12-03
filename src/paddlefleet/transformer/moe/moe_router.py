@@ -38,7 +38,7 @@ class StandardMoERouter(nn.Layer):
     ):
         super().__init__()
         self.config = config
-        
+
         self.hidden_size = config["hidden_size"]
         self.num_experts = config.get(
             "moe_num_experts",
@@ -556,7 +556,6 @@ class StandardMoERouter(nn.Layer):
         paddle.Tensor,
     ]:
         """Implements TopKGating on logits."""
-        print("self.num_experts_per_tok = ", self.num_experts_per_tok)
         if len(hidden_states.shape) == 3:
             batch_size, seq_len, d_model = hidden_states.shape
             hidden_states = hidden_states.reshape([-1, d_model])

@@ -81,10 +81,6 @@ class MoELayer(nn.Layer):
         self.moe_router_topk = config.get(
             "moe_router_topk", config.get("moe_k", -1)
         )
-        self.num_experts_per_tok = config.get(
-            "num_experts_per_tok",
-            config.get("num_experts_per_tok", config.get("moe_k", -1)),
-        )
 
         self.expert_activation = config.get(
             "hidden_act", config.get("expert_activation", "silu")
@@ -122,7 +118,6 @@ class MoELayer(nn.Layer):
 
         # MoE-Related Configs
         self.expert_dropout = config.get("expert_dropout", 0.0)
-        self.moe_grouped_gemm = config.get("moe_grouped_gemm", False)
         self._init_expert_parallel()
         self.gate = StandardMoERouter(
             config=config, pg_collection=pg_collection
@@ -157,12 +152,13 @@ class MoELayer(nn.Layer):
             else:
                 self.experts.append(None)
 
-        self.grouped_gemm_experts = GroupedMLPExpert(
-            self.num_local_experts,
-            routed_expert_config,
-            self.experts,
-            pg_collection,
-        )
+        if self.expert_parallel_degree <= 1 and self.moe_use_fusion_node:
+            self.grouped_gemm_experts = GroupedMLPExpert(
+                self.num_local_experts,
+                routed_expert_config,
+                self.experts,
+                pg_collection,
+            )
 
         shared_expert_args = deepcopy(expert_args)
         shared_expert_args["moe_intermediate_size"] = (
@@ -381,7 +377,7 @@ class MoELayer(nn.Layer):
             aux_loss,
             z_loss,
         ) = self.gate(hidden_states)
-        # topk_weights, topk_indices: Shape is [seq_len, num_experts_per_token]
+        # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
         # gates_masked, mask: Shape is [seq_len, num_experts], sometimes their names are "probs" and "routing_map"
         # capacity, priorities are used for dropping tokens, currently they are not used
 
@@ -453,7 +449,6 @@ class MoELayer(nn.Layer):
         tokens_per_expert = expert_mask.reshape([expert_mask.shape[0], -1]).sum(
             axis=-1
         )
-        print("_forward_traditional_moe tokens_per_expert:", tokens_per_expert)
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.num_experts):
             expert_layer = self.experts[expert_idx]
