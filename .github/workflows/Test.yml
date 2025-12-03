@@ -422,6 +422,24 @@ jobs:
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
           '
+      
+      - name: H20 Coverage Upload to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/coveragedata/coverage-multi.xml coverage-multi.xml
+          cp /paddle/coveragedata/coverage-single.xml coverage-single.xml
+          cp /paddle/coveragedata/coverage-qwen.xml coverage-qwen.xml
+          target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
+          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
+          target_path_qwen="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-qwen"
+          uv run ${push_file} coverage-multi.xml ${target_path_multi}
+          uv run ${push_file} coverage-single.xml ${target_path_single}
+          uv run ${push_file} coverage-qwen.xml ${target_path_qwen}
+          '
 
       - name: Terminate and delete the container
         if: ${{ always() }}
@@ -534,15 +552,27 @@ jobs:
           bash -x PaddleFleet/ci/integration_test/glm45_a100.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen/coverage.xml
-          uv run coverage report -m
+          uv run --with "coverage==7.12" -m coverage --version
+          uv run --with "coverage==7.12" coverage combine
+          uv run --with "coverage==7.12" coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
+          uv run --with "coverage==7.12" coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
+          '
+      - name: A100 Coverage Upload to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/coveragedata/coverage.xml coverage.xml
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
+          uv run ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
@@ -553,7 +583,7 @@ jobs:
 
   coverage_check:
     name: Coverage Upload And Check
-    needs: [multi-card_test, single_card_test, check-bypass]
+    needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20, check-bypass]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on: ubuntu-latest
     env:
@@ -577,12 +607,24 @@ jobs:
           wget "${multi_card_cov_file_url}" -O multi_coverage.xml --no-proxy
           single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
           wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
+          h20_multi_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi.xml"
+          wget "${h20_multi_cov_file_url}" -O h20_multi_coverage.xml --no-proxy
+          h20_single_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-single/coverage-single.xml"
+          wget "${h20_single_cov_file_url}" -O h20_single_coverage.xml --no-proxy
+          h20_qwen_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-qwen/coverage-qwen.xml"
+          wget "${h20_qwen_cov_file_url}" -O h20_qwen_coverage.xml --no-proxy
+          a100_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/a100/coverage.xml"
+          wget "${a100_cov_file_url}" -O a100_coverage.xml --no-proxy
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_single_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' a100_coverage.xml
           git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
-          diff-cover multi_coverage.xml single_coverage.xml  --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
+          diff-cover multi_coverage.xml single_coverage.xml h20_multi_coverage.xml h20_single_coverage.xml h20_qwen_coverage.xml a100_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
 
       - name: Upload coverage to Codecov
