@@ -298,10 +298,10 @@ class TransformerConfig(ModelParallelConfig):
     norm_topk_prob: bool = True
     """Whether to normalize the topk probabilities."""
 
-    n_group: int | None = None
+    n_group: int = 1
     """Number of groups for routed experts."""
 
-    topk_group: int | None = None
+    topk_group: int = 1
     """Number of selected groups per token for expert selection."""
 
     routed_scaling_factor: float = 1.0
@@ -400,7 +400,7 @@ class TransformerConfig(ModelParallelConfig):
 
     @classmethod
     def from_config(cls, config_dict):
-        instance = cls()
+        instance = object.__new__(cls)
         instance.register_attributes(config_dict)
         instance.__post_init__()
         return instance
