@@ -281,7 +281,7 @@ jobs:
             -v /ssd1/paddle-1/action_cache:/root/.cache \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v ${{ github.workspace }}:/paddle \
+            -v /paddle:/paddle \
             -e BRANCH \
             -e PR_ID \
             -e COMMIT_ID \
