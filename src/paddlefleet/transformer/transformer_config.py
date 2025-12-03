@@ -358,7 +358,7 @@ class TransformerConfig(ModelParallelConfig):
             print(f"invalid key name: {key}")
             return
 
-        if key == "torch_dtype":
+        if key == "dtype":
             self.params_dtype = value
 
         if key == "activation_func":
