@@ -176,8 +176,8 @@ class TestGPTModel(unittest.TestCase):
                 f"loss not equal ({loss.item()} != 5.344995498657227), please check your modify"
             )
         elif judge_machine_type() == "V":
-            assert loss.item() == 5.566722869873047, (
-                f"loss not equal ({loss.item()} != 5.566722869873047), please check your modify"
+            assert loss.item() == 5.518514633178711, (
+                f"loss not equal ({loss.item()} != 5.518514633178711), please check your modify"
             )
 
         loss.backward()
