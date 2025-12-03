@@ -30,6 +30,19 @@ jq --arg cache "$CACHE_DIR" \
    $config_json > $config_json.tmp
 mv $config_json.tmp $config_json
 
+python -c "
+infile = '$root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py'
+outfile = infile + '.new'
+with open(infile) as fin, open(outfile, 'w') as fout:
+    for line in fin:
+        if line.strip() == 'expert_model_parallel_size: int = 16':
+            pad = line[:len(line) - len(line.lstrip())]
+            fout.write(pad + 'expert_model_parallel_size: int = 4\n')
+        else:
+            fout.write(line)
+"
+mv $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py.new $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)
