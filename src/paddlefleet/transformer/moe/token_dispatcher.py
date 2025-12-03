@@ -287,7 +287,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
     def __init__(
         self,
         num_local_experts: int,
-        num_experts_per_tok: int,
+        moe_router_topk: int,
         moe_num_experts: int,
         ep_group: Group,
     ):
@@ -297,10 +297,48 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         assert self.ep_size > 1, "Flex token dispatcher requires EP > 1"
         self._comm_manager = _DeepepManager(
             group=self.ep_group,
-            router_topk=num_experts_per_tok,
+            router_topk=moe_router_topk,
             num_experts=moe_num_experts,
             num_local_experts=self.num_local_experts,
         )
+
+    def dispatch_preprocess(
+        self,
+        hidden_states: paddle.Tensor,
+        probs: paddle.Tensor,
+        routing_map: paddle.Tensor,
+    ):
+        self.hidden_shape = hidden_states.shape
+        hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
+        self._comm_manager.setup_metadata(routing_map, probs)
+        return hidden_states
+
+    def token_dispatch(self, hidden_states: paddle.Tensor):
+        return self._comm_manager.dispatch(hidden_states)
+
+    def dispatch_postprocess(
+        self,
+        hidden_states: paddle.Tensor,
+    ):
+        global_input_tokens = (
+            self._comm_manager.get_permuted_hidden_states_by_experts(
+                hidden_states
+            )
+        )
+        tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
+
+        return global_input_tokens, tokens_per_expert
+
+    def combine_preprocess(self, hidden_states: paddle.Tensor):
+        return self._comm_manager.get_restored_hidden_states_by_experts(
+            hidden_states
+        )
+
+    def token_combine(self, hidden_states: paddle.Tensor):
+        return self._comm_manager.combine(hidden_states)
+
+    def combine_postprocess(self, hidden_states: paddle.Tensor):
+        return hidden_states.reshape(self.hidden_shape)
 
     def token_permutation(
         self,

@@ -955,6 +955,7 @@ class LLaVAModel(FleetLayer):
                 packed_seq_params,
             )
 
+        new_labels = new_labels.transpose([1, 0]).contiguous()
         # TODO(zhangweilong): need support mamba model.now only support gpt model
         output = self.language_model(
             input_ids=None,

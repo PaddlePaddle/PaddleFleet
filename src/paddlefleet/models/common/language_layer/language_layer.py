@@ -17,9 +17,9 @@ import logging
 import paddle
 from paddle import Tensor
 
-from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
-
 # from paddlefleet.dist_checkpointing.mapping import ShardedStateDict
+from paddlefleet import tensor_parallel
+from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
 from paddlefleet.pipeline_parallel.utils import (
     is_pp_first_stage,
     is_pp_last_stage,
@@ -124,16 +124,10 @@ class LanguageLayer(FleetLayer):
         Returns:
             Tensor: Loss tensor of dimensions [batch size, sequence_length]
         """
-        # TODO(pkuzyc): check the difference between vocab_parallel_cross_entropy
-        # and paddle.nn.CrossEntropy, and use vocab_parallel_cross_entropy as loss func.
-
-        # logits: [s,b,h] labels: [b,s] -> logits: [s,b,h] labels: [s,b]
-        if labels.shape[-1] == logits.shape[0]:
-            labels = labels.transpose(0, 1).contiguous()
-        loss = self.loss_func(logits.cast("float32"), labels)
-        # loss = tensor_parallel.vocab_parallel_cross_entropy(
-        #     logits.cast("float32"), labels
-        # )
+        # loss = self.loss_func(logits.cast("float32"), labels)
+        loss = tensor_parallel.vocab_parallel_cross_entropy(
+            logits.cast("float32"), labels
+        )
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():  # empty span
@@ -160,9 +154,9 @@ class LanguageLayer(FleetLayer):
 
         # Set `is_embedding_or_output_parameter` attribute.
         if self.pre_process:
-            self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
-        if self.post_process and self.output_layer.weight is not None:
-            self.output_layer.weight.is_embedding_or_output_parameter = True
+            self.embedding.embed_tokens.weight.is_embedding_or_output_parameter = True
+        if self.post_process and self.lm_head.weight is not None:
+            self.lm_head.weight.is_embedding_or_output_parameter = True
 
         # If share_embeddings_and_output_weights is True, we need to maintain duplicated
         # embedding weights in post processing stage. If use Multi-Token Prediction (MTP),
@@ -207,13 +201,13 @@ class LanguageLayer(FleetLayer):
         # heads at the end of the model. In a pipelined setup with more than
         # one stage, the initial embedding layer and the head are on different
         # workers, so we do the following:
-        # 1. Create a second copy of word_embeddings on the last stage, with
+        # 1. Create a second copy of embed_tokens on the last stage, with
         #    initial parameters of 0.0.
         # 2. Do an all-reduce between the first and last stage to ensure that
-        #    the two copies of word_embeddings start off with the same
+        #    the two copies of embed_tokens start off with the same
         #    parameter values.
         # 3. In the training loop, before an all-reduce between the grads of
-        #    the two word_embeddings layers to ensure that every applied weight
+        #    the two embed_tokens layers to ensure that every applied weight
         #    update is the same on both stages.
 
         # Ensure that first and last stages have the same initial parameter
@@ -240,9 +234,9 @@ class LanguageLayer(FleetLayer):
             Tensor: During pre processing it returns the input embeddings weight while during post processing it returns the final output layers weight
         """
         if self.pre_process:
-            return self.embedding.word_embeddings.weight
+            return self.embedding.embed_tokens.weight
         elif self.post_process:
-            return self.output_layer.weight
+            return self.lm_head.weight
         return None
 
     # def sharded_state_dict(
@@ -264,7 +258,7 @@ class LanguageLayer(FleetLayer):
     #    assert not sharded_offsets, "Unexpected sharded offsets"
     #    sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
 
-    #    first_stage_word_emb_key = f'{prefix}embedding.word_embeddings.weight'
+    #    first_stage_word_emb_key = f'{prefix}embedding.embed_tokens.weight'
     #    output_layer_weight_key = f'{prefix}output_layer.weight'
     #    output_layer_bias_key = f'{prefix}output_layer.bias'
 

@@ -230,7 +230,7 @@ class TransformerLayerSublayersSpec:
         cross_attention (LayerSpec | type): Specification for the cross-attention mechanism.
         cross_attn_bda (LayerSpec | type): Specification for the bias-dropout-add operation
             after cross-attention.
-        pre_mlp_layernorm (LayerSpec | type): Specification for the layer normalization
+        post_attention_layernorm (LayerSpec | type): Specification for the layer normalization
             before the MLP.
         mlp (LayerSpec | type): Specification for the MLP in Dense layer.
         mlp_bda (LayerSpec | type): Specification for the bias-dropout-add operation
@@ -247,7 +247,7 @@ class TransformerLayerSublayersSpec:
     cross_attention: LayerSpec | type = IdentityOp
     cross_attn_bda: LayerSpec | type = IdentityFuncOp
 
-    pre_mlp_layernorm: LayerSpec | type = IdentityOp
+    post_attention_layernorm: LayerSpec | type = IdentityOp
     mlp: LayerSpec | type = IdentityOp
     mlp_bda: LayerSpec | type = IdentityFuncOp
 
@@ -354,8 +354,8 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         )
 
         # [Layer 7: Pre MLP] Optional Layernorm before MLP
-        self.pre_mlp_layernorm = build_layer(
-            sublayers_spec.pre_mlp_layernorm,
+        self.post_attention_layernorm = build_layer(
+            sublayers_spec.post_attention_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -398,7 +398,7 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         self.recompute_mlp = False
         if self.config.recompute_granularity == "selective":
             if "layernorm" in self.config.recompute_layers:
-                if not isinstance(self.pre_mlp_layernorm, IdentityOp):
+                if not isinstance(self.post_attention_layernorm, IdentityOp):
                     self.recompute_pre_mlp_layernorm = True
 
             if "mlp" in self.config.recompute_layers:
@@ -540,10 +540,12 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
                 tensor_parallel.CheckpointWithoutOutput()
             )
             pre_mlp_layernorm_output = self.pre_mlp_norm_checkpoint.checkpoint(
-                self.pre_mlp_layernorm, hidden_states
+                self.post_attention_layernorm, hidden_states
             )
         else:
-            pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+            pre_mlp_layernorm_output = self.post_attention_layernorm(
+                hidden_states
+            )
 
         if self.recompute_mlp:
             mlp_output_with_bias = tensor_parallel.checkpoint(

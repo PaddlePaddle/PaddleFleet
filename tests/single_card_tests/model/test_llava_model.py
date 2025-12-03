@@ -113,7 +113,7 @@ class TestLLaVAModel(unittest.TestCase):
 
         num_weights = sum([p.numel() for p in self.model.parameters()])
 
-        assert num_weights == 1488192
+        assert num_weights == 1486080
 
     def test_set_input_tensor(self):
         expected_shape = (1, 2, 3, 4)
@@ -371,7 +371,7 @@ class TestLLaVAModel(unittest.TestCase):
 
 
 class TestLLaVAModelVisionEncoders(unittest.TestCase):
-    num_weights_by_encoder = {"siglip": 1831176, "radio-g": 2843144}
+    num_weights_by_encoder = {"siglip": 1826368, "radio-g": 2838336}
 
     def setUp(self):
         pass

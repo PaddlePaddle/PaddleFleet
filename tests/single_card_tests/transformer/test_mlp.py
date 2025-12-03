@@ -30,6 +30,7 @@ class TestParallelMLP(unittest.TestCase):
         hidden_size=12,
         intermediate_size=48,
         num_attention_heads=4,
+        use_bias=True,
     )
     expected_num_weights = 1212
 
@@ -71,6 +72,7 @@ class TestBiasFusedGatedMLP(TestParallelMLP):
         num_attention_heads=4,
         bias_activation_fusion=True,
         gated_linear_unit=True,
+        use_bias=True,
     )
     expected_num_weights = 1836
 

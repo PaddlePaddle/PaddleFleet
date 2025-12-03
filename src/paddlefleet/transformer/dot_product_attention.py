@@ -184,6 +184,29 @@ class DotProductAttention(FleetLayer):
             "Attention bias is not supported for DotProductAttention."
         )
 
+        if query.dtype == paddle.bfloat16 or query.dtype == paddle.float16:
+            # Note:
+            # attention_mask is None in default
+            # is_causal is True in default
+            # training is True in default
+            # Default values above maybe changed in the future
+            attn_output = paddle.nn.functional.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                None,  # attention_mask
+                self.config.attention_dropout,
+                is_causal=True,
+                training=True,
+            )
+
+            attn_output = paddle.reshape(
+                x=attn_output,
+                shape=[0, 0, attn_output.shape[2] * attn_output.shape[3]],
+            )
+
+            return attn_output
+
         # ===================================
         # Raw attention scores. [b, n/p, s, s]
         # ===================================
@@ -209,28 +232,7 @@ class DotProductAttention(FleetLayer):
                 // self.num_query_groups_per_partition,
                 dim=2,
             )
-        if query.dtype == paddle.bfloat16 or query.dtype == paddle.float16:
-            # Note:
-            # attention_mask is None in default
-            # is_causal is True in default
-            # training is True in default
-            # Default values above maybe changed in the future
-            attn_output = paddle.nn.functional.scaled_dot_product_attention(
-                query,
-                key,
-                value,
-                None,  # attention_mask
-                self.config.attention_dropout,
-                is_causal=True,
-                training=True,
-            )
 
-            attn_output = paddle.reshape(
-                x=attn_output,
-                shape=[0, 0, attn_output.shape[2] * attn_output.shape[3]],
-            )
-
-            return attn_output
         # [b, np, sq, sk]
         output_size = (
             query.shape[0],

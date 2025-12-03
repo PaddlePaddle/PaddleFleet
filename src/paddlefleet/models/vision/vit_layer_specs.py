@@ -55,7 +55,7 @@ def get_vit_layer_with_local_spec() -> LayerSpec:
                 ),
             ),
             self_attn_bda=get_bias_dropout_add,
-            pre_mlp_layernorm=LNImpl,
+            post_attention_layernorm=LNImpl,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
         ),
