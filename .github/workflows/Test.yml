@@ -320,6 +320,7 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           pip install uv
+          pip install coverage
           uv sync -v
           '
 
