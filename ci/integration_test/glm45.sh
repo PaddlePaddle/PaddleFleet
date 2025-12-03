@@ -15,7 +15,6 @@
 root_dir=$(pwd)
 
 source PaddleFleet/.venv/bin/activate
-pip install coverage
 
 if [ ! -f $CACHE_DIR/glm45/data.tar ]; then
   mkdir -p $CACHE_DIR/glm45 && cd $CACHE_DIR/glm45

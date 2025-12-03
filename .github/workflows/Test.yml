@@ -335,6 +335,7 @@ jobs:
           git config pull.rebase false
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
+          pip install coverage==5.5
           '
 
       - name: Integration test (GLM4.5)
