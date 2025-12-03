@@ -27,8 +27,11 @@ def change_pwd():
 
 
 def setup_ops_extension():
-    """setup_ops_extension"""
     from paddle.utils.cpp_extension import CUDAExtension, setup
+    try:
+        from wheel.bdist_wheel import bdist_wheel
+    except ImportError:
+        bdist_wheel = None
 
     nvcc_path = shutil.which("nvcc")
     if nvcc_path is None:
@@ -52,6 +55,7 @@ def setup_ops_extension():
     cuda_major = int(match.group(1))
     cuda_minor = int(match.group(2))
 
+    # 定义 NVCC 编译参数
     nvcc_args = [
         "-O3",
         "-U__CUDA_NO_HALF_OPERATORS__",
@@ -70,6 +74,7 @@ def setup_ops_extension():
         "-gencode=arch=compute_100,code=sm_100",
         "-DNDEBUG",
         "-DPADDLE_NO_PYTHON",
+        # Limited API Macro for NVCC
         "-DPy_LIMITED_API=0x030A0000",
     ]
     if cuda_major < 12:
@@ -79,28 +84,39 @@ def setup_ops_extension():
     if cuda_major == 12 and cuda_minor < 8:
         nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
 
+    ext_module = CUDAExtension(
+        sources=[
+            "./src/paddlefleet/extensions/tokens_stable_unzip.cu",
+        ],
+        include_dirs=[
+            os.path.join(os.getcwd(), "src/paddlefleet/extensions"),
+        ],
+        extra_compile_args={
+            "cxx": ["-O3", "-w", "-Wno-abi", "-fPIC", "-std=c++17", "-DPy_LIMITED_API=0x030A0000"],
+            "nvcc": nvcc_args,
+        },
+        py_limited_api=True, 
+    )
+
+    ext_module.py_limited_api = True
+
+    cmdclass = {}
+    if bdist_wheel:
+        class ABI3Wheel(bdist_wheel):
+            def get_tag(self):
+                python, abi, plat = super().get_tag()
+                if python.startswith("cp"):
+                    return python, "abi3", plat
+                return python, abi, plat
+        
+        cmdclass['bdist_wheel'] = ABI3Wheel
+
     change_pwd()
+    
     setup(
         name="paddlefleet.extensions.ops",
-        ext_modules=CUDAExtension(
-            sources=[
-                "./src/paddlefleet/extensions/tokens_stable_unzip.cu",
-            ],
-            include_dirs=[
-                os.path.join(os.getcwd(), "src/paddlefleet/extensions"),
-            ],
-            extra_compile_args={
-                "cxx": [
-                    "-O3",
-                    "-w",
-                    "-Wno-abi",
-                    "-fPIC",
-                    "-std=c++17",
-                    "-DPy_LIMITED_API=0x030A0000",
-                ],
-                "nvcc": nvcc_args,
-            },
-        ),
+        ext_modules=[ext_module],
+        cmdclass=cmdclass,
     )
 
 
