@@ -278,7 +278,7 @@ jobs:
           docker run -d -t --name ${container_name} --gpus all --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
             -v "/home/data/cfs:/home/data/cfs" \
-            -v "/home/data/cfs/.cache:/root/.cache" \
+            -v /ssd1/paddle-1/action_cache:/root/.cache \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
             -v ${{ github.workspace }}:/paddle \
@@ -339,6 +339,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           pwd
+          cd /paddle
+          ls
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -401,7 +403,7 @@ jobs:
           docker run -d -t --name ${container_name} --gpus all --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
             -v "/home/data/cfs:/home/data/cfs" \
-            -v "/home/data/cfs/.cache:/root/.cache" \
+            -v /ssd1/paddle-1/action_cache:/root/.cache \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
             -v ${{ github.workspace }}:/paddle \
