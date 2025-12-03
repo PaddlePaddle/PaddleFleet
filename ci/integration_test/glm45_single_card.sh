@@ -19,11 +19,10 @@ source PaddleFleet/.venv/bin/activate
 export root_dir=$(pwd)
 cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 
-config_json="glm45.json"
+config_json="glm45_single_card.json"
 
 jq --arg cache "$CACHE_DIR" \
-   '.expert_parallel_degree = 8
-    | .save_steps = 100
+   '.save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
     | .model_name_or_path = "\($cache)/glm45/GLM-4.5-Air"' \
    $config_json > $config_json.tmp
@@ -34,15 +33,25 @@ rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
-# export FLAGS_embedding_deterministic=1
-# export FLAGS_cudnn_deterministic=1
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
-python -m paddle.distributed.launch \
-   --log_dir ./log \
-   --master $master:$port \
-   --nnodes 1 \
-   --rank 0 \
-   --run_mode=collective \
-   run_pretrain.py $config_json \
-   --output_dir ./checkpoint | tee ./glm45.log
+python run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
+
+echo "
+1 12.06599045
+2 12.03911209
+3 12.04506493
+4 12.01400757
+5 11.98324871
+6 11.96981049
+7 11.95959091
+8 11.91748428
+9 11.96483421
+10 11.93076324
+" > ./glm45_single_card_gt_loss.txt
+
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --log_file ./glm45_single_card.log \
+   --gt_file ./glm45_single_card_gt_loss.txt

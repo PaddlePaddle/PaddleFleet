@@ -19,30 +19,25 @@ source PaddleFleet/.venv/bin/activate
 export root_dir=$(pwd)
 cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 
-config_json="glm45.json"
+config_json="qwen_single_card.json"
 
 jq --arg cache "$CACHE_DIR" \
-   '.expert_parallel_degree = 8
-    | .save_steps = 100
+   '.save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
-    | .model_name_or_path = "\($cache)/glm45/GLM-4.5-Air"' \
+    | .model_name_or_path = "\($cache)/qwen/Qwen3-30B-A3B-Base"' \
    $config_json > $config_json.tmp
 mv $config_json.tmp $config_json
+
+ls -lah $CACHE_DIR/qwen/Qwen3-30B-A3B-Base
+cat $config_json
 
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
-# export FLAGS_embedding_deterministic=1
-# export FLAGS_cudnn_deterministic=1
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
-python -m paddle.distributed.launch \
-   --log_dir ./log \
-   --master $master:$port \
-   --nnodes 1 \
-   --rank 0 \
-   --run_mode=collective \
-   run_pretrain.py $config_json \
-   --output_dir ./checkpoint | tee ./glm45.log
+python run_pretrain.py $config_json | tee ./qwen3_single_card.log

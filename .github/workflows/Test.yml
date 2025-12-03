@@ -365,6 +365,7 @@ jobs:
           '
 
       - name: Install PaddleFormers
+        id: formers_install
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -378,7 +379,23 @@ jobs:
           pip install -e .
           '
 
-      - name: Integration test (GLM4.5)
+      - name: Proprocess for integration test
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          bash -x PaddleFleet/ci/integration_test/preprocess.sh
+          preprocess_exit_code=$?
+          if [[ "$preprocess_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mPreprocess failed.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mPreprocess succeeded.\033[0m"
+          fi
+          '
+
+      - name: Integration test (GLM4.5 multi-card)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -389,6 +406,36 @@ jobs:
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+          fi
+          '
+
+      - name: Integration test (GLM4.5 single-card)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          bash -x PaddleFleet/ci/integration_test/glm45_single_card.sh
+          glm45_single_card_exit_code=$?
+          if [[ "$glm45_single_card_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
+          fi
+          '
+
+      - name: Integration test (Qwen3-30B-A3B single-card)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          bash -x PaddleFleet/ci/integration_test/qwen3_single_card.sh
+          qwen3_single_card_exit_code=$?
+          if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
           '
 
@@ -411,7 +458,6 @@ jobs:
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-A100
     steps:
       - name: Check docker image and run container
-        if: ${{ matrix.name == 'H20' }}
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
@@ -443,7 +489,6 @@ jobs:
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
-        if: ${{ matrix.name == 'H20' }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
@@ -463,7 +508,6 @@ jobs:
           '
 
       - name: Install PaddleFormers
-        if: ${{ matrix.name == 'H20' }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -477,12 +521,25 @@ jobs:
           pip install -e .
           '
 
-      - name: Integration test (GLM4.5)
-        if: ${{ matrix.name == 'H20' }}
+      - name: Proprocess for integration test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/glm45.sh
+          bash -x PaddleFleet/ci/integration_test/preprocess.sh
+          preprocess_exit_code=$?
+          if [[ "$preprocess_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mPreprocess failed.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mPreprocess succeeded.\033[0m"
+          fi
+          '
+
+      - name: Integration test (GLM4.5)
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          bash -x PaddleFleet/ci/integration_test/glm45_a100.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -493,7 +550,6 @@ jobs:
           '
 
       - name: Terminate and delete the container
-        if: ${{ matrix.name == 'H20' && always() }}
         run: |
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
