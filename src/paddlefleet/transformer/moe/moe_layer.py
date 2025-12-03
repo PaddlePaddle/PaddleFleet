@@ -78,6 +78,7 @@ class MoELayer(nn.Layer):
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         self.fp8 = config.fp8
+        self.moe_use_fusion_node = False
         if self.moe_token_dispatcher_type == "deepep":
             self.moe_use_fusion_node = True
 
