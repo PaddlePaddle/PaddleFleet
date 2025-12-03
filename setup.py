@@ -28,6 +28,7 @@ def change_pwd():
 
 def setup_ops_extension():
     from paddle.utils.cpp_extension import CUDAExtension, setup
+
     try:
         from wheel.bdist_wheel import bdist_wheel
     except ImportError:
@@ -92,27 +93,34 @@ def setup_ops_extension():
             os.path.join(os.getcwd(), "src/paddlefleet/extensions"),
         ],
         extra_compile_args={
-            "cxx": ["-O3", "-w", "-Wno-abi", "-fPIC", "-std=c++17", "-DPy_LIMITED_API=0x030A0000"],
+            "cxx": [
+                "-O3",
+                "-w",
+                "-Wno-abi",
+                "-fPIC",
+                "-std=c++17",
+                "-DPy_LIMITED_API=0x030A0000",
+            ],
             "nvcc": nvcc_args,
         },
-        py_limited_api=True, 
+        py_limited_api=True,
     )
 
     ext_module.py_limited_api = True
 
     cmdclass = {}
     if bdist_wheel:
+
         class ABI3Wheel(bdist_wheel):
             def get_tag(self):
                 python, abi, plat = super().get_tag()
                 if python.startswith("cp"):
                     return python, "abi3", plat
                 return python, abi, plat
-        
-        cmdclass['bdist_wheel'] = ABI3Wheel
+
+        cmdclass["bdist_wheel"] = ABI3Wheel
 
     change_pwd()
-    
     setup(
         name="paddlefleet.extensions.ops",
         ext_modules=[ext_module],
