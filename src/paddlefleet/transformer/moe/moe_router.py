@@ -483,7 +483,10 @@ class StandardMoERouter(nn.Layer):
         """Implements TopKGating on logits."""
 
         if len(hidden_states.shape) == 3:
-            batch_size, seq_len, d_model = hidden_states.shape
+            if not self.sequence_parallel:
+                batch_size, seq_len, d_model = hidden_states.shape
+            else:
+                seq_len, batch, d_model = hidden_states.shape
             hidden_states = hidden_states.reshape([-1, d_model])
         elif len(hidden_states.shape) == 2:
             raise ValueError(
