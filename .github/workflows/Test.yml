@@ -317,8 +317,7 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          pip install coverage
-          uv sync -v
+          uv sync --group ci -v > /dev/null
           '
 
       - name: Install PaddleFormers
