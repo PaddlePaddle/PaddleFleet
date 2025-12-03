@@ -359,7 +359,6 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          export WITH_COVERAGE=ON
           bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi
@@ -383,7 +382,6 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          export WITH_COVERAGE=ON
           bash -x PaddleFleet/ci/integration_test/glm45_single_card.sh
           glm45_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-single
@@ -407,7 +405,6 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          export WITH_COVERAGE=ON
           bash -x PaddleFleet/ci/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-qwen
@@ -430,9 +427,9 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
-          cp /paddle/coveragedata/coverage-multi.xml coverage-multi.xml
-          cp /paddle/coveragedata/coverage-single.xml coverage-single.xml
-          cp /paddle/coveragedata/coverage-qwen.xml coverage-qwen.xml
+          cp /workspace/PaddleFleet/coveragedata/coverage-multi.xml coverage-multi.xml
+          cp /workspace/PaddleFleet/coveragedata/coverage-single.xml coverage-single.xml
+          cp /workspace/PaddleFleet/coveragedata/coverage-qwen.xml coverage-qwen.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
           target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
           target_path_qwen="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-qwen"
@@ -548,7 +545,6 @@ jobs:
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          export WITH_COVERAGE=ON
           bash -x PaddleFleet/ci/integration_test/glm45_a100.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata
@@ -570,7 +566,7 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
-          cp /paddle/coveragedata/coverage.xml coverage.xml
+          cp /workspace/PaddleFleet/coveragedata/coverage.xml coverage.xml
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
           uv run ${push_file} coverage.xml ${target_path}
           '
