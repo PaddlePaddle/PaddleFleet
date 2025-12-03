@@ -345,10 +345,10 @@ jobs:
           source /root/proxy
           bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
-          ls -a /paddle/coveragedata/
+          ls -a /workspace/PaddleFleet/coveragedata
           uv run coverage combine
           uv run coverage report -m
-          uv run coverage xml -o /paddle/coveragedata/coverage.xml
+          uv run coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
