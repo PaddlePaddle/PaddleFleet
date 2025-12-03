@@ -206,7 +206,7 @@ def get_expert_data_parallel_group(check_initialized=True):
     return _EXPERT_DATA_PARALLEL_GROUP
 
 
-def get_context_parallel_group(check_initialized=True):
+def get_context_parallel_group(check_initialized=False):
     """Get the context-parallel group the caller rank belongs to."""
     if check_initialized:
         assert _CONTEXT_PARALLEL_GROUP is not None, (
