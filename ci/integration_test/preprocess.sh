@@ -46,10 +46,10 @@ infile = '$root_dir/PaddleFormers/paddleformers/trainer/training_args.py'
 outfile = infile + '.new'
 with open(infile) as fin, open(outfile, 'w') as fout:
     for line in fin:
-        fout.write(line)
-        if line.strip() == '# initialize_fleet(strategy)':
+        if line.strip() == 'self.use_paddlefleet = False':
             pad = line[:len(line) - len(line.lstrip())]
-            fout.write(pad + 'import paddlefleet\n')
-            fout.write(pad + 'paddlefleet.training.initialize.initialize_fleet(strategy)\n')
+            fout.write(pad + 'self.use_paddlefleet = True\n')
+        else:
+            fout.write(line)
 "
 mv $root_dir/PaddleFormers/paddleformers/trainer/training_args.py.new $root_dir/PaddleFormers/paddleformers/trainer/training_args.py

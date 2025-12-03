@@ -365,6 +365,7 @@ jobs:
           '
 
       - name: Install PaddleFormers
+        id: formers_install
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -379,6 +380,7 @@ jobs:
           '
 
       - name: Proprocess for integration test
+        if: (success() || failure()) && steps.formers_install.conclusion != 'skipped'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -393,6 +395,7 @@ jobs:
           '
 
       - name: Integration test (GLM4.5 multi-card)
+        if: (success() || failure()) && steps.formers_install.conclusion != 'skipped'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -407,7 +410,7 @@ jobs:
           '
 
       - name: Integration test (GLM4.5 single-card)
-        if: (success() || failure()) && steps.unit_test.conclusion != 'skipped'
+        if: (success() || failure()) && steps.formers_install.conclusion != 'skipped'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -422,7 +425,7 @@ jobs:
           '
 
       - name: Integration test (Qwen3-30B-A3B single-card)
-        if: (success() || failure()) && steps.unit_test.conclusion != 'skipped'
+        if: (success() || failure()) && steps.formers_install.conclusion != 'skipped'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy

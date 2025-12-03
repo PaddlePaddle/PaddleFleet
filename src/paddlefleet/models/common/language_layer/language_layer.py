@@ -80,7 +80,9 @@ class LanguageLayer(FleetLayer):
         if (
             self.enable_parallel_cross_entropy
         ):  # and False: # and lm_head is distributed
-            self.loss_func = tensor_parallel.vocab_parallel_cross_entropy
+            self.loss_func = (
+                paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
+            )
         else:
             self.loss_func = paddle.nn.CrossEntropyLoss(
                 reduction="none",
@@ -122,7 +124,10 @@ class LanguageLayer(FleetLayer):
         Returns:
             Tensor: Loss tensor of dimensions [batch size, sequence_length]
         """
-        loss = self.loss_func(logits.cast("float32"), labels)
+        # loss = self.loss_func(logits.cast("float32"), labels)
+        loss = tensor_parallel.vocab_parallel_cross_entropy(
+            logits.cast("float32"), labels
+        )
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():  # empty span
