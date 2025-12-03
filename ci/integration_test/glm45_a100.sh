@@ -22,7 +22,8 @@ export root_dir=$(pwd)
 cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 
 jq --arg cache "$CACHE_DIR" \
-   '.expert_parallel_degree = 1
+   '.per_device_train_batch_size = 1
+    | .expert_parallel_degree = 1
     | .use_expert_parallel = false
     | .save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
