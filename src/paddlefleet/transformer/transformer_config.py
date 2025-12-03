@@ -275,6 +275,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_score_function: str = "softmax"
     """The router score function to use. Options are softmax, sigmoid, and tanh."""
 
+    moe_use_fusion_node: bool = False
+    """When expert parallelism is enabled, controls whether to use fusion node (permute & expert computation & unpermute) for MoE layer. When expert parallelism is disabled, controls whether to use grouped GEMM in expert computation."""
+
     ####################
     # initialization
     ####################
