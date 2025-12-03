@@ -538,11 +538,10 @@ class StandardMoERouter(nn.Layer):
         mask = paddle.zeros_like(gates).put_along_axis(
             top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
         )
-        print(seq_len)
-        assert 0
+
         if self.routing_type == "seq_aux_loss":
             l_aux = self._cal_seq_aux_loss(
-                gates_ori, self.num_experts_per_tok, mask, self.seq_length
+                gates_ori, self.num_experts_per_tok, mask, seq_len
             )
         else:
             l_aux = self._cal_aux_loss(gates, mask)

@@ -304,7 +304,7 @@ class TransformerConfig(ModelParallelConfig):
     topk_group: int | None = None
     """Number of selected groups per token for expert selection."""
 
-    routed_scaling_factor: float | None = None
+    routed_scaling_factor: float = 1.0
     """Scaling factor for routing score in top-k selection, only works when moe_router_pre_softmax
     enabled. Defaults to None, which means no scaling."""
 
