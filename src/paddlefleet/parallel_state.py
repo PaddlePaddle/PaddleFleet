@@ -77,7 +77,6 @@ _EXPERT_DATA_PARALLEL_GROUP = None
 
 # Context parallel group that the current rank belongs to
 _CONTEXT_PARALLEL_GROUP = None
-_CONTEXT_PARALLEL_WORLD_SIZE = None
 
 # Data parallel group information with context parallel combined.
 _DATA_PARALLEL_GROUP_WITH_CP = None
@@ -217,10 +216,10 @@ def get_context_parallel_group(check_initialized=False):
 
 def get_context_parallel_world_size():
     """Return world size for the tensor-model-parallel group."""
-    global _CONTEXT_PARALLEL_WORLD_SIZE
-    if _CONTEXT_PARALLEL_WORLD_SIZE is not None:
-        return _CONTEXT_PARALLEL_WORLD_SIZE
-    return get_context_parallel_group().world_size
+    if get_context_parallel_group() is None:
+        return 1
+    else:
+        return get_context_parallel_group().world_size
 
 
 def get_pipeline_model_parallel_world_size():
