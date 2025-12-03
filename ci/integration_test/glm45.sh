@@ -59,7 +59,7 @@ master=$(hostname -i)
 port=36677
 
 unset http_proxy https_proxy
-python -m paddle.distributed.launch \
+uv run -m coverage  paddle.distributed.launch \
    --log_dir ./log \
    --master $master:$port \
    --nnodes 1 \
