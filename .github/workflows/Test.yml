@@ -315,10 +315,11 @@ jobs:
           git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
           pip cache dir
+          pip install --upgrade pip
           echo "Install uv"
           pip install uv
           echo "uv sync"
-          uv sync --group ci -v > /dev/null
+          uv sync -v 
           '
 
       - name: Install PaddleFormers
@@ -502,10 +503,11 @@ jobs:
           git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
           pip cache dir
+          pip install --upgrade pip
           echo "Install uv"
           pip install uv
           echo "uv sync"
-          uv sync --group ci > /dev/null
+          uv sync -v
           '
 
       - name: Install PaddleFormers
@@ -520,8 +522,6 @@ jobs:
           git config pull.rebase false
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
-          pip install uv
-          uv sync -v
           '
 
       - name: Proprocess for integration test
