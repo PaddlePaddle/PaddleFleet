@@ -313,6 +313,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
+          source ../PaddleFleet/.venv/bin/activate
           mkdir -p /root/.cache/pip
           pip cache dir
           pip install --upgrade pip
@@ -502,6 +503,7 @@ jobs:
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
+          source ../PaddleFleet/.venv/bin/activate
           pip cache dir
           pip install --upgrade pip
           echo "Install uv"
