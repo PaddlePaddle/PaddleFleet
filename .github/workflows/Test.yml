@@ -315,8 +315,9 @@ jobs:
           git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
           pip cache dir
-          pip install --upgrade pip
+          echo "Install uv"
           pip install uv
+          echo "uv sync"
           uv sync --group ci -v > /dev/null
           '
 
@@ -498,9 +499,10 @@ jobs:
           git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
           pip cache dir
-          pip install --upgrade pip
+          echo "Install uv"
           pip install uv
-          uv sync --group ci> /dev/null 2>&1
+          echo "uv sync"
+          uv sync --group ci -v > /dev/null
           '
 
       - name: Install PaddleFormers
