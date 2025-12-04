@@ -230,7 +230,7 @@ class MLP(FleetLayer):
                     # ) is not None:
                     #     x_glu = x_glu.clamp(min=None, max=val)
                     #     x_linear = x_linear.clamp(min=-val, max=val)
-                    return self.config.act_fn(x_glu) * (
+                    return self.config.hidden_act(x_glu) * (
                         x_linear
                         # + self.config.glu_linear_offset
                     )

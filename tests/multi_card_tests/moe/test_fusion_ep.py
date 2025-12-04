@@ -17,6 +17,7 @@ import unittest
 
 import numpy as np
 import paddle
+import paddle.nn.functional as F
 from paddle.distributed import fleet
 
 from paddlefleet.models.gpt.gpt_layer_specs import (
@@ -63,12 +64,12 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
     def test_moe_fusion(self):
-        moe_num_experts = 4
+        n_routed_experts = 4
         hidden_size = 16
         transformer_config_moe_use_fusion_node = TransformerConfig(
             hidden_size=hidden_size,
             num_attention_heads=4,
-            moe_num_experts=moe_num_experts,
+            n_routed_experts=n_routed_experts,
             use_cpu_initialization=False,
             num_experts_per_tok=2,
             tensor_model_parallel_size=1,
@@ -77,12 +78,13 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             bf16=True,
             params_dtype=paddle.bfloat16,
             moe_intermediate_size=24,
-            moe_use_fusion_node=True,
             gated_linear_unit=True,
+            n_shared_experts=0,
+            hidden_act=F.silu,
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(
-            num_experts=moe_num_experts
+            num_experts=n_routed_experts
         )
 
         moe_layer_moe_use_fusion_node = MoELayer(

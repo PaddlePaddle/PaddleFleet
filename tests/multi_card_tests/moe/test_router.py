@@ -5,6 +5,7 @@ import unittest
 
 import numpy as np
 import paddle
+import paddle.nn.functional as F
 import pytest
 from paddle.distributed import fleet
 
@@ -15,19 +16,19 @@ from paddlefleet.training.initialize import initialize_fleet
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-moe_num_experts = 4
+n_routed_experts = 4
 hidden_size = 16
 
 
 class TestTop2Router(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.moe_num_experts = 4
+        cls.n_routed_experts = 4
         cls.hidden_size = 16
         cls.transformer_config = TransformerConfig(
             hidden_size=cls.hidden_size,
             num_attention_heads=4,
-            moe_num_experts=cls.moe_num_experts,
+            n_routed_experts=cls.n_routed_experts,
             use_cpu_initialization=False,
             num_experts_per_tok=2,
             tensor_model_parallel_size=1,
@@ -36,8 +37,9 @@ class TestTop2Router(unittest.TestCase):
             bf16=True,
             params_dtype=paddle.bfloat16,
             moe_intermediate_size=24,
-            moe_use_fusion_node=False,
             gated_linear_unit=True,
+            n_shared_experts=0,
+            hidden_act=F.silu,
         )
 
         seed = 123
@@ -72,7 +74,7 @@ class TestTop2Router(unittest.TestCase):
         cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
         transformer_layer_spec = get_gpt_layer_local_spec(
-            num_experts=cls.moe_num_experts, moe_grouped_gemm=False
+            num_experts=cls.n_routed_experts, moe_grouped_gemm=False
         )
         cls.sequential_mlp = MoELayer(
             cls.transformer_config,
@@ -84,7 +86,7 @@ class TestTop2Router(unittest.TestCase):
     @pytest.mark.internal
     def test_constructor(self):
         num_weights = sum([p.numel() for p in self.router.parameters()])
-        assert num_weights == self.hidden_size * self.moe_num_experts
+        assert num_weights == self.hidden_size * self.n_routed_experts
 
     @pytest.mark.internal
     def test_router_forward(self):
