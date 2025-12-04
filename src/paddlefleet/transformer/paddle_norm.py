@@ -114,6 +114,7 @@ class WrappedPaddleNorm:
         else:
             raise Exception("Only RMSNorm for now.")
 
+        input_is_parallel = config.sequence_parallel
         return norm_cls(
             config=config,
             normalized_shape=hidden_size,

@@ -19,7 +19,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import paddle
-import paddle.distributed as dist
 import paddle.nn.functional as F
 from paddle import nn
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
@@ -27,7 +26,6 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet import utils
 
 
 class StandardMoERouter(nn.Layer):
@@ -38,89 +36,39 @@ class StandardMoERouter(nn.Layer):
     ):
         super().__init__()
 
-        self.hidden_size = config["hidden_size"]
-        self.num_experts = config.get(
-            "moe_num_experts",
-            config.get("n_routed_experts", config.get("moe_num_experts", -1)),
-        )
+        self.hidden_size = config.hidden_size
+        self.num_experts = config.n_routed_experts
 
-        self.drop_tokens = config.get("drop_tokens", False)
-        self.topk_method = (
-            config.get("topk_method", "greedy")
-            if self.training
-            else config.get("inference_topk_method", "greedy")
-        )
-        self.num_experts_per_tok = config.get(
-            "num_experts_per_tok",
-            config.get("num_experts_per_tok", config.get("moe_k", -1)),
-        )
-        self.norm_topk_prob = config.get("norm_topk_prob", True)
+        self.topk_method = config.topk_method
+        self.num_experts_per_tok = config.num_experts_per_tok
+        self.norm_topk_prob = config.norm_topk_prob
         # force keep in float32 when using amp
         self._cast_to_low_precision = False
-        self.seq_length = config.get(
-            "seq_length", config.get("max_seq_len", 1024)
-        )
-        self.n_group = config.get(
-            "moe_router_num_groups", config.get("n_group", 1)
-        )
-        self.topk_group = config.get(
-            "moe_router_group_topk", config.get("topk_group", 1)
-        )
-        self.routed_scaling_factor = config.get(
-            "moe_router_topk_scaling_factor",
-            config.get("routed_scaling_factor", 1.0),
-        )
-        self.moe_subbatch_token_num = config.get("moe_subbatch_token_num", -1)
-        self.tensor_parallel_degree = config.get("tensor_parallel_degree", 1)
-        self.sequence_parallel = config.get("sequence_parallel", 1)
-        self.transpose_gate_weight = config.get("transpose_gate_weight", False)
 
-        self.moe_router_score_function = config.get(
-            "moe_router_score_function",
-            config.get("gate_activation", "softmax"),
-        )
-        self.capacity_factor = config.get(
-            "moe_expert_capacity_factor", config.get("capacity_factor", 1.0)
-        )
-        self.min_capacity = config.get("min_capacity", 1)
-        self.max_capacity = config.get("max_capacity", pow(2, 32))
-        self.group = config.get("group", None)
-        self.global_aux_loss = config.get("global_aux_loss", False)
-        self.drop_policy = config.get(
-            "moe_token_drop_policy", config.get("drop_policy", "probs")
-        )
-        self.routing_type = config.get(
-            "topk_method", "aux_loss"
-        )  # One of "aux_loss", "seq_aux_loss", "global_aux_loss", "sinkhorn"
+        self.n_group = config.n_group
+
+        self.topk_group = config.topk_group
+
+        self.routed_scaling_factor = config.routed_scaling_factor
+
+        self.tensor_model_parallel_size = config.tensor_model_parallel_size
+        self.sequence_parallel = config.sequence_parallel
+
+        self.scoring_func = config.scoring_func
+
+        self.routing_type = config.moe_router_load_balancing_type
 
         if self.routing_type != "seq_aux_loss" and config.get("seq_aux", False):
             raise ValueError(
                 f"seq_aux is True but routing_type is {self.routing_type}. Please check."
             )
 
-        if self.global_aux_loss:
-            assert self.group is not None, (
-                "group is required when global_aux_loss is True"
-            )
-            self.rank = (
-                utils.get_pg_rank(pg_collection.ep)
-                if pg_collection.ep is not None
-                else 0
-            )
-
         # According to the shape of gate weights in model checkpoint
-        if not self.transpose_gate_weight:
-            self.weight = paddle.create_parameter(
-                shape=[self.hidden_size, self.num_experts],
-                dtype="float32",
-                default_initializer=paddle.nn.initializer.Uniform(),
-            )
-        else:
-            self.weight = paddle.create_parameter(
-                shape=[self.num_experts, self.hidden_size],
-                dtype="float32",
-                default_initializer=paddle.nn.initializer.Uniform(),
-            )
+        self.weight = paddle.create_parameter(
+            shape=[self.num_experts, self.hidden_size],
+            dtype="float32",
+            default_initializer=paddle.nn.initializer.Uniform(),
+        )
 
         if self.topk_method == "noaux_tc":
             self.register_buffer(
@@ -137,23 +85,21 @@ class StandardMoERouter(nn.Layer):
     def gate_score_func(self, logits: paddle.Tensor) -> paddle.Tensor:
         # [..., hidden_dim] -> [..., num_experts]
         with paddle.amp.auto_cast(False):
-            moe_router_score_function = self.moe_router_score_function
-            if moe_router_score_function == "softmax":
+            scoring_func = self.scoring_func
+            if scoring_func == "softmax":
                 scores = F.softmax(logits.cast("float32"), axis=-1)
-            elif moe_router_score_function == "sigmoid":
+            elif scoring_func == "sigmoid":
                 scores = F.sigmoid(logits.cast("float32"))
-            elif moe_router_score_function == "tanh":
+            elif scoring_func == "tanh":
                 scores = F.tanh(logits.cast("float32"))
-            elif moe_router_score_function == "relu":
+            elif scoring_func == "relu":
                 scores = F.relu(logits.cast("float32"))
-            elif moe_router_score_function == "gelu":
+            elif scoring_func == "gelu":
                 scores = F.gelu(logits.cast("float32"))
-            elif moe_router_score_function == "leaky_relu":
+            elif scoring_func == "leaky_relu":
                 scores = F.leaky_relu(logits.cast("float32"))
             else:
-                raise NotImplementedError(
-                    f"{moe_router_score_function} is not implemented."
-                )
+                raise NotImplementedError(f"{scoring_func} is not implemented.")
         return scores
 
     @paddle.no_grad()
@@ -207,41 +153,21 @@ class StandardMoERouter(nn.Layer):
         # TODO: @DrownFish19 update aux_loss for Qwen2MoE and DeepSeekV2&V3
         me = paddle.mean(gates, axis=0)
         ce = paddle.mean(mask.cast("float32"), axis=0)
-        if self.global_aux_loss:
-            me_list, ce_list = [], []
-            dist.all_gather(me_list, me, group=self.group)
-            dist.all_gather(ce_list, ce, group=self.group)
-
-            me_list[self.rank] = me
-            ce_list[self.rank] = ce
-            me = paddle.stack(me_list).mean(0)
-            ce = paddle.stack(ce_list).mean(0)
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
         return aux_loss
 
     def _cal_seq_aux_loss(self, probs, top_k, routing_map, max_seq_len):
-        sub_max_seq_len = max_seq_len
-        if (
-            hasattr(self, "moe_subbatch_token_num")
-            and self.moe_subbatch_token_num > 0
-        ):
-            sub_max_seq_len = (
-                self.moe_subbatch_token_num * self.tensor_parallel_degree
-            )
-
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
-        if self.tensor_parallel_degree > 1:
+        if self.tensor_model_parallel_size > 1:
             assert (
                 self.sequence_parallel
-                and max_seq_len % self.tensor_parallel_degree == 0
+                and max_seq_len % self.tensor_model_parallel_size == 0
             )
-            local_seq_len = sub_max_seq_len // self.tensor_parallel_degree
+            local_seq_len = max_seq_len // self.tensor_model_parallel_size
             # [B*S, E]
             all_probs = AllGatherOp.apply(probs)
             # [B, S, E]
-            all_probs = all_probs.reshape(
-                [-1, sub_max_seq_len, self.num_experts]
-            )
+            all_probs = all_probs.reshape([-1, max_seq_len, self.num_experts])
             batch_size = all_probs.shape[0]
             # [B, S, E]
             routing_map = routing_map.reshape([batch_size, local_seq_len, -1])
@@ -557,27 +483,26 @@ class StandardMoERouter(nn.Layer):
         """Implements TopKGating on logits."""
 
         if len(hidden_states.shape) == 3:
-            batch_size, seq_len, d_model = hidden_states.shape
+            if not self.sequence_parallel:
+                batch_size, seq_len, d_model = hidden_states.shape
+            else:
+                seq_len, batch, d_model = hidden_states.shape
             hidden_states = hidden_states.reshape([-1, d_model])
         elif len(hidden_states.shape) == 2:
-            batch_size_seq_len, d_model = hidden_states.shape
+            raise ValueError(
+                "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
+            )
         with paddle.amp.auto_cast(False):
             hidden_states = hidden_states.cast(self.weight.dtype)
-
-            if not self.transpose_gate_weight:
-                logits = F.linear(
-                    hidden_states.cast("float32"), self.weight.cast("float32")
-                )
-            else:
-                logits = F.linear(
-                    hidden_states.cast("float32"),
-                    self.weight.cast("float32").t(),
-                )
+            logits = F.linear(
+                hidden_states.cast("float32"),
+                self.weight.cast("float32").t(),
+            )
             gates = self.gate_score_func(logits=logits)
             gates = gates.cast(paddle.float32)
 
         gates_ori = gates
-        if self.moe_router_score_function == "sigmoid":
+        if self.scoring_func == "sigmoid":
             gates_ori = gates_ori / (
                 gates_ori.sum(axis=-1, keepdim=True) + 1e-20
             )
@@ -619,7 +544,7 @@ class StandardMoERouter(nn.Layer):
 
         if self.routing_type == "seq_aux_loss":
             l_aux = self._cal_seq_aux_loss(
-                gates_ori, self.num_experts_per_tok, mask, self.seq_length
+                gates_ori, self.num_experts_per_tok, mask, seq_len
             )
         else:
             l_aux = self._cal_aux_loss(gates, mask)
@@ -627,41 +552,13 @@ class StandardMoERouter(nn.Layer):
 
         exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
 
-        if self.drop_tokens:
-            # Calculate configured capacity and remove locations outside capacity from mask
-            capacity = self._capacity(
-                gates,
-                self.capacity_factor * self.num_experts_per_tok,
-                self.max_capacity,
-                self.min_capacity,
-            )
-
-            # update mask and locations by capacity
-            if self.drop_policy == "probs":
-                topk_masked_gates = paddle.zeros_like(gates).put_along_axis(
-                    top_idx, top_gate, axis=1
-                )
-                token_priority = self._probs_drop_policy(
-                    topk_masked_gates, capacity
-                )
-
-            elif self.drop_policy == "position":
-                token_priority = self._priority(top_idx, capacity)
-            else:
-                raise ValueError(f"Invalid drop_policy: {self.drop_policy}")
-        else:
-            # Do not drop tokens - set capacity according to current expert assignments
-            local_capacity = paddle.max(exp_counts)
-            if self.group is not None:
-                dist.all_reduce(
-                    local_capacity, op=dist.ReduceOp.MAX, group=self.group
-                )
-            capacity = int(local_capacity)
-            token_priority = self._priority(top_idx, capacity)
+        # Do not drop tokens - set capacity according to current expert assignments
+        local_capacity = paddle.max(exp_counts)
+        capacity = int(local_capacity)
+        token_priority = self._priority(top_idx, capacity)
 
         # normalize gates
         gates_masked = gates * mask
-
         # if self.training:
         gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
         denom_s = paddle.clip(gates_s, min=paddle.finfo(gates_masked.dtype).eps)

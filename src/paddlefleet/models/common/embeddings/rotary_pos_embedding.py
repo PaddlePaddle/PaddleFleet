@@ -219,10 +219,17 @@ class RotaryEmbedding(nn.Layer):
                 packed_seq_params.max_seqlen_q, packed_seq_params.max_seqlen_kv
             )
         else:
-            if transformer is not None and transformer.input_tensor is not None:
-                rotary_seq_len = transformer.input_tensor.shape[1]
+            if (
+                transformer_config.sequence_parallel
+                and transformer_config.scatter_embedding_sequence_parallel
+            ):
+                seq_axis = 0
             else:
-                rotary_seq_len = transformer_input.shape[1]
+                seq_axis = 1
+            if transformer is not None and transformer.input_tensor is not None:
+                rotary_seq_len = transformer.input_tensor.shape[seq_axis]
+            else:
+                rotary_seq_len = transformer_input.shape[seq_axis]
 
             if transformer_config.sequence_parallel:
                 rotary_seq_len *= transformer_config.tensor_model_parallel_size

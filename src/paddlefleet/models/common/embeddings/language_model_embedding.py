@@ -73,9 +73,6 @@ class LanguageModelEmbedding(FleetLayer):
             and self.config.sequence_parallel
             and self.scatter_to_sequence_parallel
         )
-        assert not self.reduce_scatter_embeddings, (
-            "Currently reduce_scatter_embeddings is not supported."
-        )
 
         # Word embeddings (parallel).
         self.embed_tokens = tensor_parallel.VocabParallelEmbedding(
@@ -154,15 +151,26 @@ class LanguageModelEmbedding(FleetLayer):
         else:
             embeddings = word_embeddings
 
-        # if not self.reduce_scatter_embeddings:
-        #     # Data format change to avoid explicit transposes : [b s h] --> [s b h].
-        #     embeddings = embeddings.transpose(0, 1).contiguous()
+        if (
+            not self.reduce_scatter_embeddings
+            and self.config.sequence_parallel
+            and self.config.scatter_to_sequence_parallel_region
+        ):
+            # Data format change to avoid explicit transposes : [b s h] --> [s b h].
+            embeddings = embeddings.transpose([1, 0, 2]).contiguous()
 
         if tokentype_ids is not None:
             assert self.tokentype_embeddings is not None
             # [b s h] -> [s b h] (So that it can be added with embeddings)
             # tokentype_embedding = self.tokentype_embeddings(tokentype_ids).permute(1, 0, 2)
             tokentype_embedding = self.tokentype_embeddings(tokentype_ids)
+            if (
+                self.config.sequence_parallel
+                and self.config.scatter_to_sequence_parallel_region
+            ):
+                tokentype_embedding = tokentype_embedding.permute(
+                    1, 0, 2
+                ).contiguous()
             embeddings = embeddings + tokentype_embedding
         else:
             assert self.tokentype_embeddings is None
