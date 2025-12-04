@@ -58,7 +58,7 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 
 [build-system]
-requires = ["setuptools>=61.0.0", "pybind11", "packaging>=24.2","paddlepaddle-gpu>=3.3.0.dev"]
+requires = ["setuptools>=61.0.0", "pybind11", "wheel", "packaging>=24.2","paddlepaddle-gpu>=3.3.0.dev"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

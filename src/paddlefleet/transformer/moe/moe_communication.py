@@ -26,11 +26,11 @@ class MoECommunicationInterface(ABC):
     def __init__(
         self,
         moe_group: Group,
-        expert_parallel_degree: int,
+        expert_model_parallel_size: int,
         num_experts_per_device: int,
     ):
         self.moe_group = moe_group
-        self.expert_parallel_degree = expert_parallel_degree
+        self.expert_model_parallel_size = expert_model_parallel_size
         self.num_experts_per_device = num_experts_per_device
 
     @abstractmethod
@@ -78,12 +78,12 @@ class AllToAllMoECommunication(MoECommunicationInterface, nn.Layer):
     def __init__(
         self,
         moe_group: Group,
-        expert_parallel_degree: int,
+        expert_model_parallel_size: int,
         num_experts_per_device: int,
     ):
         nn.Layer.__init__(self)
         MoECommunicationInterface.__init__(
-            self, moe_group, expert_parallel_degree, num_experts_per_device
+            self, moe_group, expert_model_parallel_size, num_experts_per_device
         )
 
     def dispatch_and_permute(
@@ -93,7 +93,7 @@ class AllToAllMoECommunication(MoECommunicationInterface, nn.Layer):
         mask: paddle.Tensor,
     ) -> tuple[paddle.Tensor, paddle.Tensor]:
         self.gates_masked = gates_masked
-        if self.expert_parallel_degree <= 1:
+        if self.expert_model_parallel_size <= 1:
             return hidden_states
         mask = mask.to(paddle.int64)
 
@@ -119,7 +119,7 @@ class AllToAllMoECommunication(MoECommunicationInterface, nn.Layer):
         self.sorted_tokens_shape = sorted_tokens.shape
 
         tokens_per_ep_rank = tokens_per_expert.reshape(
-            [self.expert_parallel_degree, -1]
+            [self.expert_model_parallel_size, -1]
         ).sum(axis=1)
         # First All-to-All: Exchange expert token counts across ranks
         # Returns `tokens_per_expert_group` is for current rank
@@ -135,7 +135,7 @@ class AllToAllMoECommunication(MoECommunicationInterface, nn.Layer):
             self.is_empty_tokens = False
 
         tokens_per_expert_group_sum = tokens_per_expert_group.reshape(
-            [self.expert_parallel_degree, -1]
+            [self.expert_model_parallel_size, -1]
         )
         self.output_splits = (
             tokens_per_expert_group_sum.sum(axis=1).cpu().tolist()
@@ -157,7 +157,7 @@ class AllToAllMoECommunication(MoECommunicationInterface, nn.Layer):
 
         # Next, we should sort `gathered_tokens` by expert ids, so that the tokens for the same expert are contiguous.
         tokens_per_expert_post_gather = tokens_per_expert_group.reshape(
-            [self.expert_parallel_degree, self.num_experts_per_device]
+            [self.expert_model_parallel_size, self.num_experts_per_device]
         ).sum(axis=0)
         gatherd_idxs = np.zeros(
             shape=(gathered_tokens.shape[0],), dtype=np.int32
@@ -231,13 +231,13 @@ class DeepEPMoECommunication(MoECommunicationInterface, nn.Layer):
     def __init__(
         self,
         moe_group: Group,
-        expert_parallel_degree: int,
+        expert_model_parallel_size: int,
         num_experts_per_device: int,
         token_dispatcher,
     ):
         nn.Layer.__init__(self)
         MoECommunicationInterface.__init__(
-            self, moe_group, expert_parallel_degree, num_experts_per_device
+            self, moe_group, expert_model_parallel_size, num_experts_per_device
         )
         self.token_dispatcher = token_dispatcher
 

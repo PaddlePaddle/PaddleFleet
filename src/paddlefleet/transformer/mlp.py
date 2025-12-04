@@ -64,7 +64,7 @@ class MLPSublayersSpec:
     """
 
     up_gate_proj: LayerSpec | type = None
-    act_fn: LayerSpec | type = None
+    hidden_act: LayerSpec | type = None
     down_proj: LayerSpec | type = None
 
 
@@ -140,7 +140,7 @@ class MLP(FleetLayer):
             tp_group=tp_group,
         )
 
-        self.act_fn = self.config.act_fn
+        self.hidden_act = self.config.hidden_act
 
         self.down_proj = build_layer(
             sublayers_spec.down_proj,
@@ -165,7 +165,7 @@ class MLP(FleetLayer):
         nvtx_range_push(suffix="activation")
         if self.config.bias_activation_fusion:
             if per_token_scale is not None:
-                if self.act_fn == F.silu and self.config.gated_linear_unit:
+                if self.hidden_act == F.silu and self.config.gated_linear_unit:
                     # dtype is handled inside the fused kernel
                     intermediate_parallel = weighted_bias_swiglu_impl(
                         intermediate_parallel,
@@ -174,7 +174,8 @@ class MLP(FleetLayer):
                         self.config.activation_func_fp8_input_store,
                     )
                 elif (
-                    self.act_fn == quick_gelu and self.config.gated_linear_unit
+                    self.hidden_act == quick_gelu
+                    and self.config.gated_linear_unit
                 ):
                     intermediate_parallel = weighted_bias_quick_geglu_impl(
                         intermediate_parallel,
@@ -189,7 +190,7 @@ class MLP(FleetLayer):
                         "Only support fusion of swiglu and quick_gelu with per_token_scale in MLP."
                     )
             else:
-                if self.act_fn == F.gelu:
+                if self.hidden_act == F.gelu:
                     if self.config.gated_linear_unit:
                         intermediate_parallel = bias_geglu_impl(
                             intermediate_parallel, bias_parallel
@@ -199,7 +200,9 @@ class MLP(FleetLayer):
                         intermediate_parallel = bias_gelu_impl(
                             intermediate_parallel, bias_parallel
                         )
-                elif self.act_fn == F.silu and self.config.gated_linear_unit:
+                elif (
+                    self.hidden_act == F.silu and self.config.gated_linear_unit
+                ):
                     """
                     intermediate_parallel = bias_swiglu_impl(
                         intermediate_parallel,
@@ -227,13 +230,13 @@ class MLP(FleetLayer):
                     ) is not None:
                         x_glu = x_glu.clamp(min=None, max=val)
                         x_linear = x_linear.clamp(min=-val, max=val)
-                    return self.config.act_fn(x_glu) * (
+                    return self.config.hidden_act(x_glu) * (
                         x_linear + self.config.glu_linear_offset
                     )
 
                 intermediate_parallel = glu(intermediate_parallel)
             else:
-                intermediate_parallel = self.act_fn(intermediate_parallel)
+                intermediate_parallel = self.hidden_act(intermediate_parallel)
 
             if per_token_scale is not None:
                 original_dtype = intermediate_parallel.dtype

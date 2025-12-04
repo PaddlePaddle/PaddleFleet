@@ -18,11 +18,18 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Protocol
 
+from paddlefleet.parallel_state import (
+    get_context_parallel_group,
+    get_context_parallel_world_size,
+)
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.dot_product_attention import (
+    DotProductAttention,
+    FlashDotProductAttention,
+)
 from paddlefleet.transformer.mlp import MLPSublayersSpec
 
 
@@ -82,7 +89,7 @@ class BackendSpecProvider(Protocol):
         ...
 
     @abstractmethod
-    def act_fn(self) -> type:
+    def hidden_act(self) -> type:
         """Which layer to use for activation function"""
         ...
 
@@ -117,7 +124,13 @@ class LocalSpecProvider(BackendSpecProvider):
 
     def core_attention(self) -> type:
         """Which layer to use for attention"""
-        return DotProductAttention
+        if (
+            get_context_parallel_group() is not None
+            and get_context_parallel_world_size() > 1
+        ):
+            return FlashDotProductAttention
+        else:
+            return DotProductAttention
 
     def grouped_mlp_layers(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool
@@ -130,6 +143,6 @@ class LocalSpecProvider(BackendSpecProvider):
                 up_gate_proj=ColumnParallelLinear, down_proj=RowParallelLinear
             )
 
-    def act_fn(self) -> type:
+    def hidden_act(self) -> type:
         """Which layer to use for activation function"""
         return None

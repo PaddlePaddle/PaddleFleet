@@ -28,6 +28,9 @@ jq --arg cache "$CACHE_DIR" \
    $config_json > $config_json.tmp
 mv $config_json.tmp $config_json
 
+# hotfix
+sed -i 's/n_shared_experts: int = 1408/n_shared_experts: int = 1/' glm45_provider.py
+
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)
@@ -37,19 +40,19 @@ export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
-python run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
+coverage run run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
 
 echo "
 1 12.06599045
-2 12.03911209
-3 12.04506493
-4 12.01400757
-5 11.98324871
-6 11.96981049
-7 11.95959091
-8 11.91748428
-9 11.96483421
-10 11.93076324
+2 12.03905582
+3 12.04510880
+4 12.01393795
+5 11.98309994
+6 11.96981907
+7 11.95969200
+8 11.91760826
+9 11.96479797
+10 11.93074036
 " > ./glm45_single_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \

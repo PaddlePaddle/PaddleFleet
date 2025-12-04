@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 import paddle
 
 from paddlefleet import parallel_state
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 
 try:
     from packaging.version import Version as PkgVersion
@@ -255,6 +256,36 @@ def is_paddle_min_version(version, check_equality=True):
     if check_equality:
         return get_paddle_version() >= PkgVersion(version)
     return get_paddle_version() > PkgVersion(version)
+
+
+########################
+### context parallel ###
+########################
+
+
+def get_batch_on_this_cp_rank(inputs):
+    if isinstance(inputs, paddle.Tensor):
+        return ContextParallelScatterOp.apply(inputs, axis=-1)
+    elif isinstance(inputs, dict):
+        res = {}
+        keys = ["input_ids", "position_ids", "labels"]
+        for k, tensor in inputs.items():
+            if k in keys:
+                res[k] = ContextParallelScatterOp.apply(tensor, axis=-1)
+            else:
+                res[k] = tensor
+    elif isinstance(inputs, list):
+        raise AssertionError(
+            "the inputs is list, please check all the inputs can be split by context parallelism"
+        )
+        # res = []
+        # for tensor in inputs:
+        #     res.append(ContextParallelScatterOp.apply(tensor, axis=-1))
+    else:
+        raise ValueError(
+            f"the inputs should be a dict, but is type: {type(inputs)}"
+        )
+    return res
 
 
 ######################

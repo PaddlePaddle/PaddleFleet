@@ -131,12 +131,15 @@ class TransformerConfig(ModelParallelConfig):
     gated_linear_unit: bool = False
     """Use a gated linear unit for the first linear layer in the MLP."""
 
-    act_fn: Callable = F.gelu
+    hidden_act: Callable = F.gelu
     """Activation function to use for the non-linearity in the MLP."""
 
     use_bias: bool = False
-    """Include a bias term in all linear layers (QKV projections, after core attention, and two in
+    """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
     MLP layer)."""
+
+    attention_bias: bool = False
+    """Include a bias term in QKV projections."""
 
     output_layer_init_method: Callable | None = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
@@ -238,24 +241,19 @@ class TransformerConfig(ModelParallelConfig):
     ####################
     # MoE related
     ####################
-    moe_shared_expert_intermediate_size: int | None = None
-    """Shared expert total ffn hidden size.
-    It should be equal to 'num_shared_experts * ffn_size_of_each_shared_expert' if
-    there are multiple shared experts.
-    None means no shared expert.
-    By default, the shared experts execute before the router. However, when
-    moe_shared_expert_overlap or overlap_moe_expert_parallel_comm is set,
-    the shared experts execute after the router, before the routed experts.
-    This makes the gradients from the router and the shared experts added in
-    different orders to the hidden_states, causing minor numerical differences
-    in the hidden_states gradient."""
+    n_routed_experts: int | None = None
+    """Number of routed experts to use for MoE layer. When set, it replaces MLP with MoE layer. Set to None
+    for no MoE."""
+
+    n_shared_experts: int | None = None
+    """Number of shared experts to use for MoE layer. When set, it replaces MLP with MoE layer. Set to None
+    for no MoE."""
 
     num_experts_per_tok: int = 2
     """Number of experts to route to for each token."""
 
-    moe_num_experts: int | None = None
-    """Number of experts to use for MoE layer. When set, it replaces MLP with MoE layer. Set to None
-    for no MoE."""
+    scoring_func: str = "softmax"
+    """Score function for MoE routing. Can be "softmax" or "sigmoid"."""
 
     moe_intermediate_size: int | None = None
     """MoE Feed-Forward Network hidden size"""
@@ -263,17 +261,82 @@ class TransformerConfig(ModelParallelConfig):
     topk_method: str = "greedy"
     """Options are greedy, group_limited_greedy, no_auxtc"""
 
-    moe_token_dispatcher_type: str = "allgather"
+    moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'allgather'.
     Options are 'allgather','alltoall' and 'deepep'."""
 
     moe_router_load_balancing_type: str = "aux_loss"
     """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn"""
 
-    moe_layer_freq: int | list[int] = 1
+    moe_layer_freq: int | list[int] | None = None
     """Frequency between MoE layers and Dense layers. Accepts either:
     - An integer N: Represents a 1:N ratio, meaning one expert layer for every N-1 dense layers.
     - A list that defines a custom pattern, e.g.: [1,1,1,0,1,1,1,0,1,1,1,0]"""
+
+    first_k_dense_replace: int | None = None
+    """the number of Dense layers.
+    - An integer N: Represents the first N layers are dense layers, the remaining ones are moe layers."""
+
+    moe_expert_capacity_factor: float | None = None
+    """moe_expert_capacity_factor (float): The capacity factor for each expert, None means no token
+    will be dropped. The default is None."""
+
+    moe_pad_expert_input_to_capacity: bool = False
+    """moe_pad_expert_input_to_capacity (bool): If True, pads the input for each expert to match
+    the expert capacity length, effective only after the moe_expert_capacity_factor is set. The
+    default setting is False."""
+
+    moe_token_drop_policy: str = "probs"
+    """The policy to drop tokens. Can be either "probs" or "position". If "probs", the tokens with
+    the lowest probabilities will be dropped. If "position", tokens at the end of each batch will
+    be dropped.
+    """
+
+    router_aux_loss_coef: float = 1e-2
+    """Scaling coefficient for the aux loss. A starting value of 1e-2 is recommended."""
+
+    norm_topk_prob: bool = True
+    """Whether to normalize the topk probabilities."""
+
+    n_group: int = 1
+    """Number of groups for routed experts."""
+
+    topk_group: int = 1
+    """Number of selected groups per token for expert selection."""
+
+    routed_scaling_factor: float = 1.0
+    """Scaling factor for routing score in top-k selection, only works when moe_router_pre_softmax
+    enabled. Defaults to None, which means no scaling."""
+
+    moe_dequant_input: bool = False
+    """Whether to dequantize input."""
+
+    moe_expert_fusion: bool = True
+    """Whether to fuse experts."""
+
+    moe_subbatch_token_num_before_dispatch: int | None = None
+    """Whether to enable subbatch before dispatch, the value means the number of tokens in one subbatch."""
+
+    moe_subbatch_token_num_after_dispatch: int | None = None
+    """Whether to enable subbatch after dispatch, the value means the number of tokens in one subbatch."""
+
+    fp8_wgrad: bool = True
+    """Whether to use fp8 wgrad."""
+
+    moe_grouped_gemm: bool = False
+    """Whether to use grouped gemm."""
+
+    ####################
+    # fp8
+    ####################
+    fp8: str | None = None
+    """If set, enables the use of FP8 precision through Transformer Engine. There are 2 predefined
+    choices (1) 'e4m3' uniformly uses e4m3 for all FP8 tensors, (2) 'hybrid' uses e4m3 for all FP8
+    activation and weight tensors and e5m2 for all FP8 output activation gradient tensors."""
+
+    fp8_recipe: str = "blockwise"
+    """If set, enables the use of FP8 precision. There are 2 predefined
+    choices 1) 'mxfp8' for Blackwell architecture only, 2) 'blockwise' for blockwise scaling recipe"""
 
     ####################
     # initialization
@@ -337,7 +400,7 @@ class TransformerConfig(ModelParallelConfig):
 
     @classmethod
     def from_config(cls, config_dict):
-        instance = cls()
+        instance = object.__new__(cls)
         instance.register_attributes(config_dict)
         instance.__post_init__()
         return instance
@@ -358,7 +421,7 @@ class TransformerConfig(ModelParallelConfig):
             print(f"invalid key name: {key}")
             return
 
-        if key == "activation_func":
+        if key == "hidden_act":
             if isinstance(value, str):
                 func = getattr(F, value)
                 setattr(self, key, func)
@@ -366,7 +429,7 @@ class TransformerConfig(ModelParallelConfig):
                 setattr(self, key, value)
             else:
                 raise TypeError(
-                    f"activation_func must be str or callable, but get {type(value)}"
+                    f"hidden_act must be str or callable, but get {type(value)}"
                 )
         else:
             setattr(self, key, value)
@@ -421,6 +484,17 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
+
+        if self.first_k_dense_replace and self.moe_layer_freq:
+            raise ValueError(
+                "Cannot specify both first_k_dense_replace and moe_layer_freq."
+            )
+        if self.first_k_dense_replace is None and self.moe_layer_freq is None:
+            self.moe_layer_freq = 1
+        if self.first_k_dense_replace:
+            self.moe_layer_freq = [0] * self.first_k_dense_replace + [1] * (
+                self.num_hidden_layers - self.first_k_dense_replace
+            )
 
         if self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(

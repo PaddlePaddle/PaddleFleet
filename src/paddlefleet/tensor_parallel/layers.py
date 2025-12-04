@@ -247,6 +247,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             self.vocab_end_index - self.vocab_start_index
         )
         self.deterministic_mode = config.deterministic_mode
+        self.world_size = get_pg_size(self.tp_group)
 
         # Allocate weights and initialize.
         if config.use_cpu_initialization:
@@ -325,8 +326,9 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         structured_name_prefix: str = "",
     ):
         state_dict = self.state_dict(structured_name_prefix="")
+        shard_rules = None if self.world_size == 1 else {"weight": 0}
         return build_sharded_state_dict(
-            state_dict, {"weight": 0}, structured_name_prefix
+            state_dict, shard_rules, structured_name_prefix
         )
 
 
@@ -1073,8 +1075,9 @@ class ColumnParallelLinear(paddle.nn.Layer):
     ):
         """Sharding along axis 1, bias sharded"""
         state_dict = self.state_dict(structured_name_prefix="")
+        shard_rules = None if self.world_size == 1 else {"weight": 1, "bias": 0}
         return build_sharded_state_dict(
-            state_dict, {"weight": 1, "bias": 0}, structured_name_prefix
+            state_dict, shard_rules, structured_name_prefix
         )
 
     def set_extra_state(self, state):
@@ -1329,8 +1332,9 @@ class RowParallelLinear(paddle.nn.Layer):
     ):
         """Sharding along axis 0, bias not sharded"""
         state_dict = self.state_dict(structured_name_prefix="")
+        shard_rules = None if self.world_size == 1 else {"weight": 0}
         return build_sharded_state_dict(
-            state_dict, {"weight": 0}, structured_name_prefix
+            state_dict, shard_rules, structured_name_prefix
         )
 
     def set_extra_state(self, state):
