@@ -318,7 +318,6 @@ jobs:
           pip install --upgrade pip
           pip install uv
           uv sync --group ci -v > /dev/null
-          uv pip install "coverage>=7.0"
           '
 
       - name: Install PaddleFormers
@@ -501,8 +500,7 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          uv sync -v
-          uv pip install "coverage>=7.0"
+          uv sync --group ci> /dev/null 2>&1
           '
 
       - name: Install PaddleFormers
