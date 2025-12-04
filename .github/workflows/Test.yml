@@ -318,7 +318,7 @@ jobs:
           echo "Install uv"
           pip install uv
           echo "uv sync"
-          uv sync --group ci -v > /dev/null
+          uv sync --group ci --reinstall -v
           '
 
       - name: Install PaddleFormers
@@ -503,7 +503,7 @@ jobs:
           echo "Install uv"
           pip install uv
           echo "uv sync"
-          uv sync --group ci -v > /dev/null
+          uv sync --group ci --reinstall -v
           '
 
       - name: Install PaddleFormers
