@@ -428,7 +428,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-multi/coverage.xml coverage-multi.xml
-          cp /workspace/PaddleFleet/coveragedata-single/coverage-single.xml coverage-single.xml
+          cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage-single.xml
           cp /workspace/PaddleFleet/coveragedata-qwen/coverage.xml coverage-qwen.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
           target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
