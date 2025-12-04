@@ -86,7 +86,7 @@ class MoELayer(nn.Layer):
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
 
-        self.moe_group = pg_collection.ep if pg_collection else None
+        self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
             if self.moe_group is not None
