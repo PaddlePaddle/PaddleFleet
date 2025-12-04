@@ -88,6 +88,7 @@ def setup_ops_extension():
     ext_module = CUDAExtension(
         sources=[
             "./src/paddlefleet/extensions/tokens_stable_unzip.cu",
+            "./src/paddlefleet/extensions/matmul_bwd.cc",
         ],
         include_dirs=[
             os.path.join(os.getcwd(), "src/paddlefleet/extensions"),
