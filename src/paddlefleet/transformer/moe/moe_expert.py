@@ -146,7 +146,6 @@ class StandardMLPExpert(MLP):
         self,
         config: TransformerConfig,
         moe_intermediate_size: int,
-        fuse_up_gate: bool,
         is_expert: bool,
         mlp_spec: MLPSublayersSpec,
     ):
