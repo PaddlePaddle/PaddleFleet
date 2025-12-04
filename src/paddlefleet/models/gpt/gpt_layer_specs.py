@@ -135,7 +135,7 @@ def get_mlp_layer_spec_for_backend(
     """Helper function to get layer spec for MLP/MoE"""
 
     down_proj = backend.row_parallel_linear()
-    act_fn = None
+    hidden_act = None
 
     if num_experts is None:
         # Dense MLP w/ or w/o TE layers.
@@ -150,7 +150,7 @@ def get_mlp_layer_spec_for_backend(
             sublayers_spec=MLPSublayersSpec(
                 up_gate_proj=up_gate_proj,
                 down_proj=down_proj,
-                act_fn=act_fn,
+                hidden_act=hidden_act,
             ),
         )
     else:
@@ -179,7 +179,7 @@ def get_gpt_decoder_block_spec(
         qk_l2_norm=qk_l2_norm,
     )
     moe_layer_spec = get_gpt_layer_local_spec(
-        num_experts=config.moe_num_experts,
+        num_experts=config.n_routed_experts,
         moe_grouped_gemm=config.moe_grouped_gemm,
         use_qk_norm=config.use_qk_norm,
         multi_latent_attention=config.multi_latent_attention,

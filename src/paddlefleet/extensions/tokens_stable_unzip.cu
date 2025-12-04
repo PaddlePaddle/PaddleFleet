@@ -14,19 +14,12 @@
 # limitations under the License.
 */
 #include "paddle/common/array.h"
-#include "paddle/common/flags.h"
 #include "paddle/phi/core/utils/data_type.h"
 #include "paddle/phi/kernels/funcs/aligned_vector.h"
 #include "utils.h"  // NOLINT
 
-COMMON_DECLARE_bool(enable_pir_api);
-
 static paddle::DataType TransToDataType(int64_t dtype) {
-  if (FLAGS_enable_pir_api) {
-    return static_cast<paddle::DataType>(dtype);
-  } else {
-    return phi::TransToPhiDataType(dtype);
-  }
+  return phi::TransToPhiDataType(dtype);
 }
 
 #define CUMSUM_BLOCK_SIZE 48

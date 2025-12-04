@@ -89,7 +89,7 @@ class BackendSpecProvider(Protocol):
         ...
 
     @abstractmethod
-    def act_fn(self) -> type:
+    def hidden_act(self) -> type:
         """Which layer to use for activation function"""
         ...
 
@@ -143,6 +143,6 @@ class LocalSpecProvider(BackendSpecProvider):
                 up_gate_proj=ColumnParallelLinear, down_proj=RowParallelLinear
             )
 
-    def act_fn(self) -> type:
+    def hidden_act(self) -> type:
         """Which layer to use for activation function"""
         return None

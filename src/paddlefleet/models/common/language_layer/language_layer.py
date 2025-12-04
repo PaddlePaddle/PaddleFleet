@@ -18,7 +18,6 @@ import paddle
 from paddle import Tensor
 
 # from paddlefleet.dist_checkpointing.mapping import ShardedStateDict
-from paddlefleet import tensor_parallel
 from paddlefleet.context_parallel_utils import ContextParallelGatherOp
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
@@ -128,10 +127,10 @@ class LanguageLayer(FleetLayer):
         Returns:
             Tensor: Loss tensor of dimensions [batch size, sequence_length]
         """
-        # loss = self.loss_func(logits.cast("float32"), labels)
-        loss = tensor_parallel.vocab_parallel_cross_entropy(
-            logits.cast("float32"), labels
-        )
+        loss = self.loss_func(logits.cast("float32"), labels)
+        # loss = tensor_parallel.vocab_parallel_cross_entropy(
+        #     logits.cast("float32"), labels
+        # )
 
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(loss, axis=1)

@@ -97,11 +97,11 @@ class TestGPTModel(unittest.TestCase):
             normalization="RMSNorm",
             hidden_dropout_prob=0.0,
             attention_dropout=0.0,
-            moe_num_experts=8,
+            n_routed_experts=8,
             use_bias=False,
             moe_intermediate_size=1024,
             moe_token_dispatcher_type="alltoall",
-            moe_shared_expert_intermediate_size=1024,
+            n_shared_experts=1,
             init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
@@ -176,8 +176,8 @@ class TestGPTModel(unittest.TestCase):
                 f"loss not equal ({loss.item()} != 5.344995498657227), please check your modify"
             )
         elif judge_machine_type() == "V":
-            assert loss.item() == 5.566722869873047, (
-                f"loss not equal ({loss.item()} != 5.566722869873047), please check your modify"
+            assert loss.item() == 5.518514633178711, (
+                f"loss not equal ({loss.item()} != 5.518514633178711), please check your modify"
             )
 
         loss.backward()
@@ -200,8 +200,8 @@ class TestGPTModel(unittest.TestCase):
                 f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 6.112863540649414), please check your modify"
             )
         elif judge_machine_type() == "V":
-            assert word_embeddings_grad_norm == 9.869550704956055, (
-                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 9.869550704956055, please check your modify"
+            assert word_embeddings_grad_norm == 8.235458374023438, (
+                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 8.235458374023438, please check your modify"
             )
 
 
