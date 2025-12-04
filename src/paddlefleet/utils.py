@@ -95,10 +95,14 @@ class GlobalMemoryBuffer:
         """
         Returns (potentially) a sub-tensor from the self.buffer for the given shape.
         """
-        required_len = reduce(operator.mul, tensor_shape, 1)
+
+        def compute_numel(shape):
+            return reduce(operator.mul, shape, 1)
+
+        required_len = compute_numel(tensor_shape)
         if (
             self.buffer.get((name, dtype), None) is None
-            or self.buffer[(name, dtype)].numel() < required_len
+            or compute_numel(self.buffer[(name, dtype)].shape) < required_len
         ):
             mem_alloc_context = (
                 mem_alloc_context if mem_alloc_context else nullcontext
