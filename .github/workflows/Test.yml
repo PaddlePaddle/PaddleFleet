@@ -363,6 +363,7 @@ jobs:
           bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi
+          uv run coverage --version
           uv run coverage combine
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi/coverage.xml
           uv run coverage report -m
