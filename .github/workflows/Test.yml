@@ -419,7 +419,7 @@ jobs:
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
           '
-      
+
       - name: H20 Coverage Upload to BOS
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
