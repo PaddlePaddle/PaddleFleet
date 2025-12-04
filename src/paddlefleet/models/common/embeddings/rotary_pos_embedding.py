@@ -228,10 +228,7 @@ class RotaryEmbedding(nn.Layer):
                 packed_seq_params.max_seqlen_q, packed_seq_params.max_seqlen_kv
             )
         else:
-            if (
-                transformer_config.sequence_parallel
-                and transformer_config.scatter_embedding_sequence_parallel
-            ):
+            if transformer_config.sequence_parallel:
                 seq_axis = 0
             else:
                 seq_axis = 1

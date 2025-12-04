@@ -66,6 +66,11 @@ class LanguageModelEmbedding(FleetLayer):
         )
         self.num_tokentypes = num_tokentypes
         self.scatter_to_sequence_parallel = scatter_to_sequence_parallel
+        if config.sequence_parallel:
+            assert self.scatter_to_sequence_parallel is True, (
+                "If sequence parallel is turned on, scatter_to_sequence_parallel "
+                "must be set to True."
+            )
         self.tp_group = get_tensor_model_parallel_group_if_none(tp_group)
         self.reduce_scatter_embeddings = (
             (not self.add_position_embedding)
@@ -154,7 +159,7 @@ class LanguageModelEmbedding(FleetLayer):
         if (
             not self.reduce_scatter_embeddings
             and self.config.sequence_parallel
-            and self.config.scatter_to_sequence_parallel_region
+            and self.scatter_to_sequence_parallel
         ):
             # Data format change to avoid explicit transposes : [b s h] --> [s b h].
             embeddings = embeddings.transpose([1, 0, 2]).contiguous()
@@ -166,7 +171,7 @@ class LanguageModelEmbedding(FleetLayer):
             tokentype_embedding = self.tokentype_embeddings(tokentype_ids)
             if (
                 self.config.sequence_parallel
-                and self.config.scatter_to_sequence_parallel_region
+                and self.scatter_to_sequence_parallel
             ):
                 tokentype_embedding = tokentype_embedding.permute(
                     1, 0, 2
