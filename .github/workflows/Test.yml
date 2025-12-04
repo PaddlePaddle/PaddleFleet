@@ -318,7 +318,8 @@ jobs:
           echo "Install uv"
           pip install uv
           echo "uv sync"
-          uv sync --group ci --reinstall -v
+          uv sync --group ci --reinstall -v 
+          uv run which python
           '
 
       - name: Install PaddleFormers
@@ -363,6 +364,7 @@ jobs:
           bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi
+          uv run which python
           uv run coverage --version
           uv run coverage combine
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi/coverage.xml
