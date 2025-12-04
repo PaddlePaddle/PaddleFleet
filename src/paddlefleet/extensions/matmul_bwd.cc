@@ -14,7 +14,7 @@
 
 #pragma once
 #include <vector>
-#include "paddle/extension.h"
+#include "utils.h"  // NOLINT
 
 using paddle::Tensor;
 
