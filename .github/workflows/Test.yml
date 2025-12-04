@@ -318,8 +318,7 @@ jobs:
           echo "Install uv"
           pip install uv
           echo "uv sync"
-          uv sync --group ci --reinstall -v 
-          uv run which python
+          uv sync --group ci -v > /dev/null
           '
 
       - name: Install PaddleFormers
@@ -335,7 +334,6 @@ jobs:
           git config pull.rebase false
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
-          pip install coverage
           '
 
       - name: Proprocess for integration test
@@ -364,7 +362,7 @@ jobs:
           bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi
-          uv run which python
+          source /workspace/PaddleFleet/.venv/bin/activate
           uv run coverage --version
           uv run coverage combine
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi/coverage.xml
@@ -388,6 +386,7 @@ jobs:
           bash -x PaddleFleet/ci/integration_test/glm45_single_card.sh
           glm45_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-single
+          source /workspace/PaddleFleet/.venv/bin/activate
           uv run coverage combine
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
           uv run coverage report -m
@@ -410,6 +409,7 @@ jobs:
           bash -x PaddleFleet/ci/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-qwen
+          source /workspace/PaddleFleet/.venv/bin/activate
           uv run coverage combine
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen/coverage.xml
           uv run coverage report -m
@@ -505,7 +505,7 @@ jobs:
           echo "Install uv"
           pip install uv
           echo "uv sync"
-          uv sync --group ci --reinstall -v
+          uv sync --group ci > /dev/null
           '
 
       - name: Install PaddleFormers
@@ -549,6 +549,7 @@ jobs:
           bash -x PaddleFleet/ci/integration_test/glm45_a100.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata
+          source /workspace/PaddleFleet/.venv/bin/activate
           uv run coverage combine
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
           uv run coverage report -m
