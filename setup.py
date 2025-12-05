@@ -109,6 +109,7 @@ def setup_ops_extension():
                 "-std=c++17",
                 "-DPADDLE_NO_PYTHON",
                 "-DPy_LIMITED_API=0x030A0000",
+                "-DPADDLE_NO_PYTHON",
             ],
             "nvcc": nvcc_args,
         },

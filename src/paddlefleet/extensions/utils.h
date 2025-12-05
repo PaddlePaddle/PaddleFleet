@@ -23,7 +23,9 @@
 
 #include "paddle/extension.h"
 #include "paddle/phi/api/all.h"
+#ifdef __CUDACC__
 #include "paddle/phi/kernels/funcs/math_cuda_utils.h"
+#endif
 
 template <paddle::DataType DType>
 struct TypeMap;
@@ -105,6 +107,7 @@ struct alignas(16) VectorType<uint8_t, 16> {
   uint8_t data[16];
 };
 
+#ifdef __CUDACC__
 // Helper function to perform vectorized memory copy
 template <typename T>
 __device__ __forceinline__ void vectorized_memcpy(const T *src,
@@ -132,6 +135,7 @@ __device__ __forceinline__ void vectorized_memcpy(const T *src,
     }
   }
 }
+#endif
 
 #define PD_SWITCH_NUM_EXPERTS_IMPL(__num_expert, __max_num_experts, ...) \
   if (__num_expert <= __max_num_experts) {                               \
