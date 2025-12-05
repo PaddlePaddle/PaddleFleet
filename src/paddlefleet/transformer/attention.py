@@ -340,6 +340,14 @@ class Attention(FleetLayer, ABC):
         # core attention computation
         # ==================================
 
+        # NOTE: For sequence parallel, the input is [seq, b, h],
+        # transpose back to [b, seq, h] for attention computation
+        # TODO: supports [seq, b, h] input in attention computation
+        if self.config.sequence_parallel:
+            query = query.transpose([1, 0, 2, 3]).contiguous()
+            key = key.transpose([1, 0, 2, 3]).contiguous()
+            value = value.transpose([1, 0, 2, 3]).contiguous()
+
         if self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
                 query,
@@ -376,6 +384,8 @@ class Attention(FleetLayer, ABC):
         # Output. [sq, b, h]
         # =================
 
+        if self.config.sequence_parallel:
+            core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
         output, bias = self.o_proj(core_attn_out)
 
         return output, bias

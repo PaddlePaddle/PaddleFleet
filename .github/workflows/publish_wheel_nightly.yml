@@ -10,7 +10,7 @@ on:
         options:
           - publish-wheel
   schedule:
-    - cron: '0 17 * * *'
+    - cron: '0 16 * * *'
 
 permissions: read-all
 
@@ -32,8 +32,8 @@ jobs:
       matrix:
         include:
           - {CUDA_VERSION: CUDA12.6, IMAGE_TAG: cuda12.6-cudnn9.5-trt10.5-gcc11, bos_CUDA: cu126}
-          - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129,}
-          # - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
+          - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129}
+          - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
     env:
       TASK: PaddleFleet-nightly-${{ matrix.CUDA_VERSION }}
       PIP_CACHE_DIR: /root/.cache/pip
@@ -69,7 +69,7 @@ jobs:
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /workspace
-          sed -i "s#packages/nightly/cu129_debug#packages/nightly/${{ matrix.bos_CUDA }}#g" pyproject.toml
+          sed -i "s#packages/nightly/cu129#packages/nightly/${{ matrix.bos_CUDA }}#g" pyproject.toml
           cat pyproject.toml
           mkdir -p /root/.cache/pip
           pip cache dir
