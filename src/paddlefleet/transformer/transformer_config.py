@@ -326,6 +326,15 @@ class TransformerConfig(ModelParallelConfig):
     moe_grouped_gemm: bool = False
     """Whether to use grouped gemm."""
 
+    ##################
+    # Context Parallel
+    ##################
+    cp_comm_type: str | list[str] | None = None
+    """Inter-gpu communication type for context parallelism. Not support now.
+    str: all layers share same communication type.
+    List[str]: each layer has its separate communication type.
+    """
+
     ####################
     # fp8
     ####################

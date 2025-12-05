@@ -399,13 +399,13 @@ class FlashDotProductAttention(FleetLayer):
                     shape=[b, 1, seq_len, 1],
                     fill_value=seq_len,
                     dtype=paddle.int32,
-                )
+                ).cuda()
 
             if attention_mask.shape[-1] == 1:
                 b, k_heads, k_seqlen, _ = attention_mask.shape
                 append_indices = paddle.to_tensor(
                     np.arange(seq_len), dtype=attention_mask.dtype
-                )
+                ).cuda()
                 append_indices = append_indices.reshape(1, 1, seq_len, 1)
                 append_indices_expand = append_indices.expand(
                     b, k_heads, k_seqlen, 1
