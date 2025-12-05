@@ -25,6 +25,7 @@
 
 #include "paddle/extension.h"
 #include "paddle/phi/api/all.h"
+#include "paddle/phi/core/utils/data_type.h"
 #ifdef __CUDACC__
 #include "paddle/phi/kernels/funcs/math_cuda_utils.h"
 #endif

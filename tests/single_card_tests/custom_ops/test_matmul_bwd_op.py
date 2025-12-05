@@ -16,6 +16,8 @@ import unittest
 
 import numpy as np
 import paddle
+from paddle import base
+from paddle.base import core
 
 try:
     from paddlefleet.extensions import ops
@@ -37,14 +39,8 @@ class TestMatmulBwd(unittest.TestCase):
         y_np = np.random.random(shape_y).astype("float32")
 
         if dtype == "bfloat16":
-            x_np = x_np.astype("uint16")  # Placeholder for bf16 numpy
-            # Paddle handles bf16 creation from float32 usually, but let's stick to float32 init and cast
-            x = paddle.to_tensor(
-                np.random.random(shape_x).astype("float32"), dtype=dtype
-            )
-            y = paddle.to_tensor(
-                np.random.random(shape_y).astype("float32"), dtype=dtype
-            )
+            x = paddle.to_tensor(x_np, dtype="float32").astype(dtype)
+            y = paddle.to_tensor(y_np, dtype="float32").astype(dtype)
         else:
             x = paddle.to_tensor(x_np, dtype=dtype)
             y = paddle.to_tensor(y_np, dtype=dtype)
@@ -109,6 +105,10 @@ class TestMatmulBwd(unittest.TestCase):
         # x: [K, M], y: [N, K] -> out: [M, N]
         # x: [64, 32], y: [32, 64]
         self.run_matmul_bwd((64, 32), (32, 64), True, True, "float32")
+
+    def test_matmul_bwd_bf16(self):
+        if core.is_bfloat16_supported(base.CUDAPlace(0)):
+            self.run_matmul_bwd((32, 64), (64, 32), False, False, "bfloat16")
 
 
 if __name__ == "__main__":

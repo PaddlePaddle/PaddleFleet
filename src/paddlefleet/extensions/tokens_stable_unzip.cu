@@ -14,7 +14,6 @@
 # limitations under the License.
 */
 #include "paddle/common/array.h"
-#include "paddle/phi/core/utils/data_type.h"
 #include "paddle/phi/kernels/funcs/aligned_vector.h"
 #include "utils.h"  // NOLINT
 
