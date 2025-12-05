@@ -421,6 +421,9 @@ class TransformerConfig(ModelParallelConfig):
             print(f"invalid key name: {key}")
             return
 
+        if key == "dtype":
+            self.params_dtype = value
+
         if key == "hidden_act":
             if isinstance(value, str):
                 func = getattr(F, value)

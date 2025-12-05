@@ -199,7 +199,9 @@ class TestGPTModel(unittest.TestCase):
 
         state_dict = self.gpt_model.sharded_state_dict()
         for name, tensor in state_dict.items():
-            assert tensor.local_shape == tensor.global_shape
+            assert tensor.local_shape == tensor.global_shape, (
+                f"single card model_state should not be sharded, but got tensor.local_shape: {tensor.local_shape} != tensor.global_shape: {tensor.global_shape}."
+            )
 
 
 if __name__ == "__main__":
