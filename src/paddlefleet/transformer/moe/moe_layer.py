@@ -85,7 +85,7 @@ class MoELayer(nn.Layer):
             self.moe_use_fusion_node = True
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
-
+        self.moe_grouped_gemm = config.moe_grouped_gemm
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -131,7 +131,7 @@ class MoELayer(nn.Layer):
             else:
                 self.experts.append(None)
 
-        if self.expert_model_parallel_size <= 1 and self.moe_use_fusion_node:
+        if self.moe_grouped_gemm:
             self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
@@ -166,6 +166,12 @@ class MoELayer(nn.Layer):
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
             )
+        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
+            logger.warning(
+                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
+                "Will turn on moe_grouped_gemm."
+            )
+            self.moe_grouped_gemm = True
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
@@ -381,12 +387,12 @@ class MoELayer(nn.Layer):
                 reshaped_input = hidden_states.reshape([-1, d_model])
             else:
                 reshaped_input = hidden_states
-            if self.moe_use_fusion_node:
-                output = self._forward_traditional_grouped_gemm_moe(
+            if self.moe_grouped_gemm:
+                output = self._forward_single_card_grouped_gemm_moe(
                     reshaped_input, mask, gates_masked
                 )
             else:
-                output = self._forward_traditional_moe(
+                output = self._forward_single_card_moe(
                     reshaped_input, topk_indices, topk_weights
                 )
 
@@ -403,7 +409,7 @@ class MoELayer(nn.Layer):
             output = ScatterOp.apply(output)
         return output, None  # None is bias
 
-    def _forward_traditional_moe(
+    def _forward_single_card_moe(
         self,
         hidden_states: paddle.Tensor,
         selected_experts: paddle.Tensor,
@@ -459,7 +465,7 @@ class MoELayer(nn.Layer):
             final_hidden_states = final_hidden_states + final_hidden_states_tmp
         return final_hidden_states.cast(hidden_states.dtype)
 
-    def _forward_traditional_grouped_gemm_moe(
+    def _forward_single_card_grouped_gemm_moe(
         self,
         hidden_states: paddle.Tensor,
         routing_map: paddle.Tensor,

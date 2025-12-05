@@ -102,7 +102,7 @@ class GroupedMLPExpert(FleetLayer):
             tokens_per_expert = tokens_per_expert.cpu().tolist()
             tokens_per_expert = [int(x) for x in tokens_per_expert]
 
-            fc1_output = paddle.incubate.nn.functional.legacy_batched_gemm(
+            fc1_output = paddle.incubate.nn.functional.batched_gemm(
                 permuted_local_hidden_states,
                 self.weight1,
                 tokens_per_expert,
@@ -113,7 +113,7 @@ class GroupedMLPExpert(FleetLayer):
                 )
             else:
                 intermediate_parallel = self.activation_func(fc1_output)
-                fc2_output = paddle.incubate.nn.functional.legacy_batched_gemm(
+                fc2_output = paddle.incubate.nn.functional.batched_gemm(
                     intermediate_parallel, self.weight2, tokens_per_expert
                 )
         else:

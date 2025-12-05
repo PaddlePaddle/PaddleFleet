@@ -352,7 +352,7 @@ class ExpertsGroupGemmContiguousNode:
             x = self.input
         if numpy.prod(x.shape) != 0:
             expert_w1 = paddle.stack(expert_w1, axis=0)
-            o1 = paddle.incubate.nn.functional.legacy_batched_gemm(
+            o1 = paddle.incubate.nn.functional.batched_gemm(
                 x,
                 expert_w1,
                 self.tokens_per_expert,
@@ -478,7 +478,7 @@ class ExpertsGroupGemmContiguousNode:
         # down proj
         if numpy.prod(o2.shape) != 0:
             expert_w2 = paddle.stack(expert_w2, axis=0)
-            o3 = paddle.incubate.nn.functional.legacy_batched_gemm(
+            o3 = paddle.incubate.nn.functional.batched_gemm(
                 o2,
                 expert_w2,
                 self.tokens_per_expert,
@@ -559,7 +559,7 @@ class ExpertsGroupGemmContiguousNode:
 
         if numpy.prod(unzipped_grad.shape) != 0:
             expert_w2 = paddle.stack([t.T for t in expert_w2], axis=0)
-            do2_s = paddle.incubate.nn.functional.legacy_batched_gemm(
+            do2_s = paddle.incubate.nn.functional.batched_gemm(
                 unzipped_grad,
                 expert_w2,
                 self.tokens_per_expert,
@@ -668,7 +668,7 @@ class ExpertsGroupGemmContiguousNode:
         """
         if numpy.prod(do1.shape) != 0:
             expert_w1 = paddle.stack([t.T for t in expert_w1], axis=0)
-            dx = paddle.incubate.nn.functional.legacy_batched_gemm(
+            dx = paddle.incubate.nn.functional.batched_gemm(
                 do1,
                 expert_w1,
                 self.tokens_per_expert,
