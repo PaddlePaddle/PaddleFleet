@@ -205,13 +205,21 @@ def get_expert_data_parallel_group(check_initialized=True):
     return _EXPERT_DATA_PARALLEL_GROUP
 
 
-def get_context_parallel_group(check_initialized=True):
+def get_context_parallel_group(check_initialized=False):
     """Get the context-parallel group the caller rank belongs to."""
     if check_initialized:
         assert _CONTEXT_PARALLEL_GROUP is not None, (
             "context parallel group is not initialized"
         )
     return _CONTEXT_PARALLEL_GROUP
+
+
+def get_context_parallel_world_size():
+    """Return world size for the tensor-model-parallel group."""
+    if get_context_parallel_group() is None:
+        return 1
+    else:
+        return get_context_parallel_group().world_size
 
 
 def get_pipeline_model_parallel_world_size():

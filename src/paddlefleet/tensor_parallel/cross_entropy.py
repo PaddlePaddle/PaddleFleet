@@ -161,17 +161,25 @@ class _VocabParallelCrossEntropy(paddle.autograd.Function):
                 vocab_parallel_logits
             )
         )
-        paddle.distributed.all_reduce(
-            logits_max,
-            op=paddle.distributed.ReduceOp.MAX,
-            group=get_tensor_model_parallel_group(),
-        )
+
+        tp_group = get_tensor_model_parallel_group(check_initialized=False)
+        if tp_group is not None:
+            paddle.distributed.all_reduce(
+                logits_max,
+                op=paddle.distributed.ReduceOp.MAX,
+                group=tp_group,
+            )
 
         # Get the partition's vocab indices
         get_vocab_range = VocabUtility.vocab_range_from_per_partition_vocab_size
         partition_vocab_size = vocab_parallel_logits.size()[-1]
-        rank = get_tensor_model_parallel_rank()
-        world_size = get_tensor_model_parallel_world_size()
+
+        if tp_group is not None:
+            rank = get_tensor_model_parallel_rank()
+            world_size = get_tensor_model_parallel_world_size()
+        else:
+            rank = 0
+            world_size = 1
         vocab_start_index, vocab_end_index = get_vocab_range(
             partition_vocab_size, rank, world_size
         )
@@ -190,18 +198,19 @@ class _VocabParallelCrossEntropy(paddle.autograd.Function):
             vocab_end_index,
         )
 
-        # All reduce is needed to get the chunks from other GPUs.
-        paddle.distributed.all_reduce(
-            predicted_logits,
-            op=dist.ReduceOp.SUM,
-            group=get_tensor_model_parallel_group(),
-        )
+        if tp_group is not None:
+            # All reduce is needed to get the chunks from other GPUs.
+            paddle.distributed.all_reduce(
+                predicted_logits,
+                op=dist.ReduceOp.SUM,
+                group=tp_group,
+            )
 
-        paddle.distributed.all_reduce(
-            sum_exp_logits,
-            op=dist.ReduceOp.SUM,
-            group=get_tensor_model_parallel_group(),
-        )
+            paddle.distributed.all_reduce(
+                sum_exp_logits,
+                op=dist.ReduceOp.SUM,
+                group=tp_group,
+            )
 
         exp_logits, loss = (
             VocabParallelCrossEntropy.calculate_cross_entropy_loss(
