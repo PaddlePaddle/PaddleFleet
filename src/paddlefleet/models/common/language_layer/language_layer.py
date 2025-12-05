@@ -18,7 +18,11 @@ import paddle
 from paddle import Tensor
 
 # from paddlefleet.dist_checkpointing.mapping import ShardedStateDict
-from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
+from paddlefleet.context_parallel_utils import ContextParallelGatherOp
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+    get_tensor_model_parallel_world_size,
+)
 from paddlefleet.pipeline_parallel.utils import (
     is_pp_first_stage,
     is_pp_last_stage,
@@ -127,6 +131,10 @@ class LanguageLayer(FleetLayer):
         # loss = tensor_parallel.vocab_parallel_cross_entropy(
         #     logits.cast("float32"), labels
         # )
+
+        if get_context_parallel_world_size() > 1:
+            loss = ContextParallelGatherOp.apply(loss, axis=1)
+            labels = ContextParallelGatherOp.apply(labels, axis=1)
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():  # empty span

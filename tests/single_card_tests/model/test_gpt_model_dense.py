@@ -197,6 +197,10 @@ class TestGPTModel(unittest.TestCase):
                 f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 4.636361598968506), please check your modify"
             )
 
+        state_dict = self.gpt_model.sharded_state_dict()
+        for name, tensor in state_dict.items():
+            assert tensor.local_shape == tensor.global_shape
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,8 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
+from paddlefleet.parallel_state import get_context_parallel_world_size
 
 
 class StandardMoERouter(nn.Layer):
@@ -53,6 +55,7 @@ class StandardMoERouter(nn.Layer):
 
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.sequence_parallel = config.sequence_parallel
+        self.context_parallel_size = max(get_context_parallel_world_size(), 1)
 
         self.scoring_func = config.scoring_func
 
@@ -158,16 +161,38 @@ class StandardMoERouter(nn.Layer):
 
     def _cal_seq_aux_loss(self, probs, top_k, routing_map, max_seq_len):
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
-        if self.tensor_model_parallel_size > 1:
-            assert (
-                self.sequence_parallel
-                and max_seq_len % self.tensor_model_parallel_size == 0
-            )
-            local_seq_len = max_seq_len // self.tensor_model_parallel_size
+        if (
+            self.tensor_model_parallel_size > 1
+            or self.context_parallel_size > 1
+        ):
+            local_seq_len = max_seq_len
+            if self.sequence_parallel and self.tensor_model_parallel_size > 1:
+                assert local_seq_len % self.tensor_model_parallel_size == 0
+                local_seq_len = local_seq_len // self.tensor_model_parallel_size
+            if self.context_parallel_size > 1:
+                assert local_seq_len % self.context_parallel_size == 0
+                local_seq_len = local_seq_len // self.context_parallel_size
             # [B*S, E]
-            all_probs = AllGatherOp.apply(probs)
+            if self.sequence_parallel and self.tensor_model_parallel_size > 1:
+                all_probs = AllGatherOp.apply(probs)
+            else:
+                all_probs = probs
             # [B, S, E]
-            all_probs = all_probs.reshape([-1, max_seq_len, self.num_experts])
+            if self.context_parallel_size > 1:
+                all_probs = all_probs.reshape(
+                    [
+                        -1,
+                        max_seq_len // self.context_parallel_size,
+                        self.num_experts,
+                    ]
+                )
+                # [B, S, E]
+                all_probs = ContextParallelAllGatherOp.apply(all_probs, axis=1)
+            else:
+                # [B, S, E]
+                all_probs = all_probs.reshape(
+                    [-1, max_seq_len, self.num_experts]
+                )
             batch_size = all_probs.shape[0]
             # [B, S, E]
             routing_map = routing_map.reshape([batch_size, local_seq_len, -1])
