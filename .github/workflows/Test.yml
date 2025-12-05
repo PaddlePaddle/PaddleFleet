@@ -525,6 +525,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git reset --hard 576a924b01626d1f41a34f07998f8164f256ea11
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           '
