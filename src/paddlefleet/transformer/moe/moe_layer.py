@@ -59,6 +59,7 @@ class MoELayer(nn.Layer):
         pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__()
+        self.config = config
         self.sublayers = sublayers
         routed_expert_config = deepcopy(config)
         shared_expert_config = deepcopy(config)
@@ -306,7 +307,6 @@ class MoELayer(nn.Layer):
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
     ):
-        print("call fusion_moe_forward", flush=True)
         # TODO(deepllz): add fp8 dispatch config && implementation
         dispatched_hidden_states = self.dispatch(
             hidden_states, probs, routing_map
@@ -371,7 +371,11 @@ class MoELayer(nn.Layer):
                 reshaped_input, topk_indices, topk_weights
             )
 
-        if self.training and self.router_aux_loss_coef > 0.0:
+        if (
+            self.training
+            and self.router_aux_loss_coef > 0.0
+            and self.config.topk_method != "noaux_tc"
+        ):
             aux_loss = aux_loss * self.router_aux_loss_coef
             output = AddAuxiliaryLoss.apply(output, aux_loss)
 

@@ -29,6 +29,77 @@ if TYPE_CHECKING:
 from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
 
+try:
+    from paddlefleet.extensions.ops import matmul_bwd
+except ImportError:
+    matmul_bwd = None
+
+
+class FakeGate(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, x):
+        ctx.x_shape = x.shape
+        ctx.x_dtype = x.dtype
+        return paddle.randn(x.shape).cast(x.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return paddle.zeros(ctx.x_shape, dtype=ctx.x_dtype)
+
+
+def cast_if_needed(x, dtype):
+    """辅助函数：类型转换"""
+    return x.cast(dtype) if x.dtype != dtype else x
+
+
+class FusedGateDetachMatmul(paddle.autograd.PyLayer):
+    """
+    融合算子：执行 MatMul 并在反向传播时处理梯度
+    """
+
+    @staticmethod
+    def forward(ctx, x, w):
+        ctx.dtype = paddle.float32
+        ctx.save_for_backward(x, w)
+        return F.linear(
+            cast_if_needed(x, ctx.dtype), cast_if_needed(w, ctx.dtype)
+        )
+
+    @staticmethod
+    def backward(ctx, y_grad):
+        x, w = ctx.saved_tensor()
+        assert ctx.dtype == y_grad.dtype, "dtype not match"
+        if matmul_bwd is None:
+            raise ImportError(
+                "matmul_bwd is required for FusedGateDetachMatmul but not found."
+            )
+        x_g, w_g = matmul_bwd(
+            cast_if_needed(x, ctx.dtype),
+            cast_if_needed(w, ctx.dtype),
+            y_grad,
+            False,
+            False,
+        )
+        return cast_if_needed(x_g, x.dtype), cast_if_needed(w_g, w.dtype)
+
+
+def gate_detach_matmul(
+    x, weight, use_fuse, moe_router_force_load_balancing=False
+):
+    """
+    计算 Logits 的核心函数
+    """
+    if use_fuse:
+        score = FusedGateDetachMatmul.apply(x, weight)
+    else:
+        x = cast_if_needed(x, paddle.float32)
+        score = F.linear(x, weight)
+
+    if moe_router_force_load_balancing:
+        # 仅用于测试，模拟随机 Gate
+        score = FakeGate.apply(score)
+    return score
+
 
 class StandardMoERouter(nn.Layer):
     def __init__(
@@ -37,6 +108,7 @@ class StandardMoERouter(nn.Layer):
         pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__()
+        self.config = config
 
         self.hidden_size = config.hidden_size
         self.num_experts = config.n_routed_experts
@@ -85,22 +157,26 @@ class StandardMoERouter(nn.Layer):
             )  # Used in MoECorrectionBiasAdjustCallback
             self.expert_usage.stop_gradient = True
 
-    def gate_score_func(self, logits: paddle.Tensor) -> paddle.Tensor:
+    def gate_score_func(
+        self, logits: paddle.Tensor, logits_type_promotion: bool = True
+    ) -> paddle.Tensor:
         # [..., hidden_dim] -> [..., num_experts]
         with paddle.amp.auto_cast(False):
+            if logits_type_promotion:
+                logits = logits.cast("float32")
             scoring_func = self.scoring_func
             if scoring_func == "softmax":
-                scores = F.softmax(logits.cast("float32"), axis=-1)
+                scores = F.softmax(logits, axis=-1)
             elif scoring_func == "sigmoid":
-                scores = F.sigmoid(logits.cast("float32"))
+                scores = F.sigmoid(logits)
             elif scoring_func == "tanh":
-                scores = F.tanh(logits.cast("float32"))
+                scores = F.tanh(logits)
             elif scoring_func == "relu":
-                scores = F.relu(logits.cast("float32"))
+                scores = F.relu(logits)
             elif scoring_func == "gelu":
-                scores = F.gelu(logits.cast("float32"))
+                scores = F.gelu(logits)
             elif scoring_func == "leaky_relu":
-                scores = F.leaky_relu(logits.cast("float32"))
+                scores = F.leaky_relu(logits)
             else:
                 raise NotImplementedError(f"{scoring_func} is not implemented.")
         return scores
@@ -429,24 +505,29 @@ class StandardMoERouter(nn.Layer):
         scores_for_choice = scores.reshape(
             [bsz_seq_len, -1]
         ) + self.e_score_correction_bias.detach().unsqueeze(0)
-        group_scores = (
-            scores_for_choice.reshape([bsz_seq_len, self.n_group, -1])
-            .topk(2, axis=-1)[0]
-            .sum(axis=-1)
-        )  # fmt:skip [n, n_group]
-        group_idx = paddle.topk(
-            group_scores, k=topk_group, axis=-1, sorted=True
-        )[1]  # [n, top_k_group]
-        group_mask = paddle.zeros_like(group_scores).put_along_axis(group_idx, paddle.to_tensor(1.0, dtype="float32"), axis=-1)  # fmt:skip
-        score_mask = (
-            group_mask.unsqueeze(-1)
-            .expand([bsz_seq_len, n_group, n_experts // n_group])
-            .reshape([bsz_seq_len, -1])
-        )  # [n, e]
-        tmp_scores = scores_for_choice * score_mask  # [n, e]
-        topk_weight, topk_idx = paddle.topk(
-            tmp_scores, k=k, axis=-1, sorted=True
-        )
+        if n_group == 1:
+            topk_weight, topk_idx = paddle.topk(
+                scores_for_choice, k=k, axis=-1, sorted=True
+            )
+        else:
+            group_scores = (
+                scores_for_choice.reshape([bsz_seq_len, self.n_group, -1])
+                .topk(2, axis=-1)[0]
+                .sum(axis=-1)
+            )  # fmt:skip [n, n_group]
+            group_idx = paddle.topk(
+                group_scores, k=topk_group, axis=-1, sorted=True
+            )[1]  # [n, top_k_group]
+            group_mask = paddle.zeros_like(group_scores).put_along_axis(group_idx, paddle.to_tensor(1.0, dtype="float32"), axis=-1)  # fmt:skip
+            score_mask = (
+                group_mask.unsqueeze(-1)
+                .expand([bsz_seq_len, n_group, n_experts // n_group])
+                .reshape([bsz_seq_len, -1])
+            )  # [n, e]
+            tmp_scores = scores_for_choice * score_mask  # [n, e]
+            topk_weight, topk_idx = paddle.topk(
+                tmp_scores, k=k, axis=-1, sorted=True
+            )
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
@@ -600,5 +681,79 @@ class StandardMoERouter(nn.Layer):
             mask,  # mask. for each token, the selected experts are marked with 1s [num_tokens, num_experts]
             token_priority.take_along_axis(top_idx, axis=-1),  # token priority
             l_aux,
+            l_zloss,
+        )
+
+
+class DeepEPTopKRouter(StandardMoERouter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        assert self.topk_method == "noaux_tc"
+
+    def forward(self, input):
+        """
+        前向传播
+        返回:
+            logits: 路由得分 [Batch*Seq, Num_Experts]
+        """
+        if input.ndim == 3:
+            input = input.reshape([-1, input.shape[-1]])
+        assert len(input.shape) == 2, (
+            f"input Tensor must have dimensions: (s)equence, (d)im, got:{input.shape}"
+        )
+
+        with paddle.amp.auto_cast(False):
+            logits = gate_detach_matmul(
+                input,
+                self.weight.T,
+                True,
+                self.config.moe_router_force_load_balancing,
+            )
+
+        gates = self.gate_score_func(logits)
+
+        # top_gate: [B*S, K], top_idx: [B*S, K]
+        top_gate, top_idx = self._topk_noaux_tc(
+            gates,
+            k=self.num_experts_per_tok,
+            n_group=self.n_group,
+            topk_group=self.topk_group,
+        )
+
+        # z-loss
+        if self.config.moe_z_loss_coeff:
+            l_zloss = self._cal_z_loss(logits) * self.config.moe_z_loss_coeff
+        else:
+            l_zloss = None
+
+        # norm
+        if self.num_experts_per_tok > 1 and self.norm_topk_prob:
+            denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+            top_gate = top_gate / denominator
+
+        if self.routed_scaling_factor != 1.0:
+            top_gate = top_gate * self.routed_scaling_factor
+
+        mask = paddle.zeros_like(gates).put_along_axis(
+            top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
+        )
+
+        exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
+        with paddle.no_grad():
+            self.expert_usage += exp_counts
+
+        gates_masked = paddle.zeros_like(gates).put_along_axis(
+            top_idx, top_gate.cast(gates.dtype), axis=1
+        )
+
+        return (
+            None,  # new capacity
+            top_gate,  # weights of selected experts for each token [num_tokens, num_experts_per_token]
+            top_idx,  # indices of selected experts for each token [num_tokens, num_experts_per_token]
+            gates_masked,  # masked gates. for each token, the selected experts are remainded with their original values, others are 0 [num_tokens, num_experts]
+            mask,  # mask. for each token, the selected experts are marked with 1s [num_tokens, num_experts]
+            None,  # token priority
+            None,
             l_zloss,
         )
