@@ -636,7 +636,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: ./multi_coverage.xml, ./single_coverage.xml ./h20_multi_coverage.xml ./h20_single_coverage.xml ./h20_qwen_coverage.xml ./a100_coverage.xml
+          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
