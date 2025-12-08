@@ -208,3 +208,22 @@ class _AllToAll(paddle.autograd.PyLayer):
             ctx.out_split_sizes,
             ctx.group,
         )
+
+
+class RandomSTE(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, x):
+        ctx.x_shape = x.shape
+        ctx.x_dtype = x.dtype
+        return paddle.randn(x.shape).cast(x.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return paddle.zeros(ctx.x_shape, dtype=ctx.x_dtype)
+
+
+def apply_random_logits(logits):
+    """
+    Apply the RandomSTE function to the logits.
+    """
+    return RandomSTE.apply(logits)

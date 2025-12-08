@@ -26,78 +26,45 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddle._C_ops import matmul_grad
+
 from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
-
-try:
-    from paddlefleet.extensions.ops import matmul_bwd
-except ImportError:
-    matmul_bwd = None
-
-
-class FakeGate(paddle.autograd.PyLayer):
-    @staticmethod
-    def forward(ctx, x):
-        ctx.x_shape = x.shape
-        ctx.x_dtype = x.dtype
-        return paddle.randn(x.shape).cast(x.dtype)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return paddle.zeros(ctx.x_shape, dtype=ctx.x_dtype)
-
-
-def cast_if_needed(x, dtype):
-    """辅助函数：类型转换"""
-    return x.cast(dtype) if x.dtype != dtype else x
+from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 
 
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
-    """
-    融合算子：执行 MatMul 并在反向传播时处理梯度
-    """
-
     @staticmethod
     def forward(ctx, x, w):
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
-        return F.linear(
-            cast_if_needed(x, ctx.dtype), cast_if_needed(w, ctx.dtype)
-        )
+        return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
 
     @staticmethod
     def backward(ctx, y_grad):
         x, w = ctx.saved_tensor()
         assert ctx.dtype == y_grad.dtype, "dtype not match"
-        if matmul_bwd is None:
-            raise ImportError(
-                "matmul_bwd is required for FusedGateDetachMatmul but not found."
-            )
-        x_g, w_g = matmul_bwd(
-            cast_if_needed(x, ctx.dtype),
-            cast_if_needed(w, ctx.dtype),
+        x_g, w_g = matmul_grad(
+            x.cast(ctx.dtype),
+            w.cast(ctx.dtype),
             y_grad,
             False,
             False,
         )
-        return cast_if_needed(x_g, x.dtype), cast_if_needed(w_g, w.dtype)
+        return x_g.cast(x.dtype), w_g.cast(w.dtype)
 
 
 def gate_detach_matmul(
     x, weight, use_fuse, moe_router_force_load_balancing=False
 ):
-    """
-    计算 Logits 的核心函数
-    """
     if use_fuse:
         score = FusedGateDetachMatmul.apply(x, weight)
     else:
-        x = cast_if_needed(x, paddle.float32)
+        x = x.cast(paddle.float32)
         score = F.linear(x, weight)
 
     if moe_router_force_load_balancing:
-        # 仅用于测试，模拟随机 Gate
-        score = FakeGate.apply(score)
+        score = apply_random_logits(score)
     return score
 
 
@@ -692,11 +659,6 @@ class DeepEPTopKRouter(StandardMoERouter):
         assert self.topk_method == "noaux_tc"
 
     def forward(self, input):
-        """
-        前向传播
-        返回:
-            logits: 路由得分 [Batch*Seq, Num_Experts]
-        """
         if input.ndim == 3:
             input = input.reshape([-1, input.shape[-1]])
         assert len(input.shape) == 2, (
@@ -722,8 +684,8 @@ class DeepEPTopKRouter(StandardMoERouter):
         )
 
         # z-loss
-        if self.config.moe_z_loss_coeff:
-            l_zloss = self._cal_z_loss(logits) * self.config.moe_z_loss_coeff
+        if self.config.router_z_loss_coef:
+            l_zloss = self._cal_z_loss(logits) * self.config.router_z_loss_coef
         else:
             l_zloss = None
 
