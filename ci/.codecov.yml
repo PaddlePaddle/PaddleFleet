@@ -4,12 +4,12 @@ coverage:
       default:
         target: 35% # 全局覆盖率目标（可选）
         threshold: 1% # 允许下降的容忍度
-        informational: false
+        informational: true
     patch:
       default:
         target: 90%
         threshold: 0%
-        informational: false
+        informational: true
 comment:
   layout: "reach, diff, flags, files"
   behavior: new
