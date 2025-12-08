@@ -659,8 +659,11 @@ class DeepEPTopKRouter(StandardMoERouter):
         assert self.topk_method == "noaux_tc"
 
     def forward(self, input):
-        if input.ndim == 3:
-            input = input.reshape([-1, input.shape[-1]])
+        assert len(input.shape) == 3, (
+            f"input Tensor must have dimensions: b(atch),(s)equence, (d)im, got:{input.shape}"
+        )
+        _, seq_len, _ = input.shape
+        input = input.reshape([-1, input.shape[-1]])
         assert len(input.shape) == 2, (
             f"input Tensor must have dimensions: (s)equence, (d)im, got:{input.shape}"
         )
@@ -694,7 +697,7 @@ class DeepEPTopKRouter(StandardMoERouter):
             denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
             top_gate = top_gate / denominator
 
-        if self.routed_scaling_factor != 1.0:
+        if abs(self.routed_scaling_factor - 1.0) > 1e-6:
             top_gate = top_gate * self.routed_scaling_factor
 
         mask = paddle.zeros_like(gates).put_along_axis(
@@ -709,6 +712,17 @@ class DeepEPTopKRouter(StandardMoERouter):
             top_idx, top_gate.cast(gates.dtype), axis=1
         )
 
+        # aux_loss
+        if self.config.router_aux_loss_coef:
+            if self.routing_type == "seq_aux_loss":
+                l_aux = self._cal_seq_aux_loss(
+                    gates, self.num_experts_per_tok, mask, seq_len
+                )
+            else:
+                l_aux = self._cal_aux_loss(gates, mask)
+        else:
+            l_aux = None
+
         return (
             None,  # new capacity
             top_gate,  # weights of selected experts for each token [num_tokens, num_experts_per_token]
@@ -716,6 +730,6 @@ class DeepEPTopKRouter(StandardMoERouter):
             gates_masked,  # masked gates. for each token, the selected experts are remainded with their original values, others are 0 [num_tokens, num_experts]
             mask,  # mask. for each token, the selected experts are marked with 1s [num_tokens, num_experts]
             None,  # token priority
-            None,
+            l_aux,
             l_zloss,
         )

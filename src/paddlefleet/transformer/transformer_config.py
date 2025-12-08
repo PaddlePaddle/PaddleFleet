@@ -298,7 +298,7 @@ class TransformerConfig(ModelParallelConfig):
     be dropped.
     """
 
-    router_aux_loss_coef: float = 1e-2
+    router_aux_loss_coef: float = None
     """Scaling coefficient for the aux loss. A starting value of 1e-2 is recommended."""
 
     norm_topk_prob: bool = True

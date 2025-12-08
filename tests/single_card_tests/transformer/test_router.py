@@ -43,6 +43,7 @@ class MockTransformerConfig:
         self.moe_router_load_balancing_type = "aux_loss"  # Although DeepEP does not use aux, the parent class initialization might check this
         self.moe_router_force_load_balancing = False
         self.router_z_loss_coef = 0.01
+        self.router_aux_loss_coef = 0.01
 
     def get(self, key, default=None):
         return getattr(self, key, default)
@@ -165,7 +166,6 @@ class TestDeepEPTopKRouter(unittest.TestCase):
         # 1. Verify None values specific to DeepEP in the Return Tuple
         self.assertIsNone(capacity, "Capacity should be None for DeepEP")
         self.assertIsNone(outputs[5], "Token priority should be None")
-        self.assertIsNone(outputs[6], "Aux loss should be None")
 
         # 2. Verify shapes
         # Input is flattened to [B*S, H]
@@ -187,7 +187,11 @@ class TestDeepEPTopKRouter(unittest.TestCase):
         # Verify its data type and rough structure here
         self.assertEqual(mask.shape, gates_masked.shape)
 
-        # 4. Verify Z-Loss calculation
+        # 4. Verify Loss calculation
+        if self.config.router_aux_loss_coef > 0:
+            self.assertIsNotNone(outputs[6])
+            self.assertEqual(outputs[6].shape, [])
+
         if self.config.router_z_loss_coef > 0:
             self.assertIsNotNone(l_zloss)
             self.assertEqual(l_zloss.shape, [])
