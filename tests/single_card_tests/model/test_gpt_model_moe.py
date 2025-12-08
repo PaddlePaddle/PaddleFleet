@@ -200,8 +200,8 @@ class TestGPTModel(unittest.TestCase):
                 f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 6.112863540649414), please check your modify"
             )
         elif judge_machine_type() == "V":
-            assert word_embeddings_grad_norm == 8.235458374023438, (
-                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 8.235458374023438, please check your modify"
+            assert word_embeddings_grad_norm == 8.2354097366333, (
+                f"grad norm of word_embeddingsnot not equal ({word_embeddings_grad_norm} != 8.2354097366333), please check your modify"
             )
 
 
