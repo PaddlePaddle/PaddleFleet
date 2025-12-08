@@ -585,9 +585,9 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
-  
+
   coverage_check_test:
-    name: Coverage Upload And Check
+    name: Coverage Upload And Check Test
     needs: [multi-card_test, check-bypass]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on: ubuntu-latest
@@ -623,6 +623,7 @@ jobs:
         with:
           files: ./multi_coverage.xml
           flags: coverage_combine
+          config_file: /workspace/PaddleFleet/ci/.codecov.yml
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
           verbose: true
