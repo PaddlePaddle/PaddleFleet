@@ -812,6 +812,7 @@ class ExpertsGroupGemmContiguousNode:
                     paddle.float32,
                 )
             if hasattr(expert_w2[i], "_apply_backward_hook"):
+                expert_w2[i].stop_gradient = False
                 expert_w2[i]._apply_backward_hook()
 
     def bwd_gate_up_weight(self, do1, input_x, expert_w1, clear_input=False):
@@ -882,6 +883,7 @@ class ExpertsGroupGemmContiguousNode:
                     paddle.float32,
                 )
             if hasattr(expert_w1[i], "_apply_backward_hook"):
+                expert_w1[i].stop_gradient = False
                 expert_w1[i]._apply_backward_hook()
 
     @paddle.no_grad()
@@ -1213,4 +1215,5 @@ class ExpertsGroupGemmContiguousNode:
                 start_idx = end_idx
 
             if hasattr(weights[i], "_apply_backward_hook"):
+                weights[i].stop_gradient = False
                 weights[i]._apply_backward_hook()
