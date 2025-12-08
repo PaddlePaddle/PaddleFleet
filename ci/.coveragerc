@@ -1,6 +1,6 @@
 [run]
 branch = True
-source = paddlefleet ci
+source = paddlefleet
 concurrency = multiprocessing
 patch = subprocess
 parallel = True

@@ -588,7 +588,7 @@ jobs:
 
   coverage_check_test:
     name: Coverage Upload And Check Test
-    needs: [multi-card_test, check-bypass]
+    needs: [single_card_test, check-bypass]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on: ubuntu-latest
     env:
@@ -608,20 +608,20 @@ jobs:
       - name: coverage file download
         shell: bash
         run: |
-          multi_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/multi-card/coverage.xml"
-          wget "${multi_card_cov_file_url}" -O multi_coverage.xml --no-proxy
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
+          single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
+          wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
           git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
-          diff-cover multi_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
+          diff-cover single_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
 
       - name: Upload coverage to Codecov
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: ./multi_coverage.xml
+          files: ./single_coverage.xml
           flags: coverage_combine
           codecov_yml_path: /workspace/PaddleFleet/ci/.codecov.yml
           name: "${{ env.TASK }}-${{ github.run_id }}"
