@@ -1,0 +1,25 @@
+codecov:
+  require_ci_to_pass: true
+
+coverage:
+  status:
+    project:
+      default:
+        target: 60%
+        threshold: 1%
+        if_not_found: success
+    patch:
+      default:
+        target: 100%
+        threshold: 0%
+        if_not_found: success
+
+comment:
+  layout: "reach, diff, flags"
+  behavior: default
+  require_changes: false
+
+flags:
+  coverage_combine:
+    paths:
+      - paddlefleet/
