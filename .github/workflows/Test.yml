@@ -621,7 +621,7 @@ jobs:
         with:
           files: ./multi_coverage.xml
           flags: coverage_combine
-          config_file: /workspace/PaddleFleet/ci/.codecov.yml
+          codecov_yml_path: /workspace/PaddleFleet/ci/.codecov.yml
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
           verbose: true
