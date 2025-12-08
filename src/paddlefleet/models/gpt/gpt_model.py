@@ -551,10 +551,7 @@ class GPTModel(LanguageLayer):
             # runtime_gather_output=runtime_gather_output,
         )
 
-        if (
-            self.config.sequence_parallel
-            and self.config.scatter_embedding_sequence_parallel
-        ):
+        if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
 
         if labels is not None:

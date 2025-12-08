@@ -202,7 +202,7 @@ class DotProductAttention(FleetLayer):
                 query,
                 key,
                 value,
-                None,  # attention_mask
+                attention_mask,
                 self.config.attention_dropout,
                 is_causal=True,
                 training=True,

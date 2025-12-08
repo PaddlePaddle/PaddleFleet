@@ -1186,17 +1186,26 @@ class ExpertsGroupGemmContiguousNode:
 
         start_idx = 0
         for i, n in enumerate(self.tokens_per_expert):
-            if weights[i].main_grad is None:
-                weights[i].main_grad = paddle.zeros(
-                    weights[i].shape, dtype=paddle.float32
-                )
+            if hasattr(weights[i], "main_grad"):
+                if weights[i].main_grad is None:
+                    weights[i].main_grad = paddle.zeros(
+                        weights[i].shape, dtype=paddle.float32
+                    )
+                grad_attr = weights[i].main_grad
+            else:
+                if weights[i].grad is None:
+                    weights[i].grad = paddle.zeros(
+                        weights[i].shape, dtype=paddle.float32
+                    )
+                grad_attr = weights[i].grad
+
             if n > 0:
                 n = (n + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
                 end_idx = start_idx + n
                 paddle._C_ops.fused_linear_param_grad_add(
                     x._slice(start_idx, end_idx),
                     dy._slice(start_idx, end_idx),
-                    weights[i].main_grad,
+                    grad_attr,
                     None,
                     True,
                     False,

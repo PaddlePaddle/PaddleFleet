@@ -13,17 +13,22 @@
 // limitations under the License.
 
 #pragma once
+#ifdef __CUDACC__
 #include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#endif
 
 #include <iostream>
 #include <limits>
 
 #include "paddle/extension.h"
 #include "paddle/phi/api/all.h"
+#include "paddle/phi/core/utils/data_type.h"
+#ifdef __CUDACC__
 #include "paddle/phi/kernels/funcs/math_cuda_utils.h"
+#endif
 
 template <paddle::DataType DType>
 struct TypeMap;
@@ -48,11 +53,46 @@ struct TypeMap<paddle::DataType::INT64> {
   using type = int64_t;
 };
 
+inline paddle::DataType TransToDataType(int64_t dtype) {
+  return phi::TransToPhiDataType(dtype);
+}
+
+inline int LimitGridDim(int64_t n) {
+  return static_cast<int>(std::min<int64_t>(n, 1024 * 1024));
+}
+
+#ifdef __CUDACC__
+template <typename T>
+T **GetTensorDevicePtrs(const std::vector<paddle::Tensor> &tensors,
+                        paddle::Tensor *ptr_tensor,
+                        cudaStream_t stream,
+                        phi::Place place) {
+  auto nbytes = tensors.size() * sizeof(T *);
+  std::vector<const T *> cpu_ptrs(tensors.size());
+  for (size_t i = 0; i < tensors.size(); ++i) {
+    cpu_ptrs[i] = tensors[i].data<T>();
+  }
+  *ptr_tensor = paddle::empty(
+      {static_cast<int64_t>(nbytes)}, paddle::DataType::UINT8, place);
+  auto *device_ptrs = reinterpret_cast<T **>(ptr_tensor->data());
+  auto err = cudaMemcpyAsync(
+      device_ptrs, cpu_ptrs.data(), nbytes, cudaMemcpyHostToDevice, stream);
+  PD_CHECK(
+      err == cudaSuccess, "cudaMemcpyAsync error", cudaGetErrorString(err));
+  err = cudaStreamSynchronize(stream);
+  PD_CHECK(err == cudaSuccess,
+           "cudaStreamSynchronize error",
+           cudaGetErrorString(err));
+  return device_ptrs;
+}
+#endif
+
 template <typename T, int N>
 struct alignas(16) VectorType {
   T data[N];
 };
 
+#ifdef __CUDACC__
 template <>
 struct alignas(16) VectorType<float, 4> {
   float4 data;  // Built-in CUDA vector type
@@ -67,16 +107,18 @@ template <>
 struct alignas(16) VectorType<__nv_fp8_e4m3, 16> {
   __nv_fp8_e4m3 data[16];
 };
+#endif
 
 template <>
 struct alignas(16) VectorType<uint8_t, 16> {
   uint8_t data[16];
 };
 
+#ifdef __CUDACC__
 // Helper function to perform vectorized memory copy
 template <typename T>
-__device__ __forceinline__ void vectorized_memcpy(const T* src,
-                                                  T* dst,
+__device__ __forceinline__ void vectorized_memcpy(const T *src,
+                                                  T *dst,
                                                   int num_elements) {
   constexpr int vector_size_in_bytes = 16;
   const int elements_per_vector = vector_size_in_bytes / sizeof(T);
@@ -85,8 +127,8 @@ __device__ __forceinline__ void vectorized_memcpy(const T* src,
   int remaining_elements = num_elements % elements_per_vector;
 
   using VecType = VectorType<T, elements_per_vector>;
-  const VecType* src_vec = reinterpret_cast<const VecType*>(src);
-  VecType* dst_vec = reinterpret_cast<VecType*>(dst);
+  const VecType *src_vec = reinterpret_cast<const VecType *>(src);
+  VecType *dst_vec = reinterpret_cast<VecType *>(dst);
 
 #pragma unroll
   for (int idx = threadIdx.x; idx < num_vectors; idx += blockDim.x) {
@@ -100,6 +142,7 @@ __device__ __forceinline__ void vectorized_memcpy(const T* src,
     }
   }
 }
+#endif
 
 #define PD_SWITCH_NUM_EXPERTS_IMPL(__num_expert, __max_num_experts, ...) \
   if (__num_expert <= __max_num_experts) {                               \

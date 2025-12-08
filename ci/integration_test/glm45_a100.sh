@@ -54,7 +54,7 @@ export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
-python -m paddle.distributed.launch \
+coverage run -m paddle.distributed.launch \
    --log_dir ./log \
    --master $master:$port \
    --nnodes 1 \
