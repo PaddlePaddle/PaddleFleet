@@ -623,7 +623,6 @@ jobs:
         with:
           files: ./single_coverage.xml
           flags: coverage_combine
-          codecov_yml_path: ./ci/.codecov.yml
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
           verbose: true
