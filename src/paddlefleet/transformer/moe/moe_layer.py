@@ -379,11 +379,7 @@ class MoELayer(nn.Layer):
                 reshaped_input, topk_indices, topk_weights
             )
 
-        if (
-            self.training
-            and self.router_aux_loss_coef > 0.0
-            and self.config.topk_method != "noaux_tc"
-        ):
+        if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * self.router_aux_loss_coef
             output = AddAuxiliaryLoss.apply(output, aux_loss)
 
