@@ -94,10 +94,7 @@ class MoELayer(nn.Layer):
 
         # MoE-Related Configs
         self._init_expert_parallel()
-        if (
-            config.moe_token_dispatcher_type == "deepep"
-            and config.topk_method == "noaux_tc"
-        ):
+        if config.moe_router_fusion:
             self.gate = DeepEPTopKRouter(
                 config=config, pg_collection=pg_collection
             )

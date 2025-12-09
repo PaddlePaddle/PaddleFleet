@@ -338,6 +338,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
 
+    moe_router_fusion: bool = False
+    """Whether to fuse MoE router."""
+
     ####################
     # fp8
     ####################
