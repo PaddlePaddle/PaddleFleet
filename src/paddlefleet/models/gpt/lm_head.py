@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import paddle
+
 from paddlefleet.tensor_parallel.layers import ColumnParallelLinear
 
 
@@ -22,13 +24,15 @@ class GPTLMHead(ColumnParallelLinear):
             "skip_weight_param_allocation"
         ]
         super().__init__(**kwargs)
+        if not self.skip_weight_param_allocation:
+            shape = self.weight.T.shape
+            dtype = self.weight.dtype
+            del self.weight
+            self.weight = paddle.create_parameter(shape=shape, dtype=dtype)
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
-        if self.skip_weight_param_allocation:
-            logits, _ = super().forward(hidden_states, self.weight.T)
-        else:
-            logits, _ = super().forward(hidden_states)
+        logits, _ = super().forward(hidden_states, self.weight.T)
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
         return logits

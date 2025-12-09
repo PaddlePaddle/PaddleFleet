@@ -26,6 +26,7 @@ from paddlefleet.pipeline_parallel import (
 if TYPE_CHECKING:
     from paddlefleet.spec_utils import LayerSpec
 
+
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
 
@@ -108,7 +109,7 @@ class GPTModel(PipelineLayer):
             layers.append(
                 SharedLayerDesc(
                     "embed",
-                    layer_func=spec.lm_head,
+                    spec.lm_head,
                     shared_weight_attr="embedding_weight",
                 )
             )

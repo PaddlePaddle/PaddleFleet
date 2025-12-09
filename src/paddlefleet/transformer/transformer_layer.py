@@ -228,7 +228,9 @@ class TransformerLayer(nn.Layer):
         dict_args.pop("dynamic_inference_decode_only", None)
         hidden_states, context = self._forward_attention(**dict_args)
         output = self._forward_mlp(hidden_states)
-        rst = {"hidden_states": output, "context": context}
+        rst = {"hidden_states": output}
+        if context is not None:
+            rst["context"] = context
         rst = {**dict_args, **rst}
         return rst
 
@@ -239,8 +241,6 @@ class TransformerLayer(nn.Layer):
         context: Tensor | None = None,
         context_mask: Tensor | None = None,
         rotary_pos_emb: Tensor | None = None,
-        rotary_pos_cos: Tensor | None = None,
-        rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
     ):
@@ -255,8 +255,6 @@ class TransformerLayer(nn.Layer):
             context (Tensor | None): Context tensor for cross-attention.
             context_mask (Tensor | None): Mask tensor for cross-attention.
             rotary_pos_emb (Tensor | None): Rotary positional embeddings.
-            rotary_pos_cos (Tensor | None): Rotary embedding cosine.
-            rotary_pos_sin (Tensor | None): Rotary embedding sine.
             attention_bias (Tensor | None): Bias tensor for Q * K.T.
             packed_seq_params (object, optional): Parameters for packed sequence processing.
 
@@ -286,8 +284,6 @@ class TransformerLayer(nn.Layer):
             input_layernorm_output,
             attention_mask=attention_mask,
             rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
         )
