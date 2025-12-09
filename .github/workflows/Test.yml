@@ -618,7 +618,7 @@ jobs:
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
           set -o pipefail
-          diff-cover multi_coverage.xml single_coverage.xml h20_multi_coverage.xml h20_single_coverage.xml h20_qwen_coverage.xml a100_coverage.xml --diff-file=diff.txt --fail-under=90 | tee diff_cover_output.txt
+          diff-cover multi_coverage.xml single_coverage.xml --diff-file=diff.txt --fail-under=90 | tee diff_cover_output.txt
       - name: Comment diff-cover result on PR
         if: always()
         uses: actions/github-script@v7
