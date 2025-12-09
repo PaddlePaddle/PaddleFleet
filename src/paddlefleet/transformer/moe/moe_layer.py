@@ -34,12 +34,11 @@ if TYPE_CHECKING:
 from paddlefleet import utils
 
 from .fusion_layer_utils import FusionMoePyLayer
-from .moe_communication import AllToAllMoECommunication, DeepEPMoECommunication
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
 from .moe_router import StandardMoERouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
-from .token_dispatcher import MoEFlexTokenDispatcher
+from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -181,14 +180,8 @@ class MoELayer(nn.Layer):
                     self.num_experts,
                     self.moe_group,
                 )
-                self.communication = DeepEPMoECommunication(
-                    self.moe_group,
-                    self.expert_model_parallel_size,
-                    self.num_experts_per_device,
-                    self.token_dispatcher,
-                )
             elif self.moe_token_dispatcher_type == "alltoall":
-                self.communication = AllToAllMoECommunication(
+                self.token_dispatcher = AllToAllTokenDispatcher(
                     self.moe_group,
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
