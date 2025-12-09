@@ -32,7 +32,6 @@ from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.pipeline_parallel import NoPipelineParallel
 from paddlefleet.tensor_parallel.mappings import (
     _gather_along_first_dim,
@@ -200,17 +199,17 @@ def run_tp_sp(
 
     _set_random_seed(seed)
 
-    transformer_layer_spec = get_gpt_layer_local_spec(
-        num_experts=None,
-        moe_grouped_gemm=False,
-        use_qk_norm=True,
-        multi_latent_attention=False,
-        normalization="RMSNorm",
-    )
-    pre_process = True
-    post_process = True
-    mtp_block_spec = None
-    vp_stage = None
+    # transformer_layer_spec = get_gpt_layer_local_spec(
+    #     num_experts=None,
+    #     moe_grouped_gemm=False,
+    #     use_qk_norm=True,
+    #     multi_latent_attention=False,
+    #     normalization="RMSNorm",
+    # )
+    # pre_process = True
+    # post_process = True
+    # mtp_block_spec = None
+    # vp_stage = None
 
     gpt_model = gpt_builder(config, num_stages=1)
     # gpt_model = GPTModel(
