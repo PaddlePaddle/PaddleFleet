@@ -588,7 +588,7 @@ jobs:
 
   coverage_check:
     name: Coverage Upload And Check
-    needs: [multi-card_test, single_card_test, integration-test-H20, check-bypass]
+    needs: [multi-card_test, single_card_test, check-bypass]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on: ubuntu-latest
     env:
@@ -612,17 +612,8 @@ jobs:
           wget "${multi_card_cov_file_url}" -O multi_coverage.xml --no-proxy
           single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
           wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
-          h20_multi_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi.xml"
-          wget "${h20_multi_cov_file_url}" -O h20_multi_coverage.xml --no-proxy
-          h20_single_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-single/coverage-single.xml"
-          wget "${h20_single_cov_file_url}" -O h20_single_coverage.xml --no-proxy
-          h20_qwen_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-qwen/coverage-qwen.xml"
-          wget "${h20_qwen_cov_file_url}" -O h20_qwen_coverage.xml --no-proxy
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_single_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_coverage.xml
           git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
