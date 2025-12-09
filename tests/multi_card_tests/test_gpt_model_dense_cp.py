@@ -22,13 +22,10 @@ import paddle
 from paddle.distributed import fleet
 
 import paddlefleet
-
-# from tests.unit_tests.test_utilities import Utils
-# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
-from paddlefleet.models.gpt.gpt_model import GPTModel
+from paddlefleet.gpt_builders import gpt_builder
+from paddlefleet.models.gpt import GPTConfig
+from paddlefleet.pipeline_parallel import NoPipelineParallel
 from paddlefleet.training.initialize import initialize_fleet
-from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 def _set_random_seed(
@@ -94,35 +91,37 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
 
     _set_random_seed(seed)
 
-    transformer_layer_spec = get_gpt_layer_local_spec(
-        num_experts=None,
-        moe_grouped_gemm=False,
-        use_qk_norm=True,
-        multi_latent_attention=False,
-        normalization="LayerNorm",
-    )
-    pre_process = True
-    post_process = True
-    mtp_block_spec = None
-    vp_stage = None
+    # transformer_layer_spec = get_gpt_layer_local_spec(
+    #     num_experts=None,
+    #     moe_grouped_gemm=False,
+    #     use_qk_norm=True,
+    #     multi_latent_attention=False,
+    #     normalization="LayerNorm",
+    # )
+    # pre_process = True
+    # post_process = True
+    # mtp_block_spec = None
+    # vp_stage = None
 
-    gpt_model = GPTModel(
-        config=config,
-        transformer_layer_spec=transformer_layer_spec,
-        vocab_size=vocab_size,
-        max_sequence_length=seq_len,
-        pre_process=pre_process,
-        post_process=post_process,
-        fp16_lm_cross_entropy=False,
-        parallel_output=True,
-        share_embeddings_and_output_weights=True,
-        position_embedding_type="rope",
-        rotary_percent=1.0,
-        rotary_base=10000,
-        rope_scaling=1.0,
-        mtp_block_spec=mtp_block_spec,
-        vp_stage=vp_stage,
-    )
+    gpt_model = gpt_builder(config, num_stages=1)
+
+    # gpt_model = GPTModel(
+    #     config=config,
+    #     transformer_layer_spec=transformer_layer_spec,
+    #     vocab_size=vocab_size,
+    #     max_sequence_length=seq_len,
+    #     pre_process=pre_process,
+    #     post_process=post_process,
+    #     fp16_lm_cross_entropy=False,
+    #     parallel_output=True,
+    #     share_embeddings_and_output_weights=True,
+    #     position_embedding_type="rope",
+    #     rotary_percent=1.0,
+    #     rotary_base=10000,
+    #     rope_scaling=1.0,
+    #     mtp_block_spec=mtp_block_spec,
+    #     vp_stage=vp_stage,
+    # )
 
     data = paddle.randint(
         low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
@@ -135,13 +134,24 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
         .cuda()
     )
 
-    outputs = gpt_model(
-        input_ids=input_ids,
-        position_ids=position_ids,
-        labels=labels,
+    gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
+    inputs = (
+        {
+            "input_ids": [input_ids],
+            "position_ids": [position_ids],
+        },
+        [labels],
     )
-    loss = outputs[0]
-    loss.backward()
+
+    loss = gpt_pipe_model.forward_backward_pipeline(inputs)
+
+    # outputs = gpt_model(
+    #     input_ids=input_ids,
+    #     position_ids=position_ids,
+    #     labels=labels,
+    # )
+    # loss = outputs[0]
+    # loss.backward()
     loss_baseline = 7.199397087097168
     np.testing.assert_allclose(
         np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
@@ -155,25 +165,27 @@ if __name__ == "__main__":
     vocab_size = 1024
     paddle.set_default_dtype("float16")
 
-    config = TransformerConfig(
-        num_hidden_layers=2,
-        hidden_size=512,
-        num_attention_heads=4,
-        intermediate_size=1024,
-        normalization="RMSNorm",
-        hidden_dropout_prob=0.0,
-        attention_dropout=0.0,
-        use_cpu_initialization=False,
-        fp16=True,
-        autocast_dtype=paddle.float16,
-        params_dtype=paddle.float16,
-        init_method=functools.partial(paddle.nn.init.xavier_uniform_, gain=1.0),
-        output_layer_init_method=functools.partial(
-            paddle.nn.init.xavier_uniform_, gain=1.0
-        ),
-    )
+    # config = TransformerConfig(
+    #     num_hidden_layers=2,
+    #     hidden_size=512,
+    #     num_attention_heads=4,
+    #     intermediate_size=1024,
+    #     normalization="RMSNorm",
+    #     hidden_dropout_prob=0.0,
+    #     attention_dropout=0.0,
+    #     use_cpu_initialization=False,
+    #     fp16=True,
+    #     autocast_dtype=paddle.float16,
+    #     params_dtype=paddle.float16,
+    #     init_method=functools.partial(paddle.nn.init.xavier_uniform_, gain=1.0),
+    #     output_layer_init_method=functools.partial(
+    #         paddle.nn.init.xavier_uniform_, gain=1.0
+    #     ),
+    # )
 
-    dist_config = TransformerConfig(
+    dist_config = GPTConfig(
+        vocab_size=vocab_size,
+        max_sequence_length=seq_len,
         num_hidden_layers=2,
         hidden_size=512,
         num_attention_heads=4,
@@ -184,6 +196,13 @@ if __name__ == "__main__":
         use_cpu_initialization=False,
         context_parallel_size=8,
         sequence_parallel=False,
+        fp16_lm_cross_entropy=False,
+        parallel_output=True,
+        share_embeddings_and_output_weights=True,
+        position_embedding_type="rope",
+        rotary_percent=1.0,
+        rotary_base=10000,
+        rope_scaling=1.0,
         fp16=True,
         autocast_dtype=paddle.float16,
         params_dtype=paddle.float16,
