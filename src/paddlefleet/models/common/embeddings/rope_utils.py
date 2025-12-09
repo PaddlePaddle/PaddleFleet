@@ -260,6 +260,16 @@ def apply_rotary_pos_emb(
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
+
+    Args:
+        t (Tensor): Input tensor
+        freqs (Tensor): Rotary positional embedding frequencies
+        cos (Tensor | None): Pre-computed cosine values of freqs (used for fused implementation)
+        sin (Tensor | None): Pre-computed sine values of freqs (used for fused implementation)
+        config (TransformerConfig): Transformer configuration
+        cu_seqlens (Tensor | None): Cumulative sequence lengths
+        mscale (float): Scaling factor
+        cp_group (Group): Context parallel group
     """
     if config.apply_rope_fusion:
         # Paddle fused_rope not support cu_seqlens or cp_group
