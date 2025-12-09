@@ -627,6 +627,36 @@ jobs:
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
           verbose: true
+          pre_command: |
+            echo "=== COMPARISON CHECK ==="
+            tail -n 1 single_coverage.xml
+            
+            # 如果有备份文件，比较一下
+            if [ -f "./single_coverage.xml.backup" ]; then
+              echo "Comparing with backup..."
+              
+              BACKUP_SIZE=$(wc -c < ./single_coverage.xml.backup)
+              CURRENT_SIZE=$(wc -c < ./single_coverage.xml)
+              
+              echo "Backup size: $BACKUP_SIZE bytes"
+              echo "Current size: $CURRENT_SIZE bytes"
+              
+              # 计算减少了多少
+              if [ $BACKUP_SIZE -gt 0 ]; then
+                REDUCTION=$((100 - CURRENT_SIZE * 100 / BACKUP_SIZE))
+                echo "Reduced by: $REDUCTION%"
+              fi
+              
+              # 检查文件是否真的不同
+              if cmp -s ./single_coverage.xml.backup ./single_coverage.xml; then
+                echo "❌ FILES ARE THE SAME! Filtering failed."
+                echo "Uploading anyway, but check your filter script."
+              else
+                echo "✅ Files are different - filtering worked!"
+              fi
+            fi
+            
+            echo "Uploading file..."
 
   coverage_check:
     name: Coverage Upload And Check
