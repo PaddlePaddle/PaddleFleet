@@ -190,7 +190,7 @@ if __name__ == "__main__":
         hidden_size=512,
         num_attention_heads=4,
         intermediate_size=1024,
-        normalization="RMSNorm",
+        normalization="LayerNorm",
         hidden_dropout_prob=0.0,
         attention_dropout=0.0,
         use_cpu_initialization=False,
