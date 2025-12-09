@@ -250,6 +250,8 @@ def _apply_rotary_pos_emb_thd(
 def apply_rotary_pos_emb(
     t: Tensor,
     freqs: Tensor,
+    cos: Tensor | None,
+    sin: Tensor | None,
     config: TransformerConfig,
     cu_seqlens: Tensor | None = None,
     mscale: float = 1.0,
@@ -259,7 +261,6 @@ def apply_rotary_pos_emb(
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
     """
-
     if config.apply_rope_fusion:
         # Paddle fused_rope not support cu_seqlens or cp_group
         if cu_seqlens or (cp_group and cp_group.nranks > 1):
@@ -268,8 +269,12 @@ def apply_rotary_pos_emb(
             )
         else:
             if isinstance(t, tuple):
-                return fused_rope(*t, rotary_emb_base=config.rope_theta)
-            return fused_rope(t, rotary_emb_base=config.rope_theta)[0]
+                return fused_rope(
+                    *t, sin=sin, cos=cos, rotary_emb_base=config.rope_theta
+                )
+            return fused_rope(
+                t, sin=sin, cos=cos, rotary_emb_base=config.rope_theta
+            )[0]
 
     # use unfused implementation
     if cu_seqlens is None:

@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+import paddle
+
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -99,6 +101,8 @@ class GPTEmbedding(FleetLayer):
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
             )
+            rotary_pos_cos = paddle.cos(rotary_pos_emb)
+            rotary_pos_sin = paddle.sin(rotary_pos_emb)
             if self.config.sequence_parallel:
                 rotary_pos_emb = rotary_pos_emb.transpose(
                     [1, 0, 2, 3]
