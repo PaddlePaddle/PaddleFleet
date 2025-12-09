@@ -508,6 +508,7 @@ jobs:
           mkdir -p /root/.cache/pip
           pip cache dir
           pip install --upgrade pip
+          pip install virtualenv
           echo "Install uv"
           pip install uv
           echo "uv sync"
@@ -624,47 +625,6 @@ jobs:
           files: ./single_coverage.xml
           flags: coverage_combine
           config_file: /workspace/PaddleFleet/ci/.codecov.yml
-          name: "${{ env.TASK }}-${{ github.run_id }}"
-          fail_ci_if_error: true
-          verbose: true
-
-  coverage_check_test:
-    name: Coverage Upload And Check Test
-    needs: [single_card_test, check-bypass]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
-    runs-on: ubuntu-latest
-    env:
-      GITHUB_REPO_NAME: ${{ github.repository }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Fetch base branch
-        run: |
-          echo "Fetching base branch: ${{ github.event.pull_request.base.ref }}"
-          git fetch origin ${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}
-      - name: coverage file download
-        shell: bash
-        run: |
-          single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
-          wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
-          sed -i 's|<source>/paddle</source>|<source>paddlefleet</source>|' single_coverage.xml
-          git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
-          python -m pip install diff-cover
-          COVERAGE_EXIT_CODE=0
-          diff-cover single_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
-          exit ${COVERAGE_EXIT_CODE}
-
-      - name: Upload coverage to Codecov
-        if: always()
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./single_coverage.xml
-          flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
           verbose: true
