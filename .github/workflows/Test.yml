@@ -618,6 +618,83 @@ jobs:
           python ci/filter_coverage.py single_coverage.xml diff.txt
           exit ${COVERAGE_EXIT_CODE}
 
+      - name: Check coverage file before upload
+        if: always()
+        run: |
+          echo "=== CHECKING COVERAGE FILE ==="
+          
+          # 1. 文件必须存在
+          if [ ! -f "./single_coverage.xml" ]; then
+            echo "❌ ERROR: single_coverage.xml not found!"
+            echo "Current directory: $(pwd)"
+            echo "Files in directory:"
+            ls -la
+            exit 1
+          fi
+          
+          # 2. 检查文件大小
+          FILE_SIZE=$(wc -c < "./single_coverage.xml")
+          echo "File size: $FILE_SIZE bytes"
+          
+          if [ $FILE_SIZE -lt 100 ]; then
+            echo "⚠️ WARNING: File is very small (may be empty)"
+          fi
+          
+          # 3. 检查是否是XML
+          if ! head -1 "./single_coverage.xml" | grep -q "<?xml"; then
+            echo "❌ ERROR: Not a valid XML file"
+            echo "First line:"
+            head -1 "./single_coverage.xml"
+            exit 1
+          fi
+          
+          # 4. 检查是否有覆盖率数据
+          LINE_COUNT=$(grep -c "<line " "./single_coverage.xml" || echo "0")
+          echo "Coverage lines found: $LINE_COUNT"
+          
+          if [ $LINE_COUNT -eq 0 ]; then
+            echo "⚠️ WARNING: No coverage lines found"
+          fi
+          
+          # 5. 验证过滤效果（行数应该较少）
+          if [ $LINE_COUNT -lt 50 ]; then
+            echo "✅ Good: This looks like filtered PR coverage"
+          elif [ $LINE_COUNT -lt 200 ]; then
+            echo "⚠️ Note: Moderate line count"
+          else
+            echo "⚠️ WARNING: High line count ($LINE_COUNT) - might be full coverage"
+          fi
+          
+          # 6. 显示文件预览
+          echo -e "\n=== FILE PREVIEW ==="
+          echo "First 3 lines:"
+          head -3 "./single_coverage.xml"
+          echo "..."
+          echo "Last 2 lines:"
+          tail -2 "./single_coverage.xml"
+          
+          # 7. 如果有备份，比较一下
+          if [ -f "./single_coverage.xml.backup" ]; then
+            echo -e "\n=== COMPARISON WITH BACKUP ==="
+            BACKUP_SIZE=$(wc -c < "./single_coverage.xml.backup")
+            echo "Backup size: $BACKUP_SIZE bytes"
+            echo "Current size: $FILE_SIZE bytes"
+            
+            if [ $BACKUP_SIZE -gt 0 ]; then
+              REDUCTION=$((100 - FILE_SIZE * 100 / BACKUP_SIZE))
+              echo "Size reduction: $REDUCTION%"
+            fi
+            
+            # 检查是否不同
+            if cmp -s "./single_coverage.xml.backup" "./single_coverage.xml"; then
+              echo "❌ WARNING: Files are identical! Filtering didn't work."
+            else
+              echo "✅ Files are different - filtering worked!"
+            fi
+          fi
+          
+          echo "✅ File check completed"
+
       - name: Upload coverage to Codecov
         if: always()
         uses: codecov/codecov-action@v4
@@ -627,36 +704,7 @@ jobs:
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
           verbose: true
-          pre_command: |
-            echo "=== COMPARISON CHECK ==="
-            tail -n 1 single_coverage.xml
-            # 如果有备份文件，比较一下
-            if [ -f "./single_coverage.xml.backup" ]; then
-              echo "Comparing with backup..."
-              
-              BACKUP_SIZE=$(wc -c < ./single_coverage.xml.backup)
-              CURRENT_SIZE=$(wc -c < ./single_coverage.xml)
-              
-              echo "Backup size: $BACKUP_SIZE bytes"
-              echo "Current size: $CURRENT_SIZE bytes"
-              
-              # 计算减少了多少
-              if [ $BACKUP_SIZE -gt 0 ]; then
-                REDUCTION=$((100 - CURRENT_SIZE * 100 / BACKUP_SIZE))
-                echo "Reduced by: $REDUCTION%"
-              fi
-              
-              # 检查文件是否真的不同
-              if cmp -s ./single_coverage.xml.backup ./single_coverage.xml; then
-                echo "❌ FILES ARE THE SAME! Filtering failed."
-                echo "Uploading anyway, but check your filter script."
-              else
-                echo "✅ Files are different - filtering worked!"
-              fi
-            fi
-            
-            echo "Uploading file..."
-
+          
   coverage_check:
     name: Coverage Upload And Check
     needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20, check-bypass]
