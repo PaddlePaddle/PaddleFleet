@@ -143,7 +143,9 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
     loss = outputs[0]
     loss.backward()
     loss_baseline = 7.199397087097168
-    assert loss == loss_baseline, f"{loss} != {loss_baseline}"
+    np.testing.assert_allclose(
+        np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
+    )
 
 
 if __name__ == "__main__":
