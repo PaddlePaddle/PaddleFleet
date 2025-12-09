@@ -694,6 +694,7 @@ jobs:
           fi
           
           echo "✅ File check completed"
+          rm -rf ./single_coverage.xml.backup || true
 
       - name: Upload coverage to Codecov
         if: always()
