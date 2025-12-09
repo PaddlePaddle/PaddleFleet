@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .pipeline_parallel import NoPipelineParallel, PipelineParallel
+from .pipeline_parallel import (
+    NoPipelineParallel,
+    ParallelBase,
+    PipelineParallel,
+)
 from .pipeline_parallel_withinterleave import PipelineParallelWithInterleave
 from .pipeline_parallel_withinterleave_fthenb import (
     PipelineParallelWithInterleaveFthenB,
@@ -25,6 +29,7 @@ __all__ = [
     "SharedLayerDesc",
     "PipelineLayer",
     "NoPipelineParallel",
+    "ParallelBase",
     "PipelineParallel",
     "PipelineParallelWithInterleave",
     "PipelineParallelWithInterleaveFthenB",

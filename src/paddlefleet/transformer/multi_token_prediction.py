@@ -23,9 +23,7 @@ from typing import TYPE_CHECKING
 import paddle
 from paddle import Tensor
 
-from paddlefleet import parallel_state, tensor_parallel
-from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
-from paddlefleet.pipeline_parallel.utils import is_vp_last_stage
+from paddlefleet import tensor_parallel
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
@@ -38,10 +36,8 @@ from paddlefleet.transformer.layer import FleetLayer
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from paddlefleet.models.backends import BackendSpecProvider
     from paddlefleet.packed_seq_params import PackedSeqParams
-    from paddlefleet.transformer.transformer_block import (
-        TransformerBlockSublayersSpec,
-    )
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 SUPPORTED_ATTN_MASK = [
@@ -260,20 +256,11 @@ class MultiTokenPredictionLayerSublayersSpec:
     layer_norm: LayerSpec | type = None
 
 
-def get_mtp_layer_spec(transformer_layer_spec: LayerSpec) -> LayerSpec:
-    """Get the MTP layer spec.
-
-    Returns:
-        LayerSpec: Layer specification with TE layers
-    """
-    return get_mtp_layer_spec_for_backend(
-        transformer_layer_spec,
-        LocalSpecProvider(),
-    )
-
-
 def get_mtp_layer_spec_for_backend(
-    transformer_layer_spec: LayerSpec, backend: BackendSpecProvider
+    config: TransformerConfig,
+    transformer_layer_spec: LayerSpec,
+    backend: BackendSpecProvider,
+    layer_number: int,
 ) -> LayerSpec:
     """Get the MTP layer spec.
 
@@ -291,38 +278,12 @@ def get_mtp_layer_spec_for_backend(
             transformer_layer=transformer_layer_spec,
             layer_norm=layer_norm_impl,
         ),
+        extra_kwargs={
+            "config": config,
+            "layer_number": layer_number,
+        },
     )
     return mtp_layer_spec
-
-
-def get_mtp_layer_offset(config: TransformerConfig) -> int:
-    """Get the offset of the MTP layer."""
-    # Currently, we only support put all of MTP layers on the last pipeline stage.
-    return 0
-
-
-def get_mtp_num_layers_to_build(
-    config: TransformerConfig,
-    vp_stage: int | None = None,
-    pp_rank: int | None = None,
-) -> int:
-    """Get the number of MTP layers to build."""
-    # Currently, we only support put all of MTP layers on the last pipeline stage.
-    vp_size = config.virtual_pipeline_model_parallel_size
-    if pp_rank is None:
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-    is_last_pp_stage = pp_rank == config.pipeline_model_parallel_size - 1
-    if (
-        is_vp_last_stage(vp_stage=vp_stage, vp_size=vp_size)
-        and is_last_pp_stage
-    ):
-        return (
-            config.num_nextn_predict_layers
-            if config.num_nextn_predict_layers
-            else 0
-        )
-    else:
-        return 0
 
 
 class MTPLossAutoScaler(paddle.autograd.PyLayer):
@@ -398,14 +359,14 @@ class MultiTokenPredictionLayer(FleetLayer):
         config: TransformerConfig,
         sublayers_spec: MultiTokenPredictionLayerSublayersSpec,
         layer_number: int = 1,
-        vp_stage: int | None = None,
         pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__(config=config)
+        if pg_collection is None:
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.sequence_parallel = config.sequence_parallel
         self.sublayers_spec = sublayers_spec
         self.layer_number = layer_number
-        self.vp_stage = vp_stage
         self.cp_group = pg_collection.cp
 
         self_attention_spec = (
@@ -453,7 +414,6 @@ class MultiTokenPredictionLayer(FleetLayer):
         self.transformer_layer = build_layer(
             self.sublayers_spec.transformer_layer,
             config=self.config,
-            vp_stage=vp_stage,
         )
 
         self.norm = build_layer(
@@ -684,180 +644,3 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         return hidden_states, input_ids, position_ids
-
-
-@dataclass
-class MultiTokenPredictionBlockSublayersSpec:
-    """
-    Dataclass for specifying the sublayers_spec of a multi token prediction block.
-
-    This class defines the structure for configuring the layers, allowing for
-    flexible and customizable architecture designs.
-
-    Args:
-        layer_specs (list[LayerSpec], optional): A list of layer specifications for
-            the layers within the multi token prediction block. Each specification typically
-            defines a complete multi token prediction layer (e.g., shared embedding,
-            projection matrix, transformer block, shared output head).
-    """
-
-    layer_specs: list[LayerSpec] = None
-
-
-def _get_mtp_block_sublayers_spec(
-    config: TransformerConfig,
-    spec: MultiTokenPredictionBlockSublayersSpec | LayerSpec,
-) -> MultiTokenPredictionBlockSublayersSpec:
-    """
-    Retrieve or construct MultiTokenPredictionBlockSublayersSpec based on the provided specification.
-
-    Args:
-        config (TransformerConfig): Configuration object for the transformer model.
-        spec (MultiTokenPredictionBlockSublayersSpec | LayerSpec): Specification for the
-            multi token prediction block sublayers_spec.
-            Can be either a MultiTokenPredictionBlockSublayersSpec instance or a LayerSpec.
-
-    Returns:
-        MultiTokenPredictionBlockSublayersSpec: The sublayers_spec for the multi token prediction block.
-    """
-
-    # Transformer block sublayers_spec.
-    if isinstance(spec, MultiTokenPredictionBlockSublayersSpec):
-        return spec
-    elif isinstance(spec, LayerSpec):
-        if issubclass(spec.layer, MultiTokenPredictionBlock):
-            return spec.sublayers_spec
-        else:
-            raise Exception(f"specialize for {spec.layer.__name__}.")
-    else:
-        raise Exception(f"specialize for {type(spec).__name__}.")
-
-
-class MultiTokenPredictionBlock(FleetLayer):
-    """The implementation for Multi-Token Prediction (MTP) which extends
-    the prediction scope to multiple future tokens at each position.
-
-    This MTP implementation sequentially predict additional tokens and keep the complete
-    causal chain at each prediction depth, by using D sequential layers to predict
-    D additional tokens.
-
-    The k-th MTP layer consists of a shared embedding layer, a projection matrix,
-    a Transformer block, and a shared output head.
-
-    For the i-th input token at the (k - 1)-th prediction depth, we first combine
-    the representation of the i-th token and the embedding of the (i + K)-th token with
-    the linear projection. The combined serves as the input of the Transformer block at
-    the k-th depth to produce the output representation.
-
-    for more information, please refer to DeepSeek-V3 Technical Report
-    https://github.com/deepseek-ai/DeepSeek-V3/blob/main/DeepSeek_V3.pdf
-    """
-
-    def __init__(
-        self,
-        config: TransformerConfig,
-        spec: TransformerBlockSublayersSpec | LayerSpec,
-        vp_stage: int | None = None,
-        pg_collection: ProcessGroupCollection = None,
-    ):
-        super().__init__(config=config)
-        self.sublayers_spec = _get_mtp_block_sublayers_spec(config, spec)
-        self.mtp_loss_scaling_factor = config.mtp_loss_scaling_factor
-        self.vp_stage = vp_stage
-
-        # Initialize Context Parallelism (CP) support for MTP
-        # This enables MTP to work with CP > 1 by providing the CP process group
-        # to the roll_tensor function for proper boundary communication
-        if pg_collection is None:
-            # Use default MPU process groups if not provided
-            pg_collection = ProcessGroupCollection.use_mpu_process_groups(
-                required_pgs=["cp"]
-            )
-        else:
-            # Ensure the provided process groups include CP
-            assert hasattr(pg_collection, "cp"), (
-                "MultiTokenPredictionBlock pg_collection must have cp process group"
-            )
-
-        self._build_layers(pg_collection)
-        assert len(self.layers) > 0, (
-            "MultiTokenPredictionBlock must have at least one layer."
-        )
-        self.cp_group = pg_collection.cp
-
-    def _build_layers(self, pg_collection):
-        def _build_layer(layer_spec, layer_number):
-            layer = build_layer(
-                layer_spec,
-                config=self.config,
-                layer_number=layer_number,
-                vp_stage=self.vp_stage,
-                pg_collection=pg_collection,
-            )
-            return layer
-
-        self.layers = paddle.nn.LayerList(
-            [
-                _build_layer(layer_spec, i + 1)
-                for i, layer_spec in enumerate(self.sublayers_spec.layer_specs)
-            ]
-        )
-
-    def forward(
-        self,
-        input_ids: Tensor,
-        position_ids: Tensor,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        context: Tensor | None = None,
-        context_mask: Tensor | None = None,
-        rotary_pos_emb: Tensor | None = None,
-        rotary_pos_cos: Tensor | None = None,
-        rotary_pos_sin: Tensor | None = None,
-        attention_bias: Tensor | None = None,
-        packed_seq_params: PackedSeqParams | None = None,
-        sequence_len_offset: Tensor = None,
-        extra_block_kwargs: dict | None = None,
-        embedding=None,
-    ) -> Tensor:
-        """
-        Perform the forward pass through all of the MTP layers.
-
-        Args:
-            hidden_states (Tensor): Hidden states for input token with the shape [s, b, h]
-                where s is the sequence length, b is the batch size, and h is the hidden size.
-            attention_mask (Tensor): Boolean tensor of shape [1, 1, s, s] for masking
-                self-attention.
-
-        Returns:
-            (Tensor): The mtp loss tensor of shape [b, s].
-        """
-        # get hidden states from previous mtp stages
-        offset = get_mtp_layer_offset(self.config)
-        hidden_states_list = list(
-            paddle.chunk(hidden_states, 1 + offset, dim=0)
-        )
-        hidden_states = hidden_states_list[offset]
-        for layer_number in range(len(self.layers)):
-            (hidden_states, input_ids, position_ids) = self.layers[
-                layer_number
-            ](
-                input_ids=input_ids,
-                position_ids=position_ids,
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                packed_seq_params=packed_seq_params,
-                embedding=embedding,
-                **(extra_block_kwargs or {}),
-            )
-
-            # append the output hidden states of the current mtp layer
-            # to the hidden_states_list
-            hidden_states_list.append(hidden_states)
-
-        # concat the hidden states of all mtp layers
-        hidden_states = paddle.cat(hidden_states_list, dim=0)
-        return hidden_states

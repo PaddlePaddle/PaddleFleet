@@ -15,10 +15,21 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from functools import partial
+from typing import TYPE_CHECKING, Literal
 
 from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
 from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
+from paddlefleet.models.common.embeddings.language_model_embedding import (
+    LanguageModelEmbedding,
+)
+from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+    RotaryEmbedding,
+)
+from paddlefleet.models.gpt import GPTModel
+from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding, GPTEmbeddingSpec
+from paddlefleet.models.gpt.gpt_model import GPTSublayersSpec
+from paddlefleet.models.gpt.lm_head import GPTLMHead
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
@@ -27,41 +38,38 @@ from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
 )
-from paddlefleet.transformer.enums import AttnMaskType, LayerType
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.multi_token_prediction import (
-    MultiTokenPredictionBlockSublayersSpec,
-    get_mtp_layer_offset,
     get_mtp_layer_spec_for_backend,
-    get_mtp_num_layers_to_build,
 )
 from paddlefleet.transformer.paddle_norm import L2Norm
-from paddlefleet.transformer.transformer_block import (
-    TransformerBlockSublayersSpec,
-    get_num_layers_to_build,
-)
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSublayersSpec,
-    get_transformer_layer_offset,
 )
 
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
-from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
+from paddlefleet.transformer.paddle_norm import (
+    WrappedPaddleNorm,
+    WrappedPaddleNormPipe,
+)
 
 LNImpl = WrappedPaddleNorm
 
 
 def get_gpt_layer_local_spec(
+    config: TransformerConfig | None = None,
     num_experts: int | None = None,
     moe_grouped_gemm: bool | None = False,
     use_qk_norm: bool | None = False,
     multi_latent_attention: bool | None = False,
     normalization: str | None = None,
     qk_l2_norm: bool | None = False,
+    layer_number: int | None = 1,
 ) -> LayerSpec:
     """Use this spec for an implementation using only layers in Fleet-Core.
 
@@ -124,6 +132,13 @@ def get_gpt_layer_local_spec(
                 "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
             },
         ),
+        extra_kwargs={
+            "config": config,
+            "layer_number": layer_number,
+            "hidden_dropout_prob": config.hidden_dropout_prob
+            if config is not None
+            else None,
+        },
     )
 
 
@@ -161,16 +176,15 @@ def get_mlp_layer_spec_for_backend(
         )
 
 
-def get_gpt_decoder_block_spec(
+def get_gpt_decoder_layers_spec(
     config: TransformerConfig,
     normalization: str | None = None,
     qk_l2_norm: bool | None = False,
-    vp_stage: int | None = None,
-    pp_rank: int | None = None,
-) -> TransformerBlockSublayersSpec:
+) -> list[LayerSpec]:
     """GPT block spec."""
-    layer_norm_impl = LNImpl
-    dense_layer_spec = get_gpt_layer_local_spec(
+    dense_layer_spec_func = partial(
+        get_gpt_layer_local_spec,
+        config=config,
         num_experts=None,
         moe_grouped_gemm=False,
         use_qk_norm=config.use_qk_norm,
@@ -178,7 +192,10 @@ def get_gpt_decoder_block_spec(
         normalization=normalization,
         qk_l2_norm=qk_l2_norm,
     )
-    moe_layer_spec = get_gpt_layer_local_spec(
+
+    moe_layer_spec_func = partial(
+        get_gpt_layer_local_spec,
+        config=config,
         num_experts=config.n_routed_experts,
         moe_grouped_gemm=config.moe_grouped_gemm,
         use_qk_norm=config.use_qk_norm,
@@ -212,99 +229,138 @@ def get_gpt_decoder_block_spec(
     layer_specs = []
     for layer_number in range(config.num_hidden_layers):
         if moe_layer_pattern[layer_number] == 1:
-            layer_specs.append(moe_layer_spec)
+            layer_specs.append(moe_layer_spec_func(layer_number=layer_number))
         elif moe_layer_pattern[layer_number] == 0:
-            layer_specs.append(dense_layer_spec)
+            layer_specs.append(dense_layer_spec_func(layer_number=layer_number))
         else:
             raise ValueError(f"Invalid layer pattern: {moe_layer_pattern}")
 
-    # Slice the layer specs to only include the layers that are built in this pipeline stage.
-    # Note: MCore layer_number starts at 1
-    num_layers_to_build = get_num_layers_to_build(
-        config, vp_stage=vp_stage, pp_rank=pp_rank
-    )
-
-    if config.pipeline_model_parallel_layout is not None:
-        local_layer_specs = [
-            layer_specs[layer_id]
-            for layer_id in config.pipeline_model_parallel_layout.get_layer_id_list(
-                layer_type=LayerType.decoder, vp_stage=vp_stage, pp_rank=pp_rank
-            )
-        ]
-    else:
-        offset = get_transformer_layer_offset(
-            config, vp_stage=vp_stage, pp_rank=pp_rank
-        )
-        local_layer_specs = layer_specs[offset : offset + num_layers_to_build]
-
-    # Block spec.
-    block_spec = TransformerBlockSublayersSpec(
-        layer_specs=local_layer_specs, layer_norm=layer_norm_impl
-    )
-
-    return block_spec
+    return layer_specs
 
 
-def get_gpt_mtp_block_spec(
+def get_gpt_mtp_layers_spec(
     config: TransformerConfig,
-    spec: TransformerBlockSublayersSpec | LayerSpec,
-    vp_stage: int | None = None,
-    pp_rank: int | None = None,
-) -> MultiTokenPredictionBlockSublayersSpec:
+    spec: list[LayerSpec],
+) -> list[LayerSpec]:
     """GPT Multi-Token Prediction (MTP) block spec."""
     backend = LocalSpecProvider()
-    return get_gpt_mtp_block_spec_for_backend(
+    return get_gpt_mtp_layers_spec_for_backend(
         config=config,
         spec=spec,
         backend=backend,
-        vp_stage=vp_stage,
-        pp_rank=pp_rank,
     )
 
 
-def get_gpt_mtp_block_spec_for_backend(
+def get_gpt_mtp_layers_spec_for_backend(
     config: TransformerConfig,
-    spec: TransformerBlockSublayersSpec | LayerSpec,
+    spec: list[LayerSpec],
     backend: BackendSpecProvider,
-    vp_stage: int | None = None,
-    pp_rank: int | None = None,
-) -> MultiTokenPredictionBlockSublayersSpec:
-    """GPT Multi-Token Prediction (MTP) block spec."""
-    num_layers_to_build = get_mtp_num_layers_to_build(
-        config, vp_stage=vp_stage, pp_rank=pp_rank
+) -> list[LayerSpec]:
+    assert (
+        isinstance(spec, list)
+        and isinstance(spec[-1], LayerSpec)
+        and spec[-1].layer == TransformerLayer
     )
-    if num_layers_to_build == 0:
-        return None
+    transformer_layer_spec = spec[-1]
 
-    if isinstance(spec, TransformerBlockSublayersSpec):
-        # get the spec for the last layer of decoder block
-        transformer_layer_spec = spec.layer_specs[-1]
-    elif isinstance(spec, LayerSpec) and spec.layer == TransformerLayer:
-        transformer_layer_spec = spec
-    else:
-        raise ValueError(f"Invalid spec: {spec}")
-
-    mtp_layer_spec = get_mtp_layer_spec_for_backend(
-        transformer_layer_spec=transformer_layer_spec, backend=backend
+    mtp_layer_spec_func = partial(
+        get_mtp_layer_spec_for_backend,
+        config=config,
+        transformer_layer_spec=transformer_layer_spec,
+        backend=backend,
     )
-    num_nextn_predict_layers = (
+    mtp_num_layers = (
         config.num_nextn_predict_layers
         if config.num_nextn_predict_layers
         else 0
     )
-    mtp_layer_specs = [mtp_layer_spec] * num_nextn_predict_layers
+    mtp_layer_specs = []
+    for i in range(mtp_num_layers):
+        mtp_layer_specs.append(mtp_layer_spec_func(layer_number=i))
 
-    offset = get_mtp_layer_offset(config)
-    # split the mtp layer specs to only include the layers that are built in this pipeline stage.
-    mtp_layer_specs = mtp_layer_specs[offset : offset + num_layers_to_build]
-    if len(mtp_layer_specs) > 0:
-        assert len(mtp_layer_specs) == config.num_nextn_predict_layers, (
-            +"currently all of the mtp layers must stage in the same pipeline stage."
-        )
-        mtp_block_spec = MultiTokenPredictionBlockSublayersSpec(
-            layer_specs=mtp_layer_specs
-        )
-    else:
-        mtp_block_spec = None
+    return mtp_layer_specs
 
-    return mtp_block_spec
+
+def get_gpt_spec(
+    config: TransformerConfig,
+    transformer_layers_spec: list[LayerSpec],
+    mtp_layers_spec: list[LayerSpec],
+    vocab_size: int,
+    max_sequence_length: int,
+    position_embedding_type: Literal[
+        "learned_absolute", "rope", "none"
+    ] = "learned_absolute",
+    rotary_percent: float = 1.0,
+    rotary_base: int = 10000,
+    rope_scaling: bool = False,
+    parallel_output: bool = False,
+    share_embeddings_and_output_weights: bool = False,
+):
+    embedding_extra_kwargs = {
+        "config": config,
+        "vocab_size": vocab_size,
+        "max_sequence_length": max_sequence_length,
+        "position_embedding_type": position_embedding_type,
+    }
+
+    skip_weight_param_allocation = (
+        config.share_embeddings_and_output_weights
+        and config.pipeline_model_parallel_size == 1
+    )
+
+    language_embedding_spec = LayerSpec(layer=LanguageModelEmbedding)
+    rope_embedding_spec = None
+    if position_embedding_type == "rope" and not config.multi_latent_attention:
+        rope_embedding_spec = LayerSpec(layer=RotaryEmbedding)
+        rope_embedding_extra_kwargs = {
+            "rotary_percent": rotary_percent,
+            "rotary_base": rotary_base,
+            "rope_scaling": rope_scaling,
+        }
+        embedding_extra_kwargs = {
+            **embedding_extra_kwargs,
+            **rope_embedding_extra_kwargs,
+        }
+
+    embedding_spec = GPTEmbeddingSpec(
+        language_embedding=language_embedding_spec,
+        rope_embedding=rope_embedding_spec,
+    )
+
+    return LayerSpec(
+        layer=GPTModel,
+        extra_kwargs={
+            "config": config,
+            "share_embeddings_and_output_weights": share_embeddings_and_output_weights,
+        },
+        sublayers_spec=GPTSublayersSpec(
+            embedding=LayerSpec(
+                layer=GPTEmbedding,
+                sublayers_spec=embedding_spec,
+                extra_kwargs=embedding_extra_kwargs,
+            ),
+            transformer_layers=transformer_layers_spec,
+            layer_norm=LayerSpec(
+                layer=WrappedPaddleNormPipe,
+                extra_kwargs={
+                    "config": config,
+                    "hidden_size": config.hidden_size,
+                    "eps": config.rms_norm_eps,
+                },
+            ),
+            mtp=mtp_layers_spec,
+            lm_head=LayerSpec(
+                layer=GPTLMHead,
+                extra_kwargs={
+                    "input_size": config.hidden_size,
+                    "output_size": vocab_size,
+                    "config": config,
+                    "init_method": config.init_method,
+                    "bias": False,
+                    "skip_bias_add": False,
+                    "gather_output": not parallel_output,
+                    "skip_weight_param_allocation": skip_weight_param_allocation,
+                },
+            ),
+        ),
+    )
