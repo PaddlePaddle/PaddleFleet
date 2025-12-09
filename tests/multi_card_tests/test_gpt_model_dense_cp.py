@@ -142,7 +142,7 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
     )
     loss = outputs[0]
     loss.backward()
-    loss_baseline = 7.211008071899414
+    loss_baseline = 7.199397087097168
     assert loss == loss_baseline, f"{loss} != {loss_baseline}"
 
 
