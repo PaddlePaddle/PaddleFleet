@@ -12,22 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
+from dataclasses import dataclass
 
-from typing import TYPE_CHECKING
-
-import paddle
-
-if TYPE_CHECKING:
-    from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-class FleetLayer(paddle.nn.Layer):
-    """Base Fleet Layer inherited by all Models.
-    Args:
-        config (TransformerConfig): Transformer config
-    """
+@dataclass
+class GPTConfig(TransformerConfig):
+    """Configuration object for gpt."""
 
-    def __init__(self, config: TransformerConfig):
-        super().__init__()
-        self.config = config
+    vocab_size: int = 1024
+
+    position_embedding_type: str = "rope"
+
+    rotary_percent: float = 1.0
+
+    rotary_base: int = 10000
+
+    rope_scaling: float = 1.0
+
+    max_sequence_length: int = 64
+
+    share_embeddings_and_output_weights: bool = False
+
+    moe_grouped_gemm: bool = False
+
+    parallel_output: bool = True

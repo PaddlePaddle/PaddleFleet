@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .gpt_config import GPTConfig
 from .gpt_model import GPTModel
 
 __all__ = [
     "GPTModel",
+    "GPTConfig",
 ]
