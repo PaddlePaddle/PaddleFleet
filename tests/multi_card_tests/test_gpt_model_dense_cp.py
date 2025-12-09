@@ -196,7 +196,6 @@ if __name__ == "__main__":
         use_cpu_initialization=False,
         context_parallel_size=8,
         sequence_parallel=False,
-        fp16_lm_cross_entropy=False,
         parallel_output=True,
         share_embeddings_and_output_weights=True,
         position_embedding_type="rope",
