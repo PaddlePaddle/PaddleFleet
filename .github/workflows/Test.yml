@@ -630,7 +630,6 @@ jobs:
           pre_command: |
             echo "=== COMPARISON CHECK ==="
             tail -n 1 single_coverage.xml
-            
             # 如果有备份文件，比较一下
             if [ -f "./single_coverage.xml.backup" ]; then
               echo "Comparing with backup..."
