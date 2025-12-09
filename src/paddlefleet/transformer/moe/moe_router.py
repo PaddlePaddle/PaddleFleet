@@ -472,7 +472,7 @@ class StandardMoERouter(nn.Layer):
         scores_for_choice = scores.reshape(
             [bsz_seq_len, -1]
         ) + self.e_score_correction_bias.detach().unsqueeze(0)
-        if n_group == 1:
+        if n_group == 1 and self.config.moe_router_fusion:
             topk_weight, topk_idx = paddle.topk(
                 scores_for_choice, k=k, axis=-1, sorted=True
             )

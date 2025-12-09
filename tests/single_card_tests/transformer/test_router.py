@@ -44,6 +44,7 @@ class MockTransformerConfig:
         self.moe_router_force_load_balancing = False
         self.router_z_loss_coef = 0.01
         self.router_aux_loss_coef = 0.01
+        self.moe_router_fusion = True
 
     def get(self, key, default=None):
         return getattr(self, key, default)
