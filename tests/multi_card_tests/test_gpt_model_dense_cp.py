@@ -99,7 +99,7 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
         moe_grouped_gemm=False,
         use_qk_norm=True,
         multi_latent_attention=False,
-        normalization="RMSNorm",
+        normalization="LayerNorm",
     )
     pre_process = True
     post_process = True
