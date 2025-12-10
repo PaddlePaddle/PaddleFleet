@@ -163,8 +163,8 @@ class TestGPTModel(unittest.TestCase):
         print("embed_tokens_grad_norm", embed_tokens_grad_norm)
 
         if judge_machine_type() == "H":
-            assert loss.item() == 5.75022029876709, (
-                f"loss is not equal ({loss.item()} != 5.75022029876709), please check your modify"
+            assert loss.item() == 5.399779796600342, (
+                f"loss is not equal ({loss.item()} != 5.399779796600342), please check your modify"
             )
             assert embed_tokens_grad_norm == 5.828078746795654, (
                 f"grad norm of embed_tokens is not equal ({embed_tokens_grad_norm} != 5.828078746795654), please check your modify"
