@@ -45,6 +45,12 @@ def parse_diff_file(diff_file):
                 current_file = None  # 只关注 paddlefleet 相关文件
                 print(f"    Skipping non-paddlefleet file")
                 continue
+            elif line.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp',
+                                   '.pdf', '.zip', '.tar', '.gz',
+                                   '.so', '.dll', '.exe')):
+                    current_file = None  # 过滤二进制文件
+                    print(f"    Skipping binary file")
+                    continue
         
         # 解析行号范围 (@@ -old_start,old_length +new_start,new_length @@)
         elif line.startswith('@@') and current_file:
