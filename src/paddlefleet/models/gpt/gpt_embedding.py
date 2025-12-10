@@ -120,4 +120,8 @@ class GPTEmbedding(FleetLayer):
             "rotary_pos_sin": rotary_pos_sin,
         }
 
+        for key in list(preproc_output.keys()):
+            if preproc_output[key] is None:
+                preproc_output.pop(key)
+
         return preproc_output
