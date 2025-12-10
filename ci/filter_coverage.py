@@ -1,25 +1,40 @@
 #!/usr/bin/env python3
+
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 使用 diff-cover 的解析结果来过滤 coverage.xml
 只保留 diff.txt 中提到的变更文件的覆盖率数据
 """
 
-import sys
 import os
-import subprocess
+import re
+import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-import re
+
 
 def parse_diff_file(diff_file):
     """
     解析 diff.txt 文件，获取变更的文件和行号
-    
+
     格式示例：
     --- a/src/file1.py
     +++ b/src/file1.py
     @@ -10,5 +10,7 @@
-    
+
     返回: dict {文件名: set(变更行号)}
     """
     changed_files = defaultdict(set)
@@ -31,32 +46,45 @@ def parse_diff_file(diff_file):
 
     print(f"Parsing diff file: {diff_file}")
 
-    with open(diff_file, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(diff_file, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
     for line in lines:
         line = line.strip()
 
         # 识别目标文件 (+++ b/path/to/file)
-        if line.startswith('+++ b/'):
+        if line.startswith("+++ b/"):
             current_file = line[6:]  # 去掉 '+++ b/'
             print(f"  Found changed file: {current_file}")
-            if 'src/paddlefleet' not in current_file:
+            if "src/paddlefleet" not in current_file:
                 current_file = None  # 只关注 paddlefleet 相关文件
-                print(f"    Skipping non-paddlefleet file")
+                print("    Skipping non-paddlefleet file")
                 continue
-            elif line.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp',
-                                   '.pdf', '.zip', '.tar', '.gz',
-                                   '.so', '.dll', '.exe')):
-                    current_file = None  # 过滤二进制文件
-                    print(f"    Skipping binary file")
-                    continue
+            elif line.endswith(
+                (
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".gif",
+                    ".bmp",
+                    ".pdf",
+                    ".zip",
+                    ".tar",
+                    ".gz",
+                    ".so",
+                    ".dll",
+                    ".exe",
+                )
+            ):
+                current_file = None  # 过滤二进制文件
+                print("    Skipping binary file")
+                continue
 
         # 解析行号范围 (@@ -old_start,old_length +new_start,new_length @@)
-        elif line.startswith('@@') and current_file:
+        elif line.startswith("@@") and current_file:
             # 示例: @@ -10,5 +10,7 @@
             # 我们关心 + 后面的新行号
-            match = re.search(r'\+(\d+)(?:,(\d+))?', line)
+            match = re.search(r"\+(\d+)(?:,(\d+))?", line)
             if match:
                 start_line = int(match.group(1))
                 line_count = int(match.group(2) or 1)
@@ -65,17 +93,20 @@ def parse_diff_file(diff_file):
                 for line_num in range(start_line, start_line + line_count):
                     changed_files[current_file].add(line_num)
 
-    print(f"\nDiff analysis:")
+    print("\nDiff analysis:")
     total_changed_lines = sum(len(lines) for lines in changed_files.values())
     print(f"  Changed files: {len(changed_files)}")
     print(f"  Total changed lines: {total_changed_lines}")
 
     for filename, lines in changed_files.items():
         if len(lines) <= 10:
-            print(f"    {filename}: lines {sorted(list(lines))[:10]}{'...' if len(lines) > 10 else ''}")
+            print(
+                f"    {filename}: lines {sorted(list(lines))[:10]}{'...' if len(lines) > 10 else ''}"
+            )
         else:
             print(f"    {filename}: {len(lines)} changed lines")
     return changed_files
+
 
 def filter_coverage_by_diff(coverage_file, diff_data):
     """
@@ -94,16 +125,17 @@ def filter_coverage_by_diff(coverage_file, diff_data):
 
         # 备份
         import shutil
-        backup_file = coverage_file + '.backup'
+
+        backup_file = coverage_file + ".backup"
         shutil.copy2(coverage_file, backup_file)
 
         # 统计信息
         stats = {
-            'files_processed': 0,
-            'files_kept': 0,
-            'lines_kept': 0,
-            'lines_removed': 0,
-            'lines_covered': 0,
+            "files_processed": 0,
+            "files_kept": 0,
+            "lines_kept": 0,
+            "lines_removed": 0,
+            "lines_covered": 0,
         }
 
         # 构建文件名到 class 元素的映射
@@ -111,10 +143,10 @@ def filter_coverage_by_diff(coverage_file, diff_data):
 
         # 第一遍：收集所有 class 元素
         for class_elem in root.findall(".//class"):
-            filename = class_elem.get('filename', '')
+            filename = class_elem.get("filename", "")
             if filename:
                 filename_to_classes[filename].append(class_elem)
-                stats['files_processed'] += 1
+                stats["files_processed"] += 1
 
         print(f"Found {stats['files_processed']} files in coverage report")
 
@@ -170,7 +202,7 @@ def filter_coverage_by_diff(coverage_file, diff_data):
 
             # 处理这个文件的所有 class 元素
             for class_elem in filename_to_classes[filename]:
-                stats['files_kept'] += 1
+                stats["files_kept"] += 1
 
                 # 创建新的 class 元素
                 new_class = ET.Element("class")
@@ -190,24 +222,26 @@ def filter_coverage_by_diff(coverage_file, diff_data):
 
                         if line_num in changed_lines:
                             # 复制这一行
-                            new_line_elem = ET.SubElement(new_lines_elem, "line")
+                            new_line_elem = ET.SubElement(
+                                new_lines_elem, "line"
+                            )
                             for attr_name, attr_value in line_elem.items():
                                 new_line_elem.set(attr_name, attr_value)
 
-                            stats['lines_kept'] += 1
+                            stats["lines_kept"] += 1
 
                             hits = int(line_elem.get("hits", 0))
                             if hits > 0:
-                                stats['lines_covered'] += 1
+                                stats["lines_covered"] += 1
                         else:
-                            stats['lines_removed'] += 1
+                            stats["lines_removed"] += 1
 
                 # 添加到 package
                 package_elem.append(new_class)
 
         # 计算覆盖率
-        total_lines = stats['lines_kept']
-        covered_lines = stats['lines_covered']
+        total_lines = stats["lines_kept"]
+        covered_lines = stats["lines_covered"]
 
         if total_lines > 0:
             coverage_rate = covered_lines / total_lines
@@ -225,20 +259,22 @@ def filter_coverage_by_diff(coverage_file, diff_data):
 
         # 保存文件
         tree = ET.ElementTree(new_root)
-        tree.write(coverage_file, encoding='utf-8', xml_declaration=True)
+        tree.write(coverage_file, encoding="utf-8", xml_declaration=True)
 
         # 打印统计信息
-        print(f"\n📊 Filtering Statistics:")
+        print("\n📊 Filtering Statistics:")
         print(f"  Files processed: {stats['files_processed']}")
         print(f"  Files kept: {stats['files_kept']}")
         print(f"  Lines kept: {stats['lines_kept']}")
         print(f"  Lines removed: {stats['lines_removed']}")
-        print(f"  Coverage: {covered_lines}/{total_lines} lines ({coverage_rate*100:.1f}%)")
+        print(
+            f"  Coverage: {covered_lines}/{total_lines} lines ({coverage_rate * 100:.1f}%)"
+        )
 
         # 验证文件
         try:
             ET.parse(coverage_file)
-            print(f"\n✅ Valid XML generated")
+            print("\n✅ Valid XML generated")
             return True
         except ET.ParseError as e:
             print(f"❌ Generated invalid XML: {e}")
@@ -249,13 +285,15 @@ def filter_coverage_by_diff(coverage_file, diff_data):
     except Exception as e:
         print(f"❌ Error filtering coverage: {e}")
         import traceback
+
         traceback.print_exc()
         return False
+
 
 def filename_match(coverage_filename, diff_filename):
     """
     智能文件名匹配
-    
+
     处理情况：
     1. coverage: "module/file.py", diff: "src/module/file.py"
     2. coverage: "./module/file.py", diff: "module/file.py"
@@ -266,12 +304,11 @@ def filename_match(coverage_filename, diff_filename):
     # 标准化路径
     def normalize(path):
         # 去除开头的 ./
-        if path.startswith('./'):
-            path = path[2:]
+        path = path.removeprefix("./")
         # 统一分隔符
-        path = path.replace('\\', '/')
+        path = path.replace("\\", "/")
         # 去除末尾的 /
-        path = path.rstrip('/')
+        path = path.rstrip("/")
         return path.lower()
 
     cov_norm = normalize(coverage_filename)
@@ -304,9 +341,10 @@ def filename_match(coverage_filename, diff_filename):
 
     return False
 
+
 def create_minimal_coverage(filename):
     """创建最小覆盖率文件"""
-    minimal_xml = '''<?xml version="1.0"?>
+    minimal_xml = """<?xml version="1.0"?>
 <coverage version="1.0" timestamp="0">
   <sources>
     <source>.</source>
@@ -321,15 +359,18 @@ def create_minimal_coverage(filename):
       </classes>
     </package>
   </packages>
-</coverage>'''
+</coverage>"""
 
-    with open(filename, 'w', encoding='utf-8') as f:
+    with open(filename, "w", encoding="utf-8") as f:
         f.write(minimal_xml)
     print(f"Created minimal coverage file: {filename}")
 
+
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python filter_coverage_fixed.py <coverage.xml> <diff.txt>")
+        print(
+            "Usage: python filter_coverage_fixed.py <coverage.xml> <diff.txt>"
+        )
         print("Example: python filter_coverage_fixed.py coverage.xml diff.txt")
         sys.exit(1)
 
@@ -348,13 +389,14 @@ def main():
             size = os.path.getsize(coverage_file)
             print(f"\n✅ Filtered coverage saved: {size:,} bytes")
 
-            if os.path.exists(coverage_file + '.backup'):
-                orig_size = os.path.getsize(coverage_file + '.backup')
-                reduction = (1 - size/orig_size) * 100
+            if os.path.exists(coverage_file + ".backup"):
+                orig_size = os.path.getsize(coverage_file + ".backup")
+                reduction = (1 - size / orig_size) * 100
                 print(f"   Reduced by: {reduction:.1f}%")
     else:
         print("\n❌ Failed to filter coverage")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
