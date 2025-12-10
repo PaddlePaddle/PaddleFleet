@@ -352,8 +352,8 @@ def get_gpt_spec(
             lm_head=LayerSpec(
                 layer=GPTLMHead,
                 extra_kwargs={
-                    "input_size": vocab_size,
-                    "output_size": config.hidden_size,
+                    "input_size": config.hidden_size,
+                    "output_size": vocab_size,
                     "config": config,
                     "init_method": config.init_method,
                     "bias": False,
