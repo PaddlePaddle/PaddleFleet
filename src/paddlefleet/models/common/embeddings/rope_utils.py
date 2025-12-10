@@ -284,14 +284,14 @@ def apply_rotary_pos_emb(
                     sin=sin,
                     cos=cos,
                     rotary_emb_base=config.rope_theta,
-                    time_major=True,
+                    time_major=config.sequence_parallel,
                 )
             return fused_rope(
                 t,
                 sin=sin,
                 cos=cos,
                 rotary_emb_base=config.rope_theta,
-                time_major=True,
+                time_major=config.sequence_parallel,
             )[0]
 
     # use unfused implementation
