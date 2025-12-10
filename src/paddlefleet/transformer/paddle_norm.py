@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import paddle
 
@@ -36,7 +38,11 @@ except ImportError:
 
 
 from paddlefleet.jit import jit_fuser
-from paddlefleet.transformer import TransformerConfig
+
+if TYPE_CHECKING:
+    from paddle import Tensor
+
+    from paddlefleet.transformer import TransformerConfig
 
 
 class RMSNorm(paddle.nn.Layer):
@@ -65,7 +71,7 @@ class RMSNorm(paddle.nn.Layer):
         if input_is_parallel:
             self.enable_sequence_parallel()
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: Tensor):
         if self.config.fuse_rms_norm:
             assert fused_rms_norm_ext is not None, (
                 "Enable fuse rms norm but paddle version is incorrect."
@@ -101,6 +107,16 @@ class RMSNorm(paddle.nn.Layer):
         mark_as_sequence_parallel_parameter(self.weight)
 
 
+class FusedRMSNorm(RMSNorm):
+    def forward(self, hidden_states: Tensor):
+        assert fused_rms_norm_ext is not None, (
+            "Enable fuse rms norm but paddle version is incorrect."
+        )
+        return fused_rms_norm_ext(
+            hidden_states, self.weight, self.variance_epsilon
+        )[0].astype(self.weight.dtype)
+
+
 class WrappedPaddleNorm:
     def __new__(
         cls,
@@ -121,6 +137,45 @@ class WrappedPaddleNorm:
             norm_eps=eps,
             input_is_parallel=input_is_parallel,
         )
+
+
+class WrappedFusedNorm:
+    def __new__(
+        cls,
+        config: TransformerConfig,
+        hidden_size: int,
+        eps: float = 1e-5,
+        input_is_parallel: bool = False,
+    ):
+        if config.normalization == "RMSNorm":
+            norm_cls = FusedRMSNorm
+        else:
+            raise Exception("Only supports RMSNorm now.")
+
+        return norm_cls(
+            config=config,
+            normalized_shape=hidden_size,
+            norm_eps=eps,
+            input_is_parallel=config.sequence_parallel,
+        )
+
+
+class WrappedPaddleNormPipe(paddle.nn.Layer):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        hidden_size: int,
+        eps: float = 1e-5,
+        input_is_parallel: bool = False,
+    ):
+        super().__init__()
+        self.norm_cls = WrappedPaddleNorm(
+            config, hidden_size, eps, input_is_parallel
+        )
+
+    def forward(self, dict_args: dict):
+        hidden_states = dict_args["hidden_states"]
+        return {"hidden_states": self.norm_cls(hidden_states)}
 
 
 class L2Norm(paddle.nn.Layer):

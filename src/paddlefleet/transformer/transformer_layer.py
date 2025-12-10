@@ -16,199 +16,24 @@
 from __future__ import annotations
 
 import logging
-from abc import ABC
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import paddle
-from paddle import Tensor
+from paddle import Tensor, nn
 
-from paddlefleet import parallel_state, tensor_parallel
+from paddlefleet import tensor_parallel
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
-from paddlefleet.transformer.enums import LayerType
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
-from paddlefleet.transformer.layer import GraphableFleetLayer
 from paddlefleet.transformer.mlp import MLP
-from paddlefleet.utils import get_pg_rank, log_single_rank
+from paddlefleet.utils import log_single_rank
 
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 logger = logging.getLogger(__name__)
-
-
-def get_transformer_layer_offset(
-    config: TransformerConfig,
-    vp_stage: int | None,
-    pp_rank: int | None,
-):
-    """Get the index offset of current pipeline stage, given the level of pipelining."""
-    if pp_rank is None:
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-
-    is_first_pp_stage = pp_rank == 0
-
-    if config.pipeline_model_parallel_size > 1:
-        if config.pipeline_model_parallel_layout:
-            offset = config.pipeline_model_parallel_layout.get_layer_offset(
-                layer_type=LayerType.decoder, vp_stage=vp_stage
-            )
-        elif (
-            config.num_layers_in_first_pipeline_stage is not None
-            or config.num_layers_in_last_pipeline_stage is not None
-        ):
-            # Calculate number of pipeline stages to distribute the remaining Transformer
-            # layers after deducting the Transformer layers in the first or the last stages
-            middle_pipeline_stages = config.pipeline_model_parallel_size
-            middle_pipeline_stages -= sum(
-                [
-                    1 if x is not None else 0
-                    for x in (
-                        config.num_layers_in_first_pipeline_stage,
-                        config.num_layers_in_last_pipeline_stage,
-                    )
-                ]
-            )
-
-            # Calculate layers to distribute in each pipeline stage. If the
-            # num_layers_in_first_pipeline_stage and num_layers_in_last_pipeline_stage
-            # are not set, we will not enable uneven pipeline. All layers will be treated
-            # as middle layers.
-            num_layers_in_first_pipeline_stage = (
-                0
-                if config.num_layers_in_first_pipeline_stage is None
-                else config.num_layers_in_first_pipeline_stage
-            )
-            num_layers_in_last_pipeline_stage = (
-                0
-                if config.num_layers_in_last_pipeline_stage is None
-                else config.num_layers_in_last_pipeline_stage
-            )
-
-            middle_num_layers = (
-                config.num_hidden_layers
-                - num_layers_in_first_pipeline_stage
-                - num_layers_in_last_pipeline_stage
-            )
-
-            middle_pipeline_rank = (
-                pp_rank
-                if config.num_layers_in_first_pipeline_stage is None
-                else pp_rank - 1
-            )
-
-            if (
-                vp_size := config.virtual_pipeline_model_parallel_size
-            ) is not None:
-                assert vp_stage is not None, (
-                    "vp_stage must be provided if virtual pipeline model parallel size is set"
-                )
-
-                # Calculate number of layers in each virtual model chunk
-                # If the num_layers_in_first_pipeline_stage and
-                # num_layers_in_last_pipeline_stage are not set, all pipeline stages
-                # will be treated as middle pipeline stages in the calculation
-                num_layers_per_virtual_model_chunk_in_first_pipeline_stage = (
-                    0
-                    if config.num_layers_in_first_pipeline_stage is None
-                    else config.num_layers_in_first_pipeline_stage // vp_size
-                )
-
-                num_layers_per_virtual_model_chunk_in_last_pipeline_stage = (
-                    0
-                    if config.num_layers_in_last_pipeline_stage is None
-                    else config.num_layers_in_last_pipeline_stage // vp_size
-                )
-
-                num_layers_per_virtual_model_chunk_in_middle_pipeline_stage = (
-                    middle_num_layers // vp_size
-                )
-
-                # First stage + middle stage + last stage
-                total_virtual_chunks = (
-                    num_layers_per_virtual_model_chunk_in_first_pipeline_stage
-                    + num_layers_per_virtual_model_chunk_in_middle_pipeline_stage
-                    + num_layers_per_virtual_model_chunk_in_last_pipeline_stage
-                )
-
-                # Calculate the layer offset with interleaved uneven pipeline parallelism
-                if pp_rank == 0:
-                    offset = vp_stage * total_virtual_chunks
-                else:
-                    offset = (
-                        vp_stage * total_virtual_chunks
-                        + num_layers_per_virtual_model_chunk_in_first_pipeline_stage
-                        + middle_pipeline_rank
-                        * (
-                            num_layers_per_virtual_model_chunk_in_middle_pipeline_stage
-                            // middle_pipeline_stages
-                        )
-                    )
-            else:
-                if middle_pipeline_stages > 0:
-                    num_layers_per_pipeline_rank = (
-                        middle_num_layers // middle_pipeline_stages
-                    )
-                else:
-                    num_layers_per_pipeline_rank = 0
-
-                if pp_rank == 0:
-                    offset = 0
-                else:
-                    offset = (
-                        middle_pipeline_rank * num_layers_per_pipeline_rank
-                    ) + num_layers_in_first_pipeline_stage
-        else:
-            num_hidden_layers = config.num_hidden_layers
-
-            # Increase the number of layers by one if we include the embedding (loss)
-            # layer into pipeline parallelism partition and placement
-            if config.account_for_embedding_in_pipeline_split:
-                num_hidden_layers += 1
-
-            if config.account_for_loss_in_pipeline_split:
-                num_hidden_layers += 1
-
-            num_layers_per_pipeline_rank = (
-                num_hidden_layers // config.pipeline_model_parallel_size
-            )
-
-            # import here to avoid circular import
-            from paddlefleet.pipeline_parallel.utils import is_vp_first_stage
-
-            if (
-                vp_size := config.virtual_pipeline_model_parallel_size
-            ) is not None:
-                assert vp_stage is not None, (
-                    "vp_stage must be provided if virtual pipeline model parallel size is set"
-                )
-
-                num_layers_per_virtual_rank = (
-                    num_layers_per_pipeline_rank // vp_size
-                )
-                total_virtual_chunks = num_hidden_layers // vp_size
-                offset = vp_stage * total_virtual_chunks + (
-                    pp_rank * num_layers_per_virtual_rank
-                )
-
-                # Reduce the offset of embedding layer from the total layer number
-                if config.account_for_embedding_in_pipeline_split and not (
-                    is_vp_first_stage(vp_stage, vp_size) and is_first_pp_stage
-                ):
-                    offset -= 1
-            else:
-                offset = pp_rank * num_layers_per_pipeline_rank
-
-                # Reduce the offset of embedding layer from the total layer number
-                if config.account_for_embedding_in_pipeline_split and not (
-                    is_vp_first_stage(vp_stage, vp_size) and is_first_pp_stage
-                ):
-                    offset -= 1
-    else:
-        offset = 0
-    return offset
 
 
 @dataclass
@@ -255,23 +80,7 @@ class TransformerLayerSublayersSpec:
     sharded_state_dict_keys_map: dict[str, str] = field(default_factory=dict)
 
 
-class BaseTransformerLayer(ABC):
-    """A common parent class for `TransformerLayer` like implementations.
-
-    A dummy class that is subclassed by similar `TransformerLayer`s e.g. the
-    `TransformerLayer` in this file and possibly other `TransformerLayer`
-    implementations that aim to use `TransformerBlock` as the base module.
-    The main purpose is to check if any layer (or module) provided in the spec
-    is a subclass of this class to allow fanning-out of that spec for all the
-    layers in the `TransformerBlock`. See `_get_block_submodules` method
-    implementation in `transformer_block.py` file for more details.
-    """
-
-    def __init__(self):
-        pass
-
-
-class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
+class TransformerLayer(nn.Layer):
     """A single transformer layer.
 
     Transformer layer takes input with size [s, b, h] and returns an
@@ -285,17 +94,15 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         layer_number: int = 1,
         hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
-        vp_stage: int | None = None,
     ):
-        super().__init__(config=config, vp_stage=vp_stage)
+        super().__init__()
 
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
+        self.config = config
 
-        self.layer_number = layer_number + get_transformer_layer_offset(
-            self.config, vp_stage, get_pg_rank(pg_collection.pp)
-        )
+        self.layer_number = layer_number
         self.hidden_dropout_prob = (
             config.hidden_dropout_prob
             if hidden_dropout_prob is None
@@ -394,18 +201,21 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         self.mlp_bda = build_layer(sublayers_spec.mlp_bda)
 
         self.recompute_input_layernorm = False
-        self.recompute_pre_mlp_layernorm = False
+        self.recompute_post_attention_layernorm = False
         self.recompute_mlp = False
         if self.config.recompute_granularity == "selective":
             if "layernorm" in self.config.recompute_layers:
                 if not isinstance(self.post_attention_layernorm, IdentityOp):
-                    self.recompute_pre_mlp_layernorm = True
+                    self.recompute_post_attention_layernorm = True
 
             if "mlp" in self.config.recompute_layers:
                 if not isinstance(self.mlp, MoELayer):
                     self.recompute_mlp = True
 
-    def forward(self, *args, **kwargs):
+    def forward(
+        self,
+        dict_args: dict,
+    ):
         """
         Perform a forward pass through the transformer layer.
 
@@ -415,10 +225,12 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         # Remove 'dynamic_inference_decode_only' from kwargs if present
         # this is only used to uniquely identify decode and non-decode cuda graph
         # runners in the cuda graph manager
-        kwargs.pop("dynamic_inference_decode_only", None)
-        hidden_states, context = self._forward_attention(*args, **kwargs)
+        dict_args.pop("dynamic_inference_decode_only", None)
+        hidden_states, context = self._forward_attention(**dict_args)
         output = self._forward_mlp(hidden_states)
-        return output, context
+        rst = {"hidden_states": output, "context": context}
+        rst = {**dict_args, **rst}
+        return rst
 
     def _forward_attention(
         self,
@@ -535,26 +347,28 @@ class TransformerLayer(GraphableFleetLayer, BaseTransformerLayer):
         residual = hidden_states
 
         # Optional Layer norm post the cross-attention.
-        if self.recompute_pre_mlp_layernorm:
+        if self.recompute_post_attention_layernorm:
             self.pre_mlp_norm_checkpoint = (
                 tensor_parallel.CheckpointWithoutOutput()
             )
-            pre_mlp_layernorm_output = self.pre_mlp_norm_checkpoint.checkpoint(
-                self.post_attention_layernorm, hidden_states
+            post_attention_layernorm_output = (
+                self.pre_mlp_norm_checkpoint.checkpoint(
+                    self.post_attention_layernorm, hidden_states
+                )
             )
         else:
-            pre_mlp_layernorm_output = self.post_attention_layernorm(
+            post_attention_layernorm_output = self.post_attention_layernorm(
                 hidden_states
             )
 
         if self.recompute_mlp:
             mlp_output_with_bias = tensor_parallel.checkpoint(
-                self.mlp, False, pre_mlp_layernorm_output
+                self.mlp, False, post_attention_layernorm_output
             )
         else:
-            mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
+            mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
 
-        if self.recompute_pre_mlp_layernorm:
+        if self.recompute_post_attention_layernorm:
             # discard the output of the pre-mlp layernorm and register the recompute
             # as a gradient hook of mlp_output_with_bias[0]
             self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(

@@ -13,17 +13,22 @@
 // limitations under the License.
 
 #pragma once
+#ifdef __CUDACC__
 #include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#endif
 
 #include <iostream>
 #include <limits>
 
 #include "paddle/extension.h"
 #include "paddle/phi/api/all.h"
+#include "paddle/phi/core/utils/data_type.h"
+#ifdef __CUDACC__
 #include "paddle/phi/kernels/funcs/math_cuda_utils.h"
+#endif
 
 template <paddle::DataType DType>
 struct TypeMap;
@@ -56,6 +61,7 @@ inline int LimitGridDim(int64_t n) {
   return static_cast<int>(std::min<int64_t>(n, 1024 * 1024));
 }
 
+#ifdef __CUDACC__
 template <typename T>
 T **GetTensorDevicePtrs(const std::vector<paddle::Tensor> &tensors,
                         paddle::Tensor *ptr_tensor,
@@ -79,12 +85,14 @@ T **GetTensorDevicePtrs(const std::vector<paddle::Tensor> &tensors,
            cudaGetErrorString(err));
   return device_ptrs;
 }
+#endif
 
 template <typename T, int N>
 struct alignas(16) VectorType {
   T data[N];
 };
 
+#ifdef __CUDACC__
 template <>
 struct alignas(16) VectorType<float, 4> {
   float4 data;  // Built-in CUDA vector type
@@ -99,12 +107,14 @@ template <>
 struct alignas(16) VectorType<__nv_fp8_e4m3, 16> {
   __nv_fp8_e4m3 data[16];
 };
+#endif
 
 template <>
 struct alignas(16) VectorType<uint8_t, 16> {
   uint8_t data[16];
 };
 
+#ifdef __CUDACC__
 // Helper function to perform vectorized memory copy
 template <typename T>
 __device__ __forceinline__ void vectorized_memcpy(const T *src,
@@ -132,6 +142,7 @@ __device__ __forceinline__ void vectorized_memcpy(const T *src,
     }
   }
 }
+#endif
 
 #define PD_SWITCH_NUM_EXPERTS_IMPL(__num_expert, __max_num_experts, ...) \
   if (__num_expert <= __max_num_experts) {                               \

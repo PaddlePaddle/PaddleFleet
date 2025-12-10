@@ -45,6 +45,10 @@ with open(infile) as fin, open(outfile, 'w') as fout:
 "
 mv $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py.new $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
 
+sed -i 's/num_hidden_layers: int = 10/num_hidden_layers: int = 2/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 1/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+sed -i 's/expert_model_parallel_size: int = 16/expert_model_parallel_size: int = 4\n    num_experts_per_tok: int = 2/' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)

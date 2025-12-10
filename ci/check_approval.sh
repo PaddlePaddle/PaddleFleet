@@ -106,6 +106,16 @@ for FILE in "${MODELCONFIG_FILES[@]}"; do
 done
 
 
+CUSTOMOP_APPROVERS="risemeup1 From00"
+CUSTOMOP_DIR="src/paddlefleet/extensions"
+HAS_MODIFIED_CUSTOMOP=$(git diff --name-only upstream/$BRANCH | grep "^${CUSTOMOP_DIR}/" || true)
+if [ "${HAS_MODIFIED_CUSTOMOP}" != "" ] && [ "${PR_ID}" != "" ]; then
+    echo_line="You must be approved by two of ${CUSTOMOP_APPROVERS} for changes in ${CUSTOMOP_DIR}.\n"
+    APPROVER_LIST=(${CUSTOMOP_APPROVERS})
+    check_approval 2 "${APPROVER_LIST[@]}"
+fi
+
+
 
 CHECKREQ_APPROVERS="risemeup1 swgu98"
 files=$(git diff --name-status upstream/$BRANCH)
