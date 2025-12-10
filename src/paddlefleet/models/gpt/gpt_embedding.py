@@ -108,9 +108,6 @@ class GPTEmbedding(FleetLayer):
                 rotary_pos_emb = rotary_pos_emb.transpose(
                     [1, 0, 2, 3]
                 ).contiguous()
-            print(f"rotary_pos_emb.shape: {rotary_pos_emb.shape}")
-            print(f"rotary_pos_cos.shape: {rotary_pos_cos.shape}")
-            print(f"rotary_pos_sin.shape: {rotary_pos_sin.shape}")
 
         preproc_output = {
             "hidden_states": decoder_input,
