@@ -40,7 +40,7 @@ export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
-coverage run run_pretrain.py $config_json | tee ./qwen3_single_card.log
+coverage run run_pretrain.py $config_json 2>&1 | tee ./qwen3_single_card.log
 
 echo "
 1 10.57962036
