@@ -156,9 +156,10 @@ class CLIPViTModel(VisionLayer):
         if self.add_class_token:
             self.class_token = paddle.nn.Parameter(
                 paddle.randn(
-                    1,
+                    4,
                     self.class_token_len,
                     self.visual_hidden_size,
+                    self,
                     dtype=transformer_config.params_dtype,
                 )
             )
