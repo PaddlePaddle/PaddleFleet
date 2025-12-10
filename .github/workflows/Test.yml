@@ -191,6 +191,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
+          set -x
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
@@ -436,7 +437,7 @@ jobs:
   integration-test-H20-multi-card:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
-    name: Integration test (H20 multi-card)
+    name: Integration test (H20, multi-card)
     runs-on:
       group: Fleet-H-multi-card
     env:
