@@ -192,7 +192,7 @@ class TransformerConfig(ModelParallelConfig):
     masked_softmax_fusion: bool = False
     """If True, uses softmax fusion."""
 
-    fuse_rms_norm: bool = True
+    fuse_rms_norm: bool = False
     """Fused rms norm or not"""
 
     normalization: str = "RMSNorm"
