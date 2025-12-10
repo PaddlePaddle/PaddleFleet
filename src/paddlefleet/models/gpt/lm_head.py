@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import paddle
+from paddle.nn.parameter import Parameter
 
 from paddlefleet.tensor_parallel.layers import ColumnParallelLinear
 
@@ -23,13 +24,56 @@ class GPTLMHead(ColumnParallelLinear):
         self.skip_weight_param_allocation = kwargs[
             "skip_weight_param_allocation"
         ]
+
+        kwargs["skip_weight_param_allocation"] = True
         super().__init__(**kwargs)
+
         if not self.skip_weight_param_allocation:
-            shape = self.weight.T.shape
-            del self.weight
-            self.weight = paddle.create_parameter(
-                shape=shape, dtype=paddle.get_default_dtype()
+            if self.config.use_cpu_initialization:
+                self.weight = Parameter(
+                    paddle.empty(
+                        [self.output_size_per_partition, self.input_size],
+                        dtype=self.config.params_dtype,
+                    )
+                )
+                # if self.config.perform_initialization:
+                #     self.master_weight = _initialize_affine_weight_cpu(
+                #         self.weight,
+                #         self.input_size,
+                #         self.output_size,
+                #         self.output_size_per_partition,
+                #         1,
+                #         init_method,
+                #         stride=stride,
+                #         return_master_weight=keep_master_weight_for_test,
+                #         rank=rank,
+                #         world_size=self.world_size,
+                #     )
+            else:
+                self.weight = Parameter(
+                    paddle.empty(
+                        [self.output_size_per_partition, self.input_size],
+                        dtype=self.config.params_dtype,
+                    )
+                )
+                # if config.perform_initialization:
+                #     _initialize_affine_weight_gpu(
+                #         self.weight,
+                #         init_method,
+                #         partition_dim=0,
+                #         stride=stride,
+                #         is_expert=self.is_expert,
+                #     )
+
+            self.weight.allreduce = not (
+                self.is_expert and self.expert_parallel
             )
+        # if not self.skip_weight_param_allocation:
+        #    shape = self.weight.T.shape
+        #    del self.weight
+        #    self.weight = paddle.create_parameter(
+        #        shape=shape, dtype=paddle.get_default_dtype()
+        #    )
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
