@@ -30,6 +30,7 @@ from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel import checkpoint
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
+from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.utils import log_single_rank
 
 if TYPE_CHECKING:
@@ -242,8 +243,6 @@ class TransformerLayer(nn.Layer):
         )
         # [Layer 8: MLP block]
         additional_mlp_kwargs = {}
-
-        from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         # MLP expects tp_group but MoELayer expects pg_collection to be passed in.
         # We can change MLP to accept pg_collection but it makes the logic implicit
@@ -516,3 +515,14 @@ class TransformerLayer(nn.Layer):
             )(mlp_output_with_bias, residual, self.hidden_dropout_prob)
 
         return hidden_states
+
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+        if isinstance(self.mlp, MoELayer):
+            logger.info(f"fp8 quant weight for mlp {type(self.mlp)}")
+            self.mlp.fp8_quant_weight(
+                batch_mode=batch_mode, quant_transpose=quant_transpose
+            )
+
+    def use_fp8(self):
+        if isinstance(self.mlp, MoELayer):
+            return self.mlp.use_fp8()

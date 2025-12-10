@@ -326,9 +326,6 @@ class TransformerConfig(ModelParallelConfig):
     moe_subbatch_token_num_after_dispatch: int | None = None
     """Whether to enable subbatch after dispatch, the value means the number of tokens in one subbatch."""
 
-    fp8_wgrad: bool = True
-    """Whether to use fp8 wgrad."""
-
     moe_grouped_gemm: bool = False
     """Whether to use grouped gemm."""
 
@@ -340,6 +337,8 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
+    moe_shared_expert_overlap: bool = False
+    """Enable overlapping between shared expert computations and a2a combinet"""
 
     ##################
     # Context Parallel
@@ -361,6 +360,9 @@ class TransformerConfig(ModelParallelConfig):
     fp8_recipe: str = "blockwise"
     """If set, enables the use of FP8 precision. There are 2 predefined
     choices 1) 'mxfp8' for Blackwell architecture only, 2) 'blockwise' for blockwise scaling recipe"""
+
+    fp8_wgrad: bool = True
+    """Whether to use fp8 wgrad."""
 
     ####################
     # initialization
