@@ -14,7 +14,7 @@ concurrency:
 env:
   PR_ID: ${{ github.event.pull_request.number || '0' }}
   COMMIT_ID: ${{ github.event.pull_request.head.sha || github.sha }}
-  work_dir: /workspace
+  work_dir: /paddle
   PADDLE_ROOT: /paddle
   ci_scripts: /paddle/ci
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
@@ -64,7 +64,7 @@ jobs:
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
             -v /ssd1/paddle-1/action_cache:/root/.cache \
-            -v ${{ github.workspace }}:/workspace \
+            -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
             -e COMMIT_ID \
@@ -82,7 +82,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -w /workspace --network host ${docker_image}
+            -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
         run: |
@@ -192,7 +192,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -w /workspace --network host ${docker_image}
+            -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
         run: |
