@@ -225,9 +225,6 @@ class Attention(FleetLayer, ABC):
         attn_mask_startend_row_indices: Tensor | None = None,
         key_value_states: Tensor | None = None,
         rotary_pos_emb: Tensor | tuple[Tensor, Tensor] | None = None,
-        rotary_pos_cos: Tensor | None = None,
-        rotary_pos_sin: Tensor | None = None,
-        rotary_pos_cos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
