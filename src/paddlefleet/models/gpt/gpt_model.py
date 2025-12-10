@@ -135,6 +135,9 @@ class GPTModel(PipelineLayer):
 
         return layers
 
+    def get_hardware_flops(self):
+        return 989e3
+
     def add_sequential_layer(self, layers, layer_desc, name_prefix=""):
         """
         Add a sequential layer to the network with specified description and name prefix.
