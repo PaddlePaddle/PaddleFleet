@@ -13,6 +13,8 @@
 # limitations under the License.
 
 try:
+    import deep_gemm as deep_gemm
+
     from . import ops as ops
 except ImportError as e:
     import warnings

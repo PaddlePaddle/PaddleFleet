@@ -13,10 +13,25 @@
 # limitations under the License.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
+import glob
 import os
 import re
 import shutil
 import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+from setuptools.command.build_py import build_py
+
+current_dir = Path(__file__).parent
+third_party_dir = current_dir / "third_party"
+deep_gemm_dir = third_party_dir / "DeepGEMM"
+
+is_whl = False
+
+if "bdist_wheel" in sys.argv:
+    is_whl = True
 
 
 def change_pwd():
@@ -26,7 +41,94 @@ def change_pwd():
         os.chdir(path)
 
 
+def copy_external_assets(source_dir, base_dir):
+    target_dir = base_dir
+
+    print(f"[Custom] Copying {source_dir} -> {target_dir}")
+    if os.path.exists(source_dir):
+        if os.path.exists(target_dir):
+            shutil.rmtree(target_dir)
+        shutil.copytree(source_dir, target_dir)
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def pushd(path):
+    prev_cwd = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(prev_cwd)
+
+
+def extract_whl(source_dir, output_dir):
+    whl_files = glob.glob(os.path.join(source_dir, "*.whl"))
+
+    if not whl_files:
+        print(f"在 {source_dir} 没有找到 .whl 文件")
+        return
+
+    target_whl = whl_files[0]
+    print(f"正在解压: {target_whl}")
+
+    with zipfile.ZipFile(target_whl, "r") as zip_ref:
+        zip_ref.extractall(output_dir)
+
+    print(f"解压完成，位置: {output_dir}")
+
+
+def setup_deep_gemm():
+    print("----------------------")
+    print(sys.argv)
+    if "egg_info" in sys.argv:
+        return
+    print("----------------------")
+
+    with pushd(deep_gemm_dir):
+        print("Cleaning up...")
+
+        for dir_name in ["build", "dist"]:
+            if os.path.exists(dir_name):
+                shutil.rmtree(dir_name)
+                print(f"Removed {dir_name}")
+
+        for egg_dir in glob.glob("*.egg-info"):
+            if os.path.isdir(egg_dir):
+                shutil.rmtree(egg_dir)
+                print(f"Removed {egg_dir}")
+        if is_whl:
+            print("Building wheel...")
+            try:
+                subprocess.run(
+                    [sys.executable, "setup.py", "bdist_wheel"], check=True
+                )
+                print("Build success!")
+            except subprocess.CalledProcessError:
+                print("Build failed!")
+                sys.exit(1)
+            extract_whl("./dist", "./dist/.temp_unpack")
+        else:
+            print("Begin editable install")
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-e",
+                    ".",
+                    "--no-build-isolation",
+                    "-v",
+                ],
+                check=True,
+            )
+
+
 def setup_ops_extension():
+    setup_deep_gemm()
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
     try:
@@ -128,6 +230,21 @@ def setup_ops_extension():
                 return python, abi, plat
 
         cmdclass["bdist_wheel"] = ABI3Wheel
+
+    class CustomBuildPy(build_py):
+        def run(self):
+            build_py.run(self)
+            if is_whl:
+                copy_external_assets(
+                    deep_gemm_dir / "dist" / ".temp_unpack" / "deep_gemm",
+                    f"{self.build_lib}/deep_gemm",
+                )
+                copy_external_assets(
+                    deep_gemm_dir / "dist" / ".temp_unpack" / "deep_gemm_cpp",
+                    f"{self.build_lib}/deep_gemm_cpp",
+                )
+
+    cmdclass["build_py"] = CustomBuildPy
 
     change_pwd()
     setup(
