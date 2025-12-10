@@ -15,7 +15,11 @@
 import paddle
 from paddle.nn.parameter import Parameter
 
-from paddlefleet.tensor_parallel.layers import ColumnParallelLinear
+from paddlefleet.tensor_parallel.layers import (
+    ColumnParallelLinear,
+    _initialize_affine_weight_cpu,
+    _initialize_affine_weight_gpu,
+)
 
 
 class GPTLMHead(ColumnParallelLinear):
@@ -28,6 +32,14 @@ class GPTLMHead(ColumnParallelLinear):
         kwargs["skip_weight_param_allocation"] = True
         super().__init__(**kwargs)
 
+        stride = kwargs["stride"] if "stride" in kwargs.keys() else 1
+        init_method = kwargs["init_method"]
+        keep_master_weight_for_test = (
+            kwargs["keep_master_weight_for_test"]
+            if "keep_master_weight_for_test" in kwargs.keys()
+            else False
+        )
+
         if not self.skip_weight_param_allocation:
             if self.config.use_cpu_initialization:
                 self.weight = Parameter(
@@ -36,19 +48,19 @@ class GPTLMHead(ColumnParallelLinear):
                         dtype=self.config.params_dtype,
                     )
                 )
-                # if self.config.perform_initialization:
-                #     self.master_weight = _initialize_affine_weight_cpu(
-                #         self.weight,
-                #         self.input_size,
-                #         self.output_size,
-                #         self.output_size_per_partition,
-                #         1,
-                #         init_method,
-                #         stride=stride,
-                #         return_master_weight=keep_master_weight_for_test,
-                #         rank=rank,
-                #         world_size=self.world_size,
-                #     )
+                if self.config.perform_initialization:
+                    self.master_weight = _initialize_affine_weight_cpu(
+                        self.weight,
+                        self.output_size,
+                        self.input_size,
+                        self.output_size_per_partition,
+                        0,
+                        init_method,
+                        stride=stride,
+                        return_master_weight=keep_master_weight_for_test,
+                        rank=self.rank,
+                        world_size=self.world_size,
+                    )
             else:
                 self.weight = Parameter(
                     paddle.empty(
@@ -56,14 +68,14 @@ class GPTLMHead(ColumnParallelLinear):
                         dtype=self.config.params_dtype,
                     )
                 )
-                # if config.perform_initialization:
-                #     _initialize_affine_weight_gpu(
-                #         self.weight,
-                #         init_method,
-                #         partition_dim=0,
-                #         stride=stride,
-                #         is_expert=self.is_expert,
-                #     )
+                if self.config.perform_initialization:
+                    _initialize_affine_weight_gpu(
+                        self.weight,
+                        init_method,
+                        partition_dim=0,
+                        stride=stride,
+                        is_expert=self.is_expert,
+                    )
 
             self.weight.allreduce = not (
                 self.is_expert and self.expert_parallel
