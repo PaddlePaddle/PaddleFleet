@@ -35,7 +35,7 @@ from paddlefleet import utils
 
 from .fusion_layer_utils import FusionMoePyLayer
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
-from .moe_router import StandardMoERouter
+from .moe_router import DeepEPTopKRouter, StandardMoERouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
 from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
@@ -60,6 +60,7 @@ class MoELayer(nn.Layer):
         pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__()
+        self.config = config
         self.sublayers = sublayers
         routed_expert_config = deepcopy(config)
         shared_expert_config = deepcopy(config)
@@ -97,9 +98,14 @@ class MoELayer(nn.Layer):
 
         # MoE-Related Configs
         self._init_expert_parallel()
-        self.gate = StandardMoERouter(
-            config=config, pg_collection=pg_collection
-        )
+        if config.moe_router_fusion:
+            self.gate = DeepEPTopKRouter(
+                config=config, pg_collection=pg_collection
+            )
+        else:
+            self.gate = StandardMoERouter(
+                config=config, pg_collection=pg_collection
+            )
 
         self.expert_class = StandardMLPExpert
         self.shared_expert_class = StandardMLPSharedExpert
@@ -389,7 +395,7 @@ class MoELayer(nn.Layer):
                     reshaped_input, topk_indices, topk_weights
                 )
 
-        if self.training and self.router_aux_loss_coef > 0.0:
+        if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * self.router_aux_loss_coef
             output = AddAuxiliaryLoss.apply(output, aux_loss)
 
