@@ -650,7 +650,7 @@ class PipelineLayer(nn.Layer):
                         grad_var = param.grad
                     with paddle.framework.no_grad():
                         paddle.distributed.all_reduce(
-                            grad_var,
+                            grad_var.contiguous(),
                             group=comm["group"],
                         )
                 else:
