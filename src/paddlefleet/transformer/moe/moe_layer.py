@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 from paddlefleet import utils
 
 from .fusion_layer_utils import FusionMoePyLayer
-from .moe_expert import GroupedMLPExpert, StandardMLPExpert
+from .moe_expert import GroupedMLPExpertNew, StandardMLPExpert
 from .moe_router import DeepEPTopKRouter, StandardMoERouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
@@ -95,7 +95,16 @@ class MoELayer(nn.Layer):
         self.num_local_experts = (
             self.num_experts // self.expert_model_parallel_size
         )
-
+        if self.fp8:
+            assert self.moe_use_fusion_node, (
+                "fp8 can only be used when moe_use_fusion_node = True."
+            )
+        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
+            logger.warning(
+                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
+                "Will turn on moe_grouped_gemm."
+            )
+            self.moe_grouped_gemm = True
         # MoE-Related Configs
         self._init_expert_parallel()
         if config.moe_router_fusion:
@@ -137,7 +146,7 @@ class MoELayer(nn.Layer):
                 self.experts.append(None)
 
         if self.moe_grouped_gemm:
-            self.grouped_gemm_experts = GroupedMLPExpert(
+            self.grouped_gemm_experts = GroupedMLPExpertNew(
                 self.num_local_experts,
                 routed_expert_config,
                 self.experts,
@@ -166,17 +175,6 @@ class MoELayer(nn.Layer):
             )
             self.moe_token_dispatcher_type = "alltoall"
             self.moe_use_fusion_node = False
-
-        if self.fp8:
-            assert self.moe_use_fusion_node, (
-                "fp8 can only be used when moe_use_fusion_node = True."
-            )
-        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
-            logger.warning(
-                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
-                "Will turn on moe_grouped_gemm."
-            )
-            self.moe_grouped_gemm = True
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
@@ -387,6 +385,7 @@ class MoELayer(nn.Layer):
             else:
                 reshaped_input = hidden_states
             if self.moe_grouped_gemm:
+                print("Using single card moe_grouped_gemm")
                 output = self._forward_single_card_grouped_gemm_moe(
                     reshaped_input, mask, gates_masked
                 )
