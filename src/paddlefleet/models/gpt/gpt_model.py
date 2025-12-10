@@ -26,7 +26,6 @@ from paddlefleet.pipeline_parallel import (
 if TYPE_CHECKING:
     from paddlefleet.spec_utils import LayerSpec
 
-
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
 
