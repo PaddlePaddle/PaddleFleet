@@ -27,8 +27,8 @@ from paddlefleet.tensor_parallel.layers import (
     RowParallelLinear,
 )
 from paddlefleet.transformer.dot_product_attention import (
+    CPDotProductAttention,
     DotProductAttention,
-    FlashDotProductAttention,
 )
 from paddlefleet.transformer.mlp import MLPSublayersSpec
 
@@ -133,7 +133,7 @@ class LocalSpecProvider(BackendSpecProvider):
             get_context_parallel_group() is not None
             and get_context_parallel_world_size() > 1
         ):
-            return FlashDotProductAttention
+            return CPDotProductAttention
         else:
             return DotProductAttention
 
