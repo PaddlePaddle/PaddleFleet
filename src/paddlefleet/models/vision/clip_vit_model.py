@@ -137,7 +137,8 @@ class CLIPViTModel(VisionLayer):
             raise ValueError(f"unsupported vision model type {model_subtype}")
 
         self.conv1 = paddle.nn.Conv2d(
-            in_channels=4,
+            in_channels=3,
+            out_channels=self.visual_hidden_size,
             kernel_size=self.patch_dim,
             stride=self.patch_dim,
             bias=conv_bias,
@@ -156,10 +157,9 @@ class CLIPViTModel(VisionLayer):
         if self.add_class_token:
             self.class_token = paddle.nn.Parameter(
                 paddle.randn(
-                    4,
+                    1,
                     self.class_token_len,
                     self.visual_hidden_size,
-                    self,
                     dtype=transformer_config.params_dtype,
                 )
             )
