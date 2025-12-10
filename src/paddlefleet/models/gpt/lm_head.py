@@ -26,9 +26,10 @@ class GPTLMHead(ColumnParallelLinear):
         super().__init__(**kwargs)
         if not self.skip_weight_param_allocation:
             shape = self.weight.T.shape
-            dtype = self.weight.dtype
             del self.weight
-            self.weight = paddle.create_parameter(shape=shape, dtype=dtype)
+            self.weight = paddle.create_parameter(
+                shape=shape, dtype=paddle.get_default_dtype()
+            )
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
