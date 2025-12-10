@@ -630,13 +630,171 @@ jobs:
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
           diff-cover multi_coverage.xml single_coverage.xml h20_multi_coverage.xml h20_single_coverage.xml h20_qwen_coverage.xml a100_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
+          python ci/filter_coverage.py multi_coverage.xml diff.txt
+          python ci/filter_coverage.py single_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_multi_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_single_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_qwen_coverage.xml diff.txt
+          python ci/filter_coverage.py a100_coverage.xml diff.txt
           exit ${COVERAGE_EXIT_CODE}
+
+      - name: Check coverage files before upload
+        if: always()
+        run: |
+          echo "=== CHECKING COVERAGE FILES ==="
+          
+          # 定义要检查的文件列表
+          COVERAGE_FILES=(
+            ""multi_coverage.xml"
+            "single_coverage.xml"
+            "h20_multi_coverage.xml"
+            "h20_single_coverage.xml"
+            "h20_qwen_coverage.xml"
+            "a100_coverage.xml"
+          )
+          
+          ALL_PASSED=true
+          TOTAL_COVERAGE_LINES=0
+          TOTAL_FILE_SIZE=0
+          
+          for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
+            echo -e "\n=== CHECKING: $COVERAGE_FILE ==="
+            
+            # 1. 检查文件是否存在
+            if [ ! -f "$COVERAGE_FILE" ]; then
+              echo "⚠️ WARNING: File not found: $COVERAGE_FILE"
+              echo "Skipping..."
+              continue
+            fi
+            
+            # 2. 检查文件大小
+            FILE_SIZE=$(wc -c < "$COVERAGE_FILE")
+            echo "File size: $FILE_SIZE bytes"
+            TOTAL_FILE_SIZE=$((TOTAL_FILE_SIZE + FILE_SIZE))
+            
+            if [ $FILE_SIZE -lt 100 ]; then
+              echo "⚠️ WARNING: File is very small (may be empty or incomplete)"
+            fi
+            
+            # 3. 检查是否是有效的XML
+            if ! head -1 "$COVERAGE_FILE" | grep -q "<?xml"; then
+              echo "❌ ERROR: Not a valid XML file"
+              echo "First line:"
+              head -1 "$COVERAGE_FILE"
+              ALL_PASSED=false
+              continue
+            fi
+            
+            # 4. 统计覆盖率数据行
+            LINE_COUNT=$(grep -c "<line " "$COVERAGE_FILE" 2>/dev/null || echo "0")
+            echo "Coverage lines found: $LINE_COUNT"
+            TOTAL_COVERAGE_LINES=$((TOTAL_COVERAGE_LINES + LINE_COUNT))
+            
+            # 5. 按文件大小分类提示
+            if [ $FILE_SIZE -lt 1024 ]; then
+              echo "✅ Size OK: Less than 1KB"
+            elif [ $FILE_SIZE -lt 10240 ]; then
+              echo "✅ Size OK: Less than 10KB"
+            elif [ $FILE_SIZE -lt 1048576 ]; then
+              echo "⚠️ Note: Less than 1MB"
+            else
+              echo "⚠️ WARNING: Large file (>1MB)"
+            fi
+            
+            # 6. 按文件类型给出不同标准
+            FILENAME=$(basename "$COVERAGE_FILE")
+            case "$FILENAME" in
+              *python*)
+                if [ $LINE_COUNT -lt 100 ]; then
+                  echo "✅ Good Python coverage size"
+                elif [ $LINE_COUNT -lt 500 ]; then
+                  echo "⚠️ Moderate Python coverage size"
+                else
+                  echo "⚠️ Large Python coverage file"
+                fi
+                ;;
+              *cpp*)
+                if [ $LINE_COUNT -lt 200 ]; then
+                  echo "✅ Good C++ coverage size"
+                elif [ $LINE_COUNT -lt 1000 ]; then
+                  echo "⚠️ Moderate C++ coverage size"
+                else
+                  echo "⚠️ Large C++ coverage file"
+                fi
+                ;;
+              *single*)
+                if [ $LINE_COUNT -lt 50 ]; then
+                  echo "✅ Good: Filtered PR coverage"
+                elif [ $LINE_COUNT -lt 200 ]; then
+                  echo "⚠️ Note: Moderate line count"
+                else
+                  echo "⚠️ WARNING: Might be full coverage"
+                fi
+                ;;
+              *)
+                # 默认标准
+                if [ $LINE_COUNT -lt 300 ]; then
+                  echo "✅ Size looks reasonable"
+                else
+                  echo "⚠️ Note: Larger than expected"
+                fi
+                ;;
+            esac
+            
+            # 7. 显示文件基本信息
+            echo "First 2 lines:"
+            head -2 "$COVERAGE_FILE"
+            
+            # 8. 检查备份文件（如果存在）
+            BACKUP_FILE="${COVERAGE_FILE}.backup"
+            if [ -f "$BACKUP_FILE" ]; then
+              BACKUP_SIZE=$(wc -c < "$BACKUP_FILE")
+              echo "Backup size: $BACKUP_SIZE bytes"
+              
+              if [ $BACKUP_SIZE -gt 0 ] && [ $FILE_SIZE -gt 0 ]; then
+                REDUCTION=$((100 - FILE_SIZE * 100 / BACKUP_SIZE))
+                echo "Size reduction from backup: ${REDUCTION}%"
+                
+                if [ $REDUCTION -lt 50 ]; then
+                  echo "⚠️ WARNING: Less than 50% reduction"
+                fi
+              fi
+            fi
+            
+            echo "✅ $COVERAGE_FILE check passed"
+          done
+          
+          # 汇总报告
+          echo -e "\n=== SUMMARY REPORT ==="
+          echo "Total files processed: ${#COVERAGE_FILES[@]}"
+          echo "Total coverage lines: $TOTAL_COVERAGE_LINES"
+          echo "Total file size: $TOTAL_FILE_SIZE bytes"
+          
+          # 额外的整体检查
+          if [ $TOTAL_COVERAGE_LINES -eq 0 ]; then
+            echo "⚠️ WARNING: No coverage lines found in any file!"
+          fi
+          
+          if [ $TOTAL_FILE_SIZE -gt 10485760 ]; then
+            echo "⚠️ WARNING: Total size >10MB, consider compression"
+          fi
+          
+          echo "✅ All checks completed"
+          
+          # 清理备份文件
+          for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
+            BACKUP_FILE="${COVERAGE_FILE}.backup"
+            if [ -f "$BACKUP_FILE" ]; then
+              rm -f "$BACKUP_FILE"
+              echo "Removed backup: $BACKUP_FILE"
+            fi
+          done
 
       - name: Upload coverage to Codecov
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: ./multi_coverage.xml, ./single_coverage.xml ./h20_multi_coverage.xml ./h20_single_coverage.xml ./h20_qwen_coverage.xml ./a100_coverage.xml
+          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
