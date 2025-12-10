@@ -108,7 +108,7 @@ class GPTModel(PipelineLayer):
             layers.append(
                 SharedLayerDesc(
                     "embed",
-                    layer_func=spec.lm_head,
+                    spec.lm_head,
                     shared_weight_attr="embedding_weight",
                 )
             )
