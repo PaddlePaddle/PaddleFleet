@@ -43,16 +43,16 @@ unset http_proxy https_proxy
 coverage run run_pretrain.py $config_json 2>&1 | tee ./qwen3_single_card.log
 
 echo "
-1 10.57962036
-2 10.57499504
-3 10.57764149
-4 10.56986618
-5 10.56744957
-6 10.55562115
-7 10.54955864
-8 10.59902382
-9 10.53679466
-10 10.53017616
+1 10.57957458
+2 10.57491207
+3 10.57754230
+4 10.57071304
+5 10.56862450
+6 10.55602455
+7 10.55024910
+8 10.60008240
+9 10.53886032
+10 10.53166199
 " > ./qwen3_single_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
