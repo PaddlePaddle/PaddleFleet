@@ -164,7 +164,7 @@ if __name__ == "__main__":
     batch_size = 2
     seq_len = 128
     vocab_size = 1024
-    paddle.set_default_dtype("float16")
+    paddle.set_default_dtype("bfloat16")
 
     # config = TransformerConfig(
     #     num_hidden_layers=2,
@@ -204,9 +204,9 @@ if __name__ == "__main__":
         rotary_percent=1.0,
         rotary_base=10000,
         rope_scaling=1.0,
-        fp16=True,
-        autocast_dtype=paddle.float16,
-        params_dtype=paddle.float16,
+        bf16=True,
+        autocast_dtype=paddle.bfloat16,
+        params_dtype=paddle.bfloat16,
         init_method=functools.partial(paddle.nn.init.xavier_uniform_, gain=1.0),
         output_layer_init_method=functools.partial(
             paddle.nn.init.xavier_uniform_, gain=1.0
