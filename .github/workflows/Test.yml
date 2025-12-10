@@ -645,7 +645,7 @@ jobs:
           
           # 定义要检查的文件列表
           COVERAGE_FILES=(
-            ""multi_coverage.xml"
+            "multi_coverage.xml"
             "single_coverage.xml"
             "h20_multi_coverage.xml"
             "h20_single_coverage.xml"
@@ -673,7 +673,7 @@ jobs:
             TOTAL_FILE_SIZE=$((TOTAL_FILE_SIZE + FILE_SIZE))
             
             if [ $FILE_SIZE -lt 100 ]; then
-              echo "⚠️ WARNING: File is very small (may be empty or incomplete)"
+              echo "⚠️ WARNING: File is very small"
             fi
             
             # 3. 检查是否是有效的XML
