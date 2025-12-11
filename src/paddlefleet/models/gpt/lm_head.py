@@ -12,7 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from paddlefleet.tensor_parallel.layers import ColumnParallelLinear
+import paddle
+from paddle.nn.parameter import Parameter
+
+from paddlefleet.tensor_parallel.layers import (
+    ColumnParallelLinear,
+    _initialize_affine_weight_cpu,
+    _initialize_affine_weight_gpu,
+)
 
 
 class GPTLMHead(ColumnParallelLinear):
@@ -21,14 +28,68 @@ class GPTLMHead(ColumnParallelLinear):
         self.skip_weight_param_allocation = kwargs[
             "skip_weight_param_allocation"
         ]
+
+        kwargs["skip_weight_param_allocation"] = True
         super().__init__(**kwargs)
+
+        stride = kwargs["stride"] if "stride" in kwargs.keys() else 1
+        init_method = kwargs["init_method"]
+        keep_master_weight_for_test = (
+            kwargs["keep_master_weight_for_test"]
+            if "keep_master_weight_for_test" in kwargs.keys()
+            else False
+        )
+
+        if not self.skip_weight_param_allocation:
+            if self.config.use_cpu_initialization:
+                self.weight = Parameter(
+                    paddle.empty(
+                        [self.output_size_per_partition, self.input_size],
+                        dtype=self.config.params_dtype,
+                    )
+                )
+                if self.config.perform_initialization:
+                    self.master_weight = _initialize_affine_weight_cpu(
+                        self.weight,
+                        self.output_size,
+                        self.input_size,
+                        self.output_size_per_partition,
+                        0,
+                        init_method,
+                        stride=stride,
+                        return_master_weight=keep_master_weight_for_test,
+                        rank=self.rank,
+                        world_size=self.world_size,
+                    )
+            else:
+                self.weight = Parameter(
+                    paddle.empty(
+                        [self.output_size_per_partition, self.input_size],
+                        dtype=self.config.params_dtype,
+                    )
+                )
+                if self.config.perform_initialization:
+                    _initialize_affine_weight_gpu(
+                        self.weight,
+                        init_method,
+                        partition_dim=0,
+                        stride=stride,
+                        is_expert=self.is_expert,
+                    )
+
+            self.weight.allreduce = not (
+                self.is_expert and self.expert_parallel
+            )
+        # if not self.skip_weight_param_allocation:
+        #    shape = self.weight.T.shape
+        #    del self.weight
+        #    self.weight = paddle.create_parameter(
+        #        shape=shape, dtype=paddle.get_default_dtype()
+        #    )
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
-        if self.skip_weight_param_allocation:
-            logits, _ = super().forward(hidden_states, self.weight.T)
-        else:
-            logits, _ = super().forward(hidden_states)
+        logits, _ = super().forward(hidden_states, self.weight.T)
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
         return logits

@@ -58,7 +58,7 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 
 [build-system]
-requires = ["setuptools>=61.0.0", "pybind11", "wheel", "packaging>=24.2","paddlepaddle-gpu>=3.3.0.dev"]
+requires = ["setuptools>=61.0.0", "pybind11", "wheel", "packaging>=24.2", "paddlepaddle-gpu>=3.3.0.dev", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -68,7 +68,6 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.dynamic]
-version = { attr = "paddlefleet.package_info.__version__" }
 readme = { file = "README.md", content-type = "text/markdown" }
 
 [dependency-groups]

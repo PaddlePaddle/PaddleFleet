@@ -25,7 +25,8 @@ class TestExtensions(unittest.TestCase):
         "tokens_zip_prob_seq_subbatch",
         "tokens_zip_unique_add",
         "tokens_zip_unique_add_subbatch",
-        "matmul_bwd",
+        "fused_swiglu_scale",
+        "fused_swiglu_scale_bwd",
     ]
 
     def setUp(self):
