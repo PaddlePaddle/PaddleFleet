@@ -34,15 +34,13 @@ if TYPE_CHECKING:
 from paddlefleet import utils
 
 from .fusion_layer_utils import FusionMoePyLayer
-from .moe_expert import GroupedMLPExpert, StandardMLPExpert
+from .moe_expert import StandardMLPExpert
 from .moe_router import DeepEPTopKRouter, StandardMoERouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
 from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
-
-from .moe_utils import permute, unpermute
 
 
 @dataclass
@@ -135,14 +133,6 @@ class MoELayer(nn.Layer):
                 self.experts.append(self.expert_class(**expert_args))
             else:
                 self.experts.append(None)
-
-        if self.moe_grouped_gemm:
-            self.grouped_gemm_experts = GroupedMLPExpert(
-                self.num_local_experts,
-                routed_expert_config,
-                self.experts,
-                pg_collection,
-            )
 
         shared_expert_args = deepcopy(expert_args)
         shared_expert_args["moe_intermediate_size"] = (
@@ -386,14 +376,9 @@ class MoELayer(nn.Layer):
                 reshaped_input = hidden_states.reshape([-1, d_model])
             else:
                 reshaped_input = hidden_states
-            if self.moe_grouped_gemm:
-                output = self._forward_single_card_grouped_gemm_moe(
-                    reshaped_input, mask, gates_masked
-                )
-            else:
-                output = self._forward_single_card_moe(
-                    reshaped_input, topk_indices, topk_weights
-                )
+            output = self._forward_single_card_moe(
+                reshaped_input, topk_indices, topk_weights
+            )
 
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * self.router_aux_loss_coef
@@ -462,37 +447,4 @@ class MoELayer(nn.Layer):
                 overwrite=False,
             )
             final_hidden_states = final_hidden_states + final_hidden_states_tmp
-        return final_hidden_states.cast(hidden_states.dtype)
-
-    def _forward_single_card_grouped_gemm_moe(
-        self,
-        hidden_states: paddle.Tensor,
-        routing_map: paddle.Tensor,
-        probs: paddle.Tensor,
-    ) -> paddle.Tensor:
-        """
-        Forward without expert parallelism
-
-        Args:
-            hidden_states: Input hidden states, shape: [batch_size*seq_len, hidden_size]
-            routing_map: Routing map, shape: [seq_len, num_experts]
-            probs: Probabilities of selecting each expert, shape: [seq_len, num_experts]
-
-        Returns:
-            output: Output hidden states, shape: [seq_len, hidden_size]
-        """
-        tokens_per_expert = routing_map.sum(axis=0)
-        permuted_local_hidden_states, sorted_indices = permute(
-            hidden_states, routing_map, tokens_per_expert
-        )
-        grouped_expert_out = self.grouped_gemm_experts(
-            permuted_local_hidden_states, tokens_per_expert
-        )[0]
-        final_hidden_states = unpermute(
-            grouped_expert_out,
-            sorted_indices,
-            restore_shape=hidden_states.shape,
-            probs=probs,
-            routing_map=routing_map,
-        )
         return final_hidden_states.cast(hidden_states.dtype)

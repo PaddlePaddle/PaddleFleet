@@ -81,6 +81,7 @@ class TestFusionBF16SingleCard(unittest.TestCase):
             n_shared_experts=0,
             hidden_act=F.silu,
             moe_grouped_gemm=True,
+            bias_activation_fusion=True,
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(

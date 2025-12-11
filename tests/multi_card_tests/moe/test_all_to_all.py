@@ -83,6 +83,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             hidden_act=F.silu,
             moe_grouped_gemm=True,
             moe_token_dispatcher_type="alltoall",
+            bias_activation_fusion=True,
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(
