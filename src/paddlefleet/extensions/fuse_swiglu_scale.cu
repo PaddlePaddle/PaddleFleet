@@ -262,7 +262,7 @@ std::vector<paddle::DataType> FusedGradInferDtype(paddle::DataType x_dtype,
   return {x_dtype, scale_dtype};
 }
 
-PD_BUILD_OP(fused_swiglu_scale_bwd_manual)
+PD_BUILD_OP(fused_swiglu_scale_bwd)
     .Inputs({"X", "Scale", "DOut"})
     .Outputs({"DX", "DScale"})
     .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleBackward))
