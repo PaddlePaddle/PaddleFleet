@@ -25,10 +25,10 @@ import paddle
 from paddle import Tensor, nn
 
 from paddlefleet import tensor_parallel
-from paddlefleet.enums import LayerType
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel import checkpoint
+from paddlefleet.transformer.enums import LayerType
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -559,7 +559,7 @@ class TransformerLayer(nn.Layer):
         the attention operations.
 
         Args:
-            hidden_states (Tensor): Input tensor of shape [s, b, h] where s is sequence length,
+            hidden_states (Tensor): Input tensor of shape [b, s, h] where s is sequence length,
                 b is batch size, and h is hidden size.
             attention_mask (Tensor | None): Mask tensor for self-attention.
             context (Tensor | None): Context tensor for cross-attention.
