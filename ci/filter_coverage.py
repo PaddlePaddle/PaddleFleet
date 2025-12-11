@@ -102,7 +102,7 @@ def parse_diff_file(diff_file):
         if len(lines) <= 10:
             print(
                 f"    {filename}: lines {sorted(lines)[:10]}{'...' if len(lines) > 10 else ''}"
-                )
+            )
         else:
             print(f"    {filename}: {len(lines)} changed lines")
     return changed_files
