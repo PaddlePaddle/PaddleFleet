@@ -169,13 +169,13 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
         input_is_parallel: bool = False,
     ):
         super().__init__()
-        self.norm_cls = WrappedPaddleNorm(
+        self.norm = WrappedPaddleNorm(
             config, hidden_size, eps, input_is_parallel
         )
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
-        return {"hidden_states": self.norm_cls(hidden_states)}
+        return {"hidden_states": self.norm(hidden_states)}
 
 
 class L2Norm(paddle.nn.Layer):

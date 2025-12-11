@@ -37,10 +37,11 @@ rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
-# export FLAGS_embedding_deterministic=1
-# export FLAGS_cudnn_deterministic=1
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
+
 coverage run -m paddle.distributed.launch \
    --log_dir ./log \
    --master $master:$port \
@@ -48,4 +49,13 @@ coverage run -m paddle.distributed.launch \
    --rank 0 \
    --run_mode=collective \
    run_pretrain.py $config_json \
-   --output_dir ./checkpoint | tee ./glm45.log
+   --output_dir ./checkpoint 2>&1 | tee ./glm45.log
+
+echo "
+20 10.16649723
+" > ./glm45_multi_card_gt_loss.txt
+
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --compare_step 20 \
+   --log_file ./glm45.log \
+   --gt_file ./glm45_multi_card_gt_loss.txt
