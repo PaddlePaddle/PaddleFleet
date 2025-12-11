@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 from paddlefleet import utils
 
 from .fusion_layer_utils import FusionMoePyLayer
-from .moe_expert import GroupedMLPExpertNew, StandardMLPExpert
+from .moe_expert import GroupedMLPExpert, StandardMLPExpert
 from .moe_router import DeepEPTopKRouter, StandardMoERouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
@@ -146,7 +146,7 @@ class MoELayer(nn.Layer):
                 self.experts.append(None)
 
         if self.moe_grouped_gemm:
-            self.grouped_gemm_experts = GroupedMLPExpertNew(
+            self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
                 self.experts,
