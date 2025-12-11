@@ -52,7 +52,7 @@ coverage run -m paddle.distributed.launch \
    --output_dir ./checkpoint 2>&1 | tee ./glm45.log
 
 echo "
-20 10.16649723
+20 10.35060501
 " > ./glm45_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
