@@ -46,8 +46,8 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             "sharding_degree": 2,
             "sep_degree": 1,
             "cp_degree": 1,
-            "ep_degree": 4,
-            "moe_sharding_degree": 2,
+            "ep_degree": 8,
+            "moe_sharding_degree": 1,
             "order": [
                 "sharding",
                 "moe_sharding",
@@ -64,9 +64,9 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
     def test_moe_fusion(self):
-        n_routed_experts = 4
+        n_routed_experts = 8
         hidden_size = 16
-        transformer_config_moe_use_fusion_node = TransformerConfig(
+        transformer_config_moe = TransformerConfig(
             hidden_size=hidden_size,
             num_attention_heads=4,
             n_routed_experts=n_routed_experts,
@@ -89,31 +89,23 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             num_experts=n_routed_experts
         )
 
-        moe_layer_moe_use_fusion_node = MoELayer(
-            transformer_config_moe_use_fusion_node,
+        moe_layer = MoELayer(
+            transformer_config_moe,
             transformer_layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
             self.pg_collection,
         )
 
-        input_data = paddle.randn(16, 4, hidden_size, dtype=paddle.bfloat16)
+        gate_weight_shape = moe_layer.gate.weight.shape
 
-        output_moe_use_fusion_node_true = moe_layer_moe_use_fusion_node(
-            input_data
-        )[0]
-
-        moe_layer_moe_use_fusion_node.moe_use_fusion_node = False
-        moe_layer_moe_use_fusion_node.moe_grouped_gemm = False
-
-        output_moe_use_fusion_node_false = moe_layer_moe_use_fusion_node(
-            input_data
-        )[0]
-
-        np.testing.assert_allclose(
-            output_moe_use_fusion_node_true.detach().cpu().float().numpy(),
-            output_moe_use_fusion_node_false.detach().cpu().float().numpy(),
-            rtol=1e-3,
-            atol=1e-3,
+        moe_layer.gate.weight.set_value(
+            paddle.zeros(gate_weight_shape).astype("float32")
         )
+
+        input_data = paddle.ones(16, 4, hidden_size, dtype=paddle.bfloat16)
+
+        output = moe_layer(input_data)[0]
+
+        assert output.shape == (16, 4, hidden_size)
 
     def tearDown(self):
         pass

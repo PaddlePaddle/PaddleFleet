@@ -30,7 +30,7 @@ from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-class TestFusionBF16ExpertParallel(unittest.TestCase):
+class TestFusionBF16SingleCard(unittest.TestCase):
     def setUp(self):
         seed = 123
         random.seed(seed)
@@ -46,8 +46,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             "sharding_degree": 2,
             "sep_degree": 1,
             "cp_degree": 1,
-            "ep_degree": 4,
-            "moe_sharding_degree": 2,
+            "ep_degree": 1,
             "order": [
                 "sharding",
                 "moe_sharding",

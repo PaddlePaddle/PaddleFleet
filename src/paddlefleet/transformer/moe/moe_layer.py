@@ -95,16 +95,6 @@ class MoELayer(nn.Layer):
         self.num_local_experts = (
             self.num_experts // self.expert_model_parallel_size
         )
-        if self.fp8:
-            assert self.moe_use_fusion_node, (
-                "fp8 can only be used when moe_use_fusion_node = True."
-            )
-        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
-            logger.warning(
-                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
-                "Will turn on moe_grouped_gemm."
-            )
-            self.moe_grouped_gemm = True
         # MoE-Related Configs
         self._init_expert_parallel()
         if config.moe_router_fusion:
@@ -175,6 +165,17 @@ class MoELayer(nn.Layer):
             )
             self.moe_token_dispatcher_type = "alltoall"
             self.moe_use_fusion_node = False
+
+        if self.fp8:
+            assert self.moe_use_fusion_node, (
+                "fp8 can only be used when moe_use_fusion_node = True."
+            )
+        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
+            logger.warning(
+                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
+                "Will turn on moe_grouped_gemm."
+            )
+            self.moe_grouped_gemm = True
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":

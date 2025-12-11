@@ -40,6 +40,7 @@ class TestTop2Router(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
+            bias_activation_fusion=True,
         )
 
         seed = 123
