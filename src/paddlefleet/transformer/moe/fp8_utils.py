@@ -279,9 +279,6 @@ class ExpertsGroupGemmContiguousNode:
             ), self.backward_subbatch_rows
         self.use_bf16_gemm_weight_grad = use_bf16_gemm_weight_grad
         self.use_fp8_mlp = use_fp8_mlp
-        print(
-            f"ExpertsGroupGemmContiguousNode self.use_bf16_gemm_weight_grad: {self.use_bf16_gemm_weight_grad}, self.use_fp8_mlp: {self.use_fp8_mlp}"
-        )
 
     def cached_tensors(self):
         """
@@ -363,7 +360,7 @@ class ExpertsGroupGemmContiguousNode:
             )
         else:
             o1 = paddle.empty(
-                [x.shape[0], expert_w1[0].shape[1]], dtype=expert_w1[0].dtype
+                [x.shape[0], expert_w1.shape[2]], dtype=expert_w1[0].dtype
             )
         self.input = x
         return o1
@@ -487,9 +484,8 @@ class ExpertsGroupGemmContiguousNode:
                 expert_w2,
                 self.tokens_per_expert,
             )
-
         else:
-            o3_shape = [o2.shape[0], expert_w2[0].shape[1]]
+            o3_shape = [o2.shape[0], expert_w2.shape[2]]
             o3 = paddle.empty(o3_shape, dtype=o1.dtype)
         return o3
 
@@ -566,9 +562,10 @@ class ExpertsGroupGemmContiguousNode:
                 unzipped_grad,
                 expert_w2,
                 self.tokens_per_expert,
+                trans_rhs=True,
             )
         else:
-            do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
+            do2_s_shape = [unzipped_grad.shape[0], expert_w2.shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
         # recompute o2
@@ -675,9 +672,10 @@ class ExpertsGroupGemmContiguousNode:
                 do1,
                 expert_w1,
                 self.tokens_per_expert,
+                trans_rhs=True,
             )
         else:
-            dx_shape = [do1.shape[0], expert_w1[0].shape[0]]
+            dx_shape = [do1.shape[0], expert_w1.shape[1]]
             dx = paddle.empty(shape=dx_shape, dtype=do1.dtype)
         return dx
 
@@ -907,7 +905,6 @@ class ExpertsGroupGemmContiguousNode:
                 x.down_proj.weight for x in self.experts if x is not None
             ]
         else:
-            print("forward using grouped_gemm_experts")
             expert_w1 = self.grouped_gemm_experts.weight1
             expert_w2 = self.grouped_gemm_experts.weight2
 
@@ -1090,12 +1087,8 @@ class ExpertsGroupGemmContiguousNode:
         # expert_w1 = [
         #     x.up_gate_proj.weight for x in self.experts if x is not None
         # ]
-        expert_w2 = self.grouped_gemm_experts.weight2.transpose(
-            1, 2
-        ).contiguous()
-        expert_w1 = self.grouped_gemm_experts.weight1.transpose(
-            1, 2
-        ).contiguous()
+        expert_w2 = self.grouped_gemm_experts.weight2
+        expert_w1 = self.grouped_gemm_experts.weight1
         if self.recompute_fwd_gate_up:
             o1 = self.fwd_gate_up(
                 None, expert_w1, len(expert_w1), self.tokens_per_expert
@@ -1207,7 +1200,6 @@ class ExpertsGroupGemmContiguousNode:
         """
         BF16 GEMM for weight grad
         """
-        # print("bf16_weight_grad, dy shape {}, x shape {}, weights shape {}".format(dy.shape, x.shape, weights.shape))
         if x is None:
             if self.dequant_input:
                 x = paddle.incubate.nn.functional.fused_act_dequant(
@@ -1227,10 +1219,11 @@ class ExpertsGroupGemmContiguousNode:
                 weights.grad = paddle.zeros(weights.shape, dtype=paddle.float32)
             grad_attr = weights.grad
 
-        grad_attr = paddle.incubate.nn.functional.batched_gemm_transpose_a(
+        grad_attr = paddle.incubate.nn.functional.batched_gemm(
             x,
             dy,
             self.tokens_per_expert,
+            trans_lhs=True,
         )
 
         if (
