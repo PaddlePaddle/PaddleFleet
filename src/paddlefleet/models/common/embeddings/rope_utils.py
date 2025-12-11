@@ -78,8 +78,8 @@ def _rotate_half(x: Tensor, rotary_interleaved: bool) -> Tensor:
         x1, x2 = paddle.chunk(x, 2, axis=-1)
         return paddle.cat((-x2, x1), axis=-1)
     else:
-        x1 = x[:, :, :, ::2]
-        x2 = x[:, :, :, 1::2]
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
         x_new = paddle.stack((-x2, x1), axis=-1)
         return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
 
@@ -114,11 +114,22 @@ def _apply_rotary_pos_emb_bshd(
 
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
-    sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
+    with paddle.amp.auto_cast(False):
+        orig_t_dtype = t.dtype
+        t = t.astype(dtype="float32")
+        t_pass = t_pass.astype(dtype="float32")
+        rotate_t = _rotate_half(t, rotary_interleaved)
+        cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
+        sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
 
-    t = (t * cos_) + (_rotate_half(t, rotary_interleaved) * sin_)
-    return paddle.cat((t, t_pass), axis=-1)
+        if len(cos_.shape) < len(t.shape):
+            cos_.unsqueeze_(-2)
+            sin_.unsqueeze_(-2)
+        if len(rotate_t.shape) < len(t.shape):
+            rotate_t.reshape_(t.shape)
+
+        t = (t * cos_) + (rotate_t * sin_)
+        return paddle.cat((t, t_pass), axis=-1).astype(orig_t_dtype)
 
 
 def _get_thd_freqs_on_this_cp_rank(
@@ -193,9 +204,12 @@ def _apply_rotary_pos_emb_thd(
     """
 
     if cp_group is None:
-        raise ValueError("cp_group must be provided for THD format RoPE")
-    cp_size = cp_group.size()
-    cp_rank = cp_group.rank()
+        # raise ValueError("cp_group must be provided for THD format RoPE")
+        cp_size = 1
+        cp_rank = 0
+    else:
+        cp_size = cp_group.size()
+        cp_rank = cp_group.rank()
     seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
 
     # Handle two different frequency tensor formats:
@@ -218,7 +232,7 @@ def _apply_rotary_pos_emb_thd(
             )
 
         freqs_packed = paddle.cat(freq_slices, axis=0)
-
+        # whye [seq,bs,num_heads,head_dim]->[seq,bs,1,num_heads,head_dim]?
         return _apply_rotary_pos_emb_bshd(
             t.unsqueeze(1),
             freqs_packed,
@@ -259,7 +273,7 @@ def apply_rotary_pos_emb(
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
     """
-
+    # print("config.apply_rope_fusion ",config.apply_rope_fusion)
     if config.apply_rope_fusion:
         # Paddle fused_rope not support cu_seqlens or cp_group
         if cu_seqlens or (cp_group and cp_group.nranks > 1):
