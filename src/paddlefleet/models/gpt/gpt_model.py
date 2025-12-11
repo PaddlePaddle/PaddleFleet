@@ -178,6 +178,43 @@ class GPTModel(PipelineLayer):
             for index, x in enumerate(self._sequential_layers)
         }
 
+    def get_shardlayer_prefix(self, name_splited):
+        """_summary_
+            This function retrieves the prefix of a shared layer. The process involves:
+            1. Identifying all key names of shared layers, like 'shared_weight01', 'shared_weight02', etc.
+            2. For instance, given name_splited = ['shared_layers', 'shared_weight01', 'weight'],
+                the 'shared_layer_key' would be name_splited[1], which is 'shared_weight01'.
+            3. By traversing through all layers, the function checks if the specified
+                shared_layer is present in the current stage. If found, it returns the corresponding prefix.
+
+            Note: For retrieving all SharedLayer instances in Paddle, you can refer to the following Paddle code.
+            https://github.com/PaddlePaddle/Paddle/blob/2cf724d055679a1a0e48766dfb1708b920273078/python/paddle/distributed/fleet/meta_parallel/parallel_layers/pp_layers.py#L460-L513
+        Args:
+            name_splited (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        shared_layer_names = {
+            s.layer_name for s in self.layers if isinstance(s, SharedLayerDesc)
+        }
+        assert name_splited[1] in shared_layer_names, (
+            f"The shared layer name {name_splited[1]} must be in prefixes!"
+        )
+        shared_layer_key = name_splited[1]
+        for idx, layer in enumerate(self.layers):
+            if (
+                isinstance(layer, SharedLayerDesc)
+                and layer.layer_name == shared_layer_key
+            ):
+                if self.get_stage_from_index(idx) == self._stage_id:
+                    return self.get_sequential_name_prefixs()[str(idx)]
+
+        # the prefix must be in the current stage, else raise error
+        raise ValueError(
+            f"The shared layer {shared_layer_key} must be in the current stage!"
+        )
+
     def _set_pipeline_name_mapping(self, mappings=None):
         """
         Set the name mapping for pipeline.
