@@ -123,8 +123,8 @@ def _apply_rotary_pos_emb_bshd(
         sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
 
         if len(cos_.shape) < len(t.shape):
-            cos_.unsqueeze_(-2)
-            sin_.unsqueeze_(-2)
+            cos_.unsqueeze_(1)
+            sin_.unsqueeze_(1)
         if len(rotate_t.shape) < len(t.shape):
             rotate_t.reshape_(t.shape)
 
@@ -157,20 +157,22 @@ def _get_thd_freqs_on_this_cp_rank(
            compatibility.
     """
     if cp_size > 1:
-        cp_seg = x.size(0) // 2
-        full_seqlen = cp_size * x.size(0)
+        cp_seg = x.size(1) // 2
+        full_seqlen = cp_size * x.size(1)
         # Apply offset to both forward and backward segments for context parallelism
         # offset=0: traditional behavior, freqs[0:cp_seg] and freqs[...]
         # offset>0: exact mapping, freqs[offset+0:offset+cp_seg] and freqs[offset+...]
         return paddle.cat(
             [
                 freqs[
-                    offset + cp_rank * cp_seg : offset + (cp_rank + 1) * cp_seg
+                    :,
+                    offset + cp_rank * cp_seg : offset + (cp_rank + 1) * cp_seg,
                 ],
                 freqs[
+                    :,
                     offset + full_seqlen - (cp_rank + 1) * cp_seg : offset
                     + full_seqlen
-                    - cp_rank * cp_seg
+                    - cp_rank * cp_seg,
                 ],
             ]
         )
@@ -178,7 +180,7 @@ def _get_thd_freqs_on_this_cp_rank(
         # For single context parallel rank:
         # offset=0: use freqs[0:x.size(0)] (traditional)
         # offset>0: use freqs[offset:offset+x.size(0)] (exact mapping)
-        return freqs[offset : offset + x.size(0)]
+        return freqs[:, offset : offset + x.size(1)]
 
 
 def _apply_rotary_pos_emb_thd(
@@ -217,10 +219,10 @@ def _apply_rotary_pos_emb_thd(
     #    -> Use offset-based mapping for exact positional correspondence
     # 2. Otherwise: freqs contains only max sequence length positions
     #    -> Use traditional mapping without offsets (map first :seqlen part)
-    if freqs.dim() >= 1 and freqs.size(0) == cu_seqlens[-1]:
+    if freqs.dim() >= 1 and freqs.size(1) == cu_seqlens[-1]:
         # CASE 1: Exact mapping with offsets
         # Build packed freqs in one pass, then apply once to the whole packed tensor
-        sequence_splits = paddle.split(t, seqlens)
+        sequence_splits = paddle.split(t, seqlens, axis=1 if t.ndim == 4 else 0)
         freq_slices = []
         for i, x in enumerate(sequence_splits):
             # cu_seqlens[i] is the starting offset of this sequence in the original batch
@@ -231,7 +233,7 @@ def _apply_rotary_pos_emb_thd(
                 )
             )
 
-        freqs_packed = paddle.cat(freq_slices, axis=0)
+        freqs_packed = paddle.cat(freq_slices, axis=1)
         # whye [seq,bs,num_heads,head_dim]->[seq,bs,1,num_heads,head_dim]?
         return _apply_rotary_pos_emb_bshd(
             t.unsqueeze(1),
@@ -243,13 +245,13 @@ def _apply_rotary_pos_emb_thd(
     else:
         # CASE 2: Traditional mapping without offsets
         # Build packed freqs for all sequences using the standard mapping, then apply once
-        sequence_splits = paddle.split(t, seqlens)
+        sequence_splits = paddle.split(t, seqlens, axis=1 if t.ndim == 4 else 0)
         freqs_packed = paddle.cat(
             [
                 _get_thd_freqs_on_this_cp_rank(cp_rank, cp_size, x, freqs)
                 for x in sequence_splits
             ],
-            axis=0,
+            axis=1,
         )
 
         return _apply_rotary_pos_emb_bshd(
@@ -273,7 +275,6 @@ def apply_rotary_pos_emb(
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
     """
-    # print("config.apply_rope_fusion ",config.apply_rope_fusion)
     if config.apply_rope_fusion:
         # Paddle fused_rope not support cu_seqlens or cp_group
         if cu_seqlens or (cp_group and cp_group.nranks > 1):

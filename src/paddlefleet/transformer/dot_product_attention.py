@@ -201,7 +201,7 @@ class DotProductAttention(FleetLayer):
                 - packed_seq_params.cu_seqlens_kv[:-1]
             )
             splits = [
-                paddle.split(tensor, lengths.tolist(), axis=0)
+                paddle.split(tensor, lengths.tolist(), axis=1)
                 for tensor in (query, key, value)
             ]
             attn_outputs = []
@@ -216,11 +216,12 @@ class DotProductAttention(FleetLayer):
                         is_causal=False,
                     )
                 )
-            attn_output = paddle.cat(attn_outputs, axis=0)
-            return attn_output
-        if (
-            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
-        ) and attn_mask_startend_row_indices is None:
+            # [b,s,h_n,h_dim]
+            attn_output = paddle.cat(attn_outputs, axis=1)
+            return attn_output.reshape(
+                [0, 0, attn_output.shape[2] * attn_output.shape[3]]
+            )
+        if query.dtype == paddle.bfloat16 or query.dtype == paddle.float16:
             # Note:
             # attention_mask is None in default
             # is_causal is True in default
