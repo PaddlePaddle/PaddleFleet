@@ -14,6 +14,7 @@
 
 import os
 import warnings
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable
 from enum import Enum
@@ -23,6 +24,9 @@ from paddle import framework, nn
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer import (
     HybridParallelOptimizer,
+)
+from paddle.distributed.fleet.meta_parallel import (
+    PipelineDatasetPreprocessor as PaddlePipelineDatasetPreprocessor,
 )
 from paddle.distributed.fleet.utils import timer_helper as timer
 from paddle.distributed.fleet.utils.hybrid_parallel_util import (
@@ -252,7 +256,18 @@ class FakeMicroDataset:
         )
 
 
-class NoPipelineParallel(nn.Layer):
+class ParallelBase(ABC):
+    @abstractmethod
+    def forward_backward_pipeline(
+        self,
+        data,
+        scaler=None,
+        return_micro_batch_loss=False,
+    ):
+        pass
+
+
+class NoPipelineParallel(nn.Layer, ParallelBase):
     def __init__(self, layers, strategy):
         assert isinstance(layers, PipelineLayer)
         super().__init__()
@@ -267,6 +282,8 @@ class NoPipelineParallel(nn.Layer):
         self._delay_scale_loss = self._strategy.hybrid_configs[
             "pp_configs"
         ].delay_scale_loss
+        self._dp_comm_overlap = False
+        self._sharding_comm_overlap = False
 
         # store total loss of entire batch. It contains the loss of each micro batch in a list, then contains many loss_fn's list in total_loss.
         self.total_loss = None
@@ -322,13 +339,23 @@ class NoPipelineParallel(nn.Layer):
         self.scaler = scaler
         self.total_loss = None
 
-        micro_dataset = FakeMicroDataset(
+        if isinstance(
             data,
-            True,
-            True,
-            self.accumulate_steps,
-            self.micro_batch_size,
-        )
+            (PipelineDatasetPreprocessor, PaddlePipelineDatasetPreprocessor),
+        ):
+            data = data()
+
+        if (not isinstance(data, tuple)) and (not isinstance(data, list)):
+            micro_dataset = data
+        else:
+            micro_dataset = FakeMicroDataset(
+                data,
+                True,
+                True,
+                self.accumulate_steps,
+                self.micro_batch_size,
+            )
+
         loss_list = []
         for _ in range(self.accumulate_steps):
             # data prepare
@@ -419,7 +446,7 @@ class NoPipelineParallel(nn.Layer):
         return train_loss
 
 
-class PipelineParallel(nn.Layer):
+class PipelineParallel(nn.Layer, ParallelBase):
     def __init__(self, layers, hcg, strategy):
         assert isinstance(layers, PipelineLayer)
         super().__init__()

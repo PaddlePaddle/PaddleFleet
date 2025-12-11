@@ -70,6 +70,9 @@ gen_gpus_arg() {
     echo "$gpus"
 }
 
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
+
 run_count=0
 failed_tests=()
 for test_file in $(find $test_dir -type f -name "test_*.py"); do

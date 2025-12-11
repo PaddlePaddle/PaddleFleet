@@ -11,629 +11,379 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import paddle
-from paddle import Tensor
-
-from paddlefleet import parallel_state, tensor_parallel
-from paddlefleet.models.common.embeddings.language_model_embedding import (
-    LanguageModelEmbedding,
+from paddlefleet.pipeline_parallel import (
+    LayerDesc,
+    PipelineLayer,
+    SharedLayerDesc,
 )
-from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
-    RotaryEmbedding,
-)
-from paddlefleet.models.common.language_layer.language_layer import (
-    LanguageLayer,
-)
-from paddlefleet.transformer.enums import ModelType
-from paddlefleet.transformer.multi_token_prediction import (
-    MTPLossAutoScaler,
-    MTPLossLoggingHelper,
-    MultiTokenPredictionBlock,
-    roll_tensor,
-)
-from paddlefleet.transformer.transformer_block import TransformerBlock
 
 if TYPE_CHECKING:
-    from paddlefleet.packed_seq_params import PackedSeqParams
-    from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.spec_utils import LayerSpec
-    from paddlefleet.transformer.transformer_config import TransformerConfig
+
+from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
+from paddlefleet.models.gpt.lm_head import GPTLMHead
+
+logger = logging.getLogger(__name__)
 
 
-class GPTModel(LanguageLayer):
+@dataclass
+class GPTSublayersSpec:
+    """
+    The dataclass for LayerSpecs of GPT sublayers_spec
+    including embedding, n * transformer_layer, mtp, lm_head.
+    """
+
+    embedding: LayerSpec | None = None
+    transformer_layers: list[LayerSpec] | None = None
+    layer_norm: LayerSpec | None = None
+    mtp: list[LayerSpec] | None = None
+    lm_head: LayerSpec | None = None
+
+
+class GPTModel(PipelineLayer):
     """GPT Transformer language model.
 
     Args:
-        config (TransformerConfig):
-            Transformer config
-        transformer_layer_spec (ModuleSpec):
-            Specifies module to use for transformer layers
-        vocab_size (int):
-            Vocabulary size
-        max_sequence_length (int):
-            maximum size of sequence. This is used for positional embedding
-        pre_process (bool, optional):
-            Include embedding layer (used with pipeline parallelism). Defaults to True.
-        post_process (bool, optional):
-            Include an output layer (used with pipeline parallelism). Defaults to True.
-        fp16_lm_cross_entropy (bool, optional):
-            Defaults to False.
-        parallel_output (bool, optional):
-            Do not gather the outputs, keep them split across tensor
-            parallel ranks. Defaults to True.
-        share_embeddings_and_output_weights (bool, optional):
-            When True, input embeddings and output logit weights are shared. Defaults to False.
-        position_embedding_type (Literal[learned_absolute,rope], optional):
-            Position embedding type.. Defaults to 'learned_absolute'.
-        rotary_percent (float, optional):
-            Percent of rotary dimension to use for rotary position embeddings.
-            Ignored unless position_embedding_type is 'rope'. Defaults to 1.0.
-        rotary_base (int, optional):
-            Base period for rotary position embeddings. Ignored unless
-            position_embedding_type is 'rope'.
-            Defaults to 10000.
-        rope_scaling (bool, optional): Toggle RoPE scaling.
-        rope_scaling_factor (float): RoPE scaling factor. Default 8.
-        scatter_embedding_sequence_parallel (bool, optional):
-            Whether embeddings should be scattered across sequence parallel
-            region or not. Defaults to True.
-        seq_len_interpolation_factor (Optional[float], optional):
-            scale of linearly interpolating RoPE for longer sequences.
-            The value must be a float larger than 1.0. Defaults to None.
-        pg_collection (ProcessGroupCollection): Model communication process groups
+        gpt_layer_desc:
     """
 
     def __init__(
         self,
-        config: TransformerConfig,
-        transformer_layer_spec: LayerSpec,
-        vocab_size: int,
-        max_sequence_length: int,
-        pre_process: bool = True,
-        post_process: bool = True,
-        fp16_lm_cross_entropy: bool = False,
-        parallel_output: bool = True,
-        share_embeddings_and_output_weights: bool = False,
-        position_embedding_type: Literal[
-            "learned_absolute", "rope", "mrope", "yarn", "none"
-        ] = "learned_absolute",
-        rotary_percent: float = 1.0,
-        rotary_base: int = 10000,
-        rope_scaling: bool = False,
-        rope_scaling_factor: float = 8.0,
-        scatter_embedding_sequence_parallel: bool = True,
-        seq_len_interpolation_factor: float | None = None,
-        mtp_block_spec: LayerSpec | None = None,
-        pg_collection: ProcessGroupCollection | None = None,
-        vp_stage: int | None = None,
+        sublayers_spec: GPTSublayersSpec,
+        **kwargs,
     ) -> None:
-        super().__init__(config=config, pg_collection=pg_collection)
-
-        # if has_config_logger_enabled(config):
-        #    log_config_to_disk(config, locals(), prefix=type(self).__name__)
-
-        self.transformer_layer_spec: LayerSpec = transformer_layer_spec
-        self.vocab_size = vocab_size
-        self.max_sequence_length = max_sequence_length
-        self.pre_process = pre_process
-        self.post_process = post_process
-        self.fp16_lm_cross_entropy = fp16_lm_cross_entropy
-        self.parallel_output = parallel_output
-        self.share_embeddings_and_output_weights = (
-            share_embeddings_and_output_weights
+        self.config = kwargs["config"]
+        share_embeddings_and_output_weights = (
+            kwargs["share_embeddings_and_output_weights"]
+            and self.config.pipeline_model_parallel_size > 1
         )
-        self.vp_stage = vp_stage
-
-        if hasattr(self.config, "position_embedding_type"):
-            self.position_embedding_type = self.config.position_embedding_type
-        else:
-            self.position_embedding_type = position_embedding_type
-
-        self.model_type = ModelType.encoder_or_decoder
-
-        self.max_position_embeddings = max_sequence_length
-        self.rotary_percent = rotary_percent
-
-        if hasattr(self.config, "rotary_base"):
-            self.rotary_base = self.config.rotary_base
-        else:
-            self.rotary_base = rotary_base
-        self.rotary_scaling = rope_scaling
-        self.mtp_block_spec = mtp_block_spec
-        self.mtp_process = mtp_block_spec is not None
-
-        if self.pre_process or self.mtp_process:
-            self.embedding = LanguageModelEmbedding(
-                config=self.config,
-                vocab_size=self.vocab_size,
-                max_sequence_length=self.max_sequence_length,
-                position_embedding_type=position_embedding_type,
-                scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
-                tp_group=self.pg_collection.tp,
-            )
-
-        if (
-            self.position_embedding_type == "rope"
-            and not self.config.multi_latent_attention
-        ):
-            self.rotary_emb = RotaryEmbedding(
-                head_dim=self.config.head_dim,
-                rotary_percent=rotary_percent,
-                rotary_interleaved=self.config.rotary_interleaved,
-                seq_len_interpolation_factor=seq_len_interpolation_factor,
-                rotary_base=rotary_base,
-                rope_scaling=rope_scaling,
-                rope_scaling_factor=rope_scaling_factor,
-                cp_group=self.pg_collection.cp,
-            )
-
-        # elif self.position_embedding_type == 'yarn':
-        #    self.rotary_emb = YarnRotaryEmbedding(
-        #        head_dim=self.config.head_dim,
-        #        rotary_percent=rotary_percent,
-        #        rotary_interleaved=self.config.rotary_interleaved,
-        #        seq_len_interpolation_factor=seq_len_interpolation_factor,
-        #        rotary_base=rotary_base,
-        #        scaling_factor=getattr(self.config, "yarn_rotary_scaling_factor"),
-        #        original_max_position_embeddings=getattr(
-        #            self.config, "yarn_original_max_position_embeddings"
-        #        ),
-        #        beta_fast=getattr(self.config, "yarn_beta_fast"),
-        #        beta_slow=getattr(self.config, "yarn_beta_slow"),
-        #        mscale=getattr(self.config, "yarn_mscale"),
-        #        mscale_all_dim=getattr(self.config, "yarn_mscale_all_dim"),
-        #        correction_range_round_to_int=getattr(
-        #            self.config, "yarn_correction_range_round_to_int"
-        #        ),
-        #        use_cpu_initialization=self.config.use_cpu_initialization,
-        #    )
-        # elif self.position_embedding_type == 'mrope' and not self.config.multi_latent_attention:
-        #    self.rotary_emb = MultimodalRotaryEmbedding(
-        #        head_dim=self.config.head_dim,
-        #        rotary_percent=rotary_percent,
-        #        rotary_interleaved=self.config.rotary_interleaved,
-        #        seq_len_interpolation_factor=seq_len_interpolation_factor,
-        #        rotary_base=rotary_base,
-        #    )
-        #    self.mrope_section = self.config.mrope_section
-        #    assert (
-        #        self.mrope_section is not None
-        #    ), "mrope require mrope_section setting, but we got None from TransformerConfig"
-
-        # Cache for RoPE tensors which do not change between iterations.
-        self.rotary_emb_cache = {}
-
-        # Transformer.
-        self.decoder = TransformerBlock(
-            config=self.config,
-            spec=transformer_layer_spec,
-            pre_process=self.pre_process,
-            post_process=self.post_process,
-            pg_collection=self.pg_collection,
-            vp_stage=vp_stage,
+        skip_weight_param_allocation = (
+            self.config.share_embeddings_and_output_weights
+            and self.config.pipeline_model_parallel_size == 1
         )
-
-        if self.mtp_process:
-            self.mtp = MultiTokenPredictionBlock(
-                config=self.config, spec=self.mtp_block_spec, vp_stage=vp_stage
-            )
-
-        # Output
-        if self.post_process:
-            if self.config.defer_embedding_wgrad_compute:
-                # The embedding activation buffer preserves a reference to the input activations
-                # of the final embedding projection layer GEMM. It will hold the activations for
-                # all the micro-batches of a global batch for the last pipeline stage. Once we are
-                # done with all the back props for all the microbatches for the last pipeline stage,
-                # it will be in the pipeline flush stage. During this pipeline flush we use the
-                # input activations stored in embedding activation buffer and gradient outputs
-                # stored in gradient buffer to calculate the weight gradients for the embedding
-                # final linear layer.
-                self.embedding_activation_buffer = []
-                self.grad_output_buffer = []
-            else:
-                self.embedding_activation_buffer = None
-                self.grad_output_buffer = None
-
-            self.lm_head = tensor_parallel.ColumnParallelLinear(
-                config.hidden_size,
-                self.vocab_size,
-                config=config,
-                init_method=config.init_method,
-                bias=False,
-                skip_bias_add=False,
-                gather_output=not self.parallel_output,
-                skip_weight_param_allocation=self.pre_process
-                and self.share_embeddings_and_output_weights,
-                embedding_activation_buffer=self.embedding_activation_buffer,
-                grad_output_buffer=self.grad_output_buffer,
-                tp_group=self.pg_collection.tp,
-            )
-
-        if self.pre_process or self.post_process:
-            self.setup_embeddings_and_output_layer()
-
-    def set_input_tensor(self, input_tensor: Tensor) -> None:
-        """Sets input tensor to the model.
-
-        See fleet.model.transformer.set_input_tensor()
-
-        Args:
-            input_tensor (Tensor): Sets the input tensor for the model.
-        """
-        # This is usually handled in schedules.py but some inference code still
-        # gives us non-lists or None
-        if not isinstance(input_tensor, list):
-            input_tensor = [input_tensor]
-
-        assert len(input_tensor) == 1, (
-            "input_tensor should only be length 1 for gpt/bert"
+        self._pipeline_name_mapping = None
+        self._pp_to_single_mapping = None
+        self._sequential_layers = self.get_layer_desc_list(
+            sublayers_spec,
+            share_embeddings_and_output_weights,
         )
-        self.decoder.set_input_tensor(input_tensor[0])
+        self.layers = self.get_sequential_layers()
+        del kwargs["share_embeddings_and_output_weights"]
+        del kwargs["config"]
 
-    def _preprocess(
-        self,
-        input_ids: Tensor,
-        position_ids: Tensor,
-        decoder_input: Tensor = None,
-        packed_seq_params: PackedSeqParams = None,
-    ):
-        """Preprocesses inputs for the transformer decoder.
+        super().__init__(layers=self.layers, **kwargs)
 
-        Applies embeddings to input tokens, or uses `decoder_input` from a previous
-        pipeline stage. Also sets up rotary positional embeddings.
-        """
+        if skip_weight_param_allocation:
+            shared_embed_weight = None
+            for layer in self.run_function:
+                if isinstance(layer, GPTEmbedding):
+                    shared_embed_weight = layer.embedding_weight
+                if isinstance(layer, GPTLMHead):
+                    layer.weight = shared_embed_weight
 
-        # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
-        # Otherwise, apply embedding layer on input_ids and position_ids to get decoder_input.
-
-        # Decoder embedding.
-        if decoder_input is not None:
-            pass
-        elif self.pre_process:
-            decoder_input = self.embedding(
-                input_ids=input_ids, position_ids=position_ids
+    def get_layer_desc_list(self, spec, share_embeddings_and_output_weights):
+        layers = []
+        if share_embeddings_and_output_weights:
+            self.add_sequential_layer(
+                layers,
+                SharedLayerDesc(
+                    "embed",
+                    spec.embedding,
+                    shared_weight_attr="embedding_weight",
+                ),
+                "model",
             )
         else:
-            # intermediate stage of pipeline
-            # decoder will get hidden_states from encoder.input_tensor
-            decoder_input = None
-
-        # Rotary positional embeddings (embedding is None for PP intermediate devices)
-        rotary_pos_emb = None
-        rotary_pos_cos = None
-        rotary_pos_sin = None
-        # this is used to store combined cos/sin embeddings, exclusively for flash infer rope
-        rotary_pos_cos_sin = None
-
-        if (
-            self.position_embedding_type == "rope"
-            and not self.config.multi_latent_attention
-        ):
-            rotary_seq_len = self.rotary_emb.get_rotary_seq_len(
-                self.decoder, decoder_input, self.config, packed_seq_params
+            self.add_sequential_layer(
+                layers, LayerDesc(spec.embedding), "model"
             )
-            rotary_pos_emb = self.rotary_emb(
-                rotary_seq_len,
-                packed_seq=packed_seq_params is not None
-                and packed_seq_params.qkv_format == "thd",
+        i = 0
+        for transformer_layer_spec in spec.transformer_layers:
+            self.add_sequential_layer(
+                layers, LayerDesc(transformer_layer_spec), f"model.layers.{i}"
             )
-            if self.config.sequence_parallel:
-                rotary_pos_emb = rotary_pos_emb.transpose(
-                    [1, 0, 2, 3]
-                ).contiguous()
-        # elif self.position_embedding_type == 'yarn':
-        #    if self.training or not self.config.flash_decode:
-        #        rotary_seq_len = self.rotary_emb.get_rotary_seq_len(
-        #            inference_context, self.decoder, decoder_input, self.config, packed_seq_params
-        #        )
-        #        rotary_pos_emb, _ = self.rotary_emb(rotary_seq_len)
-        #    else:
-        #        raise NotImplementedError(
-        #            "Flash decoding uses precomputed cos and sin for RoPE, not implemented in "
-        #            "YarnRotaryEmbedding yet."
-        #        )
-        # elif self.position_embedding_type == 'mrope' and not self.config.multi_latent_attention:
-        #    if self.training or not self.config.flash_decode:
-        #        rotary_pos_emb = self.rotary_emb(position_ids, self.mrope_section)
-        #    else:
-        #        # Flash decoding uses precomputed cos and sin for RoPE
-        #        raise NotImplementedError(
-        #            "Flash decoding uses precomputed cos and sin for RoPE, not implemented in "
-        #            "MultimodalRotaryEmbedding yet."
-        #        )
+            i += 1
+        self.add_sequential_layer(layers, LayerDesc(spec.layer_norm), "model")
 
-        sequence_len_offset = None
+        if spec.mtp is not None:
+            for mtp_spec in spec.mtp:
+                self.add_sequential_layer(
+                    layers, LayerDesc(mtp_spec), f"model.layers.{i}"
+                )
+                i += 1
 
-        preproc_output = (
-            decoder_input,
-            rotary_pos_emb,
-            rotary_pos_cos,
-            rotary_pos_sin,
-            sequence_len_offset,
-        )
-        if rotary_pos_cos_sin is not None:
-            # only in the case of flashinfer fused rope will we
-            # return this extra tensor
-            # this is for backwards compatibility with
-            # legacy unit tests, which break if you
-            # return a 6 tuple instead of 5.
-            preproc_output += (rotary_pos_cos_sin,)
-
-        return preproc_output
-
-    def forward(
-        self,
-        input_ids: Tensor,
-        position_ids: Tensor = None,
-        attention_mask: Tensor = None,
-        attn_mask_startend_row_indices: Tensor = None,
-        decoder_input: Tensor = None,
-        labels: Tensor = None,
-        packed_seq_params: PackedSeqParams = None,
-        extra_block_kwargs: dict | None = None,
-        runtime_gather_output: bool | None = None,
-        *,
-        loss_mask: Tensor | None = None,
-    ) -> Tensor:
-        """Forward function of the GPT Model This function passes the input tensors
-        through the embedding layer, and then the decoder and finally into the post
-        processing layer (optional).
-
-        It either returns the Loss values if labels are given  or the final hidden units
-
-        Args:
-            runtime_gather_output (bool): Gather output at runtime. Default None means
-                `parallel_output` arg in the constructor will be used.
-        """
-
-        if position_ids is None and input_ids is not None:
-            batch_size, seq_length = input_ids.shape[0], input_ids.shape[1]
-            position_ids = paddle.arange(seq_length, dtype="int64").expand(
-                (batch_size, seq_length)
+        if share_embeddings_and_output_weights:
+            self.add_sequential_layer(
+                layers,
+                SharedLayerDesc(
+                    "embed",
+                    spec.lm_head,
+                    shared_weight_attr="embedding_weight",
+                ),
+                "model.shared_head",
             )
-
-        preproc_output = self._preprocess(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            decoder_input=decoder_input,
-            packed_seq_params=packed_seq_params,
-        )
-
-        (
-            decoder_input,
-            rotary_pos_emb,
-            rotary_pos_cos,
-            rotary_pos_sin,
-            sequence_len_offset,
-        ) = preproc_output[:5]
-
-        rotary_pos_cos_sin = (
-            preproc_output[5] if len(preproc_output) == 6 else None
-        )
-
-        # Run decoder.
-        hidden_states = self.decoder(
-            hidden_states=decoder_input,
-            attention_mask=attention_mask,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            rotary_pos_cos_sin=rotary_pos_cos_sin,
-            packed_seq_params=packed_seq_params,
-            sequence_len_offset=sequence_len_offset,
-            **(extra_block_kwargs or {}),
-        )
-
-        return self._postprocess(
-            hidden_states=hidden_states,
-            input_ids=input_ids,
-            position_ids=position_ids,
-            labels=labels,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            mtp_in_postprocess=self.mtp_process,
-            loss_mask=loss_mask,
-            decoder_input=decoder_input,
-            attention_mask=attention_mask,
-            packed_seq_params=packed_seq_params,
-            sequence_len_offset=sequence_len_offset,
-            runtime_gather_output=runtime_gather_output,
-            extra_block_kwargs=extra_block_kwargs,
-        )
-
-    def _postprocess(
-        self,
-        hidden_states,
-        input_ids,
-        position_ids,
-        labels,
-        rotary_pos_emb,
-        rotary_pos_cos,
-        rotary_pos_sin,
-        mtp_in_postprocess=None,
-        loss_mask=None,
-        decoder_input=None,
-        attention_mask=None,
-        packed_seq_params=None,
-        sequence_len_offset=None,
-        runtime_gather_output=None,
-        extra_block_kwargs=None,
-    ):
-        """Postprocesses decoder hidden states to generate logits or compute loss.
-
-        Applies Multi-Token Prediction if enabled, generates output logits through
-        the output layer, and computes language model loss when labels are provided.
-        """
-
-        # logits and loss
-        output_weight = None
-        if self.share_embeddings_and_output_weights:
-            output_weight = self.shared_embedding_or_output_weight()
-
-        if mtp_in_postprocess:
-            hidden_states = self.mtp(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                packed_seq_params=packed_seq_params,
-                sequence_len_offset=sequence_len_offset,
-                embedding=self.embedding,
-                **(extra_block_kwargs or {}),
-            )
-
-        if not self.post_process:
-            return hidden_states
-
-        if self.mtp_process:
-            mtp_labels = labels.clone()
-            hidden_states_list = paddle.chunk(
-                hidden_states, 1 + self.config.num_nextn_predict_layers, axis=0
-            )
-            hidden_states = hidden_states_list[0]
-            if loss_mask is None:
-                # if loss_mask is not provided, use all ones as loss_mask
-                loss_mask = paddle.ones_like(mtp_labels)
-            for mtp_layer_number in range(self.config.num_nextn_predict_layers):
-                # output
-                mtp_logits, _ = self.lm_head(
-                    hidden_states_list[mtp_layer_number + 1],
-                    weight=output_weight,
-                    # runtime_gather_output=runtime_gather_output,
-                )
-                # Calc loss for the current Multi-Token Prediction (MTP) layers.
-                mtp_labels, _ = roll_tensor(
-                    mtp_labels, shifts=-1, dims=-1, cp_group=self.cp_group
-                )
-                loss_mask, num_tokens = roll_tensor(
-                    loss_mask, shifts=-1, dims=-1, cp_group=self.cp_group
-                )
-                mtp_loss = self.compute_language_model_loss(
-                    mtp_labels, mtp_logits
-                )
-                mtp_loss = loss_mask * mtp_loss
-                if self.training:
-                    MTPLossLoggingHelper.save_loss_to_tracker(
-                        paddle.sum(mtp_loss) / num_tokens,
-                        mtp_layer_number,
-                        self.config.num_nextn_predict_layers,
-                        avg_group=parallel_state.get_data_parallel_group(
-                            with_context_parallel=True
-                        ),
-                    )
-                mtp_loss_scale = (
-                    self.config.mtp_loss_scaling_factor
-                    / self.config.num_nextn_predict_layers
-                )
-                if self.config.calculate_per_token_loss:
-                    hidden_states = MTPLossAutoScaler.apply(
-                        hidden_states, mtp_loss_scale * mtp_loss
-                    )
-                else:
-                    hidden_states = MTPLossAutoScaler.apply(
-                        hidden_states, mtp_loss_scale * mtp_loss / num_tokens
-                    )
-        sequence_parallel_override = False
-
-        logits, _ = self.lm_head(
-            hidden_states,
-            weight=output_weight,
-            # runtime_gather_output=runtime_gather_output,
-        )
-
-        if self.config.sequence_parallel:
-            logits = logits.transpose([1, 0, 2]).contiguous()
-
-        if labels is not None:
-            loss = self.compute_language_model_loss(labels, logits)
-            return (loss, logits)
         else:
-            return (logits,)
-
-    def shared_embedding_or_output_weight(self) -> Tensor:
-        """Gets the embedding weight or output logit weights when share input embedding and
-        output weights set to True or when use Multi-Token Prediction (MTP) feature.
-
-        Returns:
-            Tensor: During pre processing or MTP process it returns the input embeddings weight.
-            Otherwise, during post processing it returns the final output layers weight.
-        """
-        if self.pre_process or self.mtp_process:
-            # Multi-Token Prediction (MTP) need both embedding layer and output layer.
-            # So there will be both embedding layer and output layer in the mtp process stage.
-            # In this case, if share_embeddings_and_output_weights is True, the shared weights
-            # will be stored in embedding layer, and output layer will not have any weight.
-            assert hasattr(self, "embedding"), (
-                "embedding is needed in this pipeline stage, but it is not initialized."
+            self.add_sequential_layer(
+                layers, LayerDesc(spec.lm_head), "model.lm_head"
             )
-            return self.embedding.embed_tokens.weight.T
-        elif self.post_process:
-            return self.lm_head.weight
-        return None
 
-    def build_schedule_plan(
-        self,
-        input_ids: Tensor,
-        position_ids: Tensor,
-        attention_mask: Tensor,
-        decoder_input: Tensor = None,
-        labels: Tensor = None,
-        packed_seq_params: PackedSeqParams = None,
-        extra_block_kwargs: dict | None = None,
-        runtime_gather_output: bool | None = None,
-        loss_mask: Tensor | None = None,
-    ):
-        """Builds a computation schedule plan for the model.
-
-        This function creates a schedule plan for a model chunk, including
-        preprocessing, transformer layers, and postprocessing.
-        The schedule plan is used to optimize computation and memory usage
-        in distributed environments.
-
-        Args:
-            input_ids (Tensor): Input token IDs.
-            position_ids (Tensor): Position IDs.
-            attention_mask (Tensor): Attention mask.
-            decoder_input (Tensor, optional): Decoder input tensor. Defaults to None.
-            labels (Tensor, optional): Labels for loss computation. Defaults to None.
-            packed_seq_params (PackedSeqParams, optional):
-                Parameters for packed sequences. Defaults to None.
-            extra_block_kwargs (dict, optional):
-                Additional keyword arguments for blocks. Defaults to None.
-            runtime_gather_output (Optional[bool], optional):
-                Whether to gather output at runtime. Defaults to None.
-            loss_mask (Optional[Tensor], optional): Loss mask. Defaults to None.
-
-        Returns:
-            TransformerModelChunkSchedulePlan: The model chunk schedule plan.
-        """
-
-        from ..common.model_chunk_schedule_plan import (
-            TransformerModelChunkSchedulePlan,
-        )
-
-        return TransformerModelChunkSchedulePlan(
-            self,
-            input_ids,
-            position_ids,
-            attention_mask,
-            decoder_input,
-            labels,
-            packed_seq_params,
-            extra_block_kwargs,
-            runtime_gather_output,
-            loss_mask,
-        )
+        return layers
 
     def get_hardware_flops(self):
         return 989e3
+
+    def add_sequential_layer(self, layers, layer_desc, name_prefix=""):
+        """
+        Add a sequential layer to the network with specified description and name prefix.
+
+        Args:
+            layers (list): List to store layer descriptions. Each element should be a dict
+                with keys "layer" (LayerDesc) and "name_prefix" (str).
+            layer_desc (LayerDesc|SharedLayerDesc): Layer description object containing
+                layer self.configuration.
+            name_prefix (str, optional): Prefix for layer names in the pipeline.
+                Defaults to empty string.
+
+        Returns:
+            None: The layer description is appended to the input layers list.
+        """
+        layers.append({"layer": layer_desc, "name_prefix": name_prefix})
+
+    def get_sequential_layers(self):
+        """
+        Get all layers in the sequential network.
+
+        Returns:
+            List[paddle.nn.Layer]: List containing all layers.
+        """
+        return [x["layer"] for x in self._sequential_layers]
+
+    def get_sequential_name_prefixs(self):
+        """
+        Retrieve name prefixes for all parallel layers in the sequential network.
+
+        Returns:
+            Dict[str, str]: A dictionary mapping layer indices (as strings) to their
+                corresponding name prefixes. The indices represent the position of
+                each layer in the sequential order.
+        """
+        return {
+            str(index): x["name_prefix"]
+            for index, x in enumerate(self._sequential_layers)
+        }
+
+    def get_shardlayer_prefix(self, name_splited):
+        """_summary_
+            This function retrieves the prefix of a shared layer. The process involves:
+            1. Identifying all key names of shared layers, like 'shared_weight01', 'shared_weight02', etc.
+            2. For instance, given name_splited = ['shared_layers', 'shared_weight01', 'weight'],
+                the 'shared_layer_key' would be name_splited[1], which is 'shared_weight01'.
+            3. By traversing through all layers, the function checks if the specified
+                shared_layer is present in the current stage. If found, it returns the corresponding prefix.
+
+            Note: For retrieving all SharedLayer instances in Paddle, you can refer to the following Paddle code.
+            https://github.com/PaddlePaddle/Paddle/blob/2cf724d055679a1a0e48766dfb1708b920273078/python/paddle/distributed/fleet/meta_parallel/parallel_layers/pp_layers.py#L460-L513
+        Args:
+            name_splited (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        shared_layer_names = {
+            s.layer_name for s in self.layers if isinstance(s, SharedLayerDesc)
+        }
+        assert name_splited[1] in shared_layer_names, (
+            f"The shared layer name {name_splited[1]} must be in prefixes!"
+        )
+        shared_layer_key = name_splited[1]
+        for idx, layer in enumerate(self.layers):
+            if (
+                isinstance(layer, SharedLayerDesc)
+                and layer.layer_name == shared_layer_key
+            ):
+                if self.get_stage_from_index(idx) == self._stage_id:
+                    return self.get_sequential_name_prefixs()[str(idx)]
+
+        # the prefix must be in the current stage, else raise error
+        raise ValueError(
+            f"The shared layer {shared_layer_key} must be in the current stage!"
+        )
+
+    def _set_pipeline_name_mapping(self, mappings=None):
+        """
+        Set the name mapping for pipeline.
+
+        Args:
+            mappings (dict, optional): Dictionary storing name mapping relationships. Default is None, meaning no mapping operation.
+
+        Returns:
+            dict: Returns the updated or existing mapping relationship.
+
+        """
+        if mappings is not None:
+            self._pipeline_name_mapping = mappings
+        else:
+            single_to_pp_mapping = {}
+            pp_to_single_mapping = {}
+
+            state_dict_keys = list(super().state_dict().keys())
+            first_key = ""
+            for k in state_dict_keys:
+                if "shared_layers" not in k:
+                    first_key = k
+                    break
+            first_key = first_key.split(".")
+            # if use virtual pp_degree, the prefix is like 0.0.xxx
+            # else it will be like 0.xxx
+            use_virtual_pp_degree = (
+                first_key[0].isdigit() and first_key[1].isdigit()
+            )
+
+            prefixes = self.get_sequential_name_prefixs()
+            for k in state_dict_keys:
+                name_splited = k.split(".")
+                if use_virtual_pp_degree:
+                    if name_splited[0].isdigit():
+                        if name_splited[1].isdigit():
+                            idx = str(
+                                int(name_splited[0]) + int(name_splited[1])
+                            )
+                            single_name = [prefixes[idx]]
+                            single_name.extend(name_splited[2:])
+                        else:
+                            single_name = [prefixes[str(len(prefixes) - 1)]]
+                            single_name.extend(name_splited[2:])
+                            logger.warning(
+                                f"Please check! we treat this key as last layer, get {k}, \
+                                        set origin name as {'.'.join(single_name)}"
+                            )
+                    elif name_splited[0] == "shared_layers":
+                        single_name = [self.get_shardlayer_prefix(name_splited)]
+                        single_name.extend(name_splited[2:])
+                    else:
+                        single_to_pp_mapping[k] = k
+                        pp_to_single_mapping[k] = k
+                        continue
+                else:
+                    idx = name_splited[0]
+                    # for normal pp layer
+                    if idx.isdigit():
+                        # allow empty prefix
+                        single_name = (
+                            [] if prefixes[idx] == "" else [prefixes[idx]]
+                        )
+                        single_name.extend(name_splited[1:])
+                    elif idx == "shared_layers":
+                        single_name = [self.get_shardlayer_prefix(name_splited)]
+                        single_name.extend(name_splited[2:])
+                    else:
+                        single_to_pp_mapping[k] = k
+                        pp_to_single_mapping[k] = k
+                        continue
+
+                single_to_pp_mapping[".".join(single_name)] = k
+                pp_to_single_mapping[k] = ".".join(single_name)
+
+            self._pipeline_name_mapping = single_to_pp_mapping
+            self._pp_to_single_mapping = pp_to_single_mapping
+
+        return self._pipeline_name_mapping
+
+    def _check_shared_model_state(self):
+        if self._pipeline_name_mapping is None:
+            self._set_pipeline_name_mapping()
+
+        super_state_dict = super().state_dict()
+        structure_name_to_tensor = {}
+        for k, v in super_state_dict.items():
+            k = self._pp_to_single_mapping[k]
+            if k not in structure_name_to_tensor:
+                structure_name_to_tensor[k] = v
+            else:
+                old_v = structure_name_to_tensor[k]
+                assert old_v is v, (
+                    f"Shared tensor with different structure name: {k}"
+                )
+
+        missing_shared_keys = {}
+        for k, v in self._pp_to_single_mapping.items():
+            mapped_k = self._pipeline_name_mapping[v]
+            if k != mapped_k:
+                missing_shared_keys[k] = mapped_k
+        return missing_shared_keys
+
+    def state_dict(self, *args, **kwargs):
+        """
+        Return a dictionary with Pipeline Stage mapping.
+
+        Args:
+            *args (tuple): Variable argument list passed to parent method.
+            **kwargs (dict): Optional keyword arguments passed to parent method.
+
+        Returns:
+            dict: Dictionary containing Pipeline Stage mapping.
+
+        """
+        state_dict = super().state_dict(*args, **kwargs)
+
+        if self._pipeline_name_mapping is None:
+            self._set_pipeline_name_mapping()
+        # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
+
+        for k in list(state_dict.keys()):
+            v = state_dict.pop(k)
+            state_dict[self._pp_to_single_mapping[k]] = v
+
+        return state_dict
+
+    def sharded_state_dict(self, *args, **kwargs):
+        """
+        sharded_state_dict method for PipelinePretrainedModel.
+
+        Remaps parameter keys according to the pipeline stage mapping, and converts expert indices from local to global.
+        """
+        sharded_state_dict = super().sharded_state_dict(*args, **kwargs)
+        if self._pipeline_name_mapping is None:
+            self._set_pipeline_name_mapping()
+
+        for k in list(sharded_state_dict.keys()):
+            v = sharded_state_dict.pop(k)
+            v.key = self._pp_to_single_mapping[k]
+            sharded_state_dict[self._pp_to_single_mapping[k]] = v
+
+        def increment_expert_number(s, increment):
+            import re
+
+            def replace(match):
+                original_number = int(match.group(0))
+                new_number = original_number + increment
+                return str(new_number)
+
+            return re.sub(r"(?<=experts\.)\d+", replace, s)
+
+        renamed_sharded_state_dict = {}
+        for k, v in sharded_state_dict.items():
+            global_expert_id_offset = getattr(
+                v, "global_expert_id_offset", None
+            )
+            layer_cnt = getattr(v, "layer_cnt", None)
+            if global_expert_id_offset is not None:
+                new_key = increment_expert_number(k, global_expert_id_offset)
+                v.key = new_key
+                delattr(v, "global_expert_id_offset")
+                renamed_sharded_state_dict[new_key] = v
+            elif layer_cnt is not None:
+                new_key = k + "_layer_" + str(layer_cnt)
+                v.key = new_key
+                delattr(v, "layer_cnt")
+                renamed_sharded_state_dict[new_key] = v
+            else:
+                renamed_sharded_state_dict[k] = v
+
+        return renamed_sharded_state_dict

@@ -19,6 +19,29 @@ import shutil
 import subprocess
 
 
+def get_version_from_txt():
+    version_file = os.path.join(os.path.dirname(__file__), "version.txt")
+    with open(version_file, "r") as f:
+        version = f.read().strip()
+    return version
+
+
+def custom_version_scheme(version):
+    base_version = get_version_from_txt()
+    date_str = (
+        subprocess.check_output(
+            ["git", "log", "-1", "--format=%cd", "--date=format:%Y%m%d"]
+        )
+        .decode()
+        .strip()
+    )
+    return f"{base_version}.dev{date_str}"
+
+
+def no_local_scheme(version):
+    return ""
+
+
 def change_pwd():
     """change_pwd"""
     path = os.path.dirname(__file__)
@@ -87,7 +110,15 @@ def setup_ops_extension():
 
     ext_module = CUDAExtension(
         sources=[
+            # cpp files
+            # cuda files
             "./src/paddlefleet/extensions/tokens_stable_unzip.cu",
+            "./src/paddlefleet/extensions/tokens_unzip_gather.cu",
+            "./src/paddlefleet/extensions/tokens_zip_unique_add.cu",
+            "./src/paddlefleet/extensions/tokens_zip_prob.cu",
+            "./src/paddlefleet/extensions/merge_subbatch_cast.cu",
+            "./src/paddlefleet/extensions/tokens_unzip_slice.cu",
+            "./src/paddlefleet/extensions/fuse_swiglu_scale.cu",
         ],
         include_dirs=[
             os.path.join(os.getcwd(), "src/paddlefleet/extensions"),
@@ -99,6 +130,7 @@ def setup_ops_extension():
                 "-Wno-abi",
                 "-fPIC",
                 "-std=c++17",
+                "-DPADDLE_NO_PYTHON",
                 "-DPy_LIMITED_API=0x030A0000",
             ],
             "nvcc": nvcc_args,
@@ -125,6 +157,11 @@ def setup_ops_extension():
         name="paddlefleet.extensions.ops",
         ext_modules=[ext_module],
         cmdclass=cmdclass,
+        use_scm_version={
+            "version_scheme": custom_version_scheme,
+            "local_scheme": no_local_scheme,
+        },
+        setup_requires=["setuptools_scm"],
     )
 
 

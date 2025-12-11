@@ -43,16 +43,16 @@ unset http_proxy https_proxy
 coverage run run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
 
 echo "
-1 12.06599045
-2 12.03905582
-3 12.04510880
-4 12.01393795
-5 11.98309994
-6 11.96981907
-7 11.95969200
-8 11.91760826
-9 11.96479797
-10 11.93074036
+1 12.10431099
+2 12.05327988
+3 12.03885174
+4 12.03460503
+5 12.02089691
+6 12.00885010
+7 11.95639896
+8 11.96551323
+9 11.97876358
+10 11.97223091
 " > ./glm45_single_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \

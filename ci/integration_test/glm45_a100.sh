@@ -23,7 +23,7 @@ cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 
 jq --arg cache "$CACHE_DIR" \
    '.per_device_train_batch_size = 1
-    | .expert_parallel_degree = 1
+    | .expert_model_parallel_size = 1
     | .use_expert_parallel = false
     | .save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
@@ -44,6 +44,9 @@ with open(infile) as fin, open(outfile, 'w') as fout:
             fout.write(line)
 "
 mv $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py.new $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+
+sed -i 's/num_hidden_layers: int = 10/num_hidden_layers: int = 2/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 1/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
 
 rm -rf checkpoint/
 rm -rf outputs/

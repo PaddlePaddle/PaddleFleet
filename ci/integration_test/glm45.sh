@@ -22,22 +22,26 @@ cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 config_json="glm45.json"
 
 jq --arg cache "$CACHE_DIR" \
-   '.expert_parallel_degree = 8
+   '.expert_model_parallel_size = 8
     | .save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
     | .model_name_or_path = "\($cache)/glm45/GLM-4.5-Air"' \
    $config_json > $config_json.tmp
 mv $config_json.tmp $config_json
 
+sed -i 's/num_hidden_layers: int = 10/num_hidden_layers: int = 3/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 2/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
-# export FLAGS_embedding_deterministic=1
-# export FLAGS_cudnn_deterministic=1
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
+
 coverage run -m paddle.distributed.launch \
    --log_dir ./log \
    --master $master:$port \
@@ -45,4 +49,13 @@ coverage run -m paddle.distributed.launch \
    --rank 0 \
    --run_mode=collective \
    run_pretrain.py $config_json \
-   --output_dir ./checkpoint | tee ./glm45.log
+   --output_dir ./checkpoint 2>&1 | tee ./glm45.log
+
+echo "
+20 10.35060501
+" > ./glm45_multi_card_gt_loss.txt
+
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --compare_step 20 \
+   --log_file ./glm45.log \
+   --gt_file ./glm45_multi_card_gt_loss.txt

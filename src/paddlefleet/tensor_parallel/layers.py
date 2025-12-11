@@ -847,6 +847,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
         )
         self.world_size = get_pg_size(self.tp_group)
         rank = get_pg_rank(self.tp_group)
+        self.rank = rank
         self.explicit_expert_comm = self.is_expert and (
             self.world_size > 1 or self.expert_parallel
         )

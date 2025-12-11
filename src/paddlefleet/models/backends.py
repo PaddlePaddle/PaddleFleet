@@ -27,8 +27,8 @@ from paddlefleet.tensor_parallel.layers import (
     RowParallelLinear,
 )
 from paddlefleet.transformer.dot_product_attention import (
+    CPDotProductAttention,
     DotProductAttention,
-    FlashDotProductAttention,
 )
 from paddlefleet.transformer.mlp import MLPSublayersSpec
 
@@ -43,7 +43,10 @@ class SequentialMLP:
     pass
 
 
-from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
+from paddlefleet.transformer.paddle_norm import (
+    WrappedFusedNorm,
+    WrappedPaddleNorm,
+)
 
 LNImpl = WrappedPaddleNorm
 
@@ -113,13 +116,15 @@ class LocalSpecProvider(BackendSpecProvider):
         """Which layer for sequential layernorm and linear"""
         return None
 
-    def layer_norm(self, rms_norm: bool = False, for_qk: bool = False) -> type:
+    def layer_norm(
+        self, rms_norm: bool = False, for_qk: bool = False, fused: bool = True
+    ) -> type:
         """Which module to use for layer norm"""
         if rms_norm:
             # Matching get_gpt_layer_local_spec.
             # Why does the global need to be updated?
             global LNImpl
-            LNImpl = WrappedPaddleNorm
+            LNImpl = WrappedFusedNorm if fused else WrappedPaddleNorm
         return LNImpl
 
     def core_attention(self) -> type:
@@ -128,7 +133,7 @@ class LocalSpecProvider(BackendSpecProvider):
             get_context_parallel_group() is not None
             and get_context_parallel_world_size() > 1
         ):
-            return FlashDotProductAttention
+            return CPDotProductAttention
         else:
             return DotProductAttention
 

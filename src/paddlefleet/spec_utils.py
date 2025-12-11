@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import types
+import warnings
 from dataclasses import dataclass, field
 
 
@@ -117,6 +118,13 @@ def build_layer(spec_or_layer: LayerSpec | type, *args, **kwargs):
         and spec_or_layer.sublayers_spec is not None
     ):
         kwargs["sublayers_spec"] = spec_or_layer.sublayers_spec
+    if hasattr(spec_or_layer, "extra_kwargs"):
+        for key in spec_or_layer.extra_kwargs.keys():
+            if key in kwargs:
+                warnings.warn(
+                    f"Got same key {key} in extra_kwargs and kwargs during init {layer.__name__}. Will keep the value ing extra_kwargs."
+                )
+                kwargs.pop(key)
     try:
         return layer(
             *args,

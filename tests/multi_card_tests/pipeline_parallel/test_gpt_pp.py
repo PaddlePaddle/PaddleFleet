@@ -20,25 +20,15 @@ import unittest
 import numpy as np
 import paddle
 from paddle.distributed import fleet
-from paddle.distributed.fleet.utils.sequence_parallel_utils import (
-    register_sequence_parallel_allreduce_hooks,
-)
 
 import paddlefleet
-
-# from tests.unit_tests.test_utilities import Utils
-import paddlefleet.parallel_state as ps
+from paddlefleet.distributed.model import distributed_model
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-
-# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.pipeline_parallel import NoPipelineParallel
-from paddlefleet.tensor_parallel.mappings import (
-    _gather_along_first_dim,
-    _gather_along_last_dim,
-)
 from paddlefleet.training.initialize import initialize_fleet
+
+PP_DEGREE = 4
 
 
 def _set_random_seed(
@@ -81,26 +71,21 @@ def cal_sim(a, b):
     return paddle.nn.functional.cosine_similarity(a.flatten(), b.flatten(), 0)
 
 
-def check_grads(dist_model, serial_model, tp_group):
+def check_grads(dist_model, serial_model):
     serial_grads = {}
     for name, p in serial_model.named_parameters():
         serial_grads[name] = p.grad
 
     dist_grads = {}
     for name, p in dist_model.named_parameters():
-        if "qkv_proj.weight" in name or "up_gate_proj.weight" in name:
-            grad = _gather_along_last_dim(p.grad, tp_group)
-        elif (
-            "o_proj.weight" in name
-            or "down_proj.weight" in name
-            or "embed_tokens.weight" in name
-        ):
-            grad = _gather_along_first_dim(p.grad, tp_group)
+        grad = p.grad
+        if "shared_layers" in name:
+            serial_name = "_layers.0.embedding.embed_tokens.weight"
         else:
-            grad = p.grad
+            serial_name = name
         assert (
-            paddle.allclose(grad, serial_grads[name], atol=5e-8)
-            and cal_sim(grad, serial_grads[name]) > 0.999
+            paddle.allclose(grad, serial_grads[serial_name], atol=5e-8)
+            and cal_sim(grad, serial_grads[serial_name]) > 0.999
         )
 
 
@@ -109,38 +94,9 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
     random.seed(seed)
     np.random.seed(seed)
     paddle.manual_seed(seed)
-
-    # transformer_layer_spec = get_gpt_layer_local_spec(
-    #    num_experts=None,
-    #    moe_grouped_gemm=False,
-    #    use_qk_norm=True,
-    #    multi_latent_attention=False,
-    #    normalization="RMSNorm",
-    # )
-    # pre_process = True
-    # post_process = True
-    # mtp_block_spec = None
-    # vp_stage = None
-
     gpt_model = gpt_builder(config, num_stages=1)
-
-    # gpt_model = GPTModel(
-    #    config=config,
-    #    transformer_layer_spec=transformer_layer_spec,
-    #    vocab_size=vocab_size,
-    #    max_sequence_length=seq_len,
-    #    pre_process=pre_process,
-    #    post_process=post_process,
-    #    fp16_lm_cross_entropy=False,
-    #    parallel_output=True,
-    #    share_embeddings_and_output_weights=True,
-    #    position_embedding_type="rope",
-    #    rotary_percent=1.0,
-    #    rotary_base=10000,
-    #    rope_scaling=1.0,
-    #    mtp_block_spec=mtp_block_spec,
-    #    vp_stage=vp_stage,
-    # )
+    strategy = fleet.DistributedStrategy()
+    gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
 
     data = paddle.randint(
         low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
@@ -151,8 +107,6 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
         (batch_size, 1)
     )
 
-    strategy = fleet.DistributedStrategy()
-    gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
     inputs = (
         {
             "input_ids": [input_ids],
@@ -166,7 +120,7 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
     return loss, gpt_pipe_model
 
 
-def run_tp_sp(
+def run_pp(
     seed,
     batch_size,
     seq_len,
@@ -178,8 +132,8 @@ def run_tp_sp(
     strategy = fleet.DistributedStrategy()
     strategy.hybrid_configs = {
         "dp_degree": 1,
-        "mp_degree": 4,
-        "pp_degree": 1,
+        "mp_degree": 1,
+        "pp_degree": config.pipeline_model_parallel_size,
         "sharding_degree": 1,
         "sep_degree": 1,
         "cp_degree": 1,
@@ -200,37 +154,12 @@ def run_tp_sp(
 
     _set_random_seed(seed)
 
-    transformer_layer_spec = get_gpt_layer_local_spec(
-        num_experts=None,
-        moe_grouped_gemm=False,
-        use_qk_norm=True,
-        multi_latent_attention=False,
-        normalization="RMSNorm",
+    gpt_model = gpt_builder(
+        config,
+        num_stages=config.pipeline_model_parallel_size,
+        seg_method="layer:TransformerLayer",
     )
-    pre_process = True
-    post_process = True
-    mtp_block_spec = None
-    vp_stage = None
-
-    gpt_model = gpt_builder(config, num_stages=1)
-    # gpt_model = GPTModel(
-    #    config=config,
-    #    transformer_layer_spec=transformer_layer_spec,
-    #    vocab_size=vocab_size,
-    #    max_sequence_length=seq_len,
-    #    pre_process=pre_process,
-    #    post_process=post_process,
-    #    fp16_lm_cross_entropy=False,
-    #    parallel_output=True,
-    #    share_embeddings_and_output_weights=True,
-    #    position_embedding_type="rope",
-    #    rotary_percent=1.0,
-    #    rotary_base=10000,
-    #    rope_scaling=1.0,
-    #    mtp_block_spec=mtp_block_spec,
-    #    vp_stage=vp_stage,
-    # )
-    register_sequence_parallel_allreduce_hooks(gpt_model, 1, False)
+    gpt_pipe_model = distributed_model(gpt_model)
 
     data = paddle.randint(
         low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
@@ -241,9 +170,6 @@ def run_tp_sp(
         (batch_size, 1)
     )
 
-    tp_group = ps.get_tensor_model_parallel_group()
-
-    gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
     inputs = (
         {
             "input_ids": [input_ids],
@@ -254,29 +180,22 @@ def run_tp_sp(
 
     loss = gpt_pipe_model.forward_backward_pipeline(inputs)
 
-    # outputs = gpt_model(
-    #    input_ids=input_ids,
-    #    position_ids=position_ids,
-    #    labels=labels,
-    # )
-    # loss = outputs[0]
-    # loss.backward()
     assert loss == loss_baseline
-    check_grads(gpt_pipe_model, gpt_model_baseline, tp_group)
+    check_grads(gpt_pipe_model, gpt_model_baseline)
 
 
-class TestTPSP(unittest.TestCase):
+class TestPP(unittest.TestCase):
     def setUp(self):
         self.seed = 46
         self.batch_size = 2
         self.seq_len = 128
         self.vocab_size = 1024
 
-    def test_tp_sp(self):
+    def test_pp(self):
         config = GPTConfig(
             vocab_size=self.vocab_size,
             max_sequence_length=self.seq_len,
-            num_hidden_layers=2,
+            num_hidden_layers=4,
             hidden_size=512,
             num_attention_heads=4,
             intermediate_size=1024,
@@ -298,43 +217,19 @@ class TestTPSP(unittest.TestCase):
             ),
             use_qk_norm=True,
         )
+
         loss, gpt_model = single_device_baseline(
             self.seed, self.batch_size, self.seq_len, self.vocab_size, config
         )
 
-        dist_config = GPTConfig(
-            vocab_size=self.vocab_size,
-            max_sequence_length=self.seq_len,
-            num_hidden_layers=2,
-            hidden_size=512,
-            num_attention_heads=4,
-            intermediate_size=1024,
-            normalization="RMSNorm",
-            hidden_dropout_prob=0.0,
-            attention_dropout=0.0,
-            use_cpu_initialization=True,
-            tensor_model_parallel_size=4,
-            sequence_parallel=True,
-            parallel_output=True,
-            share_embeddings_and_output_weights=True,
-            position_embedding_type="rope",
-            rotary_percent=1.0,
-            rotary_base=10000,
-            rope_scaling=1.0,
-            init_method=functools.partial(
-                paddle.nn.init.xavier_uniform_, gain=1.0
-            ),
-            output_layer_init_method=functools.partial(
-                paddle.nn.init.xavier_uniform_, gain=1.0
-            ),
-            use_qk_norm=True,
-        )
-        run_tp_sp(
+        config.pipeline_model_parallel_size = PP_DEGREE
+
+        run_pp(
             self.seed,
             self.batch_size,
             self.seq_len,
             self.vocab_size,
-            dist_config,
+            config,
             loss,
             gpt_model,
         )

@@ -33,7 +33,7 @@ class LanguageModelEmbedding(FleetLayer):
     """Language model embeddings.
 
     Args:
-        config (TransformerConfig): config object with all necessary configs for TransformerBlock
+        config (TransformerConfig): config object with all necessary configs
         vocab_size (int): vocabulary size
         max_sequence_length (int): maximum size of sequence. This
                              is used for positional embedding
@@ -88,10 +88,6 @@ class LanguageModelEmbedding(FleetLayer):
             config=self.config,
             tp_group=self.tp_group,
         )
-        # self.word_embeddings = Embedding(
-        #     num_embeddings=self.vocab_size,
-        #     embedding_dim=self.config.hidden_size,
-        # )
 
         # Position embedding (serial).
         if self.add_position_embedding:
@@ -122,6 +118,10 @@ class LanguageModelEmbedding(FleetLayer):
             self.config.hidden_dropout_prob
         )
 
+    @property
+    def embedding_weight(self):
+        return self.embed_tokens.weight
+
     def zero_parameters(self):
         """Zero out all parameters in embedding."""
         self.embed_tokens.weight.data.fill_(0)
@@ -149,12 +149,12 @@ class LanguageModelEmbedding(FleetLayer):
         Returns:
             Tensor: The output embeddings
         """
-        word_embeddings = self.embed_tokens(input_ids)
+        embed_tokens = self.embed_tokens(input_ids)
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
-            embeddings = word_embeddings + position_embeddings
+            embeddings = embed_tokens + position_embeddings
         else:
-            embeddings = word_embeddings
+            embeddings = embed_tokens
 
         if (
             not self.reduce_scatter_embeddings

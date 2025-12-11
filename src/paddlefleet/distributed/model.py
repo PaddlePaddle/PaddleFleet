@@ -129,10 +129,10 @@ def distributed_model(model):
             use_dynamic_loss_scaling=use_dynamic_loss_scaling,
         )
 
+    assert isinstance(model, PipelineLayer), (
+        "The model should be an instance of PipelineLayer"
+    )
     if fleet_env._hcg.get_parallel_mode() == ParallelMode.PIPELINE_PARALLEL:
-        assert isinstance(model, PipelineLayer), (
-            "For pipeline parallel, the model should be an instance of PipelineLayer"
-        )
         if strategy.hybrid_configs["pp_configs"].use_dualpipev:
             raise ValueError(
                 "PaddleFleet doesn't support dualpipev parallel now."
@@ -165,9 +165,6 @@ def distributed_model(model):
                 )
 
     else:
-        assert isinstance(model, PipelineLayer), (
-            "PaddleFleet uses the same model architecture with or without pipeline parallelism. So the model should be an instance of PipelineLayer."
-        )
         model = NoPipelineParallel(model, strategy=strategy)
 
     return model
