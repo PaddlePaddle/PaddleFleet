@@ -265,6 +265,8 @@ class Attention(FleetLayer, ABC):
                     mscale=None,
                     cp_group=self.pg_collection.cp,
                 )
+            # elif self.config.apply_vision_rope:
+            #     query, key = apply_rotary_pos_emb_vision(query,key,rotary_pos_cos,rotary_pos_sin)
             else:
                 if q_pos_emb is not None:
                     query = apply_rotary_pos_emb(
@@ -340,7 +342,6 @@ class Attention(FleetLayer, ABC):
             # t is the pack size = sum (sq_i)
             # note that batch is a dummy dimension in the packed case
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
-
         # =================
         # Output. [sq, b, h]
         # =================
