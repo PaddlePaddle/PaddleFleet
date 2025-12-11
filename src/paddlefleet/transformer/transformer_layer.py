@@ -238,6 +238,7 @@ class TransformerLayer(nn.Layer):
         self,
         hidden_states: Tensor,
         attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
         context: Tensor | None = None,
         context_mask: Tensor | None = None,
         rotary_pos_emb: Tensor | None = None,
@@ -283,6 +284,7 @@ class TransformerLayer(nn.Layer):
         attention_output_with_bias = self.self_attn(
             input_layernorm_output,
             attention_mask=attention_mask,
+            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
             rotary_pos_emb=rotary_pos_emb,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
