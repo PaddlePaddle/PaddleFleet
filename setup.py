@@ -111,7 +111,6 @@ def setup_ops_extension():
     ext_module = CUDAExtension(
         sources=[
             # cpp files
-            "./src/paddlefleet/extensions/matmul_bwd.cc",
             # cuda files
             "./src/paddlefleet/extensions/tokens_stable_unzip.cu",
             "./src/paddlefleet/extensions/tokens_unzip_gather.cu",
