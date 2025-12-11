@@ -22,7 +22,7 @@ cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 config_json="glm45.json"
 
 jq --arg cache "$CACHE_DIR" \
-   '.expert_parallel_degree = 8
+   '.expert_model_parallel_size = 8
     | .save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
     | .model_name_or_path = "\($cache)/glm45/GLM-4.5-Air"' \
