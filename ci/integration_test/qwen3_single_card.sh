@@ -40,4 +40,21 @@ export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
 unset http_proxy https_proxy
-coverage run run_pretrain.py $config_json | tee ./qwen3_single_card.log
+coverage run run_pretrain.py $config_json 2>&1 | tee ./qwen3_single_card.log
+
+echo "
+1 10.57962036
+2 10.57499504
+3 10.57764149
+4 10.56986618
+5 10.56744957
+6 10.55562115
+7 10.54955864
+8 10.59902382
+9 10.53679466
+10 10.53017616
+" > ./qwen3_single_card_gt_loss.txt
+
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --log_file ./qwen3_single_card.log \
+   --gt_file ./qwen3_single_card_gt_loss.txt
