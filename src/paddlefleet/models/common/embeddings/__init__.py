@@ -17,7 +17,6 @@ from .language_model_embedding import (
 )
 from .rope_utils import (
     apply_rotary_pos_emb as apply_rotary_pos_emb,
-    apply_rotary_pos_emb_vision as apply_rotary_pos_emb_vision,
 )
 from .rotary_pos_embedding import RotaryEmbedding as RotaryEmbedding
 from .yarn_rotary_pos_embedding import (
