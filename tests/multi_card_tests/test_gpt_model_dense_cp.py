@@ -122,7 +122,7 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
     #     mtp_block_spec=mtp_block_spec,
     #     vp_stage=vp_stage,
     # )
-
+    x = 100
     data = paddle.randint(
         low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
     ).cuda()
