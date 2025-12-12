@@ -179,6 +179,7 @@ class DotProductAttention(FleetLayer):
         key: Tensor,
         value: Tensor,
         attention_mask: Tensor,
+        attn_mask_startend_row_indices: Tensor = None,
         attn_mask_type: AttnMaskType = None,
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
@@ -192,7 +193,9 @@ class DotProductAttention(FleetLayer):
             "Attention bias is not supported for DotProductAttention."
         )
 
-        if query.dtype == paddle.bfloat16 or query.dtype == paddle.float16:
+        if (
+            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
+        ) and attn_mask_startend_row_indices is None:
             # Note:
             # attention_mask is None in default
             # is_causal is True in default
@@ -213,6 +216,23 @@ class DotProductAttention(FleetLayer):
                 shape=[0, 0, attn_output.shape[2] * attn_output.shape[3]],
             )
 
+            return attn_output
+
+        elif (
+            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
+        ) and attn_mask_startend_row_indices is not None:
+            # Note:
+            # attn_mask_startend_row_indices is not None for flashmask
+            flashmask_attention_func = flashmask_attention
+            attn_output = flashmask_attention_func(
+                query.astype(value.dtype),
+                key.astype(value.dtype),
+                value.astype(value.dtype),
+                startend_row_indices=attn_mask_startend_row_indices,
+                dropout=self.config.attention_dropout,
+                causal=(attn_mask_type == AttnMaskType.causal),
+            )
+            attn_output = attn_output.reshape([0, 0, -1])
             return attn_output
 
         # ===================================
@@ -337,7 +357,7 @@ class DotProductAttention(FleetLayer):
         return context
 
 
-class FlashDotProductAttention(FleetLayer):
+class CPDotProductAttention(FleetLayer):
     """
     Attention use flashmask
     """
@@ -371,78 +391,77 @@ class FlashDotProductAttention(FleetLayer):
         key: Tensor,
         value: Tensor,
         attention_mask: Tensor,
+        attn_mask_startend_row_indices: Tensor = None,
         attn_mask_type: AttnMaskType = None,
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
     ):
         """Forward."""
         assert packed_seq_params is None, (
-            "Packed sequence is not supported by FlashDotProductAttention now."
+            "Packed sequence is not supported by CPDotProductAttention now."
         )
         assert attention_bias is None, (
-            "Attention bias is not supported for FlashDotProductAttention now."
+            "Attention bias is not supported for CPDotProductAttention now."
+        )
+        assert self.context_parallel_size > 1, (
+            "CPDotProductAttention is only for context_parallel_size > 1."
         )
 
-        causal = attn_mask_type == AttnMaskType.causal
+        b, seq_len = key.shape[0], key.shape[1]
+        seq_len = seq_len * self.context_parallel_size
 
-        flashmask_attention_func = flashmask_attention
-        if self.context_parallel_size > 1:
-            assert causal, (
-                "flashmask_attention_cp is not supported when causal = False"
+        if attn_mask_startend_row_indices is None:
+            attn_mask_startend_row_indices = paddle.full(
+                shape=[b, 1, seq_len, 1],
+                fill_value=seq_len,
+                dtype=paddle.int32,
             )
-            causal = False  # attention_mask for cp causal is False
-            flashmask_attention_func = flashmask_attention_cp
-            b, seq_len = key.shape[0], key.shape[1]
-            seq_len = seq_len * self.context_parallel_size
-            if attention_mask is None:
-                attention_mask = paddle.full(
-                    shape=[b, 1, seq_len, 1],
-                    fill_value=seq_len,
-                    dtype=paddle.int32,
-                )
 
-            if attention_mask.shape[-1] == 1:
-                b, k_heads, k_seqlen, _ = attention_mask.shape
-                append_indices = paddle.to_tensor(
-                    np.arange(seq_len), dtype=attention_mask.dtype
-                )
-                append_indices = append_indices.reshape(1, 1, seq_len, 1)
-                append_indices_expand = append_indices.expand(
-                    b, k_heads, k_seqlen, 1
-                )
-                attention_mask = paddle.concat(
-                    [attention_mask, append_indices_expand], axis=-1
-                )
-            elif attention_mask.shape[-1] == 2:
-                b, k_heads, k_seqlen, _ = attention_mask.shape
-                append_indices = paddle.to_tensor(
-                    np.arange(seq_len), dtype=attention_mask.dtype
-                )
-                append_indices = append_indices.reshape(1, 1, seq_len, 1)
-                append_indices_expand0 = append_indices.expand(
-                    b, k_heads, k_seqlen, 1
-                )
-                append_indices_expand1 = append_indices_expand0.clone()
-                attention_mask = paddle.concat(
-                    [
-                        attention_mask,
-                        append_indices_expand0,
-                        append_indices_expand1,
-                    ],
-                    axis=-1,
-                )
-            else:
-                raise ValueError(
-                    "Invalid attention mask shape, when using context parallel, attention_mask.shape[-1] must be either 1 or 2"
-                )
+        if attn_mask_startend_row_indices.shape[-1] == 1:
+            b, k_heads, k_seqlen, _ = attn_mask_startend_row_indices.shape
+            append_indices = paddle.to_tensor(
+                np.arange(seq_len),
+                dtype=attn_mask_startend_row_indices.dtype,
+            )
+            append_indices = append_indices.reshape(1, 1, seq_len, 1)
+            append_indices_expand = append_indices.expand(
+                b, k_heads, k_seqlen, 1
+            )
+            attn_mask_startend_row_indices = paddle.concat(
+                [attn_mask_startend_row_indices, append_indices_expand],
+                axis=-1,
+            )
+        elif attn_mask_startend_row_indices.shape[-1] == 2:
+            b, k_heads, k_seqlen, _ = attn_mask_startend_row_indices.shape
+            append_indices = paddle.to_tensor(
+                np.arange(seq_len),
+                dtype=attn_mask_startend_row_indices.dtype,
+            )
+            append_indices = append_indices.reshape(1, 1, seq_len, 1)
+            append_indices_expand0 = append_indices.expand(
+                b, k_heads, k_seqlen, 1
+            )
+            append_indices_expand1 = append_indices_expand0.clone()
+            attn_mask_startend_row_indices = paddle.concat(
+                [
+                    attn_mask_startend_row_indices,
+                    append_indices_expand0,
+                    append_indices_expand1,
+                ],
+                axis=-1,
+            )
+        else:
+            raise ValueError(
+                "Invalid attention mask shape, when using context parallel, attn_mask_startend_row_indices.shape[-1] must be either 1 or 2"
+            )
 
-        attn_output = flashmask_attention_func(
+        attn_output = flashmask_attention_cp(
             query.astype(value.dtype),
             key.astype(value.dtype),
             value.astype(value.dtype),
-            startend_row_indices=attention_mask,
+            startend_row_indices=attn_mask_startend_row_indices,
             dropout=self.config.attention_dropout,
-            causal=causal,
+            causal=False,  # mask for cp causal is False
         )
         attn_output = attn_output.reshape([0, 0, -1])
         return attn_output

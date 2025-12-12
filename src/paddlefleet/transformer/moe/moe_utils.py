@@ -101,7 +101,7 @@ def unpermute(
             "Mask must be provided to permute the probs."
         )
         permuted_probs = probs.T.contiguous().masked_select(
-            routing_map.T.contiguous()
+            routing_map.T.contiguous().cast(paddle.bool)
         )
         permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
 

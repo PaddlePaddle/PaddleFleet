@@ -19,12 +19,15 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import paddle
+from paddle import nn
 
 if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
+import numpy as np
+
 from .fused_a2a import fused_combine, fused_dispatch
-from .moe_utils import permute, unpermute
+from .moe_utils import _AllToAll, permute, unpermute
 
 
 class _DispatchManager(ABC):
@@ -373,3 +376,165 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
 
         hidden_states = hidden_states.reshape(self.hidden_shape)
         return hidden_states, None
+
+
+class AllToAllTokenDispatcher(nn.Layer):
+    """
+    All-to-All EP
+    """
+
+    def __init__(
+        self,
+        moe_group: Group,
+        expert_model_parallel_size: int,
+        num_experts_per_device: int,
+    ):
+        nn.Layer.__init__(self)
+        self.moe_group = moe_group
+        self.expert_model_parallel_size = expert_model_parallel_size
+        self.num_experts_per_device = num_experts_per_device
+
+    def dispatch_preprocess(
+        self,
+        hidden_states: paddle.Tensor,
+        gates_masked: paddle.Tensor,  # probs
+        mask: paddle.Tensor,  # routing_map
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
+        self.gates_masked = gates_masked
+        if self.expert_model_parallel_size <= 1:
+            return hidden_states
+        mask = mask.to(paddle.int64)
+
+        if len(hidden_states.shape) == 3:
+            batch_size, seq_len, d_model = hidden_states.shape
+        else:
+            seq_len, d_model = hidden_states.shape
+        reshaped_input = hidden_states.reshape([-1, d_model])
+        self.d_model = d_model
+        self.reshaped_input_shape = reshaped_input.shape
+        tokens_per_expert = mask.sum(axis=0)  # Shape: [num_experts]
+        token_indices, expert_indices = paddle.where(mask == 1)
+        combined_key = expert_indices * seq_len + token_indices
+        sort_indices = paddle.argsort(combined_key)
+        self.sorted_token_indices = token_indices[sort_indices]
+        self.sorted_expert_indices = expert_indices[sort_indices]
+        # `sorted_tokens` are tokens that sorted by expert id.
+        # First `tokens_per_expert[0]` tokens belong to expert 0, next `tokens_per_expert[1]` tokens belong to expert 1, etc.
+        # Shape: [batch_size * seq_len * num_experts_per_token, d_model]
+        sorted_tokens = reshaped_input[self.sorted_token_indices]
+
+        tokens_per_expert = tokens_per_expert.detach()
+        self.sorted_tokens_shape = sorted_tokens.shape
+
+        tokens_per_ep_rank = tokens_per_expert.reshape(
+            [self.expert_model_parallel_size, -1]
+        ).sum(axis=1)
+        # First All-to-All: Exchange expert token counts across ranks
+        # Returns `self.global_tokens_per_expert` is for current rank
+        self.global_tokens_per_expert = _AllToAll.apply(
+            [tokens_per_expert.shape[0]],
+            tokens_per_expert,
+            group=self.moe_group,
+        )
+
+        if self.global_tokens_per_expert.sum().item() == 0:
+            self.is_empty_tokens = True
+        else:
+            self.is_empty_tokens = False
+
+        tokens_per_expert_group_sum = self.global_tokens_per_expert.reshape(
+            [self.expert_model_parallel_size, -1]
+        )
+        self.output_splits = (
+            tokens_per_expert_group_sum.sum(axis=1).cpu().tolist()
+        )
+        self.input_split_sizes = tokens_per_ep_rank.cpu().tolist()
+        self.dispatch_output_shape = [
+            self.global_tokens_per_expert.sum(axis=0).cpu().item(),
+            sorted_tokens.shape[1],
+        ]
+
+        return sorted_tokens
+
+    def token_dispatch(self, sorted_tokens: paddle.Tensor):
+        # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
+        gathered_tokens = _AllToAll.apply(
+            self.dispatch_output_shape,
+            sorted_tokens,
+            out_split_sizes=self.output_splits,
+            in_split_sizes=self.input_split_sizes,
+            group=self.moe_group,
+        )
+        return gathered_tokens
+
+    def dispatch_postprocess(
+        self,
+        gathered_tokens: paddle.Tensor,
+    ):
+        # Next, we should sort `gathered_tokens` by expert ids, so that the tokens for the same expert are contiguous.
+        tokens_per_expert_post_gather = self.global_tokens_per_expert.reshape(
+            [self.expert_model_parallel_size, self.num_experts_per_device]
+        ).sum(axis=0)
+        gatherd_idxs = np.zeros(
+            shape=(gathered_tokens.shape[0],), dtype=np.int32
+        )
+        s = 0
+        for i, k in enumerate(self.global_tokens_per_expert.cpu().numpy()):
+            gatherd_idxs[s : s + k] = i % self.num_experts_per_device
+            s += k
+        self.gatherd_idxs = gatherd_idxs.argsort()
+        sorted_tokens = gathered_tokens[self.gatherd_idxs]
+
+        return sorted_tokens, tokens_per_expert_post_gather
+
+    def combine_preprocess(self, expert_outs: paddle.Tensor):
+        # Restore the original order of tokens, prepare for the third All-to-All.
+        if self.is_empty_tokens:
+            new_x = expert_outs
+        else:
+            new_x = paddle.empty_like(expert_outs)
+            new_x[self.gatherd_idxs] = expert_outs
+        return new_x
+
+    def token_combine(self, new_x: paddle.Tensor):
+        # Third All-to-All: Exchange expert outputs back to original rank. `gathered_tokens` are the tokens that originally belong to current rank
+        gathered_tokens = _AllToAll.apply(
+            self.sorted_tokens_shape,
+            new_x,
+            out_split_sizes=self.input_split_sizes,
+            in_split_sizes=self.output_splits,
+            group=self.moe_group,
+        )
+        return gathered_tokens
+
+    def combine_postprocess(self, gathered_tokens: paddle.Tensor):
+        # For every processed token, need to multiply the expert weight.
+        expert_major_weights = self.gates_masked[
+            self.sorted_token_indices, self.sorted_expert_indices
+        ]  # shape [batch_size * seq_len * num_experts_per_token]
+        weighted_gathered_tokens = (
+            gathered_tokens
+            * expert_major_weights.unsqueeze(-1).to(gathered_tokens.dtype)
+        )  # shape [batch_size * seq_len * num_experts_per_token, d_model]
+
+        final_output_empty = paddle.zeros(
+            self.reshaped_input_shape, dtype=gathered_tokens.dtype
+        )
+        token_indices_for_scatter = self.sorted_token_indices.unsqueeze(
+            -1
+        ).expand(
+            -1, self.d_model
+        )  # shape [batch_size * seq_len * num_experts_per_token, d_model]
+
+        token_indices_for_scatter_single = token_indices_for_scatter[
+            :, 0:1
+        ].squeeze()  # shape [batch_size * seq_len * num_experts_per_token, 1]
+
+        final_output = paddle.scatter(
+            final_output_empty,
+            token_indices_for_scatter_single,
+            weighted_gathered_tokens,
+            overwrite=False,
+        )
+
+        return final_output

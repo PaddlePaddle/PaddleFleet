@@ -34,12 +34,11 @@ if TYPE_CHECKING:
 from paddlefleet import utils
 
 from .fusion_layer_utils import FusionMoePyLayer
-from .moe_communication import AllToAllMoECommunication, DeepEPMoECommunication
 from .moe_expert import StandardMLPExpert
 from .moe_router import DeepEPTopKRouter, StandardMoERouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
-from .token_dispatcher import MoEFlexTokenDispatcher
+from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +83,15 @@ class MoELayer(nn.Layer):
             self.moe_use_fusion_node = True
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
-
+        self.moe_grouped_gemm = config.moe_grouped_gemm
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
             if self.moe_group is not None
             else 1
+        )
+        self.num_local_experts = (
+            self.num_experts // self.expert_model_parallel_size
         )
 
         # MoE-Related Configs
@@ -125,6 +127,7 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
         self.experts = nn.LayerList([])
+
         for i in range(self.num_experts):
             if i // self.num_experts_per_device == self.moe_rank:
                 self.experts.append(self.expert_class(**expert_args))
@@ -158,6 +161,12 @@ class MoELayer(nn.Layer):
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
             )
+        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
+            logger.warning(
+                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
+                "Will turn on moe_grouped_gemm."
+            )
+            self.moe_grouped_gemm = True
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
@@ -167,14 +176,8 @@ class MoELayer(nn.Layer):
                     self.num_experts,
                     self.moe_group,
                 )
-                self.communication = DeepEPMoECommunication(
-                    self.moe_group,
-                    self.expert_model_parallel_size,
-                    self.num_experts_per_device,
-                    self.token_dispatcher,
-                )
             elif self.moe_token_dispatcher_type == "alltoall":
-                self.communication = AllToAllMoECommunication(
+                self.token_dispatcher = AllToAllTokenDispatcher(
                     self.moe_group,
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
@@ -356,9 +359,10 @@ class MoELayer(nn.Layer):
             aux_loss,
             z_loss,
         ) = self.gate(hidden_states)
-        # topk_weights, topk_indices will be used in AllToAllMoECommunication
-        # gates_masked, mask will be used in DeepEPMoECommunication
-        # capacity, priorities are not used currently
+        # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
+        # gates_masked, mask: Shape is [seq_len, num_experts], sometimes their names are "probs" and "routing_map"
+        # capacity, priorities are used for dropping tokens, currently they are not used
+
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
@@ -372,7 +376,7 @@ class MoELayer(nn.Layer):
                 reshaped_input = hidden_states.reshape([-1, d_model])
             else:
                 reshaped_input = hidden_states
-            output = self._forward_traditional_moe(
+            output = self._forward_single_card_moe(
                 reshaped_input, topk_indices, topk_weights
             )
 
@@ -389,7 +393,7 @@ class MoELayer(nn.Layer):
             output = ScatterOp.apply(output)
         return output, None  # None is bias
 
-    def _forward_traditional_moe(
+    def _forward_single_card_moe(
         self,
         hidden_states: paddle.Tensor,
         selected_experts: paddle.Tensor,

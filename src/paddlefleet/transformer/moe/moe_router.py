@@ -554,7 +554,6 @@ class StandardMoERouter(nn.Layer):
         paddle.Tensor,
     ]:
         """Implements TopKGating on logits."""
-
         if len(hidden_states.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = hidden_states.shape
