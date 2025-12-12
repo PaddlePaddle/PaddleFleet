@@ -278,7 +278,7 @@ def apply_rotary_pos_emb(
                 "cu_seqlens or cp_group not be supported when using fused_rope"
             )
         else:
-            assert isinstance(t, tuple) is None, (
+            assert isinstance(t, tuple), (
                 "The input for fused_rope should be a tuple of tensors"
             )
             return fused_rope(
