@@ -16,7 +16,7 @@ import sys
 import unittest
 
 
-class TestExtensions(unittest.TestCase):
+class TestOpsImport(unittest.TestCase):
     TARGET_OPS = [
         "tokens_unzip_gather",
         "tokens_unzip_slice",
@@ -30,36 +30,34 @@ class TestExtensions(unittest.TestCase):
     ]
 
     def setUp(self):
-        if "paddlefleet.extensions" in sys.modules:
-            del sys.modules["paddlefleet.extensions"]
+        if "paddlefleet.ops" in sys.modules:
+            del sys.modules["paddlefleet.ops"]
 
         try:
-            import paddlefleet.extensions
+            import paddlefleet.ops
 
-            self.extensions = paddlefleet.extensions
+            self.ops = paddlefleet.ops
         except Exception as e:
-            self.fail(f"Failed to import paddlefleet.extensions: {e}")
+            self.fail(f"Failed to import paddlefleet.ops: {e}")
 
-        self.ops = getattr(self.extensions, "ops", None)
-
-    def test_import_extensions(self):
-        self.assertIsNotNone(self.extensions)
+    def test_import_ops(self):
+        self.assertIsNotNone(self.ops, "Failed to import paddlefleet.ops")
 
     def test_ops_submodule_availability(self):
         if self.ops is None:
             self.skipTest(
-                "paddlefleet.extensions.ops not available. Skipping op availability tests."
+                "paddlefleet.ops not available. Skipping op availability tests."
             )
         else:
             self.assertIsNotNone(
                 self.ops,
-                "paddlefleet.extensions.ops is None, expected it to be loaded.",
+                "paddlefleet.ops is None, expected it to be loaded.",
             )
 
     def test_tokens_ops_availability(self):
         if self.ops is None:
             self.skipTest(
-                "paddlefleet.extensions.ops not available. Skipping tokens_ ops availability tests."
+                "paddlefleet.ops not available. Skipping tokens_ ops availability tests."
             )
             return
 
@@ -70,7 +68,7 @@ class TestExtensions(unittest.TestCase):
 
         if missing_ops:
             self.fail(
-                f"The following 'tokens_' operators are missing from paddlefleet.extensions.ops "
+                f"The following operators are missing from paddlefleet.ops "
                 f"(C++ extension likely not compiled correctly or is outdated): {', '.join(missing_ops)}"
             )
 

@@ -112,16 +112,16 @@ def setup_ops_extension():
         sources=[
             # cpp files
             # cuda files
-            "./src/paddlefleet/extensions/tokens_stable_unzip.cu",
-            "./src/paddlefleet/extensions/tokens_unzip_gather.cu",
-            "./src/paddlefleet/extensions/tokens_zip_unique_add.cu",
-            "./src/paddlefleet/extensions/tokens_zip_prob.cu",
-            "./src/paddlefleet/extensions/merge_subbatch_cast.cu",
-            "./src/paddlefleet/extensions/tokens_unzip_slice.cu",
-            "./src/paddlefleet/extensions/fuse_swiglu_scale.cu",
+            "./src/paddlefleet/_extensions/tokens_stable_unzip.cu",
+            "./src/paddlefleet/_extensions/tokens_unzip_gather.cu",
+            "./src/paddlefleet/_extensions/tokens_zip_unique_add.cu",
+            "./src/paddlefleet/_extensions/tokens_zip_prob.cu",
+            "./src/paddlefleet/_extensions/merge_subbatch_cast.cu",
+            "./src/paddlefleet/_extensions/tokens_unzip_slice.cu",
+            "./src/paddlefleet/_extensions/fuse_swiglu_scale.cu",
         ],
         include_dirs=[
-            os.path.join(os.getcwd(), "src/paddlefleet/extensions"),
+            os.path.join(os.getcwd(), "src/paddlefleet/_extensions"),
         ],
         extra_compile_args={
             "cxx": [
@@ -154,7 +154,7 @@ def setup_ops_extension():
 
     change_pwd()
     setup(
-        name="paddlefleet.extensions.ops",
+        name="paddlefleet._extensions.ops",
         ext_modules=[ext_module],
         cmdclass=cmdclass,
         use_scm_version={
