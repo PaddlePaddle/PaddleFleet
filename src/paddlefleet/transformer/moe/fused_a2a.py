@@ -22,10 +22,19 @@ except ImportError:
     HAVE_DEEP_EP = False
 
 import paddle
+from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
 
+from .moe_utils import manual_backward
+
 _buffer = None
+
+
+def wait_for_deepep(group_id):
+    """wait_for_deepep"""
+    comm_event = deep_ep.get_event_from_comm_stream(group_id)
+    comm_event.calc_stream_wait(group_id)
 
 
 def get_hidden_bytes(x: paddle.Tensor) -> int:
@@ -270,6 +279,53 @@ class FusedCombine(PyLayer):
         )
 
 
+class FusedCombineAsync(PyLayer):
+    """FusedCombineAsync."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        group,
+        states,
+        *fn_args,
+        fn,
+        is_first_fwd=False,
+    ):
+        """Forward pass of fused combine."""
+        combined_x = fused_combine_forward_func(
+            x,
+            group,
+            states,
+            async_finish=True,
+        )
+
+        assert fn is not None, "use FusedCombineAsync async, but fn is None."
+        ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
+
+        ctx.handle = states["handle"]
+        ctx.group = group
+
+        wait_for_deepep(group.id)
+
+        return (combined_x,) + fn_out
+
+    @staticmethod
+    def backward(ctx, grad_output, *fn_out_grads):
+        """Backward pass of fused combine."""
+        grad_x = fused_combine_backward_func(
+            grad_output,
+            ctx.group,
+            ctx.handle,
+            async_finish=True,
+        )
+
+        fn_args_grads = ctx.bwf(*fn_out_grads)
+
+        wait_for_deepep(ctx.group.id)
+        return (grad_x,) + fn_args_grads
+
+
 if HAVE_DEEP_EP:
 
     def fused_dispatch(
@@ -302,7 +358,9 @@ if HAVE_DEEP_EP:
             previous_event,
         )
 
-    def fused_combine(x, group, handle, previous_event=None):
+    def fused_combine(
+        x, group, handle, previous_event=None, combine_overlap_handle=None
+    ):
         """Perform fused combine operation if deep_ep is available.
 
         Args:
@@ -316,7 +374,24 @@ if HAVE_DEEP_EP:
         """
         states = {}
         states["handle"] = handle
-        return FusedCombine.apply(x, group, states, previous_event)
+        if combine_overlap_handle is None:
+            return FusedCombine.apply(x, group, states, previous_event)
+        else:
+            assert previous_event is None
+            assert isinstance(combine_overlap_handle, dict)
+            assert "fn" in combine_overlap_handle
+            assert "fn_args" in combine_overlap_handle
+            assert isinstance(combine_overlap_handle["fn_args"], tuple)
+            combined_x, *fn_out = FusedCombineAsync.apply(
+                x,
+                group,
+                states,
+                *(combine_overlap_handle["fn_args"]),
+                fn=combine_overlap_handle["fn"],
+                is_first_fwd=not framework._dygraph_tracer()._has_grad,
+            )
+            combine_overlap_handle["fn_out"] = fn_out
+            return combined_x
 
 else:
     fused_dispatch = None

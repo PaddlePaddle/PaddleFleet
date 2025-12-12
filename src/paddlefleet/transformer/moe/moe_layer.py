@@ -78,6 +78,7 @@ class MoELayer(nn.Layer):
         self.sequence_parallel = config.sequence_parallel
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
         self.moe_use_fusion_node = False
         if self.moe_token_dispatcher_type == "deepep":
@@ -311,6 +312,7 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        combine_overlap_handle: dict,
     ):
         # TODO(deepllz): add fp8 dispatch config && implementation
         dispatched_hidden_states = self.dispatch(
@@ -330,7 +332,7 @@ class MoELayer(nn.Layer):
             use_fp8_mlp=self.fp8,
         )
         hidden_states = self.token_dispatcher._comm_manager.combine(
-            hidden_states,
+            hidden_states, combine_overlap_handle
         )
         return hidden_states
 
@@ -359,10 +361,23 @@ class MoELayer(nn.Layer):
         # topk_weights, topk_indices will be used in AllToAllMoECommunication
         # gates_masked, mask will be used in DeepEPMoECommunication
         # capacity, priorities are not used currently
+
+        if (
+            self.shared_experts is not None
+            and self.moe_shared_expert_overlap
+            and self.moe_use_fusion_node
+        ):
+            combine_overlap_handle = {
+                "fn": self.shared_experts,
+                "fn_args": (residuals,),
+            }
+        else:
+            combine_overlap_handle = None
+
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
-                    hidden_states, gates_masked, mask
+                    hidden_states, gates_masked, mask, combine_overlap_handle
                 )
             else:
                 output = self.custom_forward(hidden_states, gates_masked, mask)
@@ -382,7 +397,10 @@ class MoELayer(nn.Layer):
 
         output = output.reshape(orig_shape)
         if self.shared_experts is not None:
-            shared_output = self.shared_experts(residuals)[0]
+            if combine_overlap_handle is not None:
+                shared_output = combine_overlap_handle["fn_out"][0]
+            else:
+                shared_output = self.shared_experts(residuals)[0]
             output = output + shared_output
 
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:

@@ -50,7 +50,9 @@ class _DispatchManager(ABC):
         pass
 
     @abstractmethod
-    def combine(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
+    def combine(
+        self, hidden_states: paddle.Tensor, combine_overlap_handle: dict
+    ) -> paddle.Tensor:
         """Combine the hidden_states after expert processing."""
         pass
 
@@ -184,8 +186,12 @@ class _DeepepManager(_DispatchManager):
         """
         return self.tokens_per_expert
 
-    def combine(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
-        hidden_states = fused_combine(hidden_states, self.group, self.handle)
+    def combine(
+        self, hidden_states: paddle.Tensor, combine_overlap_handle: dict
+    ) -> paddle.Tensor:
+        hidden_states = fused_combine(
+            hidden_states, self.group, self.handle, None, combine_overlap_handle
+        )
         # Release the handle after combine operation
         self.handle = None
         return hidden_states
