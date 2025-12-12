@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import TYPE_CHECKING
 
 import paddle
@@ -25,6 +27,7 @@ from paddle import Tensor, nn
 from paddlefleet import tensor_parallel
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddlefleet.tensor_parallel import checkpoint
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.utils import log_single_rank
@@ -34,6 +37,76 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 logger = logging.getLogger(__name__)
+
+
+def need_full_recompute(layer_number, config):
+    if config.recompute_granularity == "full":
+        assert config.recompute_method in [
+            "uniform",
+            "first_n",
+            "block",
+            "manual",
+        ], "recompute_method must be one of uniform, first_n, block, manual"
+        if config.recompute_method == "uniform":
+            assert config.recompute_num_layers == 1, (
+                "don't support recompute_method=uniform wihile recompute_num_layers != 1"
+            )
+            return True
+        elif config.recompute_method == "first_n":
+            assert config.recompute_num_layers is not None, (
+                "recompute_num_layers cannot be none"
+            )
+            vpp_size = (
+                config.virtual_pipeline_model_parallel_size
+                if config.virtual_pipeline_model_parallel_size
+                else 1
+            )
+            parallel_size = config.pipeline_model_parallel_size * vpp_size
+            assert config.num_hidden_layers % parallel_size == 0, (
+                "num_hidden_layers must be divided by parallel_size"
+            )
+            chunk_size = int(config.num_hidden_layers / parallel_size)
+            num_layers_in_each_stage = (
+                config.num_hidden_layers / config.pipeline_model_parallel_size
+            )
+            assert config.recompute_num_layers <= num_layers_in_each_stage, (
+                "recompute_num_layers cannot be greater than num_layers_in_each_stage"
+            )
+            if vpp_size > 1:
+                layers = range(config.num_hidden_layers)
+                chunks = [
+                    layers[i * chunk_size : (i + 1) * chunk_size]
+                    for i in range(0, len(layers), chunk_size)
+                ]
+                recompute_layers = []
+                for pp_stage in range(config.pipeline_model_parallel_size):
+                    recompute_layers_in_curr_stage = list(
+                        chain.from_iterable(
+                            chunks[
+                                pp_stage :: config.pipeline_model_parallel_size
+                            ]
+                        )
+                    )[: config.recompute_num_layers]
+                    recompute_layers += recompute_layers_in_curr_stage
+            else:
+                recompute_layers = []
+                layers = list(range(config.num_hidden_layers))
+                if config.pipeline_model_parallel_size > 1:
+                    for recompute_layer_id in range(
+                        config.recompute_num_layers
+                    ):
+                        recompute_layers_in_curr_stage = list(
+                            layers[recompute_layer_id::chunk_size]
+                        )
+                        recompute_layers += recompute_layers_in_curr_stage
+                else:
+                    recompute_layers = range(
+                        config.pipeline_model_parallel_size
+                        * config.recompute_num_layers
+                    )
+            if layer_number in recompute_layers:
+                return True
+    return False
 
 
 @dataclass
@@ -200,6 +273,10 @@ class TransformerLayer(nn.Layer):
         # [Layer 9: BiasDropoutFusion]
         self.mlp_bda = build_layer(sublayers_spec.mlp_bda)
 
+        self.full_recompute = need_full_recompute(
+            self.layer_number, self.config
+        )
+
         self.recompute_input_layernorm = False
         self.recompute_post_attention_layernorm = False
         self.recompute_mlp = False
@@ -226,13 +303,73 @@ class TransformerLayer(nn.Layer):
         # this is only used to uniquely identify decode and non-decode cuda graph
         # runners in the cuda graph manager
         dict_args.pop("dynamic_inference_decode_only", None)
-        hidden_states, context = self._forward_attention(**dict_args)
-        output = self._forward_mlp(hidden_states)
+        keys = tuple(dict_args.keys())
+        values = tuple(dict_args.values())
+
+        if self.full_recompute:
+            hidden_states = dict_args["hidden_states"]
+            attention_mask = dict_args.get("attention_mask", None)
+            attn_mask_startend_row_indices = dict_args.get(
+                "attn_mask_startend_row_indices", None
+            )
+            context = dict_args.get("context", None)
+            context_mask = dict_args.get("context_mask", None)
+            rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
+            attention_bias = dict_args.get("attention_bias", None)
+            packed_seq_params = dict_args.get("packed_seq_params", None)
+            outputs = checkpoint(
+                self._forward_impl,
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                context=context,
+                context_mask=context_mask,
+                rotary_pos_emb=rotary_pos_emb.clone()  # Clone is necessary!
+                if rotary_pos_emb is not None
+                else None,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+            )
+        else:
+            outputs = self._forward_impl(**dict_args)
+
+        if isinstance(outputs, tuple):
+            output, context = outputs[0], outputs[1]
+        else:
+            output, context = outputs, None
+
+        rst = OrderedDict()
         rst = {"hidden_states": output}
         if context is not None:
             rst["context"] = context
         rst = {**dict_args, **rst}
         return rst
+
+    def _forward_impl(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
+    ):
+        hidden_states, context = self._forward_attention(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+            context=context,
+            context_mask=context_mask,
+            rotary_pos_emb=rotary_pos_emb,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+        )
+        output = self._forward_mlp(hidden_states)
+        if context is not None:
+            return output, context
+        return output
 
     def _forward_attention(
         self,
