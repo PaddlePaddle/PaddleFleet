@@ -278,21 +278,16 @@ def apply_rotary_pos_emb(
                 "cu_seqlens or cp_group not be supported when using fused_rope"
             )
         else:
-            if isinstance(t, tuple):
-                return fused_rope(
-                    *t,
-                    sin=sin,
-                    cos=cos,
-                    rotary_emb_base=config.rope_theta,
-                    time_major=config.sequence_parallel,
-                )
+            assert isinstance(t, tuple) is None, (
+                "The input for fused_rope should be a tuple of tensors"
+            )
             return fused_rope(
-                t,
+                *t,
                 sin=sin,
                 cos=cos,
                 rotary_emb_base=config.rope_theta,
                 time_major=config.sequence_parallel,
-            )[0]
+            )
 
     # use unfused implementation
     if cu_seqlens is None:

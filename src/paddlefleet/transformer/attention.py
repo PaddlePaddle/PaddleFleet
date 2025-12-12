@@ -321,8 +321,8 @@ class Attention(FleetLayer, ABC):
                     query = apply_rotary_pos_emb(
                         query,
                         q_pos_emb,
-                        rotary_pos_cos,
-                        rotary_pos_sin,
+                        None,
+                        None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_q,
                         mscale=_yarn_get_concentration_factor_from_config(
@@ -335,8 +335,8 @@ class Attention(FleetLayer, ABC):
                     key = apply_rotary_pos_emb(
                         key,
                         k_pos_emb,
-                        rotary_pos_cos,
-                        rotary_pos_sin,
+                        None,
+                        None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_kv,
                         mscale=_yarn_get_concentration_factor_from_config(
