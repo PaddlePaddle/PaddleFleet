@@ -1213,18 +1213,21 @@ class ExpertsGroupGemmContiguousNode:
                 weights.main_grad = paddle.zeros(
                     weights.shape, dtype=paddle.float32
                 )
-            grad_attr = weights.main_grad
+            weights.main_grad = paddle.incubate.nn.functional.batched_gemm(
+                x.cast(paddle.float32),
+                dy.cast(paddle.float32),
+                self.tokens_per_expert,
+                trans_lhs=True,
+            )
         else:
             if weights.grad is None:
                 weights.grad = paddle.zeros(weights.shape, dtype=paddle.float32)
-            grad_attr = weights.grad
-
-        grad_attr = paddle.incubate.nn.functional.batched_gemm(
-            x,
-            dy,
-            self.tokens_per_expert,
-            trans_lhs=True,
-        )
+            weights.grad = paddle.incubate.nn.functional.batched_gemm(
+                x.cast(paddle.float32),
+                dy.cast(paddle.float32),
+                self.tokens_per_expert,
+                trans_lhs=True,
+            )
 
         if (
             hasattr(weights, "_apply_backward_hook")
