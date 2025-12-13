@@ -1,10 +1,9 @@
 name: Auto Update uv.lock
 
 on:
-
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 16 * * *'
 
 permissions:
   contents: write
@@ -12,6 +11,7 @@ permissions:
 
 jobs:
   update-lockfile:
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -29,9 +29,9 @@ jobs:
             nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04 \
             /bin/bash -c "
               apt-get update && \
-              apt-get install -y python3 python3-pip && \
-              python3 -m pip install uv --break-system-packages && \
-              uv lock --upgrade && \
+              apt-get install -y curl && \
+              curl -LsSf https://astral.sh/uv/install.sh | sh && \
+              /root/.local/bin/uv lock --upgrade && \
               chown $(id -u):$(id -g) uv.lock
             "
 
@@ -46,7 +46,7 @@ jobs:
 
           commit-message: "chore 🤖: Bump `uv.lock` (${{ env.TODAY }})"
 
-          title: "chore🤖: Bump `uv.lock` (${{ env.TODAY }})"
+          title: "chore 🤖: Bump `uv.lock` (${{ env.TODAY }})"
 
           body: |
             🚀 PR to bump `uv.lock` dependencies.
