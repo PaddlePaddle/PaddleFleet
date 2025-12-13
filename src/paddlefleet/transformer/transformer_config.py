@@ -341,6 +341,15 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
 
+    ##################
+    # Context Parallel
+    ##################
+    cp_comm_type: str | list[str] | None = None
+    """Inter-gpu communication type for context parallelism. Not support now.
+    str: all layers share same communication type.
+    List[str]: each layer has its separate communication type.
+    """
+
     ####################
     # fp8
     ####################
