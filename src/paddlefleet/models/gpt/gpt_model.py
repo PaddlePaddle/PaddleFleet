@@ -119,9 +119,19 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(spec.embedding), "model"
             )
         i = 0
+        for head_empty_layer in spec.head_empty_layers:
+            self.add_sequential_layer(
+                layers, LayerDesc(head_empty_layer), f"model.layers.{i}"
+            )
+            i += 1
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
                 layers, LayerDesc(transformer_layer_spec), f"model.layers.{i}"
+            )
+            i += 1
+        for tail_empty_layer in spec.tail_empty_layers:
+            self.add_sequential_layer(
+                layers, LayerDesc(tail_empty_layer), f"model.layers.{i}"
             )
             i += 1
         self.add_sequential_layer(layers, LayerDesc(spec.layer_norm), "model")
