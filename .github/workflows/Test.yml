@@ -776,7 +776,7 @@ jobs:
           wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
           h20_multi_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi.xml"
           wget "${h20_multi_cov_file_url}" -O h20_multi_coverage.xml --no-proxy
-          h20_multi_fp8_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi-fp8/coverage-multi.xml"
+          h20_multi_fp8_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi-fp8/coverage-multi-fp8.xml"
           wget "${h20_multi_fp8_cov_file_url}" -O h20_multi_fp8_coverage.xml --no-proxy
           h20_single_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-single/coverage-single.xml"
           wget "${h20_single_cov_file_url}" -O h20_single_coverage.xml --no-proxy
