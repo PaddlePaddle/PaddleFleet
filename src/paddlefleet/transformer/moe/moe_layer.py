@@ -127,21 +127,20 @@ class MoELayer(nn.Layer):
         expert_args["moe_intermediate_size"] = self.moe_intermediate_size
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
-        self.experts = nn.LayerList([])
 
-        for i in range(self.num_experts):
-            if i // self.num_experts_per_device == self.moe_rank:
-                self.experts.append(self.expert_class(**expert_args))
-            else:
-                self.experts.append(None)
-
-        if self.moe_grouped_gemm:
+        if self.moe_grouped_gemm and not self.fp8:
             self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
-                self.experts,
                 pg_collection,
             )
+        else:
+            self.experts = nn.LayerList([])
+            for i in range(self.num_experts):
+                if i // self.num_experts_per_device == self.moe_rank:
+                    self.experts.append(self.expert_class(**expert_args))
+                else:
+                    self.experts.append(None)
 
         shared_expert_args = deepcopy(expert_args)
         shared_expert_args["moe_intermediate_size"] = (
@@ -199,13 +198,28 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            for p in self.experts.parameters():
-                p.is_moe_param = True
-                p.color = {"color": "moe_expert", "group": self.moe_grad_group}
-                p.no_sync = not self.is_mp_moe
-                p.expert = not self.is_mp_moe
-                if self.is_mp_moe or self.is_ep_moe:
-                    p.is_distributed = True
+            if self.moe_grouped_gemm:
+                for p in self.grouped_gemm_experts.parameters():
+                    p.is_moe_param = True
+                    p.color = {
+                        "color": "moe_expert",
+                        "group": self.moe_grad_group,
+                    }
+                    p.no_sync = not self.is_mp_moe
+                    p.expert = not self.is_mp_moe
+                    if self.is_mp_moe or self.is_ep_moe:
+                        p.is_distributed = True
+            else:
+                for p in self.experts.parameters():
+                    p.is_moe_param = True
+                    p.color = {
+                        "color": "moe_expert",
+                        "group": self.moe_grad_group,
+                    }
+                    p.no_sync = not self.is_mp_moe
+                    p.expert = not self.is_mp_moe
+                    if self.is_mp_moe or self.is_ep_moe:
+                        p.is_distributed = True
 
     def _init_expert_parallel(self):
         def _parse_moe_expert_parallel(

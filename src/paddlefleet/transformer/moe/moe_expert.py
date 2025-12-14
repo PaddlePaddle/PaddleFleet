@@ -64,7 +64,6 @@ class GroupedMLPExpert(FleetLayer):
         self,
         num_local_experts: int,
         config: TransformerConfig,
-        experts: list,
         pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__(config=config)

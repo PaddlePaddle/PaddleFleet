@@ -225,14 +225,13 @@ class MLP(FleetLayer):
 
                 def glu(x):
                     x_glu, x_linear = paddle.chunk(x, 2, axis=-1)
-                    # if (
-                    #     val := self.config.activation_func_clamp_value
-                    # ) is not None:
-                    #     x_glu = x_glu.clamp(min=None, max=val)
-                    #     x_linear = x_linear.clamp(min=-val, max=val)
+                    if (
+                        val := self.config.activation_func_clamp_value
+                    ) is not None:
+                        x_glu = x_glu.clamp(min=None, max=val)
+                        x_linear = x_linear.clamp(min=-val, max=val)
                     return self.config.hidden_act(x_glu) * (
-                        x_linear
-                        # + self.config.glu_linear_offset
+                        x_linear + self.config.glu_linear_offset
                     )
 
                 intermediate_parallel = glu(intermediate_parallel)

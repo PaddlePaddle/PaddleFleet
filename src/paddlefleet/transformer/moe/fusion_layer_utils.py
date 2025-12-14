@@ -250,7 +250,6 @@ class MlpNode:
         """
         self.token_dispatcher = custom_map.token_dispatcher
         self.use_expert_subbatch = use_expert_subbatch
-        self.experts = custom_map.experts
         if recompute_unzipped:
             assert use_expert_subbatch, (
                 "use_expert_subbatch must be enabled when recompute_unzipped = True"

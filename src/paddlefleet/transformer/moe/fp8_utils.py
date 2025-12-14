@@ -253,11 +253,13 @@ class ExpertsGroupGemmContiguousNode:
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
         """
-        if expert_id is None:
-            self.experts = custom_map.experts
-            self.grouped_gemm_experts = custom_map.grouped_gemm_experts
+        if use_fp8_mlp:
+            if expert_id is None:
+                self.experts = custom_map.experts
+            else:
+                self.experts = [custom_map.experts[expert_id]]
         else:
-            self.experts = [custom_map.experts[expert_id]]
+            self.grouped_gemm_experts = custom_map.grouped_gemm_experts
         self.expert_id = expert_id
         self.recompute_fwd_gate_up = recompute_fwd_gate_up
         self.dequant_input = dequant_input
