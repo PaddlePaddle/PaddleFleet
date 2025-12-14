@@ -518,6 +518,7 @@ jobs:
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
+          cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFormers
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
@@ -566,6 +567,30 @@ jobs:
           fi
           '
 
+      - name: Integration test (GLM4.5 multi-card FP8)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-fp8
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-fp8/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          bash -x PaddleFleet/ci/integration_test/glm45_fp8.sh
+          glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-fp8
+          source /workspace/PaddleFleet/.venv/bin/activate
+          uv run coverage --version
+          uv run coverage combine
+          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml
+          uv run coverage report -m
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+          fi
+          '
+
       - name: H20 Coverage Upload to BOS
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
@@ -574,8 +599,11 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-multi/coverage.xml coverage-multi.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
+          target_path_multi_fp8="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi-fp8"
           uv run ${push_file} coverage-multi.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi_fp8}
           '
 
       - name: Terminate and delete the container
@@ -748,6 +776,8 @@ jobs:
           wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
           h20_multi_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi.xml"
           wget "${h20_multi_cov_file_url}" -O h20_multi_coverage.xml --no-proxy
+          h20_multi_fp8_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi-fp8/coverage-multi-fp8.xml"
+          wget "${h20_multi_fp8_cov_file_url}" -O h20_multi_fp8_coverage.xml --no-proxy
           h20_single_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-single/coverage-single.xml"
           wget "${h20_single_cov_file_url}" -O h20_single_coverage.xml --no-proxy
           h20_qwen_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-qwen/coverage-qwen.xml"
@@ -757,20 +787,21 @@ jobs:
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_fp8_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_single_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' a100_coverage.xml
           git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
-          diff-cover multi_coverage.xml single_coverage.xml h20_multi_coverage.xml h20_single_coverage.xml h20_qwen_coverage.xml a100_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
+          diff-cover multi_coverage.xml single_coverage.xml h20_multi_coverage.xml h20_multi_fp8_coverage.xml h20_single_coverage.xml h20_qwen_coverage.xml a100_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
 
       - name: Upload coverage to Codecov
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: ./multi_coverage.xml, ./single_coverage.xml ./h20_multi_coverage.xml ./h20_single_coverage.xml ./h20_qwen_coverage.xml ./a100_coverage.xml
+          files: ./multi_coverage.xml, ./single_coverage.xml ./h20_multi_coverage.xml ./h20_multi_fp8_coverage.xml ./h20_single_coverage.xml ./h20_qwen_coverage.xml ./a100_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true

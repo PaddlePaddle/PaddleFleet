@@ -28,13 +28,14 @@ if TYPE_CHECKING:
 
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
+from paddlefleet.transformer.transformer_layer import TransformerLayer
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class GPTSublayersSpec:
-    """
+    """p
     The dataclass for LayerSpecs of GPT sublayers_spec
     including embedding, n * transformer_layer, mtp, lm_head.
     """
@@ -387,3 +388,16 @@ class GPTModel(PipelineLayer):
                 renamed_sharded_state_dict[k] = v
 
         return renamed_sharded_state_dict
+
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+        for idx, layer in enumerate(self.run_function):
+            if isinstance(layer, TransformerLayer):
+                layer.fp8_quant_weight(
+                    batch_mode=batch_mode, quant_transpose=quant_transpose
+                )
+
+    def use_fp8(self):
+        for idx, layer in enumerate(self.run_function):
+            if isinstance(layer, TransformerLayer) and layer.use_fp8():
+                return True
+        return False

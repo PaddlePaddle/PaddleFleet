@@ -48,12 +48,16 @@ class _DispatchManager(ABC):
         pass
 
     @abstractmethod
-    def dispatch(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
+    def dispatch(
+        self, hidden_states: paddle.Tensor, fp8_dispatch: bool
+    ) -> paddle.Tensor:
         """Dispatch the hidden_states according to the routing_map."""
         pass
 
     @abstractmethod
-    def combine(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
+    def combine(
+        self, hidden_states: paddle.Tensor, combine_overlap_handle: dict | None
+    ) -> paddle.Tensor:
         """Combine the hidden_states after expert processing."""
         pass
 
@@ -132,20 +136,23 @@ class _DeepepManager(_DispatchManager):
             probs, self.router_topk, axis=-1
         )
 
-    def dispatch(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
-        hidden_states, dispatched_probs, states = fused_dispatch(
+    def dispatch(
+        self, hidden_states: paddle.Tensor, fp8_dispatch: bool = False
+    ) -> paddle.Tensor:
+        hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
             self.token_indices,
             self.token_probs,
             self.num_experts,
             self.group,
+            fp8_dispatch=fp8_dispatch,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
         self.dispatched_indices = states["dispatched_indices"]
         self.dispatched_probs = dispatched_probs
 
-        return hidden_states
+        return hidden_states, scale
 
     def _indices_to_multihot(self, indices, probs):
         """
@@ -187,8 +194,14 @@ class _DeepepManager(_DispatchManager):
         """
         return self.tokens_per_expert
 
-    def combine(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
-        hidden_states = fused_combine(hidden_states, self.group, self.handle)
+    def combine(
+        self,
+        hidden_states: paddle.Tensor,
+        combine_overlap_handle: dict | None = None,
+    ) -> paddle.Tensor:
+        hidden_states = fused_combine(
+            hidden_states, self.group, self.handle, None, combine_overlap_handle
+        )
         # Release the handle after combine operation
         self.handle = None
         return hidden_states
@@ -316,8 +329,8 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         self._comm_manager.setup_metadata(routing_map, probs)
         return hidden_states
 
-    def token_dispatch(self, hidden_states: paddle.Tensor):
-        return self._comm_manager.dispatch(hidden_states)
+    def token_dispatch(self, hidden_states: paddle.Tensor, fp8_dispatch: bool):
+        return self._comm_manager.dispatch(hidden_states, fp8_dispatch)
 
     def dispatch_postprocess(
         self,
@@ -353,7 +366,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
 
         self._comm_manager.setup_metadata(routing_map, probs)
-        hidden_states = self._comm_manager.dispatch(hidden_states)
+        hidden_states, scale = self._comm_manager.dispatch(hidden_states)
         global_input_tokens = (
             self._comm_manager.get_permuted_hidden_states_by_experts(
                 hidden_states
@@ -456,7 +469,9 @@ class AllToAllTokenDispatcher(nn.Layer):
 
         return sorted_tokens
 
-    def token_dispatch(self, sorted_tokens: paddle.Tensor):
+    def token_dispatch(
+        self, sorted_tokens: paddle.Tensor, fp8_dispatch: bool = False
+    ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
         gathered_tokens = _AllToAll.apply(
             self.dispatch_output_shape,
@@ -465,7 +480,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             in_split_sizes=self.input_split_sizes,
             group=self.moe_group,
         )
-        return gathered_tokens
+        return gathered_tokens, None
 
     def dispatch_postprocess(
         self,
@@ -496,7 +511,9 @@ class AllToAllTokenDispatcher(nn.Layer):
             new_x[self.gatherd_idxs] = expert_outs
         return new_x
 
-    def token_combine(self, new_x: paddle.Tensor):
+    def token_combine(
+        self, new_x: paddle.Tensor, combine_overlap_handle: dict | None = None
+    ):
         # Third All-to-All: Exchange expert outputs back to original rank. `gathered_tokens` are the tokens that originally belong to current rank
         gathered_tokens = _AllToAll.apply(
             self.sorted_tokens_shape,

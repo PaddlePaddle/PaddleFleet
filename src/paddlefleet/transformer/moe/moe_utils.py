@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import paddle
-from paddle import Tensor
+from paddle import Tensor, framework
 
 try:
     from paddle import scatter_add_
@@ -27,6 +27,8 @@ except ImportError:
 import paddle.distributed as dist
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from paddle.distributed.communication.group import Group
 
 
@@ -227,3 +229,98 @@ def apply_random_logits(logits):
     Apply the RandomSTE function to the logits.
     """
     return RandomSTE.apply(logits)
+
+
+def is_tensor(data):
+    """Check if data is a tensor"""
+    return isinstance(data, (paddle.Tensor, paddle.base.core.eager.Tensor))
+
+
+def detach_and_requires_grad_(*args):
+    """Detach tensors and preserve their requires_grad settings"""
+    ret = [a.detach() if is_tensor(a) else a for a in args]
+    for r, a in zip(ret, args):
+        if is_tensor(a):
+            r.stop_gradient = a.stop_gradient
+    return ret
+
+
+class FakeClone(paddle.autograd.PyLayer):
+    """
+    In manual_backward, in order to preserve the local computation graph for temporary backward computation,
+    we need to clone the output of manual_backward. This clone operation essentially doesn't need the value
+    of the output, but rather needs to obtain the computation graph attached to the output.
+
+    However, calling paddle.clone would perform an unnecessary data copy.
+    FakeClone avoids this data copy and achieves the goal of extracting the computation graph.
+    """
+
+    @staticmethod
+    def forward(ctx, input):
+        """Forward pass"""
+        if input.is_contiguous():
+            fake_output = paddle.Tensor()
+            fake_output.get_tensor()._share_data_nocheck_with(
+                input.get_tensor()
+            )
+        else:
+            fake_output = input.clone()
+        return fake_output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Backward pass"""
+        return grad_output
+
+
+def manual_backward(f: Callable, is_first_fwd: bool, *args: list[Any]):
+    """
+    Args:
+        f(callable)
+        args(*Any)
+    Returns
+        bw_f(callable): manual backward fn
+        out(List[Tensor]): output of f(*args)
+    """
+    tracer = framework._dygraph_tracer()
+    orig = tracer._has_grad
+    if not is_first_fwd:
+        tracer._has_grad = True  # turn on grad trace so we can manual backward
+
+    detached_args = detach_and_requires_grad_(*args)
+    detached_args_clone = [
+        FakeClone.apply(a) if is_tensor(a) else a for a in detached_args
+    ]
+    out = f(*detached_args_clone)
+    if isinstance(out, list):
+        out = tuple(out)
+    elif not isinstance(out, tuple):
+        out = (out,)
+
+    if is_first_fwd:
+        tracer._has_grad = orig
+        return None, out
+
+    out_cached = [
+        FakeClone.apply(o) for o in out if o is not None
+    ]  # do not cache stop_gradient output
+
+    for o in out_cached:
+        o._clear_dataptr()  # free mem
+    tracer._has_grad = orig
+
+    def bwd_f(*grad):
+        nonlocal out_cached, detached_args, f
+        grad = list(grad)
+        grad = [g for g in grad if g is not None]
+        assert grad and out_cached, (len(grad), len(out_cached))
+        grad, out_cached = zip(
+            *[(g, o) for g, o in zip(grad, out_cached) if not o.stop_gradient]
+        )
+
+        assert len(grad) == len(out_cached), (len(grad), len(out_cached), f)
+
+        paddle.autograd.backward(out_cached, grad)
+        return tuple([t.grad for t in detached_args if is_tensor(t)])
+
+    return bwd_f, out
