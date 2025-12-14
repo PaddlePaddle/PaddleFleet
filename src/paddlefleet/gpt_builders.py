@@ -57,7 +57,7 @@ def gpt_builder(config, **kwargs):
                 _get_transformer_layer_spec_func(config)
             )
             transformer_layers_spec_for_mtp = []
-            for layer_number in range(config.num_nextn_predict_layers):
+            for layer_number in range(config.num_layers):
                 transformer_layers_spec_for_mtp.append(
                     transformer_layers_spec_for_mtp_func(
                         layer_number=layer_number
