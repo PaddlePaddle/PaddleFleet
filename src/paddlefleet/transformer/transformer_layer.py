@@ -352,6 +352,8 @@ class TransformerLayer(nn.Layer):
         context: Tensor | None = None,
         context_mask: Tensor | None = None,
         rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
     ):
@@ -362,6 +364,8 @@ class TransformerLayer(nn.Layer):
             context=context,
             context_mask=context_mask,
             rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
         )
