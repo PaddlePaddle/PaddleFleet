@@ -31,6 +31,8 @@ mv $config_json.tmp $config_json
 
 sed -i 's/num_hidden_layers: int = 10/num_hidden_layers: int = 3/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
 sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 2/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+sed -i 's/apply_rope_fusion: bool = True/apply_rope_fusion: bool = False/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+
 
 rm -rf checkpoint/
 rm -rf outputs/
