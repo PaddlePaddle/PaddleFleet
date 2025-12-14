@@ -33,7 +33,8 @@ bash ci/multi-card_test.sh  #跑所有多卡单测
 ```
 
 > [!TIP]
-> 如果你需要频繁在本地开发自定义算子，可以参考下面这种方式呀 ✨，这样可以触发增量编译，速度更快呢 🚀：
+> 如果你需要频繁在本地开发自定义算子，可以参考如下方式进行编译安装，这样可以触发增量编译，速度更快🚀：
+>
 > ```bash
 > uv sync --no-install-project
 > uv pip install -e . -v --no-build-isolation
