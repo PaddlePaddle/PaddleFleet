@@ -32,16 +32,16 @@ template <typename X_T,
           bool fill_x,
           int MAX_NUM_EXPERTS_C>
 __global__ void tokens_unzip_stable_kernel(
-    const X_T *__restrict__ X,
-    const routemap_T *__restrict__ routemap_topk,
-    const probs_T *__restrict__ probs_topk,
-    const float *__restrict__ XScale,
+    const X_T* __restrict__ X,
+    const routemap_T* __restrict__ routemap_topk,
+    const probs_T* __restrict__ probs_topk,
+    const float* __restrict__ XScale,
     const expert_base_offset<MAX_NUM_EXPERTS_C> expert_base_offset,
-    X_T *__restrict__ X_unzipped,
-    int *__restrict__ zipped_expertwise_rowmap,
-    probs_T *__restrict__ probs_unzipped,
-    float *__restrict__ XScale_unzipped,
-    int *global_expertwise_block_cumsum,
+    X_T* __restrict__ X_unzipped,
+    int* __restrict__ zipped_expertwise_rowmap,
+    probs_T* __restrict__ probs_unzipped,
+    float* __restrict__ XScale_unzipped,
+    int* global_expertwise_block_cumsum,
     const int total_zipped_tokens_num,
     const int token_length,
     const int scale_length,
@@ -93,10 +93,10 @@ __global__ void tokens_unzip_stable_kernel(
     for (int i = 0; i < num_experts; i++) {
       if (blockIdx.x != 0) [[likely]] {  // NOLINT
         while (cumsum_offset[i] == CUMSUM_INVALID_TAG) [[likely]] {
-            cumsum_offset[i] = atomicExch(
-                &global_expertwise_block_cumsum[blockIdx.x * num_experts + i],
-                CUMSUM_INVALID_TAG);
-          }
+          cumsum_offset[i] = atomicExch(
+              &global_expertwise_block_cumsum[blockIdx.x * num_experts + i],
+              CUMSUM_INVALID_TAG);
+        }
       }
       const int proposed_offset = cumsum_offset[i] + local_cumsum[i];
       global_expertwise_block_cumsum[(blockIdx.x + 1) * num_experts + i] =
@@ -152,16 +152,16 @@ __global__ void tokens_unzip_stable_kernel(
 // ---------------------------- Dispatch ---------------------------------
 template <int MAX_NUM_EXPERTS_C>
 void dispatch_tokens_unzip_stable(
-    const paddle::Tensor &X,
-    const paddle::Tensor &expert_routemap_topk,
-    const paddle::Tensor &expert_prob_topk,
-    const paddle::optional<paddle::Tensor> &XScale,
-    const expert_base_offset<MAX_NUM_EXPERTS_C> &expert_offsets,
-    paddle::Tensor &X_unzipped,                      // NOLINT
-    paddle::Tensor &zipped_expertwise_rowmap,        // NOLINT
-    paddle::Tensor &token_prob_unzipped,             // NOLINT
-    paddle::Tensor &XScale_unzipped,                 // NOLINT
-    paddle::Tensor &global_expertwise_block_cumsum,  // NOLINT
+    const paddle::Tensor& X,
+    const paddle::Tensor& expert_routemap_topk,
+    const paddle::Tensor& expert_prob_topk,
+    const paddle::optional<paddle::Tensor>& XScale,
+    const expert_base_offset<MAX_NUM_EXPERTS_C>& expert_offsets,
+    paddle::Tensor& X_unzipped,                      // NOLINT
+    paddle::Tensor& zipped_expertwise_rowmap,        // NOLINT
+    paddle::Tensor& token_prob_unzipped,             // NOLINT
+    paddle::Tensor& XScale_unzipped,                 // NOLINT
+    paddle::Tensor& global_expertwise_block_cumsum,  // NOLINT
     const int total_zipped_tokens_num,
     const int token_length,
     const int topk,  // deprecated
@@ -248,13 +248,13 @@ void dispatch_tokens_unzip_stable(
 }
 
 std::vector<paddle::Tensor> tokens_unzip_stable(
-    const paddle::Tensor &X,
-    const paddle::optional<paddle::Tensor> &XScale,
-    const paddle::Tensor &expert_routemap_topk,
-    const paddle::Tensor &expert_prob_topk,
-    const int &topk,
-    const int &num_experts,
-    const std::vector<int> &tokens_per_expert,
+    const paddle::Tensor& X,
+    const paddle::optional<paddle::Tensor>& XScale,
+    const paddle::Tensor& expert_routemap_topk,
+    const paddle::Tensor& expert_prob_topk,
+    const int& topk,
+    const int& num_experts,
+    const std::vector<int>& tokens_per_expert,
     const int padding_multiplex,
     const bool fill_x) {
   PD_CHECK(X.dtype() == paddle::DataType::BFLOAT16 ||
@@ -317,14 +317,14 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
         if (fill_x) {
           if (X.dtype() == paddle::DataType::BFLOAT16) {
             auto X_unzipped_ptr =
-                reinterpret_cast<void *>(X_unzipped.data<phi::bfloat16>());
+                reinterpret_cast<void*>(X_unzipped.data<phi::bfloat16>());
             cudaMemsetAsync(X_unzipped_ptr,
                             0,
                             sizeof(phi::bfloat16) * output_rows * cols,
                             X.stream());
           } else if (X.dtype() == paddle::DataType::FLOAT8_E4M3FN) {
             auto X_unzipped_ptr =
-                reinterpret_cast<void *>(X_unzipped.data<phi::float8_e4m3fn>());
+                reinterpret_cast<void*>(X_unzipped.data<phi::float8_e4m3fn>());
             cudaMemsetAsync(X_unzipped_ptr,
                             0,
                             sizeof(phi::float8_e4m3fn) * output_rows * cols,
@@ -332,7 +332,7 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
           }
           if (XScale) {
             auto XScale_unzipped_ptr =
-                reinterpret_cast<void *>(XScale_unzipped.data<float>());
+                reinterpret_cast<void*>(XScale_unzipped.data<float>());
             cudaMemsetAsync(XScale_unzipped_ptr,
                             0,
                             sizeof(float) * output_rows * quanted_cols,
@@ -340,7 +340,7 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
           }
         }
         if (expert_prob_topk.dtype() == paddle::DataType::BFLOAT16) {
-          auto token_prob_unzipped_ptr = reinterpret_cast<void *>(
+          auto token_prob_unzipped_ptr = reinterpret_cast<void*>(
               token_prob_unzipped.data<phi::bfloat16>());
           cudaMemsetAsync(token_prob_unzipped_ptr,
                           0,
@@ -348,7 +348,7 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
                           token_prob_unzipped.stream());
         } else if (expert_prob_topk.dtype() == paddle::DataType::FLOAT32) {
           auto token_prob_unzipped_ptr =
-              reinterpret_cast<void *>(token_prob_unzipped.data<float>());
+              reinterpret_cast<void*>(token_prob_unzipped.data<float>());
           cudaMemsetAsync(token_prob_unzipped_ptr,
                           0,
                           sizeof(float) * output_rows,
@@ -361,8 +361,8 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
             paddle::empty({cumsum_blocknum + 1, num_experts},
                           paddle::DataType::INT32,
                           X.place());
-        auto global_expertwise_block_cumsum_ptr = reinterpret_cast<void *>(
-            global_expertwise_block_cumsum.data<int>());
+        auto global_expertwise_block_cumsum_ptr =
+            reinterpret_cast<void*>(global_expertwise_block_cumsum.data<int>());
 
         cudaMemsetAsync(global_expertwise_block_cumsum_ptr,
                         CUMSUM_INVALID_TAG,
