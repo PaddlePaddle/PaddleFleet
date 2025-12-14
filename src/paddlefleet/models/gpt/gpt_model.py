@@ -43,7 +43,9 @@ class GPTSublayersSpec:
     """
 
     embedding: LayerSpec | None = None
+    head_empty_layers: list[LayerSpec] | None = None
     transformer_layers: list[LayerSpec] | None = None
+    tail_empty_layers: list[LayerSpec] | None = None
     layer_norm: LayerSpec | None = None
     mtp: list[LayerSpec] | None = None
     lm_head: LayerSpec | None = None

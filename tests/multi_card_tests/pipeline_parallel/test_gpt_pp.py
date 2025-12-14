@@ -157,7 +157,7 @@ def run_pp(
     gpt_model = gpt_builder(
         config,
         num_stages=config.pipeline_model_parallel_size,
-        seg_method="layer:TransformerLayer",
+        seg_method="layer:TransformerLayer|EmptyLayer",
     )
     gpt_pipe_model = distributed_model(gpt_model)
 
@@ -223,6 +223,9 @@ class TestPP(unittest.TestCase):
         )
 
         config.pipeline_model_parallel_size = PP_DEGREE
+        config.num_hidden_layers = 6
+        config.remove_head_layers = 1
+        config.remove_tail_layers = 1
 
         run_pp(
             self.seed,

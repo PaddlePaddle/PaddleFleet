@@ -417,6 +417,12 @@ class TransformerConfig(ModelParallelConfig):
     is_hybrid_model: bool = False
     """ Indicates whether this is a hybrid model. """
 
+    remove_head_layers: bool = 0
+    """ Remove first N transformer layers"""
+
+    remove_tail_layers: bool = 0
+    """ Remove last N transformer layers"""
+
     ####################
     # miscellaneous
     ####################
