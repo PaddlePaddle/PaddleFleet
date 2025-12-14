@@ -31,3 +31,10 @@ uv run python -m paddle.distributed.launch --nnodes=1 --log_dir=log --devices=0,
 bash ci/single_card_test.sh  #跑所有单卡单测
 bash ci/multi-card_test.sh  #跑所有多卡单测
 ```
+
+> [!TIP]
+> 如果你需要频繁在本地开发自定义算子，可以参考下面这种方式呀 ✨，这样可以触发增量编译，速度更快呢 🚀：
+> ```bash
+> uv sync --no-install-project
+> uv pip install -e . -v --no-build-isolation
+> ```
