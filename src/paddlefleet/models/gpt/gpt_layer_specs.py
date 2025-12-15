@@ -227,11 +227,7 @@ def get_gpt_decoder_layers_spec(
 
     # Create the layer specs for the model.
     layer_specs = []
-    for layer_number in range(
-        config.num_hidden_layers
-        - config.remove_head_layers
-        - config.remove_tail_layers
-    ):
+    for layer_number in range(config.num_hidden_layers):
         real_layer_number = layer_number + config.remove_head_layers
         if moe_layer_pattern[real_layer_number] == 1:
             layer_specs.append(

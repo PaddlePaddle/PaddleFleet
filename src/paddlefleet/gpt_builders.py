@@ -38,11 +38,7 @@ def gpt_builder(config, **kwargs):
         # Define the decoder layer spec
         transformer_layer_spec_func = _get_transformer_layer_spec_func(config)
         transformer_layers_spec = []
-        for layer_number in range(
-            config.num_hidden_layers
-            - config.remove_head_layers
-            - config.remove_tail_layers
-        ):
+        for layer_number in range(config.num_hidden_layers):
             real_layer_number = layer_number + config.remove_head_layers
             transformer_layers_spec.append(
                 transformer_layer_spec_func(layer_number=real_layer_number)

@@ -195,7 +195,7 @@ class TestPP(unittest.TestCase):
         config = GPTConfig(
             vocab_size=self.vocab_size,
             max_sequence_length=self.seq_len,
-            num_hidden_layers=8,
+            num_hidden_layers=9,
             hidden_size=512,
             num_attention_heads=4,
             intermediate_size=1024,
@@ -216,8 +216,8 @@ class TestPP(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             use_qk_norm=True,
-            remove_head_layers=2,
-            remove_tail_layers=2,
+            num_layers_in_first_pipeline_stage=2,
+            num_layers_in_last_pipeline_stage=1,
         )
 
         loss, gpt_model = single_device_baseline(

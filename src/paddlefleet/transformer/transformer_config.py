@@ -417,12 +417,6 @@ class TransformerConfig(ModelParallelConfig):
     is_hybrid_model: bool = False
     """ Indicates whether this is a hybrid model. """
 
-    remove_head_layers: bool = 0
-    """ Remove first N transformer layers"""
-
-    remove_tail_layers: bool = 0
-    """ Remove last N transformer layers"""
-
     ####################
     # miscellaneous
     ####################
@@ -555,3 +549,53 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
+
+    def get_avg_num_layers(self):
+        assert (
+            self.num_hidden_layers
+            - self.num_layers_in_first_pipeline_stage
+            - self.num_layers_in_last_pipeline_stage
+        ) // self.pipeline_model_parallel_size, (
+            "Incorrect configuration, num_hidden_layers can not divided by stages except first/last stage"
+        )
+        remain_pp_size = self.pipeline_model_parallel_size
+        if remain_pp_size > 1:
+            if self.num_layers_in_first_pipeline_stage is not None:
+                remain_pp_size -= 1
+            if self.num_layers_in_last_pipeline_stage is not None:
+                remain_pp_size -= 1
+        assert remain_pp_size != 0, (
+            "Incorrect configuration, maybe both num_layers_in_first_pipeline_stage and num_layers_in_last_pipeline_stage are set in pp_degree=2"
+        )
+        avg_num_layers = (
+            self.num_hidden_layers
+            - self.num_layers_in_first_pipeline_stage
+            - self.num_layers_in_last_pipeline_stage
+        ) // remain_pp_size
+        return avg_num_layers
+
+    @property
+    def remove_head_layers(self):
+        if (
+            self.num_layers_in_first_pipeline_stage is None
+            or self.pipeline_model_parallel_size == 1
+        ):
+            return 0
+        avg_num_layers = self.get_avg_num_layers()
+        assert avg_num_layers >= self.num_layers_in_first_pipeline_stage, (
+            f"Incorrect configuration with {avg_num_layers=}, {self.num_layers_in_first_pipeline_stage=}"
+        )
+        return avg_num_layers - self.num_layers_in_first_pipeline_stage
+
+    @property
+    def remove_tail_layers(self):
+        if (
+            self.num_layers_in_last_pipeline_stage is None
+            or self.pipeline_model_parallel_size == 1
+        ):
+            return 0
+        avg_num_layers = self.get_avg_num_layers()
+        assert avg_num_layers >= self.num_layers_in_last_pipeline_stage, (
+            f"Incorrect configuration with {avg_num_layers=}, {self.num_layers_in_last_pipeline_stage}"
+        )
+        return avg_num_layers - self.num_layers_in_last_pipeline_stage
