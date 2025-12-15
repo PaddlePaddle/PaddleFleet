@@ -555,7 +555,7 @@ class TransformerConfig(ModelParallelConfig):
             self.num_hidden_layers
             - self.num_layers_in_first_pipeline_stage
             - self.num_layers_in_last_pipeline_stage
-        ) // self.pipeline_model_parallel_size, (
+        ) % self.pipeline_model_parallel_size, (
             "Incorrect configuration, num_hidden_layers can not divided by stages except first/last stage"
         )
         remain_pp_size = self.pipeline_model_parallel_size
