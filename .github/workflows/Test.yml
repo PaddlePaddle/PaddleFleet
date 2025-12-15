@@ -51,3 +51,5 @@ jobs:
           echo "=== DIFF FILE ==="
           cat diff.txt
           echo "================="
+          git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff_origin.txt
+          cat diff_origin.txt
