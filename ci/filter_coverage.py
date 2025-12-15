@@ -15,8 +15,7 @@
 # limitations under the License.
 
 """
-使用 diff-cover 的解析结果来过滤 coverage.xml
-只保留 diff.txt 中提到的变更文件的覆盖率数据
+filter diff.txt file to get changed files and lines
 """
 
 import os
