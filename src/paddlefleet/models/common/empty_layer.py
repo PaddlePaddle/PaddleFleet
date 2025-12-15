@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
 from paddlefleet.transformer.layer import FleetLayer
 
 
@@ -20,8 +28,8 @@ class EmptyLayer(FleetLayer):
     A pass-through layer that performs no operation on its input.
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, config: TransformerConfig):
+        super().__init__(config)
 
     def forward(self, x):
         return x

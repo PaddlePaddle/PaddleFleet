@@ -72,11 +72,15 @@ def gpt_builder(config, **kwargs):
 
     head_empty_layers_spec = []
     for i in range(config.remove_head_layers):
-        head_empty_layers_spec.append(LayerSpec(layer=EmptyLayer))
+        head_empty_layers_spec.append(
+            LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
+        )
 
     tail_empty_layers_spec = []
     for i in range(config.remove_tail_layers):
-        tail_empty_layers_spec.append(LayerSpec(layer=EmptyLayer))
+        tail_empty_layers_spec.append(
+            LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
+        )
 
     gpt_spec = get_gpt_spec(
         config=config,
