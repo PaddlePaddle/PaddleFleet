@@ -801,6 +801,7 @@ jobs:
           python ci/filter_coverage.py h20_single_coverage.xml diff.txt
           python ci/filter_coverage.py h20_qwen_coverage.xml diff.txt
           python ci/filter_coverage.py a100_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_multi_fp8_coverage.xml diff.txt
           exit ${COVERAGE_EXIT_CODE}
 
       - name: Check coverage files before upload
@@ -816,6 +817,7 @@ jobs:
             "h20_single_coverage.xml"
             "h20_qwen_coverage.xml"
             "a100_coverage.xml"
+            "h20_multi_fp8_coverage.xml"
           )
 
           ALL_PASSED=true
@@ -959,7 +961,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: ./multi_coverage.xml, ./single_coverage.xml ./h20_multi_coverage.xml ./h20_multi_fp8_coverage.xml ./h20_single_coverage.xml ./h20_qwen_coverage.xml ./a100_coverage.xml
+          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_coverage.xml,./h20_multi_fp8_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
