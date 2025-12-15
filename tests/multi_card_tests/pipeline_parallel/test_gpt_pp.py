@@ -225,7 +225,6 @@ class TestPP(unittest.TestCase):
         )
 
         config.pipeline_model_parallel_size = PP_DEGREE
-        config.num_hidden_layers = 8
 
         run_pp(
             self.seed,
