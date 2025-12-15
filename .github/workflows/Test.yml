@@ -857,7 +857,7 @@ jobs:
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           cd glm45_fleet_pt
           cp -rf /workspace/PaddleFleet/ci/integration_test/cli/* .
-          bash glm45_fleet_cli.sh
+          bash glm45_multi_cli.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-cli
           source /workspace/PaddleFleet/.venv/bin/activate
