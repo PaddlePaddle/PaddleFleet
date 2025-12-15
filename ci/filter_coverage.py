@@ -31,7 +31,7 @@ def parse_diff_file(diff_file):
     +++ b/src/file1.py
     @@ -10,5 +10,7 @@
 
-    return: dict 
+    return: dict
     """
     changed_files = defaultdict(set)
     current_file = None
@@ -129,7 +129,7 @@ def filter_coverage_by_diff(coverage_file, diff_data):
             "lines_covered": 0,
         }
 
-        # filename -> class elements 
+        # filename -> class elements
         filename_to_classes = defaultdict(list)
 
         # collect all class elements
@@ -290,7 +290,7 @@ def filename_match(coverage_filename, diff_filename):
 
     # normalize path
     def normalize(path):
-        # delteprefix 
+        # delteprefix
         path = path.removeprefix("./")
         # unixify
         path = path.replace("\\", "/")
@@ -305,24 +305,19 @@ def filename_match(coverage_filename, diff_filename):
     if cov_norm == diff_norm:
         return True
 
-
     if diff_norm.endswith(cov_norm):
         return True
 
-   
     if cov_norm.endswith(diff_norm):
         return True
 
-   
     cov_basename = os.path.basename(cov_norm)
     diff_basename = os.path.basename(diff_norm)
 
     if cov_basename and diff_basename and cov_basename == diff_basename:
-        
         cov_dir = os.path.dirname(cov_norm)
         diff_dir = os.path.dirname(diff_norm)
 
-       
         if cov_dir in diff_dir or diff_dir in cov_dir:
             return True
 
