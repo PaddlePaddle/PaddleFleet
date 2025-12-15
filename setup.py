@@ -132,8 +132,6 @@ def setup_ops_extension():
         },
     )
 
-    ext_module.py_limited_api = True
-
     change_pwd()
     setup(
         name="paddlefleet._extensions.ops",
