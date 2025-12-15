@@ -46,7 +46,7 @@ rank=$(($rank-$START_RANK))
 rm -rf ./outputs
 rm -rf paddleformers_dist_log
 
-FLAGS_use_stride_compute_kernel=False NNODES=${nnodes} MASTER_ADDR=${master} MASTER_PORT=${port} CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run --source=. --branch paddleformers-cli train glm45.yaml
+FLAGS_use_stride_compute_kernel=False NNODES=${nnodes} MASTER_ADDR=${master} MASTER_PORT=${port} CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 paddleformers-cli train glm45.yaml
 
 exit 0
 
