@@ -56,6 +56,9 @@ echo "
 " > ./glm45_single_card_gt_loss.txt
 
 
+cat ./glm45_single_card.log
+
+
 export FLAGS_use_stride_compute_kernel=False
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
