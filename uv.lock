@@ -909,7 +909,7 @@ test = [
 requires-dist = [
     { name = "colorlog", specifier = ">=6.10.1" },
     { name = "paddlepaddle-gpu", specifier = ">=3.3.0.dev0" },
-    { name = "triton", specifier = "==3.4.0" },
+    { name = "triton" },
 ]
 
 [package.metadata.requires-dev]
