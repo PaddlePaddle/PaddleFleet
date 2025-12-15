@@ -28,8 +28,6 @@ jq --arg cache "$CACHE_DIR" \
    $config_json > $config_json.tmp
 mv $config_json.tmp $config_json
 
-# hotfix
-sed -i 's/n_shared_experts: int = 1408/n_shared_experts: int = 1/' glm45_provider.py
 
 rm -rf checkpoint/
 rm -rf outputs/
