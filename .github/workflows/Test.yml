@@ -772,7 +772,11 @@ jobs:
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_single_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' a100_coverage.xml
-          git diff origin/${{ github.event.pull_request.base.ref }}..HEAD --unified=0 > diff.txt
+          git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} --unified=0 > diff.txt
+          echo "=== DIFF FILE ==="
+          cat diff.txt
+          echo "================="
+
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
           diff-cover multi_coverage.xml single_coverage.xml h20_multi_coverage.xml h20_multi_fp8_coverage.xml h20_single_coverage.xml h20_qwen_coverage.xml a100_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
