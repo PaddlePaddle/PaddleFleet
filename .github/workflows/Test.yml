@@ -809,7 +809,7 @@ jobs:
         run: |
           echo "=== CHECKING COVERAGE FILES ==="
 
-          
+
           COVERAGE_FILES=(
             "multi_coverage.xml"
             "single_coverage.xml"
@@ -827,14 +827,14 @@ jobs:
           for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
             echo -e "\n=== CHECKING: $COVERAGE_FILE ==="
 
-            
+
             if [ ! -f "$COVERAGE_FILE" ]; then
               echo "⚠️ WARNING: File not found: $COVERAGE_FILE"
               echo "Skipping..."
               continue
             fi
 
-            
+
             FILE_SIZE=$(wc -c < "$COVERAGE_FILE")
             echo "File size: $FILE_SIZE bytes"
             TOTAL_FILE_SIZE=$((TOTAL_FILE_SIZE + FILE_SIZE))
@@ -843,7 +843,7 @@ jobs:
               echo "⚠️ WARNING: File is very small"
             fi
 
-            
+
             if ! head -1 "$COVERAGE_FILE" | grep -q "<?xml"; then
               echo "❌ ERROR: Not a valid XML file"
               echo "First line:"
@@ -852,7 +852,7 @@ jobs:
               continue
             fi
 
-           
+
             LINE_COUNT=$(grep -c "<line " "$COVERAGE_FILE" 2>/dev/null || echo "0")
             echo "Coverage lines found: $LINE_COUNT"
             TOTAL_COVERAGE_LINES=$((TOTAL_COVERAGE_LINES + LINE_COUNT))
@@ -905,11 +905,11 @@ jobs:
                 ;;
             esac
 
-           
+
             echo "First 2 lines:"
             head -2 "$COVERAGE_FILE"
 
-            
+
             BACKUP_FILE="${COVERAGE_FILE}.backup"
             if [ -f "$BACKUP_FILE" ]; then
               BACKUP_SIZE=$(wc -c < "$BACKUP_FILE")
@@ -928,13 +928,13 @@ jobs:
             echo "✅ $COVERAGE_FILE check passed"
           done
 
-          
+
           echo -e "\n=== SUMMARY REPORT ==="
           echo "Total files processed: ${#COVERAGE_FILES[@]}"
           echo "Total coverage lines: $TOTAL_COVERAGE_LINES"
           echo "Total file size: $TOTAL_FILE_SIZE bytes"
 
-          
+
           if [ $TOTAL_COVERAGE_LINES -eq 0 ]; then
             echo "⚠️ WARNING: No coverage lines found in any file!"
           fi
@@ -945,7 +945,7 @@ jobs:
 
           echo "✅ All checks completed"
 
-          
+
           for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
             BACKUP_FILE="${COVERAGE_FILE}.backup"
             if [ -f "$BACKUP_FILE" ]; then
