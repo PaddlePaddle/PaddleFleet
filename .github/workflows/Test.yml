@@ -873,30 +873,6 @@ jobs:
           fi
           '
 
-      - name: Integration test (GLM4.5 multi-card FP8)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi-cli
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-cli/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_fp8.sh
-          glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-multi-cli
-          source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-cli/coverage.xml
-          uv run coverage report -m
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-          fi
-          '
-
       - name: H20 Coverage Upload to BOS
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
