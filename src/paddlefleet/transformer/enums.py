@@ -27,6 +27,7 @@ class ModelType(enum.Enum):
     @property
     def encoder_and_decoder(self):
         """Deprecated property - use encoder_or_decoder instead."""
+        print("debug use")
         raise ValueError(
             "ModelType.encoder_and_decoder is deprecated. Please use ModelType.encoder_or_decoder "
             "instead."

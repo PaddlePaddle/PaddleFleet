@@ -67,6 +67,7 @@ def get_path_with_count(path):
     """
     calls get_path_count and appends returned value to path
     """
+    print("debug use")
     return f"{path}.iter{get_path_count(path)}"
 
 

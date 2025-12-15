@@ -42,6 +42,7 @@ def initialize_fleet(
     world_size = dist.get_world_size()
 
     ps.initialize_model_parallel(hcg)
+    print("debug use")
     print(f"fleet initialize successfully: {rank=} {world_size=}")
 
 

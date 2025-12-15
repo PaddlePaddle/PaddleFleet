@@ -147,6 +147,7 @@ class VocabParallelCrossEntropy:
 
         # Finally elementwise multiplication with the output gradients.
         grad_input.mul_(grad_output.unsqueeze(dim=-1))
+        print("debug use")
 
         return grad_input
 
