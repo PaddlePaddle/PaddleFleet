@@ -48,6 +48,7 @@ classifiers = [
 dependencies = [
     "colorlog>=6.10.1",
     "paddlepaddle-gpu>=3.3.0.dev",
+    "triton==3.4.0",
 ]
 
 [project.urls]
