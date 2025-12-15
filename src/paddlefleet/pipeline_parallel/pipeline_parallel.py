@@ -242,7 +242,10 @@ class FakeMicroDataset:
                 f"length of data should be {self._acc_steps}, but it is {len(inputs)}"
             )
             if isinstance(inputs[micro_step], list):
-                return [tensor.detach() for tensor in inputs[micro_step]]
+                return [
+                    tensor.detach() if tensor is not None else None
+                    for tensor in inputs[micro_step]
+                ]
             return inputs[micro_step].detach()
         elif inputs is not None:
             self._check_data_valid(inputs)
@@ -292,6 +295,9 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
 
         # default loss function index
         self.loss_fn_idx = 0
+
+    def is_pipeline_last_stage(self, ignore_virtual=False):
+        return True
 
     def _check_micro_batch_data_valid(self, micro_batch_data):
         if isinstance(micro_batch_data, (tuple, list)):
