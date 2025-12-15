@@ -21,6 +21,7 @@ import contextlib
 import logging
 
 import paddle
+from paddle.distributed.fleet.utils import recompute
 
 from ..parallel_state import (
     get_expert_model_parallel_rank,
@@ -388,25 +389,9 @@ def _fork_rng():
         _set_all_rng_states(*current_states)
 
 
-class CheckpointFunction(paddle.autograd.Function):
-    # pylint: disable=missing-function-docstring
-    @staticmethod
-    def forward(ctx, run_function, distribute_saved_activations, *args):
-        """Forward pass."""
-        pass
-
-    # pylint: disable=missing-function-docstring
-    @staticmethod
-    def backward(ctx, *args):
-        """Backward pass."""
-        pass
-
-
-def checkpoint(function, distribute_saved_activations, *args):
+def checkpoint(function, *args, **kwargs):
     """Checkpoint a model or part of the model."""
-    return CheckpointFunction.apply(
-        function, distribute_saved_activations, *args
-    )
+    return recompute(function, *args, **kwargs)
 
 
 class CheckpointWithoutOutputFunction(paddle.autograd.Function):

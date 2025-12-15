@@ -29,13 +29,6 @@ from .fused_a2a import (
     fused_dispatch,
 )
 
-# MoE communication interfaces
-from .moe_communication import (
-    AllToAllMoECommunication,
-    DeepEPMoECommunication,
-    MoECommunicationInterface,
-)
-
 # MoE experts
 from .moe_expert import StandardMLPExpert
 
@@ -52,6 +45,7 @@ from .moe_utils import (
 
 # MoE token dispatcher
 from .token_dispatcher import (
+    AllToAllTokenDispatcher,
     MoEFlexTokenDispatcher,
     MoETokenDispatcher,
     _DeepepManager,
@@ -66,10 +60,6 @@ __all__ = [
     "CombineNode",
     "fused_dispatch",
     "fused_combine",
-    # Communication
-    "MoECommunicationInterface",
-    "AllToAllMoECommunication",
-    "DeepEPMoECommunication",
     # Experts
     "StandardMLPExpert",
     "StandardMLPSharedExpert",
@@ -84,6 +74,7 @@ __all__ = [
     # Token Dispatcher
     "MoETokenDispatcher",
     "MoEFlexTokenDispatcher",
+    "AllToAllTokenDispatcher",
     "_DispatchManager",
     "_DeepepManager",
 ]

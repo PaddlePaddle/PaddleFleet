@@ -34,12 +34,11 @@ if TYPE_CHECKING:
 from paddlefleet import utils
 
 from .fusion_layer_utils import FusionMoePyLayer
-from .moe_communication import AllToAllMoECommunication, DeepEPMoECommunication
 from .moe_expert import StandardMLPExpert
 from .moe_router import DeepEPTopKRouter, StandardMoERouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
-from .token_dispatcher import MoEFlexTokenDispatcher
+from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -78,18 +77,24 @@ class MoELayer(nn.Layer):
         self.sequence_parallel = config.sequence_parallel
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
+        self.fp8_dispatch = bool(config.fp8)
+        self.fp8_wgrad = config.fp8_wgrad
         self.moe_use_fusion_node = False
         if self.moe_token_dispatcher_type == "deepep":
             self.moe_use_fusion_node = True
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
-
+        self.moe_grouped_gemm = config.moe_grouped_gemm
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
             if self.moe_group is not None
             else 1
+        )
+        self.num_local_experts = (
+            self.num_experts // self.expert_model_parallel_size
         )
 
         # MoE-Related Configs
@@ -125,6 +130,7 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
         self.experts = nn.LayerList([])
+
         for i in range(self.num_experts):
             if i // self.num_experts_per_device == self.moe_rank:
                 self.experts.append(self.expert_class(**expert_args))
@@ -153,11 +159,18 @@ class MoELayer(nn.Layer):
             )
             self.moe_token_dispatcher_type = "alltoall"
             self.moe_use_fusion_node = False
+            self.fp8_dispatch = False
 
         if self.fp8:
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
             )
+        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
+            logger.warning(
+                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
+                "Will turn on moe_grouped_gemm."
+            )
+            self.moe_grouped_gemm = True
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
@@ -167,14 +180,8 @@ class MoELayer(nn.Layer):
                     self.num_experts,
                     self.moe_group,
                 )
-                self.communication = DeepEPMoECommunication(
-                    self.moe_group,
-                    self.expert_model_parallel_size,
-                    self.num_experts_per_device,
-                    self.token_dispatcher,
-                )
             elif self.moe_token_dispatcher_type == "alltoall":
-                self.communication = AllToAllMoECommunication(
+                self.token_dispatcher = AllToAllTokenDispatcher(
                     self.moe_group,
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
@@ -268,8 +275,12 @@ class MoELayer(nn.Layer):
         hidden_states = self.token_dispatcher.dispatch_preprocess(
             hidden_states, probs, routing_map
         )
-        hidden_states = self.token_dispatcher.token_dispatch(hidden_states)
-        return hidden_states
+        hidden_states, fp8_dispatched_handle = (
+            self.token_dispatcher.token_dispatch(
+                hidden_states, self.fp8_dispatch
+            )
+        )
+        return hidden_states, fp8_dispatched_handle
 
     def permute(self, hidden_states: paddle.Tensor):
         global_input_tokens, tokens_per_expert = (
@@ -302,7 +313,7 @@ class MoELayer(nn.Layer):
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
     ):
-        hidden_states = self.dispatch(hidden_states, probs, routing_map)
+        hidden_states, _ = self.dispatch(hidden_states, probs, routing_map)
         hidden_states = self.routed_experts_compute(hidden_states)
         return self.combine(hidden_states)
 
@@ -311,9 +322,10 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        combine_overlap_handle: dict,
     ):
         # TODO(deepllz): add fp8 dispatch config && implementation
-        dispatched_hidden_states = self.dispatch(
+        dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
             hidden_states, probs, routing_map
         )
         dispatched_indices = (
@@ -328,9 +340,11 @@ class MoELayer(nn.Layer):
             self,
             self.num_experts_per_tok,
             use_fp8_mlp=self.fp8,
+            fp8_dispatched_handle=fp8_dispatched_handle,
+            use_bf16_gemm_weight_grad=not self.fp8_wgrad,
         )
         hidden_states = self.token_dispatcher._comm_manager.combine(
-            hidden_states,
+            hidden_states, combine_overlap_handle
         )
         return hidden_states
 
@@ -356,13 +370,27 @@ class MoELayer(nn.Layer):
             aux_loss,
             z_loss,
         ) = self.gate(hidden_states)
-        # topk_weights, topk_indices will be used in AllToAllMoECommunication
-        # gates_masked, mask will be used in DeepEPMoECommunication
-        # capacity, priorities are not used currently
+        # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
+        # gates_masked, mask: Shape is [seq_len, num_experts], sometimes their names are "probs" and "routing_map"
+        # capacity, priorities are used for dropping tokens, currently they are not used
+
+        if (
+            self.shared_experts is not None
+            and self.moe_shared_expert_overlap
+            and self.moe_use_fusion_node
+            and self.expert_model_parallel_size > 1
+        ):
+            combine_overlap_handle = {
+                "fn": self.shared_experts,
+                "fn_args": (residuals,),
+            }
+        else:
+            combine_overlap_handle = None
+
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
-                    hidden_states, gates_masked, mask
+                    hidden_states, gates_masked, mask, combine_overlap_handle
                 )
             else:
                 output = self.custom_forward(hidden_states, gates_masked, mask)
@@ -372,7 +400,7 @@ class MoELayer(nn.Layer):
                 reshaped_input = hidden_states.reshape([-1, d_model])
             else:
                 reshaped_input = hidden_states
-            output = self._forward_traditional_moe(
+            output = self._forward_single_card_moe(
                 reshaped_input, topk_indices, topk_weights
             )
 
@@ -382,14 +410,17 @@ class MoELayer(nn.Layer):
 
         output = output.reshape(orig_shape)
         if self.shared_experts is not None:
-            shared_output = self.shared_experts(residuals)[0]
+            if combine_overlap_handle is not None:
+                shared_output = combine_overlap_handle["fn_out"][0]
+            else:
+                shared_output = self.shared_experts(residuals)[0]
             output = output + shared_output
 
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)
         return output, None  # None is bias
 
-    def _forward_traditional_moe(
+    def _forward_single_card_moe(
         self,
         hidden_states: paddle.Tensor,
         selected_experts: paddle.Tensor,
@@ -444,3 +475,93 @@ class MoELayer(nn.Layer):
             )
             final_hidden_states = final_hidden_states + final_hidden_states_tmp
         return final_hidden_states.cast(hidden_states.dtype)
+
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+        if not (self.moe_use_fusion_node and self.fp8):
+            return
+
+        def quantize_weights(
+            weight_list, weight_obj=None, quant_transpose=None
+        ):
+            """Helper function to quantize a list of weights."""
+            if weight_obj is None:
+                weight_obj = weight_list[0]
+            if hasattr(weight_obj, "fp8_weight_stacked") or hasattr(
+                weight_obj, "fp8_weight_stacked_transpose"
+            ):
+                return
+
+            if quant_transpose is None:
+                fp8_weight, fp8_scale = (
+                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
+                        weight_list, transpose=False
+                    )
+                )
+                weight_obj.fp8_weight_stacked = fp8_weight
+                weight_obj.fp8_scale_stacked = fp8_scale
+
+                fp8_weight_t, fp8_scale_t = (
+                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
+                        weight_list, transpose=True
+                    )
+                )
+                weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
+                weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
+            elif quant_transpose is False:
+                # Only quantize without transpose
+                fp8_weight, fp8_scale = (
+                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
+                        weight_list, transpose=False
+                    )
+                )
+                weight_obj.fp8_weight_stacked = fp8_weight
+                weight_obj.fp8_scale_stacked = fp8_scale
+            elif quant_transpose is True:
+                # Only quantize with transpose
+                fp8_weight_t, fp8_scale_t = (
+                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
+                        weight_list, transpose=True
+                    )
+                )
+                weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
+                weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
+            else:
+                raise ValueError("Invalid value for `quant_transpose`.")
+
+        if batch_mode:
+            # Batch mode: process all experts' weights together
+            expert_w1_list = [
+                expert.up_gate_proj.weight
+                for expert in self.experts
+                if expert is not None
+            ]
+            expert_w2_list = [
+                expert.down_proj.weight
+                for expert in self.experts
+                if expert is not None
+            ]
+            if expert_w1_list:
+                quantize_weights(
+                    expert_w1_list, expert_w1_list[0], quant_transpose
+                )
+            if expert_w2_list:
+                quantize_weights(
+                    expert_w2_list, expert_w2_list[0], quant_transpose
+                )
+        else:
+            # Individual mode: process each expert's weights separately
+            for expert in self.experts:
+                if expert is not None:
+                    quantize_weights(
+                        [expert.up_gate_proj.weight],
+                        quant_transpose=quant_transpose,
+                    )
+                    quantize_weights(
+                        [expert.down_proj.weight],
+                        quant_transpose=quant_transpose,
+                    )
+
+    def use_fp8(self):
+        if self.moe_use_fusion_node and self.fp8:
+            return True
+        return False

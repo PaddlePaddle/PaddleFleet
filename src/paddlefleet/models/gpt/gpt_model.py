@@ -26,15 +26,18 @@ from paddlefleet.pipeline_parallel import (
 if TYPE_CHECKING:
     from paddlefleet.spec_utils import LayerSpec
 
+from paddle.distributed import fleet
+
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
+from paddlefleet.transformer.transformer_layer import TransformerLayer
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class GPTSublayersSpec:
-    """
+    """p
     The dataclass for LayerSpecs of GPT sublayers_spec
     including embedding, n * transformer_layer, mtp, lm_head.
     """
@@ -77,7 +80,17 @@ class GPTModel(PipelineLayer):
         del kwargs["share_embeddings_and_output_weights"]
         del kwargs["config"]
 
-        super().__init__(layers=self.layers, **kwargs)
+        topology = (
+            None
+            if self.config.pipeline_model_parallel_size == 1
+            else fleet.get_hybrid_communicate_group().topology()
+        )
+
+        super().__init__(
+            layers=self.layers,
+            topology=topology,
+            **kwargs,
+        )
 
         if skip_weight_param_allocation:
             shared_embed_weight = None
@@ -177,6 +190,43 @@ class GPTModel(PipelineLayer):
             str(index): x["name_prefix"]
             for index, x in enumerate(self._sequential_layers)
         }
+
+    def get_shardlayer_prefix(self, name_splited):
+        """_summary_
+            This function retrieves the prefix of a shared layer. The process involves:
+            1. Identifying all key names of shared layers, like 'shared_weight01', 'shared_weight02', etc.
+            2. For instance, given name_splited = ['shared_layers', 'shared_weight01', 'weight'],
+                the 'shared_layer_key' would be name_splited[1], which is 'shared_weight01'.
+            3. By traversing through all layers, the function checks if the specified
+                shared_layer is present in the current stage. If found, it returns the corresponding prefix.
+
+            Note: For retrieving all SharedLayer instances in Paddle, you can refer to the following Paddle code.
+            https://github.com/PaddlePaddle/Paddle/blob/2cf724d055679a1a0e48766dfb1708b920273078/python/paddle/distributed/fleet/meta_parallel/parallel_layers/pp_layers.py#L460-L513
+        Args:
+            name_splited (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        shared_layer_names = {
+            s.layer_name for s in self.layers if isinstance(s, SharedLayerDesc)
+        }
+        assert name_splited[1] in shared_layer_names, (
+            f"The shared layer name {name_splited[1]} must be in prefixes!"
+        )
+        shared_layer_key = name_splited[1]
+        for idx, layer in enumerate(self.layers):
+            if (
+                isinstance(layer, SharedLayerDesc)
+                and layer.layer_name == shared_layer_key
+            ):
+                if self.get_stage_from_index(idx) == self._stage_id:
+                    return self.get_sequential_name_prefixs()[str(idx)]
+
+        # the prefix must be in the current stage, else raise error
+        raise ValueError(
+            f"The shared layer {shared_layer_key} must be in the current stage!"
+        )
 
     def _set_pipeline_name_mapping(self, mappings=None):
         """
@@ -350,3 +400,16 @@ class GPTModel(PipelineLayer):
                 renamed_sharded_state_dict[k] = v
 
         return renamed_sharded_state_dict
+
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+        for idx, layer in enumerate(self.run_function):
+            if isinstance(layer, TransformerLayer):
+                layer.fp8_quant_weight(
+                    batch_mode=batch_mode, quant_transpose=quant_transpose
+                )
+
+    def use_fp8(self):
+        for idx, layer in enumerate(self.run_function):
+            if isinstance(layer, TransformerLayer) and layer.use_fp8():
+                return True
+        return False

@@ -266,9 +266,6 @@ class ModelParallelConfig:
     ###################
     # Pipeline Parallel
     ###################
-    pipeline_dtype: paddle.dtype = None
-    """dtype used in p2p communication, usually params_dtype"""
-
     variable_seq_lengths: bool = False
     """Support for variable sequence lengths across microbatches. Setting this communicates the size
         of tensors during pipeline parallelism communication, because of this extra overhead it
@@ -382,12 +379,6 @@ class ModelParallelConfig:
 
         if self.expert_tensor_parallel_size is None:
             self.expert_tensor_parallel_size = self.tensor_model_parallel_size
-
-        if self.pipeline_model_parallel_size > 1:
-            if self.pipeline_dtype is None:
-                raise ValueError(
-                    "When using pipeline parallelism, pipeline_dtype must be specified"
-                )
 
         if self.autocast_dtype is None:
             self.autocast_dtype = self.params_dtype

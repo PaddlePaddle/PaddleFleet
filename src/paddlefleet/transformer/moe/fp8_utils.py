@@ -65,37 +65,14 @@ FP8_ALIGN = 128
 
 def _get_fp8_weight_and_scale(weight, transpose=False):
     """_get_fp8_weight_and_scale"""
-    fp8_weight, fp8_scale = weight.fp8_weight_stacked, weight.fp8_scale_stacked
-
     if transpose:
-        if (
-            hasattr(weight, "fp8_weight_stacked_transpose")
-            and weight.fp8_weight_stacked_transpose is not None
-        ):
-            fp8_weight = weight.fp8_weight_stacked_transpose
-            fp8_scale = weight.fp8_scale_stacked_transpose
-        else:
-            assert fp8_weight.shape[0] % weight.shape[0] == 0
-            assert fp8_weight.ndim == 2, "fp8_weight must be 2 dims"
-
-            expert_num = fp8_weight.shape[0] // weight.shape[0]
-
-            def transpose_tensor(tensor):
-                assert tensor.ndim == 2
-                h0 = tensor.shape[0] // expert_num
-                h1 = tensor.shape[1]
-                tensor = tensor.reshape([expert_num, h0, h1])
-                return (
-                    tensor.contiguous()
-                    .transpose([0, 2, 1])
-                    .reshape([-1, h0])
-                    .contiguous()
-                )
-
-            fp8_weight, fp8_scale = (
-                transpose_tensor(fp8_weight),
-                transpose_tensor(fp8_scale),
-            )
+        fp8_weight = weight.fp8_weight_stacked_transpose
+        fp8_scale = weight.fp8_scale_stacked_transpose
+    else:
+        fp8_weight, fp8_scale = (
+            weight.fp8_weight_stacked,
+            weight.fp8_scale_stacked,
+        )
 
     return fp8_weight, fp8_scale
 
@@ -105,25 +82,25 @@ def fused_stack_quant(expert_weight_list, transpose=False):
         expert_weight_list[0], "fp8_weight_stacked"
     ):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], stacked=True, transpose=False
+            expert_weight_list[0], transpose=False
         )
     elif transpose is True and hasattr(
         expert_weight_list[0], "fp8_weight_stacked_transpose"
     ):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], stacked=True, transpose=True
+            expert_weight_list[0], transpose=True
         )
     elif transpose is True and hasattr(
         expert_weight_list[0], "fp8_weight_stacked"
     ):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], stacked=True, transpose=False
+            expert_weight_list[0], transpose=False
         )
     elif transpose is False and hasattr(
         expert_weight_list[0], "fp8_weight_stacked_transpose"
     ):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], stacked=True, transpose=True
+            expert_weight_list[0], transpose=True
         )
     else:
         w, scale = paddle.incubate.nn.functional.fused_stack_transpose_quant(
@@ -350,19 +327,13 @@ class ExpertsGroupGemmContiguousNode:
         if x is None:
             assert self.input is not None
             x = self.input
-
         if numpy.prod(x.shape) != 0:
-            expert_output_list = []
-            start_idx = 0
-            for i, token_num in enumerate(self.tokens_per_expert):
-                if token_num == 0:
-                    continue
-                end_idx = start_idx + token_num
-                x_i = x[start_idx:end_idx].contiguous()
-                expert_w1_i = expert_w1[i]
-                expert_output_list.append(F.linear(x=x_i, weight=expert_w1_i))
-                start_idx = end_idx
-            o1 = paddle.concat(expert_output_list, axis=0)
+            expert_w1 = paddle.stack(expert_w1, axis=0)
+            o1 = paddle.incubate.nn.functional.batched_gemm(
+                x,
+                expert_w1,
+                self.tokens_per_expert,
+            )
         else:
             o1 = paddle.empty(
                 [x.shape[0], expert_w1[0].shape[1]], dtype=expert_w1[0].dtype
@@ -483,17 +454,13 @@ class ExpertsGroupGemmContiguousNode:
 
         # down proj
         if numpy.prod(o2.shape) != 0:
-            expert_output_list = []
-            start_idx = 0
-            for i, token_num in enumerate(self.tokens_per_expert):
-                if token_num == 0:
-                    continue
-                end_idx = start_idx + token_num
-                o1_i = o2[start_idx:end_idx].contiguous()
-                expert_w2_i = expert_w2[i]
-                expert_output_list.append(F.linear(x=o1_i, weight=expert_w2_i))
-                start_idx = end_idx
-            o3 = paddle.concat(expert_output_list, axis=0)
+            expert_w2 = paddle.stack(expert_w2, axis=0)
+            o3 = paddle.incubate.nn.functional.batched_gemm(
+                o2,
+                expert_w2,
+                self.tokens_per_expert,
+            )
+
         else:
             o3_shape = [o2.shape[0], expert_w2[0].shape[1]]
             o3 = paddle.empty(o3_shape, dtype=o1.dtype)
@@ -568,19 +535,12 @@ class ExpertsGroupGemmContiguousNode:
         """
 
         if numpy.prod(unzipped_grad.shape) != 0:
-            do2_s_list = []
-            start_idx = 0
-            for i, token_num in enumerate(self.tokens_per_expert):
-                if token_num == 0:
-                    continue
-                end_idx = start_idx + token_num
-                unzipped_grad_i = unzipped_grad[start_idx:end_idx].contiguous()
-                expert_w2_i = expert_w2[i].T.contiguous()
-                do2_s_list.append(
-                    F.linear(x=unzipped_grad_i, weight=expert_w2_i)
-                )
-                start_idx = end_idx
-            do2_s = paddle.concat(do2_s_list, axis=0)
+            expert_w2 = paddle.stack([t.T for t in expert_w2], axis=0)
+            do2_s = paddle.incubate.nn.functional.batched_gemm(
+                unzipped_grad,
+                expert_w2,
+                self.tokens_per_expert,
+            )
         else:
             do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
@@ -684,17 +644,12 @@ class ExpertsGroupGemmContiguousNode:
         bwd_gate_up_input_bf16
         """
         if numpy.prod(do1.shape) != 0:
-            dx_list = []
-            start_idx = 0
-            for i, token_num in enumerate(self.tokens_per_expert):
-                if token_num == 0:
-                    continue
-                end_idx = start_idx + token_num
-                do1_i = do1[start_idx:end_idx].contiguous()
-                expert_w1_i = expert_w1[i].T.contiguous()
-                dx_list.append(F.linear(x=do1_i, weight=expert_w1_i))
-                start_idx = end_idx
-            dx = paddle.concat(dx_list, axis=0)
+            expert_w1 = paddle.stack([t.T for t in expert_w1], axis=0)
+            dx = paddle.incubate.nn.functional.batched_gemm(
+                do1,
+                expert_w1,
+                self.tokens_per_expert,
+            )
         else:
             dx_shape = [do1.shape[0], expert_w1[0].shape[0]]
             dx = paddle.empty(shape=dx_shape, dtype=do1.dtype)

@@ -19,17 +19,20 @@ source PaddleFleet/.venv/bin/activate
 export root_dir=$(pwd)
 cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
 
-config_json="glm45_single_card.json"
+config_json="glm45_fp8.json"
 
 jq --arg cache "$CACHE_DIR" \
-   '.save_steps = 100
+   '.expert_model_parallel_size = 8
+    | .save_steps = 100
     | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
     | .model_name_or_path = "\($cache)/glm45/GLM-4.5-Air"' \
    $config_json > $config_json.tmp
 mv $config_json.tmp $config_json
 
-# hotfix
-sed -i 's/n_shared_experts: int = 1408/n_shared_experts: int = 1/' glm45_provider.py
+# use fp8 Provider
+sed -i 's/GLM_muiti_cards/GLM_muiti_cards_fp8/' glm45_fp8.json
+sed -i 's/num_hidden_layers: int = 10/num_hidden_layers: int = 3/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 2/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
 
 rm -rf checkpoint/
 rm -rf outputs/
@@ -39,25 +42,24 @@ port=36677
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 export FLAGS_use_stride_compute_kernel=False
+
 unset http_proxy https_proxy
-coverage run run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
+rm -rf checkpoint/
+rm -rf outputs/
+coverage run -m paddle.distributed.launch \
+   --log_dir ./log \
+   --master $master:$port \
+   --nnodes 1 \
+   --rank 0 \
+   --run_mode=collective \
+   run_pretrain.py $config_json \
+   --output_dir ./checkpoint 2>&1 | tee ./glm45_fp8.log
 
 echo "
-1 12.10431099
-2 12.05327988
-3 12.03885174
-4 12.03460503
-5 12.02089691
-6 12.00885010
-7 11.95639896
-8 11.96551323
-9 11.97876358
-10 11.97223091
-" > ./glm45_single_card_gt_loss.txt
-
-
-export FLAGS_use_stride_compute_kernel=False
+20 10.25055885
+" > ./glm45_multi_cards_fp8_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
-   --log_file ./glm45_single_card.log \
-   --gt_file ./glm45_single_card_gt_loss.txt
+   --compare_step 20 \
+   --log_file ./glm45_fp8.log \
+   --gt_file ./glm45_multi_cards_fp8_gt_loss.txt
