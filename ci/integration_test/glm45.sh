@@ -30,13 +30,12 @@ export root_dir=$(pwd)
 
 config_yaml="glm45.yaml"
 
-yq --arg root "root_dir" \
-   '.expert_model_parallel_size = 8
-    | .train_dataset_path = \($root)/data/pre-training/train.jsonl
-    | .eval_dataset_path = \($root)/data/pre-training/eval.jsonl
-    | .model_name_or_path = \($root)/GLM-4.5-Air
-    | .logging_dir = \($root)/vdl_log
-    | .output_dir = \($root)/checkpoints' \
+yq eval '.expert_model_parallel_size = 8
+    | .train_dataset_path = strenv(root_dir)/data/pre-training/train.jsonl
+    | .eval_dataset_path = strenv(root_dir)/data/pre-training/eval.jsonl
+    | .model_name_or_path = strenv(root_dir)/GLM-4.5-Air
+    | .logging_dir = strenv(root_dir)/vdl_log
+    | .output_dir = strenv(root_dir)/checkpoints' \
    $config_yaml > $config_yaml.tmp
 mv $config_yaml.tmp $config_yaml
 
