@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 import paddle
 from paddle import Tensor
+from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet import tensor_parallel
 from paddlefleet.models.common.embeddings import (
@@ -138,7 +139,7 @@ class Attention(FleetLayer, ABC):
             pg_collection=self.pg_collection,
         )
 
-        self.checkpoint_core_attention = (
+        self.recompute_core_attention = (
             self.config.recompute_granularity == "selective"
             and "core_attn" in self.config.recompute_modules
         )
@@ -156,58 +157,6 @@ class Attention(FleetLayer, ABC):
             is_expert=False,
             tp_group=self.pg_collection.tp,
         )
-
-    def _checkpointed_attention_forward(
-        self,
-        query,
-        key,
-        value,
-        attention_mask,
-        attn_mask_startend_row_indices=None,
-        rotary_pos_emb=None,
-        attn_mask_type=None,
-        attention_bias=None,
-        packed_seq_params=None,
-    ):
-        """Forward method with selective activation checkpointing."""
-
-        def custom_forward(*inputs):
-            query = inputs[0]
-            key = inputs[1]
-            value = inputs[2]
-            attention_mask = inputs[3]
-            attn_mask_type = inputs[5]
-            attn_mask_type = AttnMaskType(attn_mask_type.item())
-            output_ = self.core_attention(
-                query,
-                key,
-                value,
-                attention_mask,
-                attn_mask_startend_row_indices,
-                attn_mask_type=attn_mask_type,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-            )
-            return output_
-
-        if attn_mask_type is None:
-            attn_mask_type = self.attn_mask_type
-        attn_mask_type = paddle.to_tensor(
-            [attn_mask_type.value], dtype=paddle.int
-        )
-        hidden_states = tensor_parallel.checkpoint(
-            custom_forward,
-            False,
-            query,
-            key,
-            value,
-            attention_mask,
-            attn_mask_startend_row_indices,
-            rotary_pos_emb,
-            attn_mask_type,
-        )
-
-        return hidden_states
 
     @abstractmethod
     def get_query_key_value_tensors(
@@ -357,8 +306,9 @@ class Attention(FleetLayer, ABC):
             key = key.transpose([1, 0, 2, 3]).contiguous()
             value = value.transpose([1, 0, 2, 3]).contiguous()
 
-        if self.checkpoint_core_attention and self.training:
-            core_attn_out = self._checkpointed_attention_forward(
+        if self.recompute_core_attention and self.training:
+            core_attn_out = recompute(
+                self.core_attention,
                 query,
                 key,
                 value,

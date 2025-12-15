@@ -244,6 +244,12 @@ class TransformerConfig(ModelParallelConfig):
     the number of transformer layers to recompute within each pipeline stage.  Must be None for
     'selective' activation checkpointing."""
 
+    recompute_modules: list[str] | dict = None
+    """The submodules to recompute.
+    list: contains all submodule need recompute
+    dict: keys contains all submodule need recompute, value means submodule in which layers need recompute
+    """
+
     ####################
     # MoE related
     ####################
@@ -521,6 +527,34 @@ class TransformerConfig(ModelParallelConfig):
             self.moe_layer_freq = [0] * self.first_k_dense_replace + [1] * (
                 self.num_hidden_layers - self.first_k_dense_replace
             )
+        if self.recompute_granularity == "":
+            self.recompute_granularity = None
+
+        # recompute config check
+        if self.recompute_granularity is not None:
+            assert self.recompute_granularity in ["full", "selective"], (
+                "recompute_granularity must be one of full and selective"
+            )
+            if self.recompute_granularity == "full":
+                assert self.recompute_method in [
+                    "block",
+                    "first_n",
+                    "uniform",
+                ], (
+                    "when recompute_granularity=full, recompute_method must be one of block, first_n and uniform"
+                )
+                assert self.recompute_num_layers is not None, (
+                    "when recompute_granularity=full, recompute_num_layers mustn't be None"
+                )
+            elif self.recompute_granularity == "selective":
+                assert self.recompute_method in ["block", "first_n", None], (
+                    "when recompute_granularity=selective, recompute_method must be one of block and first_n"
+                )
+                assert self.recompute_modules is not None
+            else:
+                raise ValueError(
+                    "recompute_granularity must be one of full and selective"
+                )
 
         if self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
