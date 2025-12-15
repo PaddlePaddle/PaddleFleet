@@ -12,12 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .utils import import_custom_ops
-
-import_custom_ops(
-    package="paddlefleet._extensions", module_name=".ops", global_ns=globals()
-)
-
 import logging
 import sys
 from pathlib import Path
@@ -25,7 +19,13 @@ from typing import Any
 
 import paddle
 
+from .utils import import_custom_ops
+
 logger = logging.getLogger(__name__)
+
+import_custom_ops(
+    package="paddlefleet._extensions", module_name=".ops", global_ns=globals()
+)
 
 
 class ModuleContext:
