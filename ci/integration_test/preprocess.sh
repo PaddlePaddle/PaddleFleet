@@ -41,6 +41,9 @@ sed -i '/if not int(os.getenv("test_ci_no_save_model", 0)):/s/^/# /' run_pretrai
 sed -i '/trainer.save_model()/s/^/# /' run_pretrain.py
 # sed -i 's/num_layers: int = 10/num_layers: int = 5/' glm45_provider.py
 
+
+export FLAGS_use_stride_compute_kernel=False
+
 python -c "
 infile = '$root_dir/PaddleFormers/paddleformers/trainer/training_args.py'
 outfile = infile + '.new'

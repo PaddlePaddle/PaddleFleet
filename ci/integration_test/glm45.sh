@@ -39,6 +39,7 @@ port=36677
 
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
+export FLAGS_use_stride_compute_kernel=False
 
 unset http_proxy https_proxy
 
@@ -52,7 +53,7 @@ coverage run -m paddle.distributed.launch \
    --output_dir ./checkpoint 2>&1 | tee ./glm45.log
 
 echo "
-20 10.35060501
+20 10.22371674
 " > ./glm45_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
