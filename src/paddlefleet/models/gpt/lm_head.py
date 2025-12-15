@@ -77,16 +77,6 @@ class GPTLMHead(ColumnParallelLinear):
                         is_expert=self.is_expert,
                     )
 
-            self.weight.allreduce = not (
-                self.is_expert and self.expert_parallel
-            )
-        # if not self.skip_weight_param_allocation:
-        #    shape = self.weight.T.shape
-        #    del self.weight
-        #    self.weight = paddle.create_parameter(
-        #        shape=shape, dtype=paddle.get_default_dtype()
-        #    )
-
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
         logits, _ = super().forward(hidden_states, self.weight.T)

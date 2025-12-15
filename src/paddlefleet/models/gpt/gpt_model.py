@@ -26,6 +26,8 @@ from paddlefleet.pipeline_parallel import (
 if TYPE_CHECKING:
     from paddlefleet.spec_utils import LayerSpec
 
+from paddle.distributed import fleet
+
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
 from paddlefleet.transformer.transformer_layer import TransformerLayer
@@ -78,7 +80,17 @@ class GPTModel(PipelineLayer):
         del kwargs["share_embeddings_and_output_weights"]
         del kwargs["config"]
 
-        super().__init__(layers=self.layers, **kwargs)
+        topology = (
+            None
+            if self.config.pipeline_model_parallel_size == 1
+            else fleet.get_hybrid_communicate_group().topology()
+        )
+
+        super().__init__(
+            layers=self.layers,
+            topology=topology,
+            **kwargs,
+        )
 
         if skip_weight_param_allocation:
             shared_embed_weight = None

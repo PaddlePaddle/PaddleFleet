@@ -28,6 +28,12 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           workflow-name: approval
 
+      - name: Merge PR to test branch
+        if: steps.check-bypass.outputs.can-skip != 'true'
+        run: |
+          git fetch origin pull/${PR_ID}/merge
+          git checkout -b test FETCH_HEAD
+
       - name: Display Required Approvers
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |

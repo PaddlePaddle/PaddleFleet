@@ -17,5 +17,5 @@ runs/
 log
 
 # Ignore files generated from `uv sync` for custom ops
-src/paddlefleet/extensions/ops_pd_.so
-src/paddlefleet/extensions/ops.py
+src/paddlefleet/_extensions/ops_pd_.so
+src/paddlefleet/_extensions/ops.py

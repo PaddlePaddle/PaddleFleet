@@ -56,6 +56,7 @@ port=36677
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 export FLAGS_use_stride_compute_kernel=False
+
 unset http_proxy https_proxy
 coverage run -m paddle.distributed.launch \
    --log_dir ./log \

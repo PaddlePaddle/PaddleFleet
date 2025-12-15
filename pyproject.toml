@@ -237,7 +237,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["fleet"]
+known-first-party = ["paddlefleet"]
 
 [tool.ruff.lint.per-file-ignores]
 # Ignore for re-export in __init__ files
