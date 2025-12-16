@@ -90,6 +90,7 @@ def _apply_rotary_pos_emb_bshd(
     rotary_interleaved: bool = False,
     multi_latent_attention: bool = False,
     mscale: float = 1.0,
+    high_precision_rope: bool = False,
 ) -> Tensor:
     """Apply rotary positional embedding to input tensor T.
 
@@ -114,10 +115,12 @@ def _apply_rotary_pos_emb_bshd(
 
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    with paddle.amp.auto_cast(False):
+    use_amp = not high_precision_rope
+    with paddle.amp.auto_cast(use_amp):
         orig_t_dtype = t.dtype
-        t = t.astype(dtype="float32")
-        t_pass = t_pass.astype(dtype="float32")
+        if high_precision_rope:
+            t = t.astype(dtype="float32")
+            t_pass = t_pass.astype(dtype="float32")
         rotate_t = _rotate_half(t, rotary_interleaved)
         cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
         sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
@@ -192,6 +195,7 @@ def _apply_rotary_pos_emb_thd(
     multi_latent_attention: bool = False,
     mscale: float = 1.0,
     cp_group: Group = None,
+    high_precision_rope: bool = False,
 ) -> Tensor:
     """A baseline implementation of applying RoPE for `thd` format.
 
@@ -242,6 +246,7 @@ def _apply_rotary_pos_emb_thd(
             rotary_interleaved=rotary_interleaved,
             multi_latent_attention=multi_latent_attention,
             mscale=mscale,
+            high_precision_rope=high_precision_rope,
         )
     else:
         # CASE 2: Traditional mapping without offsets
@@ -261,6 +266,7 @@ def _apply_rotary_pos_emb_thd(
             rotary_interleaved=rotary_interleaved,
             multi_latent_attention=multi_latent_attention,
             mscale=mscale,
+            high_precision_rope=high_precision_rope,
         )
 
 
@@ -315,6 +321,7 @@ def apply_rotary_pos_emb(
             rotary_interleaved=config.rotary_interleaved,
             multi_latent_attention=config.multi_latent_attention,
             mscale=mscale,
+            high_precision_rope=config.high_precision_rope,
         )
     else:
         return _apply_rotary_pos_emb_thd(
@@ -325,4 +332,5 @@ def apply_rotary_pos_emb(
             multi_latent_attention=config.multi_latent_attention,
             mscale=mscale,
             cp_group=cp_group,
+            high_precision_rope=config.high_precision_rope,
         )

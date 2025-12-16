@@ -181,6 +181,10 @@ class TransformerConfig(ModelParallelConfig):
 
     rope_theta: float = 10000.0
     """The base period of the RoPE embeddings, default is 10000.0."""
+
+    high_precision_rope: bool = False
+    """High precision mode for RoPE,if set to True,rotary_pos_emb will compute in FP32"""
+
     apply_residual_connection_post_layernorm: bool = False
     """If True, uses the original BERT residue connection ordering."""
 
