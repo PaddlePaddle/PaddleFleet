@@ -408,6 +408,7 @@ jobs:
               echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
             else
               echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
+            fi
             exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
@@ -620,6 +621,7 @@ jobs:
               echo -e "::error:: \033[31mIntegration test failed: GLM4.5 FP8.\033[0m"
             else
               echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+            fi
             exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
