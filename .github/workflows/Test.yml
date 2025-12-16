@@ -527,7 +527,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull origin pull/3200/head
+          git pull --no-edit origin pull/3200/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
@@ -680,7 +680,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull origin pull/3200/head
+          git pull --no-edit origin pull/3200/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
