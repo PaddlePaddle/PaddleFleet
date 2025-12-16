@@ -127,35 +127,41 @@ class MoELayer(nn.Layer):
             routed_expert_config.tensor_model_parallel_size = 1
 
         if (
-            self.moe_token_dispatcher_type == "deepep"
-            and not paddle.device.current_device_is_cpu
+            not paddle.device.current_device_is_cpu
             and paddle.device.get_device_capability()[0] < 9
         ):
             # TODO: Support Ampere architecture after upgrade deepep in paddlepaddle
-            logger.info(
-                "deepep in paddlepaddle does not support compute capability < 9.0, "
-                "fallback to alltoall token dispatcher."
-            )
-            self.moe_token_dispatcher_type = "alltoall"
+            if self.moe_token_dispatcher_type == "deepep":
+                logger.info(
+                    "deepep in paddlepaddle does not support compute capability < 9.0, "
+                    "fallback to alltoall token dispatcher."
+                )
+                self.moe_token_dispatcher_type = "alltoall"
+            if self.use_deep_gemm:
+                logger.warning(
+                    "use_deep_gemm is enabled but will be disabled due to current device capability < 9.0."
+                )
+                self.use_deep_gemm = False
 
         if (
             self.expert_model_parallel_size > 1
             and self.moe_token_dispatcher_type == "alltoall"
         ):
             self.moe_use_fusion_node = False
-            self.moe_grouped_gemm = False  # TODO: Support EP>1 moe_grouped_gemm
+            self.moe_grouped_gemm = (
+                False  # TODO: Support EP>1 not deepep moe_grouped_gemm
+            )
             self.fp8_dispatch = False
 
         if self.fp8:
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
             )
-        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
-            logger.warning(
-                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
-                "Will turn on moe_grouped_gemm."
-            )
-            self.moe_grouped_gemm = True
+            if self.moe_grouped_gemm:
+                logger.warning(
+                    "fp8 cannot be used with grouped gemm currently."
+                )
+                self.moe_grouped_gemm = False
 
         expert_args = {}
         expert_args["config"] = routed_expert_config
@@ -163,7 +169,7 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
 
-        if self.moe_grouped_gemm and not self.fp8:
+        if self.moe_grouped_gemm:
             self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
@@ -218,7 +224,7 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            if self.moe_grouped_gemm and not self.fp8:
+            if self.moe_grouped_gemm:
                 for p in self.grouped_gemm_experts.parameters():
                     p.is_moe_param = True
                     p.color = {
@@ -380,6 +386,7 @@ class MoELayer(nn.Layer):
             self.num_experts_per_tok,
             use_fp8_mlp=self.fp8,
             use_deep_gemm=self.use_deep_gemm,
+            moe_grouped_gemm=self.moe_grouped_gemm,
             recompute_moe_gate_up=self.recompute_moe_gate_up,
             recompute_moe_premute=self.recompute_moe_premute,
             fp8_dispatched_handle=fp8_dispatched_handle,
@@ -443,7 +450,6 @@ class MoELayer(nn.Layer):
             else:
                 reshaped_input = hidden_states
             if self.moe_grouped_gemm:
-                print("Using single card moe_grouped_gemm")
                 output = self._forward_single_card_grouped_gemm_moe(
                     reshaped_input, mask, gates_masked
                 )
