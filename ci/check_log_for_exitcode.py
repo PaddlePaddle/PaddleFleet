@@ -44,7 +44,7 @@ def check_unit_tests(log_path: str, check_string="OK") -> bool:
             if "Test PASSED" in line:
                 split_line = line.split(":")
                 test_name = split_line[1].strip()
-                if current_test_name is None:
+                if current_test_name is not None:
                     assert test_name == current_test_name, "Mismatch in test names."
                 else:
                     continue
@@ -61,7 +61,11 @@ def check_integration_tests(log_path: str, check_string="Training completed") ->
         log_lines = log_file.readlines()
         for line in log_lines:
             if check_string in line:
+                print("Found '{}' string in log file.'".format(check_string))
+                print("Test passed.")
                 return True
+        print("Didn't find '{}' string in log file.'".format(check_string))
+        print("Test failed.")
     return False
 
 
