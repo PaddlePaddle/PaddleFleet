@@ -38,8 +38,8 @@ yq eval '.expert_model_parallel_size = 1
     | .model_name_or_path = strenv(root_dir) + "/GLM-4.5-Air"
     | .logging_dir = strenv(root_dir) + "/vdl_log"
     | .output_dir = strenv(root_dir) + "/checkpoints"' \
-   $config_yaml > $config_yaml.tmp
-mv $config_yaml.tmp $config_yaml
+   $config_yaml > ${config_yaml}.tmp
+mv ${config_yaml}.tmp $config_yaml
 
 sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 2/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
