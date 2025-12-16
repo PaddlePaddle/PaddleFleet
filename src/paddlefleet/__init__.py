@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from . import (
-    extensions as extensions,
+    ops as ops,
     parallel_state as parallel_state,
     training as training,
 )
@@ -35,7 +35,7 @@ from .timers import Timers
 mpu = parallel_state
 
 __all__ = [
-    "extensions",
+    "ops",
     "training",
     "parallel_state",
     "Timers",

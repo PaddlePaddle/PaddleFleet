@@ -107,7 +107,7 @@ done
 
 
 CUSTOMOP_APPROVERS="risemeup1 From00"
-CUSTOMOP_DIR="src/paddlefleet/extensions"
+CUSTOMOP_DIR="src/paddlefleet/_extensions"
 HAS_MODIFIED_CUSTOMOP=$(git diff --name-only upstream/$BRANCH | grep "^${CUSTOMOP_DIR}/" || true)
 if [ "${HAS_MODIFIED_CUSTOMOP}" != "" ] && [ "${PR_ID}" != "" ]; then
     echo_line="You must be approved by two of ${CUSTOMOP_APPROVERS} for changes in ${CUSTOMOP_DIR}.\n"

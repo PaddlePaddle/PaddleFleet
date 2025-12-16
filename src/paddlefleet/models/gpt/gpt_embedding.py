@@ -119,6 +119,8 @@ class GPTEmbedding(FleetLayer):
                     )
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
+        rotary_pos_cos = None
+        rotary_pos_sin = None
 
         if (
             self.position_embedding_type == "rope"
@@ -139,12 +141,21 @@ class GPTEmbedding(FleetLayer):
 
         if self.config.sequence_parallel and rotary_pos_emb is not None:
             rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3]).contiguous()
+            if self.config.apply_rope_fusion:
+                rotary_pos_cos = paddle.cos(rotary_pos_emb)
+                rotary_pos_sin = paddle.sin(rotary_pos_emb)
+            if self.config.sequence_parallel:
+                rotary_pos_emb = rotary_pos_emb.transpose(
+                    [1, 0, 2, 3]
+                ).contiguous()
 
         preproc_output = {
             "hidden_states": decoder_input,
             "attention_mask": attention_mask,
             "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "rotary_pos_emb": rotary_pos_emb,
+            "rotary_pos_cos": rotary_pos_cos,
+            "rotary_pos_sin": rotary_pos_sin,
         }
 
         for key in list(preproc_output.keys()):
