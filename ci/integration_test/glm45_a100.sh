@@ -22,16 +22,12 @@ apt-get install jq -y
 
 source PaddleFleet/.venv/bin/activate
 
-if [ ! -f $CACHE_DIR/glm45/glm45_fleet_pt.1214.tar ]; then
-  mkdir -p $CACHE_DIR/glm45 && cd $CACHE_DIR/glm45
-  wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet_pt.1214.tar --no-check-certificate
-  tar -xf glm45_fleet_pt.1214.tar # glm45_fleet_pt
-fi
-
-cd $CACHE_DIR/glm45/glm45_fleet_pt
+wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet_pt.1214.tar --no-check-certificate
+tar -xf glm45_fleet_pt.1214.tar # glm45_fleet_pt
+cd $root_dir/glm45_fleet_pt
 export cur_dir=$(pwd)
 
-config_yaml="glm45.yaml"
+config_yaml=$root_dir/glm45.yaml
 config_json=${cur_dir}/GLM-4.5-Air/config.json
 
 yq eval '.expert_model_parallel_size = 1
@@ -42,7 +38,7 @@ yq eval '.expert_model_parallel_size = 1
     | .model_name_or_path = strenv(cur_dir) + "/GLM-4.5-Air"
     | .logging_dir = strenv(cur_dir) + "/vdl_log"
     | .output_dir = strenv(cur_dir) + "/checkpoints"' \
-   $config_yaml > ${config_yaml}.tmp
+  $config_yaml > ${config_yaml}.tmp
 mv ${config_yaml}.tmp $config_yaml
 
 jq --arg cur_dir "$cur_dir" \
