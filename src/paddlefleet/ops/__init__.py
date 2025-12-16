@@ -21,8 +21,6 @@ import paddle
 
 from .utils import import_custom_ops
 
-logger = logging.getLogger(__name__)
-
 paddle.compat.enable_torch_proxy(scope={"deep_gemm", "triton"})
 
 # paddle.compat.enable_torch_proxy(scope={"triton"}) enables the torch proxy
@@ -33,6 +31,8 @@ paddle.compat.enable_torch_proxy(scope={"deep_gemm", "triton"})
 # paddle.compat.enable_torch_proxy(scope={"triton", "new_module"})
 #
 # Note: Ensure that any torch APIs used in 'new_module' are already implemented in Paddle.
+
+logger = logging.getLogger(__name__)
 
 import_custom_ops(
     package="paddlefleet._extensions", module_name=".ops", global_ns=globals()
