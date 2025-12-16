@@ -47,7 +47,7 @@ mv ${config_yaml}.tmp $config_yaml
 # mv ${config_json}.tmp $config_json
 
 sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
-sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
+sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 2/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 
 rm -rf checkpoints/
 rm -rf vdl_log/
@@ -66,5 +66,5 @@ unset http_proxy https_proxy
 #    --run_mode=collective \
 #    run_pretrain.py $config_json \
 #    --output_dir ./checkpoint | tee ./glm45_a100.log
-
+sleep 6h
 FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $cur_dir/glm45.yaml 2>&1 | tee ./glm45_a100.log
