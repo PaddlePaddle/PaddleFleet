@@ -234,8 +234,6 @@ class TransformerConfig(ModelParallelConfig):
     apply_rope_fusion: bool = False
     """If True, use fused RoPE kernel."""
 
-    apply_vision_rope: bool = False
-
     ####################
     # activation recomputation
     ####################

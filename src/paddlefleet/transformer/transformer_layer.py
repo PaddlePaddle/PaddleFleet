@@ -110,6 +110,8 @@ def need_full_recompute(layer_number, config):
             if layer_number in recompute_layers:
                 return True
     return False
+
+
 def get_transformer_layer_offset(
     config: TransformerConfig,
     vp_stage=None,

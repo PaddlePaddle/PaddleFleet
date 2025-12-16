@@ -89,9 +89,10 @@ class GPTEmbedding(FleetLayer):
         )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
+        
+        # Deepstack
         deepstack_visual_embeds = None
         visual_pos_mask = None
-
         if decoder_input is None:
             decoder_input = self.embedding(
                 input_ids=input_ids,
@@ -111,8 +112,7 @@ class GPTEmbedding(FleetLayer):
                     decoder_input = decoder_input.masked_scatter(
                         image_mask, image_embeds
                     )
-                    visual_pos_mask = image_mask
-                    deepstack_visual_embeds = deepstack_image_embeds
+                    visual_pos_mask = image_mask[..., 0]
 
                 if video_embeds is not None:
                     _, video_mask = self.get_placeholder_mask(
@@ -123,10 +123,12 @@ class GPTEmbedding(FleetLayer):
                     decoder_input = decoder_input.masked_scatter(
                         video_mask, video_embeds
                     )
-                    visual_pos_mask = video_mask
+                    visual_pos_mask = video_mask[..., 0]
                     deepstack_visual_embeds = deepstack_video_embeds
                 
                 if image_embeds is not None and video_embeds is not None:
+                    image_mask = image_mask[..., 0]
+                    video_mask = video_mask[..., 0]
                     visual_pos_masks = image_mask | video_mask
                     deepstack_visual_embeds = []
                     image_mask_joint = image_mask[visual_pos_masks]
