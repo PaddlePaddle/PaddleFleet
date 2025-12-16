@@ -27,7 +27,7 @@ tar -xf glm45_fleet_pt.1214.tar # glm45_fleet_pt
 cd $root_dir/glm45_fleet_pt
 export cur_dir=$(pwd)
 
-config_yaml=$root_dir/glm45.yaml
+config_yaml=$cur_dir/glm45.yaml
 config_json=${cur_dir}/GLM-4.5-Air/config.json
 
 yq eval '.expert_model_parallel_size = 1

@@ -25,7 +25,7 @@ tar -xf glm45_fleet_pt.1214.tar # glm45_fleet_pt
 cd $root_dir/glm45_fleet_pt
 export cur_dir=$(pwd)
 
-config_yaml=$root_dir/glm45.yaml
+config_yaml=$cur_dir/glm45.yaml
 
 yq eval '.expert_model_parallel_size = 8
     | .train_dataset_path = strenv(cur_dir) + "/data/pre-training/train.jsonl"
