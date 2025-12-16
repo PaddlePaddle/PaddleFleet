@@ -13,56 +13,58 @@
 # limitations under the License.
 
 set -exo pipefail
+export root_dir=$(pwd)
+
+wget https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64 -O /usr/local/bin/yq
+chmod +x /usr/local/bin/yq
+apt-get update
+apt-get install jq -y
 
 source PaddleFleet/.venv/bin/activate
 
-config_json="glm45.json"
+wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet_pt.1214.tar --no-check-certificate
+tar -xf glm45_fleet_pt.1214.tar # glm45_fleet_pt
+cd $root_dir/glm45_fleet_pt
+export cur_dir=$(pwd)
 
-export root_dir=$(pwd)
-cd $root_dir/PaddleFormers/examples/experiments/paddlefleet
+config_yaml=$cur_dir/glm45.yaml
+config_json=${cur_dir}/GLM-4.5-Air/config.json
 
-jq --arg cache "$CACHE_DIR" \
-   '.per_device_train_batch_size = 1
-    | .expert_model_parallel_size = 1
+yq eval '.expert_model_parallel_size = 1
+    | .per_device_train_batch_size = 1
     | .use_expert_parallel = false
-    | .save_steps = 100
-    | .input_dir = "1.0 \($cache)/glm45/data/pre-training/llama_openwebtext_100k"
-    | .model_name_or_path = "\($cache)/glm45/GLM-4.5-Air"' \
-   $config_json > $config_json.tmp
-mv $config_json.tmp $config_json
+    | .train_dataset_path = strenv(cur_dir) + "/data/pre-training/train.jsonl"
+    | .eval_dataset_path = strenv(cur_dir) + "/data/pre-training/eval.jsonl"
+    | .model_name_or_path = strenv(cur_dir) + "/GLM-4.5-Air"
+    | .logging_dir = strenv(cur_dir) + "/vdl_log"
+    | .output_dir = strenv(cur_dir) + "/checkpoints"' \
+  $config_yaml > ${config_yaml}.tmp
+mv ${config_yaml}.tmp $config_yaml
 
-python -c "
-infile = '$root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py'
-outfile = infile + '.new'
-with open(infile) as fin, open(outfile, 'w') as fout:
-    for line in fin:
-        if line.strip() == 'expert_model_parallel_size: int = 16':
-            pad = line[:len(line) - len(line.lstrip())]
-            fout.write(pad + 'expert_model_parallel_size: int = 4\n')
-            fout.write(pad + 'num_experts_per_tok: int = 2\n')
-        else:
-            fout.write(line)
-"
-mv $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py.new $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+# jq --arg cur_dir "$cur_dir" \
+#     '.first_k_dense_replace = 0' \
+#     $config_json > ${config_json}.tmp
+# mv ${config_json}.tmp $config_json
 
-sed -i 's/num_hidden_layers: int = 10/num_hidden_layers: int = 2/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
-sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 1/g' $root_dir/PaddleFormers/examples/experiments/paddlefleet/glm45_provider.py
+sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
+sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 
-rm -rf checkpoint/
-rm -rf outputs/
+rm -rf checkpoints/
+rm -rf vdl_log/
 master=$(hostname -i)
 port=36677
 
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
-export FLAGS_use_stride_compute_kernel=False
 
 unset http_proxy https_proxy
-coverage run -m paddle.distributed.launch \
-   --log_dir ./log \
-   --master $master:$port \
-   --nnodes 1 \
-   --rank 0 \
-   --run_mode=collective \
-   run_pretrain.py $config_json \
-   --output_dir ./checkpoint | tee ./glm45_a100.log
+# coverage run -m paddle.distributed.launch \
+#    --log_dir ./log \
+#    --master $master:$port \
+#    --nnodes 1 \
+#    --rank 0 \
+#    --run_mode=collective \
+#    run_pretrain.py $config_json \
+#    --output_dir ./checkpoint | tee ./glm45_a100.log
+
+FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $cur_dir/glm45.yaml 2>&1 | tee ./glm45_a100.log
