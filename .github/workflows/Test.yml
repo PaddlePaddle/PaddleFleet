@@ -236,9 +236,14 @@ jobs:
           uv run coverage xml -o /paddle/coveragedata/coverage.xml
           uv run coverage report -m
           if [[ "$multi_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mMulti card test failed, try to analyze log.\033[0m"
+            echo -e "\033[31mMulti card test failed, try to analyze log.\033[0m"
             python ci/check_log_for_exitcode.py multi_card_test.log unit
             find_error_exit_code=$?
+            if [[ "$find_error_exit_code" != "0" ]]; then
+              echo -e "::error:: \033[31mMulti card test failed.\033[0m"
+            else
+              echo -e "\033[32mMulti card test succeeded.\033[0m"
+            fi
             exit $find_error_exit_code
           else
             echo -e "\033[32mMulti card test succeeded.\033[0m"
@@ -396,9 +401,13 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
           uv run coverage report -m
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card, try to analyze log.\033[0m"
+            echo -e "\033[31mIntegration test failed: GLM4.5 single-card, try to analyze log.\033[0m"
             python PaddleFleet/ci/check_log_for_exitcode.py glm45_single_card.log integration
             find_error_exit_code=$?
+            if [[ "$find_error_exit_code" != "0" ]]; then
+              echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
+            else
+              echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
             exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
@@ -421,9 +430,14 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen/coverage.xml
           uv run coverage report -m
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card, try to analyze log.\033[0m"
+            echo -e "\033[31mIntegration test failed: Qwen3-30B-A3B single-card, try to analyze log.\033[0m"
             python PaddleFleet/ci/check_log_for_exitcode.py qwen3_single_card.log integration
             find_error_exit_code=$?
+            if [[ "$find_error_exit_code" != "0" ]]; then
+              echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
+            else
+              echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
+            fi
             exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
@@ -568,9 +582,14 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi/coverage.xml
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5, try to analyze log.\033[0m"
+            echo -e "\033[31mIntegration test failed: GLM4.5, try to analyze log.\033[0m"
             python PaddleFleet/ci/check_log_for_exitcode.py glm45.log integration
             find_error_exit_code=$?
+            if [[ "$find_error_exit_code" != "0" ]]; then
+              echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+            else
+              echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+            fi
             exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
@@ -594,9 +613,13 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5, try to analyze log.\033[0m"
+            echo -e "\033[31mIntegration test failed: GLM4.5, try to analyze log.\033[0m"
             python PaddleFleet/ci/check_log_for_exitcode.py glm45_fp8.log integration
             find_error_exit_code=$?
+            if [[ "$find_error_exit_code" != "0" ]]; then
+              echo -e "::error:: \033[31mIntegration test failed: GLM4.5 FP8.\033[0m"
+            else
+              echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
             exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
@@ -736,9 +759,14 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+            echo -e "\033[31mIntegration test failed: GLM4.5, try to analyze log\033[0m"
             python PaddleFleet/ci/check_log_for_exitcode.py glm45_a100.log integration
             find_error_exit_code=$?
+            if [[ "$find_error_exit_code" != "0" ]]; then
+              echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+            else
+              echo -e "\033[32mLog analysis did not find specific errors.\033[0m"
+            fi
             exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
