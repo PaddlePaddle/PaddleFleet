@@ -117,15 +117,17 @@ jobs:
           uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
-          bash ci/single_card_test.sh
+          bash ci/single_card_test.sh | tee single_card_test.log
           single_card_exit_code=$?
           ls -a /paddle/coveragedata/
           uv run coverage combine
           uv run coverage report -m
           uv run coverage xml -o /paddle/coveragedata/coverage.xml
           if [[ "$single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
-            exit 1
+            echo -e "::error:: \033[31mSingle card test failed, try to analyze log.\033[0m"
+            python ci/check_log_for_exitcode.py single_card_test.log
+            find_error_exit_code=$?
+            exit $find_error_exit_code
           else
             echo -e "\033[32mSingle card test succeeded.\033[0m"
           fi
@@ -230,7 +232,7 @@ jobs:
           uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
-          bash ci/multi-card_test.sh
+          bash ci/multi-card_test.sh | tee multi_card_test.log
           multi_card_exit_code=$?
           ls -a /paddle/coveragedata/
           uv run coverage combine
@@ -238,8 +240,10 @@ jobs:
           uv run coverage report -m
 
           if [[ "$multi_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mMulti card test failed.\033[0m"
-            exit 1
+            echo -e "::error:: \033[31mMulti card test failed, try to analyze log.\033[0m"
+            python ci/check_log_for_exitcode.py multi_card_test.log
+            find_error_exit_code=$?
+            exit $find_error_exit_code
           else
             echo -e "\033[32mMulti card test succeeded.\033[0m"
           fi
@@ -720,7 +724,7 @@ jobs:
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_a100.sh
+          bash -x PaddleFleet/ci/integration_test/glm45_a100.sh | tee glm45_a100.log
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -729,7 +733,9 @@ jobs:
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
+            python ci/check_log_for_exitcode.py glm45_a100.log
+            find_error_exit_code=$?
+            exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
