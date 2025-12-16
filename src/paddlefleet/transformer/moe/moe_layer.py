@@ -83,6 +83,7 @@ class MoELayer(nn.Layer):
         self.fp8 = config.fp8
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
+        self.use_deep_gemm = config.use_deep_gemm
         self.moe_use_fusion_node = False
         if self.moe_token_dispatcher_type == "deepep":
             self.moe_use_fusion_node = True
@@ -363,6 +364,7 @@ class MoELayer(nn.Layer):
             self,
             self.num_experts_per_tok,
             use_fp8_mlp=self.fp8,
+            use_deep_gemm=self.use_deep_gemm,
             fp8_dispatched_handle=fp8_dispatched_handle,
             use_bf16_gemm_weight_grad=not self.fp8_wgrad,
         )
