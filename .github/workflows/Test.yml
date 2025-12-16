@@ -235,7 +235,6 @@ jobs:
           uv run coverage combine
           uv run coverage xml -o /paddle/coveragedata/coverage.xml
           uv run coverage report -m
-          python ci/check_log_for_exitcode.py multi_card_test.log unit
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed, try to analyze log.\033[0m"
             python ci/check_log_for_exitcode.py multi_card_test.log unit
@@ -422,7 +421,7 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen/coverage.xml
           uv run coverage report -m
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
+            echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card, try to analyze log.\033[0m"
             python PaddleFleet/ci/check_log_for_exitcode.py qwen3_single_card.log integration
             find_error_exit_code=$?
             exit $find_error_exit_code

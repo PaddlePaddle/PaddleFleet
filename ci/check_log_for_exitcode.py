@@ -16,9 +16,9 @@
 ci.integration_test.check_log_for_exitcode
 """
 
-import os
-import sys
 import re
+import sys
+
 
 def check_unit_tests(log_path: str, check_string="OK") -> bool:
     """
@@ -33,19 +33,21 @@ def check_unit_tests(log_path: str, check_string="OK") -> bool:
             m = re.search(pattern, line)
             if m:
                 if current_test_name is not None:
-                    print("Test {} failed.".format(current_test_name))
+                    print(f"Test {current_test_name} failed.")
                     recode[current_test_name] = False
                 current_test_name = m.group(1)
             if check_string in line and current_test_name is not None:
-                print("Test {} passed.".format(current_test_name))
+                print(f"Test {current_test_name} passed.")
                 current_test_name = None
                 recode[current_test_name] = True
             if "Test PASSED" in line:
                 split_line = line.split("Test PASSED:")
                 test_name = split_line[1].strip()
                 if current_test_name is not None:
-                    assert test_name == current_test_name, "Mismatch in test names."
-                    print("Test {} passed.".format(current_test_name))
+                    assert test_name == current_test_name, (
+                        "Mismatch in test names."
+                    )
+                    print(f"Test {current_test_name} passed.")
                     current_test_name = None
                     recode[test_name] = True
                 else:
@@ -55,15 +57,18 @@ def check_unit_tests(log_path: str, check_string="OK") -> bool:
                 return False
     return True
 
-def check_integration_tests(log_path: str, check_string="Training completed") -> bool:
+
+def check_integration_tests(
+    log_path: str, check_string="Training completed"
+) -> bool:
     with open(log_path, "r", encoding="utf-8") as log_file:
         log_lines = log_file.readlines()
         for line in log_lines:
             if check_string in line:
-                print("Found '{}' string in log file.'".format(check_string))
+                print(f"Found '{check_string}' string in log file.'")
                 print("Test passed.")
                 return True
-        print("Didn't find '{}' string in log file.'".format(check_string))
+        print(f"Didn't find '{check_string}' string in log file.'")
         print("Test failed.")
     return False
 
@@ -79,7 +84,7 @@ if __name__ == "__main__":
     elif type == "integration":
         result = check_integration_tests(log_path)
     else:
-        raise ValueError("Unknown type: {}".format(type))
+        raise ValueError(f"Unknown type: {type}")
     if result:
         exit(0)
     else:
