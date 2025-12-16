@@ -76,7 +76,7 @@ def check_integration_tests(
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         print("Usage: python check_log_for_exitcode.py <log_path> <type>")
-        exit(1)
+        sys.exit(1)
     log_path = sys.argv[1]
     type = sys.argv[2]
     if type == "unit":
@@ -86,6 +86,6 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown type: {type}")
     if result:
-        exit(0)
+        sys.exit(0)
     else:
-        exit(1)
+        sys.exit(1)
