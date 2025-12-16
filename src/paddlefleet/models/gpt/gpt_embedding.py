@@ -134,13 +134,15 @@ class GPTEmbedding(FleetLayer):
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
             )
-        elif self.position_embedding_type == "mrope":
+        elif (
+            self.position_embedding_type == "mrope"
+            and self.rotary_pos_emb is not None
+        ):
             rotary_pos_emb = self.rotary_pos_emb(
                 position_ids, self.mrope_section
             )
 
-        if self.config.sequence_parallel and rotary_pos_emb is not None:
-            rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3]).contiguous()
+        if rotary_pos_emb is not None:
             if self.config.apply_rope_fusion:
                 rotary_pos_cos = paddle.cos(rotary_pos_emb)
                 rotary_pos_sin = paddle.sin(rotary_pos_emb)
