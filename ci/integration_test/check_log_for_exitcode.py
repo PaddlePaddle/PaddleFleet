@@ -18,44 +18,56 @@ ci.integration_test.check_log_for_exitcode
 
 import os
 import sys
+import re
 
-
-def check_ci_logs_for_error(log_file_path):
+def check_unit_tests(log_path: str, check_string="OK") -> bool:
     """
     check_ci_logs_for_error - Docstring
     """
-    if not os.path.isfile(log_file_path):
-        raise FileNotFoundError(f"Log file not found: {log_file_path}")
-    error_patterns = [
-        r"ERROR:",
-        r"FAILED",
-        r"Traceback",
-        r"Exception:",
-        r"segmentation fault",
-        r"core dumped",
-    ]
-    with open(log_file_path, "r") as log_file:
-        for line in log_file:
-            for pattern in error_patterns:
-                if pattern in line:
-                    print("Found an error pattern in the log file.")
-                    print("Error pattern:", pattern)
-                    print("Line:")
-                    print(line)
-                    return True
+    pattern = r"Running.*?test:\s+.*?/([^/\s]+\.py)"
+
+    with open(log_path, "r", encoding="utf-8") as log_file:
+        log_lines = log_file.readlines()
+        current_test_name = None
+        recode = {}
+        for line in log_lines:
+            m = re.search(pattern, line)
+            if m:
+                if current_test_name is not None:
+                    print("Test {} failed.".format(current_test_name))
+                    recode[current_test_name] = False
+                current_test_name = m.group(1)
+            if check_string in line and current_test_name is not None:
+                print("Test {} passed.".format(current_test_name))
+                current_test_name = None
+                recode[current_test_name] = True
+        for test_name, status in recode.items():
+            if not status:
+                return False
+    return True
+
+def check_integration_tests(log_path: str, check_string="Training completed") -> bool:
+    with open(log_path, "r", encoding="utf-8") as log_file:
+        log_lines = log_file.readlines()
+        for line in log_lines:
+            if check_string in line:
+                return True
     return False
 
 
 if __name__ == "__main__":
-    log_file = sys.argv[1] if len(sys.argv) > 1 else "ci_log.txt"
-    try:
-        error_found = check_ci_logs_for_error(log_file)
-        if error_found:
-            print("Errors were found in the CI log.")
-            sys.exit(1)
-        else:
-            print("No errors found in the CI log.")
-            sys.exit(0)
-    except FileNotFoundError as e:
-        print(e)
-        sys.exit(2)
+    if len(sys.argv) != 3:
+        print("Usage: python check_log_for_exitcode.py <log_path> <type>")
+        exit(1)
+    log_path = sys.argv[1]
+    type = sys.argv[2]
+    if type == "unit":
+        result = check_unit_tests(log_path)
+    elif type == "integration":
+        result = check_integration_tests(log_path)
+    else:
+        raise ValueError("Unknown type: {}".format(type))
+    if result:
+        exit(0)
+    else:
+        exit(1)

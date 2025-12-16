@@ -123,9 +123,10 @@ jobs:
           uv run coverage combine
           uv run coverage report -m
           uv run coverage xml -o /paddle/coveragedata/coverage.xml
+          python ci/check_log_for_exitcode.py single_card_test.log unit
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed, try to analyze log.\033[0m"
-            python ci/check_log_for_exitcode.py single_card_test.log
+            python ci/check_log_for_exitcode.py single_card_test.log unit
             find_error_exit_code=$?
             exit $find_error_exit_code
           else
@@ -238,10 +239,10 @@ jobs:
           uv run coverage combine
           uv run coverage xml -o /paddle/coveragedata/coverage.xml
           uv run coverage report -m
-
+          python ci/check_log_for_exitcode.py multi_card_test.log unit
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed, try to analyze log.\033[0m"
-            python ci/check_log_for_exitcode.py multi_card_test.log
+            python ci/check_log_for_exitcode.py multi_card_test.log unit
             find_error_exit_code=$?
             exit $find_error_exit_code
           else
@@ -731,9 +732,10 @@ jobs:
           uv run coverage combine
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
           uv run coverage report -m
+          python ci/check_log_for_exitcode.py glm45_a100.log integration
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            python ci/check_log_for_exitcode.py glm45_a100.log
+            python ci/check_log_for_exitcode.py glm45_a100.log integration
             find_error_exit_code=$?
             exit $find_error_exit_code
           else
