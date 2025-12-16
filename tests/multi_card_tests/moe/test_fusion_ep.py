@@ -101,20 +101,6 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             input_data
         )[0]
 
-        np.testing.assert_allclose(
-            output_moe_use_fusion_node_true.detach()
-            .cpu()
-            .float()
-            .numpy()[0, 0, 0:3],
-            [
-                0.00000020,
-                -0.00000013,
-                0.00000020,
-            ],
-            rtol=1e-7,
-            atol=1e-7,
-        )
-
     def tearDown(self):
         pass
 

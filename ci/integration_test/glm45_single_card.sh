@@ -43,19 +43,17 @@ unset http_proxy https_proxy
 coverage run run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
 
 echo "
-1 12.10431099
-2 12.05330086
-3 12.03880692
-4 12.03462410
-5 12.02083588
-6 12.00885773
-7 11.95637226
-8 11.96553898
-9 11.97878838
-10 11.97215271
+1 12.08071899
+2 12.02536583
+3 12.04192543
+4 12.04033470
+5 12.01289749
+6 11.98886108
+7 11.96615124
+8 11.96796513
+9 11.97536564
+10 11.96284294
 " > ./glm45_single_card_gt_loss.txt
-
-
 
 
 export FLAGS_use_stride_compute_kernel=False

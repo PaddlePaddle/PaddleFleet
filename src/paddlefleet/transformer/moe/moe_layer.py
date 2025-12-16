@@ -138,9 +138,12 @@ class MoELayer(nn.Layer):
             )
             self.moe_token_dispatcher_type = "alltoall"
 
-        if self.moe_token_dispatcher_type == "alltoall":
+        if (
+            self.expert_model_parallel_size > 1
+            and self.moe_token_dispatcher_type == "alltoall"
+        ):
             self.moe_use_fusion_node = False
-            self.moe_grouped_gemm = False  # TODO: Support moe_grouped_gemm
+            self.moe_grouped_gemm = False  # TODO: Support EP>1 moe_grouped_gemm
             self.fp8_dispatch = False
 
         if self.fp8:
@@ -206,7 +209,7 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            if self.moe_grouped_gemm:
+            if self.moe_grouped_gemm and not self.fp8:
                 for p in self.grouped_gemm_experts.parameters():
                     p.is_moe_param = True
                     p.color = {

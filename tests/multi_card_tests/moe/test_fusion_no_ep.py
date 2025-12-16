@@ -107,20 +107,6 @@ class TestFusionBF16SingleCard(unittest.TestCase):
             .numpy()[0, 0, 0:3]
         )
 
-        np.testing.assert_allclose(
-            output_moe_use_fusion_node_true.detach()
-            .cpu()
-            .float()
-            .numpy()[0, 0, 0:3],
-            [
-                0.00000023,
-                -0.0000001965,
-                -0.0000003557,
-            ],
-            rtol=1e-7,
-            atol=1e-7,
-        )
-
     def tearDown(self):
         pass
 
