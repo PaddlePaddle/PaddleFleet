@@ -30,7 +30,7 @@ from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-class TestFusionBF16SingleCard(unittest.TestCase):
+class TestFusionBF16ExpertParallel(unittest.TestCase):
     def setUp(self):
         seed = 123
         random.seed(seed)
@@ -46,7 +46,8 @@ class TestFusionBF16SingleCard(unittest.TestCase):
             "sharding_degree": 2,
             "sep_degree": 1,
             "cp_degree": 1,
-            "ep_degree": 1,
+            "ep_degree": 4,
+            "moe_sharding_degree": 2,
             "order": [
                 "sharding",
                 "moe_sharding",
@@ -62,10 +63,10 @@ class TestFusionBF16SingleCard(unittest.TestCase):
         model_parallel_cuda_manual_seed(seed)
         self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
-    def test_moe_fusion(self):
+    def test_moe_grouped_gemm(self):
         n_routed_experts = 64
         hidden_size = 256
-        transformer_config_moe_use_fusion_node = TransformerConfig(
+        transformer_config = TransformerConfig(
             hidden_size=hidden_size,
             num_attention_heads=4,
             n_routed_experts=n_routed_experts,
@@ -76,49 +77,38 @@ class TestFusionBF16SingleCard(unittest.TestCase):
             sequence_parallel=False,
             bf16=True,
             params_dtype=paddle.bfloat16,
-            moe_intermediate_size=64,
+            moe_intermediate_size=128,
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
             moe_grouped_gemm=True,
             bias_activation_fusion=True,
+            use_deep_gemm=True,
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=n_routed_experts
         )
 
-        moe_layer_moe_use_fusion_node = MoELayer(
-            transformer_config_moe_use_fusion_node,
+        moe_layer = MoELayer(
+            transformer_config,
             transformer_layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
             self.pg_collection,
         )
 
-        input_data = paddle.randn(4, 64, hidden_size, dtype=paddle.bfloat16)
+        input_data = paddle.randn(4, 256, hidden_size, dtype=paddle.bfloat16)
 
-        output_moe_use_fusion_node_true = moe_layer_moe_use_fusion_node(
-            input_data
-        )[0]
+        output_moe_deep_gemm_true = moe_layer(input_data)[0]
 
-        print(
-            output_moe_use_fusion_node_true.detach()
-            .cpu()
-            .float()
-            .numpy()[0, 0, 0:3]
-        )
+        moe_layer.use_deep_gemm = False
+
+        output_moe_deep_gemm_false = moe_layer(input_data)[0]
 
         np.testing.assert_allclose(
-            output_moe_use_fusion_node_true.detach()
-            .cpu()
-            .float()
-            .numpy()[0, 0, 0:3],
-            [
-                0.00000023,
-                -0.0000001965,
-                -0.0000003557,
-            ],
-            rtol=1e-7,
-            atol=1e-7,
+            output_moe_deep_gemm_true.detach().cpu().float().numpy(),
+            output_moe_deep_gemm_false.detach().cpu().float().numpy(),
+            rtol=1e-4,
+            atol=1e-4,
         )
 
     def tearDown(self):

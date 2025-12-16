@@ -126,6 +126,34 @@ class MoELayer(nn.Layer):
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
+        if (
+            self.moe_token_dispatcher_type == "deepep"
+            and not paddle.device.current_device_is_cpu
+            and paddle.device.get_device_capability()[0] < 9
+        ):
+            # TODO: Support Ampere architecture after upgrade deepep in paddlepaddle
+            logger.info(
+                "deepep in paddlepaddle does not support compute capability < 9.0, "
+                "fallback to alltoall token dispatcher."
+            )
+            self.moe_token_dispatcher_type = "alltoall"
+
+        if self.moe_token_dispatcher_type == "alltoall":
+            self.moe_use_fusion_node = False
+            self.moe_grouped_gemm = False  # TODO: Support moe_grouped_gemm
+            self.fp8_dispatch = False
+
+        if self.fp8:
+            assert self.moe_use_fusion_node, (
+                "fp8 can only be used when moe_use_fusion_node = True."
+            )
+        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
+            logger.warning(
+                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
+                "Will turn on moe_grouped_gemm."
+            )
+            self.moe_grouped_gemm = True
+
         expert_args = {}
         expert_args["config"] = routed_expert_config
         expert_args["moe_intermediate_size"] = self.moe_intermediate_size
@@ -155,31 +183,6 @@ class MoELayer(nn.Layer):
             self.shared_experts = self.shared_expert_class(**shared_expert_args)
         else:
             self.shared_experts = None
-
-        if (
-            self.moe_token_dispatcher_type == "deepep"
-            and not paddle.device.current_device_is_cpu
-            and paddle.device.get_device_capability()[0] < 9
-        ):
-            # TODO: Support Ampere architecture after upgrade deepep in paddlepaddle
-            logger.info(
-                "deepep in paddlepaddle does not support compute capability < 9.0, "
-                "fallback to alltoall token dispatcher."
-            )
-            self.moe_token_dispatcher_type = "alltoall"
-            self.moe_use_fusion_node = False
-            self.fp8_dispatch = False
-
-        if self.fp8:
-            assert self.moe_use_fusion_node, (
-                "fp8 can only be used when moe_use_fusion_node = True."
-            )
-        if self.moe_use_fusion_node and not self.moe_grouped_gemm:
-            logger.warning(
-                "moe_use_fusion_node must work with moe_grouped_gemm, but currently moe_grouped_gemm is False. "
-                "Will turn on moe_grouped_gemm."
-            )
-            self.moe_grouped_gemm = True
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":

@@ -65,7 +65,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
 
     def test_moe_fusion(self):
         n_routed_experts = 8
-        hidden_size = 16
+        hidden_size = 64
         transformer_config_moe = TransformerConfig(
             hidden_size=hidden_size,
             num_attention_heads=4,
@@ -77,7 +77,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             sequence_parallel=False,
             bf16=True,
             params_dtype=paddle.bfloat16,
-            moe_intermediate_size=24,
+            moe_intermediate_size=64,
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
@@ -101,11 +101,11 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             paddle.zeros(gate_weight_shape).astype("float32")
         )
 
-        input_data = paddle.ones(16, 4, hidden_size, dtype=paddle.bfloat16)
+        input_data = paddle.ones(16, 64, hidden_size, dtype=paddle.bfloat16)
 
         output = moe_layer(input_data)[0]
 
-        assert output.shape == (16, 4, hidden_size)
+        assert output.shape == (16, 64, hidden_size)
 
     def tearDown(self):
         pass
