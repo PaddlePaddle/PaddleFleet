@@ -109,7 +109,9 @@ if __name__ == "__main__":
     if type == "unit":
         result = check_unit_tests(log_path)
     elif type == "integration":
-        result = check_integration_tests(log_path, need_loss_check=need_loss_check)
+        result = check_integration_tests(
+            log_path, need_loss_check=need_loss_check
+        )
     else:
         raise ValueError(f"Unknown type: {type}")
     if result:
