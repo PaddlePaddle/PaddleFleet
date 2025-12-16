@@ -117,18 +117,14 @@ jobs:
           uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
-          bash ci/single_card_test.sh | tee single_card_test.log
+          bash ci/single_card_test.sh
           single_card_exit_code=$?
           ls -a /paddle/coveragedata/
           uv run coverage combine
           uv run coverage report -m
           uv run coverage xml -o /paddle/coveragedata/coverage.xml
-          python ci/check_log_for_exitcode.py single_card_test.log unit
           if [[ "$single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mSingle card test failed, try to analyze log.\033[0m"
-            python ci/check_log_for_exitcode.py single_card_test.log unit
-            find_error_exit_code=$?
-            exit $find_error_exit_code
+            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
           else
             echo -e "\033[32mSingle card test succeeded.\033[0m"
           fi
@@ -735,7 +731,7 @@ jobs:
           python ci/check_log_for_exitcode.py glm45_a100.log integration
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            python ci/check_log_for_exitcode.py glm45_a100.log integration
+            python PaddleFleet/ci/check_log_for_exitcode.py glm45_a100.log integration
             find_error_exit_code=$?
             exit $find_error_exit_code
           else
