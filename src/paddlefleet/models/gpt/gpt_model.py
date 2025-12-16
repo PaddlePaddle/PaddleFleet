@@ -26,6 +26,8 @@ from paddlefleet.pipeline_parallel import (
 if TYPE_CHECKING:
     from paddlefleet.spec_utils import LayerSpec
 
+from paddle.distributed import fleet
+
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
 from paddlefleet.transformer.transformer_layer import TransformerLayer
@@ -41,7 +43,9 @@ class GPTSublayersSpec:
     """
 
     embedding: LayerSpec | None = None
+    head_empty_layers: list[LayerSpec] | None = None
     transformer_layers: list[LayerSpec] | None = None
+    tail_empty_layers: list[LayerSpec] | None = None
     layer_norm: LayerSpec | None = None
     mtp: list[LayerSpec] | None = None
     lm_head: LayerSpec | None = None
@@ -78,7 +82,17 @@ class GPTModel(PipelineLayer):
         del kwargs["share_embeddings_and_output_weights"]
         del kwargs["config"]
 
-        super().__init__(layers=self.layers, **kwargs)
+        topology = (
+            None
+            if self.config.pipeline_model_parallel_size == 1
+            else fleet.get_hybrid_communicate_group().topology()
+        )
+
+        super().__init__(
+            layers=self.layers,
+            topology=topology,
+            **kwargs,
+        )
 
         if skip_weight_param_allocation:
             shared_embed_weight = None
@@ -105,9 +119,19 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(spec.embedding), "model"
             )
         i = 0
+        for head_empty_layer in spec.head_empty_layers:
+            self.add_sequential_layer(
+                layers, LayerDesc(head_empty_layer), f"model.layers.{i}"
+            )
+            i += 1
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
                 layers, LayerDesc(transformer_layer_spec), f"model.layers.{i}"
+            )
+            i += 1
+        for tail_empty_layer in spec.tail_empty_layers:
+            self.add_sequential_layer(
+                layers, LayerDesc(tail_empty_layer), f"model.layers.{i}"
             )
             i += 1
         self.add_sequential_layer(layers, LayerDesc(spec.layer_norm), "model")

@@ -776,7 +776,10 @@ class PipelineParallel(nn.Layer, ParallelBase):
         """
         for backward compatibility, wrap data to Fake FakeMicroDataset if it is of type list or tuple
         """
-        if isinstance(data, PipelineDatasetPreprocessor):
+        if isinstance(
+            data,
+            (PipelineDatasetPreprocessor, PaddlePipelineDatasetPreprocessor),
+        ):
             data = data()
 
         if (not isinstance(data, tuple)) and (not isinstance(data, list)):
