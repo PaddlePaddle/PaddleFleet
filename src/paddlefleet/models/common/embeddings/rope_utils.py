@@ -250,6 +250,8 @@ def _apply_rotary_pos_emb_thd(
 def apply_rotary_pos_emb(
     t: Tensor,
     freqs: Tensor,
+    cos: Tensor | None,
+    sin: Tensor | None,
     config: TransformerConfig,
     cu_seqlens: Tensor | None = None,
     mscale: float = 1.0,
@@ -258,8 +260,17 @@ def apply_rotary_pos_emb(
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
-    """
 
+    Args:
+        t (Tensor): Input tensor
+        freqs (Tensor): Rotary positional embedding frequencies
+        cos (Tensor | None): Pre-computed cosine values of freqs (used for fused implementation)
+        sin (Tensor | None): Pre-computed sine values of freqs (used for fused implementation)
+        config (TransformerConfig): Transformer configuration
+        cu_seqlens (Tensor | None): Cumulative sequence lengths
+        mscale (float): Scaling factor
+        cp_group (Group): Context parallel group
+    """
     if config.apply_rope_fusion:
         # Paddle fused_rope not support cu_seqlens or cp_group
         if cu_seqlens or (cp_group and cp_group.nranks > 1):
@@ -267,9 +278,16 @@ def apply_rotary_pos_emb(
                 "cu_seqlens or cp_group not be supported when using fused_rope"
             )
         else:
-            if isinstance(t, tuple):
-                return fused_rope(*t, rotary_emb_base=config.rope_theta)
-            return fused_rope(t, rotary_emb_base=config.rope_theta)[0]
+            assert isinstance(t, tuple), (
+                "The input for fused_rope should be a tuple of tensors"
+            )
+            return fused_rope(
+                *t,
+                sin=sin,
+                cos=cos,
+                rotary_emb_base=config.rope_theta,
+                time_major=config.sequence_parallel,
+            )
 
     # use unfused implementation
     if cu_seqlens is None:

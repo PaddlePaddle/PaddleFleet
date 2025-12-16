@@ -45,16 +45,18 @@ coverage run run_pretrain.py $config_json 2>&1 | tee ./qwen3_single_card.log
 
 echo "
 1 10.57088089
-2 10.57881927
-3 10.56455803
-4 10.55170441
-5 10.55012321
-6 10.53712845
-7 10.52390480
-8 10.52836990
-9 10.54636002
-10 10.52686119
+2 10.57883453
+3 10.56450653
+4 10.55170822
+5 10.55018044
+6 10.53714848
+7 10.52390289
+8 10.52839851
+9 10.54638767
+10 10.52687359
 " > ./qwen3_single_card_gt_loss.txt
+
+
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --log_file ./qwen3_single_card.log \

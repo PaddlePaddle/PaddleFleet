@@ -73,5 +73,17 @@ class TestOpsImport(unittest.TestCase):
             )
 
 
+class TestDeeGEMMImport(unittest.TestCase):
+    def test_deep_gemm_import(self):
+        from paddlefleet.ops.deep_gemm import (  # noqa: F401
+            cublaslt_gemm_tn,
+            set_num_sms,
+        )
+
+    def test_error_import(self):
+        with self.assertRaises(ImportError):
+            from paddlefleet.ops.deep_gemm import xxxx  # noqa: F401
+
+
 if __name__ == "__main__":
     unittest.main()

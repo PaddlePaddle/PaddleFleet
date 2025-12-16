@@ -12,8 +12,78 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import sys
+from pathlib import Path
+from typing import Any
+
+import paddle
+
 from .utils import import_custom_ops
+
+logger = logging.getLogger(__name__)
 
 import_custom_ops(
     package="paddlefleet._extensions", module_name=".ops", global_ns=globals()
 )
+
+
+class ModuleContext:
+    """
+    Manages the context for loading a module, including:
+    1. Stashing existing modules to prevent conflicts.
+    2. Managing sys.path.
+    3. Restoring stashed modules upon exit.
+    """
+
+    def __init__(self, module_names: list[str], path: Path):
+        self.module_names = module_names
+        self.path = str(path)
+        self._stash: dict[str, Any] = {}
+
+    def _stash_modules(self):
+        """Moves modules matching module_name from sys.modules to stash."""
+        for name in list(sys.modules.keys()):
+            for module_name in self.module_names:
+                if name == module_name or name.startswith(module_name + "."):
+                    self._stash[name] = sys.modules.pop(name)
+
+    def _restore_modules(self):
+        """Restores stashed modules to sys.modules."""
+        sys.modules.update(self._stash)
+        self._stash.clear()
+
+    def __enter__(self):
+        self._stash_modules()
+        sys.path.insert(0, self.path)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.path in sys.path:
+            sys.path.remove(self.path)
+        self._restore_modules()
+
+
+def patch_module_namespace(source_name: str, target_prefix: str):
+    """
+    Moves loaded modules from source_name to target_prefix + source_name.
+    Effectively 'installs' the module into the new namespace.
+    """
+    for name in list(sys.modules.keys()):
+        if name == source_name or name.startswith(source_name + "."):
+            module = sys.modules.pop(name)
+            new_name = target_prefix + name
+            sys.modules[new_name] = module
+
+
+ops_dir = Path(__file__).parent
+
+with ModuleContext(["deep_gemm"], ops_dir):
+    paddle.compat.enable_torch_proxy(scope={"deep_gemm"})
+    try:
+        import deep_gemm  # noqa: F401
+
+        patch_module_namespace("deep_gemm", "paddlefleet.ops.")
+        logger.info("Successfully loaded ecosystem library: deep_gemm")
+    except ImportError as e:
+        logger.warning(f"Ecosystem library 'deep_gemm' not found: {e}")

@@ -225,6 +225,8 @@ class Attention(FleetLayer, ABC):
         attn_mask_startend_row_indices: Tensor | None = None,
         key_value_states: Tensor | None = None,
         rotary_pos_emb: Tensor | tuple[Tensor, Tensor] | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
@@ -307,6 +309,8 @@ class Attention(FleetLayer, ABC):
                 query, key, _ = apply_rotary_pos_emb(
                     (query, key),
                     None,
+                    rotary_pos_cos,
+                    rotary_pos_sin,
                     config=self.config,
                     cu_seqlens=cu_seqlens_q,
                     mscale=None,
@@ -317,6 +321,8 @@ class Attention(FleetLayer, ABC):
                     query = apply_rotary_pos_emb(
                         query,
                         q_pos_emb,
+                        None,
+                        None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_q,
                         mscale=_yarn_get_concentration_factor_from_config(
@@ -329,6 +335,8 @@ class Attention(FleetLayer, ABC):
                     key = apply_rotary_pos_emb(
                         key,
                         k_pos_emb,
+                        None,
+                        None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_kv,
                         mscale=_yarn_get_concentration_factor_from_config(

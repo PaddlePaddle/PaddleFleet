@@ -19,3 +19,9 @@ log
 # Ignore files generated from `uv sync` for custom ops
 src/paddlefleet/_extensions/ops_pd_.so
 src/paddlefleet/_extensions/ops.py
+
+# Ignore build artifacts for submodule
+third_party
+src/_third_party_install_temp/
+src/paddlefleet/ops/deep_gemm/
+src/paddlefleet/ops/deep_gemm_cpp/

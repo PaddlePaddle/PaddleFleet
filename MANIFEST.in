@@ -1,1 +1,6 @@
 include src/paddlefleet/_extensions/*.h
+include build_backend.py
+include build_utils.py
+graft third_party/DeepGEMM
+prune third_party/DeepGEMM/deep_gemm_cpp.egg-info
+prune third_party/DeepGEMM/build
