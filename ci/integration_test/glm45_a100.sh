@@ -44,6 +44,8 @@ mv ${config_yaml}.tmp $config_yaml
 sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 2/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 
+cat /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
+
 rm -rf checkpoints/
 rm -rf vdl_log/
 master=$(hostname -i)
