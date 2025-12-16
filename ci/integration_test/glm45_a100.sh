@@ -41,10 +41,10 @@ yq eval '.expert_model_parallel_size = 1
   $config_yaml > ${config_yaml}.tmp
 mv ${config_yaml}.tmp $config_yaml
 
-jq --arg cur_dir "$cur_dir" \
-    '.first_k_dense_replace = 0' \
-    $config_json > ${config_json}.tmp
-mv ${config_json}.tmp $config_json
+# jq --arg cur_dir "$cur_dir" \
+#     '.first_k_dense_replace = 0' \
+#     $config_json > ${config_json}.tmp
+# mv ${config_json}.tmp $config_json
 
 sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
