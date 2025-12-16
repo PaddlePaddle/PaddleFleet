@@ -46,7 +46,7 @@ mv ${config_yaml}.tmp $config_yaml
 #     $config_json > ${config_json}.tmp
 # mv ${config_json}.tmp $config_json
 
-sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
+sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 2/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 2/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 
 rm -rf checkpoints/
