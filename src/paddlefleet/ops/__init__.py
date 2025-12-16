@@ -21,6 +21,17 @@ import paddle
 
 from .utils import import_custom_ops
 
+paddle.compat.enable_torch_proxy(scope={"deep_gemm", "triton"})
+
+# paddle.compat.enable_torch_proxy(scope={"triton"}) enables the torch proxy
+# specifically for the 'triton' module. This means `import torch` inside 'triton'
+# will actually import paddle's compatibility layer (acting as torch).
+#
+# 'scope' acts as an allowlist. To add other modules, you can do:
+# paddle.compat.enable_torch_proxy(scope={"triton", "new_module"})
+#
+# Note: Ensure that any torch APIs used in 'new_module' are already implemented in Paddle.
+
 logger = logging.getLogger(__name__)
 
 import_custom_ops(
@@ -79,7 +90,6 @@ def patch_module_namespace(source_name: str, target_prefix: str):
 ops_dir = Path(__file__).parent
 
 with ModuleContext(["deep_gemm"], ops_dir):
-    paddle.compat.enable_torch_proxy(scope={"deep_gemm"})
     try:
         import deep_gemm  # noqa: F401
 
