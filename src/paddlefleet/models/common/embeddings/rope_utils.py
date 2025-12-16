@@ -123,8 +123,9 @@ def _apply_rotary_pos_emb_bshd(
         sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
 
         if len(cos_.shape) < len(t.shape):
-            cos_.unsqueeze_(1)
-            sin_.unsqueeze_(1)
+            # [b,s,h]->[b,s,1,h]
+            cos_.unsqueeze_(-2)
+            sin_.unsqueeze_(-2)
         if len(rotate_t.shape) < len(t.shape):
             rotate_t.reshape_(t.shape)
 
@@ -236,12 +237,12 @@ def _apply_rotary_pos_emb_thd(
         freqs_packed = paddle.cat(freq_slices, axis=1)
         # whye [seq,bs,num_heads,head_dim]->[seq,bs,1,num_heads,head_dim]?
         return _apply_rotary_pos_emb_bshd(
-            t.unsqueeze(1),
+            t,
             freqs_packed,
             rotary_interleaved=rotary_interleaved,
             multi_latent_attention=multi_latent_attention,
             mscale=mscale,
-        ).squeeze(1)
+        )
     else:
         # CASE 2: Traditional mapping without offsets
         # Build packed freqs for all sequences using the standard mapping, then apply once
@@ -255,12 +256,12 @@ def _apply_rotary_pos_emb_thd(
         )
 
         return _apply_rotary_pos_emb_bshd(
-            t.unsqueeze(1),
+            t,
             freqs_packed,
             rotary_interleaved=rotary_interleaved,
             multi_latent_attention=multi_latent_attention,
             mscale=mscale,
-        ).squeeze(1)
+        )
 
 
 def apply_rotary_pos_emb(
@@ -274,6 +275,10 @@ def apply_rotary_pos_emb(
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
+    Args:
+        t (`paddle.Tensor`): The query/key/ tensor.
+        freqs (`paddle.Tensor`): The rotary embedding tensor.
+        cu_seqlens(Tensor):  Cumulative sum of sequence lengths in a batch for `t`.
     """
     if config.apply_rope_fusion:
         # Paddle fused_rope not support cu_seqlens or cp_group

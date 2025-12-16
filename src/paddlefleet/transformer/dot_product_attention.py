@@ -185,10 +185,7 @@ class DotProductAttention(FleetLayer):
         packed_seq_params: PackedSeqParams | None = None,
     ):
         """Forward."""
-        # assert packed_seq_params is None, (
-        #     "Packed sequence is not supported by DotProductAttention."
-        #     "Please use TEDotProductAttention instead."
-        # )
+
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )

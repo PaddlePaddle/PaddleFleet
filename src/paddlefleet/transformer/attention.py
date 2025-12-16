@@ -375,7 +375,7 @@ class Attention(FleetLayer, ABC):
                 packed_seq_params=packed_seq_params,
             )
         # =================
-        # Output. [sq, b, h]
+        # Output. [b, sq, h]
         # =================
 
         if self.config.sequence_parallel:
@@ -457,10 +457,10 @@ class SelfAttention(Attention):
         Derives `query`, `key` and `value` tensors from `hidden_states`. If `split_qkv=False`, then
         the unsplit mixed_qkv tensor is returned.
         """
-        # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
+        # Attention heads [b, sq, h] --> [b, sq, ng * (np/ng + 2) * hn)]
         mixed_qkv, _ = self.qkv_proj(hidden_states)
 
-        # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
+        # [b, sq, hp] --> [b, sq, ng, (np/ng + 2) * hn]
         new_tensor_shape = (
             *mixed_qkv.shape[:-1],
             self.num_query_groups_per_partition,
@@ -489,11 +489,11 @@ class SelfAttention(Attention):
         if not split_qkv:
             return mixed_qkv, split_arg_list
 
-        # [sq, b, ng, (np/ng + 2) * hn]
-        # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
+        # [b, sq, ng, (np/ng + 2) * hn]
+        # --> [b, sq, ng, np/ng * hn], [b, sq, ng, hn], [b, sq, ng, hn]
         (query, key, value) = paddle.split(mixed_qkv, split_arg_list, axis=3)
 
-        # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
+        # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
         query = query.reshape(
             query.shape[0],
             query.shape[1],
@@ -601,10 +601,10 @@ class CrossAttention(Attention):
         # [sk, b, np, 2 * hn] --> 2 [sk, b, np, hn]
         (key, value) = tensor_parallel.split_tensor_along_last_dim(mixed_kv, 2)
 
-        # Attention head [sq, b, h] --> [sq, b, hp]
+        # Attention head [b, sq, h] --> [b, sq, hp]
         query, _ = self.linear_q(hidden_states)
 
-        # [sq, b, hp] --> [sq, b, np, hn]
+        # [b, sq, hp] --> [b, sq, np, hn]
         new_tensor_shape = (
             *query.size()[:-1],
             self.num_attention_heads_per_partition,
