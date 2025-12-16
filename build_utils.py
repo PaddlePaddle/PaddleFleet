@@ -132,4 +132,4 @@ def check_submodule_updated():
         logger.error(
             "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
         )
-        sys.exit()
+        sys.exit(1)
