@@ -24,8 +24,7 @@ def check_unit_tests(log_path: str, check_string="OK") -> bool:
     """
     check_ci_logs_for_error - Docstring
     """
-    pattern = r"Running.*?test:\s+.*?/([^/\s]+\.py)"
-
+    pattern = r"Running.*?test:\s+(\S+\.py)"
     with open(log_path, "r", encoding="utf-8") as log_file:
         log_lines = log_file.readlines()
         current_test_name = None
@@ -42,15 +41,15 @@ def check_unit_tests(log_path: str, check_string="OK") -> bool:
                 current_test_name = None
                 recode[current_test_name] = True
             if "Test PASSED" in line:
-                split_line = line.split(":")
+                split_line = line.split("Test PASSED:")
                 test_name = split_line[1].strip()
                 if current_test_name is not None:
                     assert test_name == current_test_name, "Mismatch in test names."
+                    print("Test {} passed.".format(current_test_name))
+                    current_test_name = None
+                    recode[test_name] = True
                 else:
                     continue
-                print("Test {} passed.".format(current_test_name))
-                current_test_name = None
-                recode[test_name] = True
         for test_name, status in recode.items():
             if not status:
                 return False
