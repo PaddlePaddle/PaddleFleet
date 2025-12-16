@@ -113,6 +113,7 @@ class TestGPTModel(unittest.TestCase):
             intermediate_size=1024,
             normalization="RMSNorm",
             hidden_dropout_prob=0.0,
+            first_k_dense_replace=1,
             attention_dropout=0.0,
             n_routed_experts=8,
             use_bias=False,
@@ -131,7 +132,7 @@ class TestGPTModel(unittest.TestCase):
             share_embeddings_and_output_weights=True,
             use_qk_norm=True,
             recompute_granularity="selective",
-            recompute_modules=["core_attn"],
+            recompute_modules=["core_attn", "norm", "mlp"],
         )
         config1.name = "config_1"
         configs.append(config1)
@@ -149,12 +150,12 @@ class TestGPTModel(unittest.TestCase):
         expectations = {
             "config_1": {
                 "H": {
-                    "loss": 5.153511047363281,
-                    "grad_norm": 11.278331756591797,
+                    "loss": 5.668004035949707,
+                    "grad_norm": 6.991505146026611,
                 },
                 "V": {
-                    "loss": 5.212523937225342,
-                    "grad_norm": 6.811282634735107,
+                    "loss": 5.3251447677612305,
+                    "grad_norm": 5.3691630363464355,
                 },
             },
         }
