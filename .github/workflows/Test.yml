@@ -728,7 +728,7 @@ jobs:
           uv run coverage combine
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
           uv run coverage report -m
-          python ci/check_log_for_exitcode.py glm45_a100.log integration
+          python PaddleFleet/ci/check_log_for_exitcode.py glm45_a100.log integration
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             python PaddleFleet/ci/check_log_for_exitcode.py glm45_a100.log integration

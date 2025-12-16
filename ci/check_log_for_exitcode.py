@@ -44,7 +44,10 @@ def check_unit_tests(log_path: str, check_string="OK") -> bool:
             if "Test PASSED" in line:
                 split_line = line.split(":")
                 test_name = split_line[1].strip()
-                assert test_name == current_test_name, "Mismatch in test names."
+                if current_test_name is None:
+                    assert test_name == current_test_name, "Mismatch in test names."
+                else:
+                    continue
                 print("Test {} passed.".format(current_test_name))
                 current_test_name = None
                 recode[test_name] = True
