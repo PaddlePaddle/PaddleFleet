@@ -125,6 +125,7 @@ jobs:
           uv run coverage xml -o /paddle/coveragedata/coverage.xml
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
+            exit 1
           else
             echo -e "\033[32mSingle card test succeeded.\033[0m"
           fi
