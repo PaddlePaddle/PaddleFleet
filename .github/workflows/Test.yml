@@ -527,24 +527,10 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git pull --no-edit origin pull/3200/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
-          '
-
-      - name: Proprocess for integration test
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/preprocess.sh
-          preprocess_exit_code=$?
-          if [[ "$preprocess_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mPreprocess failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mPreprocess succeeded.\033[0m"
-          fi
           '
 
       - name: Integration test (GLM4.5 multi-card)
@@ -694,23 +680,10 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git pull --no-edit origin pull/3200/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
-          '
-
-      - name: Proprocess for integration test
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/preprocess.sh
-          preprocess_exit_code=$?
-          if [[ "$preprocess_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mPreprocess failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mPreprocess succeeded.\033[0m"
-          fi
           '
 
       - name: Integration test (GLM4.5)

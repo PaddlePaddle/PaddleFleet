@@ -206,6 +206,15 @@ class MoELayer(nn.Layer):
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
                 )
 
+        self.recompute_moe_gate_up = (
+            self.config.recompute_granularity == "selective"
+            and "moe_gate_up" in self.config.recompute_modules
+        )
+        self.recompute_moe_premute = (
+            self.config.recompute_granularity == "selective"
+            and "moe_premute" in self.config.recompute_modules
+        )
+
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
@@ -371,6 +380,8 @@ class MoELayer(nn.Layer):
             self.num_experts_per_tok,
             use_fp8_mlp=self.fp8,
             use_deep_gemm=self.use_deep_gemm,
+            recompute_moe_gate_up=self.recompute_moe_gate_up,
+            recompute_moe_premute=self.recompute_moe_premute,
             fp8_dispatched_handle=fp8_dispatched_handle,
             use_bf16_gemm_weight_grad=not self.fp8_wgrad,
         )
