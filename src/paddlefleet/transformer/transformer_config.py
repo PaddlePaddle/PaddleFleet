@@ -192,6 +192,8 @@ class TransformerConfig(ModelParallelConfig):
     """Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). Only
     used when gated_linear_unit is True"""
 
+    multimodal_embedding: bool = False
+    """Whether to use multimodal embedding."""
     ####################
     # mixed-precision
     ####################
