@@ -101,6 +101,7 @@ jobs:
           pip install uv
           echo "uv sync"
           git submodule update --init --recursive
+          uv build
           uv sync --group ci -v > /dev/null
           '
 
