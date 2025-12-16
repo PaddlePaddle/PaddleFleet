@@ -26,6 +26,22 @@ OPS_DIR = ROOT_DIR / "src" / "paddlefleet" / "ops"
 THIRD_PARTY_INSTALL_TEMP = ROOT_DIR / "src" / "_third_party_install_temp"
 
 
+def remove_path(path: Path) -> None:
+    """Removes a path (file, directory, or symlink) if it exists."""
+    if path.is_symlink() or path.exists():
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
+def create_symlink(src: Path, dst: Path) -> None:
+    """Creates a symlink from src to dst, overwriting dst if it exists."""
+    remove_path(dst)
+    logger.info(f"Symlinking {src} -> {dst}")
+    dst.symlink_to(src, target_is_directory=src.is_dir())
+
+
 @dataclass
 class Artifact:
     """
@@ -59,6 +75,22 @@ class EcosystemLibrary:
         logger.info(f"Building ecosystem library: {self.name}")
         self.install_dir.mkdir(parents=True, exist_ok=True)
 
+        # Special pre-build step for DeepGEMM: link CUTLASS headers into deep_gemm/include
+        if self.name.lower() == "deepgemm":
+            cutlass_root = (
+                self.source_dir / "third-party" / "cutlass" / "include"
+            )
+            target_include_dir = self.source_dir / "deep_gemm" / "include"
+            target_include_dir.mkdir(parents=True, exist_ok=True)
+
+            links = {
+                cutlass_root / "cutlass": target_include_dir / "cutlass",
+                cutlass_root / "cute": target_include_dir / "cute",
+            }
+
+            for src, dst in links.items():
+                create_symlink(src, dst)
+
         # Default build command: python setup.py install --install-lib <install_dir>
         cmd = [
             sys.executable,
@@ -75,35 +107,17 @@ class EcosystemLibrary:
             logger.error(f"Failed to build {self.name}: {e}")
             raise
 
-    def clean(self) -> None:
-        """Cleans up existing artifacts in the ops directory."""
-        for artifact in self.artifacts:
-            target_path = OPS_DIR / artifact.target_name
-            if target_path.exists():
-                if target_path.is_symlink():
-                    target_path.unlink()
-                elif target_path.is_dir():
-                    shutil.rmtree(target_path)
-                else:
-                    target_path.unlink()
-
     def install(self, use_symlinks: bool = False) -> None:
         """Installs artifacts to the ops directory via symlink or copy."""
-        self.clean()  # Ensure clean state first
-
         for artifact in self.artifacts:
             # Artifact source path is relative to the installation directory
             src = self.install_dir / artifact.source_rel_path
             dst = OPS_DIR / artifact.target_name
 
-            if not src.exists():
-                logger.warning(f"Artifact source not found: {src}")
-                continue
-
             if use_symlinks:
-                logger.info(f"Symlinking {src} -> {dst}")
-                dst.symlink_to(src, target_is_directory=src.is_dir())
+                create_symlink(src, dst)
             else:
+                remove_path(dst)
                 logger.info(f"Copying {src} -> {dst}")
                 if src.is_dir():
                     shutil.copytree(
