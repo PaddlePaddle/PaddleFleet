@@ -59,30 +59,57 @@ def check_unit_tests(log_path: str, check_string="OK") -> bool:
 
 
 def check_integration_tests(
-    log_path: str, check_string="Training completed"
+    log_path: str, check_string="Training completed", need_loss_check=True
 ) -> bool:
+    loss_check_string = "All loss checks passed"
+    loss_check = False
+    train_check = False
     with open(log_path, "r", encoding="utf-8") as log_file:
         log_lines = log_file.readlines()
         for line in log_lines:
             if check_string in line:
                 print(f"Found '{check_string}' string in log file.'")
                 print("Test passed.")
-                return True
-        print(f"Didn't find '{check_string}' string in log file.'")
-        print("Test failed.")
-    return False
+                train_check = True
+            if loss_check_string in line:
+                print(f"Found '{loss_check_string}' string in log file.'")
+                print("Loss check passed.")
+                loss_check = True
+    print(need_loss_check)
+    if need_loss_check:
+        if train_check and loss_check:
+            print("Both training and loss check passed.")
+            return True
+        else:
+            print("Either training or loss check failed.")
+            return False
+    else:
+        if train_check:
+            print("Training check passed.")
+            return True
+        else:
+            print("Training check failed.")
+            return False
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python check_log_for_exitcode.py <log_path> <type>")
-        sys.exit(1)
     log_path = sys.argv[1]
     type = sys.argv[2]
+    need_loss_check_str = ""
+    need_loss_check = True
+    if len(sys.argv) == 4:
+        need_loss_check_str = sys.argv[3]
+        if need_loss_check_str.lower() == "false":
+            need_loss_check = False
+        elif need_loss_check_str.lower() == "true":
+            need_loss_check = True
+        else:
+            raise ValueError("need_loss_check must be 'true' or 'false'")
+
     if type == "unit":
         result = check_unit_tests(log_path)
     elif type == "integration":
-        result = check_integration_tests(log_path)
+        result = check_integration_tests(log_path, need_loss_check=need_loss_check)
     else:
         raise ValueError(f"Unknown type: {type}")
     if result:
