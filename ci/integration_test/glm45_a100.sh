@@ -13,9 +13,12 @@
 # limitations under the License.
 
 set -exo pipefail
+export root_dir=$(pwd)
 
 wget https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64 -O /usr/local/bin/yq
 chmod +x /usr/local/bin/yq
+apt-get update
+apt-get install jq -y
 
 source PaddleFleet/.venv/bin/activate
 
@@ -26,25 +29,29 @@ if [ ! -f $CACHE_DIR/glm45/glm45_fleet_pt.1214.tar ]; then
 fi
 
 cd $CACHE_DIR/glm45/glm45_fleet_pt
-export root_dir=$(pwd)
+export cur_dir=$(pwd)
 
 config_yaml="glm45.yaml"
+config_json=${cur_dir}/GLM-4.5-Air/config.json
 
 yq eval '.expert_model_parallel_size = 1
     | .per_device_train_batch_size = 1
     | .use_expert_parallel = false
-    | .train_dataset_path = strenv(root_dir) + "/data/pre-training/train.jsonl"
-    | .eval_dataset_path = strenv(root_dir) + "/data/pre-training/eval.jsonl"
-    | .model_name_or_path = strenv(root_dir) + "/GLM-4.5-Air"
-    | .logging_dir = strenv(root_dir) + "/vdl_log"
-    | .output_dir = strenv(root_dir) + "/checkpoints"' \
+    | .train_dataset_path = strenv(cur_dir) + "/data/pre-training/train.jsonl"
+    | .eval_dataset_path = strenv(cur_dir) + "/data/pre-training/eval.jsonl"
+    | .model_name_or_path = strenv(cur_dir) + "/GLM-4.5-Air"
+    | .logging_dir = strenv(cur_dir) + "/vdl_log"
+    | .output_dir = strenv(cur_dir) + "/checkpoints"' \
    $config_yaml > ${config_yaml}.tmp
 mv ${config_yaml}.tmp $config_yaml
 
-sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 2/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
-sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
+jq --arg cur_dir "$cur_dir" \
+    '.first_k_dense_replace = 0' \
+    $config_json > ${config_json}.tmp
+mv ${config_json}.tmp $config_json
 
-cat /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
+sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
+sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 
 rm -rf checkpoints/
 rm -rf vdl_log/

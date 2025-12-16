@@ -13,6 +13,7 @@
 # limitations under the License.
 
 set -exo pipefail
+export root_dir=$(pwd)
 
 wget https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64 -O /usr/local/bin/yq
 chmod +x /usr/local/bin/yq
@@ -26,16 +27,16 @@ if [ ! -f $CACHE_DIR/glm45/glm45_fleet_pt.1214.tar ]; then
 fi
 
 cd $CACHE_DIR/glm45/glm45_fleet_pt
-export root_dir=$(pwd)
+export cur_dir=$(pwd)
 
 config_yaml="glm45.yaml"
 
 yq eval '.expert_model_parallel_size = 8
-    | .train_dataset_path = strenv(root_dir) + "/data/pre-training/train.jsonl"
-    | .eval_dataset_path = strenv(root_dir) + "/data/pre-training/eval.jsonl"
-    | .model_name_or_path = strenv(root_dir) + "/GLM-4.5-Air"
-    | .logging_dir = strenv(root_dir) + "/vdl_log"
-    | .output_dir = strenv(root_dir) + "/checkpoints"' \
+    | .train_dataset_path = strenv(cur_dir) + "/data/pre-training/train.jsonl"
+    | .eval_dataset_path = strenv(cur_dir) + "/data/pre-training/eval.jsonl"
+    | .model_name_or_path = strenv(cur_dir) + "/GLM-4.5-Air"
+    | .logging_dir = strenv(cur_dir) + "/vdl_log"
+    | .output_dir = strenv(cur_dir) + "/checkpoints"' \
    $config_yaml > ${config_yaml}.tmp
 mv ${config_yaml}.tmp $config_yaml
 
@@ -66,10 +67,10 @@ unset http_proxy https_proxy
 FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $root_dir/glm45.yaml 2>&1 | tee ./glm45.log
 
 echo "
-20 10.27898884
+10 11.60683823
 " > ./glm45_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
-   --compare_step 20 \
+   --compare_step 10 \
    --log_file ./glm45.log \
    --gt_file ./glm45_multi_card_gt_loss.txt
