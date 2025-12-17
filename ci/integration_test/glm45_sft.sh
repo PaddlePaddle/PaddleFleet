@@ -22,6 +22,8 @@ cd -
 apt-get update
 apt-get install jq -y
 
+source PaddleFleet/.venv/bin/activate
+
 cd $root_dir/glm45_fleet
 export cur_dir=$(pwd)
 
