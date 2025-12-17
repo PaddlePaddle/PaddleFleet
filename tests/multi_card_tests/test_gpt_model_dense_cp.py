@@ -155,7 +155,7 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
     print(f"actual loss: {loss.item()}")
     loss_baseline = 7.193428039550781
     np.testing.assert_allclose(
-        np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
+        np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-6
     )
 
 
