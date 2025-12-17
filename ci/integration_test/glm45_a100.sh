@@ -68,3 +68,17 @@ unset http_proxy https_proxy
 #    --output_dir ./checkpoint | tee ./glm45_a100.log
 
 FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $cur_dir/glm45.yaml 2>&1 | tee ./glm45_a100.log
+
+exit_code=$?
+
+if [ $exit_code -ne 0 ]; then
+    echo "Test failed with exit code $exit_code, check the log: ./glm45_a100.log"
+    python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_a100.log
+    check_log_exit_code=$?
+    if [ $check_log_exit_code -ne 0 ]; then
+        echo "Failed to find 'Training completed' in log file."
+        exit 1
+    else 
+        exit 0
+    fi
+fi

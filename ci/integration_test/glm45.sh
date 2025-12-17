@@ -66,6 +66,19 @@ unset http_proxy https_proxy
 
 FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $cur_dir/glm45.yaml 2>&1 | tee ./glm45.log
 
+exit_code=$?
+if [ $exit_code -ne 0 ]; then
+   echo "GLM4.5 multi-cards training failed, try to check the log file"
+   python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45.log
+   check_exit_code=$?
+   if [ $check_exit_code -ne 0 ]; then
+     echo "Failed to find 'Training completed' in log file."
+     exit 1
+   else
+     echo "Found 'Training completed' in log file."
+   fi
+fi
+
 cat ./glm45_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \

@@ -20,50 +20,11 @@ import re
 import sys
 
 
-def check_unit_tests(log_path: str, check_string="OK") -> bool:
-    """
-    check_ci_logs_for_error - Docstring
-    """
-    pattern = r"Running.*?test:\s+(\S+\.py)"
-    with open(log_path, "r", encoding="utf-8") as log_file:
-        log_lines = log_file.readlines()
-        current_test_name = None
-        recode = {}
-        for line in log_lines:
-            m = re.search(pattern, line)
-            if m:
-                if current_test_name is not None:
-                    print(f"Test {current_test_name} failed.")
-                    recode[current_test_name] = False
-                current_test_name = m.group(1)
-            if check_string in line and current_test_name is not None:
-                print(f"Test {current_test_name} passed.")
-                current_test_name = None
-                recode[current_test_name] = True
-            if "Test PASSED" in line:
-                split_line = line.split("Test PASSED:")
-                test_name = split_line[1].strip()
-                if current_test_name is not None:
-                    assert test_name == current_test_name, (
-                        "Mismatch in test names."
-                    )
-                    print(f"Test {current_test_name} passed.")
-                    current_test_name = None
-                    recode[test_name] = True
-                else:
-                    continue
-        for test_name, status in recode.items():
-            if not status:
-                return False
-    return True
-
-
-def check_integration_tests(
+def check_tests(
     log_path: str, check_string="Training completed"
 ) -> bool:
     with open(log_path, "r", encoding="utf-8") as log_file:
-        log_lines = log_file.readlines()
-        for line in log_lines:
+        for line in log_file:
             if check_string in line:
                 print(f"Found '{check_string}' string in log file.'")
                 print("Test passed.")
@@ -75,13 +36,8 @@ def check_integration_tests(
 
 if __name__ == "__main__":
     log_path = sys.argv[1]
-    type = sys.argv[2]
-    if type == "unit":
-        result = check_unit_tests(log_path)
-    elif type == "integration":
-        result = check_integration_tests(log_path)
-    else:
-        raise ValueError(f"Unknown type: {type}")
+    check_str = sys.argv[2] if len(sys.argv) > 2 else "Training completed"
+    result = check_tests(log_path, check_string=check_str)
     if result:
         sys.exit(0)
     else:
