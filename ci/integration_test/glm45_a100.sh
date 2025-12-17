@@ -31,6 +31,7 @@ config_yaml=$cur_dir/glm45.yaml
 config_json=${cur_dir}/GLM-4.5-Air/config.json
 
 yq eval '.expert_model_parallel_size = 1
+    | .gradient_accumulation_steps = 1
     | .per_device_train_batch_size = 1
     | .use_expert_parallel = false
     | .train_dataset_path = strenv(cur_dir) + "/data/pre-training/train.jsonl"
@@ -46,8 +47,8 @@ mv ${config_yaml}.tmp $config_yaml
 #     $config_json > ${config_json}.tmp
 # mv ${config_json}.tmp $config_json
 
-sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
-sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
+sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 2/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
+sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 
 rm -rf checkpoints/
 rm -rf vdl_log/
