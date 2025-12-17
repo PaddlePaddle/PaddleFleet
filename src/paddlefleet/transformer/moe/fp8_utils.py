@@ -212,7 +212,7 @@ class ExpertsGroupGemmContiguousNode:
     def __init__(
         self,
         custom_map,
-        recompute_fwd_gate_up=False,
+        recompute_moe_gate_up=False,
         dequant_input=False,
         group=None,
         name="experts_group_gemm_contiguous_node",
@@ -226,7 +226,7 @@ class ExpertsGroupGemmContiguousNode:
 
         Args:
             custom_map (CustomMapping): Custom mapping for the model.
-            recompute_fwd_gate_up (bool, optional): Whether to recompute forward gate up. Defaults to False.
+            recompute_moe_gate_up (bool, optional): Whether to recompute forward gate up. Defaults to False.
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
         """
@@ -235,7 +235,7 @@ class ExpertsGroupGemmContiguousNode:
         else:
             self.experts = [custom_map.experts[expert_id]]
         self.expert_id = expert_id
-        self.recompute_fwd_gate_up = recompute_fwd_gate_up
+        self.recompute_moe_gate_up = recompute_moe_gate_up
         self.dequant_input = dequant_input
         self.tokens_per_expert = None
         self.m_indices = None
@@ -884,7 +884,7 @@ class ExpertsGroupGemmContiguousNode:
         o1 = self.fwd_gate_up(
             hs_out, expert_w1, num_expert, tokens_per_expert, scale=scale
         )
-        if not self.recompute_fwd_gate_up:
+        if not self.recompute_moe_gate_up:
             self.o1 = o1
             clear_o1 = False
         else:
@@ -1026,7 +1026,7 @@ class ExpertsGroupGemmContiguousNode:
         expert_w1 = [
             x.up_gate_proj.weight for x in self.experts if x is not None
         ]
-        if self.recompute_fwd_gate_up:
+        if self.recompute_moe_gate_up:
             o1 = self.fwd_gate_up(
                 None, expert_w1, len(expert_w1), self.tokens_per_expert
             )
@@ -1072,7 +1072,7 @@ class ExpertsGroupGemmContiguousNode:
             x.up_gate_proj.weight for x in self.experts if x is not None
         ]
 
-        if self.recompute_fwd_gate_up:
+        if self.recompute_moe_gate_up:
             o1 = self.fwd_gate_up(
                 None, expert_w1, len(expert_w1), self.tokens_per_expert
             )

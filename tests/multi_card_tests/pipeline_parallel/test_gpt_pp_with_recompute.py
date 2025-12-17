@@ -198,6 +198,7 @@ class TestPPWithRecompute(unittest.TestCase):
             num_hidden_layers=4,
             hidden_size=512,
             num_attention_heads=4,
+            first_k_dense_replace=1,
             intermediate_size=1024,
             normalization="RMSNorm",
             hidden_dropout_prob=0.0,

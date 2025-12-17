@@ -76,7 +76,6 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          uv sync -v
           python -m pip install bce-python-sdk==0.8.74
           '
 
@@ -86,6 +85,7 @@ jobs:
           export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
           source /root/proxy
+          git submodule update --init --recursive
           uv build
           '
 

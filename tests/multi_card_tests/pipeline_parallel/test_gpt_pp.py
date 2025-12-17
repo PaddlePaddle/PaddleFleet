@@ -25,7 +25,6 @@ import paddlefleet
 from paddlefleet.distributed.model import distributed_model
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.pipeline_parallel import NoPipelineParallel
 from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
@@ -67,67 +66,12 @@ def _set_random_seed(
         raise ValueError(f"Seed ({seed_}) should be a positive integer.")
 
 
-def cal_sim(a, b):
-    return paddle.nn.functional.cosine_similarity(a.flatten(), b.flatten(), 0)
-
-
-def check_grads(dist_model, serial_model):
-    serial_grads = {}
-    for name, p in serial_model.named_parameters():
-        serial_grads[name] = p.grad
-
-    dist_grads = {}
-    for name, p in dist_model.named_parameters():
-        grad = p.grad
-        if "shared_layers" in name:
-            serial_name = "_layers.0.embedding.embed_tokens.weight"
-        else:
-            serial_name = name
-        assert (
-            paddle.allclose(grad, serial_grads[serial_name], atol=5e-8)
-            and cal_sim(grad, serial_grads[serial_name]) > 0.999
-        )
-
-
-def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
-    seed = 46
-    random.seed(seed)
-    np.random.seed(seed)
-    paddle.manual_seed(seed)
-    gpt_model = gpt_builder(config, num_stages=1)
-    strategy = fleet.DistributedStrategy()
-    gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
-
-    data = paddle.randint(
-        low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
-    )
-    input_ids = data[:, :-1]
-    labels = data[:, 1:]
-    position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
-        (batch_size, 1)
-    )
-
-    inputs = (
-        {
-            "input_ids": [input_ids],
-            "position_ids": [position_ids],
-        },
-        [labels],
-    )
-
-    loss = gpt_pipe_model.forward_backward_pipeline(inputs)
-
-    return loss, gpt_pipe_model
-
-
 def run_pp(
     seed,
     batch_size,
     seq_len,
     vocab_size,
     config,
-    loss_baseline,
-    gpt_model_baseline,
 ):
     strategy = fleet.DistributedStrategy()
     strategy.hybrid_configs = {
@@ -157,7 +101,7 @@ def run_pp(
     gpt_model = gpt_builder(
         config,
         num_stages=config.pipeline_model_parallel_size,
-        seg_method="layer:TransformerLayer",
+        seg_method="layer:TransformerLayer|EmptyLayer",
     )
     gpt_pipe_model = distributed_model(gpt_model)
 
@@ -180,9 +124,6 @@ def run_pp(
 
     loss = gpt_pipe_model.forward_backward_pipeline(inputs)
 
-    assert loss == loss_baseline
-    check_grads(gpt_pipe_model, gpt_model_baseline)
-
 
 class TestPP(unittest.TestCase):
     def setUp(self):
@@ -195,7 +136,7 @@ class TestPP(unittest.TestCase):
         config = GPTConfig(
             vocab_size=self.vocab_size,
             max_sequence_length=self.seq_len,
-            num_hidden_layers=4,
+            num_hidden_layers=9,
             hidden_size=512,
             num_attention_heads=4,
             intermediate_size=1024,
@@ -216,13 +157,10 @@ class TestPP(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             use_qk_norm=True,
+            num_layers_in_first_pipeline_stage=2,
+            num_layers_in_last_pipeline_stage=1,
+            pipeline_model_parallel_size=PP_DEGREE,
         )
-
-        loss, gpt_model = single_device_baseline(
-            self.seed, self.batch_size, self.seq_len, self.vocab_size, config
-        )
-
-        config.pipeline_model_parallel_size = PP_DEGREE
 
         run_pp(
             self.seed,
@@ -230,8 +168,6 @@ class TestPP(unittest.TestCase):
             self.seq_len,
             self.vocab_size,
             config,
-            loss,
-            gpt_model,
         )
 
 

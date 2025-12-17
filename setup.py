@@ -97,9 +97,6 @@ def setup_ops_extension():
         "-gencode=arch=compute_90a,code=sm_90a",
         "-gencode=arch=compute_100,code=sm_100",
         "-DNDEBUG",
-        "-DPADDLE_NO_PYTHON",
-        # Limited API Macro for NVCC
-        "-DPy_LIMITED_API=0x030A0000",
     ]
     if cuda_major < 12:
         raise ValueError(
@@ -130,33 +127,15 @@ def setup_ops_extension():
                 "-Wno-abi",
                 "-fPIC",
                 "-std=c++17",
-                "-DPADDLE_NO_PYTHON",
-                "-DPy_LIMITED_API=0x030A0000",
             ],
             "nvcc": nvcc_args,
         },
-        py_limited_api=True,
     )
-
-    ext_module.py_limited_api = True
-
-    cmdclass = {}
-    if bdist_wheel:
-
-        class ABI3Wheel(bdist_wheel):
-            def get_tag(self):
-                python, abi, plat = super().get_tag()
-                if python.startswith("cp"):
-                    return python, "abi3", plat
-                return python, abi, plat
-
-        cmdclass["bdist_wheel"] = ABI3Wheel
 
     change_pwd()
     setup(
         name="paddlefleet._extensions.ops",
         ext_modules=[ext_module],
-        cmdclass=cmdclass,
         use_scm_version={
             "version_scheme": custom_version_scheme,
             "local_scheme": no_local_scheme,

@@ -48,6 +48,7 @@ classifiers = [
 dependencies = [
     "colorlog>=6.10.1",
     "paddlepaddle-gpu>=3.3.0.dev",
+    "triton",
 ]
 
 [project.urls]
@@ -59,13 +60,19 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 [build-system]
 requires = ["setuptools>=61.0.0", "pybind11", "wheel", "packaging>=24.2", "paddlepaddle-gpu>=3.3.0.dev", "setuptools-scm>=8"]
-build-backend = "setuptools.build_meta"
+build-backend = "build_backend"
+backend-path = ["."]
+
 
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.package-data]
+"paddlefleet.ops" = ["*", "**/*"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["paddlefleet*"]
 
 [tool.setuptools.dynamic]
 readme = { file = "README.md", content-type = "text/markdown" }

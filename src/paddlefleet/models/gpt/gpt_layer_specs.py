@@ -228,10 +228,15 @@ def get_gpt_decoder_layers_spec(
     # Create the layer specs for the model.
     layer_specs = []
     for layer_number in range(config.num_hidden_layers):
-        if moe_layer_pattern[layer_number] == 1:
-            layer_specs.append(moe_layer_spec_func(layer_number=layer_number))
-        elif moe_layer_pattern[layer_number] == 0:
-            layer_specs.append(dense_layer_spec_func(layer_number=layer_number))
+        real_layer_number = layer_number + config.remove_head_layers
+        if moe_layer_pattern[real_layer_number] == 1:
+            layer_specs.append(
+                moe_layer_spec_func(layer_number=real_layer_number)
+            )
+        elif moe_layer_pattern[real_layer_number] == 0:
+            layer_specs.append(
+                dense_layer_spec_func(layer_number=real_layer_number)
+            )
         else:
             raise ValueError(f"Invalid layer pattern: {moe_layer_pattern}")
 
@@ -287,6 +292,8 @@ def get_gpt_spec(
     mtp_layers_spec: list[LayerSpec],
     vocab_size: int,
     max_sequence_length: int,
+    head_empty_layers_spec: list[LayerSpec] | None = None,
+    tail_empty_layers_spec: list[LayerSpec] | None = None,
     position_embedding_type: Literal[
         "learned_absolute", "rope", "none"
     ] = "learned_absolute",
@@ -339,7 +346,9 @@ def get_gpt_spec(
                 sublayers_spec=embedding_spec,
                 extra_kwargs=embedding_extra_kwargs,
             ),
+            head_empty_layers=head_empty_layers_spec,
             transformer_layers=transformer_layers_spec,
+            tail_empty_layers=tail_empty_layers_spec,
             layer_norm=LayerSpec(
                 layer=WrappedPaddleNormPipe,
                 extra_kwargs={
