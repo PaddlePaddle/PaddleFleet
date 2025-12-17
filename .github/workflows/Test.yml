@@ -160,7 +160,7 @@ jobs:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
-      group: test
+      group: Fleet-H-multi-card
     env:
       PIP_CACHE_DIR: /root/.cache/pip
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-multi-card_test
@@ -473,7 +473,7 @@ jobs:
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (H20, multi-card)
     runs-on:
-      group: test
+      group: Fleet-H-multi-card
     env:
       PIP_CACHE_DIR: /root/.cache/pip
       CACHE_DIR: /root/.cache
