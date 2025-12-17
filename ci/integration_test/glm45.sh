@@ -46,6 +46,10 @@ rm -rf vdl_log/
 master=$(hostname -i)
 port=36677
 
+echo "
+10 11.60683823
+" > ./glm45_multi_card_gt_loss.txt
+
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
@@ -62,9 +66,7 @@ unset http_proxy https_proxy
 
 FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $cur_dir/glm45.yaml 2>&1 | tee ./glm45.log
 
-echo "
-10 11.60683823
-" > ./glm45_multi_card_gt_loss.txt
+cat ./glm45_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --compare_step 10 \

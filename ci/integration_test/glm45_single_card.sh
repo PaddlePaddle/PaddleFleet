@@ -29,17 +29,6 @@ jq --arg cache "$CACHE_DIR" \
 mv $config_json.tmp $config_json
 
 
-rm -rf checkpoint/
-rm -rf outputs/
-master=$(hostname -i)
-port=36677
-
-export FLAGS_embedding_deterministic=1
-export FLAGS_cudnn_deterministic=1
-export FLAGS_use_stride_compute_kernel=False
-unset http_proxy https_proxy
-coverage run run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
-
 echo "
 1 12.10431099
 2 12.05330086
@@ -54,9 +43,20 @@ echo "
 " > ./glm45_single_card_gt_loss.txt
 
 
+rm -rf checkpoint/
+rm -rf outputs/
+master=$(hostname -i)
+port=36677
 
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
+export FLAGS_use_stride_compute_kernel=False
+unset http_proxy https_proxy
+coverage run run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
 
 export FLAGS_use_stride_compute_kernel=False
+
+cat ./glm45_single_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --log_file ./glm45_single_card.log \

@@ -36,12 +36,6 @@ rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
-export FLAGS_embedding_deterministic=1
-export FLAGS_cudnn_deterministic=1
-export FLAGS_use_stride_compute_kernel=False
-
-unset http_proxy https_proxy
-coverage run run_pretrain.py $config_json 2>&1 | tee ./qwen3_single_card.log
 
 echo "
 1 10.57088089
@@ -56,7 +50,14 @@ echo "
 10 10.52687359
 " > ./qwen3_single_card_gt_loss.txt
 
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
+export FLAGS_use_stride_compute_kernel=False
 
+unset http_proxy https_proxy
+coverage run run_pretrain.py $config_json 2>&1 | tee ./qwen3_single_card.log
+
+cat ./qwen3_single_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --log_file ./qwen3_single_card.log \

@@ -394,7 +394,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_single_card.sh | tee glm45_single_card.log
+          bash -x PaddleFleet/ci/integration_test/glm45_single_card.sh
           glm45_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-single
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -403,8 +403,19 @@ jobs:
           uv run coverage report -m
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             echo -e "Integration test failed: GLM4.5 single-card, try to analyze log."
-            python PaddleFleet/ci/check_log_for_exitcode.py glm45_single_card.log integration true
+            python PaddleFleet/ci/check_log_for_exitcode.py ./glm45_single_card.log integration
             find_error_exit_code=$?
+            python PaddleFleet/ci/integration_test/check_loss.py --log_file ./glm45_single_card.log --gt_file ./glm45_single_card_gt_loss.txt
+            check_loss_exit_code=$?
+            if [[ "$check_loss_exit_code" == "0" && "$find_error_exit_code" == "0" ]]; then
+              echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
+              exit 0
+            else
+              echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
+              echo "  check_log_for_exitcode exit code: $find_error_exit_code"
+              echo "  check_loss exit code: $check_loss_exit_code"
+              exit 1
+            fi
             if [[ "$find_error_exit_code" != "0" ]]; then
               echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
             else
@@ -424,7 +435,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/qwen3_single_card.sh | tee qwen3_single_card.log
+          bash -x PaddleFleet/ci/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-qwen
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -433,14 +444,19 @@ jobs:
           uv run coverage report -m
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             echo -e "Integration test failed: Qwen3-30B-A3B single-card, try to analyze log."
-            python PaddleFleet/ci/check_log_for_exitcode.py qwen3_single_card.log integration true
+            python PaddleFleet/ci/check_log_for_exitcode.py ./qwen3_single_card.log integration
             find_error_exit_code=$?
-            if [[ "$find_error_exit_code" != "0" ]]; then
-              echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
-            else
+            python PaddleFleet/ci/integration_test/check_loss.py --log_file ./qwen3_single_card.log --gt_file ./qwen3_single_card_gt_loss.txt
+            check_loss_exit_code=$?
+            if [[ "$check_loss_exit_code" == "0" && "$find_error_exit_code" == "0" ]]; then
               echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
+              exit 0
+            else
+              echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
+              echo "  check_log_for_exitcode exit code: $find_error_exit_code"
+              echo "  check_loss exit code: $check_loss_exit_code"
+              exit 1
             fi
-            exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
@@ -561,7 +577,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45.sh | tee glm45.log
+          bash -x PaddleFleet/ci/integration_test/glm45.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -571,14 +587,19 @@ jobs:
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "Integration test failed: GLM4.5, try to analyze log."
-            python PaddleFleet/ci/check_log_for_exitcode.py glm45.log integration true
+            python PaddleFleet/ci/check_log_for_exitcode.py ./glm45.log integration
             find_error_exit_code=$?
-            if [[ "$find_error_exit_code" != "0" ]]; then
-              echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+            python PaddleFleet/ci/integration_test/check_loss.py --log_file ./glm45.log --gt_file ./glm45_multi_card_gt_loss.txt
+            check_loss_exit_code=$?
+            if [ $find_error_exit_code -eq 0 ] && [ $check_loss_exit_code -eq 0 ]; then
+                echo "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+                exit 0
             else
-              echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+                echo "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+                echo "  check_log_for_exitcode exit code: $find_error_exit_code"
+                echo "  check_loss exit code: $check_loss_exit_code"
+                exit 1
             fi
-            exit $find_error_exit_code
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -592,7 +613,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-fp8
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-fp8/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_fp8.sh | tee glm45_fp8.log
+          bash -x PaddleFleet/ci/integration_test/glm45_fp8.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-fp8
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -602,16 +623,21 @@ jobs:
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "Integration test failed: GLM4.5, try to analyze log."
-            python PaddleFleet/ci/check_log_for_exitcode.py glm45_fp8.log integration true
+            python PaddleFleet/ci/check_log_for_exitcode.py ./glm45_fp8.log integration
             find_error_exit_code=$?
-            if [[ "$find_error_exit_code" != "0" ]]; then
-              echo -e "::error:: \033[31mIntegration test failed: GLM4.5 FP8.\033[0m"
+            python PaddleFleet/ci/integration_test/check_loss.py --log_file ./glm45_fp8.log --gt_file ./glm45_multi_cards_fp8_gt_loss.txt
+            check_loss_exit_code=$?
+            if [ $find_error_exit_code -eq 0 ] && [ $check_loss_exit_code -eq 0 ]; then
+                echo "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
+                exit 0
             else
-              echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+                echo "::error:: \033[31mIntegration test failed: GLM4.5 FP8.\033[0m"
+                echo "  check_log_for_exitcode exit code: $find_error_exit_code"
+                echo "  check_loss exit code: $check_loss_exit_code"
+                exit 1
             fi
-            exit $find_error_exit_code
           else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
           fi
           '
 
@@ -727,7 +753,7 @@ jobs:
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_a100.sh | tee glm45_a100.log
+          bash -x PaddleFleet/ci/integration_test/glm45_a100.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -736,12 +762,12 @@ jobs:
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "Integration test failed: GLM4.5, try to analyze log."
-            python PaddleFleet/ci/check_log_for_exitcode.py glm45_a100.log integration false
+            python PaddleFleet/ci/check_log_for_exitcode.py ./glm45_a100.log integration
             find_error_exit_code=$?
             if [[ "$find_error_exit_code" != "0" ]]; then
               echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             else
-              echo -e "\033[32mLog analysis did not find specific errors.\033[0m"
+              echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
             fi
             exit $find_error_exit_code
           else

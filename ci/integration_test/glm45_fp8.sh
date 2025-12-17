@@ -42,6 +42,10 @@ rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
+echo "
+20 10.30010414
+" > ./glm45_multi_cards_fp8_gt_loss.txt
+
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 export FLAGS_use_stride_compute_kernel=False
@@ -58,9 +62,7 @@ coverage run -m paddle.distributed.launch \
    run_pretrain.py $config_json \
    --output_dir ./checkpoint 2>&1 | tee ./glm45_fp8.log
 
-echo "
-20 10.30010414
-" > ./glm45_multi_cards_fp8_gt_loss.txt
+cat ./glm45_multi_cards_fp8_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --compare_step 20 \
