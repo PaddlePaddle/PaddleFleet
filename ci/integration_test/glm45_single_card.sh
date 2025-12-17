@@ -53,7 +53,7 @@ if [ $exit_code -ne 0 ]; then
     fi
 fi
 
-export FLAGS_use_stride_compute_kernel=False
+
 
 echo "
 1 12.10431099
@@ -67,6 +67,9 @@ echo "
 9 11.97878838
 10 11.97215271
 " > ./glm45_single_card_gt_loss.txt
+
+export FLAGS_use_stride_compute_kernel=False
+
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --log_file ./glm45_single_card.log \
