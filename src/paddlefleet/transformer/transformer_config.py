@@ -350,6 +350,9 @@ class TransformerConfig(ModelParallelConfig):
     use_deep_gemm: bool = True
     """Whether to use deep gemm as the grouped GEMM. Otherwise, use the paddle batched_gemm."""
 
+    not_fuse_grouped_gemm: bool = False
+    """Whether to not fuse version of grouped gemm."""
+
     ##################
     # Context Parallel
     ##################

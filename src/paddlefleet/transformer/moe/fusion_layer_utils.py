@@ -246,6 +246,7 @@ class MlpNode:
         use_fp8_mlp=True,
         use_deep_gemm=True,
         moe_grouped_gemm=False,
+        not_fuse_grouped_gemm=False,
     ):
         """
         Constructor
@@ -312,6 +313,7 @@ class MlpNode:
                 use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
                 use_fp8_mlp=use_fp8_mlp,
                 use_deep_gemm=use_deep_gemm,
+                not_fuse_grouped_gemm=not_fuse_grouped_gemm,
                 moe_grouped_gemm=moe_grouped_gemm,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
@@ -599,6 +601,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         num_experts_per_tok,
         use_fp8_mlp=True,
         use_deep_gemm=True,
+        not_fuse_grouped_gemm=False,
         moe_grouped_gemm=False,
         recompute_moe_gate_up=False,
         dequant_input=True,
@@ -636,6 +639,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
             use_fp8_mlp=use_fp8_mlp,
             use_deep_gemm=use_deep_gemm,
+            not_fuse_grouped_gemm=not_fuse_grouped_gemm,
             moe_grouped_gemm=moe_grouped_gemm,
         )
 
