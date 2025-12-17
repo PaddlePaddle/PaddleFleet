@@ -18,16 +18,15 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from itertools import chain
 from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor, nn
+from paddle.distributed.fleet.utils import recompute
 
-from paddlefleet import tensor_parallel
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import need_full_recompute
 from paddlefleet.spec_utils import LayerSpec, build_layer
-from paddlefleet.tensor_parallel import checkpoint
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -38,76 +37,6 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 logger = logging.getLogger(__name__)
-
-
-def need_full_recompute(layer_number, config):
-    if config.recompute_granularity == "full":
-        assert config.recompute_method in [
-            "uniform",
-            "first_n",
-            "block",
-            "manual",
-        ], "recompute_method must be one of uniform, first_n, block, manual"
-        if config.recompute_method == "uniform":
-            assert config.recompute_num_layers == 1, (
-                "don't support recompute_method=uniform wihile recompute_num_layers != 1"
-            )
-            return True
-        elif config.recompute_method == "first_n":
-            assert config.recompute_num_layers is not None, (
-                "recompute_num_layers cannot be none"
-            )
-            vpp_size = (
-                config.virtual_pipeline_model_parallel_size
-                if config.virtual_pipeline_model_parallel_size
-                else 1
-            )
-            parallel_size = config.pipeline_model_parallel_size * vpp_size
-            assert config.num_hidden_layers % parallel_size == 0, (
-                "num_hidden_layers must be divided by parallel_size"
-            )
-            chunk_size = int(config.num_hidden_layers / parallel_size)
-            num_layers_in_each_stage = (
-                config.num_hidden_layers / config.pipeline_model_parallel_size
-            )
-            assert config.recompute_num_layers <= num_layers_in_each_stage, (
-                "recompute_num_layers cannot be greater than num_layers_in_each_stage"
-            )
-            if vpp_size > 1:
-                layers = range(config.num_hidden_layers)
-                chunks = [
-                    layers[i * chunk_size : (i + 1) * chunk_size]
-                    for i in range(0, len(layers), chunk_size)
-                ]
-                recompute_layers = []
-                for pp_stage in range(config.pipeline_model_parallel_size):
-                    recompute_layers_in_curr_stage = list(
-                        chain.from_iterable(
-                            chunks[
-                                pp_stage :: config.pipeline_model_parallel_size
-                            ]
-                        )
-                    )[: config.recompute_num_layers]
-                    recompute_layers += recompute_layers_in_curr_stage
-            else:
-                recompute_layers = []
-                layers = list(range(config.num_hidden_layers))
-                if config.pipeline_model_parallel_size > 1:
-                    for recompute_layer_id in range(
-                        config.recompute_num_layers
-                    ):
-                        recompute_layers_in_curr_stage = list(
-                            layers[recompute_layer_id::chunk_size]
-                        )
-                        recompute_layers += recompute_layers_in_curr_stage
-                else:
-                    recompute_layers = range(
-                        config.pipeline_model_parallel_size
-                        * config.recompute_num_layers
-                    )
-            if layer_number in recompute_layers:
-                return True
-    return False
 
 
 @dataclass
@@ -272,21 +201,24 @@ class TransformerLayer(nn.Layer):
         # [Layer 9: BiasDropoutFusion]
         self.mlp_bda = build_layer(sublayers_spec.mlp_bda)
 
-        self.full_recompute = need_full_recompute(
-            self.layer_number, self.config
-        )
-
+        self.full_recompute = False
         self.recompute_input_layernorm = False
         self.recompute_post_attention_layernorm = False
         self.recompute_mlp = False
-        if self.config.recompute_granularity == "selective":
-            if "layernorm" in self.config.recompute_layers:
+        if self.config.recompute_granularity == "full":
+            self.full_recompute = need_full_recompute(
+                self.layer_number, self.config
+            )
+        elif self.config.recompute_granularity == "selective":
+            if "norm" in self.config.recompute_modules:
+                if not isinstance(self.input_layernorm, IdentityOp):
+                    self.recompute_input_layernorm = True
+
                 if not isinstance(self.post_attention_layernorm, IdentityOp):
                     self.recompute_post_attention_layernorm = True
 
-            if "mlp" in self.config.recompute_layers:
-                if not isinstance(self.mlp, MoELayer):
-                    self.recompute_mlp = True
+            if "mlp" in self.config.recompute_modules:
+                self.recompute_mlp = True
 
     def forward(
         self,
@@ -316,7 +248,7 @@ class TransformerLayer(nn.Layer):
             rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
-            outputs = checkpoint(
+            outputs = recompute(
                 self._forward_impl,
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -415,10 +347,7 @@ class TransformerLayer(nn.Layer):
 
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
-            self.input_layernorm_checkpoint = (
-                tensor_parallel.CheckpointWithoutOutput()
-            )
-            input_layernorm_output = self.input_layernorm_checkpoint.checkpoint(
+            input_layernorm_output = recompute(
                 self.input_layernorm, hidden_states
             )
         else:
@@ -435,13 +364,6 @@ class TransformerLayer(nn.Layer):
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
         )
-
-        if self.recompute_input_layernorm:
-            # discard the output of the input layernorm and register the recompute
-            # as a gradient hook of attention_output_with_bias[0]
-            self.input_layernorm_checkpoint.discard_output_and_register_recompute(
-                attention_output_with_bias[0]
-            )
 
         with paddle.enable_grad():
             hidden_states = self.self_attn_bda(
@@ -492,13 +414,8 @@ class TransformerLayer(nn.Layer):
 
         # Optional Layer norm post the cross-attention.
         if self.recompute_post_attention_layernorm:
-            self.pre_mlp_norm_checkpoint = (
-                tensor_parallel.CheckpointWithoutOutput()
-            )
-            post_attention_layernorm_output = (
-                self.pre_mlp_norm_checkpoint.checkpoint(
-                    self.post_attention_layernorm, hidden_states
-                )
+            post_attention_layernorm_output = recompute(
+                self.post_attention_layernorm, hidden_states
             )
         else:
             post_attention_layernorm_output = self.post_attention_layernorm(
@@ -506,18 +423,23 @@ class TransformerLayer(nn.Layer):
             )
 
         if self.recompute_mlp:
-            mlp_output_with_bias = tensor_parallel.checkpoint(
-                self.mlp, False, post_attention_layernorm_output
+
+            def recompute_handler(post_attention_layernorm_output):
+                mlp_output, bias = self.mlp(post_attention_layernorm_output)
+                if bias is None:
+                    return mlp_output
+                return mlp_output, bias
+
+            mlp_output_with_bias = recompute(
+                recompute_handler, post_attention_layernorm_output
             )
+            if not isinstance(mlp_output_with_bias, tuple):
+                mlp_output_with_bias = (
+                    mlp_output_with_bias,
+                    None,
+                )  # bias is None
         else:
             mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
-
-        if self.recompute_post_attention_layernorm:
-            # discard the output of the pre-mlp layernorm and register the recompute
-            # as a gradient hook of mlp_output_with_bias[0]
-            self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(
-                mlp_output_with_bias[0]
-            )
 
         with paddle.enable_grad():
             hidden_states = self.mlp_bda(

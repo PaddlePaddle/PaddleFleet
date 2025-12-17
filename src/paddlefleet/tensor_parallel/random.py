@@ -21,7 +21,6 @@ import contextlib
 import logging
 
 import paddle
-from paddle.distributed.fleet.utils import recompute
 
 from ..parallel_state import (
     get_expert_model_parallel_rank,
@@ -391,7 +390,7 @@ def _fork_rng():
 
 def checkpoint(function, *args, **kwargs):
     """Checkpoint a model or part of the model."""
-    return recompute(function, *args, **kwargs)
+    pass
 
 
 class CheckpointWithoutOutputFunction(paddle.autograd.Function):
