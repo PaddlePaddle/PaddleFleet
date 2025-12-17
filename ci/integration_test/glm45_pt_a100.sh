@@ -29,6 +29,7 @@ config_yaml=$cur_dir/glm45_pt.yaml
 # config_json=${cur_dir}/GLM-4.5-Air/config.json
 
 yq eval '.expert_model_parallel_size = 1
+    | .gated_linear_unit = true
     | .gradient_accumulation_steps = 1
     | .per_device_train_batch_size = 1
     | .use_expert_parallel = false
