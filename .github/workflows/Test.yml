@@ -236,8 +236,9 @@ jobs:
           uv run coverage combine
           uv run coverage xml -o /paddle/coveragedata/coverage.xml
           uv run coverage report -m
+
           if [[ "$multi_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[32mMulti card test failed.\033[0m"
+            echo -e "::error:: \033[31mMulti card test failed.\033[0m"
             exit 1
           else
             echo -e "\033[32mMulti card test succeeded.\033[0m"
@@ -395,7 +396,7 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
           uv run coverage report -m
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[32mIntegration test failed: GLM4.5 single-card\033[0m"
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
@@ -418,7 +419,7 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen/coverage.xml
           uv run coverage report -m
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[32mIntegration test failed: Qwen3-30B-A3B single-card\033[0m"
+            echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
@@ -549,7 +550,7 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi/coverage.xml
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[32mIntegration test failed: GLM4.5.\033[0m"
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
@@ -573,7 +574,7 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[32mIntegration test failed: GLM4.5 FP8.\033[0m"
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
@@ -700,7 +701,7 @@ jobs:
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[32mIntegration test failed: GLM4.5.\033[0m"
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
