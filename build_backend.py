@@ -14,7 +14,35 @@
 
 from setuptools import build_meta as orig
 
-from build_utils import Artifact, EcosystemLibrary
+from build_utils import (
+    Artifact,
+    EcosystemLibrary,
+    check_submodule_updated,
+    create_symlink,
+    remove_path,
+)
+
+
+def prepare_deepgemm(lib: EcosystemLibrary) -> None:
+    """Pre-build hook for DeepGEMM: Links CUTLASS headers."""
+    cutlass_root = lib.source_dir / "third-party" / "cutlass" / "include"
+    target_include_dir = lib.source_dir / "deep_gemm" / "include"
+    target_include_dir.mkdir(parents=True, exist_ok=True)
+
+    links = {
+        cutlass_root / "cutlass": target_include_dir / "cutlass",
+        cutlass_root / "cute": target_include_dir / "cute",
+    }
+    for src, dst in links.items():
+        create_symlink(src, dst)
+
+
+def cleanup_deepgemm(lib: EcosystemLibrary) -> None:
+    """Cleanup hook for DeepGEMM: Removes linked headers."""
+    base_include = lib.source_dir / "deep_gemm" / "include"
+    remove_path(base_include / "cute")
+    remove_path(base_include / "cutlass")
+
 
 LIBRARIES: list[EcosystemLibrary] = [
     EcosystemLibrary(
@@ -25,6 +53,8 @@ LIBRARIES: list[EcosystemLibrary] = [
             Artifact("deep_gemm", "deep_gemm"),
             Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
         ],
+        pre_build_func=prepare_deepgemm,
+        cleanup_func=cleanup_deepgemm,
     ),
 ]
 
@@ -34,6 +64,12 @@ def _prepare_ecosystem(use_symlinks: bool):
     for lib in LIBRARIES:
         lib.build()
         lib.install(use_symlinks=use_symlinks)
+
+
+def _cleanup_ecosystem():
+    """Cleans up all registered libraries."""
+    for lib in LIBRARIES:
+        lib.cleanup()
 
 
 def get_requires_for_build_wheel(config_settings=None):
@@ -63,6 +99,7 @@ def prepare_metadata_for_build_editable(
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+    check_submodule_updated()
     _prepare_ecosystem(use_symlinks=False)
     return orig.build_wheel(
         wheel_directory, config_settings, metadata_directory
@@ -72,6 +109,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
 def build_editable(
     wheel_directory, config_settings=None, metadata_directory=None
 ):
+    check_submodule_updated()
     _prepare_ecosystem(use_symlinks=True)
     return orig.build_editable(
         wheel_directory, config_settings, metadata_directory
@@ -79,4 +117,6 @@ def build_editable(
 
 
 def build_sdist(sdist_directory, config_settings=None):
+    check_submodule_updated()
+    _cleanup_ecosystem()
     return orig.build_sdist(sdist_directory, config_settings)
