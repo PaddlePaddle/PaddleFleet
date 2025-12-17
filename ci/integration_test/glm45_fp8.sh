@@ -42,10 +42,6 @@ rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
-echo "
-20 10.30010414
-" > ./glm45_multi_cards_fp8_gt_loss.txt
-
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 export FLAGS_use_stride_compute_kernel=False
@@ -74,6 +70,11 @@ if [ $exit_code -ne 0 ]; then
        echo "found Training completed in log file."
    fi
 fi
+
+
+echo "
+20 10.30010414
+" > ./glm45_multi_cards_fp8_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --compare_step 20 \

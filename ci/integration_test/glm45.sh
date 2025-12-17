@@ -46,10 +46,6 @@ rm -rf vdl_log/
 master=$(hostname -i)
 port=36677
 
-echo "
-10 11.60683823
-" > ./glm45_multi_card_gt_loss.txt
-
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
@@ -79,7 +75,9 @@ if [ $exit_code -ne 0 ]; then
    fi
 fi
 
-cat ./glm45_multi_card_gt_loss.txt
+echo "
+10 11.60683823
+" > ./glm45_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --compare_step 10 \

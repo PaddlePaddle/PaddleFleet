@@ -37,19 +37,6 @@ master=$(hostname -i)
 port=36677
 
 
-echo "
-1 10.57088089
-2 10.57883453
-3 10.56450653
-4 10.55170822
-5 10.55018044
-6 10.53714848
-7 10.52390289
-8 10.52839851
-9 10.54638767
-10 10.52687359
-" > ./qwen3_single_card_gt_loss.txt
-
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 export FLAGS_use_stride_compute_kernel=False
@@ -70,7 +57,18 @@ if [ $exit_code -ne 0 ]; then
       fi
 fi
 
-cat ./qwen3_single_card_gt_loss.txt
+echo "
+1 10.57088089
+2 10.57883453
+3 10.56450653
+4 10.55170822
+5 10.55018044
+6 10.53714848
+7 10.52390289
+8 10.52839851
+9 10.54638767
+10 10.52687359
+" > ./qwen3_single_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --log_file ./qwen3_single_card.log \

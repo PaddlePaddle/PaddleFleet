@@ -29,20 +29,6 @@ jq --arg cache "$CACHE_DIR" \
 mv $config_json.tmp $config_json
 
 
-echo "
-1 12.10431099
-2 12.05330086
-3 12.03880692
-4 12.03462410
-5 12.02083588
-6 12.00885773
-7 11.95637226
-8 11.96553898
-9 11.97878838
-10 11.97215271
-" > ./glm45_single_card_gt_loss.txt
-
-
 rm -rf checkpoint/
 rm -rf outputs/
 master=$(hostname -i)
@@ -69,7 +55,18 @@ fi
 
 export FLAGS_use_stride_compute_kernel=False
 
-cat ./glm45_single_card_gt_loss.txt
+echo "
+1 12.10431099
+2 12.05330086
+3 12.03880692
+4 12.03462410
+5 12.02083588
+6 12.00885773
+7 11.95637226
+8 11.96553898
+9 11.97878838
+10 11.97215271
+" > ./glm45_single_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --log_file ./glm45_single_card.log \
