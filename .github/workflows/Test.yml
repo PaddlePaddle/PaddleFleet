@@ -602,7 +602,7 @@ jobs:
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "Integration test failed: GLM4.5, try to analyze log."
-            python PaddleFleet/ci/check_log_for_exitcode.py glm45_fp8.log integration
+            python PaddleFleet/ci/check_log_for_exitcode.py glm45_fp8.log integration true
             find_error_exit_code=$?
             if [[ "$find_error_exit_code" != "0" ]]; then
               echo -e "::error:: \033[31mIntegration test failed: GLM4.5 FP8.\033[0m"
