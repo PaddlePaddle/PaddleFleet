@@ -91,6 +91,7 @@ class GPTModel(PipelineLayer):
         super().__init__(
             layers=self.layers,
             topology=topology,
+            num_virtual_pipeline_stages=self.config.virtual_pipeline_model_parallel_size,
             **kwargs,
         )
 
@@ -414,14 +415,29 @@ class GPTModel(PipelineLayer):
         return renamed_sharded_state_dict
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
-        for idx, layer in enumerate(self.run_function):
-            if isinstance(layer, TransformerLayer):
-                layer.fp8_quant_weight(
-                    batch_mode=batch_mode, quant_transpose=quant_transpose
-                )
+        if self._num_virtual_pipeline_stages > 1:
+            for idx, chunk in enumerate(self._model_chunks):
+                for idx, layer in enumerate(chunk):
+                    if isinstance(layer, TransformerLayer):
+                        layer.fp8_quant_weight(
+                            batch_mode=batch_mode,
+                            quant_transpose=quant_transpose,
+                        )
+        else:
+            for idx, layer in enumerate(self.run_function):
+                if isinstance(layer, TransformerLayer):
+                    layer.fp8_quant_weight(
+                        batch_mode=batch_mode, quant_transpose=quant_transpose
+                    )
 
     def use_fp8(self):
-        for idx, layer in enumerate(self.run_function):
-            if isinstance(layer, TransformerLayer) and layer.use_fp8():
-                return True
-        return False
+        if self._num_virtual_pipeline_stages > 1:
+            for idx, chunk in enumerate(self._model_chunks):
+                for idx, layer in enumerate(chunk):
+                    if isinstance(layer, TransformerLayer) and layer.use_fp8():
+                        return True
+        else:
+            for idx, layer in enumerate(self.run_function):
+                if isinstance(layer, TransformerLayer) and layer.use_fp8():
+                    return True
+            return False

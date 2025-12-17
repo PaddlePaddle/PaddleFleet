@@ -585,13 +585,17 @@ class TransformerConfig(ModelParallelConfig):
                 self.embedding_init_method = self.init_method
 
     def get_avg_num_layers(self):
-        assert (
-            self.num_hidden_layers
-            - self.num_layers_in_first_pipeline_stage
-            - self.num_layers_in_last_pipeline_stage
-        ) % self.pipeline_model_parallel_size, (
-            "Incorrect configuration, num_hidden_layers can not divided by stages except first/last stage"
+        num_layers_in_first_pipeline_stage = (
+            0
+            if self.num_layers_in_first_pipeline_stage is None
+            else self.num_layers_in_first_pipeline_stage
         )
+        num_layers_in_last_pipeline_stage = (
+            0
+            if self.num_layers_in_last_pipeline_stage is None
+            else self.num_layers_in_last_pipeline_stage
+        )
+
         remain_pp_size = self.pipeline_model_parallel_size
         if remain_pp_size > 1:
             if self.num_layers_in_first_pipeline_stage is not None:
@@ -601,11 +605,21 @@ class TransformerConfig(ModelParallelConfig):
         assert remain_pp_size != 0, (
             "Incorrect configuration, maybe both num_layers_in_first_pipeline_stage and num_layers_in_last_pipeline_stage are set in pp_degree=2"
         )
+
+        assert (
+            self.num_hidden_layers
+            - num_layers_in_first_pipeline_stage
+            - num_layers_in_last_pipeline_stage
+        ) % remain_pp_size == 0, (
+            "Incorrect configuration, num_hidden_layers can not divided by stages except first/last stage"
+        )
+
         avg_num_layers = (
             self.num_hidden_layers
-            - self.num_layers_in_first_pipeline_stage
-            - self.num_layers_in_last_pipeline_stage
+            - num_layers_in_first_pipeline_stage
+            - num_layers_in_last_pipeline_stage
         ) // remain_pp_size
+
         return avg_num_layers
 
     @property
