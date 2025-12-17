@@ -71,6 +71,10 @@ class GPTEmbedding(FleetLayer):
     def embedding_weight(self):
         return self.embedding.embedding_weight
 
+    @property
+    def position_embedding_weight(self):
+        return self.embedding.position_embedding_weight
+
     def forward(
         self,
         dict_args: dict,
@@ -112,13 +116,16 @@ class GPTEmbedding(FleetLayer):
                 ).contiguous()
 
         preproc_output = {
+            "input_ids": input_ids.contiguous(),
             "hidden_states": decoder_input,
-            "attention_mask": attention_mask,
-            "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "rotary_pos_emb": rotary_pos_emb,
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
-        }
+            # "embedding_weight": self.embedding_weight,
+            # "position_embedding_weight": self.position_embedding_weight,
+        }  # pass these two weights will cause error in backward
+
+        preproc_output = {**dict_args, **preproc_output}
 
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:

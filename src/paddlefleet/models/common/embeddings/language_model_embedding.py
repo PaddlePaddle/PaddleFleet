@@ -100,6 +100,8 @@ class LanguageModelEmbedding(FleetLayer):
                 self.config.embedding_init_method(
                     self.position_embeddings.weight
                 )
+        else:
+            self.position_embeddings = None
 
         if self.num_tokentypes > 0:
             self.tokentype_embeddings = paddle.nn.Embedding(
@@ -122,12 +124,21 @@ class LanguageModelEmbedding(FleetLayer):
     def embedding_weight(self):
         return self.embed_tokens.weight
 
+    @property
+    def position_embedding_weight(self):
+        return (
+            self.position_embeddings.weight
+            if self.add_position_embedding
+            else None
+        )
+
     def zero_parameters(self):
         """Zero out all parameters in embedding."""
         self.embed_tokens.weight.data.fill_(0)
         self.embed_tokens.weight.shared = True
-        self.position_embeddings.weight.data.fill_(0)
-        self.position_embeddings.weight.shared = True
+        if self.add_position_embedding:
+            self.position_embeddings.weight.data.fill_(0)
+            self.position_embeddings.weight.shared = True
         if self.num_tokentypes > 0:
             self.tokentype_embeddings.weight.data.fill_(0)
             self.tokentype_embeddings.weight.shared = True
