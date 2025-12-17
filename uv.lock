@@ -848,6 +848,15 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-nvshmem-cu12"
+version = "3.4.5"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1d/6a/03aa43cc9bd3ad91553a88b5f6fb25ed6a3752ae86ce2180221962bc2aa5/nvidia_nvshmem_cu12-3.4.5-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:0b48363fc6964dede448029434c6abed6c5e37f823cb43c3bcde7ecfc0457e15", size = 138936938, upload-time = "2025-09-06T00:32:05.589Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/09/6ea3ea725f82e1e76684f0708bbedd871fc96da89945adeba65c3835a64c/nvidia_nvshmem_cu12-3.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:042f2500f24c021db8a06c5eec2539027d57460e1c1a762055a6554f72c369bd", size = 139103095, upload-time = "2025-09-06T00:32:31.266Z" },
+]
+
+[[package]]
 name = "nvidia-nvtx-cu12"
 version = "12.9.19"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
@@ -881,6 +890,7 @@ name = "paddlefleet"
 source = { editable = "." }
 dependencies = [
     { name = "colorlog" },
+    { name = "nvidia-nvshmem-cu12" },
     { name = "paddlepaddle-gpu" },
     { name = "triton" },
 ]
@@ -908,6 +918,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "colorlog", specifier = ">=6.10.1" },
+    { name = "nvidia-nvshmem-cu12", specifier = ">=3.3.9" },
     { name = "paddlepaddle-gpu", specifier = ">=3.3.0.dev0" },
     { name = "triton" },
 ]

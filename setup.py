@@ -52,11 +52,6 @@ def change_pwd():
 def setup_ops_extension():
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
-    try:
-        from wheel.bdist_wheel import bdist_wheel
-    except ImportError:
-        bdist_wheel = None
-
     nvcc_path = shutil.which("nvcc")
     if nvcc_path is None:
         raise FileNotFoundError(

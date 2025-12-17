@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
+import importlib.util
 import logging
 import sys
 from pathlib import Path
@@ -21,7 +23,7 @@ import paddle
 
 from .utils import import_custom_ops
 
-paddle.compat.enable_torch_proxy(scope={"deep_gemm", "triton"})
+paddle.compat.enable_torch_proxy(scope={"deep_gemm", "triton", "deep_ep"})
 
 # paddle.compat.enable_torch_proxy(scope={"triton"}) enables the torch proxy
 # specifically for the 'triton' module. This means `import torch` inside 'triton'
@@ -89,6 +91,34 @@ def patch_module_namespace(source_name: str, target_prefix: str):
 
 ops_dir = Path(__file__).parent
 
+_third_party_install_temp_dir = (
+    ops_dir.parent.parent / "_third_party_install_temp"
+)
+
+
+# Wheel specific: the wheels only include the soname of the host library `libnvshmem_host.so.X`
+def get_nvshmem_host_lib_path(base_dir):
+    path = Path(base_dir).joinpath("lib")
+    for file in path.rglob("libnvshmem_host.so.*"):
+        return file.resolve()
+    raise ModuleNotFoundError("libnvshmem_host.so not found")
+
+
+if _third_party_install_temp_dir.exists():
+    try:
+        nvshmem_dir = importlib.util.find_spec(
+            "nvidia.nvshmem"
+        ).submodule_search_locations[0]
+        nvshmem_host_lib_path = get_nvshmem_host_lib_path(nvshmem_dir)
+        logger.info(
+            f"Pre-loading NVSHMEM library from: {nvshmem_host_lib_path}"
+        )
+        ctypes.CDLL(str(nvshmem_host_lib_path), mode=ctypes.RTLD_GLOBAL)
+    except OSError as e:
+        logger.warning(f"Failed to dlopen libnvshmem_host.so.3: {e}")
+    except Exception as e:
+        logger.warning(f"Unexpected error during NVSHMEM pre-loading: {e}")
+
 with ModuleContext(["deep_gemm"], ops_dir):
     try:
         import deep_gemm  # noqa: F401
@@ -97,3 +127,12 @@ with ModuleContext(["deep_gemm"], ops_dir):
         logger.info("Successfully loaded ecosystem library: deep_gemm")
     except ImportError as e:
         logger.warning(f"Ecosystem library 'deep_gemm' not found: {e}")
+
+with ModuleContext(["deep_ep"], ops_dir):
+    try:
+        import deep_ep  # noqa: F401
+
+        patch_module_namespace("deep_ep", "paddlefleet.ops.")
+        logger.info("Successfully loaded ecosystem library: deep_ep")
+    except ImportError as e:
+        logger.warning(f"Ecosystem library 'deep_ep' not found: {e}")

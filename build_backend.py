@@ -26,6 +26,15 @@ LIBRARIES: list[EcosystemLibrary] = [
             Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
         ],
     ),
+    EcosystemLibrary(
+        name="DeepEP",
+        source_rel_path="third_party/DeepEP",
+        artifacts=[
+            Artifact("deep_ep", "deep_ep"),
+            Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
+        ],
+        extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0;10.0"},
+    ),
 ]
 
 
