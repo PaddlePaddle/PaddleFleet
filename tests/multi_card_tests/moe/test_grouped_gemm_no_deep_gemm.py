@@ -81,9 +81,9 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
-            moe_grouped_gemm=True,
+            moe_grouped_gemm=False,
             bias_activation_fusion=True,
-            use_deep_gemm=True,
+            use_deep_gemm=False,
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(
