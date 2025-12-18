@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -158,3 +159,28 @@ def check_submodule_updated():
             "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
         )
         sys.exit(1)
+
+
+def get_cuda_version():
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path is None:
+        raise FileNotFoundError(
+            "nvcc command not found. Please make sure CUDA toolkit is installed and nvcc is in PATH."
+        )
+
+    result = subprocess.run(
+        ["nvcc", "--version"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    version_output = result.stdout
+
+    match = re.search(r"release (\d+)\.(\d+)", version_output)
+    if not match:
+        raise ValueError(
+            f"Cannot parse CUDA version from nvcc output:\n{version_output}"
+        )
+    cuda_major = int(match.group(1))
+    cuda_minor = int(match.group(2))
+    return cuda_major, cuda_minor
