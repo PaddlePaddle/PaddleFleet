@@ -20,14 +20,23 @@
 
 ### Clone Repo 到本地调试
 
+<!-- TODO: Need to update the following commands. -->
 ```bash
-git clone git@github.com:<YOUR_USER_NAME>/PaddleFleet.git               # 将你的 repo clone 到本地
-cd PaddleFleet/                                                         # cd 到该目录
-git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git     # 将原分支绑定在 upstream
-uv sync -v # 本地构建环境
-uv build # 构建wheel包
-uv run pytest tess/_card_tests/test_imports.py #跑指定的单卡单测
-uv run python -m paddle.distributed.launch --nnodes=1 --log_dir=log --devices=0,1,2,3,4,5,6,7 tests/unit_tests/test_parallel_states.py #跑指定的多卡单测
-bash ci/single_card_test.sh  #跑所有单卡单测
-bash ci/multi-card_test.sh  #跑所有多卡单测
+git clone git@github.com:<YOUR_USER_NAME>/PaddleFleet.git  # 将你的 repo clone 到本地
+cd PaddleFleet/  # cd 到该目录
+git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git  # 将原分支绑定在 upstream
+uv sync -v  # 本地构建环境
+uv build  # 构建 wheel 包
+uv run pytest tess/_card_tests/test_imports.py  # 跑指定的单卡单测
+uv run python -m paddle.distributed.launch --nnodes=1 --log_dir=log --devices=0,1,2,3,4,5,6,7 tests/unit_tests/test_parallel_states.py  # 跑指定的多卡单测
+bash ci/single_card_test.sh  # 跑所有单卡单测
+bash ci/multi_card_test.sh  # 跑所有多卡单测
 ```
+
+> [!TIP]
+> 如果你需要频繁在本地开发自定义算子，可以参考如下方式进行编译安装，这样可以触发增量编译，速度更快🚀：
+>
+> ```bash
+> uv sync --no-install-project
+> uv pip install -e . -v --no-build-isolation
+> ```

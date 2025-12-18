@@ -14,7 +14,7 @@
 
 from setuptools import build_meta as orig
 
-from build_utils import Artifact, EcosystemLibrary
+from build_utils import Artifact, EcosystemLibrary, check_submodule_updated
 
 LIBRARIES: list[EcosystemLibrary] = [
     EcosystemLibrary(
@@ -63,6 +63,7 @@ def prepare_metadata_for_build_editable(
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+    check_submodule_updated()
     _prepare_ecosystem(use_symlinks=False)
     return orig.build_wheel(
         wheel_directory, config_settings, metadata_directory
@@ -72,6 +73,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
 def build_editable(
     wheel_directory, config_settings=None, metadata_directory=None
 ):
+    check_submodule_updated()
     _prepare_ecosystem(use_symlinks=True)
     return orig.build_editable(
         wheel_directory, config_settings, metadata_directory
@@ -79,4 +81,5 @@ def build_editable(
 
 
 def build_sdist(sdist_directory, config_settings=None):
+    check_submodule_updated()
     return orig.build_sdist(sdist_directory, config_settings)
