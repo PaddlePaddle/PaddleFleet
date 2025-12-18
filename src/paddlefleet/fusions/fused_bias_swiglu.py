@@ -76,18 +76,6 @@ def swiglu_back(g, y):
         paddle.Tensor: Gradient with respect to the input tensor, computed using the
             chain rule and the derivative of the SiLU activation function.
     """
-    # y_1, y_2 = paddle.chunk(y, 2, -1)
-    # return paddle.concat(
-    #     (
-    #         g
-    #         * paddle.sigmoid(y_1)
-    #         * (1 + y_1 * (1 - paddle.sigmoid(y_1)))
-    #         * y_2,
-    #         g * F.silu(y_1),
-    #     ),
-    #     -1,
-    # )
-    # #assert 0, "not implemented yet"
     return fused_swiglu_bwd(g, y)
 
 
