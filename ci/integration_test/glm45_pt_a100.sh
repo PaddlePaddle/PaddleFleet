@@ -15,9 +15,6 @@
 set -exo pipefail
 export root_dir=$(pwd)
 
-wget https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64 -O /usr/local/bin/yq
-chmod +x /usr/local/bin/yq
-
 source PaddleFleet/.venv/bin/activate
 
 wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12-18.tar --no-check-certificate

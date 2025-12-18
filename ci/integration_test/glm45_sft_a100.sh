@@ -19,9 +19,6 @@ cd $root_dir/PaddleFormers
 git reset --hard HEAD
 cd -
 
-apt-get update
-apt-get install jq -y
-
 source PaddleFleet/.venv/bin/activate
 
 cd $root_dir/glm45_fleet
