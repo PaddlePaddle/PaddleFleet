@@ -545,7 +545,7 @@ jobs:
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFleet/ci/integration_test/glm45_pt.sh
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-multi
+          ls -a /workspace/PaddleFleet/coveragedata-multi-pt
           source /workspace/PaddleFleet/.venv/bin/activate
           uv run coverage --version
           uv run coverage combine
@@ -591,7 +591,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-fp8
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-fp8/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_fp8.sh
+          bash -x PaddleFleet/ci/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-fp8
           source /workspace/PaddleFleet/.venv/bin/activate
