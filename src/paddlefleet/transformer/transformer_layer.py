@@ -252,7 +252,7 @@ class TransformerLayer(nn.Layer):
                 self._forward_impl,
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
-                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices.clone(),  # Clone is necessary!
                 context=context,
                 context_mask=context_mask,
                 rotary_pos_emb=rotary_pos_emb.clone()  # Clone is necessary!
