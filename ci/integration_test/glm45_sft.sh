@@ -32,7 +32,7 @@ config_lora_yaml=$cur_dir/tp4_sp_ep4_pp2_lora.yaml
 
 config_json=$CACHE_DIR/glm45/GLM-4.5-Air/config.json
 
-yq 'del(.recompute_granularity)
+yq '.recompute_granularity = ""
     | .train_dataset_path = strenv(cur_dir) + "/data/sft/train_gsm8k.jsonl"
     | .eval_dataset_path = strenv(cur_dir) + "/data/sft/test_gsm8k.jsonl"
     | .model_name_or_path = strenv(CACHE_DIR) + "/glm45/GLM-4.5-Air"
