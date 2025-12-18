@@ -154,6 +154,7 @@ class MoELayer(nn.Layer):
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
             )
+            self.moe_grouped_gemm = False  # fp8 has its own implementation
 
         expert_args = {}
         expert_args["config"] = routed_expert_config
