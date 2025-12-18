@@ -29,6 +29,8 @@ config_yaml=$cur_dir/glm45_pt.yaml
 
 yq eval '.expert_model_parallel_size = 8
     | .gradient_accumulation_steps = 1
+    | .moe_token_dispatcher_type = "deepep"
+    | .gated_linear_unit = true
     | .train_dataset_path = strenv(cur_dir) + "/data/pre-training/train.jsonl"
     | .eval_dataset_path = strenv(cur_dir) + "/data/pre-training/eval.jsonl"
     | .model_name_or_path = strenv(cur_dir) + "/GLM-4.5-Air"
