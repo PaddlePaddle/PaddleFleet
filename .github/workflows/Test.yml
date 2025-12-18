@@ -206,8 +206,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          # git pull --no-edit origin pull/${PR_ID}/head
-          git checkout 7dd8b33e7b52c36c886cd46e065130dd84562c04
+          git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /root/.cache/pip
           pip cache dir
           echo "Install uv"
