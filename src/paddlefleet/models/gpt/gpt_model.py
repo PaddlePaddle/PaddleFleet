@@ -190,7 +190,7 @@ class GPTModel(PipelineLayer):
         """
         return [x["layer"] for x in self._sequential_layers]
 
-    def get_sequential_name_prefixs(self):
+    def get_sequential_name_prefixes(self):
         """
         Retrieve name prefixes for all parallel layers in the sequential network.
 
@@ -234,7 +234,7 @@ class GPTModel(PipelineLayer):
                 and layer.layer_name == shared_layer_key
             ):
                 if self.get_stage_from_index(idx) == self._stage_id:
-                    return self.get_sequential_name_prefixs()[str(idx)]
+                    return self.get_sequential_name_prefixes()[str(idx)]
 
         # the prefix must be in the current stage, else raise error
         raise ValueError(
@@ -271,7 +271,7 @@ class GPTModel(PipelineLayer):
                 first_key[0].isdigit() and first_key[1].isdigit()
             )
 
-            prefixes = self.get_sequential_name_prefixs()
+            prefixes = self.get_sequential_name_prefixes()
             for k in state_dict_keys:
                 name_splited = k.split(".")
                 if use_virtual_pp_degree:
