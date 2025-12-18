@@ -229,11 +229,11 @@ def get_gpt_decoder_layers_spec(
     layer_specs = []
     for layer_number in range(config.num_hidden_layers):
         real_layer_number = layer_number + config.remove_head_layers
-        if moe_layer_pattern[real_layer_number] == 1:
+        if moe_layer_pattern[layer_number] == 1:
             layer_specs.append(
                 moe_layer_spec_func(layer_number=real_layer_number)
             )
-        elif moe_layer_pattern[real_layer_number] == 0:
+        elif moe_layer_pattern[layer_number] == 0:
             layer_specs.append(
                 dense_layer_spec_func(layer_number=real_layer_number)
             )

@@ -125,3 +125,11 @@ class EcosystemLibrary:
                     )
                 else:
                     shutil.copy(src, dst)
+
+
+def check_submodule_updated():
+    if not (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists():
+        logger.error(
+            "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
+        )
+        sys.exit(1)
