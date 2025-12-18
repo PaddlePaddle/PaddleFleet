@@ -61,6 +61,8 @@ unset http_proxy https_proxy
 
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_sft_yaml 2>&1 | tee ./glm45_sft.log
 
+echo "====================================================="
 echo -e "\033[34msft is over, lora is about to start\033[0m"
+echo "====================================================="
 
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_lora_yaml 2>&1 | tee ./glm45_lora.log
