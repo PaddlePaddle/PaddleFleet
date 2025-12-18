@@ -63,18 +63,18 @@ inline int LimitGridDim(int64_t n) {
 
 #ifdef __CUDACC__
 template <typename T>
-T **GetTensorDevicePtrs(const std::vector<paddle::Tensor> &tensors,
-                        paddle::Tensor *ptr_tensor,
+T** GetTensorDevicePtrs(const std::vector<paddle::Tensor>& tensors,
+                        paddle::Tensor* ptr_tensor,
                         cudaStream_t stream,
                         phi::Place place) {
-  auto nbytes = tensors.size() * sizeof(T *);
-  std::vector<const T *> cpu_ptrs(tensors.size());
+  auto nbytes = tensors.size() * sizeof(T*);
+  std::vector<const T*> cpu_ptrs(tensors.size());
   for (size_t i = 0; i < tensors.size(); ++i) {
     cpu_ptrs[i] = tensors[i].data<T>();
   }
   *ptr_tensor = paddle::empty(
       {static_cast<int64_t>(nbytes)}, paddle::DataType::UINT8, place);
-  auto *device_ptrs = reinterpret_cast<T **>(ptr_tensor->data());
+  auto* device_ptrs = reinterpret_cast<T**>(ptr_tensor->data());
   auto err = cudaMemcpyAsync(
       device_ptrs, cpu_ptrs.data(), nbytes, cudaMemcpyHostToDevice, stream);
   PD_CHECK(
@@ -117,8 +117,8 @@ struct alignas(16) VectorType<uint8_t, 16> {
 #ifdef __CUDACC__
 // Helper function to perform vectorized memory copy
 template <typename T>
-__device__ __forceinline__ void vectorized_memcpy(const T *src,
-                                                  T *dst,
+__device__ __forceinline__ void vectorized_memcpy(const T* src,
+                                                  T* dst,
                                                   int num_elements) {
   constexpr int vector_size_in_bytes = 16;
   const int elements_per_vector = vector_size_in_bytes / sizeof(T);
@@ -127,8 +127,8 @@ __device__ __forceinline__ void vectorized_memcpy(const T *src,
   int remaining_elements = num_elements % elements_per_vector;
 
   using VecType = VectorType<T, elements_per_vector>;
-  const VecType *src_vec = reinterpret_cast<const VecType *>(src);
-  VecType *dst_vec = reinterpret_cast<VecType *>(dst);
+  const VecType* src_vec = reinterpret_cast<const VecType*>(src);
+  VecType* dst_vec = reinterpret_cast<VecType*>(dst);
 
 #pragma unroll
   for (int idx = threadIdx.x; idx < num_vectors; idx += blockDim.x) {

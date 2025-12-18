@@ -18,12 +18,12 @@
 
 template <typename T, bool has_scale>
 __global__ void tokens_unzip_gather_kernel(
-    const T *__restrict__ x,
-    const float *__restrict__ x_scale,
-    const int *__restrict__ zipped_expertwise_rowmap,
-    T *__restrict__ x_unzipped,
-    float *__restrict__ x_scale_unzipped,
-    int64_t *__restrict__ index_unzipped,
+    const T* __restrict__ x,
+    const float* __restrict__ x_scale,
+    const int* __restrict__ zipped_expertwise_rowmap,
+    T* __restrict__ x_unzipped,
+    float* __restrict__ x_scale_unzipped,
+    int64_t* __restrict__ index_unzipped,
     int64_t unzipped_rows,
     int64_t zipped_rows,
     int token_length,
@@ -50,11 +50,11 @@ __global__ void tokens_unzip_gather_kernel(
 }
 
 std::vector<paddle::Tensor> tokens_unzip_gather(
-    const paddle::Tensor &x,
-    const paddle::optional<paddle::Tensor> &x_scale,
-    const paddle::Tensor &zipped_expertwise_rowmap,
+    const paddle::Tensor& x,
+    const paddle::optional<paddle::Tensor>& x_scale,
+    const paddle::Tensor& zipped_expertwise_rowmap,
     const int expert_id,
-    const std::vector<int64_t> &tokens_per_expert,
+    const std::vector<int64_t>& tokens_per_expert,
     const int padding_multiplex) {
   int num_experts = tokens_per_expert.size();
   PD_CHECK(expert_id >= 0 && expert_id < num_experts);

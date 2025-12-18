@@ -18,16 +18,16 @@
 
 template <typename T>
 struct UnzippedProbInfo {
-  const T *__restrict__ data;
+  const T* __restrict__ data;
   int64_t offset;
 };
 
 template <typename T, int MAX_NUM_EXPERTS_C>
 __global__ void tokens_zip_prob_kernel(
     phi::Array<UnzippedProbInfo<T>, MAX_NUM_EXPERTS_C> unzipped_probs,
-    const int *__restrict__ zipped_expertwise_rowmap,
-    const int *__restrict__ dispatched_indices,
-    T *zipped_probs,
+    const int* __restrict__ zipped_expertwise_rowmap,
+    const int* __restrict__ dispatched_indices,
+    T* zipped_probs,
     int64_t zipped_rows,
     int topk,
     int num_expert) {
@@ -54,9 +54,9 @@ __global__ void tokens_zip_prob_kernel(
 
 template <typename T>
 std::vector<paddle::Tensor> tokens_zip_prob_impl(
-    const std::vector<paddle::Tensor> &unzipped_probs,
-    const paddle::Tensor &zipped_expertwise_rowmap,
-    const paddle::Tensor &dispatched_indices,
+    const std::vector<paddle::Tensor>& unzipped_probs,
+    const paddle::Tensor& zipped_expertwise_rowmap,
+    const paddle::Tensor& dispatched_indices,
     paddle::DataType dtype) {
   auto zipped_expertwise_rowmap_shape = zipped_expertwise_rowmap.shape();
   auto dispatched_indices_shape = dispatched_indices.shape();
@@ -103,9 +103,9 @@ std::vector<paddle::Tensor> tokens_zip_prob_impl(
 }
 
 std::vector<paddle::Tensor> tokens_zip_prob(
-    const std::vector<paddle::Tensor> &unzipped_probs,
-    const paddle::Tensor &zipped_expertwise_rowmap,
-    const paddle::Tensor &dispatched_indices) {
+    const std::vector<paddle::Tensor>& unzipped_probs,
+    const paddle::Tensor& zipped_expertwise_rowmap,
+    const paddle::Tensor& dispatched_indices) {
   PD_CHECK(zipped_expertwise_rowmap.dtype() == paddle::DataType::INT32);
   PD_CHECK(dispatched_indices.dtype() == paddle::DataType::INT32);
 
@@ -124,9 +124,9 @@ std::vector<paddle::Tensor> tokens_zip_prob(
 template <typename T, typename UnZipProbPtrsT>
 __global__ void tokens_zip_prob_seq_subbatch_kernel(
     UnZipProbPtrsT unzipped_probs,
-    const int *__restrict__ zipped_expertwise_rowmap,
-    const int *__restrict__ dispatched_indices,
-    T *zipped_probs,
+    const int* __restrict__ zipped_expertwise_rowmap,
+    const int* __restrict__ dispatched_indices,
+    T* zipped_probs,
     int64_t zipped_rows,
     int topk,
     int num_expert,
@@ -155,9 +155,9 @@ __global__ void tokens_zip_prob_seq_subbatch_kernel(
 
 template <typename T>
 std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch_impl(
-    const std::vector<paddle::Tensor> &unzipped_probs,
-    const paddle::Tensor &zipped_expertwise_rowmap,
-    const paddle::Tensor &dispatched_indices,
+    const std::vector<paddle::Tensor>& unzipped_probs,
+    const paddle::Tensor& zipped_expertwise_rowmap,
+    const paddle::Tensor& dispatched_indices,
     int64_t subbatch_rows,
     paddle::DataType dtype) {
   auto zipped_expertwise_rowmap_shape = zipped_expertwise_rowmap.shape();
@@ -177,7 +177,7 @@ std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch_impl(
 
 #define LAUNCH_TOKENS_ZIP_PROB_SEQ_SUBBATCH_FIX_CASE(__T, __num_split)       \
   if (unzipped_probs.size() <= __num_split) {                                \
-    phi::Array<const __T *, __num_split> unzipped_probs_info;                \
+    phi::Array<const __T*, __num_split> unzipped_probs_info;                 \
     for (size_t i = 0; i < unzipped_probs.size(); ++i) {                     \
       unzipped_probs_info[i] = unzipped_probs[i].data<__T>();                \
     }                                                                        \
@@ -245,9 +245,9 @@ std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch_impl(
 }
 
 std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch(
-    const std::vector<paddle::Tensor> &unzipped_probs,
-    const paddle::Tensor &zipped_expertwise_rowmap,
-    const paddle::Tensor &dispatched_indices,
+    const std::vector<paddle::Tensor>& unzipped_probs,
+    const paddle::Tensor& zipped_expertwise_rowmap,
+    const paddle::Tensor& dispatched_indices,
     int64_t subbatch_rows) {
   PD_CHECK(zipped_expertwise_rowmap.dtype() == paddle::DataType::INT32);
   PD_CHECK(dispatched_indices.dtype() == paddle::DataType::INT32);

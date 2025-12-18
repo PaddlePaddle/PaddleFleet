@@ -28,6 +28,9 @@ export cur_dir=$(pwd)
 config_yaml=$cur_dir/glm45.yaml
 
 yq eval '.expert_model_parallel_size = 8
+    | .gradient_accumulation_steps = 1
+    | .moe_token_dispatcher_type = "deepep"
+    | .gated_linear_unit = true
     | .train_dataset_path = strenv(cur_dir) + "/data/pre-training/train.jsonl"
     | .eval_dataset_path = strenv(cur_dir) + "/data/pre-training/eval.jsonl"
     | .model_name_or_path = strenv(cur_dir) + "/GLM-4.5-Air"
@@ -76,7 +79,7 @@ if [ $exit_code -ne 0 ]; then
 fi
 
 echo "
-10 11.60683823
+10 11.70267677
 " > ./glm45_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
