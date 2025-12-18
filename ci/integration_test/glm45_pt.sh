@@ -20,8 +20,8 @@ chmod +x /usr/local/bin/yq
 
 source PaddleFleet/.venv/bin/activate
 
-wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.1217.tar --no-check-certificate
-tar -xf glm45_fleet.1217.tar # glm45_fleet
+wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.1218.tar --no-check-certificate
+tar -xf glm45_fleet.1218.tar # glm45_fleet
 cd $root_dir/glm45_fleet
 export cur_dir=$(pwd)
 

@@ -32,25 +32,19 @@ config_lora_yaml=$cur_dir/tp4_sp_ep4_pp2_lora.yaml
 
 config_json=$CACHE_DIR/glm45/GLM-4.5-Air/config.json
 
-yq '.recompute_granularity = ""
-    | .moe_token_dispatcher_type = "alltoall"
-    | .gated_linear_unit = true
-    | .train_dataset_path = strenv(cur_dir) + "/data/sft/train_gsm8k.jsonl"
-    | .eval_dataset_path = strenv(cur_dir) + "/data/sft/test_gsm8k.jsonl"
+yq '.train_dataset_path = strenv(cur_dir) + "/data/sft/train.jsonl"
+    | .eval_dataset_path = strenv(cur_dir) + "/data/sft/dev.jsonl"
     | .model_name_or_path = strenv(CACHE_DIR) + "/glm45/GLM-4.5-Air"
-    | .logging_dir = strenv(cur_dir) + "/vdl_log"
-    | .output_dir = strenv(cur_dir) + "/checkpoints"' \
+    | .logging_dir = strenv(cur_dir) + "/glm_full_pp_vdl_log"
+    | .output_dir = strenv(cur_dir) + "/checkpoints/glm_full_pp_ckpts"' \
    $config_sft_yaml > ${config_sft_yaml}.tmp
 mv ${config_sft_yaml}.tmp $config_sft_yaml
 
-yq '.recompute_granularity = ""
-    | .moe_token_dispatcher_type = "alltoall"
-    | .gated_linear_unit = true
-    | .train_dataset_path = strenv(cur_dir) + "/data/sft/train_gsm8k.jsonl"
-    | .eval_dataset_path = strenv(cur_dir) + "/data/sft/test_gsm8k.jsonl"
+yq '.train_dataset_path = strenv(cur_dir) + "/data/sft/train.jsonl"
+    | .eval_dataset_path = strenv(cur_dir) + "/data/sft/dev.jsonl"
     | .model_name_or_path = strenv(CACHE_DIR) + "/glm45/GLM-4.5-Air"
-    | .logging_dir = strenv(cur_dir) + "/vdl_log"
-    | .output_dir = strenv(cur_dir) + "/checkpoints"' \
+    | .logging_dir = strenv(cur_dir) + "/glm_full_single_lora_log"
+    | .output_dir = strenv(cur_dir) + "/checkpoints/glm_single_lora_ckps"' \
    $config_lora_yaml > ${config_lora_yaml}.tmp
 mv ${config_lora_yaml}.tmp $config_lora_yaml
 
