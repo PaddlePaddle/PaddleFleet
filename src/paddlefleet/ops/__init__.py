@@ -17,6 +17,7 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 import paddle
 
@@ -64,11 +65,14 @@ def _try_load_nvshmem(ops_dir: Path):
             ) from e
 
 
-def _safe_load_ecosystem_lib(lib_name: str, ops_dir: Path):
+def _safe_load_ecosystem_lib(
+    lib_name: str, ops_dir: Path, module_globals: dict[str, Any]
+):
     with ModuleContext([lib_name], ops_dir):
         try:
-            importlib.import_module(lib_name)
+            module = importlib.import_module(lib_name)
             patch_module_namespace(lib_name, "paddlefleet.ops.")
+            module_globals[lib_name] = module
             logger.info(f"Successfully loaded ecosystem library: {lib_name}")
         except ImportError as e:
             logger.warning(f"Ecosystem library '{lib_name}' not found: {e}")
@@ -82,8 +86,8 @@ if is_deep_gemm_or_deep_ep_available():
     ops_dir = Path(__file__).parent
     # Loading libnvshmem_host.so.* first when use editable install
     _try_load_nvshmem(ops_dir)
-    _safe_load_ecosystem_lib("deep_gemm", ops_dir)
-    _safe_load_ecosystem_lib("deep_ep", ops_dir)
+    _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
+    _safe_load_ecosystem_lib("deep_ep", ops_dir, globals())
 else:
     capability = paddle.cuda.get_device_capability()
     sys.meta_path.insert(0, HardwareIncompatibleBlocker(capability))
