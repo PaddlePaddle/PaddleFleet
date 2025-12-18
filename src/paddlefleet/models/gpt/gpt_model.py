@@ -116,8 +116,10 @@ class GPTModel(PipelineLayer):
                 position_ids, shifts=-1, dims=-1, cp_group=embedding.cp_group
             )
 
-            hidden_states = embedding(input_ids, position_ids)
-            rst = {"hidden_states": hidden_states}
+            ret_dict = embedding(
+                {"input_ids": input_ids, "position_ids": position_ids}
+            )
+            rst = {"mtp_hidden_states": ret_dict["hidden_states"]}
             rst = {**dict_args, **rst}
             return rst
 

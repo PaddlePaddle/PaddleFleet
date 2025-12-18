@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
-import paddle.nn.functional as F
 from paddle import Tensor
 
 from paddlefleet import tensor_parallel
@@ -423,48 +422,6 @@ class MultiTokenPredictionLayer(FleetLayer):
         )
         self.offload_context = nullcontext()
 
-    def _get_embeddings(
-        self,
-        input_ids: paddle.Tensor,
-        position_ids: paddle.Tensor,
-        embedding_weight: paddle.Tensor,
-        position_embedding_weight: paddle.Tensor | None,
-        hidden_states: paddle.Tensor,
-    ):
-        """
-        Preprocesses input data for the Multi-Token Prediction (MTP) layers.
-
-        This function computes the decoder input and sends updated input_ids and position_ids to
-        the next layer.
-
-        Args:
-            input_ids (paddle.Tensor): The input token IDs.
-            position_ids (paddle.Tensor): The position IDs corresponding to the input tokens.
-            embedding_weight (paddle.Tensor): The embedding weight
-                from gpt model to compute the decoder input.
-            hidden_states (paddle.Tensor): hidden states tensor of shape [s, b, h] where s is the
-                sequence length, b is the batch size, and h is the hidden size.
-        """
-        # Calc logits for the current Multi-Token Prediction (MTP) layers.
-        input_ids, _ = roll_tensor(
-            input_ids, shifts=-1, dims=-1, cp_group=self.cp_group
-        )
-        position_ids, _ = roll_tensor(
-            position_ids, shifts=-1, dims=-1, cp_group=self.cp_group
-        )
-
-        # BUG Here, only part of the forward of embedding, only for tmp ut.
-        embed_tokens = F.embedding(input_ids, embedding_weight)
-        if position_embedding_weight:
-            position_embeddings = F.embedding(
-                position_ids, position_embedding_weight
-            )
-            decoder_input = embed_tokens + position_embeddings
-        else:
-            decoder_input = embed_tokens
-
-        return input_ids, position_ids, decoder_input, hidden_states
-
     def _concat_embeddings(
         self, hidden_states: paddle.Tensor, decoder_input: paddle.Tensor
     ):
@@ -592,22 +549,13 @@ class MultiTokenPredictionLayer(FleetLayer):
         position_embedding_weight = dict_args.get(
             "position_embedding_weight", None
         )
+        decoder_input = dict_args.get("mtp_hidden_states", None)
 
         assert context is None, (
             "multi token prediction + cross attention is not yet supported."
         )
         assert packed_seq_params is None, (
             "multi token prediction + sequence packing is not yet supported."
-        )
-
-        input_ids, position_ids, decoder_input, hidden_states = (
-            self._get_embeddings(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                embedding_weight=embedding_weight,
-                position_embedding_weight=position_embedding_weight,
-                hidden_states=hidden_states,
-            )
         )
 
         if self.config.recompute_granularity == "full" and self.training:
