@@ -1413,16 +1413,13 @@ class ExpertsGroupGemmContiguousNode:
                         weights.shape, dtype=paddle.float32
                     )
                 if self.use_deep_gemm:
-                    weights_res = paddle.empty_like(
-                        weights.main_grad, dtype=paddle.float
-                    )
                     paddlefleet.ops.deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
                         a=x,
                         b=dy,
-                        d=weights_res,
+                        d=weights.main_grad,
                         ks=self.tokens_per_expert,
                         ks_tensor=paddle.to_tensor(self.tokens_per_expert),
-                        c=paddle.zeros_like(weights_res).cast(paddle.float),
+                        c=weights.main_grad,
                     )
                 else:
                     weights_res = paddle.empty_like(
@@ -1434,26 +1431,23 @@ class ExpertsGroupGemmContiguousNode:
                         self.tokens_per_expert,
                         trans_lhs=True,
                     )
-                weights.main_grad = weights.main_grad + weights_res.cast(
-                    weights.main_grad.dtype
-                )
-                del weights_res
+                    weights.main_grad = weights.main_grad + weights_res.cast(
+                        weights.main_grad.dtype
+                    )
+                    del weights_res
             else:
                 if weights.grad is None:
                     weights.grad = paddle.zeros(
                         weights.shape, dtype=paddle.float32
                     )
                 if self.use_deep_gemm:
-                    weights_res = paddle.empty_like(
-                        weights.main_grad, dtype=paddle.float
-                    )
                     paddlefleet.ops.deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
                         a=x,
                         b=dy,
-                        d=weights_res,
+                        d=weights.grad,
                         ks=self.tokens_per_expert,
                         ks_tensor=paddle.to_tensor(self.tokens_per_expert),
-                        c=paddle.zeros_like(weights_res).cast(paddle.float),
+                        c=weights.grad,
                     )
                 else:
                     weights_res = paddle.empty_like(weights.grad, dtype=x.dtype)
@@ -1463,10 +1457,10 @@ class ExpertsGroupGemmContiguousNode:
                         self.tokens_per_expert,
                         trans_lhs=True,
                     )
-                weights.grad = weights.grad + weights_res.cast(
-                    weights.grad.dtype
-                )
-                del weights_res
+                    weights.grad = weights.grad + weights_res.cast(
+                        weights.grad.dtype
+                    )
+                    del weights_res
             if (
                 hasattr(weights, "_apply_backward_hook")
                 and not weights.stop_gradient
