@@ -253,7 +253,7 @@ class TransformerLayer(nn.Layer):
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 attn_mask_startend_row_indices=attn_mask_startend_row_indices.clone()  # Clone is necessary!
-                if rotary_pos_emb is not None
+                if attn_mask_startend_row_indices is not None
                 else None,
                 context=context,
                 context_mask=context_mask,
