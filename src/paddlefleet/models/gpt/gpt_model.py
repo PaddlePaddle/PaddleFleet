@@ -121,6 +121,14 @@ class GPTModel(PipelineLayer):
             rst = {**dict_args, **rst}
             return rst
 
+        if self.config.position_embedding_type == "learned_absolute":
+            embedding_mtp_shared_list = [
+                "embedding_weight",
+                "position_embedding_weight",
+            ]
+        else:
+            embedding_mtp_shared_list = ["embedding_weight"]
+
         layers = []
         if share_embeddings_and_output_weights:
             self.add_sequential_layer(
@@ -128,10 +136,7 @@ class GPTModel(PipelineLayer):
                 SharedLayerDesc(
                     "embed",
                     spec.embedding,
-                    shared_weight_attr=[
-                        "embedding_weight",
-                        "position_embedding_weight",
-                    ],
+                    shared_weight_attr=embedding_mtp_shared_list,
                 ),
                 "model",
             )
@@ -163,10 +168,7 @@ class GPTModel(PipelineLayer):
                 SharedLayerDesc(
                     "embed",
                     spec.embedding,
-                    shared_weight_attr=[
-                        "embedding_weight",
-                        "position_embedding_weight",
-                    ],
+                    shared_weight_attr=embedding_mtp_shared_list,
                     forward_func=mtp_embedding,
                 ),
                 "model.layers.mtp_embedding",
