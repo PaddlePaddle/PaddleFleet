@@ -223,7 +223,7 @@ class TransformerConfig(ModelParallelConfig):
     use_qk_norm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
 
-    rms_norm_eps: float = 1e-6
+    rms_norm_eps: float = 1e-5
     """Epsilon value for norm."""
 
     layernorm_zero_centered_gamma: bool = False
