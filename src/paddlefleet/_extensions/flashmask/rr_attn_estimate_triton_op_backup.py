@@ -97,13 +97,13 @@ def flashmask_apply(
 @triton.jit
 def check_dense_contains_partial_stride(
     dense_flashmask,
-    mask_token_q,
-    mask_token_k,
+    q_token_mask,
+    k_token_mask,
     BLOCK_SIZE: tl.constexpr,
     STRIDE: tl.constexpr,
 ):
     dense_flashmask = tl.where(
-        (mask_token_q[:, None] & mask_token_k[None, :]),
+        (q_token_mask[:, None] & k_token_mask[None, :]),
         dense_flashmask.to(tl.int32),
         tl.full([], 0, tl.int32),
     )
@@ -111,7 +111,7 @@ def check_dense_contains_partial_stride(
         BLOCK_SIZE // STRIDE, BLOCK_SIZE // STRIDE, STRIDE
     ).sum(2)
     mask_stride_valid_cnt = (
-        mask_token_k.reshape(1, BLOCK_SIZE // STRIDE, STRIDE)
+        k_token_mask.reshape(1, BLOCK_SIZE // STRIDE, STRIDE)
         .to(tl.int32)
         .sum(2)
     )
@@ -121,273 +121,6 @@ def check_dense_contains_partial_stride(
     )
     # return mask_stride_is_partial
     return tl.sum(mask_stride_is_partial.to(tl.int32)) > 0
-
-
-@triton.jit
-def _fast_path(
-    b_q,
-    p_k,
-    mask_token_k,
-    fully_masked_stride_mask,
-    K: tl.constexpr,
-    ratio: tl.constexpr,
-    STRIDE: tl.constexpr,
-):
-    b_k = tl.load(p_k, mask=mask_token_k[None, :], other=0.0)
-    X = tl.dot(b_q, b_k.reshape(K, ratio, STRIDE).sum(axis=2))
-    X = tl.where(fully_masked_stride_mask, -1.0e6, X)
-    return X, tl.zeros([], dtype=tl.int1)
-
-
-@triton.jit
-def _fine_path(
-    # Q 相关
-    b_q,
-    offs_tokens_q,
-    mask_token_q,
-    p_k,
-    mask_token_k,
-    mask_ptr_base_bh_stride,
-    mask_ptr_base_bh_tokens,
-    # 循环变量
-    iter,
-    # Mask 参数
-    lt_start_ptr,
-    lt_end_ptr,
-    ut_start_ptr,
-    ut_end_ptr,
-    lt_start_nstridemin,
-    lt_end_nstridemax,
-    ut_start_nstridemin,
-    ut_end_nstridemax,
-    # mask
-    fully_masked_stride_mask,
-    N_STRIDES,
-    shift,
-    BLOCK_SIZE: tl.constexpr,
-    STRIDE: tl.constexpr,
-    H: tl.constexpr,
-    K: tl.constexpr,
-    causal: tl.constexpr,
-    mode: tl.constexpr,
-    is_causal_loop: tl.constexpr,
-    check_partial: tl.constexpr,
-):
-    ratio: tl.constexpr = BLOCK_SIZE // STRIDE
-    b_k = tl.load(p_k, mask=mask_token_k[None, :], other=0.0)
-    logits = tl.dot(b_q, b_k)
-
-    offs_tokens_k = tl.arange(0, BLOCK_SIZE)
-    curr_token_offset = mask_ptr_base_bh_tokens + iter * BLOCK_SIZE
-
-    X, dense_flashmask = flashmask_apply(
-        logits,
-        offs_tokens_q,
-        curr_token_offset,
-        offs_tokens_k,
-        mask_token_k,
-        lt_start_ptr,
-        lt_end_ptr,
-        ut_start_ptr,
-        ut_end_ptr,
-        causal=causal,
-        mode=mode,
-    )
-
-    if is_causal_loop:
-        global_offs_token_k = iter * BLOCK_SIZE + offs_tokens_k
-        causal_mask_token = global_offs_token_k[None, :] > (
-            offs_tokens_q[:, None] + shift
-        )
-        X = tl.where(causal_mask_token, 0.0, X)
-        dense_flashmask = causal_mask_token | dense_flashmask
-
-    # Reduce token logits to get stride score
-    X = X.reshape(ratio, ratio, STRIDE).sum(axis=2)
-    fully_masked_by_fm = (dense_flashmask.reshape(ratio, ratio, STRIDE)).min(
-        axis=2
-    ) == 1
-    X = tl.where(fully_masked_by_fm, -1.0e6, X)
-
-    if check_partial:
-        return X, check_dense_contains_partial_stride(
-            dense_flashmask,
-            mask_token_q=mask_token_q,  # [ratio]
-            mask_token_k=mask_token_k,  # [block_size]
-            BLOCK_SIZE=BLOCK_SIZE,
-            STRIDE=STRIDE,
-        )
-    else:
-        return X, tl.zeros([], dtype=tl.int1)
-
-
-@triton.jit
-def _compute_block_logits(
-    # 指针和基础偏移
-    p_k_base,
-    mask_ptr_base_bh_stride,
-    mask_ptr_base_bh_tokens,
-    # 循环变量
-    iter,
-    # Q 相关
-    b_q,
-    offs_tokens_q,
-    mask_token_q,
-    # Mask 参数
-    lt_start_ptr,
-    lt_end_ptr,
-    ut_start_ptr,
-    ut_end_ptr,
-    lt_start_nstridemin,
-    lt_end_nstridemax,
-    ut_start_nstridemin,
-    ut_end_nstridemax,
-    # mask
-    fully_masked_stride_mask,
-    # 常量
-    seqlen_k,
-    N_STRIDES,
-    shift,
-    BLOCK_SIZE: tl.constexpr,
-    STRIDE: tl.constexpr,
-    H: tl.constexpr,
-    K: tl.constexpr,
-    causal: tl.constexpr,
-    mode: tl.constexpr,
-    is_causal_loop: tl.constexpr,
-    check_partial: tl.constexpr,
-):
-    ratio: tl.constexpr = BLOCK_SIZE // STRIDE
-
-    offs_stride_k = tl.arange(0, ratio)
-    offs_tokens_k = tl.arange(0, BLOCK_SIZE)
-
-    curr_stride_offset = mask_ptr_base_bh_stride + iter * ratio
-    curr_token_offset = mask_ptr_base_bh_tokens + iter * BLOCK_SIZE
-    mask_stride_k = (iter * ratio + offs_stride_k) < N_STRIDES
-
-    global_offs_token_k = iter * BLOCK_SIZE + offs_tokens_k
-    mask_token_k = global_offs_token_k < seqlen_k
-
-    p_k = (
-        p_k_base
-        # + iter * BLOCK_SIZE * H * K
-        # + tl.arange(0, BLOCK_SIZE)[None, :] * H * K
-        + global_offs_token_k[None, :] * H * K
-        + tl.arange(0, K)[:, None]
-    )
-    b_k = tl.load(p_k, mask=mask_token_k[None, :], other=0.0)
-
-    if is_causal_loop:
-        tl.static_assert(
-            causal is True, "if is_causal_loop is True, causal must be True"
-        )
-
-        logits = tl.dot(b_q, b_k)
-        X, dense_flashmask = flashmask_apply(
-            logits,
-            offs_tokens_q,
-            curr_token_offset,
-            offs_tokens_k,
-            mask_token_k,
-            lt_start_ptr,
-            lt_end_ptr,
-            ut_start_ptr,
-            ut_end_ptr,
-            causal=causal,
-            mode=mode,
-        )
-        causal_mask_token = global_offs_token_k[None, :] > (
-            offs_tokens_q[:, None] + shift
-        )
-        X = tl.where(causal_mask_token, 0.0, X)
-
-        # Reduce token logits to get stride score
-        X = X.reshape(ratio, ratio, STRIDE).sum(axis=2)
-        # fully_masked_by_fm = dense_flashmask.reshape(ratio, ratio, STRIDE).min(axis=2) == 1
-        causal_fuse_fm = causal_mask_token | dense_flashmask
-        fully_masked_by_fm = (
-            causal_fuse_fm.reshape(ratio, ratio, STRIDE).min(axis=2) == 1
-        )
-        X = tl.where(fully_masked_by_fm, -1.0e6, X)
-
-        if check_partial:
-            return X, check_dense_contains_partial_stride(
-                causal_fuse_fm,
-                mask_token_q=mask_token_q,  # [ratio]
-                mask_token_k=mask_token_k,  # [block_size]
-                BLOCK_SIZE=BLOCK_SIZE,
-                STRIDE=STRIDE,
-            )
-        else:
-            return X, tl.zeros([], dtype=tl.int1)
-    else:
-        partially_masked_stride_mask = check_partially_masked_state(
-            curr_stride_offset,
-            offs_stride_k,
-            mask_stride_k,
-            offs_tokens_q,
-            lt_start_nstridemin,
-            lt_end_nstridemax,
-            ut_start_nstridemin,
-            ut_end_nstridemax,
-            causal=causal,
-            mode=mode,
-        )
-
-        fast_partially_masked_stride_mask = (
-            ~fully_masked_stride_mask
-        ) & partially_masked_stride_mask
-
-        has_partial = tl.sum(fast_partially_masked_stride_mask.to(tl.int32)) > 0
-        if has_partial:
-            # logits = tl.dot(b_q, b_k)  # [ratio, BLOCK_SIZE]
-            X, dense_flashmask = flashmask_apply(
-                logits,
-                offs_tokens_q,
-                curr_token_offset,
-                offs_tokens_k,
-                mask_token_k,
-                lt_start_ptr,
-                lt_end_ptr,
-                ut_start_ptr,
-                ut_end_ptr,
-                causal=causal,
-                mode=mode,
-            )
-            # Reduce token logits to get stride score
-            X = X.reshape(ratio, ratio, STRIDE).sum(axis=2)
-            fully_masked_by_fm = (
-                dense_flashmask.reshape(ratio, ratio, STRIDE)
-            ).min(axis=2) == 1
-            X = tl.where(fully_masked_by_fm, -1.0e6, X)
-
-            if check_partial:
-                return X, check_dense_contains_partial_stride(
-                    dense_flashmask,
-                    mask_token_q=mask_token_q,  # [ratio]
-                    mask_token_k=mask_token_k,  # [block_size]
-                    BLOCK_SIZE=BLOCK_SIZE,
-                    STRIDE=STRIDE,
-                )
-            else:
-                return X, tl.zeros([], dtype=tl.int1)
-
-        else:
-            return _fast_path(
-                b_q,
-                p_k,
-                mask_token_k,
-                fully_masked_stride_mask,
-                K,
-                ratio,
-                STRIDE,
-            )
-            # # Fast path
-            # X = tl.dot(b_q, b_k.reshape(K, ratio, STRIDE).sum(axis=2))
-            # X = tl.where(fully_masked_stride_mask, -1.0e6, X)
-            # # if check_partial:
-            # return X, tl.zeros([], dtype=tl.int1)
 
 
 @triton.jit
@@ -450,10 +183,10 @@ def gemm_fuse_softmax_causal(
     offs_tokens_q = (
         tl.arange(0, ratio) * STRIDE + i_block * BLOCK_SIZE + (i_h % STRIDE)
     )  # round-robin offset
-    mask_token_q = offs_tokens_q < seqlen_q
+    mask_q = offs_tokens_q < seqlen_q
     # mask_q = offs_tokens_q[:, None] < seqlen_q
 
-    b_q = tl.load(p_q, mask=mask_token_q[:, None], other=0.0)
+    b_q = tl.load(p_q, mask=mask_q[:, None], other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
 
     # Softmax Accumulators
@@ -499,36 +232,67 @@ def gemm_fuse_softmax_causal(
         )
 
         if tl.sum(fully_masked_stride_mask.to(tl.int32)) < ratio * ratio:
-            X, _ = _compute_block_logits(
-                p_k_base,
-                mask_ptr_base_bh_stride,
-                mask_ptr_base_bh_tokens,
-                iter,
-                b_q,
+            # Load K & Compute Dot
+            p_k = (
+                p_k_base
+                + iter * BLOCK_SIZE * H * K
+                + tl.arange(0, BLOCK_SIZE)[None, :] * H * K
+                + offs_k_base
+            )
+            b_k = tl.load(p_k)
+            # CHANGE: NO REDUCE HERE
+            # logits = tl.dot(b_q, b_k) # [ratio, BLOCK_SIZE]
+
+            partially_masked_stride_mask = check_partially_masked_state(
+                curr_stride_offset,
+                offs_stride_k,
+                curr_load_mask,
                 offs_tokens_q,
-                mask_token_q,
-                lt_start_ptr,
-                lt_end_ptr,
-                ut_start_ptr,
-                ut_end_ptr,
                 lt_start_nstridemin,
                 lt_end_nstridemax,
                 ut_start_nstridemin,
                 ut_end_nstridemax,
-                # mask
-                fully_masked_stride_mask,
-                seqlen_k,
-                N_STRIDES,
-                shift=shift,
-                BLOCK_SIZE=BLOCK_SIZE,
-                STRIDE=STRIDE,
-                H=H,
-                K=K,
                 causal=True,
                 mode=mode,
-                is_causal_loop=False,
-                check_partial=False,
             )
+
+            real_partially_masked_stride_mask = (
+                ~fully_masked_stride_mask
+            ) & partially_masked_stride_mask
+            if tl.sum(real_partially_masked_stride_mask) > 0:
+                logits = tl.dot(b_q, b_k)  # [ratio, BLOCK_SIZE]
+                curr_token_offset = mask_ptr_base_bh_tokens + iter * BLOCK_SIZE
+                curr_token_load_mask = (
+                    iter * BLOCK_SIZE + offs_tokens_k
+                ) < seqlen_k
+                X, dense_flashmask = flashmask_apply(
+                    logits,
+                    offs_tokens_q,
+                    curr_token_offset,
+                    offs_tokens_k,
+                    curr_token_load_mask,
+                    lt_start_ptr,
+                    lt_end_ptr,
+                    ut_start_ptr,
+                    ut_end_ptr,
+                    causal=True,
+                    mode=mode,
+                )
+
+                # Reduce token logits to get stride score
+                X = X.reshape(ratio, ratio, STRIDE).sum(axis=2)
+                fully_masked_by_fm = (
+                    dense_flashmask.reshape(ratio, ratio, STRIDE)
+                ).min(axis=2) == 1
+                X = tl.where(fully_masked_by_fm, -1.0e6, X)
+            else:
+                # Reduce token logits to get stride score
+                X = tl.dot(b_q, b_k.reshape(K, ratio, STRIDE).sum(2))
+
+            # Explicitly mask out fully masked stride blocks
+            X = tl.where(fully_masked_stride_mask, -1.0e6, X)
+            # if i_block == 0 and iter == 0:
+            #     tl.device_print("stride_logits", X / 1.4426950408889634)
 
             # Update Stats
             m_local = tl.max(X, 1)
@@ -558,36 +322,65 @@ def gemm_fuse_softmax_causal(
         )
 
         if tl.sum(fully_masked_stride_mask.to(tl.int32)) < ratio * ratio:
-            X, _ = _compute_block_logits(
-                p_k_base,
-                mask_ptr_base_bh_stride,
-                mask_ptr_base_bh_tokens,
-                iter,
-                b_q,
+            p_k = (
+                p_k_base
+                + iter * BLOCK_SIZE * H * K
+                + tl.arange(0, BLOCK_SIZE)[None, :] * H * K
+                + offs_k_base
+            )
+            mask_k = (
+                tl.arange(0, BLOCK_SIZE)[None, :] + iter * BLOCK_SIZE
+            ) < seqlen_k
+            b_k = tl.load(p_k, mask=mask_k, other=0.0)
+            # b_k = b_k.reshape(K, ratio, STRIDE)
+            # b_k = tl.sum(b_k, axis=2)
+            logits = tl.dot(b_q, b_k)
+
+            curr_token_offset = mask_ptr_base_bh_tokens + iter * BLOCK_SIZE
+            curr_token_load_mask = (
+                iter * BLOCK_SIZE + offs_tokens_k
+            ) < seqlen_k
+            X, dense_flashmask = flashmask_apply(
+                logits,
                 offs_tokens_q,
-                mask_token_q,
+                curr_token_offset,
+                offs_tokens_k,
+                curr_token_load_mask,
                 lt_start_ptr,
                 lt_end_ptr,
                 ut_start_ptr,
                 ut_end_ptr,
-                lt_start_nstridemin,
-                lt_end_nstridemax,
-                ut_start_nstridemin,
-                ut_end_nstridemax,
-                # mask
-                fully_masked_stride_mask,
-                seqlen_k,
-                N_STRIDES,
-                shift=shift,
-                BLOCK_SIZE=BLOCK_SIZE,
-                STRIDE=STRIDE,
-                H=H,
-                K=K,
                 causal=True,
                 mode=mode,
-                is_causal_loop=True,
-                check_partial=False,
             )
+            global_offs_k = iter * BLOCK_SIZE + offs_tokens_k
+
+            # Causal Condition: k_idx > q_idx + shift => Masked
+            # Mask value: 0.0 (Identity for sum reduction of logits)
+            causal_mask_token = global_offs_k[None, :] > (
+                offs_tokens_q[:, None] + shift
+            )
+            X = tl.where(causal_mask_token, 0.0, X)
+
+            # Reduce token logits to get stride score
+            X = X.reshape(ratio, ratio, STRIDE).sum(axis=2)
+            # fully_masked_by_fm = dense_flashmask.reshape(ratio, ratio, STRIDE).min(axis=2) == 1
+            causal_fuse_fm = causal_mask_token | dense_flashmask
+            fully_masked_by_fm = (
+                causal_fuse_fm.reshape(ratio, ratio, STRIDE).min(axis=2) == 1
+            )
+            X = tl.where(fully_masked_by_fm, -1.0e6, X)
+
+            offs_k_stride_global = iter * ratio + offs_stride_k
+            k_stride_token_start = offs_k_stride_global * STRIDE
+            visibility_limit = offs_tokens_q + shift
+            causal_mask_stride = (
+                k_stride_token_start[None, :] > visibility_limit[:, None]
+            )
+
+            X = tl.where(causal_mask_stride, -1.0e6, X)
+            # Explicitly mask out fully masked stride blocks
+            X = tl.where(fully_masked_stride_mask, -1.0e6, X)
 
             m_local = tl.max(X, 1)
             m_new = tl.maximum(m_i, m_local)
@@ -636,53 +429,94 @@ def gemm_fuse_softmax_causal(
         )
 
         if tl.sum(fully_masked_stride_mask.to(tl.int32)) < ratio * ratio:
-            X, is_partial_block = _compute_block_logits(
-                p_k_base,
-                mask_ptr_base_bh_stride,
-                mask_ptr_base_bh_tokens,
-                iter,
-                b_q,
+            # Load K & Compute Dot
+            p_k = (
+                p_k_base
+                + iter * BLOCK_SIZE * H * K
+                + tl.arange(0, BLOCK_SIZE)[None, :] * H * K
+                + offs_k_base
+            )
+            b_k = tl.load(p_k)
+
+            partially_masked_stride_mask = check_partially_masked_state(
+                curr_stride_offset,
+                offs_stride_k,
+                curr_load_mask,
                 offs_tokens_q,
-                mask_token_q,
-                lt_start_ptr,
-                lt_end_ptr,
-                ut_start_ptr,
-                ut_end_ptr,
                 lt_start_nstridemin,
                 lt_end_nstridemax,
                 ut_start_nstridemin,
                 ut_end_nstridemax,
-                # mask
-                fully_masked_stride_mask,
-                seqlen_k,
-                N_STRIDES,
-                shift=shift,
-                BLOCK_SIZE=BLOCK_SIZE,
-                STRIDE=STRIDE,
-                H=H,
-                K=K,
                 causal=True,
                 mode=mode,
-                is_causal_loop=False,
-                check_partial=True,
             )
+
+            real_partially_masked_stride_mask = (
+                ~fully_masked_stride_mask
+            ) & partially_masked_stride_mask
+
+            if tl.sum(real_partially_masked_stride_mask) > 0:
+                logits = tl.dot(b_q, b_k)  # [ratio, BLOCK_SIZE]
+
+                curr_token_offset = mask_ptr_base_bh_tokens + iter * BLOCK_SIZE
+
+                curr_token_load_mask = (
+                    iter * BLOCK_SIZE + offs_tokens_k
+                ) < seqlen_k
+
+                X, dense_flashmask = flashmask_apply(
+                    logits,
+                    offs_tokens_q,
+                    curr_token_offset,
+                    offs_tokens_k,
+                    curr_token_load_mask,
+                    lt_start_ptr,
+                    lt_end_ptr,
+                    ut_start_ptr,
+                    ut_end_ptr,
+                    causal=True,
+                    mode=mode,
+                )
+
+                # Reduce token logits to get stride score
+
+                X = X.reshape(ratio, ratio, STRIDE).sum(axis=2)
+
+                fully_masked_by_fm = (
+                    dense_flashmask.reshape(ratio, ratio, STRIDE).min(axis=2)
+                    == 1
+                )
+
+                X = tl.where(fully_masked_by_fm, -1.0e6, X)
+
+                # partial_stride_mask = check_dense_contains_partial_stride(dense_flashmask, curr_token_load_mask, BLOCK_SIZE, STRIDE):
+
+                if check_dense_contains_partial_stride(
+                    dense_flashmask,
+                    q_token_mask=mask_q,  # [ratio]
+                    k_token_mask=curr_token_load_mask,  # [block_size]
+                    BLOCK_SIZE=BLOCK_SIZE,
+                    STRIDE=STRIDE,
+                ):
+                    tl.store(p_out_mask + iter, tl.full([], 1, dtype=tl.int8))
+
+            else:
+                # Reduce token logits to get stride score
+
+                X = tl.dot(b_q, b_k.reshape(K, ratio, STRIDE).sum(2))
+
+            X = tl.where(fully_masked_stride_mask, -1.0e6, X)
 
             # Normalization & Reduction
             X = tl.exp2(X - m_i[:, None]) * l_i_inv[:, None]
-            X = tl.where(mask_token_q[:, None], X, 0)
+            X = tl.where(mask_q[:, None], X, 0)
             X = tl.where(m_i[:, None] < -1.0e5, 0, X)
             X = tl.sum(X, 1)  # Sum K-strides
             X = tl.sum(X, 0)  # Sum Q-tokens
             tl.store(p_out + iter, X.to(out.type.element_ty))
-            tl.store(
-                p_out_mask + iter, tl.full([], is_partial_block, dtype=tl.int8)
-            )
-
-        else:
-            tl.store(p_out + iter, tl.zeros([], dtype=out.type.element_ty))
-            tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
 
     # 4.2 Causal Block
+
     for iter in range(k_safe_end, k_valid_end):
         curr_stride_offset = mask_ptr_base_bh_stride + iter * ratio
 
@@ -704,56 +538,104 @@ def gemm_fuse_softmax_causal(
         )
 
         if tl.sum(fully_masked_stride_mask.to(tl.int32)) < ratio * ratio:
-            X, is_partial_block = _compute_block_logits(
-                p_k_base,
-                mask_ptr_base_bh_stride,
-                mask_ptr_base_bh_tokens,
-                iter,
-                b_q,
+            p_k = (
+                p_k_base
+                + iter * BLOCK_SIZE * H * K
+                + tl.arange(0, BLOCK_SIZE)[None, :] * H * K
+                + offs_k_base
+            )
+
+            mask_k = (
+                tl.arange(0, BLOCK_SIZE)[None, :] + iter * BLOCK_SIZE
+            ) < seqlen_k
+
+            b_k = tl.load(p_k, mask=mask_k, other=0.0)
+
+            logits = tl.dot(b_q, b_k)
+            partially_masked_stride_mask = check_partially_masked_state(
+                curr_stride_offset,
+                offs_stride_k,
+                curr_load_mask,
                 offs_tokens_q,
-                mask_token_q,
-                lt_start_ptr,
-                lt_end_ptr,
-                ut_start_ptr,
-                ut_end_ptr,
                 lt_start_nstridemin,
                 lt_end_nstridemax,
                 ut_start_nstridemin,
                 ut_end_nstridemax,
-                # mask
-                fully_masked_stride_mask,
-                seqlen_k,
-                N_STRIDES,
-                shift=shift,
-                BLOCK_SIZE=BLOCK_SIZE,
-                STRIDE=STRIDE,
-                H=H,
-                K=K,
                 causal=True,
                 mode=mode,
-                is_causal_loop=True,
-                check_partial=True,
             )
+
+            real_partially_masked_stride_mask = (
+                ~fully_masked_stride_mask
+            ) & partially_masked_stride_mask
+
+            curr_token_offset = mask_ptr_base_bh_tokens + iter * BLOCK_SIZE
+
+            curr_token_load_mask = (
+                iter * BLOCK_SIZE + offs_tokens_k
+            ) < seqlen_k
+
+            X, dense_flashmask = flashmask_apply(
+                logits,
+                offs_tokens_q,
+                curr_token_offset,
+                offs_tokens_k,
+                curr_token_load_mask,
+                lt_start_ptr,
+                lt_end_ptr,
+                ut_start_ptr,
+                ut_end_ptr,
+                causal=True,
+                mode=mode,
+            )
+
+            global_offs_k = iter * BLOCK_SIZE + offs_tokens_k
+
+            # Causal Condition: k_idx > q_idx + shift => Masked
+
+            # Mask value: 0.0 (Identity for sum reduction of logits)
+
+            causal_mask_token = global_offs_k[None, :] > (
+                offs_tokens_q[:, None] + shift
+            )
+
+            X = tl.where(causal_mask_token, 0.0, X)
+
+            # Reduce token logits to get stride score
+            X = X.reshape(ratio, ratio, STRIDE).sum(axis=2)
+
+            causal_fuse_fm = causal_mask_token | dense_flashmask
+            fully_masked_by_fm = (
+                causal_fuse_fm.reshape(ratio, ratio, STRIDE).min(axis=2) == 1
+            )
+
+            X = tl.where(fully_masked_by_fm, -1.0e6, X)
+
+            if check_dense_contains_partial_stride(
+                causal_fuse_fm,
+                q_token_mask=mask_q,
+                k_token_mask=curr_token_load_mask,
+                BLOCK_SIZE=BLOCK_SIZE,
+                STRIDE=STRIDE,
+            ):
+                tl.store(p_out_mask + iter, tl.full([], 1, dtype=tl.int8))
+
+            offs_k_stride_global = iter * ratio + offs_stride_k
+            k_stride_token_start = offs_k_stride_global * STRIDE
+            visibility_limit = offs_tokens_q + shift
+            causal_mask_stride = (
+                k_stride_token_start[None, :] > visibility_limit[:, None]
+            )
+            X = tl.where(causal_mask_stride, -1.0e6, X)
 
             # Explicitly mask out fully masked stride blocks
             X = tl.where(fully_masked_stride_mask, -1.0e6, X)
             X = tl.exp2(X - m_i[:, None]) * l_i_inv[:, None]
             X = tl.where(m_i[:, None] < -1.0e5, 0, X)
-            X = tl.where(mask_token_q[:, None], X, 0)
+            X = tl.where(mask_q[:, None], X, 0)
             X = tl.sum(X, 1)
             X = tl.sum(X, 0)
             tl.store(p_out + iter, X.to(out.type.element_ty))
-            tl.store(
-                p_out_mask + iter, tl.full([], is_partial_block, dtype=tl.int8)
-            )
-
-        else:
-            tl.store(p_out + iter, tl.zeros([], dtype=out.type.element_ty))
-            tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
-
-    for iter in range(k_valid_end, num_k_blocks):
-        tl.store(p_out + iter, tl.zeros([], dtype=out.type.element_ty))
-        tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
 
 
 @triton.jit
@@ -825,8 +707,8 @@ def gemm_fuse_softmax_non_causal(
         tl.arange(0, ratio) * STRIDE + i_block * BLOCK_SIZE + (i_h % STRIDE)
     )
 
-    mask_tokens_q = offs_tokens_q < seqlen_q
-    b_q = tl.load(p_q, mask=mask_tokens_q[:, None], other=0.0)
+    mask_q = offs_tokens_q < seqlen_q
+    b_q = tl.load(p_q, mask=mask_q[:, None], other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
 
     # Softmax Accumulators
@@ -861,36 +743,75 @@ def gemm_fuse_softmax_non_causal(
         )
 
         if tl.sum(fully_masked_stride_mask.to(tl.int32)) < ratio * ratio:
-            X, _ = _compute_block_logits(
-                p_k_base,
-                mask_ptr_base_bh_stride,
-                mask_ptr_base_bh_tokens,
-                iter,
-                b_q,
+            # Load K & Compute Dot
+            p_k = (
+                p_k_base
+                + iter * BLOCK_SIZE * H * K
+                + tl.arange(0, BLOCK_SIZE)[None, :] * H * K
+                + offs_k_base
+            )
+
+            mask_k = (
+                tl.arange(0, BLOCK_SIZE)[None, :] + iter * BLOCK_SIZE
+            ) < seqlen_k
+
+            b_k = tl.load(p_k, mask=mask_k, other=0.0)
+            # Compute Scores: [ratio, K] @ [K, BLOCK_SIZE] -> [ratio, BLOCK_SIZE]
+            # logits = tl.dot(b_q, b_k)
+            # [Check Partial Mask]
+
+            partially_masked_stride_mask = check_partially_masked_state(
+                curr_stride_offset,
+                offs_stride_k,
+                curr_load_mask,
                 offs_tokens_q,
-                mask_tokens_q,
-                lt_start_ptr,
-                lt_end_ptr,
-                ut_start_ptr,
-                ut_end_ptr,
                 lt_start_nstridemin,
                 lt_end_nstridemax,
                 ut_start_nstridemin,
                 ut_end_nstridemax,
-                # mask
-                fully_masked_stride_mask,
-                seqlen_k,
-                N_STRIDES,
-                shift=0,
-                BLOCK_SIZE=BLOCK_SIZE,
-                STRIDE=STRIDE,
-                H=H,
-                K=K,
                 causal=False,
                 mode=mode,
-                is_causal_loop=False,
-                check_partial=False,
             )
+
+            real_partially_masked_stride_mask = (
+                ~fully_masked_stride_mask
+            ) & partially_masked_stride_mask
+
+            if tl.sum(real_partially_masked_stride_mask) > 0:
+                logits = tl.dot(b_q, b_k)
+                curr_token_offset = mask_ptr_base_bh_tokens + iter * BLOCK_SIZE
+                curr_token_load_mask = (
+                    iter * BLOCK_SIZE + offs_tokens_k
+                ) < seqlen_k
+
+                X, dense_flashmask = flashmask_apply(
+                    logits,
+                    offs_tokens_q,
+                    curr_token_offset,
+                    offs_tokens_k,
+                    curr_token_load_mask,
+                    lt_start_ptr,
+                    lt_end_ptr,
+                    ut_start_ptr,
+                    ut_end_ptr,
+                    causal=False,
+                    mode=mode,
+                )
+
+                # Reduce token logits to get stride score
+                X = X.reshape(ratio, ratio, STRIDE).sum(axis=2)
+
+                fully_masked_by_fm = (
+                    dense_flashmask.reshape(ratio, ratio, STRIDE).min(axis=2)
+                    == 1
+                )
+                X = tl.where(fully_masked_by_fm, -1.0e6, X)
+
+            else:
+                X = tl.dot(b_q, b_k.reshape(K, ratio, STRIDE).sum(2))
+
+            # Explicitly mask out fully masked stride blocks
+            X = tl.where(fully_masked_stride_mask, -1.0e6, X)
 
             # Update Stats
             m_local = tl.max(X, 1)
@@ -942,51 +863,87 @@ def gemm_fuse_softmax_non_causal(
         )
 
         if tl.sum(fully_masked_stride_mask.to(tl.int32)) < ratio * ratio:
-            X, is_partial_block = _compute_block_logits(
-                p_k_base,
-                mask_ptr_base_bh_stride,
-                mask_ptr_base_bh_tokens,
-                iter,
-                b_q,
+            p_k = (
+                p_k_base
+                + iter * BLOCK_SIZE * H * K
+                + tl.arange(0, BLOCK_SIZE)[None, :] * H * K
+                + offs_k_base
+            )
+            mask_k = (
+                tl.arange(0, BLOCK_SIZE)[None, :] + iter * BLOCK_SIZE
+            ) < seqlen_k
+
+            b_k = tl.load(p_k, mask=mask_k, other=0.0)
+            # logits = tl.dot(b_q, b_k)
+
+            partially_masked_stride_mask = check_partially_masked_state(
+                curr_stride_offset,
+                offs_stride_k,
+                curr_load_mask,
                 offs_tokens_q,
-                mask_tokens_q,
-                lt_start_ptr,
-                lt_end_ptr,
-                ut_start_ptr,
-                ut_end_ptr,
                 lt_start_nstridemin,
                 lt_end_nstridemax,
                 ut_start_nstridemin,
                 ut_end_nstridemax,
-                # mask
-                fully_masked_stride_mask,
-                seqlen_k,
-                N_STRIDES,
-                shift=0,
-                BLOCK_SIZE=BLOCK_SIZE,
-                STRIDE=STRIDE,
-                H=H,
-                K=K,
                 causal=False,
                 mode=mode,
-                is_causal_loop=False,
-                check_partial=True,
             )
+
+            real_partially_masked_stride_mask = (
+                ~fully_masked_stride_mask
+            ) & partially_masked_stride_mask
+
+            if tl.sum(real_partially_masked_stride_mask) > 0:
+                logits = tl.dot(b_q, b_k)
+                curr_token_offset = mask_ptr_base_bh_tokens + iter * BLOCK_SIZE
+
+                curr_token_load_mask = (
+                    iter * BLOCK_SIZE + offs_tokens_k
+                ) < seqlen_k
+
+                X, dense_flashmask = flashmask_apply(
+                    logits,
+                    offs_tokens_q,
+                    curr_token_offset,
+                    offs_tokens_k,
+                    curr_token_load_mask,
+                    lt_start_ptr,
+                    lt_end_ptr,
+                    ut_start_ptr,
+                    ut_end_ptr,
+                    causal=False,
+                    mode=mode,
+                )
+                # Reduce token logits to get stride score
+                X = X.reshape(ratio, ratio, STRIDE).sum(axis=2)
+
+                fully_masked_by_fm = (
+                    dense_flashmask.reshape(ratio, ratio, STRIDE).min(axis=2)
+                    == 1
+                )
+                X = tl.where(fully_masked_by_fm, -1.0e6, X)
+
+                if check_dense_contains_partial_stride(
+                    dense_flashmask,
+                    q_token_mask=mask_q,
+                    k_token_mask=curr_token_load_mask,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                    STRIDE=STRIDE,
+                ):
+                    tl.store(p_out_mask + iter, tl.full([], 1, dtype=tl.int8))
+
+            else:
+                # Reduce token logits to get stride score
+                X = tl.dot(b_q, b_k.reshape(K, ratio, STRIDE).sum(2))
+            X = tl.where(fully_masked_stride_mask, -1.0e6, X)
 
             # Normalization & Reduction
             X = tl.exp2(X - m_i[:, None]) * l_i_inv[:, None]
-            X = tl.where(mask_tokens_q[:, None], X, 0)
+            X = tl.where(mask_q[:, None], X, 0)
             X = tl.where(m_i[:, None] < -1.0e5, 0, X)
             X = tl.sum(X, 1)  # Sum K-strides
             X = tl.sum(X, 0)  # Sum Q-tokens
             tl.store(p_out + iter, X.to(out.type.element_ty))
-            tl.store(
-                p_out_mask + iter, tl.full([], is_partial_block, dtype=tl.int8)
-            )
-
-        else:
-            tl.store(p_out + iter, tl.zeros([], dtype=out.type.element_ty))
-            tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
 
 
 def rr_attn_estimate_triton_func(
