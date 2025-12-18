@@ -33,7 +33,6 @@ config_lora_yaml=$cur_dir/tp4_sp_ep4_pp2_lora.yaml
 config_json=$CACHE_DIR/glm45/GLM-4.5-Air/config.json
 
 yq '.recompute_granularity = ""
-    | .moe_token_dispatcher_type = "alltoall"
     | .gated_linear_unit = true
     | .train_dataset_path = strenv(cur_dir) + "/data/sft/train_gsm8k.jsonl"
     | .eval_dataset_path = strenv(cur_dir) + "/data/sft/test_gsm8k.jsonl"
@@ -44,7 +43,6 @@ yq '.recompute_granularity = ""
 mv ${config_sft_yaml}.tmp $config_sft_yaml
 
 yq '.recompute_granularity = ""
-    | .moe_token_dispatcher_type = "alltoall"
     | .gated_linear_unit = true
     | .train_dataset_path = strenv(cur_dir) + "/data/sft/train_gsm8k.jsonl"
     | .eval_dataset_path = strenv(cur_dir) + "/data/sft/test_gsm8k.jsonl"
@@ -70,6 +68,6 @@ unset http_proxy https_proxy
 
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_sft_yaml 2>&1 | tee ./glm45_sft.log
 
-echo -e "\033[32msft is over, lora is about to start\033[0m"
+echo -e "\033[34msft is over, lora is about to start\033[0m"
 
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_lora_yaml 2>&1 | tee ./glm45_lora.log
