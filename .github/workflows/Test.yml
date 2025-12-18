@@ -745,7 +745,7 @@ jobs:
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-sft/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_sft.sh
+          bash -x PaddleFleet/ci/integration_test/glm45_sft_a100.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-sft
           source /workspace/PaddleFleet/.venv/bin/activate
