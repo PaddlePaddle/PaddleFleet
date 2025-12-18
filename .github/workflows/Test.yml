@@ -618,9 +618,10 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml coverage-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
+          target_path_multi_fp8="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi-fp8"
           uv run ${push_file} coverage-multi-pt.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-sft.xml ${target_path_multi}
-          uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi_fp8}
           '
 
       - name: Terminate and delete the container
