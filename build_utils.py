@@ -141,7 +141,7 @@ class EcosystemLibrary:
             if artifact.target_name == "deep_ep_cpp.so":
                 cmd = [
                     "patchelf",
-                    "--set-rpath",
+                    "--add-rpath",
                     "$ORIGIN/../../nvidia/nvshmem/lib",
                     dst,
                 ]
@@ -154,7 +154,10 @@ class EcosystemLibrary:
 
 
 def check_submodule_updated():
-    if not (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists():
+    if not (
+        (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists()
+        and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
+    ):
         logger.error(
             "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
         )
