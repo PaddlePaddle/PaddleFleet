@@ -26,21 +26,26 @@ from paddlefleet.pipeline_parallel import (
 if TYPE_CHECKING:
     from paddlefleet.spec_utils import LayerSpec
 
+from paddle.distributed import fleet
+
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
+from paddlefleet.transformer.transformer_layer import TransformerLayer
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class GPTSublayersSpec:
-    """
+    """p
     The dataclass for LayerSpecs of GPT sublayers_spec
     including embedding, n * transformer_layer, mtp, lm_head.
     """
 
     embedding: LayerSpec | None = None
+    head_empty_layers: list[LayerSpec] | None = None
     transformer_layers: list[LayerSpec] | None = None
+    tail_empty_layers: list[LayerSpec] | None = None
     layer_norm: LayerSpec | None = None
     mtp: list[LayerSpec] | None = None
     lm_head: LayerSpec | None = None
@@ -77,7 +82,18 @@ class GPTModel(PipelineLayer):
         del kwargs["share_embeddings_and_output_weights"]
         del kwargs["config"]
 
-        super().__init__(layers=self.layers, **kwargs)
+        topology = (
+            None
+            if self.config.pipeline_model_parallel_size == 1
+            else fleet.get_hybrid_communicate_group().topology()
+        )
+
+        super().__init__(
+            layers=self.layers,
+            topology=topology,
+            num_virtual_pipeline_stages=self.config.virtual_pipeline_model_parallel_size,
+            **kwargs,
+        )
 
         if skip_weight_param_allocation:
             shared_embed_weight = None
@@ -104,9 +120,19 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(spec.embedding), "model"
             )
         i = 0
+        for head_empty_layer in spec.head_empty_layers:
+            self.add_sequential_layer(
+                layers, LayerDesc(head_empty_layer), f"model.layers.{i}"
+            )
+            i += 1
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
                 layers, LayerDesc(transformer_layer_spec), f"model.layers.{i}"
+            )
+            i += 1
+        for tail_empty_layer in spec.tail_empty_layers:
+            self.add_sequential_layer(
+                layers, LayerDesc(tail_empty_layer), f"model.layers.{i}"
             )
             i += 1
         self.add_sequential_layer(layers, LayerDesc(spec.layer_norm), "model")
@@ -164,7 +190,7 @@ class GPTModel(PipelineLayer):
         """
         return [x["layer"] for x in self._sequential_layers]
 
-    def get_sequential_name_prefixs(self):
+    def get_sequential_name_prefixes(self):
         """
         Retrieve name prefixes for all parallel layers in the sequential network.
 
@@ -208,7 +234,7 @@ class GPTModel(PipelineLayer):
                 and layer.layer_name == shared_layer_key
             ):
                 if self.get_stage_from_index(idx) == self._stage_id:
-                    return self.get_sequential_name_prefixs()[str(idx)]
+                    return self.get_sequential_name_prefixes()[str(idx)]
 
         # the prefix must be in the current stage, else raise error
         raise ValueError(
@@ -245,7 +271,7 @@ class GPTModel(PipelineLayer):
                 first_key[0].isdigit() and first_key[1].isdigit()
             )
 
-            prefixes = self.get_sequential_name_prefixs()
+            prefixes = self.get_sequential_name_prefixes()
             for k in state_dict_keys:
                 name_splited = k.split(".")
                 if use_virtual_pp_degree:
@@ -363,3 +389,31 @@ class GPTModel(PipelineLayer):
                 renamed_sharded_state_dict[k] = v
 
         return renamed_sharded_state_dict
+
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+        if self._num_virtual_pipeline_stages > 1:
+            for idx, chunk in enumerate(self._model_chunks):
+                for idx, layer in enumerate(chunk):
+                    if isinstance(layer, TransformerLayer):
+                        layer.fp8_quant_weight(
+                            batch_mode=batch_mode,
+                            quant_transpose=quant_transpose,
+                        )
+        else:
+            for idx, layer in enumerate(self.run_function):
+                if isinstance(layer, TransformerLayer):
+                    layer.fp8_quant_weight(
+                        batch_mode=batch_mode, quant_transpose=quant_transpose
+                    )
+
+    def use_fp8(self):
+        if self._num_virtual_pipeline_stages > 1:
+            for idx, chunk in enumerate(self._model_chunks):
+                for idx, layer in enumerate(chunk):
+                    if isinstance(layer, TransformerLayer) and layer.use_fp8():
+                        return True
+        else:
+            for idx, layer in enumerate(self.run_function):
+                if isinstance(layer, TransformerLayer) and layer.use_fp8():
+                    return True
+            return False

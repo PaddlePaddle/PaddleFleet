@@ -51,7 +51,10 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             False,
             False,
         )
-        return x_g.cast(x.dtype), w_g.cast(w.dtype)
+
+        x_grad = x_g.cast(x.dtype) if not x.stop_gradient else None
+        w_grad = w_g.cast(w.dtype) if not w.stop_gradient else None
+        return x_grad, w_grad
 
 
 def gate_detach_matmul(
@@ -658,14 +661,18 @@ class DeepEPTopKRouter(StandardMoERouter):
         assert self.topk_method == "noaux_tc"
 
     def forward(self, input):
-        assert len(input.shape) == 3, (
-            f"input Tensor must have dimensions: b(atch),(s)equence, (d)im, got:{input.shape}"
-        )
-        _, seq_len, _ = input.shape
+        if len(input.shape) == 3:
+            if not self.sequence_parallel:
+                batch_size, seq_len, d_model = input.shape
+            else:
+                seq_len, batch, d_model = input.shape
+            input = input.reshape([-1, d_model])
+        elif len(input.shape) == 2:
+            raise ValueError(
+                "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
+            )
+
         input = input.reshape([-1, input.shape[-1]])
-        assert len(input.shape) == 2, (
-            f"input Tensor must have dimensions: (s)equence, (d)im, got:{input.shape}"
-        )
 
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(

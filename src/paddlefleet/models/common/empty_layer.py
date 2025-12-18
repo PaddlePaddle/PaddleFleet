@@ -12,12 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-readonly VERSION="1.6.0"
+from __future__ import annotations
 
-version=$(cpplint --version)
+from typing import TYPE_CHECKING
 
-if ! [[ $version == *"$VERSION"* ]]; then
-    pip install cpplint==1.6.0
-fi
+if TYPE_CHECKING:
+    from paddlefleet.transformer.transformer_config import TransformerConfig
 
-cpplint $@
+
+from paddlefleet.transformer.layer import FleetLayer
+
+
+class EmptyLayer(FleetLayer):
+    """
+    A pass-through layer that performs no operation on its input.
+    """
+
+    def __init__(self, config: TransformerConfig):
+        super().__init__(config)
+
+    def forward(self, x):
+        return x

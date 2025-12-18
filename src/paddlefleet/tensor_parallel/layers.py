@@ -993,6 +993,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             or self.explicit_expert_comm
             or self.disable_grad_reduce
             or (self.tp_group is not None and self.tp_group.world_size == -1)
+            or self.tp_group is None
         ):
             input_parallel = input_
         else:

@@ -42,25 +42,19 @@ repos:
         args: [--fix, --exit-non-zero-on-fix, --no-cache]
       - id: ruff-format
   # For C++ files
-  - repo: local
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v21.1.7
     hooks:
       - id: clang-format
-        name: clang-format
-        description: Format files with ClangFormat.
-        entry: bash ./ci/hooks/clang-format.sh -i
-        language: system
         files: \.(c|cc|cxx|cpp|cu|h|cuh|hpp|hxx|xpu|kps)$
-  - repo: local
+  - repo: https://github.com/cpplint/cpplint
+    rev: 2.0.2
     hooks:
-      - id: cpplint-cpp-source
-        name: cpplint
-        description: Check C++ code style using cpplint.py.
-        entry: bash ./ci/hooks/cpplint.sh
-        language: system
+      - id: cpplint
         files: \.(cc|cxx|cpp|cu|h|hpp|hxx)$
         args:
           - --extensions=cc,cxx,cpp,cu,cuh,h,hpp,hxx,kps
-          - --filter=-readability/fn_size,-build/include_what_you_use,-build/c++11,-whitespace/parens
+          - --filter=-readability/fn_size,-build/include_what_you_use,-build/c++11,-whitespace/parens,-whitespace/indent_namespace
           - --quiet
   # For CMake files
   - repo: https://github.com/cheshirekow/cmake-format-precommit

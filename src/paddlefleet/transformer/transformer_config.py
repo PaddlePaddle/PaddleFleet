@@ -244,6 +244,12 @@ class TransformerConfig(ModelParallelConfig):
     the number of transformer layers to recompute within each pipeline stage.  Must be None for
     'selective' activation checkpointing."""
 
+    recompute_modules: list[str] | dict = None
+    """The submodules to recompute.
+    list: contains all submodule need recompute
+    dict: keys contains all submodule need recompute, value means submodule in which layers need recompute
+    """
+
     ####################
     # MoE related
     ####################
@@ -326,9 +332,6 @@ class TransformerConfig(ModelParallelConfig):
     moe_subbatch_token_num_after_dispatch: int | None = None
     """Whether to enable subbatch after dispatch, the value means the number of tokens in one subbatch."""
 
-    fp8_wgrad: bool = True
-    """Whether to use fp8 wgrad."""
-
     moe_grouped_gemm: bool = False
     """Whether to use grouped gemm."""
 
@@ -340,6 +343,8 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
+    moe_shared_expert_overlap: bool = False
+    """Enable overlapping between shared expert computations and a2a combinet"""
 
     ##################
     # Context Parallel
@@ -361,6 +366,9 @@ class TransformerConfig(ModelParallelConfig):
     fp8_recipe: str = "blockwise"
     """If set, enables the use of FP8 precision. There are 2 predefined
     choices 1) 'mxfp8' for Blackwell architecture only, 2) 'blockwise' for blockwise scaling recipe"""
+
+    fp8_wgrad: bool = True
+    """Whether to use fp8 wgrad."""
 
     ####################
     # initialization
@@ -519,6 +527,34 @@ class TransformerConfig(ModelParallelConfig):
             self.moe_layer_freq = [0] * self.first_k_dense_replace + [1] * (
                 self.num_hidden_layers - self.first_k_dense_replace
             )
+        if self.recompute_granularity == "":
+            self.recompute_granularity = None
+
+        # recompute config check
+        if self.recompute_granularity is not None:
+            assert self.recompute_granularity in ["full", "selective"], (
+                "recompute_granularity must be one of full and selective"
+            )
+            if self.recompute_granularity == "full":
+                assert self.recompute_method in [
+                    "block",
+                    "first_n",
+                    "uniform",
+                ], (
+                    "when recompute_granularity=full, recompute_method must be one of block, first_n and uniform"
+                )
+                assert self.recompute_num_layers is not None, (
+                    "when recompute_granularity=full, recompute_num_layers mustn't be None"
+                )
+            elif self.recompute_granularity == "selective":
+                assert self.recompute_method in ["block", "first_n", None], (
+                    "when recompute_granularity=selective, recompute_method must be one of block and first_n"
+                )
+                assert self.recompute_modules is not None
+            else:
+                raise ValueError(
+                    "recompute_granularity must be one of full and selective"
+                )
 
         if self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
@@ -547,3 +583,67 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
+
+    def get_avg_num_layers(self):
+        num_layers_in_first_pipeline_stage = (
+            0
+            if self.num_layers_in_first_pipeline_stage is None
+            else self.num_layers_in_first_pipeline_stage
+        )
+        num_layers_in_last_pipeline_stage = (
+            0
+            if self.num_layers_in_last_pipeline_stage is None
+            else self.num_layers_in_last_pipeline_stage
+        )
+
+        remain_pp_size = self.pipeline_model_parallel_size
+        if remain_pp_size > 1:
+            if self.num_layers_in_first_pipeline_stage is not None:
+                remain_pp_size -= 1
+            if self.num_layers_in_last_pipeline_stage is not None:
+                remain_pp_size -= 1
+        assert remain_pp_size != 0, (
+            "Incorrect configuration, maybe both num_layers_in_first_pipeline_stage and num_layers_in_last_pipeline_stage are set in pp_degree=2"
+        )
+
+        assert (
+            self.num_hidden_layers
+            - num_layers_in_first_pipeline_stage
+            - num_layers_in_last_pipeline_stage
+        ) % remain_pp_size == 0, (
+            "Incorrect configuration, num_hidden_layers can not divided by stages except first/last stage"
+        )
+
+        avg_num_layers = (
+            self.num_hidden_layers
+            - num_layers_in_first_pipeline_stage
+            - num_layers_in_last_pipeline_stage
+        ) // remain_pp_size
+
+        return avg_num_layers
+
+    @property
+    def remove_head_layers(self):
+        if (
+            self.num_layers_in_first_pipeline_stage is None
+            or self.pipeline_model_parallel_size == 1
+        ):
+            return 0
+        avg_num_layers = self.get_avg_num_layers()
+        assert avg_num_layers >= self.num_layers_in_first_pipeline_stage, (
+            f"Incorrect configuration with {avg_num_layers=}, {self.num_layers_in_first_pipeline_stage=}"
+        )
+        return avg_num_layers - self.num_layers_in_first_pipeline_stage
+
+    @property
+    def remove_tail_layers(self):
+        if (
+            self.num_layers_in_last_pipeline_stage is None
+            or self.pipeline_model_parallel_size == 1
+        ):
+            return 0
+        avg_num_layers = self.get_avg_num_layers()
+        assert avg_num_layers >= self.num_layers_in_last_pipeline_stage, (
+            f"Incorrect configuration with {avg_num_layers=}, {self.num_layers_in_last_pipeline_stage}"
+        )
+        return avg_num_layers - self.num_layers_in_last_pipeline_stage

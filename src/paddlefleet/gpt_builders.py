@@ -15,6 +15,7 @@
 
 from functools import partial
 
+from paddlefleet.models.common.empty_layer import EmptyLayer
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_layers_spec,
@@ -22,7 +23,7 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_layers_spec,
     get_gpt_spec,
 )
-from paddlefleet.spec_utils import build_layer
+from paddlefleet.spec_utils import LayerSpec, build_layer
 
 
 def gpt_builder(config, **kwargs):
@@ -38,8 +39,9 @@ def gpt_builder(config, **kwargs):
         transformer_layer_spec_func = _get_transformer_layer_spec_func(config)
         transformer_layers_spec = []
         for layer_number in range(config.num_hidden_layers):
+            real_layer_number = layer_number + config.remove_head_layers
             transformer_layers_spec.append(
-                transformer_layer_spec_func(layer_number=layer_number)
+                transformer_layer_spec_func(layer_number=real_layer_number)
             )
     mtp_layers_spec = None
     if config.num_nextn_predict_layers is not None:
@@ -64,9 +66,23 @@ def gpt_builder(config, **kwargs):
             transformer_layers_spec_for_mtp,
         )
 
+    head_empty_layers_spec = []
+    for i in range(config.remove_head_layers):
+        head_empty_layers_spec.append(
+            LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
+        )
+
+    tail_empty_layers_spec = []
+    for i in range(config.remove_tail_layers):
+        tail_empty_layers_spec.append(
+            LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
+        )
+
     gpt_spec = get_gpt_spec(
         config=config,
+        head_empty_layers_spec=head_empty_layers_spec,
         transformer_layers_spec=transformer_layers_spec,
+        tail_empty_layers_spec=tail_empty_layers_spec,
         mtp_layers_spec=mtp_layers_spec,
         vocab_size=config.vocab_size,
         share_embeddings_and_output_weights=config.share_embeddings_and_output_weights,
