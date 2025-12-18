@@ -932,7 +932,7 @@ test = [
 
 [[package]]
 name = "paddlepaddle-gpu"
-version = "3.3.0.dev20251215"
+version = "3.3.0.dev20251218"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
 dependencies = [
     { name = "cuda-python", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -964,10 +964,10 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0.dev20251215-cp310-cp310-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0.dev20251215-cp311-cp311-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0.dev20251215-cp312-cp312-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0.dev20251215-cp313-cp313-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0.dev20251218-cp310-cp310-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0.dev20251218-cp311-cp311-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0.dev20251218-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0.dev20251218-cp313-cp313-linux_x86_64.whl" },
 ]
 
 [[package]]
