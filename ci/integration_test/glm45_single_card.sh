@@ -36,7 +36,6 @@ port=36677
 
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
-export FLAGS_use_stride_compute_kernel=False
 unset http_proxy https_proxy
 coverage run run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
 
@@ -56,7 +55,6 @@ echo "
 
 
 
-export FLAGS_use_stride_compute_kernel=False
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --log_file ./glm45_single_card.log \

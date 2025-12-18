@@ -63,7 +63,7 @@ unset http_proxy https_proxy
 #    run_pretrain.py $config_json \
 #    --output_dir ./checkpoint 2>&1 | tee ./glm45.log
 
-FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $cur_dir/glm45.yaml 2>&1 | tee ./glm45.log
+NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $cur_dir/glm45.yaml 2>&1 | tee ./glm45.log
 
 echo "
 10 11.70277214

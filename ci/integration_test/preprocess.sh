@@ -42,7 +42,6 @@ sed -i '/trainer.save_model()/s/^/# /' run_pretrain.py
 # sed -i 's/num_layers: int = 10/num_layers: int = 5/' glm45_provider.py
 
 
-export FLAGS_use_stride_compute_kernel=False
 
 python -c "
 infile = '$root_dir/PaddleFormers/paddleformers/trainer/training_args.py'
