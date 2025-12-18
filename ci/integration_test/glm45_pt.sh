@@ -15,10 +15,14 @@
 set -exo pipefail
 export root_dir=$(pwd)
 
+cd $root_dir/PaddleFormers
+git pull --no-edit origin pull/3200/head
+cd -
+
 source PaddleFleet/.venv/bin/activate
 
-wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12-18.tar --no-check-certificate
-tar -xf glm45_fleet.12-18.tar # glm45_fleet
+wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12_18.tar --no-check-certificate
+tar -xf glm45_fleet.12_18.tar # glm45_fleet
 cd $root_dir/glm45_fleet
 export cur_dir=$(pwd)
 
