@@ -49,7 +49,7 @@ dependencies = [
     "colorlog>=6.10.1",
     "paddlepaddle-gpu>=3.3.0.dev",
     "triton",
-    "nvidia-nvshmem-cu12>=3.3.9",
+    "nvidia-nvshmem-cu12>=3.3.9", # for deep_ep build
 ]
 
 [project.urls]
@@ -109,7 +109,7 @@ prerelease = "allow"
 
 
 [tool.ruff]
-exclude = []
+exclude = ["third_party"]
 line-length = 80
 target-version = "py310"
 

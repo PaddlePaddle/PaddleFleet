@@ -73,7 +73,7 @@ class TestOpsImport(unittest.TestCase):
             )
 
 
-class TestDeeGEMMImport(unittest.TestCase):
+class TestDeepGEMMImport(unittest.TestCase):
     def test_deep_gemm_import(self):
         from paddlefleet.ops.deep_gemm import (  # noqa: F401
             cublaslt_gemm_tn,
@@ -83,6 +83,20 @@ class TestDeeGEMMImport(unittest.TestCase):
     def test_error_import(self):
         with self.assertRaises(ImportError):
             from paddlefleet.ops.deep_gemm import xxxx  # noqa: F401
+
+
+class TestDeepEPImport(unittest.TestCase):
+    def test_deep_gemm_import(self):
+        from paddlefleet.ops.deep_ep import (  # noqa: F401
+            Buffer,
+            Config,
+            EventOverlap,
+            topk_idx_t,
+        )
+
+    def test_error_import(self):
+        with self.assertRaises(ImportError):
+            from paddlefleet.ops.deep_ep import xxxx  # noqa: F401
 
 
 if __name__ == "__main__":

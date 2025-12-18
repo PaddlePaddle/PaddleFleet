@@ -101,7 +101,10 @@ def get_nvshmem_host_lib_path(base_dir):
     path = Path(base_dir).joinpath("lib")
     for file in path.rglob("libnvshmem_host.so.*"):
         return file.resolve()
-    raise ModuleNotFoundError("libnvshmem_host.so not found")
+    raise FileNotFoundError(
+        f"Could not locate 'libnvshmem_host.so.*' within the expected directory: {path}. "
+        "Please ensure nvidia-nvshmem is installed correctly."
+    )
 
 
 if _third_party_install_temp_dir.exists():
@@ -114,10 +117,14 @@ if _third_party_install_temp_dir.exists():
             f"Pre-loading NVSHMEM library from: {nvshmem_host_lib_path}"
         )
         ctypes.CDLL(str(nvshmem_host_lib_path), mode=ctypes.RTLD_GLOBAL)
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Corrupted installation: {e}") from e
     except OSError as e:
-        logger.warning(f"Failed to dlopen libnvshmem_host.so.3: {e}")
+        raise RuntimeError(f"Failed to dlopen libnvshmem_host.so.3: {e}") from e
     except Exception as e:
-        logger.warning(f"Unexpected error during NVSHMEM pre-loading: {e}")
+        raise RuntimeError(
+            f"Unexpected error during NVSHMEM pre-loading: {e}"
+        ) from e
 
 with ModuleContext(["deep_gemm"], ops_dir):
     try:
