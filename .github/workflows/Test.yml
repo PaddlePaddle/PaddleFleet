@@ -768,11 +768,11 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-pt/coverage.xml coverage-a-pt.xml
-          cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-a-sft.xml
+          # cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-a-sft.xml
           target_path_pt="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100-pt"
-          target_path_sft="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100-sft"
+          # target_path_sft="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100-sft"
           uv run ${push_file} coverage-a-pt.xml ${target_path_pt}
-          uv run ${push_file} coverage-a-sft.xml ${target_path_sft}
+          # uv run ${push_file} coverage-a-sft.xml ${target_path_sft}
           '
 
       - name: Terminate and delete the container
