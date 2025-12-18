@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 import paddle
 
+from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -47,8 +48,12 @@ class GPTEmbedding(FleetLayer):
         rotary_percent: float = 1.0,
         rotary_base: int = 10000,
         rope_scaling: bool = False,
+        pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__(config)
+        if pg_collection is None:
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+        self.cp_group = pg_collection.cp
         self.embedding = build_layer(
             sublayers_spec.language_embedding,
             config=config,
@@ -121,9 +126,7 @@ class GPTEmbedding(FleetLayer):
             "rotary_pos_emb": rotary_pos_emb,
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
-            # "embedding_weight": self.embedding_weight,
-            # "position_embedding_weight": self.position_embedding_weight,
-        }  # pass these two weights will cause error in backward
+        }
 
         preproc_output = {**dict_args, **preproc_output}
 
