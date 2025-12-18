@@ -14,9 +14,6 @@
 
 set -exo pipefail
 
-apt-get update
-apt-get install jq -y
-
 source PaddleFleet/.venv/bin/activate
 
 export root_dir=$(pwd)
