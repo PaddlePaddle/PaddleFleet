@@ -152,7 +152,7 @@ class GPTModel(PipelineLayer):
                     spec.lm_head,
                     shared_weight_attr="embedding_weight",
                 ),
-                f"model.layers.{i}.shared_head.norm",
+                "shared_head",
             )
         else:
             self.add_sequential_layer(

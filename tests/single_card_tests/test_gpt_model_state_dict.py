@@ -94,7 +94,7 @@ class TestGPTModelStateDict(unittest.TestCase):
         state_dict = self.gpt_model.state_dict()
         print("state_dict: ", state_dict)
         # Verify all keys start with expected prefixes
-        valid_prefixes = ("model.", "model.layers.")
+        valid_prefixes = ("model.", "model.layers.", "lm_head")
         for key in state_dict.keys():
             self.assertTrue(
                 key.startswith(valid_prefixes),
@@ -108,7 +108,7 @@ class TestGPTModelStateDict(unittest.TestCase):
         sharded_state_dict = self.gpt_model.sharded_state_dict()
         print("sharded_state_dict: ", sharded_state_dict)
         # Verify all keys start with expected prefixes
-        valid_prefixes = ("model.", "model.layers.")
+        valid_prefixes = ("model.", "model.layers.", "lm_head")
         for key in sharded_state_dict.keys():
             self.assertTrue(
                 key.startswith(valid_prefixes),
