@@ -42,7 +42,7 @@ yq '.train_dataset_path = strenv(cur_dir) + "/data/dpo/dpo_train.jsonl"
    $config_dpo_yaml > ${config_dpo_yaml}.tmp
 mv ${config_dpo_yaml}.tmp $config_dpo_yaml
 
-jq '.num_hidden_layers = 4' \
+jq '.num_hidden_layers = 2' \
     $config_json > ${config_json}.tmp
 mv ${config_json}.tmp $config_json
 

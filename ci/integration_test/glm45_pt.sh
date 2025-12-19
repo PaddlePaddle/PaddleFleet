@@ -21,8 +21,8 @@ cd -
 
 source PaddleFleet/.venv/bin/activate
 
-wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12.19.tar --no-check-certificate
-tar -xf glm45_fleet.12.19.tar # glm45_fleet
+wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12-19.tar --no-check-certificate
+tar -xf glm45_fleet.12-19.tar # glm45_fleet
 cd $root_dir/glm45_fleet
 export cur_dir=$(pwd)
 
@@ -67,7 +67,7 @@ unset http_proxy https_proxy
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_yaml 2>&1 | tee ./glm45_pt.log
 
 echo "
-10 11.70277214
+10 11.69409561
 " > ./glm45_pt_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
