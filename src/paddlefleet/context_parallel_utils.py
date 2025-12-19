@@ -24,6 +24,7 @@ from paddle.nn.functional.flash_attention import flashmask_attention
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
     """
     Mark parameters or layers to disable context parallel gradient scaling.
+
     This function sets the attribute `context_parallel_disable_scale_grad` to `True` for the given parameter,
     tensor, or layer. When set, this flag indicates that the specified parameter or layer should not have
     its gradient scaled during context parallel training.
