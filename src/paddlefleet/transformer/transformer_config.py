@@ -463,6 +463,8 @@ class TransformerConfig(ModelParallelConfig):
                 raise TypeError(
                     f"hidden_act must be str or callable, but get {type(value)}"
                 )
+        elif key == "dtype":
+            self.params_dtype = value
         else:
             setattr(self, key, value)
 
