@@ -19,10 +19,10 @@ import numpy
 import paddle
 import paddle.nn.functional as F
 
-import paddlefleet
+from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
 
 try:
-    from paddle.incubate.nn.functional import swiglu
+    from paddle.nn.functional import swiglu
 except ImportError:
 
     def swiglu(x, y=None):
@@ -342,7 +342,7 @@ class ExpertsGroupGemmContiguousNode:
                     o1 = paddle.zeros(
                         [x.shape[0], expert_w1.shape[2]], dtype="bfloat16"
                     )
-                    paddlefleet.ops.deep_gemm.m_grouped_bf16_gemm_nn_contiguous(
+                    paddlefleet_deep_gemm.m_grouped_bf16_gemm_nn_contiguous(
                         x,
                         expert_w1,
                         o1,
@@ -504,7 +504,7 @@ class ExpertsGroupGemmContiguousNode:
                     o3 = paddle.zeros(
                         [o2.shape[0], expert_w2.shape[2]], dtype="bfloat16"
                     )
-                    paddlefleet.ops.deep_gemm.m_grouped_bf16_gemm_nn_contiguous(
+                    paddlefleet_deep_gemm.m_grouped_bf16_gemm_nn_contiguous(
                         o2,
                         expert_w2,
                         o3,
@@ -612,7 +612,7 @@ class ExpertsGroupGemmContiguousNode:
                         [unzipped_grad.shape[0], expert_w2.shape[1]],
                         dtype=paddle.bfloat16,
                     )
-                    paddlefleet.ops.deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
+                    paddlefleet_deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
                         unzipped_grad,
                         expert_w2,
                         do2_s,
@@ -753,7 +753,7 @@ class ExpertsGroupGemmContiguousNode:
                         [do1.shape[0], expert_w1.shape[1]],
                         dtype=paddle.bfloat16,
                     )
-                    paddlefleet.ops.deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
+                    paddlefleet_deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
                         do1,
                         expert_w1,
                         dx,
@@ -1336,7 +1336,7 @@ class ExpertsGroupGemmContiguousNode:
                         weights.shape, dtype=paddle.float32
                     )
                 if self.moe_deep_gemm:
-                    paddlefleet.ops.deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+                    paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
                         a=x,
                         b=dy,
                         d=weights.main_grad,
@@ -1361,7 +1361,7 @@ class ExpertsGroupGemmContiguousNode:
                         weights.shape, dtype=paddle.float32
                     )
                 if self.moe_deep_gemm:
-                    paddlefleet.ops.deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+                    paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
                         a=x,
                         b=dy,
                         d=weights.grad,

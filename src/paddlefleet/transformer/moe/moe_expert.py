@@ -18,8 +18,8 @@ from copy import deepcopy
 import paddle
 import paddle.nn.functional as F
 
-import paddlefleet
 from paddlefleet import utils
+from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
@@ -66,7 +66,7 @@ class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
             paddle.arange(batch_sizes.shape[0]), batch_sizes
         ).cast("int32")
 
-        paddlefleet.ops.deep_gemm.m_grouped_bf16_gemm_nn_contiguous(
+        paddlefleet_deep_gemm.m_grouped_bf16_gemm_nn_contiguous(
             x, y, out, tokens_per_expert_indices
         )
 
@@ -83,7 +83,7 @@ class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
         ).cast("int32")
 
         dx = paddle.zeros_like(x)
-        paddlefleet.ops.deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
+        paddlefleet_deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
             grad,
             y,
             dx,
@@ -92,7 +92,7 @@ class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
         dx = paddle.cast(dx, paddle.float)
 
         dy = paddle.zeros_like(y, dtype=paddle.float)
-        paddlefleet.ops.deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+        paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
             a=x,
             b=grad,
             d=dy,
