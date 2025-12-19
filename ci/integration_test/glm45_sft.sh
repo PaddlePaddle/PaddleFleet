@@ -29,7 +29,7 @@ config_lora_yaml=$cur_dir/tp4_sp_ep4_pp2_lora.yaml
 
 config_json=$CACHE_DIR/glm45/GLM-4.5-Air/config.json
 
-yq 'moe_router_force_load_balancing = true
+yq '.moe_router_force_load_balancing = true
     | .train_dataset_path = strenv(cur_dir) + "/data/sft/train.jsonl"
     | .eval_dataset_path = strenv(cur_dir) + "/data/sft/dev.jsonl"
     | .model_name_or_path = strenv(CACHE_DIR) + "/glm45/GLM-4.5-Air"
@@ -38,7 +38,7 @@ yq 'moe_router_force_load_balancing = true
    $config_sft_yaml > ${config_sft_yaml}.tmp
 mv ${config_sft_yaml}.tmp $config_sft_yaml
 
-yq 'moe_router_force_load_balancing = true
+yq '.moe_router_force_load_balancing = true
     | .train_dataset_path = strenv(cur_dir) + "/data/sft/train.jsonl"
     | .eval_dataset_path = strenv(cur_dir) + "/data/sft/dev.jsonl"
     | .model_name_or_path = strenv(CACHE_DIR) + "/glm45/GLM-4.5-Air"
