@@ -13,21 +13,24 @@
 # limitations under the License.
 
 import math
+from dataclasses import dataclass
 
 import paddle
 
-paddle.compat.enable_torch_proxy()
-
+# paddle.compat.enable_torch_proxy()
 import triton
 import triton.language as tl
 
 from .block_mask_utils import (
     check_fully_masked_state,
     check_partially_masked_state,
+    find_blocks_topp,
 )
 from .index_utils import (
     prepare_maxmin,
 )
+
+LOG2E = 1.4426950408889634  # 1 / ln(2)
 
 
 @triton.jit
@@ -148,13 +151,11 @@ def gemm_fuse_softmax_causal(
     seqlen_k: int,
     num_q_blocks: int,
     num_k_blocks: int,
-    stride_mask_b,
-    stride_mask_h,
-    indices_mask_b,
-    indices_mask_h,
     N_STRIDES,
     STRIDE: tl.constexpr,
+    HQ: tl.constexpr,
     H: tl.constexpr,
+    HIDS: tl.constexpr,
     K: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     mode: tl.constexpr,
@@ -164,21 +165,28 @@ def gemm_fuse_softmax_causal(
     i_b = tl.program_id(2).to(tl.int64)
 
     ratio: tl.constexpr = BLOCK_SIZE // STRIDE
+    G: tl.constexpr = HQ // H
+    GIDS: tl.constexpr = HQ // HIDS
+
+    i_hkv = i_h // G
+    i_hid = i_h // GIDS
 
     # ================= 1. Coordinates Setup =================
     q_stride_base = i_block * ratio
     offs_q_stride = q_stride_base + tl.arange(0, ratio)
 
-    mask_ptr_base_bh_stride = i_b * stride_mask_b + i_h * stride_mask_h
-    mask_ptr_base_bh_tokens = i_b * indices_mask_b + i_h * indices_mask_h
+    mask_ptr_base_bh_stride = i_b * N_STRIDES * HIDS + i_hid * N_STRIDES
+    mask_ptr_base_bh_tokens = i_b * seqlen_k * HIDS + i_hid * seqlen_k
 
     # Load Q
-    p_q = q + i_b * seqlen_q * H * K + (i_block * BLOCK_SIZE) * H * K + i_h * K
+    p_q = (
+        q + i_b * seqlen_q * HQ * K + (i_block * BLOCK_SIZE) * HQ * K + i_h * K
+    )
     p_q = (
         p_q
-        + tl.arange(0, ratio)[:, None] * (H * K * STRIDE)
+        + tl.arange(0, ratio)[:, None] * (HQ * K * STRIDE)
         + tl.arange(0, K)[None, :]
-        + H * K * (i_h % STRIDE)
+        + HQ * K * (i_h % STRIDE)
     )
     offs_tokens_q = (
         tl.arange(0, ratio) * STRIDE + i_block * BLOCK_SIZE + (i_h % STRIDE)
@@ -208,7 +216,7 @@ def gemm_fuse_softmax_causal(
     k_valid_end = ((i_block + 1) * BLOCK_SIZE - 1 + shift) // BLOCK_SIZE + 1
     k_valid_end = min(num_k_blocks, max(k_safe_end, k_valid_end))
 
-    p_k_base = k + i_b * seqlen_k * H * K + i_h * K
+    p_k_base = k + i_b * seqlen_k * H * K + i_hkv * K
     offs_k_base = tl.arange(0, K)[:, None]
     offs_stride_k = tl.arange(0, ratio)
     offs_tokens_k = tl.arange(0, BLOCK_SIZE)
@@ -368,15 +376,6 @@ def gemm_fuse_softmax_causal(
             )
             X = tl.where(fully_masked_by_fm, -1.0e6, X)
 
-            # offs_k_stride_global = iter * ratio + offs_stride_k
-            # k_stride_token_start = offs_k_stride_global * STRIDE
-            # visibility_limit = offs_tokens_q + shift
-            # causal_mask_stride = (
-            #     k_stride_token_start[None, :] > visibility_limit[:, None]
-            # )
-
-            # X = tl.where(causal_mask_stride, -1.0e6, X)
-            # # Explicitly mask out fully masked stride blocks
             X = tl.where(fully_masked_stride_mask, -1.0e6, X)
 
             m_local = tl.max(X, 1)
@@ -390,7 +389,7 @@ def gemm_fuse_softmax_causal(
     # ================= 3. Output Preparation =================
     l_i_inv = 1.0 / l_i
 
-    stride_out_b = (H * num_q_blocks * num_k_blocks).to(tl.int64)
+    stride_out_b = (HQ * num_q_blocks * num_k_blocks).to(tl.int64)
     stride_out_head = (num_q_blocks * num_k_blocks).to(tl.int64)
     stride_out_q = num_k_blocks.to(tl.int64)
     p_out = (
@@ -484,17 +483,18 @@ def gemm_fuse_softmax_causal(
                 )
                 X = tl.where(fully_masked_by_fm, -1.0e6, X)
 
-                if check_dense_contains_partial_stride(
+                has_partial = check_dense_contains_partial_stride(
                     dense_flashmask,
                     q_token_mask=mask_q,  # [ratio]
                     k_token_mask=curr_token_load_mask,  # [block_size]
                     BLOCK_SIZE=BLOCK_SIZE,
                     STRIDE=STRIDE,
-                ):
-                    tl.store(p_out_mask + iter, tl.full([], 1, dtype=tl.int8))
+                )
+                tl.store(p_out_mask + iter, has_partial.to(tl.int8))
 
             else:
                 X = tl.dot(b_q, b_k.reshape(K, ratio, STRIDE).sum(2))
+                tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
 
             X = tl.where(fully_masked_stride_mask, -1.0e6, X)
 
@@ -505,6 +505,10 @@ def gemm_fuse_softmax_causal(
             X = tl.sum(X, 1)  # Sum K-strides
             X = tl.sum(X, 0)  # Sum Q-tokens
             tl.store(p_out + iter, X.to(out.type.element_ty))
+
+        else:
+            tl.store(p_out + iter, tl.zeros([], dtype=out.type.element_ty))
+            tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
 
     # 4.2 Causal Block
     for iter in range(k_safe_end, k_valid_end):
@@ -594,22 +598,14 @@ def gemm_fuse_softmax_causal(
             )
 
             X = tl.where(fully_masked_by_fm, -1.0e6, X)
-            if check_dense_contains_partial_stride(
+            has_partial = check_dense_contains_partial_stride(
                 causal_fuse_fm,
                 q_token_mask=mask_q,
                 k_token_mask=curr_token_load_mask,
                 BLOCK_SIZE=BLOCK_SIZE,
                 STRIDE=STRIDE,
-            ):
-                tl.store(p_out_mask + iter, tl.full([], 1, dtype=tl.int8))
-
-            # offs_k_stride_global = iter * ratio + offs_stride_k
-            # k_stride_token_start = offs_k_stride_global * STRIDE
-            # visibility_limit = offs_tokens_q + shift
-            # causal_mask_stride = (
-            #     k_stride_token_start[None, :] > visibility_limit[:, None]
-            # )
-            # X = tl.where(causal_mask_stride, -1.0e6, X)
+            )
+            tl.store(p_out_mask + iter, has_partial.to(tl.int8))
 
             # Explicitly mask out fully masked stride blocks
             X = tl.where(fully_masked_stride_mask, -1.0e6, X)
@@ -619,6 +615,13 @@ def gemm_fuse_softmax_causal(
             X = tl.sum(X, 1)
             X = tl.sum(X, 0)
             tl.store(p_out + iter, X.to(out.type.element_ty))
+        else:
+            tl.store(p_out + iter, tl.zeros([], dtype=out.type.element_ty))
+            tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
+
+    for iter in range(k_valid_end, num_k_blocks):
+        tl.store(p_out + iter, tl.zeros([], dtype=out.type.element_ty))
+        tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
 
 
 @triton.jit
@@ -646,13 +649,11 @@ def gemm_fuse_softmax_non_causal(
     seqlen_k: int,
     num_q_blocks: int,
     num_k_blocks: int,
-    stride_mask_b,
-    stride_mask_h,
-    indices_mask_b,
-    indices_mask_h,
     N_STRIDES,
     STRIDE: tl.constexpr,
+    HQ: tl.constexpr,
     H: tl.constexpr,
+    HIDS: tl.constexpr,
     K: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     mode: tl.constexpr,
@@ -667,23 +668,31 @@ def gemm_fuse_softmax_non_causal(
     i_block = tl.program_id(0).to(tl.int64)
     i_h = tl.program_id(1).to(tl.int64)
     i_b = tl.program_id(2).to(tl.int64)
+
     ratio: tl.constexpr = BLOCK_SIZE // STRIDE
+    G: tl.constexpr = HQ // H
+    GIDS: tl.constexpr = HQ // HIDS
+
+    i_hkv = i_h // G
+    i_hid = i_h // GIDS
 
     # ================= 1. Coordinates Setup =================
 
     q_stride_base = i_block * ratio
     offs_q_stride = q_stride_base + tl.arange(0, ratio)
-    mask_ptr_base_bh_stride = i_b * stride_mask_b + i_h * stride_mask_h
-    mask_ptr_base_bh_tokens = i_b * indices_mask_b + i_h * indices_mask_h
+    mask_ptr_base_bh_stride = i_b * N_STRIDES * HIDS + i_hid * N_STRIDES
+    mask_ptr_base_bh_tokens = i_b * seqlen_k * HIDS + i_hid * seqlen_k
     # Load Q (Round-Robin Sampling)
 
-    p_q = q + i_b * seqlen_q * H * K + (i_block * BLOCK_SIZE) * H * K + i_h * K
+    p_q = (
+        q + i_b * seqlen_q * HQ * K + (i_block * BLOCK_SIZE) * HQ * K + i_h * K
+    )
 
     p_q = (
         p_q
-        + tl.arange(0, ratio)[:, None] * (H * K * STRIDE)
+        + tl.arange(0, ratio)[:, None] * (HQ * K * STRIDE)
         + tl.arange(0, K)[None, :]
-        + H * K * (i_h % STRIDE)
+        + HQ * K * (i_h % STRIDE)
     )
 
     offs_tokens_q = (
@@ -699,7 +708,7 @@ def gemm_fuse_softmax_non_causal(
     l_i = tl.zeros([ratio], dtype=tl.float32)
 
     # K Pointers Setup
-    p_k_base = k + i_b * seqlen_k * H * K + i_h * K
+    p_k_base = k + i_b * seqlen_k * H * K + i_hkv * K
     offs_k_base = tl.arange(0, K)[:, None]
     offs_stride_k = tl.arange(0, ratio)
     offs_tokens_k = tl.arange(0, BLOCK_SIZE)
@@ -808,7 +817,7 @@ def gemm_fuse_softmax_non_causal(
     # ================= 3. Output Preparation =================
 
     l_i_inv = 1.0 / l_i
-    stride_out_b = (H * num_q_blocks * num_k_blocks).to(tl.int64)
+    stride_out_b = (HQ * num_q_blocks * num_k_blocks).to(tl.int64)
     stride_out_head = (num_q_blocks * num_k_blocks).to(tl.int64)
     stride_out_q = num_k_blocks.to(tl.int64)
 
@@ -857,7 +866,6 @@ def gemm_fuse_softmax_non_causal(
             ) < seqlen_k
 
             b_k = tl.load(p_k, mask=mask_k, other=0.0)
-            # logits = tl.dot(b_q, b_k)
 
             partially_masked_stride_mask = check_partially_masked_state(
                 curr_stride_offset,
@@ -906,18 +914,19 @@ def gemm_fuse_softmax_non_causal(
                 )
                 X = tl.where(fully_masked_by_fm, -1.0e6, X)
 
-                if check_dense_contains_partial_stride(
+                has_partial = check_dense_contains_partial_stride(
                     dense_flashmask,
                     q_token_mask=mask_q,
                     k_token_mask=curr_token_load_mask,
                     BLOCK_SIZE=BLOCK_SIZE,
                     STRIDE=STRIDE,
-                ):
-                    tl.store(p_out_mask + iter, tl.full([], 1, dtype=tl.int8))
+                )
+                tl.store(p_out_mask + iter, has_partial.to(tl.int8))
 
             else:
                 # Reduce token logits to get stride score
                 X = tl.dot(b_q, b_k.reshape(K, ratio, STRIDE).sum(2))
+                tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
 
             X = tl.where(fully_masked_stride_mask, -1.0e6, X)
 
@@ -929,6 +938,117 @@ def gemm_fuse_softmax_non_causal(
             X = tl.sum(X, 0)  # Sum Q-tokens
             tl.store(p_out + iter, X.to(out.type.element_ty))
 
+        else:
+            tl.store(p_out + iter, tl.zeros([], dtype=out.type.element_ty))
+            tl.store(p_out_mask + iter, tl.zeros([], dtype=tl.int8))
+
+
+@dataclass(frozen=True)
+class RawPtrs:
+    # token-level: [B, HIDS, seqlen_q]
+    lt_start: paddle.Tensor
+    lt_end: paddle.Tensor
+    ut_start: paddle.Tensor
+    ut_end: paddle.Tensor
+
+
+@dataclass(frozen=True)
+class StrideMaxMinPtrs:
+    # stride-level: [B, HIDS, n_strides]
+    lt_start_max: paddle.Tensor
+    lt_start_min: paddle.Tensor
+    lt_end_max: paddle.Tensor
+    lt_end_min: paddle.Tensor
+    ut_start_max: paddle.Tensor
+    ut_start_min: paddle.Tensor
+    ut_end_max: paddle.Tensor
+    ut_end_min: paddle.Tensor
+    n_strides: int
+
+
+def _require(cond: bool, msg: str):
+    if not cond:
+        raise ValueError(msg)
+
+
+def _extract_raw_ptrs(
+    startend_row_indices: paddle.Tensor,
+    causal: bool,
+) -> tuple[int, RawPtrs]:
+    """
+    startend_row_indices: [B, HIDS, seqlen_q, mode], mode in {1,2,4}
+    - mode=1: only lt_start
+    - mode=2:
+        causal=True  -> (lt_start, lt_end)
+        causal=False -> (lt_start, ut_end)
+    - mode=4: (lt_start, lt_end, ut_start, ut_end)
+    """
+    mode = startend_row_indices.shape[-1]
+    _require(mode in (1, 2, 4), f"Unsupported mode={mode}, expected 1/2/4")
+
+    # 统一保证 contiguous
+    x = startend_row_indices.contiguous()
+
+    lt_start = x[..., 0].contiguous()
+
+    lt_end = lt_start
+    ut_start = lt_start
+    ut_end = lt_start
+
+    if mode == 2:
+        if causal:
+            lt_end = x[..., 1].contiguous()
+        else:
+            ut_end = x[..., 1].contiguous()
+    elif mode == 4:
+        lt_end = x[..., 1].contiguous()
+        ut_start = x[..., 2].contiguous()
+        ut_end = x[..., 3].contiguous()
+
+    return mode, RawPtrs(
+        lt_start=lt_start, lt_end=lt_end, ut_start=ut_start, ut_end=ut_end
+    )
+
+
+def _prepare_stride_maxmin_ptrs(
+    raw: RawPtrs,
+    mode: int,
+    causal: bool,
+    stride: int,
+) -> StrideMaxMinPtrs:
+    _require(stride > 0, "stride must be positive")
+
+    lt_start_max, lt_start_min = prepare_maxmin(raw.lt_start, stride)
+    n_strides = lt_start_max.shape[2]
+
+    dummy_max, dummy_min = lt_start_max, lt_start_min
+
+    lt_end_max = lt_end_min = dummy_max
+    ut_start_max = ut_start_min = dummy_max
+    ut_end_max = ut_end_min = dummy_max
+
+    if mode == 2:
+        if causal:
+            lt_end_max, lt_end_min = prepare_maxmin(raw.lt_end, stride)
+        else:
+            ut_end_max, ut_end_min = prepare_maxmin(raw.ut_end, stride)
+    elif mode == 4:
+        lt_end_max, lt_end_min = prepare_maxmin(raw.lt_end, stride)
+        ut_start_max, ut_start_min = prepare_maxmin(raw.ut_start, stride)
+        ut_end_max, ut_end_min = prepare_maxmin(raw.ut_end, stride)
+
+    return StrideMaxMinPtrs(
+        lt_start_max=lt_start_max,
+        lt_start_min=lt_start_min,
+        lt_end_max=lt_end_max,
+        lt_end_min=lt_end_min,
+        ut_start_max=ut_start_max,
+        ut_start_min=ut_start_min,
+        ut_end_max=ut_end_max,
+        ut_end_min=ut_end_min,
+        n_strides=n_strides,
+    )
+
 
 def rr_attn_estimate_triton_func(
     q: paddle.Tensor,
@@ -936,205 +1056,110 @@ def rr_attn_estimate_triton_func(
     startend_row_indices: paddle.Tensor,
     stride: int = 8,
     causal: bool = True,
+    threshold: float = 1.0,
 ) -> paddle.Tensor:
-    bsz, q_len, num_heads, head_dim = q.shape
-    _, kv_len, num_kv_heads, _ = k.shape
-    num_indices_heads = startend_row_indices.shape[1]
-
-    if num_heads != num_kv_heads:
-        k = k.repeat_interleave(num_heads // num_kv_heads, axis=2).contiguous()
-
-    if num_heads != num_indices_heads:
-        startend_row_indices = startend_row_indices.repeat_interleave(
-            num_heads // num_indices_heads, axis=1
-        ).contiguous()
-
-    # startend_row_indices shape assumption: [B, H, Q, Mode] or [B, 1, Q, Mode]
-    # Ensure it's on the same device
-    assert startend_row_indices.place == q.place
-    # print(startend_row_indices)
-    # mode = 1: [lt_start]
-    # mode = 2: [, lt_end] (Causal)
-    # mode = 4: [lt_start, lt_end, ut_start, ut_end]
-
-    mode = startend_row_indices.shape[-1]
-    assert mode in [1, 2, 4]
-    chunk_size = stride
-    # --- 1. Prepare Raw Pointers (Token Level) ---
-    # We need these for flashmask_apply inside the kernel
-    lt_start_raw = startend_row_indices[..., 0].contiguous()
-    # Initialize optional raw pointers to lt_start_raw (as a safe dummy)
-    # to avoid passing None/Invalid pointers to Kernel
-    lt_end_raw = lt_start_raw
-    ut_start_raw = lt_start_raw
-    ut_end_raw = lt_start_raw
-    if mode == 2:
-        if causal:
-            lt_end_raw = startend_row_indices[..., 1].contiguous()
-
-        else:
-            ut_end_raw = startend_row_indices[..., 1].contiguous()
-
-    elif mode == 4:
-        lt_end_raw = startend_row_indices[..., 1].contiguous()
-        ut_start_raw = startend_row_indices[..., 2].contiguous()
-        ut_end_raw = startend_row_indices[..., 3].contiguous()
-
-    # --- 2. Calculate Strides for Raw Pointers ---
-    # Used for indices_mask_b / indices_mask_h
-    # Assuming startend_row_indices shape is [B, H, Q, Mode]
-    indices_mask_b = lt_start_raw.strides[0]
-
-    if lt_start_raw.shape[1] == 1 and num_heads > 1:
-        # Broadcasting raw mask across heads
-        indices_mask_h = 0
-
-    else:
-        indices_mask_h = lt_start_raw.strides[1]
-
-    # --- 3. Prepare Min/Max Pointers (Stride/Block Level) ---
-    # Helper to generate min/max views
-    # (Assuming prepare_maxmin implementation exists and returns tensors on GPU)
-    # Initialize all to None
-    lt_start_nstridemax, lt_start_nstridemin = None, None
-    lt_end_nstridemax, lt_end_nstridemin = None, None
-    ut_start_nstridemax, ut_start_nstridemin = None, None
-    ut_end_nstridemax, ut_end_nstridemin = None, None
-
-    # LT Start (Always exists)
-    lt_start_nstridemax, lt_start_nstridemin = prepare_maxmin(
-        lt_start_raw, chunk_size
+    """
+    Returns:
+      attn_sums: [B, HQ, ceil(seqlen_q/BS), ceil(seqlen_k/BS)]
+      boundary_protection_mask: same shape, bool
+    """
+    _require(
+        startend_row_indices.ndim == 4,
+        "startend_row_indices must be [B, HIDS, seqlen_q, mode]",
     )
 
-    # Base tensor for safe_ptr (stride level)
-    base_tensor_stride = lt_start_nstridemax
-    if mode == 2:
-        if causal:
-            lt_end_nstridemax, lt_end_nstridemin = prepare_maxmin(
-                lt_end_raw, chunk_size
-            )
-        else:
-            ut_end_nstridemax, ut_end_nstridemin = prepare_maxmin(
-                ut_end_raw, chunk_size
-            )
+    bsz, q_len, num_q_heads, head_dim = q.shape
+    bsz2, kv_len, num_kv_heads, _ = k.shape
+    _require(bsz2 == bsz, "q/k batch size mismatch")
 
-    elif mode == 4:
-        lt_end_nstridemax, lt_end_nstridemin = prepare_maxmin(
-            lt_end_raw, chunk_size
-        )
+    _require(
+        startend_row_indices.shape[0] == bsz,
+        "startend_row_indices batch mismatch",
+    )
+    _require(
+        startend_row_indices.shape[2] == kv_len,
+        "startend_row_indices seqlen_k mismatch",
+    )
 
-        ut_start_nstridemax, ut_start_nstridemin = prepare_maxmin(
-            ut_start_raw, chunk_size
-        )
+    num_indices_heads = startend_row_indices.shape[1]
+    _require(
+        num_q_heads % num_kv_heads == 0,
+        "MHA/GQA requires num_q_heads % num_kv_heads == 0",
+    )
+    _require(
+        num_q_heads % num_indices_heads == 0,
+        "Require num_q_heads % num_indices_heads == 0 for head mapping",
+    )
 
-        ut_end_nstridemax, ut_end_nstridemin = prepare_maxmin(
-            ut_end_raw, chunk_size
-        )
+    _require(
+        startend_row_indices.place == q.place,
+        "startend_row_indices must be on the same device as q",
+    )
+    _require(stride > 0, "stride must be positive")
 
-    def safe_ptr(t):
-        return t if t is not None else base_tensor_stride
-
-    # --- 4. Calculate Strides for Min/Max Pointers ---
-    # Used for stride_mask_b / stride_mask_h
-    stride_mask_b = base_tensor_stride.strides[0]
-
-    if base_tensor_stride.shape[1] == 1 and num_heads > 1:
-        stride_mask_h = 0
-
-    else:
-        stride_mask_h = base_tensor_stride.strides[1]
-
-    n_strides_len = base_tensor_stride.shape[2]
+    mode, raw = _extract_raw_ptrs(startend_row_indices, causal)
+    stride_mm = _prepare_stride_maxmin_ptrs(raw, mode, causal, stride)
 
     # --- 5. Kernel Launch Setup ---
     BLOCK_SIZE = 128
     num_q_blocks = triton.cdiv(q_len, BLOCK_SIZE)
     num_k_blocks = triton.cdiv(kv_len, BLOCK_SIZE)
-    attn_sums = paddle.zeros(
-        (bsz, num_heads, num_q_blocks, num_k_blocks),
+
+    attn_sums = paddle.empty(
+        (bsz, num_q_heads, num_q_blocks, num_k_blocks),
         dtype=q.dtype,
     )
 
-    boundary_protection_mask = paddle.zeros(
-        (bsz, num_heads, num_q_blocks, num_k_blocks),
+    boundary_protection_mask = paddle.empty(
+        (bsz, num_q_heads, num_q_blocks, num_k_blocks),
         dtype=paddle.bool,
     )
 
-    grid = (num_q_blocks, num_heads, bsz)
-    # print(grid)
-    # print(lt_start_raw.shape)
-    # print(lt_start_nstridemax.shape)
+    grid = (num_q_blocks, num_q_heads, bsz)
 
-    scale = 1.4426950408889634 / math.sqrt(head_dim) / stride
+    scale = LOG2E / math.sqrt(head_dim) / stride
 
-    if causal:
-        gemm_fuse_softmax_causal[grid](
-            q,
-            k,
-            attn_sums,
-            boundary_protection_mask,
-            lt_start_raw,
-            lt_end_raw,
-            ut_start_raw,
-            ut_end_raw,
-            safe_ptr(lt_start_nstridemax),
-            safe_ptr(lt_start_nstridemin),
-            safe_ptr(lt_end_nstridemax),
-            safe_ptr(lt_end_nstridemin),
-            safe_ptr(ut_start_nstridemax),
-            safe_ptr(ut_start_nstridemin),
-            safe_ptr(ut_end_nstridemax),
-            safe_ptr(ut_end_nstridemin),
-            scale=scale,
-            seqlen_q=q_len,
-            seqlen_k=kv_len,
-            num_q_blocks=num_q_blocks,
-            num_k_blocks=num_k_blocks,
-            stride_mask_b=stride_mask_b,
-            stride_mask_h=stride_mask_h,
-            indices_mask_b=indices_mask_b,
-            indices_mask_h=indices_mask_h,
-            N_STRIDES=n_strides_len,
-            STRIDE=stride,
-            H=num_heads,
-            K=head_dim,
-            BLOCK_SIZE=BLOCK_SIZE,
-            mode=mode,
-        )
+    kernel = (
+        gemm_fuse_softmax_causal if causal else gemm_fuse_softmax_non_causal
+    )
 
-    else:
-        gemm_fuse_softmax_non_causal[grid](
-            q,
-            k,
-            attn_sums,
-            boundary_protection_mask,
-            lt_start_raw,
-            lt_end_raw,
-            ut_start_raw,
-            ut_end_raw,
-            safe_ptr(lt_start_nstridemax),
-            safe_ptr(lt_start_nstridemin),
-            safe_ptr(lt_end_nstridemax),
-            safe_ptr(lt_end_nstridemin),
-            safe_ptr(ut_start_nstridemax),
-            safe_ptr(ut_start_nstridemin),
-            safe_ptr(ut_end_nstridemax),
-            safe_ptr(ut_end_nstridemin),
-            scale=scale,
-            seqlen_q=q_len,
-            seqlen_k=kv_len,
-            num_q_blocks=num_q_blocks,
-            num_k_blocks=num_k_blocks,
-            stride_mask_b=stride_mask_b,
-            stride_mask_h=stride_mask_h,
-            indices_mask_b=indices_mask_b,
-            indices_mask_h=indices_mask_h,
-            N_STRIDES=n_strides_len,
-            STRIDE=stride,
-            H=num_heads,
-            K=head_dim,
-            BLOCK_SIZE=BLOCK_SIZE,
-            mode=mode,
-        )
+    kernel[grid](
+        q,
+        k,
+        attn_sums,
+        boundary_protection_mask,
+        # raw pointers (token-level)
+        raw.lt_start,
+        raw.lt_end,
+        raw.ut_start,
+        raw.ut_end,
+        # stride max/min pointers
+        stride_mm.lt_start_max,
+        stride_mm.lt_start_min,
+        stride_mm.lt_end_max,
+        stride_mm.lt_end_min,
+        stride_mm.ut_start_max,
+        stride_mm.ut_start_min,
+        stride_mm.ut_end_max,
+        stride_mm.ut_end_min,
+        # meta
+        scale=scale,
+        seqlen_q=q_len,
+        seqlen_k=kv_len,
+        num_q_blocks=num_q_blocks,
+        num_k_blocks=num_k_blocks,
+        N_STRIDES=stride_mm.n_strides,
+        STRIDE=stride,
+        HQ=num_q_heads,
+        H=num_kv_heads,
+        HIDS=num_indices_heads,
+        K=head_dim,
+        BLOCK_SIZE=BLOCK_SIZE,
+        mode=mode,
+    )
 
-    return attn_sums, boundary_protection_mask
+    return (
+        attn_sums,
+        boundary_protection_mask,
+        find_blocks_topp(attn_sums, threshold),
+    )
