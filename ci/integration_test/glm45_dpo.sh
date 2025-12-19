@@ -55,5 +55,5 @@ export FLAGS_use_stride_compute_kernel=False
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 unset http_proxy https_proxy
-
+sleep 6h
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_dpo_yaml 2>&1 | tee ./glm45_dpo.log
