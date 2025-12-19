@@ -46,7 +46,6 @@ jq '.num_hidden_layers = 2' \
     $config_json > ${config_json}.tmp
 mv ${config_json}.tmp $config_json
 
-
 python -c "
 infile = '/workspace/PaddleFormers/paddleformers/transformers/auto/modeling.py'
 outfile = infile + '.new'
