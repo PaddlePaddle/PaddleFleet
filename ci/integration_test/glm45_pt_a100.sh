@@ -15,20 +15,15 @@
 set -exo pipefail
 export root_dir=$(pwd)
 
-wget https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64 -O /usr/local/bin/yq
-chmod +x /usr/local/bin/yq
-apt-get update
-apt-get install jq -y
-
 source PaddleFleet/.venv/bin/activate
 
-wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet_pt.1214.tar --no-check-certificate
-tar -xf glm45_fleet_pt.1214.tar # glm45_fleet_pt
-cd $root_dir/glm45_fleet_pt
+wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12-18.tar --no-check-certificate
+tar -xf glm45_fleet.12-18.tar # glm45_fleet
+cd $root_dir/glm45_fleet
 export cur_dir=$(pwd)
 
-config_yaml=$cur_dir/glm45.yaml
-config_json=${cur_dir}/GLM-4.5-Air/config.json
+config_yaml=$cur_dir/glm45_pt.yaml
+# config_json=${cur_dir}/GLM-4.5-Air/config.json
 
 yq eval '.expert_model_parallel_size = 1
     | .gated_linear_unit = true
@@ -42,11 +37,6 @@ yq eval '.expert_model_parallel_size = 1
     | .output_dir = strenv(cur_dir) + "/checkpoints"' \
   $config_yaml > ${config_yaml}.tmp
 mv ${config_yaml}.tmp $config_yaml
-
-# jq --arg cur_dir "$cur_dir" \
-#     '.first_k_dense_replace = 0' \
-#     $config_json > ${config_json}.tmp
-# mv ${config_json}.tmp $config_json
 
 sed -i 's/config.num_hidden_layers = 10/config.num_hidden_layers = 2/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
 sed -i 's/\[0\] \* 1 + \[1\] \* 9/\[0\] \* 1 + \[1\] \* 1/g' /workspace/PaddleFormers/paddleformers/transformers/glm4_moe/modeling.py
@@ -69,4 +59,4 @@ unset http_proxy https_proxy
 #    run_pretrain.py $config_json \
 #    --output_dir ./checkpoint | tee ./glm45_a100.log
 
-FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $cur_dir/glm45.yaml 2>&1 | tee ./glm45_a100.log
+FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $config_yaml 2>&1 | tee ./glm45_pt_a100.log
