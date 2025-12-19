@@ -75,7 +75,6 @@ def context_parallel_parameter_disable_scale_grad(param):
 def scatter_balance(input_tensor, group=None, axis=0):
     """
     Evenly split input tensor along the specified axis across model parallel ranks.
-
     This function implements balanced scattering by taking chunks from both ends
     of the tensor to ensure load balancing across ranks.
     Args:
@@ -372,7 +371,6 @@ class ContextParallelScatterOp(PyLayer):
 class ContextParallelGatherOp(PyLayer):
     """
     Context parallel gather operation using PyLayer for automatic differentiation.
-
     Forward: All-gather input tensor using balanced reconstruction
     Backward: Scatter gradients using balanced splitting
     """
@@ -600,7 +598,6 @@ def cp_flashmask_allgatherkv_balance_backward(
 ):
     """
     Backward pass of context parallel flashmask attention with balanced all-gather strategy.
-
     This function implements the backward pass of flashmask attention with context parallelism,
     computing gradients for query, key, and value tensors.
     Args:
@@ -619,8 +616,6 @@ def cp_flashmask_allgatherkv_balance_backward(
     paddle.base.core.nvprof_nvtx_push(
         "cp_flashmask_allgatherkv_balance_backward"
     )
-
-    cp_size = group.world_size
 
     # All-gather key and value tensors (same as forward pass)
     key_gathered = all_gather_balance(key, axis=1, group=group)
@@ -954,7 +949,6 @@ def flashmask_attention_cp(
 ):
     """
     FlashMask attention with context parallelism - public API.
-
     This is the main entry point for using FlashMask attention with context parallelism.
     It provides a convenient interface that wraps the FlashMaskContextParallel PyLayer.
     Args:
