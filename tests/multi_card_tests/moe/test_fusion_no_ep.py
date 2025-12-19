@@ -100,13 +100,6 @@ class TestFusionBF16SingleCard(unittest.TestCase):
             input_data
         )[0]
 
-        print(
-            output_moe_use_fusion_node_true.detach()
-            .cpu()
-            .float()
-            .numpy()[0, 0, 0:3]
-        )
-
     def tearDown(self):
         pass
 

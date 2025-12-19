@@ -86,6 +86,7 @@ class MoELayer(nn.Layer):
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
+        self.moe_deep_gemm = config.moe_deep_gemm
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -122,7 +123,6 @@ class MoELayer(nn.Layer):
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
-        self.moe_deep_gemm = True
         if (
             not paddle.device.current_device_is_cpu
             and paddle.device.get_device_capability()[0] < 9
@@ -134,7 +134,11 @@ class MoELayer(nn.Layer):
                     "fallback to alltoall token dispatcher."
                 )
                 self.moe_token_dispatcher_type = "alltoall"
-            self.moe_deep_gemm = False
+            if self.moe_deep_gemm:
+                logger.warning(
+                    "moe_deep_gemm is not supported when device capability < 9.0."
+                )
+                self.moe_deep_gemm = False
 
         self.moe_use_fusion_node = False
         if self.expert_model_parallel_size > 1:
@@ -166,6 +170,7 @@ class MoELayer(nn.Layer):
             self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
+                self.moe_deep_gemm,
                 pg_collection,
             )
         else:

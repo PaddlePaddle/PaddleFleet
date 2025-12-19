@@ -1345,9 +1345,6 @@ class ExpertsGroupGemmContiguousNode:
                         c=weights.main_grad,
                     )
                 else:
-                    weights_res = paddle.empty_like(
-                        weights.main_grad, dtype=x.dtype
-                    )
                     weights_res = paddle.incubate.nn.functional.batched_gemm(
                         x,
                         dy,
@@ -1373,7 +1370,6 @@ class ExpertsGroupGemmContiguousNode:
                         c=weights.grad,
                     )
                 else:
-                    weights_res = paddle.empty_like(weights.grad, dtype=x.dtype)
                     weights_res = paddle.incubate.nn.functional.batched_gemm(
                         x,
                         dy,

@@ -18,6 +18,7 @@ from copy import deepcopy
 import paddle
 import paddle.nn.functional as F
 
+import paddlefleet
 from paddlefleet import utils
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
@@ -54,6 +55,56 @@ class BMMFunction(paddle.autograd.PyLayer):
         return dx, dy
 
 
+class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, x, y, batch_sizes):
+        ctx.save_for_backward(x, y)
+        ctx.batch_sizes = batch_sizes
+        out = paddle.zeros([x.shape[0], y.shape[2]], dtype="bfloat16")
+
+        tokens_per_expert_indices = paddle.repeat_interleave(
+            paddle.arange(batch_sizes.shape[0]), batch_sizes
+        ).cast("int32")
+
+        paddlefleet.ops.deep_gemm.m_grouped_bf16_gemm_nn_contiguous(
+            x, y, out, tokens_per_expert_indices
+        )
+
+        del tokens_per_expert_indices
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, y = ctx.saved_tensor()
+        batch_sizes = ctx.batch_sizes
+
+        tokens_per_expert_indices = paddle.repeat_interleave(
+            paddle.arange(batch_sizes.shape[0]), batch_sizes
+        ).cast("int32")
+
+        dx = paddle.zeros_like(x)
+        paddlefleet.ops.deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
+            grad,
+            y,
+            dx,
+            tokens_per_expert_indices,
+        )
+        dx = paddle.cast(dx, paddle.float)
+
+        dy = paddle.zeros_like(y, dtype=paddle.float)
+        paddlefleet.ops.deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+            a=x,
+            b=grad,
+            d=dy,
+            ks=paddle.tolist(batch_sizes),
+            ks_tensor=batch_sizes,
+            c=paddle.zeros_like(y, dtype=paddle.float),
+        )
+
+        del tokens_per_expert_indices
+        return dx, dy
+
+
 class GroupedMLPExpert(FleetLayer):
     """An efficient implementation of the Experts layer using GroupedGEMM without TP/DP.
 
@@ -64,12 +115,14 @@ class GroupedMLPExpert(FleetLayer):
         self,
         num_local_experts: int,
         config: TransformerConfig,
+        moe_deep_gemm,
         pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__(config=config)
         self.config: TransformerConfig = config
         self.config.hidden_act = F.silu
         self.num_local_experts = num_local_experts
+        self.moe_deep_gemm = moe_deep_gemm
         assert not config.use_bias, (
             "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
         )
@@ -142,20 +195,34 @@ class GroupedMLPExpert(FleetLayer):
             tokens_per_expert = tokens_per_expert.cpu().tolist()
             tokens_per_expert = [int(x) for x in tokens_per_expert]
 
-            fc1_output = BMMFunction.apply(
-                permuted_local_hidden_states,
-                self.weight1,
-                tokens_per_expert,
-            )
+            if self.moe_deep_gemm:
+                fc1_output = DeepGEMMBMMFunction.apply(
+                    permuted_local_hidden_states,
+                    self.weight1,
+                    paddle.to_tensor(tokens_per_expert, dtype="int32"),
+                )
+            else:
+                fc1_output = BMMFunction.apply(
+                    permuted_local_hidden_states,
+                    self.weight1,
+                    tokens_per_expert,
+                )
             if self.activation_recompute:
                 raise NotImplementedError(
                     "Recompute in GroupedMLPExpert is not implemented"
                 )
             else:
                 intermediate_parallel = self.activation_func(fc1_output)
-                fc2_output = BMMFunction.apply(
-                    intermediate_parallel, self.weight2, tokens_per_expert
-                )
+                if self.moe_deep_gemm:
+                    fc2_output = DeepGEMMBMMFunction.apply(
+                        intermediate_parallel,
+                        self.weight2,
+                        paddle.to_tensor(tokens_per_expert, dtype="int32"),
+                    )
+                else:
+                    fc2_output = BMMFunction.apply(
+                        intermediate_parallel, self.weight2, tokens_per_expert
+                    )
         else:
             # No token is allocated for local experts.
             assert paddle.count_nonzero(tokens_per_expert) == 0
