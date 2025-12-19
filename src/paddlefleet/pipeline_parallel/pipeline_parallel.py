@@ -391,29 +391,31 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
                     loss = loss_tensor
 
             # backward
-            if self.scaler:
-                paddle.autograd.backward(self.scaler.scale(loss))
-            else:
-                paddle.autograd.backward(loss)
+            with paddle.amp.auto_cast(enable=False):
+                if self.scaler:
+                    paddle.autograd.backward(self.scaler.scale(loss))
+                else:
+                    paddle.autograd.backward(loss)
 
             assert self.total_loss is not None, (
                 "train_batch() in last stage should obtain valid loss"
             )
 
         losses = []
-        for idx in range(len(self._layers._loss_fn)):
-            self.total_loss[idx] = paddle.to_tensor(self.total_loss[idx])
-            if not return_micro_batch_loss:
-                # TODO(shenliang03): it will use mean/sum to calculate loss
-                tmp = paddle.zeros_like(self.total_loss[idx][0])
-                for loss in self.total_loss[idx]:
-                    tmp += loss.detach()
-                if not self._delay_scale_loss:
-                    losses.append(tmp)
+        with paddle.amp.auto_cast(enable=False):
+            for idx in range(len(self._layers._loss_fn)):
+                self.total_loss[idx] = paddle.to_tensor(self.total_loss[idx])
+                if not return_micro_batch_loss:
+                    # TODO(shenliang03): it will use mean/sum to calculate loss
+                    tmp = paddle.zeros_like(self.total_loss[idx][0])
+                    for loss in self.total_loss[idx]:
+                        tmp += loss.detach()
+                    if not self._delay_scale_loss:
+                        losses.append(tmp)
+                    else:
+                        losses.append(tmp / self.accumulate_steps)
                 else:
-                    losses.append(tmp / self.accumulate_steps)
-            else:
-                losses.append(self.total_loss[idx].detach())
+                    losses.append(self.total_loss[idx].detach())
         return losses[0] if len(losses) == 1 else losses
 
     def train_batch(

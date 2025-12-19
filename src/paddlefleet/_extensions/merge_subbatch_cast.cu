@@ -18,7 +18,7 @@
 
 template <typename InT, typename OutT, typename InPtrsT, int VecSize>
 __global__ void merge_subbatch_cast_kernel(const InPtrsT in_ptrs,
-                                           OutT *__restrict__ out,
+                                           OutT* __restrict__ out,
                                            int64_t total_num,
                                            int64_t subbatch_num) {
   int64_t idx =
@@ -26,7 +26,7 @@ __global__ void merge_subbatch_cast_kernel(const InPtrsT in_ptrs,
   int64_t stride = (static_cast<int64_t>(blockDim.x) * gridDim.x) * VecSize;
 
   while (idx < total_num) {
-    const InT *x_ptr = in_ptrs[idx / subbatch_num] + idx % subbatch_num;
+    const InT* x_ptr = in_ptrs[idx / subbatch_num] + idx % subbatch_num;
     phi::AlignedVector<InT, VecSize> in_data;
     phi::Load(x_ptr, &in_data);
     if constexpr (std::is_same<InT, OutT>::value) {
@@ -44,7 +44,7 @@ __global__ void merge_subbatch_cast_kernel(const InPtrsT in_ptrs,
 }
 
 std::vector<paddle::Tensor> merge_subbatch_cast(
-    const std::vector<paddle::Tensor> &x, int64_t int_dtype) {
+    const std::vector<paddle::Tensor>& x, int64_t int_dtype) {
   if (x.empty()) return {};
 
   auto in_dtype = x[0].dtype();
@@ -99,7 +99,7 @@ std::vector<paddle::Tensor> merge_subbatch_cast(
 
 #define LAUNCH_MERGE_SUBBATCH_CAST_FIX_CASE(__InT, __OutT, __num_split) \
   if (num_split <= __num_split) {                                       \
-    phi::Array<const __InT *, __num_split> array;                       \
+    phi::Array<const __InT*, __num_split> array;                        \
     for (int64_t i = 0; i < num_split; ++i) {                           \
       array[i] = x[i].data<__InT>();                                    \
     }                                                                   \
