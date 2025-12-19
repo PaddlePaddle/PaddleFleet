@@ -77,6 +77,7 @@ with open(infile) as fin, open(outfile, 'w') as fout:
             fout.write(line)
             i += 1
 "
+mv /workspace/PaddleFormers/paddleformers/transformers/auto/modeling.py.new /workspace/PaddleFormers/paddleformers/transformers/auto/modeling.py
 
 rm -rf ./outputs
 rm -rf paddleformers_dist_log
