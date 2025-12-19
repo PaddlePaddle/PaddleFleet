@@ -24,22 +24,17 @@ from paddle.nn.functional.flash_attention import flashmask_attention
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
     """
     Mark parameters or layers to disable context parallel gradient scaling.
-
     This function sets the attribute `context_parallel_disable_scale_grad` to `True` for the given parameter,
     tensor, or layer. When set, this flag indicates that the specified parameter or layer should not have
     its gradient scaled during context parallel training.
-
     - If a `paddle.nn.Layer` is provided, both its `weight` and (if present) `bias` will be marked.
     - If a `paddle.base.framework.Parameter` or `paddle.Tensor` is provided, it will be marked directly.
     - Raises a `TypeError` if the input is not a supported type.
-
     Args:
         param_or_layer (paddle.nn.Layer or paddle.base.framework.Parameter or paddle.Tensor):
             The parameter, tensor, or layer to mark as disabling context parallel gradient scaling.
-
     Raises:
         TypeError: If `param_or_layer` is not a `Parameter`, `Tensor`, or `Layer`.
-
     Example:
         >>> mark_context_parallel_parameter_disable_scale_grad(layer)
         >>> mark_context_parallel_parameter_disable_scale_grad(param)
@@ -62,17 +57,13 @@ def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
 def context_parallel_parameter_disable_scale_grad(param):
     """
     Check whether context parallel gradient scaling is disabled for the parameter or tensor.
-
     Returns the value of the `context_parallel_disable_scale_grad` attribute for the given parameter or tensor.
     If the attribute is not set, returns `False` by default.
-
     Args:
         param (paddle.base.framework.Parameter or paddle.Tensor):
             The parameter or tensor to check.
-
     Returns:
         bool: True if context parallel gradient scaling is disabled, False otherwise.
-
     Example:
         >>> if context_parallel_parameter_disable_scale_grad(param):
         ...     # Handle parameter that should not have its gradient scaled
@@ -87,16 +78,13 @@ def scatter_balance(input_tensor, group=None, axis=0):
 
     This function implements balanced scattering by taking chunks from both ends
     of the tensor to ensure load balancing across ranks.
-
     Args:
         input_tensor (paddle.Tensor): Input tensor to be scattered
         group (paddle.distributed.Group, optional): Communication group.
             If None, uses model parallel group from fleet
         axis (int, optional): Axis along which to scatter. Defaults to 0
-
     Returns:
         paddle.Tensor: Scattered tensor chunk for current rank
-
     Note:
         This API is different from distributed.scatter - it performs balanced
         splitting by taking chunks from both ends of the sequence.
@@ -148,15 +136,12 @@ def scatter_balance(input_tensor, group=None, axis=0):
 def all_gather_balance(input_tensor, group=None, axis=0):
     """
     All-gather operation with balanced reconstruction.
-
     This function performs all-gather to reconstruct the original tensor
     from balanced scattered chunks.
-
     Args:
         input_tensor (paddle.Tensor): Input tensor chunk
         group (paddle.distributed.Group, optional): Communication group
         axis (int, optional): Axis along which to gather. Defaults to 0
-
     Returns:
         paddle.Tensor: Reconstructed full tensor
     """
@@ -227,15 +212,12 @@ def all_gather_balance(input_tensor, group=None, axis=0):
 def reduce_scatter_any_axis(input_tensor, axis, group=None):
     """
     Reduce-scatter operation along any axis.
-
     Performs element-wise reduction (sum) across ranks and scatters the result
     so each rank gets a portion of the reduced tensor.
-
     Args:
         input_tensor (paddle.Tensor): Input tensor to reduce and scatter
         axis (int): Axis along which to perform reduce-scatter
         group (paddle.distributed.Group, optional): Communication group
-
     Returns:
         paddle.Tensor: Reduced and scattered tensor chunk
     """
@@ -287,15 +269,12 @@ def reduce_scatter_any_axis(input_tensor, axis, group=None):
 def reduce_scatter_any_axis_balance(input_tensor, axis, group=None):
     """
     Balanced reduce-scatter operation along any axis.
-
     Similar to reduce_scatter_any_axis but uses balanced splitting strategy
     by processing chunks from both ends of the tensor.
-
     Args:
         input_tensor (paddle.Tensor): Input tensor to reduce and scatter
         axis (int): Axis along which to perform reduce-scatter
         group (paddle.distributed.Group, optional): Communication group
-
     Returns:
         paddle.Tensor: Reduced and scattered tensor chunk with balanced distribution
     """
@@ -346,7 +325,6 @@ def reduce_scatter_any_axis_balance(input_tensor, axis, group=None):
 class ContextParallelScatterOp(PyLayer):
     """
     Context parallel scatter operation using PyLayer for automatic differentiation.
-
     Forward: Scatter input tensor using balanced splitting
     Backward: All-gather gradients using balanced reconstruction
     """
@@ -355,12 +333,10 @@ class ContextParallelScatterOp(PyLayer):
     def forward(ctx, input_tensor, axis=0):
         """
         Forward pass: scatter input tensor across context parallel ranks.
-
         Args:
             ctx: Context object for saving information for backward pass
             input_tensor (paddle.Tensor): Input tensor to scatter
             axis (int): Axis along which to scatter
-
         Returns:
             paddle.Tensor: Scattered tensor chunk
         """
@@ -381,11 +357,9 @@ class ContextParallelScatterOp(PyLayer):
     def backward(ctx, grad_output):
         """
         Backward pass: all-gather gradients.
-
         Args:
             ctx: Context object with saved information
             grad_output (paddle.Tensor): Gradient of output
-
         Returns:
             tuple: Gradients for input arguments
         """
@@ -407,12 +381,10 @@ class ContextParallelGatherOp(PyLayer):
     def forward(ctx, input_tensor, axis=0):
         """
         Forward pass: all-gather input tensor across context parallel ranks.
-
         Args:
             ctx: Context object for saving information for backward pass
             input_tensor (paddle.Tensor): Input tensor to gather
             axis (int): Axis along which to gather
-
         Returns:
             paddle.Tensor: Gathered full tensor
         """
@@ -433,11 +405,9 @@ class ContextParallelGatherOp(PyLayer):
     def backward(ctx, grad_output):
         """
         Backward pass: scatter gradients.
-
         Args:
             ctx: Context object with saved information
             grad_output (paddle.Tensor): Gradient of output
-
         Returns:
             tuple: Gradients for input arguments
         """
@@ -450,10 +420,8 @@ class ContextParallelGatherOp(PyLayer):
 class ContextParallelAllGatherOp(PyLayer):
     """
     Context parallel all-gather operation with gradient reduction.
-
     Forward: All-gather input tensor (e.g., [batch, seq_len/n, hidden] -> [batch, seq_len, hidden])
     Backward: Reduce-scatter gradients with balanced distribution
-
     This operation is similar to AllGatherOp but maintains context parallel state
     after gradient aggregation.
     """
@@ -462,12 +430,10 @@ class ContextParallelAllGatherOp(PyLayer):
     def forward(ctx, input_tensor, axis):
         """
         Forward pass: all-gather input tensor.
-
         Args:
             ctx: Context object for saving information
             input_tensor (paddle.Tensor): Input tensor with shape [batch, seq_len/n, hidden]
             axis (int): Axis along which to gather
-
         Returns:
             paddle.Tensor: Gathered tensor with shape [batch, seq_len, hidden]
         """
@@ -488,11 +454,9 @@ class ContextParallelAllGatherOp(PyLayer):
     def backward(ctx, grad_output):
         """
         Backward pass: reduce-scatter gradients.
-
         Args:
             ctx: Context object with saved information
             grad_output (paddle.Tensor): Gradient with shape [batch, seq_len, hidden]
-
         Returns:
             tuple: Gradients with shape [batch, seq_len/n, hidden]
         """
@@ -507,16 +471,13 @@ def preprocess_index(
 ):
     """
     Preprocess startend row indices for a single chunk.
-
     Adjusts the startend_row_indices relative to the chunk's starting position and
     clips them to valid range.
-
     Args:
         startend_row_indices (paddle.Tensor): Original startend row indices
         chunk_id (int): ID of the current chunk
         seq_blocksize (int): Size of each sequence block
         max_seqlen_q (int): Maximum sequence length for queries
-
     Returns:
         paddle.Tensor: Preprocessed row indices
     """
@@ -535,17 +496,14 @@ def preprocess_index_dual_chunks(
 ):
     """
     Preprocess row indices for dual chunks (DualChunkSwap strategy).
-
     This function handles the index preprocessing for the balanced dual-chunk
     strategy where each rank processes chunks from both ends of the sequence.
-
     Args:
         startend_row_indices (paddle.Tensor): Original row indices
         chunk_id_first (int): ID of the first chunk
         chunk_id_second (int): ID of the second chunk
         seq_blocksize (int): Size of each sequence block
         max_seqlen_q (int): Maximum sequence length for queries
-
     Returns:
         paddle.Tensor: Preprocessed row indices for dual chunks
     """
@@ -576,10 +534,8 @@ def cp_flashmask_allgatherkv_balance_forward(
 ):
     """
     Forward pass of context parallel flashmask attention with balanced all-gather strategy.
-
     This function implements the forward pass of flash attention with context parallelism
     using the DualChunkSwap strategy for load balancing.
-
     Args:
         query (paddle.Tensor): Query tensor with shape [batch, seq_len/n, num_heads, head_dim]
         key (paddle.Tensor): Key tensor with shape [batch, seq_len/n, num_heads, head_dim]
@@ -588,7 +544,6 @@ def cp_flashmask_allgatherkv_balance_forward(
         group (paddle.distributed.Group): Communication group
         causal (bool): Whether to use causal attention
         is_training (bool): Whether in training mode
-
     Returns:
         tuple: (output, log_sum_exp, processed_indices)
     """
@@ -648,7 +603,6 @@ def cp_flashmask_allgatherkv_balance_backward(
 
     This function implements the backward pass of flashmask attention with context parallelism,
     computing gradients for query, key, and value tensors.
-
     Args:
         query (paddle.Tensor): Query tensor
         key (paddle.Tensor): Key tensor
@@ -659,7 +613,6 @@ def cp_flashmask_allgatherkv_balance_backward(
         output_grad (paddle.Tensor): Gradient of output
         group (paddle.distributed.Group): Communication group
         causal (bool): Whether causal attention was used
-
     Returns:
         tuple: (query_grad, key_grad, value_grad)
     """
@@ -873,11 +826,9 @@ class ContextParallelNormalGather(PyLayer):
 class FlashMaskContextParallel(PyLayer):
     """
     FlashMask attention with context parallelism implementation.
-
     This class implements flashmask attention with context parallelism (CP) using PyLayer
     for automatic differentiation. CP partitions tensors along the sequence dimension
     to enable long-context LLMs in a distributed fashion.
-
     The implementation uses the DualChunkSwap strategy to ensure load balancing
     across CP ranks by processing chunks from both ends of the sequence.
     """
@@ -897,7 +848,6 @@ class FlashMaskContextParallel(PyLayer):
     ):
         """
         Forward pass of FlashMask attention with context parallelism.
-
         Args:
             ctx: Context object for saving information for backward pass
             query (paddle.Tensor): Query tensor, pre-divided by CP size
@@ -909,10 +859,8 @@ class FlashMaskContextParallel(PyLayer):
             causal (bool): Whether to use causal attention
             training (bool): Whether in training mode
             mode (str): Attention mode, currently supports "allgather_kv"
-
         Returns:
             paddle.Tensor: Attention output
-
         Raises:
             NotImplementedError: If dropout > 0.0 or causal=True
             AssertionError: If query sequence length is not divisible by 2
@@ -962,11 +910,9 @@ class FlashMaskContextParallel(PyLayer):
     def backward(ctx, output_grad):
         """
         Backward pass of FlashMask attention with context parallelism.
-
         Args:
             ctx: Context object with saved information
             output_grad (paddle.Tensor): Gradient of output
-
         Returns:
             tuple: Gradients for all input arguments
         """
@@ -1011,7 +957,6 @@ def flashmask_attention_cp(
 
     This is the main entry point for using FlashMask attention with context parallelism.
     It provides a convenient interface that wraps the FlashMaskContextParallel PyLayer.
-
     Args:
         query (paddle.Tensor): Query tensor with shape [batch, seq_len/n, num_heads, head_dim]
         key (paddle.Tensor): Key tensor with shape [batch, seq_len/n, num_heads, head_dim]
@@ -1022,10 +967,8 @@ def flashmask_attention_cp(
         causal (bool, optional): Whether to use causal attention. Defaults to False
         training (bool, optional): Whether in training mode. Defaults to True
         mode (str, optional): Attention mode. Defaults to "allgather_kv"
-
     Returns:
         paddle.Tensor: Attention output with shape [batch, seq_len/n, num_heads, head_dim]
-
     Example:
         ```python
         # Initialize tensors (assuming context parallelism is set up)
@@ -1033,7 +976,6 @@ def flashmask_attention_cp(
         key = paddle.randn([2, 512, 8, 64])    # [batch, seq_len/n, heads, head_dim]
         value = paddle.randn([2, 512, 8, 64])  # [batch, seq_len/n, heads, head_dim]
         mask_indices = paddle.randint(0, 1024, [100, 2])
-
         # Apply FlashMask attention with context parallelism
         output = flashmask_attention_cp(
             query=query,
