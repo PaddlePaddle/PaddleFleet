@@ -18,9 +18,9 @@
 
 template <typename T>
 __global__ void tokens_unzip_slice_kernel(
-    const T *__restrict__ x,
-    const int *__restrict__ zipped_expertwise_rowmap,
-    int64_t *__restrict__ index_out,
+    const T* __restrict__ x,
+    const int* __restrict__ zipped_expertwise_rowmap,
+    int64_t* __restrict__ index_out,
     int64_t total_zipped_rows,
     int num_experts,
     int start_idx,
@@ -42,8 +42,8 @@ __global__ void tokens_unzip_slice_kernel(
 }
 
 std::vector<paddle::Tensor> tokens_unzip_slice(
-    const paddle::Tensor &x,
-    const paddle::Tensor &zipped_expertwise_rowmap,
+    const paddle::Tensor& x,
+    const paddle::Tensor& zipped_expertwise_rowmap,
     const int num_experts,
     const int total_unzipped_rows,
     const int start_idx,

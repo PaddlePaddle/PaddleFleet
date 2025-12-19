@@ -65,37 +65,14 @@ FP8_ALIGN = 128
 
 def _get_fp8_weight_and_scale(weight, transpose=False):
     """_get_fp8_weight_and_scale"""
-    fp8_weight, fp8_scale = weight.fp8_weight_stacked, weight.fp8_scale_stacked
-
     if transpose:
-        if (
-            hasattr(weight, "fp8_weight_stacked_transpose")
-            and weight.fp8_weight_stacked_transpose is not None
-        ):
-            fp8_weight = weight.fp8_weight_stacked_transpose
-            fp8_scale = weight.fp8_scale_stacked_transpose
-        else:
-            assert fp8_weight.shape[0] % weight.shape[0] == 0
-            assert fp8_weight.ndim == 2, "fp8_weight must be 2 dims"
-
-            expert_num = fp8_weight.shape[0] // weight.shape[0]
-
-            def transpose_tensor(tensor):
-                assert tensor.ndim == 2
-                h0 = tensor.shape[0] // expert_num
-                h1 = tensor.shape[1]
-                tensor = tensor.reshape([expert_num, h0, h1])
-                return (
-                    tensor.contiguous()
-                    .transpose([0, 2, 1])
-                    .reshape([-1, h0])
-                    .contiguous()
-                )
-
-            fp8_weight, fp8_scale = (
-                transpose_tensor(fp8_weight),
-                transpose_tensor(fp8_scale),
-            )
+        fp8_weight = weight.fp8_weight_stacked_transpose
+        fp8_scale = weight.fp8_scale_stacked_transpose
+    else:
+        fp8_weight, fp8_scale = (
+            weight.fp8_weight_stacked,
+            weight.fp8_scale_stacked,
+        )
 
     return fp8_weight, fp8_scale
 
@@ -105,25 +82,25 @@ def fused_stack_quant(expert_weight_list, transpose=False):
         expert_weight_list[0], "fp8_weight_stacked"
     ):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], stacked=True, transpose=False
+            expert_weight_list[0], transpose=False
         )
     elif transpose is True and hasattr(
         expert_weight_list[0], "fp8_weight_stacked_transpose"
     ):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], stacked=True, transpose=True
+            expert_weight_list[0], transpose=True
         )
     elif transpose is True and hasattr(
         expert_weight_list[0], "fp8_weight_stacked"
     ):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], stacked=True, transpose=False
+            expert_weight_list[0], transpose=False
         )
     elif transpose is False and hasattr(
         expert_weight_list[0], "fp8_weight_stacked_transpose"
     ):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], stacked=True, transpose=True
+            expert_weight_list[0], transpose=True
         )
     else:
         w, scale = paddle.incubate.nn.functional.fused_stack_transpose_quant(
@@ -235,7 +212,7 @@ class ExpertsGroupGemmContiguousNode:
     def __init__(
         self,
         custom_map,
-        recompute_fwd_gate_up=False,
+        recompute_moe_gate_up=False,
         dequant_input=False,
         group=None,
         name="experts_group_gemm_contiguous_node",
@@ -249,7 +226,7 @@ class ExpertsGroupGemmContiguousNode:
 
         Args:
             custom_map (CustomMapping): Custom mapping for the model.
-            recompute_fwd_gate_up (bool, optional): Whether to recompute forward gate up. Defaults to False.
+            recompute_moe_gate_up (bool, optional): Whether to recompute forward gate up. Defaults to False.
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
         """
@@ -258,7 +235,7 @@ class ExpertsGroupGemmContiguousNode:
         else:
             self.experts = [custom_map.experts[expert_id]]
         self.expert_id = expert_id
-        self.recompute_fwd_gate_up = recompute_fwd_gate_up
+        self.recompute_moe_gate_up = recompute_moe_gate_up
         self.dequant_input = dequant_input
         self.tokens_per_expert = None
         self.m_indices = None
@@ -907,7 +884,7 @@ class ExpertsGroupGemmContiguousNode:
         o1 = self.fwd_gate_up(
             hs_out, expert_w1, num_expert, tokens_per_expert, scale=scale
         )
-        if not self.recompute_fwd_gate_up:
+        if not self.recompute_moe_gate_up:
             self.o1 = o1
             clear_o1 = False
         else:
@@ -1049,7 +1026,7 @@ class ExpertsGroupGemmContiguousNode:
         expert_w1 = [
             x.up_gate_proj.weight for x in self.experts if x is not None
         ]
-        if self.recompute_fwd_gate_up:
+        if self.recompute_moe_gate_up:
             o1 = self.fwd_gate_up(
                 None, expert_w1, len(expert_w1), self.tokens_per_expert
             )
@@ -1095,7 +1072,7 @@ class ExpertsGroupGemmContiguousNode:
             x.up_gate_proj.weight for x in self.experts if x is not None
         ]
 
-        if self.recompute_fwd_gate_up:
+        if self.recompute_moe_gate_up:
             o1 = self.fwd_gate_up(
                 None, expert_w1, len(expert_w1), self.tokens_per_expert
             )

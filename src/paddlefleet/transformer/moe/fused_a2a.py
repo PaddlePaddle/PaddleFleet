@@ -22,10 +22,19 @@ except ImportError:
     HAVE_DEEP_EP = False
 
 import paddle
+from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
 
+from .moe_utils import manual_backward
+
 _buffer = None
+
+
+def wait_for_deepep(group_id):
+    """wait_for_deepep"""
+    comm_event = deep_ep.get_event_from_comm_stream(group_id)
+    comm_event.calc_stream_wait(group_id)
 
 
 def get_hidden_bytes(x: paddle.Tensor) -> int:
@@ -226,8 +235,19 @@ class FusedDispatch(PyLayer):
         num_experts,
         group,
         previous_event=None,
+        fp8_dispatch: bool = False,
     ):
         """Forward pass of fused dispatch."""
+        if fp8_dispatch:
+            x_fp8, scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+                x,
+                quant_method="1x128",
+                input_transpose=False,
+                output_scale_transpose=True,
+                return_transpose_only=False,
+            )
+            scale = scale.T
+            x = (x_fp8, scale)
         recv_x, recv_token_probs, states, event = fused_dispatch_forward_func(
             x, token_indices, token_probs, num_experts, group, previous_event
         )
@@ -235,8 +255,11 @@ class FusedDispatch(PyLayer):
         ctx.group = group
         ctx.handle = states["handle"]
         ctx.event = event
-
-        return recv_x, recv_token_probs, states
+        ctx.set_grad_in_dtype_consistent(False)
+        if fp8_dispatch:
+            recv_x, scale = recv_x
+            return recv_x, recv_token_probs, states, {"scale": scale}
+        return recv_x, recv_token_probs, states, None
 
     @staticmethod
     def backward(ctx, grad_output, grad_token_probs):
@@ -270,6 +293,53 @@ class FusedCombine(PyLayer):
         )
 
 
+class FusedCombineAsync(PyLayer):
+    """FusedCombineAsync."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        group,
+        states,
+        *fn_args,
+        fn,
+        is_first_fwd=False,
+    ):
+        """Forward pass of fused combine."""
+        combined_x = fused_combine_forward_func(
+            x,
+            group,
+            states,
+            async_finish=True,
+        )
+
+        assert fn is not None, "use FusedCombineAsync async, but fn is None."
+        ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
+
+        ctx.handle = states["handle"]
+        ctx.group = group
+
+        wait_for_deepep(group.id)
+
+        return (combined_x,) + fn_out  # noqa: RUF005
+
+    @staticmethod
+    def backward(ctx, grad_output, *fn_out_grads):
+        """Backward pass of fused combine."""
+        grad_x = fused_combine_backward_func(
+            grad_output,
+            ctx.group,
+            ctx.handle,
+            async_finish=True,
+        )
+
+        fn_args_grads = ctx.bwf(*fn_out_grads)
+
+        wait_for_deepep(ctx.group.id)
+        return (grad_x,) + fn_args_grads  # noqa: RUF005
+
+
 if HAVE_DEEP_EP:
 
     def fused_dispatch(
@@ -279,6 +349,7 @@ if HAVE_DEEP_EP:
         num_experts,
         group: Group,
         previous_event=None,
+        fp8_dispatch: bool = False,
     ):
         """Perform fused dispatch operation if deep_ep is available.
 
@@ -300,9 +371,12 @@ if HAVE_DEEP_EP:
             num_experts,
             group,
             previous_event,
+            fp8_dispatch,
         )
 
-    def fused_combine(x, group, handle, previous_event=None):
+    def fused_combine(
+        x, group, handle, previous_event=None, combine_overlap_handle=None
+    ):
         """Perform fused combine operation if deep_ep is available.
 
         Args:
@@ -316,7 +390,24 @@ if HAVE_DEEP_EP:
         """
         states = {}
         states["handle"] = handle
-        return FusedCombine.apply(x, group, states, previous_event)
+        if combine_overlap_handle is None:
+            return FusedCombine.apply(x, group, states, previous_event)
+        else:
+            assert previous_event is None
+            assert isinstance(combine_overlap_handle, dict)
+            assert "fn" in combine_overlap_handle
+            assert "fn_args" in combine_overlap_handle
+            assert isinstance(combine_overlap_handle["fn_args"], tuple)
+            combined_x, *fn_out = FusedCombineAsync.apply(
+                x,
+                group,
+                states,
+                *(combine_overlap_handle["fn_args"]),
+                fn=combine_overlap_handle["fn"],
+                is_first_fwd=not framework._dygraph_tracer()._has_grad,
+            )
+            combine_overlap_handle["fn_out"] = fn_out
+            return combined_x
 
 else:
     fused_dispatch = None

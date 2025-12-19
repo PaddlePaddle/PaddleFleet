@@ -16,17 +16,20 @@
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor, nn
+from paddle.distributed.fleet.utils import recompute
 
-from paddlefleet import tensor_parallel
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import need_full_recompute
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
+from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.utils import log_single_rank
 
 if TYPE_CHECKING:
@@ -170,8 +173,6 @@ class TransformerLayer(nn.Layer):
         # [Layer 8: MLP block]
         additional_mlp_kwargs = {}
 
-        from paddlefleet.transformer.moe.moe_layer import MoELayer
-
         # MLP expects tp_group but MoELayer expects pg_collection to be passed in.
         # We can change MLP to accept pg_collection but it makes the logic implicit
         # The conditional below is to make the logic explicit
@@ -200,17 +201,24 @@ class TransformerLayer(nn.Layer):
         # [Layer 9: BiasDropoutFusion]
         self.mlp_bda = build_layer(sublayers_spec.mlp_bda)
 
+        self.full_recompute = False
         self.recompute_input_layernorm = False
         self.recompute_post_attention_layernorm = False
         self.recompute_mlp = False
-        if self.config.recompute_granularity == "selective":
-            if "layernorm" in self.config.recompute_layers:
+        if self.config.recompute_granularity == "full":
+            self.full_recompute = need_full_recompute(
+                self.layer_number, self.config
+            )
+        elif self.config.recompute_granularity == "selective":
+            if "norm" in self.config.recompute_modules:
+                if not isinstance(self.input_layernorm, IdentityOp):
+                    self.recompute_input_layernorm = True
+
                 if not isinstance(self.post_attention_layernorm, IdentityOp):
                     self.recompute_post_attention_layernorm = True
 
-            if "mlp" in self.config.recompute_layers:
-                if not isinstance(self.mlp, MoELayer):
-                    self.recompute_mlp = True
+            if "mlp" in self.config.recompute_modules:
+                self.recompute_mlp = True
 
     def forward(
         self,
@@ -226,13 +234,79 @@ class TransformerLayer(nn.Layer):
         # this is only used to uniquely identify decode and non-decode cuda graph
         # runners in the cuda graph manager
         dict_args.pop("dynamic_inference_decode_only", None)
-        hidden_states, context = self._forward_attention(**dict_args)
-        output = self._forward_mlp(hidden_states)
+        keys = tuple(dict_args.keys())
+        values = tuple(dict_args.values())
+
+        if self.full_recompute:
+            hidden_states = dict_args["hidden_states"]
+            attention_mask = dict_args.get("attention_mask", None)
+            attn_mask_startend_row_indices = dict_args.get(
+                "attn_mask_startend_row_indices", None
+            )
+            context = dict_args.get("context", None)
+            context_mask = dict_args.get("context_mask", None)
+            rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
+            attention_bias = dict_args.get("attention_bias", None)
+            packed_seq_params = dict_args.get("packed_seq_params", None)
+            outputs = recompute(
+                self._forward_impl,
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices.clone()  # Clone is necessary!
+                if attn_mask_startend_row_indices is not None
+                else None,
+                context=context,
+                context_mask=context_mask,
+                rotary_pos_emb=rotary_pos_emb.clone()  # Clone is necessary!
+                if rotary_pos_emb is not None
+                else None,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+            )
+        else:
+            outputs = self._forward_impl(**dict_args)
+
+        if isinstance(outputs, tuple):
+            output, context = outputs[0], outputs[1]
+        else:
+            output, context = outputs, None
+
+        rst = OrderedDict()
         rst = {"hidden_states": output}
         if context is not None:
             rst["context"] = context
         rst = {**dict_args, **rst}
         return rst
+
+    def _forward_impl(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
+    ):
+        hidden_states, context = self._forward_attention(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+            context=context,
+            context_mask=context_mask,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+        )
+        output = self._forward_mlp(hidden_states)
+        if context is not None:
+            return output, context
+        return output
 
     def _forward_attention(
         self,
@@ -242,6 +316,8 @@ class TransformerLayer(nn.Layer):
         context: Tensor | None = None,
         context_mask: Tensor | None = None,
         rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
     ):
@@ -256,6 +332,8 @@ class TransformerLayer(nn.Layer):
             context (Tensor | None): Context tensor for cross-attention.
             context_mask (Tensor | None): Mask tensor for cross-attention.
             rotary_pos_emb (Tensor | None): Rotary positional embeddings.
+            rotary_pos_cos (Tensor | None): Rotary embedding cosine.
+            rotary_pos_sin (Tensor | None): Rotary embedding sine.
             attention_bias (Tensor | None): Bias tensor for Q * K.T.
             packed_seq_params (object, optional): Parameters for packed sequence processing.
 
@@ -271,10 +349,7 @@ class TransformerLayer(nn.Layer):
 
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
-            self.input_layernorm_checkpoint = (
-                tensor_parallel.CheckpointWithoutOutput()
-            )
-            input_layernorm_output = self.input_layernorm_checkpoint.checkpoint(
+            input_layernorm_output = recompute(
                 self.input_layernorm, hidden_states
             )
         else:
@@ -286,16 +361,11 @@ class TransformerLayer(nn.Layer):
             attention_mask=attention_mask,
             attn_mask_startend_row_indices=attn_mask_startend_row_indices,
             rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
         )
-
-        if self.recompute_input_layernorm:
-            # discard the output of the input layernorm and register the recompute
-            # as a gradient hook of attention_output_with_bias[0]
-            self.input_layernorm_checkpoint.discard_output_and_register_recompute(
-                attention_output_with_bias[0]
-            )
 
         with paddle.enable_grad():
             hidden_states = self.self_attn_bda(
@@ -346,13 +416,8 @@ class TransformerLayer(nn.Layer):
 
         # Optional Layer norm post the cross-attention.
         if self.recompute_post_attention_layernorm:
-            self.pre_mlp_norm_checkpoint = (
-                tensor_parallel.CheckpointWithoutOutput()
-            )
-            post_attention_layernorm_output = (
-                self.pre_mlp_norm_checkpoint.checkpoint(
-                    self.post_attention_layernorm, hidden_states
-                )
+            post_attention_layernorm_output = recompute(
+                self.post_attention_layernorm, hidden_states
             )
         else:
             post_attention_layernorm_output = self.post_attention_layernorm(
@@ -360,18 +425,23 @@ class TransformerLayer(nn.Layer):
             )
 
         if self.recompute_mlp:
-            mlp_output_with_bias = tensor_parallel.checkpoint(
-                self.mlp, False, post_attention_layernorm_output
+
+            def recompute_handler(post_attention_layernorm_output):
+                mlp_output, bias = self.mlp(post_attention_layernorm_output)
+                if bias is None:
+                    return mlp_output
+                return mlp_output, bias
+
+            mlp_output_with_bias = recompute(
+                recompute_handler, post_attention_layernorm_output
             )
+            if not isinstance(mlp_output_with_bias, tuple):
+                mlp_output_with_bias = (
+                    mlp_output_with_bias,
+                    None,
+                )  # bias is None
         else:
             mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
-
-        if self.recompute_post_attention_layernorm:
-            # discard the output of the pre-mlp layernorm and register the recompute
-            # as a gradient hook of mlp_output_with_bias[0]
-            self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(
-                mlp_output_with_bias[0]
-            )
 
         with paddle.enable_grad():
             hidden_states = self.mlp_bda(
@@ -379,3 +449,14 @@ class TransformerLayer(nn.Layer):
             )(mlp_output_with_bias, residual, self.hidden_dropout_prob)
 
         return hidden_states
+
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+        if isinstance(self.mlp, MoELayer):
+            logger.info(f"fp8 quant weight for mlp {type(self.mlp)}")
+            self.mlp.fp8_quant_weight(
+                batch_mode=batch_mode, quant_transpose=quant_transpose
+            )
+
+    def use_fp8(self):
+        if isinstance(self.mlp, MoELayer):
+            return self.mlp.use_fp8()

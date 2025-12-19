@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+import paddle
+
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -89,6 +91,8 @@ class GPTEmbedding(FleetLayer):
 
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
+        rotary_pos_cos = None
+        rotary_pos_sin = None
 
         if self.rotary_pos_emb is not None:
             rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
@@ -99,6 +103,9 @@ class GPTEmbedding(FleetLayer):
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
             )
+            if self.config.apply_rope_fusion:
+                rotary_pos_cos = paddle.cos(rotary_pos_emb)
+                rotary_pos_sin = paddle.sin(rotary_pos_emb)
             if self.config.sequence_parallel:
                 rotary_pos_emb = rotary_pos_emb.transpose(
                     [1, 0, 2, 3]
@@ -109,6 +116,8 @@ class GPTEmbedding(FleetLayer):
             "attention_mask": attention_mask,
             "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "rotary_pos_emb": rotary_pos_emb,
+            "rotary_pos_cos": rotary_pos_cos,
+            "rotary_pos_sin": rotary_pos_sin,
         }
 
         for key in list(preproc_output.keys()):

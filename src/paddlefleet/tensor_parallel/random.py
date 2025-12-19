@@ -388,25 +388,9 @@ def _fork_rng():
         _set_all_rng_states(*current_states)
 
 
-class CheckpointFunction(paddle.autograd.Function):
-    # pylint: disable=missing-function-docstring
-    @staticmethod
-    def forward(ctx, run_function, distribute_saved_activations, *args):
-        """Forward pass."""
-        pass
-
-    # pylint: disable=missing-function-docstring
-    @staticmethod
-    def backward(ctx, *args):
-        """Backward pass."""
-        pass
-
-
-def checkpoint(function, distribute_saved_activations, *args):
+def checkpoint(function, *args, **kwargs):
     """Checkpoint a model or part of the model."""
-    return CheckpointFunction.apply(
-        function, distribute_saved_activations, *args
-    )
+    pass
 
 
 class CheckpointWithoutOutputFunction(paddle.autograd.Function):

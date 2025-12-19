@@ -490,6 +490,8 @@ class MultiTokenPredictionLayer(FleetLayer):
         context: paddle.Tensor | None = None,
         context_mask: paddle.Tensor | None = None,
         rotary_pos_emb: paddle.Tensor | None = None,
+        rotary_pos_cos: paddle.Tensor | None = None,
+        rotary_pos_sin: paddle.Tensor | None = None,
         attention_bias: paddle.Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
     ) -> paddle.Tensor:
@@ -512,6 +514,8 @@ class MultiTokenPredictionLayer(FleetLayer):
                 context=context,
                 context_mask=context_mask,
                 rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
             )
@@ -568,6 +572,8 @@ class MultiTokenPredictionLayer(FleetLayer):
         context: Tensor = None,
         context_mask: Tensor = None,
         rotary_pos_emb: Tensor = None,
+        rotary_pos_cos: Tensor = None,
+        rotary_pos_sin: Tensor = None,
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams = None,
         embedding=None,
@@ -585,6 +591,8 @@ class MultiTokenPredictionLayer(FleetLayer):
             context (Tensor, optional): Context tensor for cross-attention, if applicable.
             context_mask (Tensor, optional): Mask for cross-attention context, if applicable.
             rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
+            rotary_pos_cos (Tensor, optional): Cosine component of rotary positional embeddings.
+            rotary_pos_sin (Tensor, optional): Sine component of rotary positional embeddings.
             embedding (Callable): The embedding layer from gpt model to compute the decoder input.
 
         Returns:
@@ -616,6 +624,8 @@ class MultiTokenPredictionLayer(FleetLayer):
                 context=context,
                 context_mask=context_mask,
                 rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
             )
@@ -627,6 +637,8 @@ class MultiTokenPredictionLayer(FleetLayer):
                 context=context,
                 context_mask=context_mask,
                 rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
             )

@@ -16,7 +16,11 @@
 import paddle
 from paddle import Tensor
 
-from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
+from paddlefleet.context_parallel_utils import ContextParallelGatherOp
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+    get_tensor_model_parallel_world_size,
+)
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -51,6 +55,10 @@ class LanguageLoss(FleetLayer):
 
     def forward(self, logits: Tensor, labels: Tensor) -> Tensor:
         loss = self.loss_func(logits.cast("float32"), labels)
+
+        if get_context_parallel_world_size() > 1:
+            loss = ContextParallelGatherOp.apply(loss, axis=1)
+            labels = ContextParallelGatherOp.apply(labels, axis=1)
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():
