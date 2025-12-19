@@ -529,13 +529,13 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          git checkout 5b60fe01b74e84949957e4e1d6f45a7f1288eefd
           git pull --no-edit origin pull/3200/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
 
+          
       - name: GLM4.5 pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
