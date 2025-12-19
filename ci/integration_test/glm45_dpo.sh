@@ -46,6 +46,38 @@ jq '.num_hidden_layers = 4' \
     $config_json > ${config_json}.tmp
 mv ${config_json}.tmp $config_json
 
+
+python -c "
+infile = '/workspace/PaddleFormers/paddleformers/transformers/auto/modeling.py'
+outfile = infile + '.new'
+with open(infile) as fin, open(outfile, 'w') as fout:
+    lines = list(fin)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if (
+            line.strip() == 'model_class = getattr(import_class, init_class)' and
+            i + 1 < len(lines) and
+            lines[i + 1].strip() == 'return model_class'
+        ):
+            pad = line[:len(line) - len(line.lstrip())]
+            fout.write(pad + 'model_class = getattr(import_class, init_class + \"Fleet\")\n')
+            fout.write(lines[i + 1])
+            i += 2
+        elif (
+            line.strip() == 'model_class = getattr(import_class, init_class + \"Fleet\")' and
+            i + 1 < len(lines) and
+            lines[i + 1].strip() == 'return model_class'
+        ):
+            pad = line[:len(line) - len(line.lstrip())]
+            fout.write(pad + 'model_class = getattr(import_class, init_class)\n')
+            fout.write(lines[i + 1])
+            i += 2
+        else:
+            fout.write(line)
+            i += 1
+"
+
 rm -rf ./outputs
 rm -rf paddleformers_dist_log
 master=$(hostname -i)
@@ -55,5 +87,5 @@ export FLAGS_use_stride_compute_kernel=False
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 unset http_proxy https_proxy
-sleep 6h
+
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_dpo_yaml 2>&1 | tee ./glm45_dpo.log
