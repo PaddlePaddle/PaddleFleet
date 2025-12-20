@@ -358,6 +358,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git pull --no-edit origin pull/3263/head
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
@@ -371,7 +372,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/preprocess.sh
+          bash -x PaddleFormers/tests/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mPreprocess failed.\033[0m"
