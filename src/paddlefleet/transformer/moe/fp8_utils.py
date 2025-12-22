@@ -19,7 +19,10 @@ import numpy
 import paddle
 import paddle.nn.functional as F
 
-from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
+try:
+    from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
+except (ImportError, RuntimeError):
+    pass
 
 try:
     from paddle.nn.functional import swiglu

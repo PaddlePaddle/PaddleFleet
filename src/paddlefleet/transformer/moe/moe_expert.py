@@ -19,11 +19,15 @@ import paddle
 import paddle.nn.functional as F
 
 from paddlefleet import utils
-from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+try:
+    from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
+except (ImportError, RuntimeError):
+    pass
 
 
 class BMMFunction(paddle.autograd.PyLayer):
