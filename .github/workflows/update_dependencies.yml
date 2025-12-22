@@ -49,7 +49,7 @@ jobs:
               apt-get install -y curl git && \
               git config --global --add safe.directory /work && \
               curl -LsSf https://astral.sh/uv/install.sh | sh && \
-              export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:/usr/local/cuda-12.9/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
+              export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:/usr/local/cuda-12.9/targets/x86_64-linux/lib:$LD_LIBRARY_PATH  && \
               /root/.local/bin/uv lock --upgrade --link-mode hardlink --no-cache -v && \
               chown $(id -u):$(id -g) uv.lock
             "
