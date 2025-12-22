@@ -105,5 +105,71 @@ class TestDeepEPImport(unittest.TestCase):
             from paddlefleet.ops.deep_ep import xxxx  # noqa: F401
 
 
+class TestSM80ImportError(unittest.TestCase):
+    # patch is_deep_gemm_or_deep_ep_available return False to simulate SM < 9.0 before import paddlefleet
+    def setUp(self):
+        import unittest.mock
+
+        if "paddlefleet.ops" in sys.modules:
+            del sys.modules["paddlefleet.ops"]
+
+        self.patcher = unittest.mock.patch(
+            "paddle.cuda.get_device_capability", return_value=(8, 0)
+        )
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        # Clean up sys.meta_path
+        sys.meta_path = [
+            x
+            for x in sys.meta_path
+            if x.__class__.__name__ != "HardwareIncompatibleBlocker"
+        ]
+
+        if "paddlefleet.ops" in sys.modules:
+            del sys.modules["paddlefleet.ops"]
+
+    def test_deep_gemm_import_error(self):
+        import paddlefleet.ops
+
+        with self.assertRaises(RuntimeError) as cm:
+            from paddlefleet.ops import deep_gemm  # noqa: F401
+        self.assertIn(
+            "Cannot access 'paddlefleet.ops.deep_gemm'", str(cm.exception)
+        )
+        with self.assertRaises(RuntimeError) as cm:
+            from paddlefleet.ops.deep_gemm import cublaslt_gemm_tn  # noqa: F401
+        self.assertIn(
+            "Blocking import of 'paddlefleet.ops.deep_gemm'", str(cm.exception)
+        )
+        with self.assertRaises(RuntimeError) as cm:
+            print(paddlefleet.ops.deep_gemm.cublaslt_gemm_tn)
+        self.assertIn(
+            "Cannot access 'paddlefleet.ops.deep_gemm'", str(cm.exception)
+        )
+
+    def test_deep_ep_import_error(self):
+        import paddlefleet.ops
+
+        with self.assertRaises(RuntimeError) as cm:
+            from paddlefleet.ops import deep_ep  # noqa: F401
+        self.assertIn(
+            "Cannot access 'paddlefleet.ops.deep_ep'", str(cm.exception)
+        )
+
+        with self.assertRaises(RuntimeError) as cm:
+            from paddlefleet.ops.deep_ep import Buffer  # noqa: F401
+        self.assertIn(
+            "Blocking import of 'paddlefleet.ops.deep_ep'", str(cm.exception)
+        )
+
+        with self.assertRaises(RuntimeError) as cm:
+            print(paddlefleet.ops.deep_ep.Buffer)
+        self.assertIn(
+            "Cannot access 'paddlefleet.ops.deep_ep'", str(cm.exception)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

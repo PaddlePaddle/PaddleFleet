@@ -41,6 +41,7 @@ paddle.compat.enable_torch_proxy(scope={"deep_gemm", "triton", "deep_ep"})
 # Note: Ensure that any torch APIs used in 'new_module' are already implemented in Paddle.
 
 logger = logging.getLogger(__name__)
+_device_capability = paddle.cuda.get_device_capability()
 
 
 def is_deep_gemm_or_deep_ep_available():
@@ -68,7 +69,7 @@ def _try_load_nvshmem(ops_dir: Path):
 def _safe_load_ecosystem_lib(
     lib_name: str, ops_dir: Path, module_globals: dict[str, Any]
 ):
-    with ModuleContext([lib_name], ops_dir):
+    with ModuleContext(lib_name, ops_dir):
         try:
             module = importlib.import_module(lib_name)
             patch_module_namespace(lib_name, "paddlefleet.ops.")
@@ -89,8 +90,19 @@ if is_deep_gemm_or_deep_ep_available():
     _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
     _safe_load_ecosystem_lib("deep_ep", ops_dir, globals())
 else:
-    capability = paddle.cuda.get_device_capability()
-    sys.meta_path.insert(0, HardwareIncompatibleBlocker(capability))
+    # Explicit error message when `import paddlefleet.ops.deep_gemm` and `from paddlefleet.ops.deep_gemm import xxx`
+    sys.meta_path.insert(0, HardwareIncompatibleBlocker(_device_capability))
     logger.warning(
-        f"The capability for your device is {capability[0]}.{capability[1]}, which is less than 9.0. Please don't call anything in 'paddle.ops.deep_gemm' and 'paddle.ops.deep_op' which is unsupported in your device"
+        f"The capability for your device is {_device_capability[0]}.{_device_capability[1]}, which is less than 9.0. Please don't call anything in 'paddle.ops.deep_gemm' and 'paddle.ops.deep_op' which is unsupported in your device"
     )
+
+
+# Explicit error message when call `paddlefleet.ops.deep_gemm` and `from paddlefleet.ops import deep_gemm`
+def __getattr__(name):
+    if name in ["deep_gemm", "deep_ep"]:
+        if _device_capability[0] < 9:
+            raise RuntimeError(
+                f"Cannot access 'paddlefleet.ops.{name}'. "
+                f"Your GPU capability {_device_capability[0]}.{_device_capability[1]} < 9.0."
+            )
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

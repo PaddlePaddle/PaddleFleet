@@ -51,6 +51,10 @@ def import_custom_ops(package, module_name, global_ns):
         )
 
 
+def _is_specific_module_or_its_submodule(name: str, module: str) -> bool:
+    return name == module or name.startswith(f"{module}.")
+
+
 class ModuleContext:
     """
     Manages the context for loading a module, including:
@@ -59,17 +63,16 @@ class ModuleContext:
     3. Restoring stashed modules upon exit.
     """
 
-    def __init__(self, module_names: list[str], path: Path):
-        self.module_names = module_names
+    def __init__(self, module_name: str, path: Path):
+        self.module_name = module_name
         self.path = str(path)
         self._stash: dict[str, types.ModuleType] = {}
 
     def _stash_modules(self):
         """Moves modules matching module_name from sys.modules to stash."""
         for name in list(sys.modules.keys()):
-            for module_name in self.module_names:
-                if name == module_name or name.startswith(module_name + "."):
-                    self._stash[name] = sys.modules.pop(name)
+            if _is_specific_module_or_its_submodule(name, self.module_name):
+                self._stash[name] = sys.modules.pop(name)
 
     def _restore_modules(self):
         """Restores stashed modules to sys.modules."""
@@ -93,7 +96,7 @@ def patch_module_namespace(source_name: str, target_prefix: str):
     Effectively 'installs' the module into the new namespace.
     """
     for name in list(sys.modules.keys()):
-        if name == source_name or name.startswith(source_name + "."):
+        if _is_specific_module_or_its_submodule(name, source_name):
             module = sys.modules.pop(name)
             new_name = target_prefix + name
             sys.modules[new_name] = module
