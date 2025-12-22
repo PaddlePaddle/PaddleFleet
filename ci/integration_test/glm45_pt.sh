@@ -15,6 +15,10 @@
 set -exo pipefail
 export root_dir=$(pwd)
 
+cd $root_dir/PaddleFormers
+git pull --no-edit origin pull/3200/head
+cd -
+
 source PaddleFleet/.venv/bin/activate
 
 wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12-18.tar --no-check-certificate
@@ -25,6 +29,10 @@ export cur_dir=$(pwd)
 config_yaml=$cur_dir/glm45_pt.yaml
 
 yq eval '.moe_router_force_load_balancing = true
+    | .num_hidden_layers = 3
+    | .apply_rope_fusion = true
+    | .moe_router_fusion = true
+    | .router_aux_loss_coef = 0.001
     | .expert_model_parallel_size = 8
     | .gradient_accumulation_steps = 1
     | .moe_token_dispatcher_type = "deepep"
@@ -64,7 +72,7 @@ unset http_proxy https_proxy
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_yaml 2>&1 | tee ./glm45_pt.log
 
 echo "
-10 11.70277214
+10 11.72221279
 " > ./glm45_pt_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
