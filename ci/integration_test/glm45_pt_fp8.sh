@@ -64,7 +64,7 @@ if [ $exit_code -ne 0 ]; then
        echo "Failed to find 'Training completed' in log file."
        exit 1
    else 
-       echo "found Training completed in log file."
+       echo "Log check passed."
    fi
 fi
 
