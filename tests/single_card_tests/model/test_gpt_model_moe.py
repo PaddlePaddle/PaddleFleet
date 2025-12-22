@@ -114,7 +114,7 @@ class TestGPTModel(unittest.TestCase):
             output_layer_init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
-            share_embeddings_and_output_weights=True,
+            tie_word_embeddings=True,
             use_qk_norm=True,
         )
         self.gpt_model = gpt_builder(config, num_stages=1)

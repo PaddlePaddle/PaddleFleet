@@ -146,7 +146,7 @@ if __name__ == "__main__":
         context_parallel_size=8,
         sequence_parallel=False,
         parallel_output=True,
-        share_embeddings_and_output_weights=True,
+        tie_word_embeddings=True,
         position_embedding_type="rope",
         rotary_percent=1.0,
         rotary_base=10000,
