@@ -16,13 +16,10 @@
 ci.integration_test.check_log_for_exitcode
 """
 
-import re
 import sys
 
 
-def check_tests(
-    log_path: str, check_string="Training completed"
-) -> bool:
+def check_tests(log_path: str, check_string="Training completed") -> bool:
     with open(log_path, "r", encoding="utf-8") as log_file:
         for line in log_file:
             if check_string in line:

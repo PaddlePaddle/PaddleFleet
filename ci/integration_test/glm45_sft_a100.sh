@@ -96,5 +96,3 @@ if [ $lora_exit_code -ne 0 ]; then
 else
     echo "LORA Test passed."
 fi
-
-
