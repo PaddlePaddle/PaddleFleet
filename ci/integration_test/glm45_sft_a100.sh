@@ -67,14 +67,15 @@ sft_exit_code=$?
 if [ $sft_exit_code -ne 0 ]; then
    echo "GLM4.5 multi-cards training failed, try to check the log file"
    python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_sft.log
-   check_exit_code=$?
+   sft_check_exit_code=$?
    if [ $sft_check_exit_code -ne 0 ]; then
      echo "Failed to find 'Training completed' in log file."
      exit 1
    else
      echo "Log check passed."
-     exit 0
    fi
+else
+   echo "SFT Test passed."
 fi
 
 echo -e "\033[34msft is over, lora is about to start\033[0m"
@@ -86,13 +87,14 @@ if [ $lora_exit_code -ne 0 ]; then
    echo "GLM4.5 multi-cards training failed, try to check the log file"
    python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_lora.log
    lora_check_exit_code=$?
-   if [ $check_exit_code -ne 0 ]; then
+   if [ $lora_check_exit_code -ne 0 ]; then
      echo "Failed to find 'Training completed' in log file."
      exit 1
    else
      echo "Log check passed."
-     exit 0
    fi
+else
+    echo "LORA Test passed."
 fi
 
 

@@ -73,8 +73,9 @@ if [ $exit_code -ne 0 ]; then
      exit 1
    else
      echo "Log check passed."
-     exit 0
    fi
+else
+    echo "Test passed."
 fi
 
 echo "
