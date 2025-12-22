@@ -33,6 +33,9 @@ yq eval '.moe_router_force_load_balancing = true
     | .expert_model_parallel_size = 1
     | .gated_linear_unit = true
     | .num_hidden_layers = 2
+    | .apply_rope_fusion = true
+    | .moe_router_fusion = true
+    | .router_aux_loss_coef = 0.001
     | .gradient_accumulation_steps = 1
     | .per_device_train_batch_size = 1
     | .use_expert_parallel = false
@@ -66,3 +69,13 @@ unset http_proxy https_proxy
 #    --output_dir ./checkpoint | tee ./glm45_a100.log
 
 FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $config_yaml 2>&1 | tee ./glm45_pt_a100.log
+
+
+echo "
+10 11.70277214
+" > ./glm45_pt_multi_card_gt_loss.txt
+
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --compare_step 10 \
+   --log_file ./glm45_pt_a100.log \
+   --gt_file ./glm45_pt_multi_card_gt_loss.txt

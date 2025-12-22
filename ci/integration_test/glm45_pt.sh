@@ -30,6 +30,9 @@ config_yaml=$cur_dir/glm45_pt.yaml
 
 yq eval '.moe_router_force_load_balancing = true
     | .num_hidden_layers = 3
+    | .apply_rope_fusion = true
+    | .moe_router_fusion = true
+    | .router_aux_loss_coef = 0.001
     | .expert_model_parallel_size = 8
     | .gradient_accumulation_steps = 1
     | .moe_token_dispatcher_type = "deepep"
