@@ -15,6 +15,10 @@
 set -exo pipefail
 export root_dir=$(pwd)
 
+cd $root_dir/PaddleFormers
+git pull --no-edit origin pull/3200/head
+cd -
+
 source PaddleFleet/.venv/bin/activate
 
 wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12-18.tar --no-check-certificate
@@ -26,10 +30,15 @@ config_yaml=$cur_dir/glm45_pt.yaml
 # config_json=${cur_dir}/GLM-4.5-Air/config.json
 
 yq eval '.moe_router_force_load_balancing = true
+    | .moe_token_dispatcher_type = "deepep"
     | .expert_model_parallel_size = 1
     | .gated_linear_unit = true
+    | .num_hidden_layers = 2
+    | .apply_rope_fusion = true
+    | .moe_router_fusion = true
     | .gradient_accumulation_steps = 1
     | .per_device_train_batch_size = 1
+    | .router_aux_loss_coef = 0.001
     | .use_expert_parallel = false
     | .train_dataset_path = strenv(cur_dir) + "/data/pre-training/train.jsonl"
     | .eval_dataset_path = strenv(cur_dir) + "/data/pre-training/eval.jsonl"
