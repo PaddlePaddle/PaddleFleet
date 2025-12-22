@@ -106,12 +106,16 @@ class TestDeepEPImport(unittest.TestCase):
 
 
 class TestSM80ImportError(unittest.TestCase):
-    # patch is_deep_gemm_or_deep_ep_available return False to simulate SM < 9.0 before import paddlefleet
+    # Patch paddle.cuda.get_device_capability to return (8, 0) to simulate SM 8.0 (< 9.0) before import paddlefleet
     def setUp(self):
         import unittest.mock
 
-        if "paddlefleet.ops" in sys.modules:
-            del sys.modules["paddlefleet.ops"]
+        # Clean up paddlefleet.ops and its submodules to ensure clean import
+        for mod_name in list(sys.modules.keys()):
+            if mod_name == "paddlefleet.ops" or mod_name.startswith(
+                "paddlefleet.ops."
+            ):
+                del sys.modules[mod_name]
 
         self.patcher = unittest.mock.patch(
             "paddle.cuda.get_device_capability", return_value=(8, 0)
@@ -120,15 +124,19 @@ class TestSM80ImportError(unittest.TestCase):
 
     def tearDown(self):
         self.patcher.stop()
-        # Clean up sys.meta_path
+        # Clean up sys.meta_path to remove HardwareIncompatibleBlocker
         sys.meta_path = [
             x
             for x in sys.meta_path
             if x.__class__.__name__ != "HardwareIncompatibleBlocker"
         ]
 
-        if "paddlefleet.ops" in sys.modules:
-            del sys.modules["paddlefleet.ops"]
+        # Clean up modules again
+        for mod_name in list(sys.modules.keys()):
+            if mod_name == "paddlefleet.ops" or mod_name.startswith(
+                "paddlefleet.ops."
+            ):
+                del sys.modules[mod_name]
 
     def test_deep_gemm_import_error(self):
         import paddlefleet.ops
