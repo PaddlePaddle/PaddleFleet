@@ -1,3 +1,6 @@
 [submodule "third_party/DeepGEMM"]
 	path = third_party/DeepGEMM
 	url = https://github.com/PFCCLab/DeepGEMM.git
+[submodule "third_party/DeepEP"]
+	path = third_party/DeepEP
+	url = https://github.com/PFCCLab/DeepEP.git
