@@ -64,22 +64,22 @@ class GPTModel(PipelineLayer):
         **kwargs,
     ) -> None:
         self.config = kwargs["config"]
-        share_embeddings_and_output_weights = (
-            kwargs["share_embeddings_and_output_weights"]
+        tie_word_embeddings = (
+            kwargs["tie_word_embeddings"]
             and self.config.pipeline_model_parallel_size > 1
         )
         skip_weight_param_allocation = (
-            self.config.share_embeddings_and_output_weights
+            self.config.tie_word_embeddings
             and self.config.pipeline_model_parallel_size == 1
         )
         self._pipeline_name_mapping = None
         self._pp_to_single_mapping = None
         self._sequential_layers = self.get_layer_desc_list(
             sublayers_spec,
-            share_embeddings_and_output_weights,
+            tie_word_embeddings,
         )
         self.layers = self.get_sequential_layers()
-        del kwargs["share_embeddings_and_output_weights"]
+        del kwargs["tie_word_embeddings"]
         del kwargs["config"]
 
         topology = (
@@ -103,9 +103,9 @@ class GPTModel(PipelineLayer):
                 if isinstance(layer, GPTLMHead):
                     layer.weight = shared_embed_weight
 
-    def get_layer_desc_list(self, spec, share_embeddings_and_output_weights):
+    def get_layer_desc_list(self, spec, tie_word_embeddings):
         layers = []
-        if share_embeddings_and_output_weights:
+        if tie_word_embeddings:
             self.add_sequential_layer(
                 layers,
                 SharedLayerDesc(
@@ -144,7 +144,7 @@ class GPTModel(PipelineLayer):
                 )
                 i += 1
 
-        if share_embeddings_and_output_weights:
+        if tie_word_embeddings:
             self.add_sequential_layer(
                 layers,
                 SharedLayerDesc(
