@@ -177,9 +177,7 @@ class LLaVAModel(FleetLayer):
 
         # This attribute is needed to check if an all-reduce is required
         # on the word embeddings inside `finalize_model_grads._allreduce_word_embedding_grads`.
-        self.tie_word_embeddings = (
-            tie_word_embeddings
-        )
+        self.tie_word_embeddings = tie_word_embeddings
 
         if self.add_decoder:
             if getattr(

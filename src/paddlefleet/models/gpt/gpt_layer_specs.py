@@ -311,8 +311,7 @@ def get_gpt_spec(
     }
 
     skip_weight_param_allocation = (
-        config.tie_word_embeddings
-        and config.pipeline_model_parallel_size == 1
+        config.tie_word_embeddings and config.pipeline_model_parallel_size == 1
     )
 
     language_embedding_spec = LayerSpec(layer=LanguageModelEmbedding)
