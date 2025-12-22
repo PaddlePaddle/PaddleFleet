@@ -93,7 +93,7 @@ else:
     # Explicit error message when `import paddlefleet.ops.deep_gemm` and `from paddlefleet.ops.deep_gemm import xxx`
     sys.meta_path.insert(0, HardwareIncompatibleBlocker(_device_capability))
     logger.warning(
-        f"The capability for your device is {_device_capability[0]}.{_device_capability[1]}, which is less than 9.0. Please don't call anything in 'paddle.ops.deep_gemm' and 'paddle.ops.deep_op' which is unsupported in your device"
+        f"The capability for your device is {_device_capability[0]}.{_device_capability[1]}, which is less than 9.0. Please don't call anything in 'paddlefleet.ops.deep_gemm' and 'paddlefleet.ops.deep_ep' which is unsupported in your device"
     )
 
 
