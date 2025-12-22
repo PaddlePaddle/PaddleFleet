@@ -1,0 +1,60 @@
+name: Auto Update uv.lock
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 16 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-lockfile:
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get current date
+        id: date
+        run: echo "TODAY=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      - name: Run uv lock --upgrade in Docker
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/work" \
+            -w /work \
+            nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04 \
+            /bin/bash -c "
+              apt-get update && \
+              apt-get install -y curl && \
+              curl -LsSf https://astral.sh/uv/install.sh | sh && \
+              /root/.local/bin/uv lock --upgrade && \
+              chown $(id -u):$(id -g) uv.lock
+            "
+
+      - name: Create Bump PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          author: "ooooo <3164076421@qq.com>"
+          committer: "ooooo <3164076421@qq.com>"
+          branch: chore/upgrade-uv-lock-${{ env.TODAY }}
+          delete-branch: true
+
+          commit-message: "chore 🤖: Bump `uv.lock` (${{ env.TODAY }})"
+
+          title: "chore 🤖: Bump `uv.lock` (${{ env.TODAY }})"
+
+          body: |
+            🚀 PR to bump `uv.lock` dependencies.
+            📅 Created on: **${{ env.TODAY }}**
+
+            🙏 Please close and reopen this PR to trigger CI
+
+            ---
+            Triggered by @${{ github.actor }}
+
+          reviewers: ooooo-create
