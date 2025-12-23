@@ -114,8 +114,7 @@ jobs:
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           export UV_HTTP_TIMEOUT=300
-          # uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
-          uv pip install https://paddle-github-action.cdn.bcebos.com/PR/h-coverage/77041/2060547ef158a38f51c847319869ce0f3eea2477/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/single_card_test.sh
@@ -228,8 +227,7 @@ jobs:
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           export UV_HTTP_TIMEOUT=300
-          # uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
-          uv pip install https://paddle-github-action.cdn.bcebos.com/PR/h-coverage/77041/2060547ef158a38f51c847319869ce0f3eea2477/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/multi-card_test.sh
@@ -238,7 +236,6 @@ jobs:
           uv run coverage combine
           uv run coverage xml -o /paddle/coveragedata/coverage.xml
           uv run coverage report -m
-
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed.\033[0m"
             exit 1
@@ -344,7 +341,7 @@ jobs:
           git submodule update --init --recursive
           uv sync --group ci -v > /dev/null
           export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          # uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -365,7 +362,6 @@ jobs:
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
-          uv pip install https://paddle-github-action.cdn.bcebos.com/PR/h-coverage/77041/2060547ef158a38f51c847319869ce0f3eea2477/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -514,7 +510,7 @@ jobs:
           git submodule update --init --recursive
           uv sync --group ci -v > /dev/null
           export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          # uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -534,7 +530,6 @@ jobs:
           git log -1
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
-          uv pip install https://paddle-github-action.cdn.bcebos.com/PR/h-coverage/77041/2060547ef158a38f51c847319869ce0f3eea2477/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -696,7 +691,7 @@ jobs:
           git submodule update --init --recursive
           uv sync --group ci > /dev/null
           export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          # uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          uv pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -714,7 +709,6 @@ jobs:
           git log -1
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
-          uv pip install https://paddle-github-action.cdn.bcebos.com/PR/h-coverage/77041/2060547ef158a38f51c847319869ce0f3eea2477/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           python -c "import paddle; print(paddle.version.commit)"
           '
 

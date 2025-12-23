@@ -74,7 +74,7 @@ unset http_proxy https_proxy
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_yaml 2>&1 | tee ./glm45_pt.log
 
 echo "
-10 12.66259193
+10 12.66192627
 " > ./glm45_pt_multi_card_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
