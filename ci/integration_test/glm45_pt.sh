@@ -16,6 +16,7 @@ set -exo pipefail
 export root_dir=$(pwd)
 
 cd $root_dir/PaddleFormers
+git checkout 2acea4f6be03d1aca1b1f479d964be8eb9b3c225
 git pull --no-edit origin pull/3200/head
 cd -
 
