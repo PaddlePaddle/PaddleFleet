@@ -365,6 +365,7 @@ jobs:
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           source ../PaddleFleet/.venv/bin/activate
+          sed -i "s/paddlefleet >= 0.0.1.dev ; platform_system == 'Linux' and platform_machine == 'x86_64'//g" requirements.txt
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -534,6 +535,7 @@ jobs:
           git config pull.rebase false
           git log -1
           source ../PaddleFleet/.venv/bin/activate
+          sed -i "s/paddlefleet >= 0.0.1.dev ; platform_system == 'Linux' and platform_machine == 'x86_64'//g" requirements.txt
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -714,6 +716,7 @@ jobs:
           git config pull.rebase false
           git log -1
           source ../PaddleFleet/.venv/bin/activate
+          sed -i "s/paddlefleet >= 0.0.1.dev ; platform_system == 'Linux' and platform_machine == 'x86_64'//g" requirements.txt
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
