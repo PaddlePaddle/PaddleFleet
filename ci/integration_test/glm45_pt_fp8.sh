@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -xo pipefail
+set -exo pipefail
 
 source PaddleFleet/.venv/bin/activate
 
@@ -46,6 +46,8 @@ export FLAGS_use_stride_compute_kernel=False
 unset http_proxy https_proxy
 rm -rf checkpoint/
 rm -rf outputs/
+
+set +e
 coverage run -m paddle.distributed.launch \
    --log_dir ./log \
    --master $master:$port \
@@ -70,7 +72,7 @@ else
    echo "Test passed."
 fi
 
-
+set -e
 echo "
 20 10.30010414
 " > ./glm45_multi_cards_fp8_gt_loss.txt

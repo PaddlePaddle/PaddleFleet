@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -xo pipefail
+set -exo pipefail
 export root_dir=$(pwd)
 
 cd $root_dir/PaddleFormers
@@ -69,6 +69,8 @@ unset http_proxy https_proxy
 #    run_pretrain.py $config_json \
 #    --output_dir ./checkpoint 2>&1 | tee ./glm45.log
 
+
+set +e
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_yaml 2>&1 | tee ./glm45_pt.log
 
 exit_code=$?
@@ -86,6 +88,8 @@ else
     echo "Test passed."
 fi
 
+
+set -e
 echo "
 10 12.66259193
 " > ./glm45_pt_multi_card_gt_loss.txt

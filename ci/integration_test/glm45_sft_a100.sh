@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -xo pipefail
+set -exo pipefail
 export root_dir=$(pwd)
 
 cd $root_dir/PaddleFormers
@@ -61,6 +61,8 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 unset http_proxy https_proxy
 
+
+set +e
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_sft_yaml 2>&1 | tee ./glm45_sft.log
 
 sft_exit_code=$?

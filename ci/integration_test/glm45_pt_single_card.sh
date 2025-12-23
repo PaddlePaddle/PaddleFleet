@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -xo pipefail
+set -exo pipefail
 
 source PaddleFleet/.venv/bin/activate
 
@@ -38,6 +38,8 @@ export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 export FLAGS_use_stride_compute_kernel=False
 unset http_proxy https_proxy
+
+set +e
 coverage run run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
 
 exit_code=$?
@@ -56,7 +58,7 @@ else
 fi
 
 
-
+set -e
 echo "
 1 12.10431099
 2 12.05330086
