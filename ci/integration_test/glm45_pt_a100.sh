@@ -71,15 +71,6 @@ unset http_proxy https_proxy
 FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $config_yaml 2>&1 | tee ./glm45_pt_a100.log
 
 
-echo "
-10 12.65496635
-" > ./glm45_pt_multi_card_gt_loss.txt
-
-python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
-   --compare_step 10 \
-   --log_file ./glm45_pt_a100.log \
-   --gt_file ./glm45_pt_multi_card_gt_loss.txt
-
 exit_code=$?
 
 if [ $exit_code -ne 0 ]; then
@@ -95,3 +86,13 @@ if [ $exit_code -ne 0 ]; then
 else
     echo "Test passed."
 fi
+
+
+echo "
+10 12.65496635
+" > ./glm45_pt_multi_card_gt_loss.txt
+
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --compare_step 10 \
+   --log_file ./glm45_pt_a100.log \
+   --gt_file ./glm45_pt_multi_card_gt_loss.txt
