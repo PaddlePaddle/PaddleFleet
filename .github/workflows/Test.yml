@@ -340,6 +340,7 @@ jobs:
           pip install --upgrade pip
           echo "Install uv"
           pip install uv
+          sed -i "s/\"paddlepaddle-gpu>=3.3.0.dev\",//g" pyproject.toml
           echo "uv sync"
           git submodule update --init --recursive
           uv sync --group ci -v > /dev/null
@@ -365,7 +366,6 @@ jobs:
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           source ../PaddleFleet/.venv/bin/activate
-          sed -i "s/paddlefleet >= 0.0.1.dev ; platform_system == 'Linux' and platform_machine == 'x86_64'//g" requirements.txt
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -511,6 +511,7 @@ jobs:
           pip install --upgrade pip
           echo "Install uv"
           pip install uv
+          sed -i "s/\"paddlepaddle-gpu>=3.3.0.dev\",//g" pyproject.toml
           echo "uv sync"
           git submodule update --init --recursive
           uv sync --group ci -v > /dev/null
@@ -535,7 +536,6 @@ jobs:
           git config pull.rebase false
           git log -1
           source ../PaddleFleet/.venv/bin/activate
-          sed -i "s/paddlefleet >= 0.0.1.dev ; platform_system == 'Linux' and platform_machine == 'x86_64'//g" requirements.txt
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -694,6 +694,7 @@ jobs:
           pip install --upgrade pip
           echo "Install uv"
           pip install uv
+          sed -i "s/\"paddlepaddle-gpu>=3.3.0.dev\",//g" pyproject.toml
           echo "uv sync"
           git submodule update --init --recursive
           uv sync --group ci > /dev/null
@@ -716,7 +717,6 @@ jobs:
           git config pull.rebase false
           git log -1
           source ../PaddleFleet/.venv/bin/activate
-          sed -i "s/paddlefleet >= 0.0.1.dev ; platform_system == 'Linux' and platform_machine == 'x86_64'//g" requirements.txt
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
