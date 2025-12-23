@@ -16,7 +16,6 @@ set -exo pipefail
 export root_dir=$(pwd)
 
 cd $root_dir/PaddleFormers
-git checkout 2acea4f6be03d1aca1b1f479d964be8eb9b3c225
 git pull --no-edit origin pull/3200/head
 cd -
 
@@ -29,7 +28,9 @@ export cur_dir=$(pwd)
 
 config_yaml=$cur_dir/glm45_pt.yaml
 
-yq eval '.moe_router_force_load_balancing = true
+yq eval 'del(.sharding_parallel_config)
+    | .split_param = true
+    |.moe_router_force_load_balancing = true
     | .num_hidden_layers = 3
     | .apply_rope_fusion = true
     | .moe_router_fusion = true
