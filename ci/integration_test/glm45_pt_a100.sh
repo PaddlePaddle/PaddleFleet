@@ -29,7 +29,9 @@ export cur_dir=$(pwd)
 config_yaml=$cur_dir/glm45_pt.yaml
 # config_json=${cur_dir}/GLM-4.5-Air/config.json
 
-yq eval '.moe_router_force_load_balancing = true
+yq eval 'del(.sharding_parallel_config)
+    | .split_param = true
+    |.moe_router_force_load_balancing = true
     | .expert_model_parallel_size = 1
     | .gated_linear_unit = true
     | .num_hidden_layers = 2

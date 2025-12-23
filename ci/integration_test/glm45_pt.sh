@@ -28,7 +28,9 @@ export cur_dir=$(pwd)
 
 config_yaml=$cur_dir/glm45_pt.yaml
 
-yq eval '.moe_router_force_load_balancing = true
+yq eval 'del(.sharding_parallel_config)
+    | .split_param = true
+    | .moe_router_force_load_balancing = true
     | .num_hidden_layers = 3
     | .apply_rope_fusion = true
     | .moe_router_fusion = true
