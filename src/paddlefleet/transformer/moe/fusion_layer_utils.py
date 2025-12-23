@@ -237,11 +237,9 @@ class MlpNode:
         num_experts_per_tok,
         recompute_moe_gate_up=False,
         dequant_input=False,
-        moe_expert_fusion=False,
+        moe_expert_fusion=True,
         recompute_moe_premute=False,
-        tokens_zip_unique_add_subbatch_rows=None,
-        use_forward_subbatch=False,
-        backward_subbatch_rows=None,
+        moe_subbatch_token_num_after_dispatch=None,
         use_bf16_gemm_weight_grad=False,
         use_fp8_mlp=True,
     ):
@@ -252,8 +250,8 @@ class MlpNode:
         self.moe_expert_fusion = moe_expert_fusion
         self.experts = custom_map.experts
         if recompute_moe_premute:
-            assert moe_expert_fusion, (
-                "moe_expert_fusion must be enabled when recompute_moe_premute = True"
+            assert not moe_expert_fusion, (
+                "moe_expert_fusion must be disabled when recompute_unzipped = True"
             )
             assert recompute_moe_gate_up, (
                 "recompute_moe_gate_up must be enabled when recompute_moe_premute = True"
@@ -263,51 +261,35 @@ class MlpNode:
             )
         self.recompute_moe_premute = recompute_moe_premute
 
-        self.use_forward_subbatch = use_forward_subbatch
-        self.tokens_zip_unique_add_subbatch_rows = (
-            tokens_zip_unique_add_subbatch_rows
+        self.moe_subbatch_token_num_after_dispatch = (
+            moe_subbatch_token_num_after_dispatch
         )
-        if (
-            self.tokens_zip_unique_add_subbatch_rows is not None
-            and self.tokens_zip_unique_add_subbatch_rows > 0
-        ):
-            assert self.tokens_zip_unique_add_subbatch_rows % FP8_ALIGN == 0, (
-                self.tokens_zip_unique_add_subbatch_rows
-            )
-        else:
-            assert not self.use_forward_subbatch, (
-                "tokens_zip_unique_add_subbatch_rows must be set when use_forward_subbatch = True"
-            )
 
-        if backward_subbatch_rows is not None and backward_subbatch_rows > 0:
-            assert moe_expert_fusion, (
-                "moe_expert_fusion must be enabled when backward_subbatch_rows > 0"
-            )
-            assert backward_subbatch_rows % FP8_ALIGN == 0, (
-                backward_subbatch_rows
-            )
-
-        if self.use_forward_subbatch:
-            assert moe_expert_fusion, (
-                "moe_expert_fusion must be enabled when use_forward_subbatch = True"
+        if self.moe_subbatch_token_num_after_dispatch is not None:
+            assert (
+                self.moe_subbatch_token_num_after_dispatch > 0
+                and self.moe_subbatch_token_num_after_dispatch % FP8_ALIGN == 0
+            ), self.moe_subbatch_token_num_after_dispatch
+            assert not moe_expert_fusion, (
+                "moe_expert_fusion must be disabled when moe_subbatch_token_num_after_dispatch > 0"
             )
             assert recompute_moe_gate_up, (
-                "recompute_moe_gate_up must be enabled when use_forward_subbatch = True"
+                "recompute_moe_gate_up must be enabled when moe_subbatch_token_num_after_dispatch > 0"
             )
             assert dequant_input, (
-                "dequant_input must be enabled when use_forward_subbatch = True"
+                "dequant_input must be enabled when moe_subbatch_token_num_after_dispatch > 0"
             )
 
-        if self.moe_expert_fusion:
+        if not self.moe_expert_fusion:
             raise NotImplementedError(
-                "moe_expert_fusion = True is not supported currently"
+                "moe_expert_fusion = False is not supported currently"
             )
         else:
             self.experts_group_gemm_node = ExpertsGroupGemmContiguousNode(
                 custom_map,
                 recompute_moe_gate_up=recompute_moe_gate_up,
                 dequant_input=dequant_input,
-                backward_subbatch_rows=backward_subbatch_rows,
+                moe_subbatch_token_num_after_dispatch=moe_subbatch_token_num_after_dispatch,
                 use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
                 use_fp8_mlp=use_fp8_mlp,
             )
@@ -336,7 +318,7 @@ class MlpNode:
         cached tensors
         """
         if self.experts_group_gemm_node is not None:
-            if self.moe_expert_fusion:
+            if not self.moe_expert_fusion:
                 gemm_node_tensors = []
                 for gemm_node in self.experts_group_gemm_node:
                     gemm_node_tensors.extend(gemm_node.cached_tensors())
@@ -368,7 +350,7 @@ class MlpNode:
         """
         idx = 0
         if self.experts_group_gemm_node is not None:
-            if self.moe_expert_fusion:
+            if not self.moe_expert_fusion:
                 for expert_id, gemm_node in enumerate(
                     self.experts_group_gemm_node
                 ):
@@ -436,7 +418,7 @@ class MlpNode:
         Returns:
             无返回值，直接修改了类实例中的变量。
         """
-        if self.moe_expert_fusion:
+        if not self.moe_expert_fusion:
             for node in self.experts_group_gemm_node:
                 node.reset_state()
         else:
@@ -474,10 +456,10 @@ class MlpNode:
             topk=self.router_topk,
             num_experts=num_experts,
             tokens_per_expert=self.tokens_per_expert,
-            fill_output=not self.moe_expert_fusion,
+            fill_output=self.moe_expert_fusion,
         )
         self.unzipped_probs = unzipped_probs
-        if self.moe_expert_fusion:
+        if not self.moe_expert_fusion:
             unzipped_tokens = None
 
         if use_fp8_dispatch_a2a:
@@ -494,9 +476,9 @@ class MlpNode:
         if self.dispatched_indices.dtype is not dispatched_indices:
             dispatched_indices._clear_to_zero_allocation()
 
-        if self.moe_expert_fusion:
+        if not self.moe_expert_fusion:
             raise NotImplementedError(
-                "moe_expert_fusion = True is not supported currently"
+                "moe_expert_fusion = False is not supported currently"
             )
         else:
             if not use_fp8_dispatch_a2a:
@@ -551,13 +533,13 @@ class MlpNode:
             top_k=self.router_topk,
             num_experts=len(self.tokens_per_expert),
             tokens_per_expert=self.tokens_per_expert,
-            fill_output=not self.moe_expert_fusion,
+            fill_output=self.moe_expert_fusion,
         )
         hidden_states_out_grad._record_stream()
 
-        if self.moe_expert_fusion:
+        if not self.moe_expert_fusion:
             raise NotImplementedError(
-                "moe_expert_fusion = True is not supported currently"
+                "moe_expert_fusion = False is not supported currently"
             )
         else:
             hidden_states_out_grad._clear_to_zero_allocation()
@@ -597,11 +579,9 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         use_fp8_mlp=True,
         recompute_moe_gate_up=False,
         dequant_input=True,
-        moe_expert_fusion=False,
+        moe_expert_fusion=True,
         recompute_moe_premute=False,
-        tokens_zip_unique_add_subbatch_rows=None,
-        use_forward_subbatch=False,
-        backward_subbatch_rows=None,
+        moe_subbatch_token_num_after_dispatch=None,
         use_bf16_gemm_weight_grad=False,
         is_first_fwd=False,
         fp8_dispatched_handle=None,
@@ -625,9 +605,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             dequant_input=dequant_input,
             moe_expert_fusion=moe_expert_fusion,
             recompute_moe_premute=recompute_moe_premute,
-            tokens_zip_unique_add_subbatch_rows=tokens_zip_unique_add_subbatch_rows,
-            use_forward_subbatch=use_forward_subbatch,
-            backward_subbatch_rows=backward_subbatch_rows,
+            moe_subbatch_token_num_after_dispatch=moe_subbatch_token_num_after_dispatch,
             use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
             use_fp8_mlp=use_fp8_mlp,
         )

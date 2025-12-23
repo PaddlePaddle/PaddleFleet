@@ -217,7 +217,7 @@ class ExpertsGroupGemmContiguousNode:
         group=None,
         name="experts_group_gemm_contiguous_node",
         expert_id=None,
-        backward_subbatch_rows=None,
+        moe_subbatch_token_num_after_dispatch=None,
         use_bf16_gemm_weight_grad=False,
         use_fp8_mlp=True,
     ):
@@ -247,12 +247,14 @@ class ExpertsGroupGemmContiguousNode:
         self.is_split_group_gemm = True
         # self.is_split_group_gemm = has_config(self.fp8_fused_ops_configs, "split_group_gemm")
         self.group = group
-        self.backward_subbatch_rows = backward_subbatch_rows
-        if self.backward_subbatch_rows is not None:
+        self.moe_subbatch_token_num_after_dispatch = (
+            moe_subbatch_token_num_after_dispatch
+        )
+        if self.moe_subbatch_token_num_after_dispatch is not None:
             assert (
-                self.backward_subbatch_rows > 0
-                and self.backward_subbatch_rows % FP8_ALIGN == 0
-            ), self.backward_subbatch_rows
+                self.moe_subbatch_token_num_after_dispatch > 0
+                and self.moe_subbatch_token_num_after_dispatch % FP8_ALIGN == 0
+            ), self.moe_subbatch_token_num_after_dispatch
         self.use_bf16_gemm_weight_grad = use_bf16_gemm_weight_grad
         self.use_fp8_mlp = use_fp8_mlp
 
@@ -952,14 +954,14 @@ class ExpertsGroupGemmContiguousNode:
                 task.wait()
             return dx, probs_grad
 
-        subbatch_rows = self.backward_subbatch_rows
+        subbatch_rows = self.moe_subbatch_token_num_after_dispatch
         if subbatch_rows is None:
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
             )
 
         assert a2a_async_fn is None, (
-            "a2a_async_fn should be None when backward_subbatch_rows is not None"
+            "a2a_async_fn should be None when moe_subbatch_token_num_after_dispatch is not None"
         )
         assert self.expert_id is not None, self.expert_id
 
