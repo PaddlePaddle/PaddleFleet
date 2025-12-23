@@ -2,7 +2,7 @@ name: Approval
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
 
 env:
   BRANCH: ${{ github.base_ref }}

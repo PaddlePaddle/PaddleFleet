@@ -14,8 +14,6 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 import os
-import re
-import shutil
 import subprocess
 
 
@@ -52,32 +50,7 @@ def change_pwd():
 def setup_ops_extension():
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
-    try:
-        from wheel.bdist_wheel import bdist_wheel
-    except ImportError:
-        bdist_wheel = None
-
-    nvcc_path = shutil.which("nvcc")
-    if nvcc_path is None:
-        raise FileNotFoundError(
-            "nvcc command not found. Please make sure CUDA toolkit is installed and nvcc is in PATH."
-        )
-
-    result = subprocess.run(
-        ["nvcc", "--version"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    version_output = result.stdout
-
-    match = re.search(r"release (\d+)\.(\d+)", version_output)
-    if not match:
-        raise ValueError(
-            f"Cannot parse CUDA version from nvcc output:\n{version_output}"
-        )
-    cuda_major = int(match.group(1))
-    cuda_minor = int(match.group(2))
+    from build_utils import get_cuda_version
 
     # 定义 NVCC 编译参数
     nvcc_args = [
@@ -98,6 +71,7 @@ def setup_ops_extension():
         "-gencode=arch=compute_100,code=sm_100",
         "-DNDEBUG",
     ]
+    cuda_major, cuda_minor = get_cuda_version()
     if cuda_major < 12:
         raise ValueError(
             f"CUDA version must be >= 12. Detected version: {cuda_major}.{cuda_minor}"

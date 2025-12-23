@@ -4,3 +4,10 @@ include build_utils.py
 graft third_party/DeepGEMM
 prune third_party/DeepGEMM/deep_gemm_cpp.egg-info
 prune third_party/DeepGEMM/build
+graft third_party/DeepGEMM/third-party/cutlass/include
+graft third_party/DeepEP
+prune third_party/DeepEP/deep_ep.egg-info
+prune third_party/DeepEP/build
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude __pycache__

@@ -14,6 +14,23 @@ jobs:
     if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on: ubuntu-latest
     steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: BRAINSia/free-disk-space@f9f59b0ef974ff4b873aa243ce5278ab644eedc6
+        with:
+          # this might remove tools that are actually needed,
+          # if set to "true" but frees about 6 GB
+          tool-cache: false
+
+          # all of these default to true, but feel free to set to
+          # "false" if necessary for your workflow
+          mandb: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -26,12 +43,14 @@ jobs:
           docker run --rm \
             -v "${{ github.workspace }}:/work" \
             -w /work \
-            nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04 \
+            nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04 \
             /bin/bash -c "
               apt-get update && \
-              apt-get install -y curl && \
+              apt-get install -y curl git && \
+              git config --global --add safe.directory /work && \
               curl -LsSf https://astral.sh/uv/install.sh | sh && \
-              /root/.local/bin/uv lock --upgrade && \
+              export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:/usr/local/cuda-12.9/targets/x86_64-linux/lib:$LD_LIBRARY_PATH  && \
+              /root/.local/bin/uv lock --upgrade --link-mode hardlink --no-cache -v && \
               chown $(id -u):$(id -g) uv.lock
             "
 

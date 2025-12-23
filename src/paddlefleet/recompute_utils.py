@@ -22,9 +22,9 @@ def need_recompute_in_block(layer_number, config, recompute_num_layers):
         "recompute_num_layers cannot be none"
     )
     total_num_hidden_layers = (
-        config.remove_head_layers
+        config.num_empty_layers_add_in_head
         + config.num_hidden_layers
-        + config.remove_tail_layers
+        + config.num_empty_layers_add_in_tail
     )
     vpp_size = (
         config.virtual_pipeline_model_parallel_size
@@ -56,9 +56,9 @@ def need_recompute_in_first_n(layer_number, config, recompute_num_layers):
         "recompute_num_layers cannot be none"
     )
     total_num_hidden_layers = (
-        config.remove_head_layers
+        config.num_empty_layers_add_in_head
         + config.num_hidden_layers
-        + config.remove_tail_layers
+        + config.num_empty_layers_add_in_tail
     )
     vpp_size = (
         config.virtual_pipeline_model_parallel_size
