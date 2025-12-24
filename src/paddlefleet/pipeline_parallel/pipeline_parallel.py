@@ -391,29 +391,31 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
                     loss = loss_tensor
 
             # backward
-            if self.scaler:
-                paddle.autograd.backward(self.scaler.scale(loss))
-            else:
-                paddle.autograd.backward(loss)
+            with paddle.amp.auto_cast(enable=False):
+                if self.scaler:
+                    paddle.autograd.backward(self.scaler.scale(loss))
+                else:
+                    paddle.autograd.backward(loss)
 
             assert self.total_loss is not None, (
                 "train_batch() in last stage should obtain valid loss"
             )
 
         losses = []
-        for idx in range(len(self._layers._loss_fn)):
-            self.total_loss[idx] = paddle.to_tensor(self.total_loss[idx])
-            if not return_micro_batch_loss:
-                # TODO(shenliang03): it will use mean/sum to calculate loss
-                tmp = paddle.zeros_like(self.total_loss[idx][0])
-                for loss in self.total_loss[idx]:
-                    tmp += loss.detach()
-                if not self._delay_scale_loss:
-                    losses.append(tmp)
+        with paddle.amp.auto_cast(enable=False):
+            for idx in range(len(self._layers._loss_fn)):
+                self.total_loss[idx] = paddle.to_tensor(self.total_loss[idx])
+                if not return_micro_batch_loss:
+                    # TODO(shenliang03): it will use mean/sum to calculate loss
+                    tmp = paddle.zeros_like(self.total_loss[idx][0])
+                    for loss in self.total_loss[idx]:
+                        tmp += loss.detach()
+                    if not self._delay_scale_loss:
+                        losses.append(tmp)
+                    else:
+                        losses.append(tmp / self.accumulate_steps)
                 else:
-                    losses.append(tmp / self.accumulate_steps)
-            else:
-                losses.append(self.total_loss[idx].detach())
+                    losses.append(self.total_loss[idx].detach())
         return losses[0] if len(losses) == 1 else losses
 
     def train_batch(
@@ -864,21 +866,31 @@ class PipelineParallel(nn.Layer, ParallelBase):
                 batch_p2p_comm=self._use_batch_p2p_comm,
             )
 
+            # p2p data type: tuple
+            # model input/return type: dict
+            # here, convert p2p tuple -> dict input
+            input_tensor_dict, use_dict = tuple_to_dict_helper(input_tensor)
+
             output_tensor, _, _ = self._forward_step(
-                input_tensor, micro_dataset, step_id=None
+                input_tensor=input_tensor_dict if use_dict else input_tensor,
+                micro_dataset=micro_dataset,
+                step_id=None,
             )
+            # convert dict to tuple whose tensor element has a key attribution
+            output_tensor_tuple = dict_to_tuple_helper(output_tensor)
+
             self._p2p_helper.send_forward(
-                output_tensor,
-                self.is_pipeline_last_stage(),
+                output_tensor=output_tensor_tuple,
+                pp_last_stage=self.is_pipeline_last_stage(),
                 skip_check_meta=True,
                 batch_p2p_comm=self._use_batch_p2p_comm,
             )
             if not self.is_pipeline_last_stage():
-                self._release_output(output_tensor)
+                self._release_output(output_tensor_tuple)
             else:
-                self._offload_tensors(output_tensor)
+                self._offload_tensors(output_tensor_tuple)
 
-            output_buffers.append(output_tensor)
+            output_buffers.append(output_tensor_tuple)
 
         if steady_steps > 0:
             input_tensor = self._p2p_helper.recv_forward(
@@ -889,21 +901,28 @@ class PipelineParallel(nn.Layer, ParallelBase):
         for i in range(steady_steps):
             last_iter = i == (steady_steps - 1)
 
+            input_tensor_dict, use_dict = tuple_to_dict_helper(input_tensor)
+
             output_tensor, _, _ = self._forward_step(
-                input_tensor, micro_dataset, step_id=None
+                input_tensor_dict if use_dict else input_tensor,
+                micro_dataset,
+                step_id=None,
             )
+
+            output_tensor_tuple = dict_to_tuple_helper(output_tensor)
+
             self._p2p_helper.send_forward(
-                output_tensor,
+                output_tensor_tuple,
                 self.is_pipeline_last_stage(),
                 skip_check_meta=True,
                 batch_p2p_comm=self._use_batch_p2p_comm,
             )
             if not self.is_pipeline_last_stage():
-                self._release_output(output_tensor)
+                self._release_output(output_tensor_tuple)
             else:
-                self._offload_tensors(output_tensor)
+                self._offload_tensors(output_tensor_tuple)
 
-            output_buffers.append(output_tensor)
+            output_buffers.append(output_tensor_tuple)
 
             if not last_iter:
                 input_tensor = self._p2p_helper.recv_forward(

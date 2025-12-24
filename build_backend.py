@@ -14,7 +14,18 @@
 
 from setuptools import build_meta as orig
 
-from build_utils import Artifact, EcosystemLibrary, check_submodule_updated
+from build_utils import (
+    Artifact,
+    EcosystemLibrary,
+    check_submodule_updated,
+    get_cuda_version,
+)
+
+cuda_major, cuda_minor = get_cuda_version()
+if cuda_major < 12:
+    raise ValueError(
+        f"CUDA version must be >= 12. Detected version: {cuda_major}.{cuda_minor}"
+    )
 
 LIBRARIES: list[EcosystemLibrary] = [
     EcosystemLibrary(
@@ -25,6 +36,17 @@ LIBRARIES: list[EcosystemLibrary] = [
             Artifact("deep_gemm", "deep_gemm"),
             Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
         ],
+    ),
+    EcosystemLibrary(
+        name="DeepEP",
+        source_rel_path="third_party/DeepEP",
+        artifacts=[
+            Artifact("deep_ep", "deep_ep"),
+            Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
+        ],
+        extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
+        if (cuda_major == 12 and cuda_minor < 8)
+        else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0"},
     ),
 ]
 
