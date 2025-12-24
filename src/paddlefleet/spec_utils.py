@@ -122,7 +122,7 @@ def build_layer(spec_or_layer: LayerSpec | type, *args, **kwargs):
         for key in spec_or_layer.extra_kwargs.keys():
             if key in kwargs:
                 warnings.warn(
-                    f"Got same key {key} in extra_kwargs and kwargs during init {layer.__name__}. Will keep the value ing extra_kwargs."
+                    f"Got same key `{key}` in extra_kwargs and kwargs during init `{layer.__name__}`. Will keep the value ing extra_kwargs."
                 )
                 kwargs.pop(key)
     try:

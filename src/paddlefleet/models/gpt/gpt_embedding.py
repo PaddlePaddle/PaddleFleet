@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 import paddle
 
+from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -47,8 +48,12 @@ class GPTEmbedding(FleetLayer):
         rotary_percent: float = 1.0,
         rotary_base: int = 10000,
         rope_scaling: bool = False,
+        pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__(config)
+        if pg_collection is None:
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+        self.cp_group = pg_collection.cp
         self.embedding = build_layer(
             sublayers_spec.language_embedding,
             config=config,
@@ -70,6 +75,10 @@ class GPTEmbedding(FleetLayer):
     @property
     def embedding_weight(self):
         return self.embedding.embedding_weight
+
+    @property
+    def position_embedding_weight(self):
+        return self.embedding.position_embedding_weight
 
     def forward(
         self,
@@ -112,13 +121,14 @@ class GPTEmbedding(FleetLayer):
                 ).contiguous()
 
         preproc_output = {
+            "input_ids": input_ids.contiguous(),
             "hidden_states": decoder_input,
-            "attention_mask": attention_mask,
-            "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "rotary_pos_emb": rotary_pos_emb,
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
         }
+
+        preproc_output = {**dict_args, **preproc_output}
 
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:

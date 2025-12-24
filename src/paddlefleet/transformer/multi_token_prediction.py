@@ -34,8 +34,6 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from paddlefleet.models.backends import BackendSpecProvider
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -424,41 +422,6 @@ class MultiTokenPredictionLayer(FleetLayer):
         )
         self.offload_context = nullcontext()
 
-    def _get_embeddings(
-        self,
-        input_ids: paddle.Tensor,
-        position_ids: paddle.Tensor,
-        embedding: Callable,
-        hidden_states: paddle.Tensor,
-    ):
-        """
-        Preprocesses input data for the Multi-Token Prediction (MTP) layers.
-
-        This function computes the decoder input and sends updated input_ids and position_ids to
-        the next layer.
-
-        Args:
-            input_ids (paddle.Tensor): The input token IDs.
-            position_ids (paddle.Tensor): The position IDs corresponding to the input tokens.
-            embedding (Callable): The embedding layer
-                from gpt model to compute the decoder input.
-            hidden_states (paddle.Tensor): hidden states tensor of shape [s, b, h] where s is the
-                sequence length, b is the batch size, and h is the hidden size.
-        """
-        # Calc logits for the current Multi-Token Prediction (MTP) layers.
-        input_ids, _ = roll_tensor(
-            input_ids, shifts=-1, dims=-1, cp_group=self.cp_group
-        )
-        position_ids, _ = roll_tensor(
-            position_ids, shifts=-1, dims=-1, cp_group=self.cp_group
-        )
-        # embedding
-        decoder_input = embedding(
-            input_ids=input_ids, position_ids=position_ids
-        )
-
-        return input_ids, position_ids, decoder_input, hidden_states
-
     def _concat_embeddings(
         self, hidden_states: paddle.Tensor, decoder_input: paddle.Tensor
     ):
@@ -508,17 +471,21 @@ class MultiTokenPredictionLayer(FleetLayer):
                 hidden_states, decoder_input
             )
 
-            hidden_states, _ = self.transformer_layer(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                context=context,
-                context_mask=context_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-            )
+            transformer_layer_input = {
+                "hidden_states": hidden_states,
+                "attention_mask": attention_mask,
+                "context": context,
+                "context_mask": context_mask,
+                "rotary_pos_emb": rotary_pos_emb,
+                "rotary_pos_cos": rotary_pos_cos,
+                "rotary_pos_sin": rotary_pos_sin,
+                "attention_bias": attention_bias,
+                "packed_seq_params": packed_seq_params,
+            }
+
+            rst = self.transformer_layer(transformer_layer_input)
+
+            hidden_states = rst["hidden_states"]
 
         hidden_states = self._postprocess(hidden_states)
 
@@ -565,54 +532,30 @@ class MultiTokenPredictionLayer(FleetLayer):
 
     def forward(
         self,
-        input_ids: Tensor,
-        position_ids: Tensor,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        context: Tensor = None,
-        context_mask: Tensor = None,
-        rotary_pos_emb: Tensor = None,
-        rotary_pos_cos: Tensor = None,
-        rotary_pos_sin: Tensor = None,
-        attention_bias: Tensor = None,
-        packed_seq_params: PackedSeqParams = None,
-        embedding=None,
+        dict_args: dict,
     ):
-        """
-        Execute the forward pass through the Multi-Token Prediction (MTP) layer.
+        input_ids = dict_args.get("input_ids", None)
+        position_ids = dict_args.get("position_ids", None)
+        hidden_states = dict_args.get("hidden_states", None)
+        attention_mask = dict_args.get("attention_mask", None)
+        context = dict_args.get("context", None)
+        context_mask = dict_args.get("context_mask", None)
+        rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
+        rotary_pos_cos = dict_args.get("rotary_pos_cos", None)
+        rotary_pos_sin = dict_args.get("rotary_pos_sin", None)
+        attention_bias = dict_args.get("attention_bias", None)
+        packed_seq_params = dict_args.get("packed_seq_params", None)
+        embedding_weight = dict_args.get("embedding_weight", None)
+        position_embedding_weight = dict_args.get(
+            "position_embedding_weight", None
+        )
+        decoder_input = dict_args.get("mtp_hidden_states", None)
 
-        Args:
-            input_ids (Tensor): Input token IDs .
-            position_ids (Tensor): Positional IDs of the input tokens.
-            hidden_states (Tensor): Hidden states tensor of shape [s, b, h] where s is the
-                sequence length, b is the batch size, and h is the hidden size.
-            attention_mask (Tensor): Boolean tensor of shape [1, 1, s, s] for masking
-                self-attention.
-            context (Tensor, optional): Context tensor for cross-attention, if applicable.
-            context_mask (Tensor, optional): Mask for cross-attention context, if applicable.
-            rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
-            rotary_pos_cos (Tensor, optional): Cosine component of rotary positional embeddings.
-            rotary_pos_sin (Tensor, optional): Sine component of rotary positional embeddings.
-            embedding (Callable): The embedding layer from gpt model to compute the decoder input.
-
-        Returns:
-            Union[Tensor, Tuple[Tensor, Tensor]]: The output hidden states tensor of shape
-            [s, b, h], and optionally the updated context tensor if cross-attention is used.
-        """
         assert context is None, (
             "multi token prediction + cross attention is not yet supported."
         )
         assert packed_seq_params is None, (
             "multi token prediction + sequence packing is not yet supported."
-        )
-
-        input_ids, position_ids, decoder_input, hidden_states = (
-            self._get_embeddings(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                embedding=embedding,
-                hidden_states=hidden_states,
-            )
         )
 
         if self.config.recompute_granularity == "full" and self.training:
@@ -643,4 +586,6 @@ class MultiTokenPredictionLayer(FleetLayer):
                 packed_seq_params=packed_seq_params,
             )
 
-        return hidden_states, input_ids, position_ids
+        rst = {"hidden_states": hidden_states}
+        rst = {**dict_args, **rst}
+        return rst

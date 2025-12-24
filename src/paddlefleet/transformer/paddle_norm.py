@@ -175,7 +175,9 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
-        return {"hidden_states": self.norm(hidden_states)}
+        rst = {"hidden_states": self.norm(hidden_states)}
+        rst = {**dict_args, **rst}
+        return rst
 
 
 class L2Norm(paddle.nn.Layer):

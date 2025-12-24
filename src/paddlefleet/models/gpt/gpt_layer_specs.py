@@ -279,11 +279,11 @@ def get_gpt_mtp_layers_spec_for_backend(
         if config.num_nextn_predict_layers
         else 0
     )
-    mtp_layer_specs = []
+    mtp_layers_spec = []
     for i in range(mtp_num_layers):
-        mtp_layer_specs.append(mtp_layer_spec_func(layer_number=i))
+        mtp_layers_spec.append(mtp_layer_spec_func(layer_number=i))
 
-    return mtp_layer_specs
+    return mtp_layers_spec
 
 
 def get_gpt_spec(

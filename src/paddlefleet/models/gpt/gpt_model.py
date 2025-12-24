@@ -30,6 +30,7 @@ from paddle.distributed import fleet
 
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
+from paddlefleet.transformer.multi_token_prediction import roll_tensor
 from paddlefleet.transformer.transformer_layer import TransformerLayer
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,32 @@ class GPTModel(PipelineLayer):
                     layer.weight = shared_embed_weight
 
     def get_layer_desc_list(self, spec, share_embeddings_and_output_weights):
+        def mtp_embedding(embedding, dict_args: dict):
+            input_ids = dict_args.get("input_ids")
+            position_ids = dict_args.get("position_ids", None)
+
+            input_ids, _ = roll_tensor(
+                input_ids, shifts=-1, dims=-1, cp_group=embedding.cp_group
+            )
+            position_ids, _ = roll_tensor(
+                position_ids, shifts=-1, dims=-1, cp_group=embedding.cp_group
+            )
+
+            ret_dict = embedding(
+                {"input_ids": input_ids, "position_ids": position_ids}
+            )
+            rst = {"mtp_hidden_states": ret_dict["hidden_states"]}
+            rst = {**dict_args, **rst}
+            return rst
+
+        if self.config.position_embedding_type == "learned_absolute":
+            embedding_mtp_shared_list = [
+                "embedding_weight",
+                "position_embedding_weight",
+            ]
+        else:
+            embedding_mtp_shared_list = ["embedding_weight"]
+
         layers = []
         if share_embeddings_and_output_weights:
             self.add_sequential_layer(
@@ -111,7 +138,7 @@ class GPTModel(PipelineLayer):
                 SharedLayerDesc(
                     "embed",
                     spec.embedding,
-                    shared_weight_attr="embedding_weight",
+                    shared_weight_attr=embedding_mtp_shared_list,
                 ),
                 "model",
             )
@@ -138,6 +165,16 @@ class GPTModel(PipelineLayer):
         self.add_sequential_layer(layers, LayerDesc(spec.layer_norm), "model")
 
         if spec.mtp is not None:
+            self.add_sequential_layer(
+                layers,
+                SharedLayerDesc(
+                    "embed",
+                    spec.embedding,
+                    shared_weight_attr=embedding_mtp_shared_list,
+                    forward_func=mtp_embedding,
+                ),
+                "model.layers.mtp_embedding",
+            )
             for mtp_spec in spec.mtp:
                 self.add_sequential_layer(
                     layers, LayerDesc(mtp_spec), f"model.layers.{i}"

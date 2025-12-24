@@ -26,7 +26,7 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
 from paddlefleet.spec_utils import LayerSpec, build_layer
 
 
-def gpt_builder(config, **kwargs):
+def gpt_builder(config, num_stages=1, **kwargs):
     print("building GPT model ...")
     if config.n_routed_experts:
         # Define the decoder block spec
@@ -96,7 +96,9 @@ def gpt_builder(config, **kwargs):
         parallel_output=config.parallel_output,
     )
 
-    return build_layer(gpt_spec, loss_fn=LanguageLoss(config), **kwargs)
+    return build_layer(
+        gpt_spec, loss_fn=LanguageLoss(config), num_stages=num_stages, **kwargs
+    )
 
 
 def _get_transformer_layer_spec_func(config):

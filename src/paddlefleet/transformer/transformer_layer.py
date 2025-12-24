@@ -290,6 +290,7 @@ class TransformerLayer(nn.Layer):
         rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
+        **kwargs,
     ):
         hidden_states, context = self._forward_attention(
             hidden_states=hidden_states,
