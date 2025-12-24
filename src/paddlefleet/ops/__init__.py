@@ -23,7 +23,6 @@ from typing import Any
 import paddle
 
 from .utils import (
-    HardwareIncompatibleBlocker,
     ModuleContext,
     get_nvshmem_host_lib_path,
     import_custom_ops,
@@ -34,9 +33,32 @@ logger = logging.getLogger(__name__)
 _device_capability = paddle.cuda.get_device_capability()
 
 
+HINT_MESSAGE = """For developers:
+1. Imports of these modules must be guarded by `if is_deep_gemm_or_deep_ep_available():`.
+2. Direct calls to `paddlefleet.ops.deep_gemm.xxx` should be conditional based on their enabling flags.
+
+For users:
+1. To avoid using these ops, set `use_deep_gemm` to False and ensure `moe_token_dispatcher_type` is not "deepep".
+2. Alternatively, use a device with compute capability >= 9.0 to enable deep_gemm and deep_ep.
+"""
+
+
 @functools.cache
 def is_deep_gemm_or_deep_ep_available():
+    """Check whether deep GEMM or deep EP kernels are available on the current GPU."""
     return paddle.cuda.get_device_capability()[0] >= 9
+
+
+class HardwareIncompatibleBlocker(importlib.abc.MetaPathFinder):
+    def __init__(self, capability: tuple[int, int]):
+        self.capability = capability
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname in ["paddlefleet.ops.deep_gemm", "paddlefleet.ops.deep_ep"]:
+            raise RuntimeError(
+                f"The module '{fullname}' requires GPU compute capability >= 9.0 (Hopper architecture), "
+                f"but your device capability is {self.capability[0]}.{self.capability[1]}. \n{HINT_MESSAGE}"
+            )
 
 
 def _try_load_nvshmem(ops_dir: Path):
@@ -102,13 +124,12 @@ else:
     )
 
 
-# TODO(ooooo): Refine error message to show how to not use deep_gemm and deep_ep in models.
 # Explicit error message when call `paddlefleet.ops.deep_gemm` and `from paddlefleet.ops import deep_gemm`
 def __getattr__(name):
     if name in ["deep_gemm", "deep_ep"]:
-        if _device_capability[0] < 9:
+        if not is_deep_gemm_or_deep_ep_available():
             raise RuntimeError(
-                f"Cannot access 'paddlefleet.ops.{name}'. "
-                f"Your GPU capability {_device_capability[0]}.{_device_capability[1]} < 9.0."
+                f"The module 'paddlefleet.ops.{name}' requires GPU compute capability >= 9.0 (Hopper architecture), "
+                f"but your device capability is {_device_capability[0]}.{_device_capability[1]}. \n{HINT_MESSAGE}"
             )
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

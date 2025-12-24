@@ -110,6 +110,11 @@ class TestSM80ImportError(unittest.TestCase):
     def setUp(self):
         import unittest.mock
 
+        from paddlefleet.ops import is_deep_gemm_or_deep_ep_available
+
+        # Clear cache to ensure get_device_capability is called again
+        is_deep_gemm_or_deep_ep_available.cache_clear()
+
         # Clean up paddlefleet.ops and its submodules to ensure clean import
         for mod_name in list(sys.modules.keys()):
             if mod_name == "paddlefleet.ops" or mod_name.startswith(
@@ -123,6 +128,11 @@ class TestSM80ImportError(unittest.TestCase):
         self.patcher.start()
 
     def tearDown(self):
+        from paddlefleet.ops import is_deep_gemm_or_deep_ep_available
+
+        # Clear cache to restore original state
+        is_deep_gemm_or_deep_ep_available.cache_clear()
+
         self.patcher.stop()
         # Clean up sys.meta_path to remove HardwareIncompatibleBlocker
         sys.meta_path = [
@@ -144,17 +154,20 @@ class TestSM80ImportError(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             from paddlefleet.ops import deep_gemm  # noqa: F401
         self.assertIn(
-            "Cannot access 'paddlefleet.ops.deep_gemm'", str(cm.exception)
+            "The module 'paddlefleet.ops.deep_gemm' requires GPU compute capability >= 9.0",
+            str(cm.exception),
         )
         with self.assertRaises(RuntimeError) as cm:
             from paddlefleet.ops.deep_gemm import cublaslt_gemm_tn  # noqa: F401
         self.assertIn(
-            "Blocking import of 'paddlefleet.ops.deep_gemm'", str(cm.exception)
+            "The module 'paddlefleet.ops.deep_gemm' requires GPU compute capability >= 9.0",
+            str(cm.exception),
         )
         with self.assertRaises(RuntimeError) as cm:
             print(paddlefleet.ops.deep_gemm.cublaslt_gemm_tn)
         self.assertIn(
-            "Cannot access 'paddlefleet.ops.deep_gemm'", str(cm.exception)
+            "The module 'paddlefleet.ops.deep_gemm' requires GPU compute capability >= 9.0",
+            str(cm.exception),
         )
 
     def test_deep_ep_import_error(self):
@@ -163,19 +176,22 @@ class TestSM80ImportError(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             from paddlefleet.ops import deep_ep  # noqa: F401
         self.assertIn(
-            "Cannot access 'paddlefleet.ops.deep_ep'", str(cm.exception)
+            "The module 'paddlefleet.ops.deep_ep' requires GPU compute capability >= 9.0",
+            str(cm.exception),
         )
 
         with self.assertRaises(RuntimeError) as cm:
             from paddlefleet.ops.deep_ep import Buffer  # noqa: F401
         self.assertIn(
-            "Blocking import of 'paddlefleet.ops.deep_ep'", str(cm.exception)
+            "The module 'paddlefleet.ops.deep_ep' requires GPU compute capability >= 9.0",
+            str(cm.exception),
         )
 
         with self.assertRaises(RuntimeError) as cm:
             print(paddlefleet.ops.deep_ep.Buffer)
         self.assertIn(
-            "Cannot access 'paddlefleet.ops.deep_ep'", str(cm.exception)
+            "The module 'paddlefleet.ops.deep_ep' requires GPU compute capability >= 9.0",
+            str(cm.exception),
         )
 
 

@@ -102,20 +102,6 @@ def patch_module_namespace(source_name: str, target_prefix: str):
             sys.modules[new_name] = module
 
 
-class HardwareIncompatibleBlocker(importlib.abc.MetaPathFinder):
-    def __init__(self, capability: tuple[int, int]):
-        self.capability = capability
-
-    def find_spec(self, fullname, path, target=None):
-        if fullname in ["paddlefleet.ops.deep_gemm", "paddlefleet.ops.deep_ep"]:
-            # TODO(ooooo): Refine error message to show how to not use deep_gemm and deep_ep in models.
-            raise RuntimeError(
-                f"Blocking import of '{fullname}'. "
-                f"Your GPU compute capability is {self.capability[0]}.{self.capability[1]}, "
-                f"but >= 9.0 (Hopper architecture) is required for this module."
-            )
-
-
 # Wheel specific: the wheels only include the soname of the host library `libnvshmem_host.so.X`
 def get_nvshmem_host_lib_path(base_dir):
     path = Path(base_dir).joinpath("lib")
