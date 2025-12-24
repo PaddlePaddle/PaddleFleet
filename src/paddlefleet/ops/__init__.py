@@ -29,8 +29,6 @@ from .utils import (
     patch_module_namespace,
 )
 
-paddle.compat.enable_torch_proxy(scope={"deep_gemm", "triton", "deep_ep"})
-
 # paddle.compat.enable_torch_proxy(scope={"triton"}) enables the torch proxy
 # specifically for the 'triton' module. This means `import torch` inside 'triton'
 # will actually import paddle's compatibility layer (acting as torch).
@@ -83,11 +81,17 @@ import_custom_ops(
 )
 
 if is_deep_gemm_or_deep_ep_available():
-    ops_dir = Path(__file__).parent
-    # Loading libnvshmem_host.so.* first when use editable install
-    _try_load_nvshmem(ops_dir)
-    _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
-    _safe_load_ecosystem_lib("deep_ep", ops_dir, globals())
+    try:
+        paddle.compat.enable_torch_proxy(
+            scope={"deep_gemm", "triton", "deep_ep"}
+        )
+        ops_dir = Path(__file__).parent
+        # Loading libnvshmem_host.so.* first when use editable install
+        _try_load_nvshmem(ops_dir)
+        _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
+        _safe_load_ecosystem_lib("deep_ep", ops_dir, globals())
+    finally:
+        paddle.compat.disable_torch_proxy()
 else:
     capability = paddle.cuda.get_device_capability()
     sys.meta_path.insert(0, HardwareIncompatibleBlocker(capability))

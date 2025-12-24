@@ -184,9 +184,11 @@ class CudaRNGStatesTracker:
         finally:
             # Throw a warning if cpu RNG state changed
             if not cpu_rng_state == paddle.get_rng_state("cpu"):
-                logging.getLogger(__name__).warning(
-                    "CPU RNG state changed within GPU RNG context"
-                )
+                if not hasattr(self.__class__, "_cpu_rng_warning_issued"):
+                    logging.getLogger(__name__).warning(
+                        "CPU RNG state changed within GPU RNG context"
+                    )
+                    self.__class__._cpu_rng_warning_issued = True
             # Update the current rng state for later use.
             self.states_[name] = _get_cuda_rng_state(
                 graph_safe=self.use_cudagraphable_rng
