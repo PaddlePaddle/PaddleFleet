@@ -77,8 +77,8 @@ FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$
 exit_code=$?
 
 if [ $exit_code -ne 0 ]; then
-    echo "Test failed with exit code $exit_code, check the log: ./glm45_a100.log"
-    python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_a100.log
+    echo "Test failed with exit code $exit_code, check the log: ./glm45_pt_a100.log"
+    python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_pt_a100.log
     check_log_exit_code=$?
     if [ $check_log_exit_code -ne 0 ]; then
         echo "Failed to find 'Training completed' in log file."
