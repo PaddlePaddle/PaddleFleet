@@ -58,7 +58,8 @@ port=36677
 
 export FLAGS_use_stride_compute_kernel=False
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
+export FLAGS_embedding_deterministic=1
+export FLAGS_cudnn_deterministic=1
 unset http_proxy https_proxy
 
 set +e
