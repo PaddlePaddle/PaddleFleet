@@ -587,6 +587,7 @@ def cp_flashmask_allgatherkv_balance_forward(
 
 
 def cp_flashmask_allgatherkv_balance_backward(
+    config,
     query,
     key,
     value,
@@ -622,20 +623,11 @@ def cp_flashmask_allgatherkv_balance_backward(
     key_gathered = all_gather_balance(key, axis=1, group=group)
     value_gathered = all_gather_balance(value, axis=1, group=group)
 
-    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-        "FLAGS_flash_attn_version"
-    ]
+    fa_version = config.fa_version
     if "block_mask" in inspect.signature(flashmask_attention).parameters:
-        if (
-            paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-                "FLAGS_cudnn_deterministic"
-            ]
-            and query.shape[-1] > 128
-        ):
+        if config.deterministic_mode and query.shape[-1] > 128:
             fa_version = 2
-    elif paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-        "FLAGS_cudnn_deterministic"
-    ]:
+    elif config.deterministic_mode:
         fa_version = 2
     if fa_version == 2:
         # Create seed offset tensor (required for gradient computation)
@@ -832,6 +824,7 @@ class FlashMaskContextParallel(PyLayer):
     @staticmethod
     def forward(
         ctx,
+        config,
         query,
         key,
         value,
@@ -899,6 +892,7 @@ class FlashMaskContextParallel(PyLayer):
         )
         ctx.group = group
         ctx.causal = causal
+        ctx.config = config
 
         return output
 
@@ -918,10 +912,12 @@ class FlashMaskContextParallel(PyLayer):
         )
         group = ctx.group
         causal = ctx.causal
+        config = ctx.config
 
         # Compute gradients
         query_grad, key_grad, value_grad = (
             cp_flashmask_allgatherkv_balance_backward(
+                config,
                 query,
                 key,
                 value,
@@ -938,6 +934,7 @@ class FlashMaskContextParallel(PyLayer):
 
 
 def flashmask_attention_cp(
+    config,
     query,
     key,
     value,
@@ -982,6 +979,7 @@ def flashmask_attention_cp(
         ```
     """
     output = FlashMaskContextParallel.apply(
+        config,
         query,
         key,
         value,
