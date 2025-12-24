@@ -41,18 +41,6 @@ def test_gemm() -> None:
             diff = calc_diff(d, ref_d)
             assert diff < 1e-5, (f'{m=}, {n=}, {k=}, {major_opt=}, {accumulate=}, {out_dtype=}, '
                                    f'{diff:.5f}, alias={test_alias}')
-    #     a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, kernel_type, use_bf16=True)
-
-    #     t = bench_kineto(lambda: deep_gemm.bf16_gemm_nt(a, b, d, c=c), 'bf16_gemm', suppress_kineto_output=True)
-    #     cublas_t, split_k_t = bench_kineto(lambda: deep_gemm.cublaslt_gemm_nt(a, b, d, c=c), ('nvjet', 'reduce'), suppress_kineto_output=True)
-    #     print(f' > Perf (m={m:6}, n={n:6}, k={k:6}, layout={major_opt}, {out_opt}, {acc_opt}): '
-    #           f'{t * 1e6:7.1f} us | '
-    #           f'{2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
-    #           f'{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s | '
-    #           f'{(cublas_t + split_k_t) / t:.2f}x cuBLAS')
-    #     if cublas_t > 0:
-    #         scores.append((cublas_t + split_k_t) / t)
-    # print(f"Average speedup over cuBLASLt: {float(np.prod(scores)) ** (1.0 / len(scores)):.3f}x\n")
 
 
 def test_m_grouped_gemm_contiguous() -> None:
@@ -73,17 +61,6 @@ def test_m_grouped_gemm_contiguous() -> None:
             d = torch.where((m_indices == -1).unsqueeze(1), torch.zeros_like(d), d)
             diff = calc_diff(d, ref_d)
             assert diff < 1e-5, f'{m=}, {n=}, {k=}, {major_opt}, {diff:.5f}, alias={test_alias}'
-        # m, a, b, m_indices, d, ref_d = generate_m_grouped_contiguous(num_groups, expected_m_per_group, n, k, major_a, major_b, use_bf16=True)
-
-        # # noinspection PyShadowingNames
-        # def test_func():
-        #     deep_gemm.m_grouped_bf16_gemm_nt_contiguous(a, b, d, m_indices)
-
-        # t = bench_kineto(test_func, 'bf16_gemm', suppress_kineto_output=True)
-        # print(f' > Perf ({num_groups=}, m={m:5}, n={n:5}, k={k:5}, layout={major_opt}): '
-        #       f'{t * 1e6:4.0f} us | '
-        #       f'{2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
-        #       f'{count_bytes(a, b, d) / 1e9 / t:4.0f} GB/s')
     print()
 
 
@@ -132,19 +109,6 @@ def test_k_grouped_gemm_contiguous() -> None:
             diff = calc_diff(d, ref_d)
             assert diff < 1e-5, f'{m=}, {n=}, {k=}, {ks=}, {diff:.7f}'
 
-        # # Test performance
-        # k, a, b, c, d, ref_d = generate_k_grouped_contiguous(num_groups, m, n, major_a, major_b, ks, use_bf16=True)
-        # ks_tensor = torch.tensor(ks, dtype=torch.int, device='cuda')
-
-        # # noinspection PyShadowingNames
-        # def test_func():
-        #     deep_gemm.k_grouped_bf16_gemm_tn_contiguous(a, b, d, ks, ks_tensor, c)
-
-        # t = bench_kineto(test_func, 'bf16_gemm', suppress_kineto_output=True)
-        # print(f' > Perf ({num_groups=:2}, m={m:5}, n={n:5}, k={k:5}): '
-        #       f'{t * 1e6:4.0f} us | '
-        #       f'{2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
-        #       f'{count_bytes(a, b, c, d) / 1e9 / t:4.0f} GB/s')
     print()
 
 
@@ -161,11 +125,6 @@ def test_cublaslt_gemm() -> None:
         diff = calc_diff(d, ref_d)
         assert diff < 6e-7, f'{diff=}, ({m=}, {n=}, {k=}, {major_opt=}, {accumulate=}, {out_dtype=})'
 
-        # t = bench_kineto(lambda: deep_gemm.cublaslt_gemm_nt(a, b, d, c=c), 'nvjet', suppress_kineto_output=True,)
-        # print(f' > Perf (m={m:6}, n={n:6}, k={k:6}, layout={major_opt}, {out_opt}, {acc_opt}): '
-        #       f'{t * 1e6:5.0f} us | '
-        #       f'{2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
-        #       f'{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s')
     print()
 
 
