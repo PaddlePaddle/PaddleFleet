@@ -6,7 +6,7 @@ import random
 import torch
 
 from paddlefleet.ops import deep_gemm
-from deep_gemm.testing import (
+from paddlefleet.ops.deep_gemm.testing import (
     bench_kineto,
     calc_diff, count_bytes,
     ignore_env, get_arch_major

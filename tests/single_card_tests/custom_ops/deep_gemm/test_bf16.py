@@ -6,7 +6,7 @@ import random
 import torch
 
 from paddlefleet.ops import deep_gemm
-from deep_gemm.testing import (
+from paddlefleet.ops.deep_gemm.testing import (
     bench_kineto,
     calc_diff, count_bytes
 )
@@ -77,20 +77,6 @@ def test_m_grouped_gemm_masked() -> None:
                 diff = calc_diff(d[j, :masked_m[j].item()], ref_d[j, :masked_m[j].item()])
                 assert diff < 1e-5, f'{max_m=}, {n=}, {k=}, {j=}, masked_m={masked_m[j]}, {num_groups=}, {diff:.5f}'
 
-        # # Construct full cases
-        # a, b, masked_m, d, ref_d = generate_m_grouped_masked(num_groups, max_m, expected_m_per_group, n, k, use_bf16=True)
-
-        # # noinspection PyShadowingNames
-        # def test_func():
-        #     deep_gemm.m_grouped_bf16_gemm_nt_masked(a, b, d, masked_m, expected_m_per_group)
-
-        # # Test performance with fixed shapes
-        # valid_m = masked_m.sum().item()
-        # t = bench_kineto(test_func, 'bf16_gemm', suppress_kineto_output=True)
-        # print(f' > Perf ({num_groups=}, expected_m_per_group={expected_m_per_group:4}, n={n:4}, k={k:4}): '
-        #       f'{t * 1e6:4.0f} us | '
-        #       f'{2 * valid_m * n * k / t / 1e12:4.0f} TFLOPS | '
-        #       f'{(count_bytes(a, d) * valid_m / (max_m * num_groups) + count_bytes(b)) / 1e9 / t:4.0f} GB/s')
     print()
 
 
