@@ -43,8 +43,8 @@ jobs:
     runs-on:
       group: Fleet-H-single-card
     env:
-      PIP_CACHE_DIR: /root/.cache/pip
-      CACHE_DIR: /root/.cache
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-single-card-test
     steps:
       - name: Determine the runner
@@ -62,8 +62,8 @@ jobs:
           docker run -d -t --name ${container_name} --gpus "\"device=${GPU_DEVICES}\"" --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v /ssd1/paddle-1/action_cache:/root/.cache \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v /ssd1/paddle-1/action_cache:/home/.cache \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
@@ -95,7 +95,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /root/.cache/pip
+          mkdir -p /home/.cache/pip
           pip cache dir
           echo "Install uv"
           pip install uv
@@ -152,7 +152,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
   multi-card_test:
@@ -162,7 +162,7 @@ jobs:
     runs-on:
       group: Fleet-H-multi-card
     env:
-      PIP_CACHE_DIR: /root/.cache/pip
+      PIP_CACHE_DIR: /home/.cache/pip
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-multi-card_test
     steps:
       - name: Check docker image and run container
@@ -173,8 +173,8 @@ jobs:
           docker run -d -t --gpus all --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v ${{ github.workspace }}/../../../.cache:/root/.cache \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v /ssd1/paddle-1/action_cache:/home/.cache \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
@@ -207,7 +207,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /root/.cache/pip
+          mkdir -p /home/.cache/pip
           pip cache dir
           echo "Install uv"
           pip install uv
@@ -266,7 +266,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
 
@@ -277,8 +277,8 @@ jobs:
     runs-on:
       group: Fleet-H-single-card
     env:
-      PIP_CACHE_DIR: /root/.cache/pip
-      CACHE_DIR: /root/.cache
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-single-card
     steps:
       - name: Determine the runner
@@ -297,8 +297,8 @@ jobs:
           docker run -d -t --name ${container_name} --gpus "\"device=${GPU_DEVICES}\"" --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v /ssd1/paddle-1/action_cache:/root/.cache \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v /ssd1/paddle-1/action_cache:/home/.cache \
             -v ${{ github.workspace }}:/workspace \
             -e BRANCH \
             -e PR_ID \
@@ -332,7 +332,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /root/.cache/pip
+          mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
           echo "Install uv"
@@ -446,7 +446,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
   integration-test-H20-multi-card:
@@ -456,8 +456,8 @@ jobs:
     runs-on:
       group: Fleet-H-multi-card
     env:
-      PIP_CACHE_DIR: /root/.cache/pip
-      CACHE_DIR: /root/.cache
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-multi-card
     steps:
       - name: Check docker image and run container
@@ -468,8 +468,8 @@ jobs:
           docker run -d -t --name ${container_name} --gpus all --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v /ssd1/paddle-1/action_cache:/root/.cache \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v /ssd1/paddle-1/action_cache:/home/.cache \
             -v ${{ github.workspace }}:/workspace \
             -e BRANCH \
             -e PR_ID \
@@ -502,7 +502,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /root/.cache/pip
+          mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
           echo "Install uv"
@@ -627,7 +627,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
 
@@ -638,8 +638,8 @@ jobs:
     runs-on:
       group: Distribute
     env:
-      PIP_CACHE_DIR: /root/.cache/pip
-      CACHE_DIR: /root/.cache
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-A100
     steps:
       - name: Check docker image and run container
@@ -650,8 +650,8 @@ jobs:
           docker run -d -t --name ${container_name} --gpus all --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v /ssd1/paddle-1/action_cache:/root/.cache \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v /ssd1/paddle-1/action_cache:/home/.cache \
             -v ${{ github.workspace }}:/workspace \
             -e BRANCH \
             -e PR_ID \
@@ -684,7 +684,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /root/.cache/pip
+          mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
           echo "Install uv"
@@ -776,7 +776,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
   coverage_check:
