@@ -17,6 +17,7 @@ from . import (
     parallel_state as parallel_state,
     training as training,
 )
+from .ops import is_deep_gemm_or_deep_ep_available
 from .package_info import (
     __contact_emails__,
     __contact_names__,
@@ -40,6 +41,7 @@ __all__ = [
     "parallel_state",
     "Timers",
     "LayerSpec",
+    "is_deep_gemm_or_deep_ep_available",
     "__contact_emails__",
     "__contact_names__",
     "__description__",

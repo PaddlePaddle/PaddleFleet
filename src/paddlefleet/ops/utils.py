@@ -108,6 +108,7 @@ class HardwareIncompatibleBlocker(importlib.abc.MetaPathFinder):
 
     def find_spec(self, fullname, path, target=None):
         if fullname in ["paddlefleet.ops.deep_gemm", "paddlefleet.ops.deep_ep"]:
+            # TODO(ooooo): Refine error message to show how to not use deep_gemm and deep_ep in models.
             raise RuntimeError(
                 f"Blocking import of '{fullname}'. "
                 f"Your GPU compute capability is {self.capability[0]}.{self.capability[1]}, "

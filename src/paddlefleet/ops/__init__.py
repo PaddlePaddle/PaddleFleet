@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import ctypes
+import functools
 import importlib.util
 import logging
 import sys
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 _device_capability = paddle.cuda.get_device_capability()
 
 
+@functools.cache
 def is_deep_gemm_or_deep_ep_available():
     return paddle.cuda.get_device_capability()[0] >= 9
 
@@ -100,6 +102,7 @@ else:
     )
 
 
+# TODO(ooooo): Refine error message to show how to not use deep_gemm and deep_ep in models.
 # Explicit error message when call `paddlefleet.ops.deep_gemm` and `from paddlefleet.ops import deep_gemm`
 def __getattr__(name):
     if name in ["deep_gemm", "deep_ep"]:
