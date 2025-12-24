@@ -32,7 +32,7 @@ jobs:
     if: ${{ inputs.can-skip != 'true' }}
     uses: ./.github/workflows/check-bypass.yml
     with:
-      workflow-name: 'test'
+      workflow-name: 'test-release3.3'
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
 
