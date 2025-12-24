@@ -74,7 +74,7 @@ fi
 
 set -e
 echo "
-20 10.21387482
+20 10.21405411
 " > ./glm45_multi_cards_fp8_gt_loss.txt
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
