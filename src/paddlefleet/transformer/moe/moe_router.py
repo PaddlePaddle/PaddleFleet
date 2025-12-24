@@ -102,6 +102,13 @@ class StandardMoERouter(nn.Layer):
         self.scoring_func = config.scoring_func
 
         self.routing_type = config.moe_router_load_balancing_type
+        self.moe_expert_capacity_factor = config.moe_expert_capacity_factor
+        self.moe_token_drop_policy = config.moe_token_drop_policy
+        self.drop_tokens = (
+            self.moe_expert_capacity_factor is not None
+            and self.moe_expert_capacity_factor != 0.0
+        )
+        self.moe_group = pg_collection.ep if pg_collection else None
 
         if self.routing_type != "seq_aux_loss" and config.get("seq_aux", False):
             raise ValueError(
@@ -156,8 +163,6 @@ class StandardMoERouter(nn.Layer):
         self,
         gates: paddle.Tensor,
         capacity_factor: float,
-        max_capacity: int,
-        min_capacity: int,
     ) -> paddle.Tensor:
         """Calculate the capacity for each expert based on the gates and capacity factor.
 
@@ -177,10 +182,6 @@ class StandardMoERouter(nn.Layer):
         num_tokens = gates.shape[0]
         num_experts = gates.shape[1]
         capacity = int((num_tokens // num_experts) * capacity_factor)
-        if capacity < min_capacity:
-            capacity = min_capacity
-        if capacity > max_capacity:
-            capacity = max_capacity
         assert capacity > 0, (
             f"requires capacity > 0, capacity_factor: {capacity_factor}, input_shape: {gates.shape}"
         )
@@ -625,12 +626,39 @@ class StandardMoERouter(nn.Layer):
             l_aux = self._cal_aux_loss(gates, mask)
         # TODO: support global_aux_loss
 
-        exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
-
-        # Do not drop tokens - set capacity according to current expert assignments
-        local_capacity = paddle.max(exp_counts)
-        capacity = int(local_capacity)
-        token_priority = self._priority(top_idx, capacity)
+        if self.drop_tokens:
+            # Calculate configured capacity and remove locations outside capacity from mask
+            capacity = self._capacity(
+                gates,
+                self.moe_expert_capacity_factor * self.top_k,
+            )
+            # update mask and locations by capacity
+            if self.moe_token_drop_policy == "probs":
+                topk_masked_gates = paddle.zeros_like(gates).put_along_axis(
+                    top_idx, top_gate, axis=1
+                )
+                capacity_probs, capacity_indices = paddle.topk(
+                    topk_masked_gates, k=capacity, axis=0, sorted=False
+                )
+                token_priority = self._priority(capacity_indices, capacity)
+            elif self.moe_token_drop_policy == "position":
+                token_priority = self._priority(top_idx, capacity)
+            else:
+                raise ValueError(
+                    f"Invalid moe_token_drop_policy: {self.moe_token_drop_policy}"
+                )
+        else:
+            # Do not drop tokens - set capacity according to current expert assignments
+            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
+            local_capacity = paddle.max(exp_counts)
+            if self.moe_group is not None:
+                paddle.distributed.all_reduce(
+                    local_capacity,
+                    op=paddle.distributed.ReduceOp.MAX,
+                    group=self.moe_group,
+                )
+            capacity = int(local_capacity)
+            token_priority = self._priority(top_idx, capacity)
 
         # normalize gates
         gates_masked = gates * mask

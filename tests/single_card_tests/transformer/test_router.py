@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from copy import deepcopy
 from unittest.mock import patch
 
 import numpy as np
@@ -45,6 +46,8 @@ class MockTransformerConfig:
         self.router_z_loss_coef = 0.01
         self.router_aux_loss_coef = 0.01
         self.moe_router_fusion = True
+        self.moe_expert_capacity_factor = 0.0
+        self.moe_token_drop_policy = "probs"
 
     def get(self, key, default=None):
         return getattr(self, key, default)
@@ -212,6 +215,36 @@ class TestDeepEPTopKRouter(unittest.TestCase):
         self.assertEqual(
             new_usage.sum(), 2 * 5 * self.config.num_experts_per_tok
         )
+
+    def test_force_load_balancing(self):
+        router = DeepEPTopKRouter(self.config)
+        no_force_balance_config = deepcopy(self.config)
+        no_force_balance_config.moe_router_force_load_balancing = False
+        no_force_balance_router = DeepEPTopKRouter(no_force_balance_config)
+
+        hidden_states = paddle.randn(
+            (32, 2, router.hidden_size), device="cuda", dtype=paddle.bfloat16
+        )
+        hidden_states.requires_grad = True
+
+        # First forward pass with normal routing
+        (_, _, _, normal_scores, normal_routing_map, _, _, _) = (
+            no_force_balance_router(hidden_states)
+        )
+        # Second forward pass with force load balancing
+        (_, _, _, force_scores, force_routing_map, _, _, _) = router(
+            hidden_states
+        )
+
+        assert normal_scores.shape == force_scores.shape
+        assert normal_routing_map.shape == force_routing_map.shape
+        assert not paddle.equal_all(normal_scores, force_scores)
+
+        # Backward pass for force load balancing
+        router.zero_grad()
+        force_scores.sum().backward()
+        assert hidden_states.grad is not None
+        assert router.weight.grad.norm() > 0
 
 
 if __name__ == "__main__":
