@@ -32,7 +32,7 @@ jobs:
     if: ${{ inputs.can-skip != 'true' }}
     uses: ./.github/workflows/check-bypass.yml
     with:
-      workflow-name: 'test-release3.3'
+      workflow-name: 'test-release'
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -45,7 +45,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-single-card-test
+      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-single-card-test-release
     steps:
       - name: Determine the runner
         run: |
@@ -140,7 +140,7 @@ jobs:
       group: Fleet-H-multi-card
     env:
       PIP_CACHE_DIR: /home/.cache/pip
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-multi-card_test
+      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-multi-card_test-release
     steps:
       - name: Check docker image and run container
         run: |
@@ -232,7 +232,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-single-card
+      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-single-card-release
     steps:
       - name: Determine the runner
         run: |
@@ -380,7 +380,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-multi-card
+      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-multi-card-release
     steps:
       - name: Check docker image and run container
         run: |
@@ -518,7 +518,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-A100
+      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-A100-release
     steps:
       - name: Check docker image and run container
         run: |
