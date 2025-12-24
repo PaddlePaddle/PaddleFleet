@@ -315,6 +315,7 @@ jobs:
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
+          git pull --no-edit origin/3233/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
@@ -325,7 +326,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/preprocess.sh
+          bash -x PaddleFormers/tests/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mPreprocess failed.\033[0m"
@@ -340,7 +341,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/glm45_pt_single_card.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
@@ -355,7 +356,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/qwen3_single_card.sh
+          bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
@@ -452,6 +453,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
+          git pull --no-edit origin/3233/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
@@ -462,7 +464,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/glm45_pt.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -477,7 +479,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/glm45_sft.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -492,7 +494,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/glm45_pt_fp8.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -588,6 +590,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
+          git pull --no-edit origin/3233/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
@@ -597,7 +600,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/glm45_pt_a100.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_a100.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
