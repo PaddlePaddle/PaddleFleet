@@ -29,15 +29,6 @@ from .utils import (
     patch_module_namespace,
 )
 
-# paddle.compat.enable_torch_proxy(scope={"triton"}) enables the torch proxy
-# specifically for the 'triton' module. This means `import torch` inside 'triton'
-# will actually import paddle's compatibility layer (acting as torch).
-#
-# 'scope' acts as an allowlist. To add other modules, you can do:
-# paddle.compat.enable_torch_proxy(scope={"triton", "new_module"})
-#
-# Note: Ensure that any torch APIs used in 'new_module' are already implemented in Paddle.
-
 logger = logging.getLogger(__name__)
 _device_capability = paddle.cuda.get_device_capability()
 
@@ -86,6 +77,14 @@ if is_deep_gemm_or_deep_ep_available():
         paddle.compat.enable_torch_proxy(
             scope={"deep_gemm", "triton", "deep_ep"}
         )
+        # paddle.compat.enable_torch_proxy(scope={"triton"}) enables the torch proxy
+        # specifically for the 'triton' module. This means `import torch` inside 'triton'
+        # will actually import paddle's compatibility layer (acting as torch).
+        #
+        # 'scope' acts as an allowlist. To add other modules, you can do:
+        # paddle.compat.enable_torch_proxy(scope={"triton", "new_module"})
+        #
+        # Note: Ensure that any torch APIs used in 'new_module' are already implemented in Paddle.
         ops_dir = Path(__file__).parent
         # Loading libnvshmem_host.so.* first when use editable install
         _try_load_nvshmem(ops_dir)
@@ -97,7 +96,7 @@ else:
     # Explicit error message when `import paddlefleet.ops.deep_gemm` and `from paddlefleet.ops.deep_gemm import xxx`
     sys.meta_path.insert(0, HardwareIncompatibleBlocker(_device_capability))
     logger.warning(
-        f"The capability for your device is {_device_capability[0]}.{_device_capability[1]}, which is less than 9.0. Please don't call anything in 'paddlefleet.ops.deep_gemm' and 'paddlefleet.ops.deep_ep' which is unsupported in your device"
+        f"The capability for your device is {_device_capability[0]}.{_device_capability[1]}, which is less than 9.0. Please don't call anything in 'paddlefleet.ops.deep_gemm' and 'paddlefleet.ops.deep_ep' which is unsupported in your device."
     )
 
 
