@@ -866,21 +866,31 @@ class PipelineParallel(nn.Layer, ParallelBase):
                 batch_p2p_comm=self._use_batch_p2p_comm,
             )
 
+            # p2p data type: tuple
+            # model input/return type: dict
+            # here, convert p2p tuple -> dict input
+            input_tensor_dict, use_dict = tuple_to_dict_helper(input_tensor)
+
             output_tensor, _, _ = self._forward_step(
-                input_tensor, micro_dataset, step_id=None
+                input_tensor=input_tensor_dict if use_dict else input_tensor,
+                micro_dataset=micro_dataset,
+                step_id=None,
             )
+            # convert dict to tuple whose tensor element has a key attribution
+            output_tensor_tuple = dict_to_tuple_helper(output_tensor)
+
             self._p2p_helper.send_forward(
-                output_tensor,
-                self.is_pipeline_last_stage(),
+                output_tensor=output_tensor_tuple,
+                pp_last_stage=self.is_pipeline_last_stage(),
                 skip_check_meta=True,
                 batch_p2p_comm=self._use_batch_p2p_comm,
             )
             if not self.is_pipeline_last_stage():
-                self._release_output(output_tensor)
+                self._release_output(output_tensor_tuple)
             else:
-                self._offload_tensors(output_tensor)
+                self._offload_tensors(output_tensor_tuple)
 
-            output_buffers.append(output_tensor)
+            output_buffers.append(output_tensor_tuple)
 
         if steady_steps > 0:
             input_tensor = self._p2p_helper.recv_forward(
@@ -891,21 +901,28 @@ class PipelineParallel(nn.Layer, ParallelBase):
         for i in range(steady_steps):
             last_iter = i == (steady_steps - 1)
 
+            input_tensor_dict, use_dict = tuple_to_dict_helper(input_tensor)
+
             output_tensor, _, _ = self._forward_step(
-                input_tensor, micro_dataset, step_id=None
+                input_tensor_dict if use_dict else input_tensor,
+                micro_dataset,
+                step_id=None,
             )
+
+            output_tensor_tuple = dict_to_tuple_helper(output_tensor)
+
             self._p2p_helper.send_forward(
-                output_tensor,
+                output_tensor_tuple,
                 self.is_pipeline_last_stage(),
                 skip_check_meta=True,
                 batch_p2p_comm=self._use_batch_p2p_comm,
             )
             if not self.is_pipeline_last_stage():
-                self._release_output(output_tensor)
+                self._release_output(output_tensor_tuple)
             else:
-                self._offload_tensors(output_tensor)
+                self._offload_tensors(output_tensor_tuple)
 
-            output_buffers.append(output_tensor)
+            output_buffers.append(output_tensor_tuple)
 
             if not last_iter:
                 input_tensor = self._p2p_helper.recv_forward(

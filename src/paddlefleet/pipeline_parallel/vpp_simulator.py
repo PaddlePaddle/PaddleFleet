@@ -689,18 +689,16 @@ class PPChunkRecorder:
         vpp_degree,
         num_acc_steps,
         num_hidden_layers,
-        remove_head_layer,
-        remove_tail_layer,
+        num_empty_layers_add_in_head,
+        num_empty_layers_add_in_tail,
     ):
         # Record model and training configuration
         self.pp_degree = pp_degree
         self.vpp_degree = vpp_degree
         self.num_acc_steps = num_acc_steps
-        self.remove_head_layer = remove_head_layer
-        self.remove_tail_layer = remove_tail_layer
-        self.num_hidden_layers = (
-            num_hidden_layers - remove_head_layer - remove_tail_layer
-        )
+        self.num_empty_layers_add_in_head = num_empty_layers_add_in_head
+        self.num_empty_layers_add_in_tail = num_empty_layers_add_in_tail
+        self.num_hidden_layers = num_hidden_layers
 
         # Initialize intermediate variables
         self.acc_stamp = [0] * self.num_hidden_layers
@@ -713,10 +711,11 @@ class PPChunkRecorder:
 
     def record_chunk_forward(self, layer_id):
         if (
-            layer_id >= (self.num_hidden_layers + self.remove_head_layer)
-            or layer_id < self.remove_head_layer
+            layer_id
+            >= (self.num_hidden_layers + self.num_empty_layers_add_in_head)
+            or layer_id < self.num_empty_layers_add_in_head
         ):
             return False
 
         # Increment execution count of current layer by 1
-        self.acc_stamp[layer_id - self.remove_head_layer] += 1
+        self.acc_stamp[layer_id - self.num_empty_layers_add_in_head] += 1
