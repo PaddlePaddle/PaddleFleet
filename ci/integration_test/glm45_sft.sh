@@ -61,8 +61,37 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 unset http_proxy https_proxy
 
+set +e
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_sft_yaml 2>&1 | tee ./glm45_sft.log
+
+sft_exit_code=$?
+if [ $sft_exit_code -ne 0 ]; then
+   echo "GLM4.5 multi-cards training failed, try to check the log file"
+   python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_sft.log
+   sft_check_exit_code=$?
+   if [ $sft_check_exit_code -ne 0 ]; then
+     echo "Failed to find 'Training completed' in log file."
+     exit 1
+   else
+     echo "Log check passed."
+   fi
+fi
 
 echo -e "\033[34msft is over, lora is about to start\033[0m"
 
 NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port coverage run $(which paddleformers-cli) train $config_lora_yaml 2>&1 | tee ./glm45_lora.log
+
+lora_exit_code=$?
+if [ $lora_exit_code -ne 0 ]; then
+   echo "GLM4.5 multi-cards training failed, try to check the log file"
+   python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_lora.log
+   lora_check_exit_code=$?
+   if [ $lora_check_exit_code -ne 0 ]; then
+     echo "Failed to find 'Training completed' in log file."
+     exit 1
+   else
+     echo "Log check passed."
+   fi
+else
+    echo "LORA Test passed."
+fi

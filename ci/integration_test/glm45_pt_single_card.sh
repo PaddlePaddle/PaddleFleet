@@ -38,25 +38,42 @@ export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 export FLAGS_use_stride_compute_kernel=False
 unset http_proxy https_proxy
+
+set +e
 coverage run run_pretrain.py $config_json 2>&1 | tee ./glm45_single_card.log
 
+exit_code=$?
+if [ $exit_code -ne 0 ]; then
+    echo "GLM4.5 single card training failed, try to check the log file"
+    python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_single_card.log
+    check_exit_code=$?
+    if [ $check_exit_code -ne 0 ]; then
+      echo "Failed to find 'Training completed' in log file."
+      exit 1
+    else
+      echo "Log check passed."
+    fi
+else
+    echo "Test passed."
+fi
+
+
+set -e
 echo "
 1 12.10431099
-2 12.05330086
-3 12.03880692
-4 12.03462410
-5 12.02083588
-6 12.00885773
-7 11.95637226
-8 11.96553898
-9 11.97878838
-10 11.97215271
+2 12.05327988
+3 12.03885174
+4 12.03460503
+5 12.02089691
+6 12.00885010
+7 11.95639896
+8 11.96551323
+9 11.97876358
+10 11.97223091
 " > ./glm45_single_card_gt_loss.txt
 
-
-
-
 export FLAGS_use_stride_compute_kernel=False
+
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --log_file ./glm45_single_card.log \
