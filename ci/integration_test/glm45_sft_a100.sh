@@ -98,3 +98,22 @@ if [ $lora_exit_code -ne 0 ]; then
 else
     echo "LORA Test passed."
 fi
+
+set -e
+
+echo "
+10 10.52686119
+" > ./glm45_sft_gt_loss.txt
+
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --log_file ./glm45_sft.log \
+   --gt_file ./glm45_sft_gt_loss.txt
+
+
+echo "
+10 10.52686119
+" > ./glm45_lora_gt_loss.txt
+
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --log_file ./glm45_lora.log \
+   --gt_file ./glm45_lora_gt_loss.txt
