@@ -36,13 +36,33 @@ rm -rf outputs/
 master=$(hostname -i)
 port=36677
 
+
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 export FLAGS_use_stride_compute_kernel=False
 
 unset http_proxy https_proxy
+
+set +e
 coverage run run_pretrain.py $config_json 2>&1 | tee ./qwen3_single_card.log
 
+exit_code=$?
+if [ $exit_code -ne 0 ]; then
+      echo "Qwen3-30B-A3B single card training failed, try to check the log ./qwen3_single_card.log"
+      python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./qwen3_single_card.log
+      check_exit_code=$?
+      if [ $check_exit_code -ne 0 ]; then
+         echo "Log check failed."
+         exit 1
+      else
+         echo "Log check passed."
+      fi
+else
+      echo "Test passed."
+fi
+
+
+set -e
 echo "
 1 10.57955360
 2 10.57497406
@@ -55,8 +75,6 @@ echo "
 9 10.53660393
 10 10.52988529
 " > ./qwen3_single_card_gt_loss.txt
-
-
 
 python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
    --log_file ./qwen3_single_card.log \

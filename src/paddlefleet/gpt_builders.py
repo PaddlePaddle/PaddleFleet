@@ -39,7 +39,9 @@ def gpt_builder(config, **kwargs):
         transformer_layer_spec_func = _get_transformer_layer_spec_func(config)
         transformer_layers_spec = []
         for layer_number in range(config.num_hidden_layers):
-            real_layer_number = layer_number + config.remove_head_layers
+            real_layer_number = (
+                layer_number + config.num_empty_layers_add_in_tail
+            )
             transformer_layers_spec.append(
                 transformer_layer_spec_func(layer_number=real_layer_number)
             )
@@ -67,13 +69,13 @@ def gpt_builder(config, **kwargs):
         )
 
     head_empty_layers_spec = []
-    for i in range(config.remove_head_layers):
+    for i in range(config.num_empty_layers_add_in_head):
         head_empty_layers_spec.append(
             LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
         )
 
     tail_empty_layers_spec = []
-    for i in range(config.remove_tail_layers):
+    for i in range(config.num_empty_layers_add_in_tail):
         tail_empty_layers_spec.append(
             LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
         )

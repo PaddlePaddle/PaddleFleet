@@ -49,6 +49,7 @@ dependencies = [
     "colorlog>=6.10.1",
     "paddlepaddle-gpu>=3.3.0.dev",
     "triton",
+    "nvidia-nvshmem-cu12>=3.3.9", # for deep_ep build
 ]
 
 [project.urls]
@@ -59,7 +60,7 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 
 [build-system]
-requires = ["setuptools>=61.0.0", "pybind11", "wheel", "packaging>=24.2", "paddlepaddle-gpu>=3.3.0.dev", "setuptools-scm>=8"]
+requires = ["setuptools>=61.0.0", "pybind11", "wheel", "packaging>=24.2", "paddlepaddle-gpu>=3.3.0.dev", "setuptools-scm>=8", "nvidia-nvshmem-cu12>=3.3.9"]
 build-backend = "build_backend"
 backend-path = ["."]
 
@@ -108,7 +109,7 @@ prerelease = "allow"
 
 
 [tool.ruff]
-exclude = []
+exclude = ["third_party"]
 line-length = 80
 target-version = "py310"
 

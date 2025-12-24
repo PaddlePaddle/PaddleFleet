@@ -46,6 +46,8 @@ export FLAGS_use_stride_compute_kernel=False
 unset http_proxy https_proxy
 rm -rf checkpoint/
 rm -rf outputs/
+
+set +e
 coverage run -m paddle.distributed.launch \
    --log_dir ./log \
    --master $master:$port \
@@ -55,6 +57,22 @@ coverage run -m paddle.distributed.launch \
    run_pretrain.py $config_json \
    --output_dir ./checkpoint 2>&1 | tee ./glm45_fp8.log
 
+exit_code=$?
+if [ $exit_code -ne 0 ]; then
+   echo "Training failed with exit code $exit_cod, see ./glm45_fp8.log for details."
+   python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_fp8.log
+   check_result=$?
+   if [ $check_result -ne 0 ]; then
+       echo "Failed to find 'Training completed' in log file."
+       exit 1
+   else
+       echo "Log check passed."
+   fi
+else
+   echo "Test passed."
+fi
+
+set -e
 echo "
 20 10.21387482
 " > ./glm45_multi_cards_fp8_gt_loss.txt

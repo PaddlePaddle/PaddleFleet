@@ -15,6 +15,10 @@
 set -exo pipefail
 export root_dir=$(pwd)
 
+cd $root_dir/PaddleFormers
+git pull --no-edit origin pull/3200/head
+cd -
+
 source PaddleFleet/.venv/bin/activate
 
 wget -q --tries=5 --no-proxy https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12-18.tar --no-check-certificate
@@ -25,8 +29,15 @@ export cur_dir=$(pwd)
 config_yaml=$cur_dir/glm45_pt.yaml
 # config_json=${cur_dir}/GLM-4.5-Air/config.json
 
-yq eval '.expert_model_parallel_size = 1
+yq eval 'del(.sharding_parallel_config)
+    | .split_param = true
+    |.moe_router_force_load_balancing = true
+    | .expert_model_parallel_size = 1
     | .gated_linear_unit = true
+    | .num_hidden_layers = 2
+    | .apply_rope_fusion = true
+    | .moe_router_fusion = true
+    | .router_aux_loss_coef = 0.001
     | .gradient_accumulation_steps = 1
     | .per_device_train_batch_size = 1
     | .use_expert_parallel = false
@@ -59,4 +70,33 @@ unset http_proxy https_proxy
 #    run_pretrain.py $config_json \
 #    --output_dir ./checkpoint | tee ./glm45_a100.log
 
+set +e
 FLAGS_use_stride_compute_kernel=False NNODES=1 MASTER_ADDR=$master MASTER_PORT=$port CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 coverage run $(which paddleformers-cli) train $config_yaml 2>&1 | tee ./glm45_pt_a100.log
+
+
+exit_code=$?
+
+if [ $exit_code -ne 0 ]; then
+    echo "Test failed with exit code $exit_code, check the log: ./glm45_a100.log"
+    python $root_dir/PaddleFleet/ci/check_log_for_exitcode.py ./glm45_a100.log
+    check_log_exit_code=$?
+    if [ $check_log_exit_code -ne 0 ]; then
+        echo "Failed to find 'Training completed' in log file."
+        exit 1
+    else
+        echo "Log check passed"
+    fi
+else
+    echo "Test passed."
+fi
+
+set -e
+
+echo "
+10 12.65529728
+" > ./glm45_pt_multi_card_gt_loss.txt
+
+python $root_dir/PaddleFleet/ci/integration_test/check_loss.py \
+   --compare_step 10 \
+   --log_file ./glm45_pt_a100.log \
+   --gt_file ./glm45_pt_multi_card_gt_loss.txt

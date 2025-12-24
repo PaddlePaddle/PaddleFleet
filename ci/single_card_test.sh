@@ -56,8 +56,15 @@ for test_file in $(find $test_dir -type f -name "test_*.py"); do
     fi
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
-        echo "Test FAILED: $test_file"
-        failed_tests+=("$test_file")
+        echo "Test FAILED: $test_file, see log for details..."
+        python $work_dir/ci/check_log_for_exitcode.py "./$(basename ${test_file%.*})_single_card.log" "OK"
+        check_exit_code=${PIPESTATUS[0]}
+        if [ $check_exit_code -ne 0 ]; then
+            failed_tests+=("$test_file")
+            echo "Log check failed for $test_file."
+        else
+            echo "Log check passed for $test_file."
+        fi
     else
         echo "Test PASSED: $test_file"
     fi
