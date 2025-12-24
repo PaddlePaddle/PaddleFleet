@@ -372,12 +372,12 @@ class MoELayer(nn.Layer):
         orig_shape = hidden_states.shape
         residuals = hidden_states
         (
-            capacity,
+            _,  # capacity
             topk_weights,
             topk_indices,
             gates_masked,
             mask,
-            priorities,
+            _,  # priorities
             aux_loss,
             z_loss,
         ) = self.gate(hidden_states)
