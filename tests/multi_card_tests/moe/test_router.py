@@ -57,8 +57,7 @@ class TestTop2Router(unittest.TestCase):
             "sharding_degree": 2,
             "sep_degree": 1,
             "cp_degree": 1,
-            "ep_degree": 4,
-            "moe_sharding_degree": 2,
+            "ep_degree": 1,
             "order": [
                 "sharding",
                 "moe_sharding",
