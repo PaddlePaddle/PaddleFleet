@@ -40,7 +40,7 @@ def gpt_builder(config, **kwargs):
         transformer_layers_spec = []
         for layer_number in range(config.num_hidden_layers):
             real_layer_number = (
-                layer_number + config.num_empty_layers_add_in_tail
+                layer_number + config.num_empty_layers_add_in_head
             )
             transformer_layers_spec.append(
                 transformer_layer_spec_func(layer_number=real_layer_number)
