@@ -13,9 +13,7 @@
 # limitations under the License.
 
 from .rr_attn_estimate_triton_op import rr_attn_estimate_triton_func
-from .rr_attn_interface import rr_attention
 
 __all__ = [
     "rr_attn_estimate_triton_func",
-    "rr_attention",
 ]
