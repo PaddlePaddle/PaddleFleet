@@ -304,17 +304,14 @@ class TestRRAttnEstimateTritonOP(unittest.TestCase):
             chunk_size=2048,
         )
 
-        with paddle.compat.use_torch_proxy_guard():
-            out_kernel, bound_kernel, topp_kernel = (
-                rr_attn_estimate_triton_func(
-                    q=q_kernel_t,
-                    k=k_kernel_t,
-                    startend_row_indices=startend_row_indices,
-                    stride=stride,
-                    threshold=threshold,
-                    causal=causal,
-                )
-            )
+        out_kernel, bound_kernel, topp_kernel = rr_attn_estimate_triton_func(
+            q=q_kernel_t,
+            k=k_kernel_t,
+            startend_row_indices=startend_row_indices,
+            stride=stride,
+            threshold=threshold,
+            causal=causal,
+        )
 
         out_ref = out_ref.astype("float32")
         bound_ref = bound_ref.astype("int32")
