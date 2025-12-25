@@ -219,7 +219,6 @@ def test_cublaslt_gemm() -> None:
         assert diff < 6e-7, (
             f"{diff=}, ({m=}, {n=}, {k=}, {major_opt=}, {accumulate=}, {out_dtype=})"
         )
-        raise AssertionError
 
     print()
 

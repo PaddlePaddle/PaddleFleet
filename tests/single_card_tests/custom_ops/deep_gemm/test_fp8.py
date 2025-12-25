@@ -218,7 +218,6 @@ def test_k_grouped_gemm_contiguous() -> None:
 
             diff = calc_diff(d, ref_d)
             assert diff < 0.001, f"{m=}, {n=}, {k=}, {ks=}, {diff:.5f}"
-            raise AssertionError
 
     print()
 
