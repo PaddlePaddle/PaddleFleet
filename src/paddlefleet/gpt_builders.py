@@ -96,7 +96,15 @@ def gpt_builder(config, **kwargs):
         parallel_output=config.parallel_output,
     )
 
-    return build_layer(gpt_spec, loss_fn=LanguageLoss(config), **kwargs)
+    loss_fn = None
+    if "loss_fn" in kwargs:
+        loss_fn = kwargs.pop("loss_fn")
+
+    return build_layer(
+        gpt_spec,
+        loss_fn=LanguageLoss(config) if not loss_fn else loss_fn,
+        **kwargs,
+    )
 
 
 def _get_transformer_layer_spec_func(config):

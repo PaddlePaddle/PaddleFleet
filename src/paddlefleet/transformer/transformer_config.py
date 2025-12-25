@@ -367,8 +367,12 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
+
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
+
+    moe_deep_gemm: bool = True
+    """Whether to use deep gemm. Only work when moe_grouped_gemm enabled."""
 
     ##################
     # Context Parallel
@@ -487,6 +491,8 @@ class TransformerConfig(ModelParallelConfig):
                 raise TypeError(
                     f"hidden_act must be str or callable, but get {type(value)}"
                 )
+        elif key == "dtype":
+            self.params_dtype = value
         else:
             setattr(self, key, value)
 
