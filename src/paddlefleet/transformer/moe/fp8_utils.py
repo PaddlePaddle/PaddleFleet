@@ -1356,10 +1356,7 @@ class ExpertsGroupGemmContiguousNode:
                         self.tokens_per_expert,
                         trans_lhs=True,
                     )
-                    weights.main_grad = weights.main_grad + weights_res.cast(
-                        weights.main_grad.dtype
-                    )
-                    del weights_res
+                    weights.main_grad.add_(weights_res.cast(weights.main_grad.dtype))
             else:
                 if weights.grad is None:
                     weights.grad = paddle.zeros(
