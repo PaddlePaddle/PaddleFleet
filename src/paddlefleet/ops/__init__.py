@@ -46,7 +46,10 @@ For users:
 @functools.cache
 def is_deep_gemm_or_deep_ep_available():
     """Check whether deep GEMM or deep EP kernels are available on the current GPU."""
-    return paddle.cuda.get_device_capability()[0] >= 9
+    return (
+        paddle.is_compiled_with_cuda()
+        and paddle.cuda.get_device_capability()[0] >= 9
+    )
 
 
 class HardwareIncompatibleBlocker(importlib.abc.MetaPathFinder):
