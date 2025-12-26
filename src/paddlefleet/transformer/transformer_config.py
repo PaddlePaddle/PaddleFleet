@@ -182,6 +182,36 @@ class TransformerConfig(ModelParallelConfig):
     rope_theta: float = 10000.0
     """The base period of the RoPE embeddings, default is 10000.0."""
 
+    high_precision_rope: bool = False
+    """High precision mode for RoPE,if set to True,rotary_pos_emb will compute in FP32"""
+
+    apply_residual_connection_post_layernorm: bool = False
+    """If True, uses the original BERT residue connection ordering."""
+
+    activation_func_clamp_value: float = None
+    """Clamp the output of the linear_fc1 in the activation function. Only used when activation_func
+    is quick_gelu."""
+
+    glu_linear_offset: float = 0.0
+    """Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). Only
+    used when gated_linear_unit is True"""
+
+    high_precision_rope: bool = False
+    """High precision mode for RoPE,if set to True,rotary_pos_emb will compute in FP32"""
+
+    apply_residual_connection_post_layernorm: bool = False
+    """If True, uses the original BERT residue connection ordering."""
+
+    activation_func_clamp_value: float = None
+    """Clamp the output of the linear_fc1 in the activation function. Only used when activation_func
+    is quick_gelu."""
+
+    glu_linear_offset: float = 0.0
+    """Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). Only
+    used when gated_linear_unit is True"""
+
+    multimodal_embedding: bool = False
+    """Whether to use multimodal embedding."""
     ####################
     # mixed-precision
     ####################
@@ -213,6 +243,10 @@ class TransformerConfig(ModelParallelConfig):
 
     rms_norm_eps: float = 1e-5
     """Epsilon value for norm."""
+
+    layernorm_zero_centered_gamma: bool = False
+    """If set to True, the LayerNorm is adjusted to center the gamma values around 0. This improves
+    numerical stability."""
 
     bias_dropout_fusion: bool = False
     """If True, uses bias dropout fusion."""
@@ -440,7 +474,9 @@ class TransformerConfig(ModelParallelConfig):
 
     @classmethod
     def from_config(cls, config_dict):
+        #note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
         instance = object.__new__(cls)
+        print("start register_attributes")
         instance.register_attributes(config_dict)
         instance.__post_init__()
         return instance
@@ -593,3 +629,4 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
+        print(f"Config init_method {self.init_method} embedding_init_method {self.embedding_init_method}")
