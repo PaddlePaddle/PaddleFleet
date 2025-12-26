@@ -1050,6 +1050,7 @@ def _prepare_stride_maxmin_ptrs(
     )
 
 
+@paddle.compat.use_torch_proxy_guard()
 def rr_attn_estimate_triton_func(
     q: paddle.Tensor,
     k: paddle.Tensor,
