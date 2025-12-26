@@ -562,8 +562,7 @@ class TopKRouter(StandardMoERouter):
         gates = self.gate_score_func(logits)
 
         # top_gate: [B*S, K], top_idx: [B*S, K]
-        top_gate, top_idx = self._call_topk_method(
-            self.topk_method,
+        top_gate, top_idx = self._topk_noaux_tc(
             gates,
             k=self.num_experts_per_tok,
             n_group=self.n_group,
@@ -587,11 +586,10 @@ class TopKRouter(StandardMoERouter):
         mask = paddle.zeros_like(gates).put_along_axis(
             top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
         )
-
-        if self.topk_method == "noaux_tc":
-            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
-            with paddle.no_grad():
-                self.expert_usage += exp_counts
+        exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
+            
+        with paddle.no_grad():
+            self.expert_usage += exp_counts
 
         gates_masked = paddle.zeros_like(gates).put_along_axis(
             top_idx, top_gate.cast(gates.dtype), axis=1
