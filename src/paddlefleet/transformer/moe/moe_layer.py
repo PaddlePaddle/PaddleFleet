@@ -104,6 +104,7 @@ class MoELayer(nn.Layer):
                 config=config, pg_collection=pg_collection
             )
         else:
+            assert 0, f"Unsupported router fusion mode {config}"
             self.gate = StandardMoERouter(
                 config=config, pg_collection=pg_collection
             )
