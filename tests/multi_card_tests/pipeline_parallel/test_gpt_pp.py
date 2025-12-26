@@ -157,8 +157,8 @@ class TestPP(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             use_qk_norm=True,
-            num_empty_layers_add_in_head=2,
-            num_empty_layers_add_in_tail=1,
+            num_empty_layers_add_in_head=1,
+            num_empty_layers_add_in_tail=2,
             pipeline_model_parallel_size=PP_DEGREE,
         )
 

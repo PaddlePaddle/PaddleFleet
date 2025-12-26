@@ -371,7 +371,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/ci/integration_test/preprocess.sh
+          bash -x PaddleFormers/tests/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mPreprocess failed.\033[0m"
@@ -389,7 +389,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_pt_single_card.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-single
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -412,7 +412,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/qwen3_single_card.sh
+          bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-qwen
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -542,7 +542,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-pt
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-pt/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_pt.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-pt
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -566,7 +566,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-sft
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-sft/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_sft.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-sft
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -590,7 +590,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-fp8
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-fp8/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_pt_fp8.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-fp8
           source /workspace/PaddleFleet/.venv/bin/activate
@@ -721,7 +721,7 @@ jobs:
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-pt/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/ci/integration_test/glm45_pt_a100.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_a100.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-pt
           source /workspace/PaddleFleet/.venv/bin/activate

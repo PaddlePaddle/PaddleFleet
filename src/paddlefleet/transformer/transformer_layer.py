@@ -394,6 +394,7 @@ class TransformerLayer(nn.Layer):
             context = attention_output_with_bias["context"]
 
         with paddle.enable_grad():
+            residual.stop_gradient = False
             hidden_states = self.cross_attn_bda(
                 self.training, self.config.bias_dropout_fusion
             )(attention_output_with_bias, residual, self.hidden_dropout_prob)
