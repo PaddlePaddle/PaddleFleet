@@ -99,7 +99,14 @@ class MoELayer(nn.Layer):
         # MoE-Related Configs
         self._init_expert_parallel()
 
-        self.gate = TopKRouter(config=config, pg_collection=pg_collection)
+        if config.moe_router_fusion:
+            self.gate = TopKRouter(
+                config=config, pg_collection=pg_collection
+            )
+        else:
+            self.gate = StandardMoERouter(
+                config=config, pg_collection=pg_collection
+            )
 
         self.expert_class = StandardMLPExpert
         self.shared_expert_class = StandardMLPSharedExpert
