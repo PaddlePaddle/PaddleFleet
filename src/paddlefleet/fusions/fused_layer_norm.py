@@ -168,9 +168,9 @@ class FusedLayerNorm(paddle.nn.Layer):
             )
         output = fused_layer_norm(
             input,
-            weight,
-            self.bias,
-            self.self.eps,
+            weight.to(dtype="float32"),
+            self.bias.to(dtype="float32"),
+            self.eps,
             begin_norm_axis=begin_norm_axis,
         )
 

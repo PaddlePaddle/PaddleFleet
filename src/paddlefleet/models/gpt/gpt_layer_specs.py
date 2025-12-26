@@ -99,9 +99,11 @@ def get_gpt_layer_local_spec(
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
     )
+    
+    transformer_layer = getattr(config, "specific_layer", TransformerLayer)
 
     return LayerSpec(
-        layer=TransformerLayer,
+        layer=transformer_layer,
         sublayers_spec=TransformerLayerSublayersSpec(
             input_layernorm=layer_norm,
             self_attn=LayerSpec(
