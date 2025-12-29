@@ -582,6 +582,31 @@ jobs:
           fi
           '
 
+      - name: GLM4.5 dpo
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-dpo
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-dpo/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
+          glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-dpo
+          source /workspace/PaddleFleet/.venv/bin/activate
+          uv run coverage --version
+          uv run coverage combine
+          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml
+          uv run coverage report -m
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
+          fi
+          '
+
       - name: Integration test (GLM4.5 multi-card FP8)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
@@ -616,11 +641,12 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml coverage-multi-pt.xml
           cp /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml coverage-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml coverage-multi-dpo.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
-          target_path_multi_fp8="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi-fp8"
           uv run ${push_file} coverage-multi-pt.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-sft.xml ${target_path_multi}
-          uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi_fp8}
+          uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-dpo.xml ${target_path_multi}
           '
 
       - name: Terminate and delete the container
@@ -801,33 +827,27 @@ jobs:
       - name: coverage file download
         shell: bash
         run: |
-          multi_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/multi-card/coverage.xml"
-          wget "${multi_card_cov_file_url}" -O multi_coverage.xml --no-proxy
-          single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
-          wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
-          h20_multi_pt_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi-pt.xml"
-          wget "${h20_multi_pt_cov_file_url}" -O h20_multi_pt_coverage.xml --no-proxy
-          h20_multi_sft_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi-sft.xml"
-          wget "${h20_multi_sft_cov_file_url}" -O h20_multi_sft_coverage.xml --no-proxy
-          h20_multi_fp8_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi-fp8/coverage-multi-fp8.xml"
-          wget "${h20_multi_fp8_cov_file_url}" -O h20_multi_fp8_coverage.xml --no-proxy
-          h20_single_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-single/coverage-single.xml"
-          wget "${h20_single_cov_file_url}" -O h20_single_coverage.xml --no-proxy
-          h20_qwen_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-qwen/coverage-qwen.xml"
-          wget "${h20_qwen_cov_file_url}" -O h20_qwen_coverage.xml --no-proxy
-          a100_pt_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/a100/coverage-a-pt.xml"
-          wget "${a100_pt_cov_file_url}" -O a100_pt_coverage.xml --no-proxy
-          # a100_sft_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/a100/coverage-a-sft.xml"
-          # wget "${a100_sft_cov_file_url}" -O a100_sft_coverage.xml --no-proxy
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_pt_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_sft_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_fp8_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_single_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' a100_pt_coverage.xml
-          # sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' a100_sft_coverage.xml
+          coverage_configs="
+          multi_coverage.xml:multi-card/coverage.xml
+          single_coverage.xml:single-card/coverage.xml
+          h20_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
+          h20_multi_sft_coverage.xml:h20-multi/coverage-multi-sft.xml
+          h20_multi_dpo_coverage.xml:h20-multi-dpo/coverage-multi-dpo.xml
+          h20_multi_fp8_coverage.xml:h20-multi-fp8/coverage-multi-fp8.xml
+          h20_single_coverage.xml:h20-single/coverage-single.xml
+          h20_qwen_coverage.xml:h20-qwen/coverage-qwen.xml
+          a100_pt_coverage.xml:a100/coverage-a-pt.xml
+          "
+          base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
+
+          echo "$coverage_configs" | while IFS= read -r config; do
+            if [ -n "$config" ]; then
+                filename="${config%%:*}"
+                filepath="${config#*:}"
+                wget "${base_url}/${filepath}" -O "$filename" --no-proxy
+                sed -i "s|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|" "$filename"
+            fi
+          done
           git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} --unified=0 > diff.txt
           echo "=== DIFF FILE ==="
           cat diff.txt
@@ -836,20 +856,22 @@ jobs:
           COVERAGE_EXIT_CODE=0
           diff-cover multi_coverage.xml single_coverage.xml h20_multi_pt_coverage.xml h20_multi_sft_coverage.xml h20_multi_fp8_coverage.xml \
           h20_single_coverage.xml h20_qwen_coverage.xml a100_pt_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
-          python ci/filter_coverage.py multi_coverage.xml diff.txt
-          python ci/filter_coverage.py single_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_pt_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_sft_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_single_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_qwen_coverage.xml diff.txt
-          python ci/filter_coverage.py a100_pt_coverage.xml diff.txt
-          # python ci/filter_coverage.py a100_sft_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_fp8_coverage.xml diff.txt
           exit ${COVERAGE_EXIT_CODE}
 
       - name: Check coverage files before upload
         if: always()
         run: |
+          python ci/filter_coverage.py multi_coverage.xml diff.txt
+          python ci/filter_coverage.py single_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_multi_pt_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_multi_sft_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_multi_fp8_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_multi_dpo_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_single_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_qwen_coverage.xml diff.txt
+          python ci/filter_coverage.py a100_pt_coverage.xml diff.txt
+          # python ci/filter_coverage.py a100_sft_coverage.xml diff.txt
+          
           echo "=== CHECKING COVERAGE FILES ==="
 
 
