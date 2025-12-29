@@ -861,25 +861,14 @@ jobs:
       - name: Check coverage files before upload
         if: always()
         run: |
-          python ci/filter_coverage.py multi_coverage.xml diff.txt
-          python ci/filter_coverage.py single_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_pt_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_sft_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_fp8_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_dpo_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_single_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_qwen_coverage.xml diff.txt
-          python ci/filter_coverage.py a100_pt_coverage.xml diff.txt
-          # python ci/filter_coverage.py a100_sft_coverage.xml diff.txt
-
           echo "=== CHECKING COVERAGE FILES ==="
-
 
           COVERAGE_FILES=(
             "multi_coverage.xml"
             "single_coverage.xml"
             "h20_multi_pt_coverage.xml"
             "h20_multi_sft_coverage.xml"
+            "h20_multi_dpo_coverage.xml"
             "h20_single_coverage.xml"
             "h20_qwen_coverage.xml"
             "a100_pt_coverage.xml"
@@ -891,6 +880,7 @@ jobs:
           TOTAL_FILE_SIZE=0
 
           for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
+            python ci/filter_coverage.py "$COVERAGE_FILE" diff.txt
             echo -e "\n=== CHECKING: $COVERAGE_FILE ==="
 
 
