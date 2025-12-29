@@ -507,9 +507,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          cd PaddleFormers
-          git pull origin --no-edit pull/3366/head
-          cd -
           bash -x PaddleFormers/tests/integration_test/qwen.sh pt
           '
 
