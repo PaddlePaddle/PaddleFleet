@@ -13,6 +13,9 @@
 # limitations under the License.
 
 import paddle
+from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
+    build_sharded_state_dict,
+)
 from paddle.nn.parameter import Parameter
 
 from paddlefleet.tensor_parallel.layers import (
@@ -76,6 +79,7 @@ class GPTLMHead(ColumnParallelLinear):
                         stride=stride,
                         is_expert=self.is_expert,
                     )
+            self.weight.is_distributed = True if self.world_size > 1 else False
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
@@ -87,3 +91,14 @@ class GPTLMHead(ColumnParallelLinear):
     @property
     def embedding_weight(self):
         return self.weight
+
+    def sharded_state_dict(
+        self,
+        structured_name_prefix: str = "",
+    ):
+        """Sharding along axis 0, bias sharded"""
+        state_dict = self.state_dict(structured_name_prefix="")
+        shard_rules = None if self.world_size == 1 else {"weight": 0, "bias": 0}
+        return build_sharded_state_dict(
+            state_dict, shard_rules, structured_name_prefix
+        )
