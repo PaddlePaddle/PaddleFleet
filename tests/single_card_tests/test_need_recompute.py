@@ -141,8 +141,8 @@ class TestNeedRescompute(unittest.TestCase):
         config_4 = TransformerConfig(
             num_hidden_layers=9,
             pipeline_model_parallel_size=4,
-            num_empty_layers_add_in_head=2,
-            num_empty_layers_add_in_tail=1,
+            num_empty_layers_add_in_head=1,
+            num_empty_layers_add_in_tail=2,
             recompute_granularity="full",
             recompute_method="block",
             recompute_num_layers=1,

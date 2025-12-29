@@ -286,6 +286,7 @@ def apply_rotary_pos_emb(
                 sin=sin,
                 cos=cos,
                 rotary_emb_base=config.rope_theta,
+                use_neox_rotary_style=config.rotary_interleaved,
                 time_major=config.sequence_parallel,
             )
 

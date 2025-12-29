@@ -90,6 +90,7 @@ def setup_ops_extension():
             "./src/paddlefleet/_extensions/merge_subbatch_cast.cu",
             "./src/paddlefleet/_extensions/tokens_unzip_slice.cu",
             "./src/paddlefleet/_extensions/fuse_swiglu_scale.cu",
+            "./src/paddlefleet/_extensions/swiglu_kernel.cu",
         ],
         include_dirs=[
             os.path.join(os.getcwd(), "src/paddlefleet/_extensions"),

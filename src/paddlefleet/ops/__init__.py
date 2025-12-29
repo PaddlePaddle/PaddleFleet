@@ -98,3 +98,11 @@ else:
     logger.warning(
         f"The capability for your device is {capability[0]}.{capability[1]}, which is less than 9.0. Please don't call anything in 'paddle.ops.deep_gemm' and 'paddle.ops.deep_op' which is unsupported in your device"
     )
+
+try:
+    paddle.compat.enable_torch_proxy(scope={"triton"})
+    from .._extensions.flashmask import (
+        rr_attn_estimate_triton_func,  # noqa: F401
+    )
+finally:
+    paddle.compat.disable_torch_proxy()

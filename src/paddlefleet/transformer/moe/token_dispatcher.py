@@ -554,4 +554,14 @@ class AllToAllTokenDispatcher(nn.Layer):
             overwrite=False,
         )
 
+        # When using non-deterministic mode, index_add and scatter give similar precision.
+        # In deterministic mode, index_add yields more precise results — but it is significantly slower.
+        # For most use cases (where ultra-high precision isn’t required), scatter is recommended for better performance.
+        # final_output = paddle.index_add(
+        #     x=final_output_empty,
+        #     index=token_indices_for_scatter_single,
+        #     axis=0,
+        #     value=weighted_gathered_tokens,
+        # )
+
         return final_output
