@@ -19,6 +19,11 @@ import numpy
 import paddle
 import paddle.nn.functional as F
 
+from paddlefleet.ops import (
+    fused_swiglu_scale,
+    fused_swiglu_scale_bwd,
+)
+
 try:
     from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
 except (ImportError, RuntimeError):
@@ -493,11 +498,7 @@ class ExpertsGroupGemmContiguousNode:
                 "fuse node do not support group gemm currently"
             )
 
-        # swiglu
-        o2 = self.fwd_swiglu(o1)
-
-        unzipped_probs = unzipped_probs.unsqueeze(-1)
-        o2 = (o2 * unzipped_probs).cast(paddle.bfloat16)
+        o2 = fused_swiglu_scale(o1, unzipped_probs)
 
         if clear_o1:
             o1._clear_to_zero_allocation()
@@ -653,20 +654,8 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        # recompute o2
-        o2 = self.fwd_swiglu(o1)
-        o2_s = (o2 * unzipped_probs).cast(paddle.bfloat16)
-        # do2: 前向从bfloat16-->float32，反向从float32-->bfloat16,do2 需要保持 bfloat16（因为 o2 是 bfloat16)
-        do2 = (do2_s.cast(paddle.float32) * unzipped_probs).cast(
-            paddle.bfloat16
-        )
-
-        # probs_grad: probs_grad 需要保持 float32（因为 unzipped_probs 是 float32）
-        probs_grad = (
-            do2_s.cast(paddle.float32) * (o2.cast(paddle.float32))
-        ).sum(axis=-1)
-        # do1
-        do1 = self.bwd_swiglu(o1, do2)
+        o2_s = fused_swiglu_scale(o1, unzipped_probs)
+        do1, probs_grad = fused_swiglu_scale_bwd(o1, unzipped_probs, do2_s)
 
         return do1, o2_s, probs_grad
 
