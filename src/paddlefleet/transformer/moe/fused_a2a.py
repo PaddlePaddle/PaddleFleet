@@ -30,6 +30,7 @@ from .moe_utils import manual_backward
 
 _buffer = None
 
+
 def barrier_ep(ep_group):
     """barrier_ep"""
     paddle.distributed.barrier(ep_group)
@@ -212,7 +213,7 @@ def fused_combine_backward_func(
 ):
     """Backward pass of fused combine."""
     barrier_ep(group)
-    
+
     if isinstance(grad_output, tuple):
         buffer = get_buffer(group, get_hidden_bytes(grad_output[0]))
         grad_x, _, _, _, _, event = buffer.dispatch(
