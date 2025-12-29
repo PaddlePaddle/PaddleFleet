@@ -1380,9 +1380,7 @@ class ExpertsGroupGemmContiguousNode:
                         self.tokens_per_expert,
                         trans_lhs=True,
                     )
-                    weights.grad.add_(
-                        weights_res.cast(weights.grad.dtype)
-                    )
+                    weights.grad.add_(weights_res.cast(weights.grad.dtype))
             if (
                 hasattr(weights, "_apply_backward_hook")
                 and not weights.stop_gradient
