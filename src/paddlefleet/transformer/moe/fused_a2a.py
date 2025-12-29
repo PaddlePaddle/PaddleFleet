@@ -30,6 +30,10 @@ from .moe_utils import manual_backward
 
 _buffer = None
 
+def barrier_ep(ep_group):
+    """barrier_ep"""
+    paddle.distributed.barrier(ep_group)
+
 
 def wait_for_deepep(group_id):
     """wait_for_deepep"""
@@ -98,6 +102,7 @@ def fused_dispatch_forward_func(
     allocate_on_comm_stream=False,
 ):
     """Forward pass of fused dispatch."""
+    barrier_ep(group)
     # Calculate layout before actual dispatch
     if isinstance(x, tuple):
         buffer = get_buffer(group, get_hidden_bytes(x[0]))
@@ -159,6 +164,8 @@ def fused_dispatch_backward_func(
     allocate_on_comm_stream=False,
 ):
     """Backward pass of fused dispatch."""
+    barrier_ep(group)
+
     buffer = get_buffer(group, get_hidden_bytes(grad_output))
 
     grad_x, grad_token_probs, event = buffer.combine(
@@ -181,6 +188,8 @@ def fused_combine_forward_func(
     allocate_on_comm_stream=False,
 ):
     """Forward pass of fused combine."""
+    barrier_ep(group)
+
     handle = states["handle"]
     buffer = get_buffer(group, get_hidden_bytes(x))
     combined_x, _, event = buffer.combine(
@@ -202,6 +211,8 @@ def fused_combine_backward_func(
     allocate_on_comm_stream=False,
 ):
     """Backward pass of fused combine."""
+    barrier_ep(group)
+    
     if isinstance(grad_output, tuple):
         buffer = get_buffer(group, get_hidden_bytes(grad_output[0]))
         grad_x, _, _, _, _, event = buffer.dispatch(
