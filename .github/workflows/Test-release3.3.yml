@@ -502,7 +502,7 @@ jobs:
           fi
           '
 
-            - name: Qwen pre-train
+      - name: Qwen pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
