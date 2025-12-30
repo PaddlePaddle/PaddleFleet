@@ -606,6 +606,57 @@ jobs:
           fi
           '
 
+      - name: Qwen pre-train
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-pt
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-pt/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-pt
+          source /workspace/PaddleFleet/.venv/bin/activate
+          uv run coverage --version
+          uv run coverage combine
+          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml
+          uv run coverage report -m
+          '
+
+      - name: Qwen sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-sft
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-sft/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-sft
+          source /workspace/PaddleFleet/.venv/bin/activate
+          uv run coverage --version
+          uv run coverage combine
+          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml
+          uv run coverage report -m
+          '
+
+      - name: Qwen lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-pt
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-lora/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-lora
+          source /workspace/PaddleFleet/.venv/bin/activate
+          uv run coverage --version
+          uv run coverage combine
+          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml
+          uv run coverage report -m
+          '
+
       - name: H20 Coverage Upload to BOS
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
@@ -616,11 +667,17 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml coverage-multi-pt.xml
           cp /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml coverage-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml coverage-qwen-multi-pt.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
           target_path_multi_fp8="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi-fp8"
           uv run ${push_file} coverage-multi-pt.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-sft.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi_fp8}
+          uv run ${push_file} coverage-qwen-multi-pt.xml ${target_path_multi}
+          uv run ${push_file} coverage-qwen-multi-sft.xml ${target_path_multi}
+          uv run ${push_file} coverage-qwen-multi-lora.xml ${target_path_multi}
           '
 
       - name: Terminate and delete the container
@@ -811,6 +868,12 @@ jobs:
           wget "${h20_multi_sft_cov_file_url}" -O h20_multi_sft_coverage.xml --no-proxy
           h20_multi_fp8_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi-fp8/coverage-multi-fp8.xml"
           wget "${h20_multi_fp8_cov_file_url}" -O h20_multi_fp8_coverage.xml --no-proxy
+          h20_qwen_multi_pt_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi-pt.xml"
+          wget "${h20_qwen_multi_pt_cov_file_url}" -O h20_qwen_multi_pt_coverage.xml --no-proxy
+          h20_qwen_multi_sft_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-qwen-multi-sft.xml"
+          wget "${h20_qwen_multi_sft_cov_file_url}" -O h20_qwen_multi_sft_coverage.xml --no-proxy
+          h20_qwen_multi_lora_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-qwen-multi-lora.xml"
+          wget "${h20_qwen_multi_lora_cov_file_url}" -O h20_qwen_multi_lora_coverage.xml --no-proxy
           h20_single_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-single/coverage-single.xml"
           wget "${h20_single_cov_file_url}" -O h20_single_coverage.xml --no-proxy
           h20_qwen_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-qwen/coverage-qwen.xml"
@@ -823,6 +886,9 @@ jobs:
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_pt_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_sft_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_multi_pt_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_multi_sft_coverage.xml
+          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_multi_lora_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_fp8_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_single_coverage.xml
           sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_coverage.xml
@@ -835,11 +901,14 @@ jobs:
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
           diff-cover multi_coverage.xml single_coverage.xml h20_multi_pt_coverage.xml h20_multi_sft_coverage.xml h20_multi_fp8_coverage.xml \
-          h20_single_coverage.xml h20_qwen_coverage.xml a100_pt_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
+          h20_qwen_multi_pt_coverage.xml h20_qwen_multi_sft_coverage.xml h20_qwen_multi_lora_coverage.xml h20_single_coverage.xml h20_qwen_coverage.xml a100_pt_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           python ci/filter_coverage.py multi_coverage.xml diff.txt
           python ci/filter_coverage.py single_coverage.xml diff.txt
           python ci/filter_coverage.py h20_multi_pt_coverage.xml diff.txt
           python ci/filter_coverage.py h20_multi_sft_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_qwen_multi_pt_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_qwen_multi_sft_coverage.xml diff.txt
+          python ci/filter_coverage.py h20_qwen_multi_lora_coverage.xml diff.txt
           python ci/filter_coverage.py h20_single_coverage.xml diff.txt
           python ci/filter_coverage.py h20_qwen_coverage.xml diff.txt
           python ci/filter_coverage.py a100_pt_coverage.xml diff.txt
@@ -858,6 +927,9 @@ jobs:
             "single_coverage.xml"
             "h20_multi_pt_coverage.xml"
             "h20_multi_sft_coverage.xml"
+            "h20_qwen_multi_pt_coverage.xml"
+            "h20_qwen_multi_sft_coverage.xml"
+            "h20_qwen_multi_lora_coverage.xml"
             "h20_single_coverage.xml"
             "h20_qwen_coverage.xml"
             "a100_pt_coverage.xml"
@@ -1002,7 +1074,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_pt_coverage.xml,./h20_multi_sft_coverage.xml,./h20_multi_fp8_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_pt_coverage.xml
+          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_pt_coverage.xml,./h20_multi_sft_coverage.xml,./h20_qwen_multi_pt_coverage.xml,./h20_qwen_multi_sft_coverage.xml,./h20_qwen_multi_lora_coverage.xml,./h20_multi_fp8_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_pt_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
