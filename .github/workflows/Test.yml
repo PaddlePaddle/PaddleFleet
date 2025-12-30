@@ -582,6 +582,30 @@ jobs:
           fi
           '
 
+      - name: GLM4.5 dpo
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-dpo
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-dpo/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
+          glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-dpo
+          source /workspace/PaddleFleet/.venv/bin/activate
+          uv run coverage --version
+          uv run coverage combine
+          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml
+          uv run coverage report -m
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
+          fi
+          '
+
       - name: Integration test (GLM4.5 multi-card FP8)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
@@ -603,6 +627,30 @@ jobs:
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
+          fi
+          '
+
+      - name: Integration test (GLM4.5 multi-card Grouped GEMM)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-grouped-gemm/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
+          glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
+          source /workspace/PaddleFleet/.venv/bin/activate
+          uv run coverage --version
+          uv run coverage combine
+          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml
+          uv run coverage report -m
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
           fi
           '
 
@@ -667,14 +715,17 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml coverage-multi-pt.xml
           cp /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml coverage-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml coverage-multi-grouped-gemm.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml coverage-multi-dpo.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml coverage-qwen-multi-pt.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
-          target_path_multi_fp8="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi-fp8"
           uv run ${push_file} coverage-multi-pt.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-sft.xml ${target_path_multi}
-          uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi_fp8}
+          uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-grouped-gemm.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-dpo.xml ${target_path_multi}
           uv run ${push_file} coverage-qwen-multi-pt.xml ${target_path_multi}
           uv run ${push_file} coverage-qwen-multi-sft.xml ${target_path_multi}
           uv run ${push_file} coverage-qwen-multi-lora.xml ${target_path_multi}
@@ -858,211 +909,64 @@ jobs:
       - name: coverage file download
         shell: bash
         run: |
-          multi_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/multi-card/coverage.xml"
-          wget "${multi_card_cov_file_url}" -O multi_coverage.xml --no-proxy
-          single_card_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/single-card/coverage.xml"
-          wget "${single_card_cov_file_url}" -O single_coverage.xml --no-proxy
-          h20_multi_pt_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi-pt.xml"
-          wget "${h20_multi_pt_cov_file_url}" -O h20_multi_pt_coverage.xml --no-proxy
-          h20_multi_sft_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi-sft.xml"
-          wget "${h20_multi_sft_cov_file_url}" -O h20_multi_sft_coverage.xml --no-proxy
-          h20_multi_fp8_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi-fp8/coverage-multi-fp8.xml"
-          wget "${h20_multi_fp8_cov_file_url}" -O h20_multi_fp8_coverage.xml --no-proxy
-          h20_qwen_multi_pt_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-multi-pt.xml"
-          wget "${h20_qwen_multi_pt_cov_file_url}" -O h20_qwen_multi_pt_coverage.xml --no-proxy
-          h20_qwen_multi_sft_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-qwen-multi-sft.xml"
-          wget "${h20_qwen_multi_sft_cov_file_url}" -O h20_qwen_multi_sft_coverage.xml --no-proxy
-          h20_qwen_multi_lora_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-multi/coverage-qwen-multi-lora.xml"
-          wget "${h20_qwen_multi_lora_cov_file_url}" -O h20_qwen_multi_lora_coverage.xml --no-proxy
-          h20_single_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-single/coverage-single.xml"
-          wget "${h20_single_cov_file_url}" -O h20_single_coverage.xml --no-proxy
-          h20_qwen_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/h20-qwen/coverage-qwen.xml"
-          wget "${h20_qwen_cov_file_url}" -O h20_qwen_coverage.xml --no-proxy
-          a100_pt_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/a100/coverage-a-pt.xml"
-          wget "${a100_pt_cov_file_url}" -O a100_pt_coverage.xml --no-proxy
-          # a100_sft_cov_file_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}/a100/coverage-a-sft.xml"
-          # wget "${a100_sft_cov_file_url}" -O a100_sft_coverage.xml --no-proxy
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' multi_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' single_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_pt_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_sft_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_multi_pt_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_multi_sft_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_multi_lora_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_multi_fp8_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_single_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' h20_qwen_coverage.xml
-          sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' a100_pt_coverage.xml
-          # sed -i 's|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|' a100_sft_coverage.xml
+          coverage_configs="
+          multi_coverage.xml:multi-card/coverage.xml
+          single_coverage.xml:single-card/coverage.xml
+          h20_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
+          h20_multi_sft_coverage.xml:h20-multi/coverage-multi-sft.xml
+          h20_multi_dpo_coverage.xml:h20-multi/coverage-multi-dpo.xml
+          h20_multi_fp8_coverage.xml:h20-multi/coverage-multi-fp8.xml
+          h20_multi_grouped_gemm_coverage.xml:h20-multi/coverage-multi-grouped-gemm.xml
+          h20_single_coverage.xml:h20-single/coverage-single.xml
+          h20_qwen_coverage.xml:h20-qwen/coverage-qwen.xml
+          a100_pt_coverage.xml:a100/coverage-a-pt.xml
+          h20_qwen_multi_pt_coverage.xml:h20-multi/coverage-qwen-multi-pt.xml
+          h20_qwen_multi_sft_coverage.xml:h20-multi/coverage-qwen-multi-sft.xml
+          h20_qwen_multi_lora_coverage.xml:h20-multi/coverage-qwen-multi-lora.xml
+          "
+          base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
+
+          echo "$coverage_configs" | while IFS= read -r config; do
+            if [ -n "$config" ]; then
+                filename="${config%%:*}"
+                filepath="${config#*:}"
+                wget "${base_url}/${filepath}" -O "$filename" --no-proxy
+                sed -i "s|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|" "$filename"
+            fi
+          done
           git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} --unified=0 > diff.txt
           echo "=== DIFF FILE ==="
           cat diff.txt
           echo "================="
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
-          diff-cover multi_coverage.xml single_coverage.xml h20_multi_pt_coverage.xml h20_multi_sft_coverage.xml h20_multi_fp8_coverage.xml \
-          h20_qwen_multi_pt_coverage.xml h20_qwen_multi_sft_coverage.xml h20_qwen_multi_lora_coverage.xml h20_single_coverage.xml h20_qwen_coverage.xml a100_pt_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
-          python ci/filter_coverage.py multi_coverage.xml diff.txt
-          python ci/filter_coverage.py single_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_pt_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_sft_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_qwen_multi_pt_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_qwen_multi_sft_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_qwen_multi_lora_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_single_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_qwen_coverage.xml diff.txt
-          python ci/filter_coverage.py a100_pt_coverage.xml diff.txt
-          # python ci/filter_coverage.py a100_sft_coverage.xml diff.txt
-          python ci/filter_coverage.py h20_multi_fp8_coverage.xml diff.txt
+          diff-cover multi_coverage.xml single_coverage.xml h20_multi_pt_coverage.xml h20_multi_sft_coverage.xml h20_multi_dpo_coverage.xml h20_multi_fp8_coverage.xml h20_multi_grouped_gemm_coverage.xml \
+          h20_single_coverage.xml h20_qwen_coverage.xml a100_pt_coverage.xml h20_qwen_multi_pt_coverage.xml h20_qwen_multi_sft_coverage.xml h20_qwen_multi_lora_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
 
-      - name: Check coverage files before upload
+      - name: filter coverage files and remove backup files
         if: always()
         run: |
           echo "=== CHECKING COVERAGE FILES ==="
-
 
           COVERAGE_FILES=(
             "multi_coverage.xml"
             "single_coverage.xml"
             "h20_multi_pt_coverage.xml"
             "h20_multi_sft_coverage.xml"
+            "h20_multi_dpo_coverage.xml"
+            "h20_multi_fp8_coverage.xml"
+            "h20_multi_grouped_gemm_coverage.xml"
             "h20_qwen_multi_pt_coverage.xml"
             "h20_qwen_multi_sft_coverage.xml"
             "h20_qwen_multi_lora_coverage.xml"
             "h20_single_coverage.xml"
             "h20_qwen_coverage.xml"
             "a100_pt_coverage.xml"
-            "h20_multi_fp8_coverage.xml"
           )
 
-          ALL_PASSED=true
-          TOTAL_COVERAGE_LINES=0
-          TOTAL_FILE_SIZE=0
-
           for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
-            echo -e "\n=== CHECKING: $COVERAGE_FILE ==="
-
-
-            if [ ! -f "$COVERAGE_FILE" ]; then
-              echo "⚠️ WARNING: File not found: $COVERAGE_FILE"
-              echo "Skipping..."
-              continue
-            fi
-
-
-            FILE_SIZE=$(wc -c < "$COVERAGE_FILE")
-            echo "File size: $FILE_SIZE bytes"
-            TOTAL_FILE_SIZE=$((TOTAL_FILE_SIZE + FILE_SIZE))
-
-            if [ $FILE_SIZE -lt 100 ]; then
-              echo "⚠️ WARNING: File is very small"
-            fi
-
-
-            if ! head -1 "$COVERAGE_FILE" | grep -q "<?xml"; then
-              echo "❌ ERROR: Not a valid XML file"
-              echo "First line:"
-              head -1 "$COVERAGE_FILE"
-              ALL_PASSED=false
-              continue
-            fi
-
-
-            LINE_COUNT=$(grep -c "<line " "$COVERAGE_FILE" 2>/dev/null || echo "0")
-            echo "Coverage lines found: $LINE_COUNT"
-            TOTAL_COVERAGE_LINES=$((TOTAL_COVERAGE_LINES + LINE_COUNT))
-
-            if [ $FILE_SIZE -lt 1024 ]; then
-              echo "✅ Size OK: Less than 1KB"
-            elif [ $FILE_SIZE -lt 10240 ]; then
-              echo "✅ Size OK: Less than 10KB"
-            elif [ $FILE_SIZE -lt 1048576 ]; then
-              echo "⚠️ Note: Less than 1MB"
-            else
-              echo "⚠️ WARNING: Large file (>1MB)"
-            fi
-
-            FILENAME=$(basename "$COVERAGE_FILE")
-            case "$FILENAME" in
-              *python*)
-                if [ $LINE_COUNT -lt 100 ]; then
-                  echo "✅ Good Python coverage size"
-                elif [ $LINE_COUNT -lt 500 ]; then
-                  echo "⚠️ Moderate Python coverage size"
-                else
-                  echo "⚠️ Large Python coverage file"
-                fi
-                ;;
-              *cpp*)
-                if [ $LINE_COUNT -lt 200 ]; then
-                  echo "✅ Good C++ coverage size"
-                elif [ $LINE_COUNT -lt 1000 ]; then
-                  echo "⚠️ Moderate C++ coverage size"
-                else
-                  echo "⚠️ Large C++ coverage file"
-                fi
-                ;;
-              *single*)
-                if [ $LINE_COUNT -lt 50 ]; then
-                  echo "✅ Good: Filtered PR coverage"
-                elif [ $LINE_COUNT -lt 200 ]; then
-                  echo "⚠️ Note: Moderate line count"
-                else
-                  echo "⚠️ WARNING: Might be full coverage"
-                fi
-                ;;
-              *)
-                if [ $LINE_COUNT -lt 300 ]; then
-                  echo "✅ Size looks reasonable"
-                else
-                  echo "⚠️ Note: Larger than expected"
-                fi
-                ;;
-            esac
-
-
-            echo "First 2 lines:"
-            head -2 "$COVERAGE_FILE"
-
-
-            BACKUP_FILE="${COVERAGE_FILE}.backup"
-            if [ -f "$BACKUP_FILE" ]; then
-              BACKUP_SIZE=$(wc -c < "$BACKUP_FILE")
-              echo "Backup size: $BACKUP_SIZE bytes"
-
-              if [ $BACKUP_SIZE -gt 0 ] && [ $FILE_SIZE -gt 0 ]; then
-                REDUCTION=$((100 - FILE_SIZE * 100 / BACKUP_SIZE))
-                echo "Size reduction from backup: ${REDUCTION}%"
-
-                if [ $REDUCTION -lt 50 ]; then
-                  echo "⚠️ WARNING: Less than 50% reduction"
-                fi
-              fi
-            fi
-
-            echo "✅ $COVERAGE_FILE check passed"
-          done
-
-
-          echo -e "\n=== SUMMARY REPORT ==="
-          echo "Total files processed: ${#COVERAGE_FILES[@]}"
-          echo "Total coverage lines: $TOTAL_COVERAGE_LINES"
-          echo "Total file size: $TOTAL_FILE_SIZE bytes"
-
-
-          if [ $TOTAL_COVERAGE_LINES -eq 0 ]; then
-            echo "⚠️ WARNING: No coverage lines found in any file!"
-          fi
-
-          if [ $TOTAL_FILE_SIZE -gt 10485760 ]; then
-            echo "⚠️ WARNING: Total size >10MB, consider compression"
-          fi
-
-          echo "✅ All checks completed"
-
-
-          for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
+            python ci/filter_coverage.py "$COVERAGE_FILE" diff.txt
             BACKUP_FILE="${COVERAGE_FILE}.backup"
             if [ -f "$BACKUP_FILE" ]; then
               rm -f "$BACKUP_FILE"
@@ -1074,7 +978,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_pt_coverage.xml,./h20_multi_sft_coverage.xml,./h20_qwen_multi_pt_coverage.xml,./h20_qwen_multi_sft_coverage.xml,./h20_qwen_multi_lora_coverage.xml,./h20_multi_fp8_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_pt_coverage.xml
+          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_pt_coverage.xml,./h20_multi_sft_coverage.xml,./h20_qwen_multi_pt_coverage.xml,./h20_qwen_multi_sft_coverage.xml,./h20_qwen_multi_lora_coverage.xml,./h20_multi_fp8_coverage.xml,./h20_multi_grouped_gemm_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_pt_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
