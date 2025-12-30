@@ -246,6 +246,8 @@ class TransformerLayer(nn.Layer):
             context = dict_args.get("context", None)
             context_mask = dict_args.get("context_mask", None)
             rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
+            rotary_pos_cos = dict_args.get("rotary_pos_cos", None)
+            rotary_pos_sin = dict_args.get("rotary_pos_sin", None)
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
             outputs = recompute(
@@ -259,6 +261,12 @@ class TransformerLayer(nn.Layer):
                 context_mask=context_mask,
                 rotary_pos_emb=rotary_pos_emb.clone()  # Clone is necessary!
                 if rotary_pos_emb is not None
+                else None,
+                rotary_pos_cos=rotary_pos_cos.clone()  # Clone is necessary!
+                if rotary_pos_cos is not None
+                else None,
+                rotary_pos_sin=rotary_pos_sin.clone()  # Clone is necessary!
+                if rotary_pos_sin is not None
                 else None,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
@@ -394,6 +402,7 @@ class TransformerLayer(nn.Layer):
             context = attention_output_with_bias["context"]
 
         with paddle.enable_grad():
+            residual.stop_gradient = False
             hidden_states = self.cross_attn_bda(
                 self.training, self.config.bias_dropout_fusion
             )(attention_output_with_bias, residual, self.hidden_dropout_prob)

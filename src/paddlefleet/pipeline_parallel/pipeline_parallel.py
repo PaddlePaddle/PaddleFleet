@@ -241,6 +241,11 @@ class FakeMicroDataset:
             assert len(inputs) == self._acc_steps, (
                 f"length of data should be {self._acc_steps}, but it is {len(inputs)}"
             )
+            if isinstance(inputs[micro_step], list):
+                return [
+                    tensor.detach() if tensor is not None else None
+                    for tensor in inputs[micro_step]
+                ]
             return inputs[micro_step].detach()
         elif inputs is not None:
             self._check_data_valid(inputs)
@@ -290,6 +295,9 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
 
         # default loss function index
         self.loss_fn_idx = 0
+
+    def is_pipeline_last_stage(self, ignore_virtual=False):
+        return True
 
     def _check_micro_batch_data_valid(self, micro_batch_data):
         if isinstance(micro_batch_data, (tuple, list)):
@@ -446,6 +454,88 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
             self._optimizer_step()
 
         return train_loss
+
+    def eval_batch(self, data, compute_loss=False, loss_fn_idx=0):
+        # check loss_fn_idx is valid and loss_fn exists
+        assert (
+            loss_fn_idx in range(len(self._layers._loss_fn))
+            and self._layers._loss_fn[loss_fn_idx] is not None
+        ), f"loss function {loss_fn_idx} should exist to compute loss"
+        self.loss_fn_idx = loss_fn_idx
+
+        self.total_loss = None
+
+        if isinstance(
+            data,
+            (PipelineDatasetPreprocessor, PaddlePipelineDatasetPreprocessor),
+        ):
+            data = data()
+
+        if (not isinstance(data, tuple)) and (not isinstance(data, list)):
+            micro_dataset = data
+        else:
+            micro_dataset = FakeMicroDataset(
+                data,
+                True,
+                True,
+                self.accumulate_steps,
+                self.micro_batch_size,
+            )
+
+        loss_list = []
+        for _ in range(self.accumulate_steps):
+            # data prepare
+            data_iter = next(micro_dataset)
+            input_tensor = data_iter[0]
+            label = data_iter[1]
+            self._check_micro_batch_data_valid(input_tensor)
+            self._check_micro_batch_data_valid(label)
+
+            # forward
+            output_tensor = self._layers.forward(input_tensor)
+
+            # loss is loss_fn[loss_fn_idx]'s result
+            loss = None
+            # cal loss
+            for idx, loss_fn in enumerate(self._layers._loss_fn):
+                loss_tensor = loss_fn(output_tensor, label)
+                assert isinstance(loss_tensor, paddle.Tensor), (
+                    "Currently, loss_fn should obtain Paddle.Tensor dtype"
+                )
+                with paddle.amp.auto_cast(enable=False):
+                    if self.accumulate_steps > 1 and not self._delay_scale_loss:
+                        loss_tensor = loss_tensor / self.accumulate_steps
+                if self.total_loss is None:
+                    self.total_loss = []
+                # when self.total_loss length is less than idx, append a new tensor
+                if len(self.total_loss) <= idx:
+                    self.total_loss.append([])
+
+                self.total_loss[idx].append(loss_tensor.detach())
+
+                if idx == self.loss_fn_idx:
+                    loss = loss_tensor
+
+            assert self.total_loss is not None, (
+                "train_batch() in last stage should obtain valid loss"
+            )
+
+        losses = []
+        return_micro_batch_loss = False
+        for idx in range(len(self._layers._loss_fn)):
+            self.total_loss[idx] = paddle.to_tensor(self.total_loss[idx])
+            if not return_micro_batch_loss:
+                # TODO(shenliang03): it will use mean/sum to calculate loss
+                tmp = paddle.zeros_like(self.total_loss[idx][0])
+                for loss in self.total_loss[idx]:
+                    tmp += loss.detach()
+                if not self._delay_scale_loss:
+                    losses.append(tmp)
+                else:
+                    losses.append(tmp / self.accumulate_steps)
+            else:
+                losses.append(self.total_loss[idx].detach())
+        return losses[0] if len(losses) == 1 else losses
 
 
 class PipelineParallel(nn.Layer, ParallelBase):
@@ -866,21 +956,31 @@ class PipelineParallel(nn.Layer, ParallelBase):
                 batch_p2p_comm=self._use_batch_p2p_comm,
             )
 
+            # p2p data type: tuple
+            # model input/return type: dict
+            # here, convert p2p tuple -> dict input
+            input_tensor_dict, use_dict = tuple_to_dict_helper(input_tensor)
+
             output_tensor, _, _ = self._forward_step(
-                input_tensor, micro_dataset, step_id=None
+                input_tensor=input_tensor_dict if use_dict else input_tensor,
+                micro_dataset=micro_dataset,
+                step_id=None,
             )
+            # convert dict to tuple whose tensor element has a key attribution
+            output_tensor_tuple = dict_to_tuple_helper(output_tensor)
+
             self._p2p_helper.send_forward(
-                output_tensor,
-                self.is_pipeline_last_stage(),
+                output_tensor=output_tensor_tuple,
+                pp_last_stage=self.is_pipeline_last_stage(),
                 skip_check_meta=True,
                 batch_p2p_comm=self._use_batch_p2p_comm,
             )
             if not self.is_pipeline_last_stage():
-                self._release_output(output_tensor)
+                self._release_output(output_tensor_tuple)
             else:
-                self._offload_tensors(output_tensor)
+                self._offload_tensors(output_tensor_tuple)
 
-            output_buffers.append(output_tensor)
+            output_buffers.append(output_tensor_tuple)
 
         if steady_steps > 0:
             input_tensor = self._p2p_helper.recv_forward(
@@ -891,21 +991,28 @@ class PipelineParallel(nn.Layer, ParallelBase):
         for i in range(steady_steps):
             last_iter = i == (steady_steps - 1)
 
+            input_tensor_dict, use_dict = tuple_to_dict_helper(input_tensor)
+
             output_tensor, _, _ = self._forward_step(
-                input_tensor, micro_dataset, step_id=None
+                input_tensor_dict if use_dict else input_tensor,
+                micro_dataset,
+                step_id=None,
             )
+
+            output_tensor_tuple = dict_to_tuple_helper(output_tensor)
+
             self._p2p_helper.send_forward(
-                output_tensor,
+                output_tensor_tuple,
                 self.is_pipeline_last_stage(),
                 skip_check_meta=True,
                 batch_p2p_comm=self._use_batch_p2p_comm,
             )
             if not self.is_pipeline_last_stage():
-                self._release_output(output_tensor)
+                self._release_output(output_tensor_tuple)
             else:
-                self._offload_tensors(output_tensor)
+                self._offload_tensors(output_tensor_tuple)
 
-            output_buffers.append(output_tensor)
+            output_buffers.append(output_tensor_tuple)
 
             if not last_iter:
                 input_tensor = self._p2p_helper.recv_forward(

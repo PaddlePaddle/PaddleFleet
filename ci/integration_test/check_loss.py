@@ -89,10 +89,8 @@ def main():
     gt_dict = parse_ground_truth(args.gt_file)
 
     if args.compare_step is not None:
-        # --- 单点比较逻辑 ---
         target_step = args.compare_step
 
-        # 检查该 step 是否存在于两个文件中
         if target_step not in log_dict:
             print(
                 f"\033[91mError: Step {target_step} not found in log file.\033[0m"

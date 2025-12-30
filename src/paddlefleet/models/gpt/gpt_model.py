@@ -321,6 +321,43 @@ class GPTModel(PipelineLayer):
 
         return self._pipeline_name_mapping
 
+    def state_dict(self, *args, **kwargs):
+        """
+        Return a dictionary with Pipeline Stage mapping.
+        Args:
+            *args (tuple): Variable argument list passed to parent method.
+            **kwargs (dict): Optional keyword arguments passed to parent method.
+        Returns:
+            dict: Dictionary containing Pipeline Stage mapping.
+        """
+        state_dict = super().state_dict(*args, **kwargs)
+
+        if self._pipeline_name_mapping is None:
+            self._set_pipeline_name_mapping()
+        # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
+
+        for k in list(state_dict.keys()):
+            v = state_dict.pop(k)
+            state_dict[self._pp_to_single_mapping[k]] = v
+
+        return state_dict
+
+    def set_state_dict(self, state_dict, *args, **kwargs):
+        if self._pipeline_name_mapping is None:
+            self._set_pipeline_name_mapping()
+        assert len(self._pipeline_name_mapping) > 0, (
+            "The pipeline stage must have parameters!"
+        )
+
+        for k in list(state_dict.keys()):
+            v = state_dict.pop(k)
+            if k not in self._pipeline_name_mapping:
+                continue
+            state_dict[self._pipeline_name_mapping[k]] = v
+
+        ret = super().set_state_dict(state_dict, *args, **kwargs)
+        return ret
+
     def _check_shared_model_state(self):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
@@ -343,30 +380,6 @@ class GPTModel(PipelineLayer):
             if k != mapped_k:
                 missing_shared_keys[k] = mapped_k
         return missing_shared_keys
-
-    def state_dict(self, *args, **kwargs):
-        """
-        Return a dictionary with Pipeline Stage mapping.
-
-        Args:
-            *args (tuple): Variable argument list passed to parent method.
-            **kwargs (dict): Optional keyword arguments passed to parent method.
-
-        Returns:
-            dict: Dictionary containing Pipeline Stage mapping.
-
-        """
-        state_dict = super().state_dict(*args, **kwargs)
-
-        if self._pipeline_name_mapping is None:
-            self._set_pipeline_name_mapping()
-        # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
-
-        for k in list(state_dict.keys()):
-            v = state_dict.pop(k)
-            state_dict[self._pp_to_single_mapping[k]] = v
-
-        return state_dict
 
     def sharded_state_dict(self, *args, **kwargs):
         """
