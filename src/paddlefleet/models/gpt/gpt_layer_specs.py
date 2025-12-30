@@ -100,9 +100,11 @@ def get_gpt_layer_local_spec(
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
     )
+    
+    transformer_layer = getattr(config, "specific_layer", TransformerLayer)
 
     return LayerSpec(
-        layer=TransformerLayer,
+        layer=transformer_layer,
         sublayers_spec=TransformerLayerSublayersSpec(
             input_layernorm=layer_norm,
             self_attn=LayerSpec(
@@ -229,7 +231,7 @@ def get_gpt_decoder_layers_spec(
     # Create the layer specs for the model.
     layer_specs = []
     for layer_number in range(config.num_hidden_layers):
-        real_layer_number = layer_number + config.num_empty_layers_add_in_head
+        real_layer_number = layer_number + config.remove_head_layers
         if moe_layer_pattern[layer_number] == 1:
             layer_specs.append(
                 moe_layer_spec_func(layer_number=real_layer_number)
