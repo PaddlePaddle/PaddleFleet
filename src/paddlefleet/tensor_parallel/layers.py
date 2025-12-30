@@ -280,6 +280,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
                 _initialize_affine_weight_gpu(
                     self.weight, init_method, partition_dim=0, stride=1
                 )
+        self.weight.is_distributed = True if self.world_size > 1 else False
 
     def forward(self, input_):
         """Forward.
@@ -897,6 +898,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             self.weight.allreduce = not (
                 self.is_expert and self.expert_parallel
             )
+            self.weight.is_distributed = True if self.world_size > 1 else False
         else:
             self.weight = None
 
@@ -921,6 +923,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
                 with paddle.no_grad():
                     self.bias.zero_()
             self.bias.allreduce = not (self.is_expert and self.expert_parallel)
+            self.bias.is_distributed = True if self.world_size > 1 else False
         else:
             self.bias = None
             # self.register_parameter("bias", None)
@@ -1224,6 +1227,7 @@ class RowParallelLinear(paddle.nn.Layer):
                     is_expert=self.is_expert,
                 )
         self.weight.allreduce = not (self.is_expert and self.expert_parallel)
+        self.weight.is_distributed = True if self.world_size > 1 else False
 
         if bias:
             if config.use_cpu_initialization:
