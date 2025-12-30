@@ -585,12 +585,11 @@ jobs:
       - name: GLM4.5 dpo
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-dpo
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-dpo/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
           bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-dpo
@@ -894,6 +893,9 @@ jobs:
           h20_single_coverage.xml:h20-single/coverage-single.xml
           h20_qwen_coverage.xml:h20-qwen/coverage-qwen.xml
           a100_pt_coverage.xml:a100/coverage-a-pt.xml
+          h20_qwen_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
+          h20_qwen_multi_sft_coverage.xml:h20-multi/coverage-qwen-multi-sft.xml
+          h20_qwen_multi_lora_coverage.xml:h20-multi/coverage-qwen-multi-lora.xml
           "
           base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
 
@@ -933,6 +935,9 @@ jobs:
             "h20_qwen_coverage.xml"
             "a100_pt_coverage.xml"
             "h20_multi_fp8_coverage.xml"
+            "h20_qwen_multi_pt_coverage.xml"
+            "h20_qwen_multi_sft_coverage.xml"
+            "h20_qwen_multi_lora_coverage.xml"
           )
 
           ALL_PASSED=true
