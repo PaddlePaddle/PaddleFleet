@@ -113,6 +113,7 @@ class GPTEmbedding(FleetLayer):
                         image_mask, image_embeds
                     )
                     visual_pos_mask = image_mask[..., 0]
+                    deepstack_visual_embeds = deepstack_image_embeds
 
                 if video_embeds is not None:
                     _, video_mask = self.get_placeholder_mask(

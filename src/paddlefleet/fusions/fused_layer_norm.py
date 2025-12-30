@@ -115,7 +115,7 @@ class FusedLayerNorm(paddle.nn.Layer):
 
         if isinstance(hidden_size, numbers.Integral):
             hidden_size = (hidden_size,)
-        self.hidden_size = paddle.shape(hidden_size)
+        self.hidden_size = hidden_size
         self.eps = eps
         # Parameters need to be initialized with paddle.empty rather than paddle.Tensor for correct device placement .
         self.weight = Parameter(paddle.empty(*hidden_size))
@@ -174,4 +174,4 @@ class FusedLayerNorm(paddle.nn.Layer):
             begin_norm_axis=begin_norm_axis,
         )
 
-        return output
+        return output[0]
