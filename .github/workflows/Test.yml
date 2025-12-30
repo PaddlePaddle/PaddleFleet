@@ -888,12 +888,12 @@ jobs:
           single_coverage.xml:single-card/coverage.xml
           h20_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
           h20_multi_sft_coverage.xml:h20-multi/coverage-multi-sft.xml
-          h20_multi_dpo_coverage.xml:h20-multi-dpo/coverage-multi-dpo.xml
-          h20_multi_fp8_coverage.xml:h20-multi-fp8/coverage-multi-fp8.xml
+          h20_multi_dpo_coverage.xml:h20-multi/coverage-multi-dpo.xml
+          h20_multi_fp8_coverage.xml:h20-multi/coverage-multi-fp8.xml
           h20_single_coverage.xml:h20-single/coverage-single.xml
           h20_qwen_coverage.xml:h20-qwen/coverage-qwen.xml
           a100_pt_coverage.xml:a100/coverage-a-pt.xml
-          h20_qwen_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
+          h20_qwen_multi_pt_coverage.xml:h20-multi/coverage-qwen-multi-pt.xml
           h20_qwen_multi_sft_coverage.xml:h20-multi/coverage-qwen-multi-sft.xml
           h20_qwen_multi_lora_coverage.xml:h20-multi/coverage-qwen-multi-lora.xml
           "
@@ -913,8 +913,8 @@ jobs:
           echo "================="
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
-          diff-cover multi_coverage.xml single_coverage.xml h20_multi_pt_coverage.xml h20_multi_sft_coverage.xml h20_multi_fp8_coverage.xml \
-          h20_single_coverage.xml h20_qwen_coverage.xml a100_pt_coverage.xml h20_multi_dpo_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
+          diff-cover multi_coverage.xml single_coverage.xml h20_multi_pt_coverage.xml h20_multi_sft_coverage.xml h20_multi_dpo_coverage.xml h20_multi_fp8_coverage.xml \
+          h20_single_coverage.xml h20_qwen_coverage.xml a100_pt_coverage.xml h20_qwen_multi_pt_coverage.xml h20_qwen_multi_sft_coverage.xml h20_qwen_multi_lora_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
 
       - name: Check coverage files before upload
@@ -928,16 +928,13 @@ jobs:
             "h20_multi_pt_coverage.xml"
             "h20_multi_sft_coverage.xml"
             "h20_multi_dpo_coverage.xml"
+            "h20_multi_fp8_coverage.xml"
             "h20_qwen_multi_pt_coverage.xml"
             "h20_qwen_multi_sft_coverage.xml"
             "h20_qwen_multi_lora_coverage.xml"
             "h20_single_coverage.xml"
             "h20_qwen_coverage.xml"
             "a100_pt_coverage.xml"
-            "h20_multi_fp8_coverage.xml"
-            "h20_qwen_multi_pt_coverage.xml"
-            "h20_qwen_multi_sft_coverage.xml"
-            "h20_qwen_multi_lora_coverage.xml"
           )
 
           ALL_PASSED=true
