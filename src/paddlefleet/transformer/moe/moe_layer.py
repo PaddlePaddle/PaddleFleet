@@ -35,7 +35,7 @@ from paddlefleet import utils
 
 from .fusion_layer_utils import FusionMoePyLayer
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
-from .moe_router import DeepEPTopKRouter, StandardMoERouter
+from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
 from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
@@ -98,14 +98,8 @@ class MoELayer(nn.Layer):
         )
         # MoE-Related Configs
         self._init_expert_parallel()
-        if config.moe_router_fusion:
-            self.gate = DeepEPTopKRouter(
-                config=config, pg_collection=pg_collection
-            )
-        else:
-            self.gate = StandardMoERouter(
-                config=config, pg_collection=pg_collection
-            )
+
+        self.gate = TopKRouter(config=config, pg_collection=pg_collection)
 
         self.expert_class = StandardMLPExpert
         self.shared_expert_class = StandardMLPSharedExpert
