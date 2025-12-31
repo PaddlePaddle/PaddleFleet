@@ -337,6 +337,8 @@ def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
         a: Input tensor a, shape [K, M]
         b: Input tensor b, shape [K, N]
         d: Output tensor d, shape [num_batches, M, N]
+        ks: List of group sizes, shape [num_batches]
+        ks_tensor: Tensor of group sizes, shape [num_batches]
         c: Bias tensor c, shape [num_batches, M, N]
 
     Returns:
@@ -359,7 +361,6 @@ def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
             ks_tensor=ks_tensor,
             c=c,
         )
-        return d
 
     # Padding is needed
     # Calculate padded sizes (round up to nearest multiple of ALIGNMENT)
