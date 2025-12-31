@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 import paddle
 from paddle import Tensor, framework
 
+from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
+
 try:
     from paddle import scatter_add_
 except ImportError:
@@ -324,3 +326,95 @@ def manual_backward(f: Callable, is_first_fwd: bool, *args: list[Any]):
         return tuple([t.grad for t in detached_args if is_tensor(t)])
 
     return bwd_f, out
+
+
+def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
+    """
+    Wrapper for paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous that handles
+    batch sizes not divisible by ALIGNMENT by padding.
+
+    Args:
+        a: Input tensor a, shape [K, M]
+        b: Input tensor b, shape [K, N]
+        d: Output tensor d, shape [num_batches, M, N]
+        c: Bias tensor c, shape [num_batches, M, N]
+
+    Returns:
+        d: Result tensor with original (unpadded) dimensions
+    """
+
+    # Convert batch_sizes to list if it's a tensor
+    ALIGNMENT = paddlefleet_deep_gemm.get_mk_alignment_for_contiguous_layout()
+
+    # Check if padding is needed
+    needs_padding = any(size % ALIGNMENT != 0 for size in ks)
+
+    if not needs_padding:
+        # No padding needed, call directly
+        paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+            a=a,
+            b=b,
+            d=d,
+            ks=ks,
+            ks_tensor=ks_tensor,
+            c=c,
+        )
+        return d
+
+    # Padding is needed
+    # Calculate padded sizes (round up to nearest multiple of ALIGNMENT)
+    padded_sizes = [
+        ((size + ALIGNMENT - 1) // ALIGNMENT) * ALIGNMENT for size in ks
+    ]
+
+    def pad_grouped_tensor(tensor, original_sizes, padded_sizes):
+        """
+        Pad a grouped/batched tensor where groups are concatenated along dim 0.
+
+        Args:
+            tensor: Input tensor with groups concatenated along dimension 0
+            original_sizes: List of original group sizes
+            padded_sizes: List of padded group sizes
+
+        Returns:
+            Padded tensor
+        """
+        if sum(original_sizes) == sum(padded_sizes):
+            return tensor  # No padding needed
+
+        padded_chunks = []
+        offset = 0
+
+        for orig_size, pad_size in zip(original_sizes, padded_sizes):
+            # Extract the chunk for this group
+            chunk = tensor[offset : offset + orig_size]
+
+            if pad_size > orig_size:
+                # Create padding
+                pad_shape = list(chunk.shape)
+                pad_shape[0] = pad_size - orig_size
+                padding = paddle.zeros(pad_shape, dtype=tensor.dtype)
+                chunk = paddle.cat([chunk, padding], dim=0)
+
+            padded_chunks.append(chunk)
+            offset += orig_size
+
+        return paddle.cat(padded_chunks, dim=0)
+
+    # Pad tensors
+    a_padded = pad_grouped_tensor(a, ks, padded_sizes)
+    b_padded = pad_grouped_tensor(b, ks, padded_sizes)
+
+    # Call the function with padded tensors
+    padded_sizes_tensor = paddle.tensor(padded_sizes)
+
+    paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+        a=a_padded,
+        b=b_padded,
+        d=d,
+        ks=padded_sizes,
+        ks_tensor=padded_sizes_tensor,
+        c=c,
+    )
+
+    # No need return since d is updated in-place

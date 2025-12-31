@@ -24,6 +24,8 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
+from .moe_utils import k_grouped_bf16_gemm_tn_contiguous_aligned
+
 try:
     from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
 except (ImportError, RuntimeError):
@@ -96,7 +98,7 @@ class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
         dx = paddle.cast(dx, paddle.float)
 
         dy = paddle.zeros_like(y, dtype=paddle.float)
-        paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+        k_grouped_bf16_gemm_tn_contiguous_aligned(
             a=x,
             b=grad,
             d=dy,
