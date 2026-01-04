@@ -117,6 +117,7 @@ class TestGPTModel(unittest.TestCase):
             share_embeddings_and_output_weights=True,
             use_qk_norm=True,
             moe_grouped_gemm=True,
+            dtype="bfloat16",
         )
         self.gpt_model = gpt_builder(config, num_stages=1)
         self.config = config
