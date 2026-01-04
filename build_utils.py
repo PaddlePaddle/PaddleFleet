@@ -74,7 +74,7 @@ class EcosystemLibrary:
         extra_env: dict[str, str] | None = None,
     ):
         self.name = name
-        self.source_dir = ROOT_DIR / source_rel_path
+        self.source_dir = ROOT_DIR / source_rel_path  #
         # Install into a subdirectory named after the library
         self.install_dir = THIRD_PARTY_INSTALL_TEMP / name
         self.artifacts = artifacts
@@ -101,14 +101,17 @@ class EcosystemLibrary:
             for src, dst in links.items():
                 create_symlink(src, dst)
 
-        # Default build command: python setup.py install --install-lib <install_dir>
+        # pip install . --target  <install_dir> --no-deps --no-build-isolation
         cmd = [
             sys.executable,
-            "setup.py",
+            "-m",
+            "pip",
             "install",
-            "--install-lib",
+            ".",
+            "--target",
             str(self.install_dir),
-            "--no-compile",
+            "--no-deps",
+            "--no-build-isolation",
         ]
 
         try:

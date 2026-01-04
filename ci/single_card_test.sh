@@ -37,6 +37,7 @@ is_disabled() {
 
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
+export RUN_IN_PADDLE_CI=1
 
 run_count=0
 failed_tests=()
