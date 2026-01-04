@@ -89,6 +89,7 @@ class TestTop2Router(unittest.TestCase):
         self.router = self.router.cuda()
         self.router.moe_expert_capacity_factor = None
         self.router.moe_token_drop_policy = "probs"
+        self.router.drop_tokens = False
 
         hidden_states = paddle.randn(
             (1, num_tokens, self.router.hidden_size),
@@ -108,6 +109,7 @@ class TestTop2Router(unittest.TestCase):
         self.router = self.router.cuda()
         self.router.moe_expert_capacity_factor = None
         self.router.moe_token_drop_policy = "position"
+        self.router.drop_tokens = False
 
         hidden_states = paddle.randn(
             (1, num_tokens, self.router.hidden_size),
@@ -127,6 +129,7 @@ class TestTop2Router(unittest.TestCase):
         self.router = self.router.cuda()
         self.router.moe_expert_capacity_factor = 1.0
         self.router.moe_token_drop_policy = "probs"
+        self.router.drop_tokens = True
 
         hidden_states = paddle.randn(
             (1, num_tokens, self.router.hidden_size),
@@ -146,6 +149,7 @@ class TestTop2Router(unittest.TestCase):
         self.router = self.router.cuda()
         self.router.moe_expert_capacity_factor = 1.0
         self.router.moe_token_drop_policy = "position"
+        self.router.drop_tokens = True
 
         hidden_states = paddle.randn(
             (1, num_tokens, self.router.hidden_size),
@@ -165,6 +169,7 @@ class TestTop2Router(unittest.TestCase):
         self.router = self.router.cuda()
         self.router.moe_expert_capacity_factor = 2.0
         self.router.moe_token_drop_policy = "probs"
+        self.router.drop_tokens = True
 
         hidden_states = paddle.randn(
             (1, num_tokens, self.router.hidden_size),
@@ -184,6 +189,7 @@ class TestTop2Router(unittest.TestCase):
         self.router = self.router.cuda()
         self.router.moe_expert_capacity_factor = 2.0
         self.router.moe_token_drop_policy = "position"
+        self.router.drop_tokens = True
 
         hidden_states = paddle.randn(
             (1, num_tokens, self.router.hidden_size),

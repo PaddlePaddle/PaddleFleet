@@ -317,7 +317,6 @@ class StandardMoERouter(nn.Layer):
         router_topk: int,
         new_capacity: int,
         drop_policy: str = "probs",
-        pad_to_capacity: bool = False,
     ):
         """Apply token dropping to top-k expert selection.
 
@@ -332,7 +331,6 @@ class StandardMoERouter(nn.Layer):
             router_topk (int): Number of experts selected per token.
             new_capacity (int): New capacity limit for each expert.
             drop_policy (str): Policy to drop tokens - "probs" or "position".
-            pad_to_capacity (bool): Whether to pad to capacity.
 
         Returns:
             Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor, paddle.Tensor]:
@@ -364,16 +362,11 @@ class StandardMoERouter(nn.Layer):
         else:
             raise ValueError(f"Invalid drop_policy: {drop_policy}")
 
-        # Apply capacity constraints
-        if pad_to_capacity:
-            final_map = capacity_mask
-            final_probs = routing_probs * final_map.cast(routing_probs.dtype)
-        else:
-            # Get exceed mask and maskout exceeded probs and indices
-            final_map = paddle.logical_and(
-                routing_map.cast(paddle.bool), capacity_mask.cast(paddle.bool)
-            )
-            final_probs = routing_probs * final_map.cast(routing_probs.dtype)
+        # Get exceed mask and maskout exceeded probs and indices
+        final_map = paddle.logical_and(
+            routing_map.cast(paddle.bool), capacity_mask.cast(paddle.bool)
+        )
+        final_probs = routing_probs * final_map.cast(routing_probs.dtype)
 
         # Extract top-k expert indices and weights for each token
         top_weights, top_idx = paddle.topk(final_probs, k=router_topk, dim=1)
