@@ -20,8 +20,10 @@ from typing import TYPE_CHECKING, Any
 import paddle
 from paddle import Tensor, framework
 
-from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
-
+try:
+    from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
+except (ImportError, RuntimeError):
+    pass
 try:
     from paddle import scatter_add_
 except ImportError:
