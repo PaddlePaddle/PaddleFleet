@@ -329,83 +329,78 @@ def manual_backward(f: Callable, is_first_fwd: bool, *args: list[Any]):
 
 
 def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
-    """
-    Wrapper for paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous that handles
-    batch sizes not divisible by ALIGNMENT by padding in an optimized way.
-
-    Args:
-        a: Input tensor a, shape [K_total_a, M]
-        b: Input tensor b, shape [K_total_b, N]
-        d: Output tensor d, shape [num_batches, M, N] (updated in-place)
-        ks: List of group sizes, length = num_batches
-        ks_tensor: Tensor of group sizes, shape [num_batches]
-        c: Bias tensor c, shape [num_batches, M, N]
-    """
-
     ALIGNMENT = paddlefleet_deep_gemm.get_mk_alignment_for_contiguous_layout()
 
-    # Check if padding is required
-    needs_padding = any(size % ALIGNMENT != 0 for size in ks)
-
-    if not needs_padding:
-        print("No padding")
-        # Direct call without changes
+    # Vectorized check for padding
+    if not any(size % ALIGNMENT != 0 for size in ks):
         paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
-            a=a,
-            b=b,
-            d=d,
-            ks=ks,
-            ks_tensor=ks_tensor,
-            c=c,
+            a, b, d, ks, ks_tensor, c
         )
         return
 
-    # Compute padded sizes
-    padded_sizes = [
-        ((size + ALIGNMENT - 1) // ALIGNMENT) * ALIGNMENT for size in ks
-    ]
+    # Compute padded sizes using tensor ops
+    padded_ks_tensor = ((ks_tensor + ALIGNMENT - 1) // ALIGNMENT) * ALIGNMENT
+    padded_sizes_list = padded_ks_tensor.tolist()
 
-    def pad_grouped_tensor_fast(tensor, original_sizes, padded_sizes):
+    def pad_grouped_tensor(tensor, ks_tensor, padded_ks_tensor):
         """
-        Efficiently pad a grouped/batched tensor where groups are
-        concatenated along dim 0, using single allocation and copy.
+        Vectorized padding for grouped tensors.
+        Eliminates for-loops and uses a single global index assignment.
         """
-        if sum(original_sizes) == sum(padded_sizes):
-            return tensor  # No padding needed
+        total_unpadded = ks_tensor.sum().item()
+        total_padded = padded_ks_tensor.sum().item()
 
-        total_padded = sum(padded_sizes)
+        if total_unpadded == total_padded:
+            return tensor
 
-        # Allocate on same device/dtype as input tensor
+        # 1. Compute start offsets for both source and destination
+        # We use cumsum to find where each group begins
+        src_offsets = paddle.cat([paddle.tensor([0]), ks_tensor.cumsum(0)[:-1]])
+        dst_offsets = paddle.cat(
+            [paddle.tensor([0]), padded_ks_tensor.cumsum(0)[:-1]]
+        )
+
+        # 2. Calculate the "shift" required for every single element
+        # diff represents how much further each group moves in the padded tensor
+        diff = dst_offsets - src_offsets
+
+        # 3. Create a map of indices from source to destination
+        # Repeat the shift amount for every element in that group
+        element_shifts = paddle.repeat_interleave(diff, ks_tensor)
+        src_indices = paddle.arange(total_unpadded, device=tensor.device)
+        dst_indices = src_indices + element_shifts
+
+        # 4. Allocate and scatter
         padded_tensor = paddle.zeros(
             (total_padded, *tensor.shape[1:]),
             dtype=tensor.dtype,
             device=tensor.device,
         )
 
-        src_offset = 0
-        dst_offset = 0
-        for orig_size, pad_size in zip(original_sizes, padded_sizes):
-            # Copy only actual group data
-            padded_tensor[dst_offset : dst_offset + orig_size].copy_(
-                tensor[src_offset : src_offset + orig_size]
-            )
-            src_offset += orig_size
-            dst_offset += pad_size
+        # Single vectorized assignment
+        padded_tensor[dst_indices] = tensor
 
+        del (
+            src_offsets,
+            dst_offsets,
+            diff,
+            element_shifts,
+            src_indices,
+            dst_indices,
+        )
         return padded_tensor
 
-    # Pad a and b efficiently
-    a_padded = pad_grouped_tensor_fast(a, ks, padded_sizes)
-    b_padded = pad_grouped_tensor_fast(b, ks, padded_sizes)
+    # Vectorized pad
+    a_padded = pad_grouped_tensor(a, ks_tensor, padded_ks_tensor)
+    b_padded = pad_grouped_tensor(b, ks_tensor, padded_ks_tensor)
 
-    padded_sizes_tensor = paddle.tensor(padded_sizes, device=a.device)
-
-    # Call GEMM with padded input
     paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
         a=a_padded,
         b=b_padded,
         d=d,
-        ks=padded_sizes,
-        ks_tensor=padded_sizes_tensor,
+        ks=padded_sizes_list,
+        ks_tensor=padded_ks_tensor,
         c=c,
     )
+
+    del a_padded, b_padded
