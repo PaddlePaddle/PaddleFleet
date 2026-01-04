@@ -24,8 +24,6 @@ from paddlefleet.ops import (
     fused_swiglu_scale_bwd,
 )
 
-from .moe_utils import k_grouped_bf16_gemm_tn_contiguous_aligned
-
 try:
     from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
 except (ImportError, RuntimeError):
@@ -1332,7 +1330,7 @@ class ExpertsGroupGemmContiguousNode:
                         weights.shape, dtype=paddle.float32
                     )
                 if self.moe_deep_gemm:
-                    k_grouped_bf16_gemm_tn_contiguous_aligned(
+                    paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
                         a=x,
                         b=dy,
                         d=weights.main_grad,
@@ -1356,7 +1354,7 @@ class ExpertsGroupGemmContiguousNode:
                         weights.shape, dtype=paddle.float32
                     )
                 if self.moe_deep_gemm:
-                    k_grouped_bf16_gemm_tn_contiguous_aligned(
+                    paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
                         a=x,
                         b=dy,
                         d=weights.grad,
