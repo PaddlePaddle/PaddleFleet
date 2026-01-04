@@ -601,15 +601,16 @@ class TopKRouter(StandardMoERouter):
                 gates,
                 self.moe_expert_capacity_factor * self.num_experts_per_tok,
             )
-            gates_masked, mask, top_idx, top_gate = (
-                self.apply_router_token_dropping(
-                    gates_masked,
-                    mask,
-                    router_topk=self.num_experts_per_tok,
-                    new_capacity=capacity,
-                    drop_policy=self.moe_token_drop_policy,
+            if capacity < seq_len:
+                gates_masked, mask, top_idx, top_gate = (
+                    self.apply_router_token_dropping(
+                        gates_masked,
+                        mask,
+                        router_topk=self.num_experts_per_tok,
+                        new_capacity=capacity,
+                        drop_policy=self.moe_token_drop_policy,
+                    )
                 )
-            )
         else:
             # Do not drop tokens - set capacity according to current expert assignments
             exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)

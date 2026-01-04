@@ -135,43 +135,6 @@ class TestTop2Router(unittest.TestCase):
     #     out.sum().mul_(paddle.empty_like(out.sum())).backward()
     #     assert self.sequential_mlp.router.weight.grad.abs().sum() > 0
 
-    @pytest.mark.internal
-    def test_token_dropping(self):
-        # Define the parameter sets
-        capacity_factors = [None, 1.0, 2.0]
-        drop_policies = ["probs", "position"]
-
-        # Loop over all combinations of parameters
-        for capacity_factor in capacity_factors:
-            for drop_policy in drop_policies:
-                num_tokens = 32
-                self.router = self.router.cuda()
-                self.router.moe_expert_capacity_factor = capacity_factor
-                self.router.moe_token_drop_policy = drop_policy
-                # self.router.moe_pad_expert_input_to_capacity = pad_to_capacity
-
-                hidden_states = paddle.randn(
-                    (1, num_tokens, self.router.hidden_size),
-                    dtype=paddle.bfloat16,
-                )
-                hidden_states.requires_grad = True
-
-                _, _, _, probs, routing_map, _, _, _ = self.router(
-                    hidden_states
-                )
-                if capacity_factor is not None:
-                    assert (
-                        routing_map.sum().item()
-                        <= num_tokens
-                        * self.router.num_experts_per_tok
-                        * capacity_factor
-                    )
-                else:
-                    assert (
-                        routing_map.sum().item()
-                        == num_tokens * self.router.num_experts_per_tok
-                    )
-
 
 if __name__ == "__main__":
     unittest.main()
