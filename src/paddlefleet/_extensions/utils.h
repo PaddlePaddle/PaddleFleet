@@ -54,6 +54,7 @@ struct TypeMap<paddle::DataType::INT64> {
 };
 
 inline paddle::DataType TransToDataType(int64_t dtype) {
+  // Caller must ensure dtype is a valid paddle::DataType enum value
   return static_cast<paddle::DataType>(dtype);
 }
 
