@@ -552,6 +552,8 @@ def _p2p_ops_tuple_or_tensor(tensors, p2p_func, pp_rank, pp_group):
 
     reqs = []
     for tensor in tensors:
+        if tensor.place != paddle.device.get_device():
+            tensor = tensor.to(paddle.device.get_device())
         reqs.append(p2p_func(tensor, pp_rank, pp_group))
     return reqs
 
