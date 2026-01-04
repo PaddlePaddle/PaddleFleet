@@ -49,7 +49,7 @@ dependencies = [
     "colorlog>=6.10.1",
     "paddlepaddle-gpu>=3.3.0.dev",
     "triton",
-    "nvidia-nvshmem-cu12>=3.3.9", # for deep_ep build
+    "nvidia-nvshmem-cu12>=3.3.9,<3.5", # for deep_ep build
 ]
 
 [project.urls]
@@ -60,7 +60,7 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 
 [build-system]
-requires = ["setuptools>=61.0.0", "pybind11", "wheel", "packaging>=24.2", "paddlepaddle-gpu>=3.3.0.dev", "setuptools-scm>=8", "nvidia-nvshmem-cu12>=3.3.9"]
+requires = ["setuptools>=61.0.0", "paddlepaddle-gpu>=3.3.0.dev", "setuptools-scm>=8", "nvidia-nvshmem-cu12>=3.3.9,<3.5"] # nvshmem max version is limited to avoid multiple definitions
 build-backend = "build_backend"
 backend-path = ["."]
 

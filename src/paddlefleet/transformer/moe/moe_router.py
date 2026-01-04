@@ -475,7 +475,7 @@ class StandardMoERouter(nn.Layer):
         scores_for_choice = scores.reshape(
             [bsz_seq_len, -1]
         ) + self.e_score_correction_bias.detach().unsqueeze(0)
-        if n_group == 1 and self.config.moe_router_fusion:
+        if n_group == 1:
             topk_weight, topk_idx = paddle.topk(
                 scores_for_choice, k=k, axis=-1, sorted=True
             )
@@ -509,156 +509,33 @@ class StandardMoERouter(nn.Layer):
 
         return topk_weight, topk_idx
 
-    def forward(
-        self,
-        hidden_states: paddle.Tensor,
-    ) -> tuple[
-        int,
-        paddle.Tensor,
-        paddle.Tensor,
-        paddle.Tensor,
-        paddle.Tensor,
-        paddle.Tensor,
-    ]:
-        (
-            capacity,
-            top_gate,
-            top_idx,
-            gates_masked,
-            mask,
-            token_priority,
-            l_aux,
-            l_zloss,
-        ) = self.topkgating(hidden_states)
-        exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
-        if self.topk_method == "noaux_tc":
-            with paddle.no_grad():
-                self.expert_usage += exp_counts
-        return (
-            capacity,
-            top_gate,
-            top_idx,
-            gates_masked,
-            mask,
-            token_priority,
-            l_aux,
-            l_zloss,
-        )
-
-    def topkgating(
-        self,
-        hidden_states: paddle.Tensor,
-    ) -> tuple[
-        int,
-        paddle.Tensor,
-        paddle.Tensor,
-        paddle.Tensor,
-        paddle.Tensor,
-        paddle.Tensor,
-    ]:
-        """Implements TopKGating on logits."""
-        if len(hidden_states.shape) == 3:
-            if not self.sequence_parallel:
-                batch_size, seq_len, d_model = hidden_states.shape
-            else:
-                seq_len, batch, d_model = hidden_states.shape
-            hidden_states = hidden_states.reshape([-1, d_model])
-        elif len(hidden_states.shape) == 2:
-            raise ValueError(
-                "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
-            )
-        with paddle.amp.auto_cast(False):
-            hidden_states = hidden_states.cast(self.weight.dtype)
-            logits = F.linear(
-                hidden_states.cast("float32"),
-                self.weight.cast("float32").t(),
-            )
-            gates = self.gate_score_func(logits=logits)
-            gates = gates.cast(paddle.float32)
-
-        gates_ori = gates
-        if self.scoring_func == "sigmoid":
-            gates_ori = gates_ori / (
-                gates_ori.sum(axis=-1, keepdim=True) + 1e-20
-            )
-
-        l_zloss = self._cal_z_loss(gates)
-
-        if self.topk_method == "greedy":
-            top_gate, top_idx = self._topk_greedy(
-                gates, k=self.num_experts_per_tok
-            )
-        elif self.topk_method == "group_limited_greedy":
+    def _call_topk_method(
+        self, topk_method, gates, k, n_group=None, topk_group=None
+    ):
+        if topk_method == "greedy":
+            top_gate, top_idx = self._topk_greedy(gates, k=k)
+        elif topk_method == "group_limited_greedy":
             top_gate, top_idx = self._topk_group_limited_greedy(
                 gates,
-                k=self.num_experts_per_tok,
-                n_group=self.n_group,
-                topk_group=self.topk_group,
+                k,
+                n_group,
+                topk_group,
             )
-        elif self.topk_method == "noaux_tc":
+        elif topk_method == "noaux_tc":
             top_gate, top_idx = self._topk_noaux_tc(
                 gates,
-                k=self.num_experts_per_tok,
-                n_group=self.n_group,
-                topk_group=self.topk_group,
+                k,
+                n_group,
+                topk_group,
             )
         else:
-            raise NotImplementedError(
-                f"Invalid topk_method: {self.topk_method}"
-            )
-
-        # norm gate to sum 1
-        if self.num_experts_per_tok > 1 and self.norm_topk_prob:
-            denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
-            top_gate = top_gate / denominator
-        top_gate = top_gate * self.routed_scaling_factor
-
-        mask = paddle.zeros_like(gates).put_along_axis(
-            top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
-        )
-
-        if self.routing_type == "seq_aux_loss":
-            l_aux = self._cal_seq_aux_loss(
-                gates_ori, self.num_experts_per_tok, mask, seq_len
-            )
-        else:
-            l_aux = self._cal_aux_loss(gates, mask)
-        # TODO: support global_aux_loss
-
-        exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
-
-        # Do not drop tokens - set capacity according to current expert assignments
-        local_capacity = paddle.max(exp_counts)
-        capacity = int(local_capacity)
-        token_priority = self._priority(top_idx, capacity)
-
-        # normalize gates
-        gates_masked = gates * mask
-        # if self.training:
-        gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
-        denom_s = paddle.clip(gates_s, min=paddle.finfo(gates_masked.dtype).eps)
-        if self.norm_topk_prob:
-            gates_masked = gates_masked / denom_s
-        gates_masked *= self.routed_scaling_factor
-        return (
-            capacity,  # new capacity
-            top_gate,  # weights of selected experts for each token [num_tokens, num_experts_per_token]
-            top_idx,  # indices of selected experts for each token [num_tokens, num_experts_per_token]
-            gates_masked.to(
-                paddle.float32
-            ),  # masked gates. for each token, the selected experts are remainded with their original values, others are 0 [num_tokens, num_experts]
-            mask,  # mask. for each token, the selected experts are marked with 1s [num_tokens, num_experts]
-            token_priority.take_along_axis(top_idx, axis=-1),  # token priority
-            l_aux,
-            l_zloss,
-        )
+            raise NotImplementedError(f"Invalid topk_method: {topk_method}")
+        return top_gate, top_idx
 
 
-class DeepEPTopKRouter(StandardMoERouter):
+class TopKRouter(StandardMoERouter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-        assert self.topk_method == "noaux_tc"
 
     def forward(self, input):
         if len(input.shape) == 3:
@@ -685,7 +562,8 @@ class DeepEPTopKRouter(StandardMoERouter):
         gates = self.gate_score_func(logits)
 
         # top_gate: [B*S, K], top_idx: [B*S, K]
-        top_gate, top_idx = self._topk_noaux_tc(
+        top_gate, top_idx = self._call_topk_method(
+            self.topk_method,
             gates,
             k=self.num_experts_per_tok,
             n_group=self.n_group,
@@ -710,9 +588,10 @@ class DeepEPTopKRouter(StandardMoERouter):
             top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
         )
 
-        exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
-        with paddle.no_grad():
-            self.expert_usage += exp_counts
+        if self.topk_method == "noaux_tc":
+            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
+            with paddle.no_grad():
+                self.expert_usage += exp_counts
 
         gates_masked = paddle.zeros_like(gates).put_along_axis(
             top_idx, top_gate.cast(gates.dtype), axis=1

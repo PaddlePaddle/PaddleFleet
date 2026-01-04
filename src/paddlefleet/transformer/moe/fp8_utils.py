@@ -1345,10 +1345,9 @@ class ExpertsGroupGemmContiguousNode:
                         self.tokens_per_expert,
                         trans_lhs=True,
                     )
-                    weights.main_grad = weights.main_grad + weights_res.cast(
-                        weights.main_grad.dtype
+                    weights.main_grad.add_(
+                        weights_res.cast(weights.main_grad.dtype)
                     )
-                    del weights_res
             else:
                 if weights.grad is None:
                     weights.grad = paddle.zeros(
@@ -1370,10 +1369,7 @@ class ExpertsGroupGemmContiguousNode:
                         self.tokens_per_expert,
                         trans_lhs=True,
                     )
-                    weights.grad = weights.grad + weights_res.cast(
-                        weights.grad.dtype
-                    )
-                    del weights_res
+                    weights.grad.add_(weights_res.cast(weights.grad.dtype))
             if (
                 hasattr(weights, "_apply_backward_hook")
                 and not weights.stop_gradient

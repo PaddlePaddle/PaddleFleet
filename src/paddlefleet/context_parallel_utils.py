@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
+
 import paddle
 from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
@@ -22,6 +24,7 @@ from paddle.nn.functional.flash_attention import flashmask_attention
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
     """
     Mark parameters or layers to disable context parallel gradient scaling.
+
     This function sets the attribute `context_parallel_disable_scale_grad` to `True` for the given parameter,
     tensor, or layer. When set, this flag indicates that the specified parameter or layer should not have
     its gradient scaled during context parallel training.
@@ -584,6 +587,7 @@ def cp_flashmask_allgatherkv_balance_forward(
 
 
 def cp_flashmask_allgatherkv_balance_backward(
+    config,
     query,
     key,
     value,
@@ -619,14 +623,12 @@ def cp_flashmask_allgatherkv_balance_backward(
     key_gathered = all_gather_balance(key, axis=1, group=group)
     value_gathered = all_gather_balance(value, axis=1, group=group)
 
-    if paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-        "FLAGS_cudnn_deterministic"
-    ]:
+    fa_version = config.fa_version
+    if "block_mask" in inspect.signature(flashmask_attention).parameters:
+        if config.deterministic_mode and query.shape[-1] > 128:
+            fa_version = 2
+    elif config.deterministic_mode:
         fa_version = 2
-    else:
-        fa_version = paddle.base.framework.get_flags(
-            ["FLAGS_flash_attn_version"]
-        )["FLAGS_flash_attn_version"]
     if fa_version == 2:
         # Create seed offset tensor (required for gradient computation)
         seed_offset = paddle.zeros(
@@ -649,19 +651,35 @@ def cp_flashmask_allgatherkv_balance_backward(
             )
         )
     elif fa_version == 3:
-        query_grad, key_grad_gathered, value_grad_gathered = (
-            paddle._C_ops.flashmask_attention_v2_grad(
-                query,
-                key_gathered,
-                value_gathered,
-                output,
-                log_sum_exp,
-                startend_row_indices,
-                output_grad,
-                query.shape[-1] ** (-0.5),
-                False,
+        if "block_mask" in inspect.signature(flashmask_attention).parameters:
+            query_grad, key_grad_gathered, value_grad_gathered = (
+                paddle._C_ops.flashmask_attention_v2_grad(
+                    query,
+                    key_gathered,
+                    value_gathered,
+                    output,
+                    log_sum_exp,
+                    startend_row_indices,
+                    None,  # block_mask
+                    output_grad,
+                    query.shape[-1] ** (-0.5),
+                    False,
+                )
             )
-        )
+        else:
+            query_grad, key_grad_gathered, value_grad_gathered = (
+                paddle._C_ops.flashmask_attention_v2_grad(
+                    query,
+                    key_gathered,
+                    value_gathered,
+                    output,
+                    log_sum_exp,
+                    startend_row_indices,
+                    output_grad,
+                    query.shape[-1] ** (-0.5),
+                    False,
+                )
+            )
     else:
         raise ValueError(
             f"FlashAttention version {fa_version} is not supported."
@@ -679,7 +697,6 @@ def cp_flashmask_allgatherkv_balance_backward(
     return query_grad, key_grad, value_grad
 
 
-#
 def scatter_with_padding(input_tensor, num_pad, axis, group):
     """scatter_with_padding"""
     cp_degree = group.nranks
@@ -720,7 +737,6 @@ def scatter_with_padding(input_tensor, num_pad, axis, group):
     return cur_res
 
 
-#
 def all_gather_without_padding(input_tensor, num_pad, axis, group):
     """all_gather_without_padding"""
     output_shape = list(input_tensor.shape)
@@ -735,7 +751,6 @@ def all_gather_without_padding(input_tensor, num_pad, axis, group):
     return output_tensor
 
 
-#
 class ContextParallelNormalScatter(PyLayer):
     """ContextParallelNormalScatter"""
 
@@ -767,7 +782,6 @@ class ContextParallelNormalScatter(PyLayer):
         )
 
 
-#
 class ContextParallelNormalGather(PyLayer):
     """ContextParallelNormalGather"""
 
@@ -810,6 +824,7 @@ class FlashMaskContextParallel(PyLayer):
     @staticmethod
     def forward(
         ctx,
+        config,
         query,
         key,
         value,
@@ -877,6 +892,7 @@ class FlashMaskContextParallel(PyLayer):
         )
         ctx.group = group
         ctx.causal = causal
+        ctx.config = config
 
         return output
 
@@ -896,10 +912,12 @@ class FlashMaskContextParallel(PyLayer):
         )
         group = ctx.group
         causal = ctx.causal
+        config = ctx.config
 
         # Compute gradients
         query_grad, key_grad, value_grad = (
             cp_flashmask_allgatherkv_balance_backward(
+                config,
                 query,
                 key,
                 value,
@@ -916,6 +934,7 @@ class FlashMaskContextParallel(PyLayer):
 
 
 def flashmask_attention_cp(
+    config,
     query,
     key,
     value,
@@ -960,6 +979,7 @@ def flashmask_attention_cp(
         ```
     """
     output = FlashMaskContextParallel.apply(
+        config,
         query,
         key,
         value,
