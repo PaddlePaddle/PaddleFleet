@@ -99,7 +99,6 @@ index-strategy = "unsafe-best-match"
 [tool.uv.pip]
 prerelease = "allow"
 
-
 [tool.ruff]
 exclude = ["third_party"]
 line-length = 80
