@@ -165,6 +165,11 @@ class ModelParallelConfig:
 
     """
 
+    fa_version: int = 2
+    """FlashAttention version, can be set to 2 or 3. Default is 2. Flashmask version is also
+       controlled by it.
+    """
+
     ###################
     # Optimizations
     ###################
