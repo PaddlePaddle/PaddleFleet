@@ -98,7 +98,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           echo "Install uv"
-          pip install uv coverage
+          pip install uv coverage==7.6.1
           echo "uv build"
           git submodule update --init --recursive
           uv build --wheel
