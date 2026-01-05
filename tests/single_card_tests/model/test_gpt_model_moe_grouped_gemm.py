@@ -116,6 +116,7 @@ class TestGPTModel(unittest.TestCase):
             ),
             share_embeddings_and_output_weights=True,
             use_qk_norm=True,
+            moe_grouped_gemm=True,
         )
         self.gpt_model = gpt_builder(config, num_stages=1)
         self.config = config
@@ -176,7 +177,7 @@ class TestGPTModel(unittest.TestCase):
 
         if judge_machine_type() == "H":
             assert loss.item() == 5.153562068939209, (
-                f"loss not equal ({loss.item()} != 5.153562068939209), please check your modify"
+                f"loss not equal ({loss.item()} != 5.153562068939209), embed_tokens_grad_norm = {embed_tokens_grad_norm}, please check your modify"
             )
             assert embed_tokens_grad_norm == 13.3125, (
                 f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 13.3125), please check your modify"
