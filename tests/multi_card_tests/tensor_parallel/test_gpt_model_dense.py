@@ -170,23 +170,7 @@ def run_tp_sp(
     _set_random_seed(seed)
 
     gpt_model = gpt_builder(config, num_stages=1)
-    # gpt_model = GPTModel(
-    #    config=config,
-    #    transformer_layer_spec=transformer_layer_spec,
-    #    vocab_size=vocab_size,
-    #    max_sequence_length=seq_len,
-    #    pre_process=pre_process,
-    #    post_process=post_process,
-    #    fp16_lm_cross_entropy=False,
-    #    parallel_output=True,
-    #    tie_word_embeddings=True,
-    #    position_embedding_type="rope",
-    #    rotary_percent=1.0,
-    #    rotary_base=10000,
-    #    rope_scaling=1.0,
-    #    mtp_block_spec=mtp_block_spec,
-    #    vp_stage=vp_stage,
-    # )
+
     register_sequence_parallel_allreduce_hooks(gpt_model, 1, False)
 
     data = paddle.randint(
