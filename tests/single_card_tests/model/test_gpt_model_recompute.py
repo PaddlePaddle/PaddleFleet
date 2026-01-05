@@ -132,7 +132,14 @@ class TestGPTModel(unittest.TestCase):
             share_embeddings_and_output_weights=True,
             use_qk_norm=True,
             recompute_granularity="selective",
-            recompute_modules=["core_attn", "norm", "mlp"],
+            recompute_modules=[
+                "core_attn",
+                "norm",
+                "mlp",
+                "lm_head",
+                "embedding",
+                "loss_fn",
+            ],
         )
         config1.name = "config_1"
         configs.append(config1)

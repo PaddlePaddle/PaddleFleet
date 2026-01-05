@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import paddle
+from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
@@ -85,9 +86,17 @@ class GPTEmbedding(FleetLayer):
         )
 
         if decoder_input is None:
-            decoder_input = self.embedding(
-                input_ids=input_ids, position_ids=position_ids
-            )
+            if (
+                self.config.recompute_modules is not None
+                and "embedding" in self.config.recompute_modules
+            ):
+                decoder_input = recompute(
+                    self.embedding, input_ids, position_ids
+                )
+            else:
+                decoder_input = self.embedding(
+                    input_ids=input_ids, position_ids=position_ids
+                )
 
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
