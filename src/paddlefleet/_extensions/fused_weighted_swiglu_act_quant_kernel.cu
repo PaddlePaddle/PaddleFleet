@@ -18,22 +18,8 @@
 #include "paddle/phi/kernels/funcs/aligned_vector.h"
 #include "paddle/phi/kernels/fusion/gpu/quant_utils.h"
 
-__device__ __forceinline__ float ceil_to_ue8m0(float s) {
-  int exp;
-  frexpf(s, &exp);
-  float pow2 = ldexpf(1.0f, exp - 1);
-  if (pow2 < s) {
-    pow2 = ldexpf(1.0f, exp);
-  }
-  return pow2;
-}
-
 __host__ __device__ __forceinline__ int ceil_div(int x, int y) {
   return (x + y - 1) / y;
-}
-
-__host__ __device__ __forceinline__ int align(int x, int y) {
-  return ceil_div(x, y) * y;
 }
 
 inline paddle::Tensor GetEmptyTensor(const common::DDim &dims,
@@ -514,7 +500,7 @@ std::vector<paddle::Tensor> FusedWeightedSwigluActQuantKernel(
 }
 
 
-PD_BUILD_OP(fused_spaq)
+PD_BUILD_OP(fused_weighted_swiglu_act_quant_custom)
   .Inputs({"expert_out_list",
            paddle::Optional("prob")
            })

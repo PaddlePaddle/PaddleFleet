@@ -6,7 +6,7 @@ import paddle.incubate.nn.functional as F
 
 paddle.compat.enable_torch_proxy()
 
-from paddlefleet.ops import fused_spaq, deep_gemm
+from paddlefleet.ops import fused_weighted_swiglu_act_quant_custom, deep_gemm
 
 class TestSPAQ(unittest.TestCase):
     def setUp(self):
@@ -44,7 +44,7 @@ class TestSPAQ(unittest.TestCase):
         golden_res = F.swiglu(x) * prob
 
         fp8_x_out_ref, fp32_x_scale_ref = (
-            fused_spaq(
+            fused_weighted_swiglu_act_quant_custom(
                     x, prob, using_pow2_scaling=False, use_ue8m0=False
             )
         )
@@ -86,7 +86,7 @@ class TestSPAQ(unittest.TestCase):
 
         # spaq test with using_pow2_scaling=True, use_ue8m0=False
         fp8_x_out_ref, fp32_x_scale_ref = (
-            fused_spaq(
+            fused_weighted_swiglu_act_quant_custom(
                     x, prob, using_pow2_scaling=True, use_ue8m0=False
             )
         )
@@ -97,7 +97,7 @@ class TestSPAQ(unittest.TestCase):
 
         # spaq test with using_pow2_scaling=True, use_ue8m0=True
         fp8_x_out, ue8m0_x_scale = (
-            fused_spaq(
+            fused_weighted_swiglu_act_quant_custom(
                     x, prob, using_pow2_scaling=True, use_ue8m0=True
             )
         )
@@ -118,10 +118,12 @@ class TestSPAQ(unittest.TestCase):
         self.run_fused_op_test(128 * 10, 128 * 20, 4096)
 
     def test_spaq_ue8m0_0(self):
-        self.run_fused_op_ue8m0_test(128 * 3, 128 * 4, 2048)
+        if get_arch_major() == 10:
+            self.run_fused_op_ue8m0_test(128 * 3, 128 * 4, 2048)
 
     def test_spaq_ue8m0_1(self):
-        self.run_fused_op_ue8m0_test(128 * 10, 128 * 20, 4096)
+        if get_arch_major() == 10:
+            self.run_fused_op_ue8m0_test(128 * 10, 128 * 20, 4096)
 
 if __name__ == "__main__":
     unittest.main()
