@@ -11,6 +11,7 @@ on:
           - publish-wheel
   schedule:
     - cron: '0 16 * * *'
+  workflow_call:
 
 permissions: read-all
 
@@ -43,6 +44,7 @@ jobs:
       no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
     steps:
       - name: Check docker image and run container
+        if: github.event_name != 'push' || matrix.CUDA_VERSION == 'CUDA12.9'
         run: |
           docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:${{ matrix.IMAGE_TAG }}"
           docker pull $docker_image
@@ -59,6 +61,8 @@ jobs:
             -e UV_HTTP_TIMEOUT \
             -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
             -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
+            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+            -e GITHUB_REPO_NAME=${{ github.repository }} \
             -w /workspace --network=host $docker_image
 
       - name: Install PaddleFleet
@@ -89,7 +93,7 @@ jobs:
           uv build
           '
 
-      - name: Upload wheel
+      - name: Upload wheel (and update precision)
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
@@ -99,11 +103,22 @@ jobs:
           tar -xf bos_new.tar.gz -C bos
           cd dist
           python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.bos_CUDA }}/paddlefleet
+          curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          if [[ ${{ github.event_name }} == 'push' ]]; then
+            export AK=${{ secrets.AK }}
+            export SK=${{ secrets.SK }}
+            export GITHUB_TOKEN=${{ github.token }}
+            export COMMIT_ID=${{ github.sha }}
+            cd /workspace
+            source /root/proxy
+            git clone https://github.com/PaddlePaddle/PaddleFormers.git
+            bash -x /workspace/PaddleFormers/tests/integration_test/update_precision.sh
+          fi
           '
 
       - name: Cleanup
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
