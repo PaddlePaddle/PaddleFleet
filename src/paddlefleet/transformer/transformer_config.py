@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -29,8 +28,6 @@ from ..utils import init_method_normal, scaled_init_method_normal
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -496,13 +493,6 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
-
-        if hasattr(self, "num_experts") and self.n_routed_experts is not None:
-            logger.warning(
-                f"both num_experts({self.num_experts}) and n_routed_experts({self.n_routed_experts}) are configured, TransformerConfig will use n_routed_experts({self.n_routed_experts}) at first"
-            )
-        elif hasattr(self, "num_experts") and self.n_routed_experts is None:
-            self.n_routed_experts = self.num_experts
 
         if self.num_key_value_heads % self.tensor_model_parallel_size != 0:
             raise ValueError(
