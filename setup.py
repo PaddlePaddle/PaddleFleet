@@ -52,7 +52,7 @@ common_dependencies = [
 ]
 
 
-def get_cuda_sepcial_dependencies(cuda_major, cuda_minor):
+def get_cuda_special_dependencies(cuda_major, cuda_minor):
     deps = [
         "paddlepaddle-gpu>=3.3.0.dev",
         "triton",  # for deep_gemm, flashmask
@@ -99,7 +99,7 @@ def setup_ops_extension():
         )
     if cuda_major == 12 and cuda_minor < 8:
         nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
-    cuda_dependencies = common_dependencies + get_cuda_sepcial_dependencies(
+    cuda_dependencies = common_dependencies + get_cuda_special_dependencies(
         cuda_major, cuda_minor
     )
     ext_module = CUDAExtension(

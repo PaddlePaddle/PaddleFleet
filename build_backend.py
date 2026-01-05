@@ -58,7 +58,7 @@ def _prepare_ecosystem(use_symlinks: bool):
         lib.install(use_symlinks=use_symlinks)
 
 
-def get_cuda_sepcial_build_deps(cuda_major, cuda_minor):
+def get_cuda_special_build_deps(cuda_major, cuda_minor):
     deps = [
         "paddlepaddle-gpu>=3.3.0.dev",
     ]
@@ -74,19 +74,15 @@ def get_cuda_sepcial_build_deps(cuda_major, cuda_minor):
 
 
 def get_requires_for_build_wheel(config_settings=None):
-    return orig.get_requires_for_build_wheel(
-        config_settings
-    ) + get_cuda_sepcial_build_deps(cuda_major, cuda_minor)
+    return get_cuda_special_build_deps(cuda_major, cuda_minor)
 
 
 def get_requires_for_build_sdist(config_settings=None):
-    return orig.get_requires_for_build_sdist(config_settings)
+    return []
 
 
 def get_requires_for_build_editable(config_settings=None):
-    return orig.get_requires_for_build_editable(
-        config_settings
-    ) + get_cuda_sepcial_build_deps(cuda_major, cuda_minor)
+    return get_cuda_special_build_deps(cuda_major, cuda_minor)
 
 
 def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None):
