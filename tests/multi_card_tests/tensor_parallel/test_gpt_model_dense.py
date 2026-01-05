@@ -109,18 +109,6 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
     np.random.seed(seed)
     paddle.manual_seed(seed)
 
-    # transformer_layer_spec = get_gpt_layer_local_spec(
-    #    num_experts=None,
-    #    moe_grouped_gemm=False,
-    #    use_qk_norm=True,
-    #    multi_latent_attention=False,
-    #    normalization="RMSNorm",
-    # )
-    # pre_process = True
-    # post_process = True
-    # mtp_block_spec = None
-    # vp_stage = None
-
     gpt_model = gpt_builder(config, num_stages=1)
 
     # gpt_model = GPTModel(
@@ -199,18 +187,6 @@ def run_tp_sp(
 
     _set_random_seed(seed)
 
-    # transformer_layer_spec = get_gpt_layer_local_spec(
-    #     num_experts=None,
-    #     moe_grouped_gemm=False,
-    #     use_qk_norm=True,
-    #     multi_latent_attention=False,
-    #     normalization="RMSNorm",
-    # )
-    # pre_process = True
-    # post_process = True
-    # mtp_block_spec = None
-    # vp_stage = None
-
     gpt_model = gpt_builder(config, num_stages=1)
     # gpt_model = GPTModel(
     #    config=config,
@@ -253,13 +229,6 @@ def run_tp_sp(
 
     loss = gpt_pipe_model.forward_backward_pipeline(inputs)
 
-    # outputs = gpt_model(
-    #    input_ids=input_ids,
-    #    position_ids=position_ids,
-    #    labels=labels,
-    # )
-    # loss = outputs[0]
-    # loss.backward()
     assert loss == loss_baseline
     check_grads(gpt_pipe_model, gpt_model_baseline, tp_group)
 
