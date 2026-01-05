@@ -116,8 +116,6 @@ class TestGPTModel(unittest.TestCase):
             ),
             share_embeddings_and_output_weights=True,
             use_qk_norm=True,
-            moe_grouped_gemm=True,
-            dtype="bfloat16",
         )
         self.gpt_model = gpt_builder(config, num_stages=1)
         self.config = config
@@ -156,6 +154,9 @@ class TestGPTModel(unittest.TestCase):
         )
 
         gpt_pipe_model = NoPipelineParallel(self.gpt_model, self.strategy)
+        gpt_pipe_model = paddle.amp.decorate(
+            models=gpt_pipe_model, level="O2", dtype="bfloat16"
+        )
         loss = gpt_pipe_model.forward_backward_pipeline(data)
 
         for name, param in self.gpt_model.named_parameters():
@@ -168,6 +169,25 @@ class TestGPTModel(unittest.TestCase):
             print(f"{name}: {grad_norm:.6f}, {grad_abssum:.6f}")
             if name == "0.embedding.embed_tokens.weight":
                 embed_tokens_grad_norm = grad_norm
+
+        print("loss", loss.item())
+
+        print("embed_tokens_grad_norm", embed_tokens_grad_norm)
+
+        if judge_machine_type() == "H":
+            assert loss.item() == 5.302924156188965, (
+                f"loss not equal ({loss.item()} != 5.302924156188965), please check your modify"
+            )
+            assert embed_tokens_grad_norm == 13.3125, (
+                f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 13.3125), please check your modify"
+            )
+        elif judge_machine_type() == "V":
+            assert loss.item() == 5.284281253814697, (
+                f"loss not equal ({loss.item()} != 5.284281253814697), please check your modify"
+            )
+            assert embed_tokens_grad_norm == 9.912039756774902, (
+                f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 9.912039756774902, please check your modify"
+            )
 
 
 if __name__ == "__main__":
