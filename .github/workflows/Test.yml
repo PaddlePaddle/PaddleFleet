@@ -876,12 +876,8 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-pt/coverage.xml coverage-a-pt.xml
           # cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-a-sft.xml
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
-          set -x
-          pip list
-          uv pip list
-          python -c "import baidubce"
-          uv run python -c "import baidubce"
-          uv run ${push_file} coverage-a-pt.xml ${target_path}
+          source /workspace/PaddleFleet/.venv/bin/activate
+          python ${push_file} coverage-a-pt.xml ${target_path}
           # uv run ${push_file} coverage-a-sft.xml ${target_path}
           '
 
