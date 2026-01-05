@@ -7,6 +7,9 @@ import paddle.incubate.nn.functional as F
 paddle.compat.enable_torch_proxy()
 
 from paddlefleet.ops import fused_weighted_swiglu_act_quant_custom, deep_gemm
+from paddlefleet.ops.deep_gemm.testing import (
+    get_arch_major,
+)
 
 class TestSPAQ(unittest.TestCase):
     def setUp(self):
