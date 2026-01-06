@@ -1,11 +1,26 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import itertools
 import unittest
 
 import numpy as np
-
 import paddle
 from paddle.nn.functional import moe_permute
+
 from paddlefleet.ops import tokens_unzip_gather
+
 
 def fabricate_dispatch_result(
     seqlen,
@@ -123,17 +138,34 @@ class TestTokensUnzipGatherUE8M0Scale(unittest.TestCase):
 
                 for expert_id in range(expert_num):
                     # Test tokens_unzip_gather with int32 (four ue8m0) scale
-                    (x_unzipped, x_scale_unzipped, index_unzipped) = tokens_unzip_gather(hidden_states, scale, zipped_expertwise_rowmap,expert_id,tokens_per_expert,128)
+                    (x_unzipped, x_scale_unzipped, index_unzipped) = (
+                        tokens_unzip_gather(
+                            hidden_states,
+                            scale,
+                            zipped_expertwise_rowmap,
+                            expert_id,
+                            tokens_per_expert,
+                            128,
+                        )
+                    )
                     x_scale_unzipped_np = x_scale_unzipped.numpy()
                     # Test tokens_unzip_gather with float32 scale
-                    (x_unzipped, x_scale_fp32_unzipped, index_unzipped) = tokens_unzip_gather(hidden_states, scale_fp32, zipped_expertwise_rowmap,expert_id,tokens_per_expert,128)
-                    # Verify the result of scale is the same 
-                    np.allclose(x_scale_unzipped_np, x_scale_fp32_unzipped.astype("int32").numpy())
+                    (x_unzipped, x_scale_fp32_unzipped, index_unzipped) = (
+                        tokens_unzip_gather(
+                            hidden_states,
+                            scale_fp32,
+                            zipped_expertwise_rowmap,
+                            expert_id,
+                            tokens_per_expert,
+                            128,
+                        )
+                    )
+                    # Verify the result of scale is the same
+                    np.allclose(
+                        x_scale_unzipped_np,
+                        x_scale_fp32_unzipped.astype("int32").numpy(),
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
-        
