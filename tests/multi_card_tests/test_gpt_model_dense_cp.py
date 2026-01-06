@@ -139,6 +139,7 @@ if __name__ == "__main__":
         intermediate_size=1024,
         normalization="RMSNorm",
         fuse_rms_norm=False,
+        apply_rope_fusion=True,
         hidden_dropout_prob=0.0,
         attention_dropout=0.0,
         use_cpu_initialization=False,
