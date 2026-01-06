@@ -456,6 +456,7 @@ class CPDotProductAttention(FleetLayer):
             )
 
         attn_output = flashmask_attention_cp(
+            self.config,
             query.astype(value.dtype),
             key.astype(value.dtype),
             value.astype(value.dtype),

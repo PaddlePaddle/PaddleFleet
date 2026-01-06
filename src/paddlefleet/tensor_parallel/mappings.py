@@ -228,12 +228,14 @@ class _ReduceFromModelParallelRegion(paddle.autograd.Function):
     @staticmethod
     def symbolic(graph, input_, group):
         """Symbolic function for tracing."""
+        if group is None or group.nranks <= 1:
+            return input_
         return _reduce(input_, group)
 
     @staticmethod
     def forward(ctx, input_, group):
         """Forward function."""
-        if group is None:
+        if group is None or group.nranks <= 1:
             return input_
         return _reduce(input_, group)
 
