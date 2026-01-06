@@ -271,6 +271,9 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e PR_USER="${{ github.event.pull_request.user.login }}" \
+            -e PP="rel" \
+            -e PF="${{ github.event.pull_request.base.ref }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -313,6 +316,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
+          git pull origin --no-edit pull/3444/head
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           source ../PaddleFleet/.venv/bin/activate
@@ -411,6 +415,9 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e PR_USER="${{ github.event.pull_request.user.login }}" \
+            -e PP="rel" \
+            -e PF="${{ github.event.pull_request.base.ref }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -452,6 +459,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
+          git pull origin --no-edit pull/3444/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
@@ -618,6 +626,9 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e PR_USER="${{ github.event.pull_request.user.login }}" \
+            -e PP="rel" \
+            -e PF="${{ github.event.pull_request.base.ref }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -657,6 +668,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
+          git pull origin --no-edit pull/3444/head
           source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"

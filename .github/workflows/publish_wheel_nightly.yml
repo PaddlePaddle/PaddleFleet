@@ -105,6 +105,7 @@ jobs:
           python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.bos_CUDA }}/paddlefleet
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           if [[ ${{ github.event_name }} == 'push' ]]; then
+            export step="formers"
             export AK=${{ secrets.AK }}
             export SK=${{ secrets.SK }}
             export GITHUB_TOKEN=${{ github.token }}
@@ -120,5 +121,5 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
