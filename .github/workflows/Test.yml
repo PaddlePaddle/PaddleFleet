@@ -434,11 +434,11 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
+          cd /workspace/PaddleFleet
           cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage-single.xml
           cp /workspace/PaddleFleet/coveragedata-qwen/coverage.xml coverage-qwen.xml
           target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
           target_path_qwen="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-qwen"
-          cd /workspace/PaddleFleet
           uv run ${push_file} coverage-single.xml ${target_path_single}
           uv run ${push_file} coverage-qwen.xml ${target_path_qwen}
           '
@@ -713,6 +713,7 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
+          cd /workspace/PaddleFleet
           cp /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml coverage-multi-pt.xml
           cp /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml coverage-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
@@ -722,7 +723,6 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
-          cd /workspace/PaddleFleet
           uv run ${push_file} coverage-multi-pt.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-sft.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi}
@@ -875,10 +875,10 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
+          cd /workspace/PaddleFleet
           cp /workspace/PaddleFleet/coveragedata-pt/coverage.xml coverage-a-pt.xml
           # cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-a-sft.xml
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
-          cd /workspace/PaddleFleet
           uv run ${push_file} coverage-a-pt.xml ${target_path}
           # uv run ${push_file} coverage-a-sft.xml ${target_path}
           '
