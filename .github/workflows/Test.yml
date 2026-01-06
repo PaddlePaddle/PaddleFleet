@@ -438,9 +438,9 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-qwen/coverage.xml coverage-qwen.xml
           target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
           target_path_qwen="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-qwen"
-          source /workspace/PaddleFleet/.venv/bin/activate
-          python ${push_file} coverage-single.xml ${target_path_single}
-          python ${push_file} coverage-qwen.xml ${target_path_qwen}
+          cd /workspace/PaddleFleet
+          uv run ${push_file} coverage-single.xml ${target_path_single}
+          uv run ${push_file} coverage-qwen.xml ${target_path_qwen}
           '
 
       - name: Terminate and delete the container
@@ -722,15 +722,15 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
-          source /workspace/PaddleFleet/.venv/bin/activate
-          python ${push_file} coverage-multi-pt.xml ${target_path_multi}
-          python ${push_file} coverage-multi-sft.xml ${target_path_multi}
-          python ${push_file} coverage-multi-fp8.xml ${target_path_multi}
-          python ${push_file} coverage-multi-grouped-gemm.xml ${target_path_multi}
-          python ${push_file} coverage-multi-dpo.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-multi-pt.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-multi-sft.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-multi-lora.xml ${target_path_multi}
+          cd /workspace/PaddleFleet
+          uv run ${push_file} coverage-multi-pt.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-sft.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-grouped-gemm.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-dpo.xml ${target_path_multi}
+          uv run ${push_file} coverage-qwen-multi-pt.xml ${target_path_multi}
+          uv run ${push_file} coverage-qwen-multi-sft.xml ${target_path_multi}
+          uv run ${push_file} coverage-qwen-multi-lora.xml ${target_path_multi}
           '
 
       - name: Terminate and delete the container
@@ -878,8 +878,8 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-pt/coverage.xml coverage-a-pt.xml
           # cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-a-sft.xml
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
-          source /workspace/PaddleFleet/.venv/bin/activate
-          python ${push_file} coverage-a-pt.xml ${target_path}
+          cd /workspace/PaddleFleet
+          uv run ${push_file} coverage-a-pt.xml ${target_path}
           # uv run ${push_file} coverage-a-sft.xml ${target_path}
           '
 
