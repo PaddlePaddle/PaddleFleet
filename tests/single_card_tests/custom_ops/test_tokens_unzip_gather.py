@@ -121,19 +121,18 @@ class TestTokensUnzipGatherUE8M0Scale(unittest.TestCase):
 
                 # Using Permute get rowmap
                 (
-                    unzipped_tokens,
+                    _,
                     zipped_expertwise_rowmap,
-                    unzipped_probs,
-                    unzipped_scales,
+                    _,
+                    _,
                 ) = moe_permute(
                     hidden_states,
-                    scale,
+                    scale_fp32,
                     expert_routemap_topk,
                     expert_prob_topk,
                     num_experts=expert_num,
                     tokens_per_expert=tokens_per_expert,
                     padding_alignment=128,
-                    using_ue8m0_scale=True,
                 )
 
                 for expert_id in range(expert_num):
