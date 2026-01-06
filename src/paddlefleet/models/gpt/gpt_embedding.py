@@ -92,7 +92,7 @@ class GPTEmbedding(FleetLayer):
         
         # Deepstack
         deepstack_visual_embeds = None
-        visual_pos_mask = None
+        visual_pos_masks = None
         if decoder_input is None:
             decoder_input = self.embedding(
                 input_ids=input_ids,

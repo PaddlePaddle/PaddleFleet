@@ -283,7 +283,6 @@ def apply_rotary_pos_emb(
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
     fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
-
     Args:
         t (Tensor): Input tensor
         freqs (Tensor): Rotary positional embedding frequencies

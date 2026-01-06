@@ -722,16 +722,6 @@ class TransformerLayer(nn.Layer):
             packed_seq_params=packed_seq_params,
         )
 
-<<<<<<< HEAD
-=======
-        if self.recompute_input_layernorm:
-            # Discard the output of the input layernorm and register the recompute
-            # as a gradient hook of attention_output_with_bias[0]
-            self.input_layernorm_checkpoint.discard_output_and_register_recompute(
-                attention_output_with_bias[0]
-            )
-
->>>>>>> support mm_model
         with paddle.enable_grad():
             hidden_states = self.self_attn_bda(
                 self.training, self.config.bias_dropout_fusion
