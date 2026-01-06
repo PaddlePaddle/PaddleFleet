@@ -86,7 +86,6 @@ class MoELayer(nn.Layer):
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
-        self.moe_deep_gemm = config.moe_deep_gemm
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -117,6 +116,7 @@ class MoELayer(nn.Layer):
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
+        self.moe_deep_gemm = True
         if (
             not paddle.device.current_device_is_cpu
             and paddle.device.get_device_capability()[0] < 9
