@@ -15,6 +15,7 @@
 day=$(date +%d)
 
 if [[ "$day" == "10" || "$day" == "20" || "$day" == "30" ]]; then
+    uv cache clean paddlepaddle-gpu
     uv cache prune
     dir="/root/.cache/uv/builds-v0"
     if [ -d "$dir" ]; then
