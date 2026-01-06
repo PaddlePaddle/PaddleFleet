@@ -333,13 +333,6 @@ def manual_backward(f: Callable, is_first_fwd: bool, *args: list[Any]):
 def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
     ALIGNMENT = paddlefleet_deep_gemm.get_mk_alignment_for_contiguous_layout()
 
-    # Vectorized check for padding
-    if not any(size % ALIGNMENT != 0 for size in ks):
-        paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
-            a, b, d, ks, ks_tensor, c
-        )
-        return
-
     # Compute padded sizes using tensor ops
     padded_ks_tensor = ((ks_tensor + ALIGNMENT - 1) // ALIGNMENT) * ALIGNMENT
     padded_sizes_list = padded_ks_tensor.tolist()
@@ -351,9 +344,6 @@ def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
         """
         total_unpadded = ks_tensor.sum().item()
         total_padded = padded_ks_tensor.sum().item()
-
-        if total_unpadded == total_padded:
-            return tensor
 
         # 1. Compute start offsets for both source and destination
         # We use cumsum to find where each group begins
