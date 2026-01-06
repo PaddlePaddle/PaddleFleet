@@ -267,7 +267,6 @@ def get_gpt_mtp_layers_spec_for_backend(
     assert (
         isinstance(spec, list)
         and isinstance(spec[-1], LayerSpec)
-        and spec[-1].layer == TransformerLayer
     )
     transformer_layer_spec = spec[-1]
 
