@@ -14,11 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-try:
+from paddlefleet.ops import is_deep_gemm_or_deep_ep_available
+
+if is_deep_gemm_or_deep_ep_available():
     from paddlefleet.ops import deep_ep
 
     HAVE_DEEP_EP = True
-except ImportError:
+else:
+    deep_ep = None
     HAVE_DEEP_EP = False
 
 import paddle
