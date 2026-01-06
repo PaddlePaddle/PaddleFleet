@@ -317,6 +317,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -489,6 +490,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -559,7 +561,7 @@ jobs:
           fi
           '
 
-      - name: GLM4.5 sft+lora
+      - name: GLM4.5 sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -574,6 +576,30 @@ jobs:
           uv run coverage --version
           uv run coverage combine
           uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml
+          uv run coverage report -m
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+          fi
+          '
+
+      - name: GLM4.5 lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-lora
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-lora/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
+          glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-lora
+          source /workspace/PaddleFleet/.venv/bin/activate
+          uv run coverage --version
+          uv run coverage combine
+          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml
           uv run coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -716,6 +742,7 @@ jobs:
           cd /workspace/PaddleFleet
           cp /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml coverage-multi-pt.xml
           cp /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml coverage-multi-sft.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml coverage-multi-lora.xml
           cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
           cp /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml coverage-multi-grouped-gemm.xml
           cp /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml coverage-multi-dpo.xml
@@ -725,6 +752,7 @@ jobs:
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
           uv run ${push_file} coverage-multi-pt.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-sft.xml ${target_path_multi}
+          uv run ${push_file} coverage-multi-lora.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-grouped-gemm.xml ${target_path_multi}
           uv run ${push_file} coverage-multi-dpo.xml ${target_path_multi}
@@ -780,6 +808,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -917,6 +946,7 @@ jobs:
           single_coverage.xml:single-card/coverage.xml
           h20_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
           h20_multi_sft_coverage.xml:h20-multi/coverage-multi-sft.xml
+          h20_multi_lora_coverage.xml:h20-multi/coverage-multi-lora.xml
           h20_multi_dpo_coverage.xml:h20-multi/coverage-multi-dpo.xml
           h20_multi_fp8_coverage.xml:h20-multi/coverage-multi-fp8.xml
           h20_multi_grouped_gemm_coverage.xml:h20-multi/coverage-multi-grouped-gemm.xml
@@ -943,7 +973,7 @@ jobs:
           echo "================="
           python -m pip install diff-cover
           COVERAGE_EXIT_CODE=0
-          diff-cover multi_coverage.xml single_coverage.xml h20_multi_pt_coverage.xml h20_multi_sft_coverage.xml h20_multi_dpo_coverage.xml h20_multi_fp8_coverage.xml h20_multi_grouped_gemm_coverage.xml \
+          diff-cover multi_coverage.xml single_coverage.xml h20_multi_pt_coverage.xml h20_multi_sft_coverage.xml h20_multi_lora_coverage.xml h20_multi_dpo_coverage.xml h20_multi_fp8_coverage.xml h20_multi_grouped_gemm_coverage.xml \
           h20_single_coverage.xml h20_qwen_coverage.xml a100_pt_coverage.xml h20_qwen_multi_pt_coverage.xml h20_qwen_multi_sft_coverage.xml h20_qwen_multi_lora_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
 
@@ -957,6 +987,7 @@ jobs:
             "single_coverage.xml"
             "h20_multi_pt_coverage.xml"
             "h20_multi_sft_coverage.xml"
+            "h20_multi_lora_coverage.xml"
             "h20_multi_dpo_coverage.xml"
             "h20_multi_fp8_coverage.xml"
             "h20_multi_grouped_gemm_coverage.xml"
@@ -981,7 +1012,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_pt_coverage.xml,./h20_multi_sft_coverage.xml,./h20_qwen_multi_pt_coverage.xml,./h20_qwen_multi_sft_coverage.xml,./h20_qwen_multi_lora_coverage.xml,./h20_multi_fp8_coverage.xml,./h20_multi_grouped_gemm_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_pt_coverage.xml
+          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_pt_coverage.xml,./h20_multi_sft_coverage.xml,./h20_multi_lora_coverage.xml,./h20_multi_dpo_coverage.xml,./h20_qwen_multi_pt_coverage.xml,./h20_qwen_multi_sft_coverage.xml,./h20_qwen_multi_lora_coverage.xml,./h20_multi_fp8_coverage.xml,./h20_multi_grouped_gemm_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_pt_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
