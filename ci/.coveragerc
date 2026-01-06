@@ -4,3 +4,5 @@ source = paddlefleet
 concurrency = multiprocessing
 patch = subprocess
 parallel = True
+omit =
+    **/sonicmoe/**
