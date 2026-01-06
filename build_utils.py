@@ -74,7 +74,7 @@ class EcosystemLibrary:
         extra_env: dict[str, str] | None = None,
     ):
         self.name = name
-        self.source_dir = ROOT_DIR / source_rel_path  #
+        self.source_dir = ROOT_DIR / source_rel_path
         # Install into a subdirectory named after the library
         self.install_dir = THIRD_PARTY_INSTALL_TEMP / name
         self.artifacts = artifacts

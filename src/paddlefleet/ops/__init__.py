@@ -112,27 +112,32 @@ def _sonic_moe_requirement(
     return _build_notice(lib_module, reason, hint_for_error=hint)
 
 
+_DEEP_GEMM_AVAILABLE = False
+_DEEP_EP_AVAILABLE = False
+_SONIC_MOE_AVAILABLE = False
+
+if paddle.is_compiled_with_cuda():
+    if paddle.cuda.get_device_capability()[0] >= 9:
+        _DEEP_GEMM_AVAILABLE = True
+        _DEEP_EP_AVAILABLE = True
+    if (
+        sys.version_info >= (3, 12)
+        and paddle.cuda.get_device_capability()[0] == 9
+        and _cuda_version >= (12, 9)
+    ):
+        _SONIC_MOE_AVAILABLE = True
+
+
 def is_deep_gemm_available():
-    return (
-        paddle.is_compiled_with_cuda()
-        and paddle.cuda.get_device_capability()[0] >= 9
-    )
+    return _DEEP_GEMM_AVAILABLE
 
 
 def is_deep_ep_available():
-    return (
-        paddle.is_compiled_with_cuda()
-        and paddle.cuda.get_device_capability()[0] >= 9
-    )
+    return _DEEP_EP_AVAILABLE
 
 
 def is_sonic_moe_available():
-    return (
-        sys.version_info >= (3, 12)
-        and paddle.is_compiled_with_cuda()
-        and paddle.cuda.get_device_capability()[0] == 9
-        and _cuda_version >= (12, 9)
-    )
+    return _SONIC_MOE_AVAILABLE
 
 
 def _try_load_nvshmem(ops_dir: Path):
