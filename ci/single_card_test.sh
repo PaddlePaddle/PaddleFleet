@@ -50,9 +50,11 @@ for test_file in $(find $test_dir -type f -name "test_*.py"); do
     echo "Running single card test: $test_file"
     run_count=$((run_count + 1))
     if [[ "${WITH_COVERAGE:-OFF}" == "ON" ]];then
-        uv run -m coverage run -m pytest "$test_file"
+        # uv run -m coverage run -m pytest "$test_file"
+        coverage run -m pytest "$test_file"
     else
-        uv run pytest "$test_file"
+        # uv run pytest "$test_file"
+        pytest "$test_file"
     fi
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
