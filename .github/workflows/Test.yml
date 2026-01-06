@@ -84,7 +84,7 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
 
-      - name: Clone PaddleFleet
+      - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
@@ -98,10 +98,11 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           echo "Install uv"
-          pip install uv
-          echo "uv sync"
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          echo "uv build"
           git submodule update --init --recursive
-          uv sync --group ci -v > /dev/null
+          uv build --wheel
+          pip install dist/paddlefleet*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           '
 
       - name: Single card test
@@ -114,15 +115,14 @@ jobs:
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           export UV_HTTP_TIMEOUT=300
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
-          source .venv/bin/activate
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/single_card_test.sh
           single_card_exit_code=$?
           ls -a /paddle/coveragedata/
-          uv run coverage combine
-          uv run coverage report -m
-          uv run coverage xml -o /paddle/coveragedata/coverage.xml
+          coverage combine
+          coverage report -m
+          coverage xml -o /paddle/coveragedata/coverage.xml
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
             exit 1
@@ -145,14 +145,14 @@ jobs:
           push_file=$(realpath bos_tools.py)
           cp /paddle/coveragedata/coverage.xml coverage.xml
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/single-card"
-          uv run ${push_file} coverage.xml ${target_path}
+          python ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
   multi-card_test:
@@ -266,7 +266,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
 
@@ -434,6 +434,7 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
+          cd /workspace/PaddleFleet
           cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage-single.xml
           cp /workspace/PaddleFleet/coveragedata-qwen/coverage.xml coverage-qwen.xml
           target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
@@ -446,7 +447,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
   integration-test-H20-multi-card:
@@ -712,6 +713,7 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
+          cd /workspace/PaddleFleet
           cp /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml coverage-multi-pt.xml
           cp /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml coverage-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
@@ -735,7 +737,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
 
@@ -873,6 +875,7 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
+          cd /workspace/PaddleFleet
           cp /workspace/PaddleFleet/coveragedata-pt/coverage.xml coverage-a-pt.xml
           # cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-a-sft.xml
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
@@ -884,7 +887,7 @@ jobs:
         if: ${{ always() }}
         run: |
           set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'uv cache prune; bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
   coverage_check:
