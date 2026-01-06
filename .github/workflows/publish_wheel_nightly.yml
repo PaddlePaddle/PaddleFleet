@@ -90,7 +90,7 @@ jobs:
           export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
           source /root/proxy
           git submodule update --init --recursive
-          uv build
+          uv build --wheel
           '
 
       - name: Upload wheel (and update precision)
