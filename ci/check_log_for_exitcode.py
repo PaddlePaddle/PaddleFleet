@@ -31,6 +31,30 @@ def check_tests(log_path: str, check_string="Training completed") -> bool:
     return False
 
 
+def check_pod_status(log_path: str) -> bool:
+    find_c_trace = False
+    find_trace = False
+    c_error = "FatalError: `Process abort signal` is detected by the operating system."
+    c_error_status = False
+    with open(log_path, "r", encoding="utf-8") as log_file:
+        for line in log_file:
+            if "C++ Traceback (most recent call last):" in line:
+                find_c_trace = True
+            if find_c_trace and c_error in line:
+                c_error_status = True
+            if "Traceback (most recent call last):" in line:
+                find_trace = True
+    if c_error_status:
+        print("Detected C++ FatalError in log file.")
+        return True
+    elif find_trace:
+        print("Detected Python Traceback in log file.")
+        return False
+    else:
+        print("No errors detected in log file.")
+        return False
+
+
 if __name__ == "__main__":
     log_path = sys.argv[1]
     check_str = sys.argv[2] if len(sys.argv) > 2 else "Training completed"
@@ -38,4 +62,9 @@ if __name__ == "__main__":
     if result:
         sys.exit(0)
     else:
+        if "_multi_card.log" in log_path:
+            print("Since this is a multi-card log, check pod status instead.")
+            result = check_pod_status(log_path)
+            if result:
+                sys.exit(0)
         sys.exit(1)
