@@ -49,9 +49,9 @@ dependencies = [
     "colorlog>=6.10.1",
     "paddlepaddle-gpu>=3.3.0.dev",
     "triton",
-    "nvidia-nvshmem-cu12>=3.3.9,<3.5", # for socie_moe
-    "nvidia-cutlass-dsl==4.2.1",
-    "filelock",
+    "nvidia-nvshmem-cu12>=3.3.9,<3.5", # for deep_ep build
+    "nvidia-cutlass-dsl==4.2.1", # for sonic_moe
+    "filelock", # for sonic_moe
 ]
 
 [project.urls]
