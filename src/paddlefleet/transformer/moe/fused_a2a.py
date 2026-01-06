@@ -15,7 +15,7 @@
 # limitations under the License.
 
 try:
-    from paddle.distributed.communication import deep_ep
+    from paddlefleet.ops import deep_ep
 
     HAVE_DEEP_EP = True
 except ImportError:
