@@ -48,6 +48,20 @@ LIBRARIES: list[EcosystemLibrary] = [
         if (cuda_major == 12 and cuda_minor < 8)
         else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0"},
     ),
+    EcosystemLibrary(
+        name="sonic-moe",
+        source_rel_path="third_party/sonic-moe",
+        artifacts=[
+            Artifact("sonicmoe", "sonicmoe"),
+        ],
+    ),
+    EcosystemLibrary(
+        name="quack",
+        source_rel_path="third_party/quack",
+        artifacts=[
+            Artifact("quack", "quack"),
+        ],
+    ),
 ]
 
 

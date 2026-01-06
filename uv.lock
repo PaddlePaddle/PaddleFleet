@@ -367,10 +367,19 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 wheels = [
     { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/exceptiongroup/exceptiongroup-1.3.1-py3-none-any.whl" },
+]
+
+[[package]]
+name = "filelock"
+version = "3.20.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c1/e0/a75dbe4bca1e7d41307323dad5ea2efdd95408f74ab2de8bd7dba9b51a1a/filelock-3.20.2.tar.gz", hash = "sha256:a2241ff4ddde2a7cebddf78e39832509cb045d18ec1a09d7248d6bfc6bfbbe64", size = 19510, upload-time = "2026-01-02T15:33:32.582Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/30/ab407e2ec752aa541704ed8f93c11e2a5d92c168b8a755d818b74a3c5c2d/filelock-3.20.2-py3-none-any.whl", hash = "sha256:fbba7237d6ea277175a32c54bb71ef814a8546d8601269e1bfc388de333974e8", size = 16697, upload-time = "2026-01-02T15:33:31.133Z" },
 ]
 
 [[package]]
@@ -679,7 +688,6 @@ name = "networkx"
 version = "3.4.2"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
 resolution-markers = [
-    "python_full_version == '3.11.*'",
     "python_full_version < '3.11'",
 ]
 wheels = [
@@ -692,6 +700,7 @@ version = "3.6.1"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
 resolution-markers = [
     "python_full_version >= '3.12'",
+    "python_full_version == '3.11.*'",
 ]
 wheels = [
     { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/networkx/networkx-3.6.1-py3-none-any.whl" },
@@ -919,6 +928,28 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cutlass-dsl"
+version = "4.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuda-python" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.4.0", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }, marker = "python_full_version >= '3.12'" },
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/0f/1e96ce9fbe07e8c39484fae4d2cf36e328bdf434b311d88ccedccbfed7db/nvidia_cutlass_dsl-4.2.1-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:1628bacedde042c60c7ebb1aeccce5a82501197f5e5c4fbbf803712fa45fba59", size = 58540319, upload-time = "2025-09-23T14:38:00.634Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/e3/bc6071743d0ad43d837bf633139bfe1202260c28d893e30f247cf0aa8019/nvidia_cutlass_dsl-4.2.1-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:aec74b50f700a8ef455f15863de4cb5f1486f72b7bd4becea88624c58c555a13", size = 62233601, upload-time = "2025-09-23T14:39:50.44Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/2a/e65312728338e5bb00b592ce0be12b51e7594a3ef288cd8c99bc1c456968/nvidia_cutlass_dsl-4.2.1-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:04e605417773957405cad0ac6c2d46139a88aca07a783b4f66e1363f3a91a835", size = 58540069, upload-time = "2025-09-23T14:38:56.002Z" },
+    { url = "https://files.pythonhosted.org/packages/be/f3/20eacdf9876abd892668c191003edc5d7100e45fabfa027d9f3f99d21871/nvidia_cutlass_dsl-4.2.1-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:874aa3620b3d3dc6598af2226fa3b78f2e7998b8656929b492259e0c9f778786", size = 62233009, upload-time = "2025-09-23T14:39:23.308Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/1d/f168a3dbd8570e5dbbe0deca217d7b374c977b4a4970ebadf3b6d0f1174f/nvidia_cutlass_dsl-4.2.1-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:10ace6e2005cb0bc04d158c7660f8ec104ab29aeffb26f1ed3bb0b5a577ccc34", size = 58535504, upload-time = "2025-09-23T14:38:29.028Z" },
+    { url = "https://files.pythonhosted.org/packages/02/ab/5bcc0c8c620af5d4acbc71abce10e3eb3023e50342e6bc29b6461f72530e/nvidia_cutlass_dsl-4.2.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:d7ddc9c1f5bb803718d736c907fac857fc606f1fce630c0b1d741935a72723b9", size = 62230361, upload-time = "2025-09-23T14:40:18.156Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/d5/9b79faaec3fa12c52b7de1e727af94c54184b00f280c79b667ab045550db/nvidia_cutlass_dsl-4.2.1-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:c0985124a74ba435e1f756aa78e89f64c6d01e4f54de1d5a5d218ebbc1c92eff", size = 58535424, upload-time = "2025-09-23T14:37:33.064Z" },
+    { url = "https://files.pythonhosted.org/packages/43/86/78c8cd3fa1a684f3976535d7ac69e54f4ede165b5abca7979fd0820f74f2/nvidia_cutlass_dsl-4.2.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:9356604afc8f62aac46634b3a12baf8cb3f3a6f2e44e398dcfe6ec98ff1a8d1b", size = 62230122, upload-time = "2025-09-23T14:40:46.621Z" },
+]
+
+[[package]]
 name = "nvidia-nccl-cu12"
 version = "2.27.3"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
@@ -978,6 +1009,8 @@ name = "paddlefleet"
 source = { editable = "." }
 dependencies = [
     { name = "colorlog" },
+    { name = "filelock" },
+    { name = "nvidia-cutlass-dsl" },
     { name = "nvidia-nvshmem-cu12" },
     { name = "paddlepaddle-gpu" },
     { name = "triton" },
@@ -998,6 +1031,7 @@ linting = [
 ]
 test = [
     { name = "matplotlib" },
+    { name = "parameterized" },
     { name = "pytest" },
     { name = "pyyaml" },
     { name = "wrapt" },
@@ -1006,6 +1040,8 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "colorlog", specifier = ">=6.10.1" },
+    { name = "filelock" },
+    { name = "nvidia-cutlass-dsl", specifier = "==4.2.1" },
     { name = "nvidia-nvshmem-cu12", specifier = ">=3.3.9,<3.5" },
     { name = "paddlepaddle-gpu", specifier = ">=3.3.0.dev0" },
     { name = "triton" },
@@ -1024,6 +1060,7 @@ ci = [
 linting = [{ name = "ruff", specifier = "~=0.14.0" }]
 test = [
     { name = "matplotlib" },
+    { name = "parameterized" },
     { name = "pytest" },
     { name = "pyyaml" },
     { name = "wrapt" },
@@ -1036,8 +1073,8 @@ source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" 
 dependencies = [
     { name = "cuda-python", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "httpx" },
-    { name = "networkx", version = "3.4.2", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }, marker = "python_full_version < '3.12'" },
-    { name = "networkx", version = "3.6.1", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }, marker = "python_full_version >= '3.12'" },
+    { name = "networkx", version = "3.4.2", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }, marker = "python_full_version < '3.11'" },
+    { name = "networkx", version = "3.6.1", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }, marker = "python_full_version >= '3.11'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.4.0", source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }, marker = "python_full_version >= '3.12'" },
@@ -1072,6 +1109,15 @@ wheels = [
     { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp312-cp312-win_amd64.whl" },
     { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp313-cp313-linux_x86_64.whl" },
     { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp313-cp313-win_amd64.whl" },
+]
+
+[[package]]
+name = "parameterized"
+version = "0.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/49/00c0c0cc24ff4266025a53e41336b79adaa5a4ebfad214f433d623f9865e/parameterized-0.9.0.tar.gz", hash = "sha256:7fc905272cefa4f364c1a3429cbbe9c0f98b793988efb5bf90aac80f08db09b1", size = 24351, upload-time = "2023-03-27T02:01:11.592Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/00/2f/804f58f0b856ab3bf21617cccf5b39206e6c4c94c2cd227bde125ea6105f/parameterized-0.9.0-py2.py3-none-any.whl", hash = "sha256:4e0758e3d41bea3bbd05ec14fc2c24736723f243b28d702081aef438c9372b1b", size = 20475, upload-time = "2023-03-27T02:01:09.31Z" },
 ]
 
 [[package]]

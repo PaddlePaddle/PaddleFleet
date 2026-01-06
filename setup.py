@@ -56,6 +56,8 @@ def get_cuda_special_dependencies(cuda_major, cuda_minor):
     deps = [
         "paddlepaddle-gpu>=3.3.0.dev",
         "triton",  # for deep_gemm, flashmask
+        "nvidia-cutlass-dsl==4.2.1", # for sonic_moe
+        "filelock", # for sonic_moe
     ]
     if cuda_major == 12:
         deps.append("nvidia-nvshmem-cu12>=3.3.9,<3.5")  # for deep_ep build

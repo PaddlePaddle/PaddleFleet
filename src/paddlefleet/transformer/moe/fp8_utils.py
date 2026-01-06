@@ -1335,7 +1335,9 @@ class ExpertsGroupGemmContiguousNode:
                         b=dy,
                         d=weights.main_grad,
                         ks=self.tokens_per_expert,
-                        ks_tensor=paddle.to_tensor(self.tokens_per_expert),
+                        ks_tensor=paddle.to_tensor(
+                            self.tokens_per_expert, dtype="int32"
+                        ),
                         c=weights.main_grad,
                     )
                 else:
@@ -1359,7 +1361,9 @@ class ExpertsGroupGemmContiguousNode:
                         b=dy,
                         d=weights.grad,
                         ks=self.tokens_per_expert,
-                        ks_tensor=paddle.to_tensor(self.tokens_per_expert),
+                        ks_tensor=paddle.to_tensor(
+                            self.tokens_per_expert, dtype="int32"
+                        ),
                         c=weights.grad,
                     )
                 else:
