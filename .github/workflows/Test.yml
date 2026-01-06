@@ -438,6 +438,7 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-qwen/coverage.xml coverage-qwen.xml
           target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
           target_path_qwen="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-qwen"
+          sleep 2h
           uv run ${push_file} coverage-single.xml ${target_path_single}
           uv run ${push_file} coverage-qwen.xml ${target_path_qwen}
           '
