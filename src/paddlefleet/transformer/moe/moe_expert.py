@@ -105,7 +105,7 @@ class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
             b=grad,
             d=dy,
             ks=paddle.tolist(batch_sizes),
-            ks_tensor=batch_sizes,
+            ks_tensor=batch_sizes.cast("int32"),
             c=paddle.zeros_like(y, dtype=paddle.float),
         )
 
