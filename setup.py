@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
-
 import os
+import shutil
 import subprocess
 
 
@@ -49,6 +49,7 @@ def change_pwd():
 
 def setup_ops_extension():
     from paddle.utils.cpp_extension import CUDAExtension, setup
+    from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
     from build_utils import get_cuda_version
 
@@ -107,6 +108,17 @@ def setup_ops_extension():
         },
     )
 
+    class CustomBdistWheel(_bdist_wheel):
+        def run(self):
+            super().run()
+            print(f"--- Cleaning up unwanted files in: {self.bdist_dir} ---")
+            path_to_remove = os.path.join(self.bdist_dir, "build")
+            if os.path.exists(path_to_remove):
+                print(f"Removing unwanted directory: {path_to_remove}")
+                shutil.rmtree(path_to_remove)
+            else:
+                print(f"No unwanted directory found at: {path_to_remove}")
+
     change_pwd()
     setup(
         name="paddlefleet._extensions.ops",
@@ -115,6 +127,7 @@ def setup_ops_extension():
             "version_scheme": custom_version_scheme,
             "local_scheme": no_local_scheme,
         },
+        cmdclass={"bdist_wheel": CustomBdistWheel},
     )
 
 
