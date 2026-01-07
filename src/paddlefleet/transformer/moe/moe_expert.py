@@ -264,6 +264,8 @@ class GroupedMLPExpert(FleetLayer):
         state_dict = self.state_dict(structured_name_prefix="")
         w1 = state_dict["weight1"].reshape(-1, self.weight1.shape[-1])
         w2 = state_dict["weight2"].reshape(-1, self.weight2.shape[-1])
+        w1.name = self.weight1.name
+        w2.name = self.weight2.name
         state_dict["weight1"] = w1
         state_dict["weight2"] = w2
         sharded_dict = {}
