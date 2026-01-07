@@ -574,11 +574,11 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
+          cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          cd PaddleFleet
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
@@ -890,11 +890,11 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
+          cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          cd /workspace/PaddleFleet
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
