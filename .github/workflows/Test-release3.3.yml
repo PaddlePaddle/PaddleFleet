@@ -86,7 +86,6 @@ jobs:
           git submodule update --init --recursive
           export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
           uv build --wheel
-          uv pip install --system dist/paddlefleet*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           '
 
       - name: upload whl to BOS
