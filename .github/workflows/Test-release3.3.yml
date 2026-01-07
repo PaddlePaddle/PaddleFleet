@@ -173,7 +173,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
-          pip install  uv
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
@@ -260,7 +260,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
-          pip install  uv
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
@@ -495,7 +495,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
-          pip install  uv
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
@@ -699,7 +699,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
-          pip install  uv
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
