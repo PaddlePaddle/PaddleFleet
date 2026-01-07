@@ -9,30 +9,63 @@ jobs:
   build-whl:
     runs-on: ubuntu-latest
 
-    container:
-      image: nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
-      options: --shm-size 7g
-      env:
-        LD_LIBRARY_PATH: /usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
+    # ❌ 移除 jobs.container，改用手动模式以获得磁盘控制权
+    # container: ...
 
     steps:
-      - name: Install System Dependencies
-        run: |
-          apt-get update
-          apt-get install -y git
+      # 【第一步】暴力清理磁盘（关键！）
+      # 这能在 Docker 启动前腾出约 15GB+ 空间
+      - name: Free Disk Space (Ubuntu)
+        uses: BRAINSia/free-disk-space@f9f59b0ef974ff4b873aa243ce5278ab644eedc6
+        with:
+          # this might remove tools that are actually needed,
+          # if set to "true" but frees about 6 GB
+          tool-cache: false
+
+          # all of these default to true, but feel free to set to
+          # "false" if necessary for your workflow
+          mandb: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
 
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      # 【第二步】手动拉取并运行 Docker
+      # 此时磁盘空间非常充足
+      - name: Build in Docker
+        uses: addnab/docker-run-action@v3
         with:
-          version: "latest"
-          enable-cache: true
+          image: nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
+          # 挂载当前工作目录
+          options: |
+            --network host
+            --shm-size 7g
+            -v ${{ github.workspace }}:/work
+            -e LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:/usr/local/cuda/lib64
+            -e UV_HTTP_TIMEOUT=600
+          run: |
+            cd /work
 
-      - name: Build Wheel
-        run: |
-          export UV_HTTP_TIMEOUT=300
-          uv sync
+            # 1. 镜像内可能没有 git，先安装 (checkout 是在外面做的，这里主要是 uv 可能需要)
+            apt-get update && apt-get install -y git curl build-essential
+
+            # 2. 解决 git 目录归属权报错
+            git config --global --add safe.directory /work
+
+            # 3. 安装 uv
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            source $HOME/.cargo/env
+            alias uv=/root/.local/bin/uv
+
+            # 4. 执行构建
+            # --no-cache: 禁用 uv 缓存以节省空间（防止下载缓存一份，安装一份，双倍占用）
+            echo "Starting sync..."
+            uv sync --no-cache --link-mode hardlink --no-cache -v
