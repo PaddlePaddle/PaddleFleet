@@ -937,7 +937,7 @@ jobs:
       - name: Fetch base branch
         run: |
           echo "Fetching base branch: ${{ github.event.pull_request.base.ref }}"
-          git fetch origin ${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }}
+          git fetch origin origin/${{ github.event.pull_request.base.ref }}...HEAD 
       - name: coverage file download
         shell: bash
         run: |
@@ -967,7 +967,7 @@ jobs:
                 sed -i "s|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|" "$filename"
             fi
           done
-          git diff ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} --unified=0 > diff.txt
+          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD  --unified=0 > diff.txt
           echo "=== DIFF FILE ==="
           cat diff.txt
           echo "================="
