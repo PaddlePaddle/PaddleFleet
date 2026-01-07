@@ -2,3 +2,5 @@ test_utilities.py
 test_multi_token_prediction.py
 test_llava_model.py
 test_clip_vit_model.py
+test_moe.py
+test_count_cumsum.py

@@ -101,14 +101,17 @@ class EcosystemLibrary:
             for src, dst in links.items():
                 create_symlink(src, dst)
 
-        # Default build command: python setup.py install --install-lib <install_dir>
+        # pip install . --target  <install_dir> --no-deps --no-build-isolation
         cmd = [
             sys.executable,
-            "setup.py",
+            "-m",
+            "pip",
             "install",
-            "--install-lib",
+            ".",
+            "--target",
             str(self.install_dir),
-            "--no-compile",
+            "--no-deps",
+            "--no-build-isolation",
         ]
 
         try:
