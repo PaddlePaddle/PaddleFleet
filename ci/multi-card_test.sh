@@ -90,7 +90,7 @@ for test_file in $(find $test_dir -type f -name "test_*.py"); do
     run_count=$((run_count + 1))
     uv run -m paddle.distributed.launch --gpus "$gpus_arg" "$test_file" | tee "./$(basename ${test_file%.*})_multi_card.log"
     check_exit_code=${PIPESTATUS[0]}
-    if [ $exit_code -ne 0 ]; then
+    if [ $check_exit_code -ne 0 ]; then
         echo "Test FAILED: $test_file, see log for details..."
         python $work_dir/ci/check_log_for_exitcode.py "./$(basename ${test_file%.*})_multi_card.log" "OK"
         exit_code=$?

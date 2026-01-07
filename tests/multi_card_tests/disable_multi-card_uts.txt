@@ -1,2 +1,4 @@
 test_mappings.py
 test_layers.py
+test_gpt_model_dense_cp.py
+test_tensor_parallel_utils.py
