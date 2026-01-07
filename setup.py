@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+
+import logging
 import os
 import shutil
 import subprocess
+
+from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 def get_version_from_txt():
@@ -47,9 +51,31 @@ def change_pwd():
         os.chdir(path)
 
 
+class CustomBdistWheel(_bdist_wheel):
+    # check whether the dir is all .o file with recursion
+    def is_all_o_files_with_subdirs(self, dir_path):
+        for root, dirs, files in os.walk(dir_path):
+            for file in files:
+                logging.info(f"Checking file: {os.path.join(root, file)}")
+                if not file.endswith(".o"):
+                    return False
+        return True
+
+    def run(self):
+        super().run()
+        logging.info(f"Cleaning up unwanted files in: {self.bdist_dir}")
+        path_to_remove = os.path.join(self.bdist_dir, "build")
+        if os.path.exists(path_to_remove) and self.is_all_o_files_with_subdirs(
+            path_to_remove
+        ):
+            logging.info(f"Removing unwanted directory: {path_to_remove}")
+            shutil.rmtree(path_to_remove)
+        else:
+            logging.info(f"No unwanted directory found at: {path_to_remove}")
+
+
 def setup_ops_extension():
     from paddle.utils.cpp_extension import CUDAExtension, setup
-    from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
     from build_utils import get_cuda_version
 
@@ -107,17 +133,6 @@ def setup_ops_extension():
             "nvcc": nvcc_args,
         },
     )
-
-    class CustomBdistWheel(_bdist_wheel):
-        def run(self):
-            super().run()
-            print(f"--- Cleaning up unwanted files in: {self.bdist_dir} ---")
-            path_to_remove = os.path.join(self.bdist_dir, "build")
-            if os.path.exists(path_to_remove):
-                print(f"Removing unwanted directory: {path_to_remove}")
-                shutil.rmtree(path_to_remove)
-            else:
-                print(f"No unwanted directory found at: {path_to_remove}")
 
     change_pwd()
     setup(
