@@ -54,7 +54,6 @@ jobs:
           docker run -d -t --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-            -v ${{ github.workspace }}/../../..:/root \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
@@ -69,7 +68,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
-          source /root/proxy
+          source ${{ github.workspace }}/../../../proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
