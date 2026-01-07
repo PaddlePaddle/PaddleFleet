@@ -1,4 +1,4 @@
-# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,18 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-day=$(date +%d)
-
-if [[ "$day" == "10" || "$day" == "20" || "$day" == "30" ]]; then
-    uv cache clean paddlepaddle-gpu
-    uv cache prune
-    dir="/root/.cache/uv/builds-v0"
-    if [ -d "$dir" ]; then
-        size=$(du -sBG "$dir" | awk '{print $1}' | sed 's/G//')
-        if [ "$size" -gt 30 ]; then
-            rm -rf "$dir"
-            echo "$dir has been deleted because its size was ${size}G."
-        fi
-    fi
-fi

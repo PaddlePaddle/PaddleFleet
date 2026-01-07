@@ -115,7 +115,6 @@ def setup_ops_extension():
             "version_scheme": custom_version_scheme,
             "local_scheme": no_local_scheme,
         },
-        setup_requires=["setuptools_scm"],
     )
 
 

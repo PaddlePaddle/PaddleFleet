@@ -50,6 +50,8 @@ dependencies = [
     "paddlepaddle-gpu>=3.3.0.dev",
     "triton",
     "nvidia-nvshmem-cu12>=3.3.9,<3.5", # for deep_ep build
+    "nvidia-cutlass-dsl==4.2.1", # for sonic_moe
+    "filelock", # for sonic_moe
 ]
 
 [project.urls]
@@ -58,9 +60,8 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 [project.optional-dependencies]
 
-
 [build-system]
-requires = ["setuptools>=61.0.0", "paddlepaddle-gpu>=3.3.0.dev", "setuptools-scm>=8", "nvidia-nvshmem-cu12>=3.3.9,<3.5"] # nvshmem max version is limited to avoid multiple definitions
+requires = ["setuptools>=61.0.0", "paddlepaddle-gpu>=3.3.0.dev", "pip", "setuptools-scm>=8", "nvidia-nvshmem-cu12>=3.3.9,<3.5"] # nvshmem max version is limited to avoid multiple definitions
 build-backend = "build_backend"
 backend-path = ["."]
 
@@ -84,6 +85,7 @@ test = [
     "matplotlib",
     "pytest",
     "pyyaml",
+    "parameterized",
 ]
 build = [
     "pip",
