@@ -69,8 +69,9 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source ${{ github.workspace }}/../../../proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git
-          git config --global --add safe.directory 
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
+          set -x
+          git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
@@ -80,6 +81,7 @@ jobs:
           echo "Install uv"
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           echo "uv build"
+          export UV_HTTP_TIMEOUT=300
           git submodule update --init --recursive
           uv build --wheel
           uv pip install --system dist/paddlefleet*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
