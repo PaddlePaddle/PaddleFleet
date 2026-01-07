@@ -158,9 +158,11 @@ class TestTokensUnzipGatherUE8M0Scale(unittest.TestCase):
                         )
                     )
                     # Verify the result of scale is the same
-                    np.allclose(
-                        x_scale_unzipped_np,
-                        x_scale_fp32_unzipped.astype("int32").numpy(),
+                    self.assertTrue(
+                        np.allclose(
+                            x_scale_unzipped_np,
+                            x_scale_fp32_unzipped.astype("int32").numpy(),
+                        )
                     )
 
 
