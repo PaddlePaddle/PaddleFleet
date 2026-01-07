@@ -52,6 +52,7 @@ jobs:
           docker pull $docker_image
           docker run -d -t --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
+            -v "/home/data/cfs:/home/data/cfs" \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
@@ -68,8 +69,8 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source ${{ github.workspace }}/../../../proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
-          git config --global --add safe.directory /paddle
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git
+          git config --global --add safe.directory 
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
