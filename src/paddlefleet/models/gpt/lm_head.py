@@ -83,7 +83,9 @@ class GPTLMHead(ColumnParallelLinear):
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
-        logits, _ = super().forward(hidden_states.to(dtype="float32"), self.weight.T.to(dtype="float32"))
+        logits, _ = super().forward(
+            hidden_states.to(dtype="float32"), self.weight.T.to(dtype="float32")
+        )
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
         return logits

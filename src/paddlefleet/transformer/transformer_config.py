@@ -460,7 +460,7 @@ class TransformerConfig(ModelParallelConfig):
 
     @classmethod
     def from_config(cls, config_dict):
-        #note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
+        # note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
         instance = object.__new__(cls)
         print("start register_attributes")
         instance.register_attributes(config_dict)
@@ -615,4 +615,6 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
-        print(f"Config init_method {self.init_method} embedding_init_method {self.embedding_init_method}")
+        print(
+            f"Config init_method {self.init_method} embedding_init_method {self.embedding_init_method}"
+        )

@@ -100,7 +100,7 @@ def get_gpt_layer_local_spec(
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
     )
-    
+
     transformer_layer = getattr(config, "specific_layer", TransformerLayer)
 
     return LayerSpec(
@@ -264,10 +264,7 @@ def get_gpt_mtp_layers_spec_for_backend(
     spec: list[LayerSpec],
     backend: BackendSpecProvider,
 ) -> list[LayerSpec]:
-    assert (
-        isinstance(spec, list)
-        and isinstance(spec[-1], LayerSpec)
-    )
+    assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
     transformer_layer_spec = spec[-1]
 
     mtp_layer_spec_func = partial(
