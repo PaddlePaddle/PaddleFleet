@@ -38,8 +38,6 @@ def fabricate_dispatch_result(
     if data_type == "float8_e4m3fn":
         if using_ue8m0_scale:
             scale_cols = (token_length + 127) // 128
-            # if using_ue8m0_scale, four ue8m0 scales will be packed into one int32
-            scale_cols = (scale_cols + 3) // 4
             scale = paddle.randn([seqlen, scale_cols], dtype="float32").astype(
                 paddle.int32
             )
