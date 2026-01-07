@@ -353,7 +353,7 @@ jobs:
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (H20, single card)
     runs-on:
-      group: Fleet-H-single-card
+      group: fleet-single-test
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -532,7 +532,7 @@ jobs:
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (H20, multi-card)
     runs-on:
-      group: Fleet-H-multi-card
+      group: fleet-multi-test
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
