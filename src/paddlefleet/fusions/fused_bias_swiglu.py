@@ -19,7 +19,6 @@ import paddle
 import paddle.nn.functional as F
 
 from paddlefleet.jit import jit_fuser
-from paddlefleet.ops import fused_swiglu_bwd
 from paddlefleet.utils import nvtx_decorator
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
@@ -76,7 +75,17 @@ def swiglu_back(g, y):
         paddle.Tensor: Gradient with respect to the input tensor, computed using the
             chain rule and the derivative of the SiLU activation function.
     """
-    return fused_swiglu_bwd(g, y)
+    y_1, y_2 = paddle.chunk(y, 2, -1)
+    return paddle.concat(
+        (
+            g
+            * paddle.sigmoid(y_1)
+            * (1 + y_1 * (1 - paddle.sigmoid(y_1)))
+            * y_2,
+            g * F.silu(y_1),
+        ),
+        -1,
+    )
 
 
 @jit_fuser
