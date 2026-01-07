@@ -14,9 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from paddlefleet.ops import is_deep_gemm_or_deep_ep_available
+import hashlib
+import logging
 
-if is_deep_gemm_or_deep_ep_available():
+from paddlefleet.ops import is_deep_ep_available
+
+if is_deep_ep_available():
     from paddlefleet.ops import deep_ep
 
     HAVE_DEEP_EP = True
@@ -105,6 +108,31 @@ def fused_dispatch_forward_func(
     async_finish=False,
     allocate_on_comm_stream=False,
 ):
+    logging.info(
+        f"input fused_dispatch_forward_func x: {hashlib.md5(x.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_dispatch_forward_func token_indices: {hashlib.md5(token_indices.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_dispatch_forward_func token_probs: {hashlib.md5(token_probs.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_dispatch_forward_func num_experts: {hashlib.md5(num_experts.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_dispatch_forward_func group: {hashlib.md5(group.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_dispatch_forward_func previous_event: {previous_event}"
+    )
+    logging.info(
+        f"input fused_dispatch_forward_func async_finish: {async_finish}"
+    )
+    logging.info(
+        f"input fused_dispatch_forward_func allocate_on_comm_stream: {allocate_on_comm_stream}"
+    )
+
     """Forward pass of fused dispatch."""
     barrier_ep(group)
     # Calculate layout before actual dispatch
@@ -154,7 +182,18 @@ def fused_dispatch_forward_func(
     states["dispatched_indices"] = recv_token_indices
     states["tokens_per_expert"] = num_recv_tokens_per_expert_list
     states["handle"] = handle
-
+    logging.info(
+        f"output fused_dispatch_forward_func recv_x: {hashlib.md5(recv_x.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"output fused_dispatch_forward_func recv_token_probs: {hashlib.md5(recv_token_probs.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"output fused_dispatch_forward_func states: {hashlib.md5(states.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"output fused_dispatch_forward_func event: {hashlib.md5(event.cpu().numpy().tobytes()).hexdigest()}"
+    )
     return recv_x, recv_token_probs, states, event
 
 
@@ -167,6 +206,27 @@ def fused_dispatch_backward_func(
     async_finish=False,
     allocate_on_comm_stream=False,
 ):
+    logging.info(
+        f"input fused_dispatch_backward_func grad_output: {hashlib.md5(grad_output.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_dispatch_backward_func grad_token_probs: {hashlib.md5(grad_token_probs.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_dispatch_backward_func group: {hashlib.md5(group.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_dispatch_backward_func handle: {hashlib.md5(handle.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_dispatch_backward_func previous_event: {previous_event}"
+    )
+    logging.info(
+        f"input fused_dispatch_backward_func async_finish: {async_finish}"
+    )
+    logging.info(
+        f"input fused_dispatch_backward_func allocate_on_comm_stream: {allocate_on_comm_stream}"
+    )
     """Backward pass of fused dispatch."""
     barrier_ep(group)
 
@@ -180,6 +240,12 @@ def fused_dispatch_backward_func(
         async_finish=async_finish,
         allocate_on_comm_stream=allocate_on_comm_stream,
     )
+    logging.info(
+        f"output fused_dispatch_backward_func grad_x: {hashlib.md5(grad_x.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"output fused_dispatch_backward_func grad_token_probs: {hashlib.md5(grad_token_probs.cpu().numpy().tobytes()).hexdigest()}"
+    )
     return grad_x, None, grad_token_probs
 
 
@@ -191,6 +257,24 @@ def fused_combine_forward_func(
     async_finish=False,
     allocate_on_comm_stream=False,
 ):
+    logging.info(
+        f"input fused_combine_forward_func x: {hashlib.md5(x.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_combine_forward_func states: {hashlib.md5(states.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_combine_forward_func group: {hashlib.md5(group.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_combine_forward_func previous_event: {previous_event}"
+    )
+    logging.info(
+        f"input fused_combine_forward_func async_finish: {async_finish}"
+    )
+    logging.info(
+        f"input fused_combine_forward_func allocate_on_comm_stream: {allocate_on_comm_stream}"
+    )
     """Forward pass of fused combine."""
     barrier_ep(group)
 
@@ -203,6 +287,9 @@ def fused_combine_forward_func(
         previous_event=previous_event,
         allocate_on_comm_stream=allocate_on_comm_stream,
     )
+    logging.info(
+        f"output fused_combine_forward_func combined_x: {hashlib.md5(combined_x.cpu().numpy().tobytes()).hexdigest()}"
+    )
     return combined_x
 
 
@@ -214,6 +301,24 @@ def fused_combine_backward_func(
     async_finish=False,
     allocate_on_comm_stream=False,
 ):
+    logging.info(
+        f"input fused_combine_backward_func grad_output: {hashlib.md5(grad_output.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_combine_backward_func group: {hashlib.md5(group.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_combine_backward_func handle: {hashlib.md5(handle.cpu().numpy().tobytes()).hexdigest()}"
+    )
+    logging.info(
+        f"input fused_combine_backward_func previous_event: {previous_event}"
+    )
+    logging.info(
+        f"input fused_combine_backward_func async_finish: {async_finish}"
+    )
+    logging.info(
+        f"input fused_combine_backward_func allocate_on_comm_stream: {allocate_on_comm_stream}"
+    )
     """Backward pass of fused combine."""
     barrier_ep(group)
 
@@ -235,6 +340,9 @@ def fused_combine_backward_func(
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
         )
+    logging.info(
+        f"output fused_combine_backward_func grad_x: {hashlib.md5(grad_x.cpu().numpy().tobytes()).hexdigest()}"
+    )
     return grad_x
 
 
