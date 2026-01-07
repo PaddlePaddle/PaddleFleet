@@ -73,36 +73,24 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
 
-      - name: Clone PaddleFleet
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          rm -rf * .[^.]*
-          source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
-          git config --global --add safe.directory /paddle
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          echo "Install uv"
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          echo "uv build"
-          git submodule update --init --recursive
-          uv build --wheel
-          pip install dist/paddlefleet*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
-          '
 
       - name: Single card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
+          rm -rf * .[^.]*
+          source /root/proxy
+          mkdir -p /home/.cache/pip
+          pip cache dir
+          echo "Install uv"
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          echo "uv build"
           export WITH_COVERAGE=ON
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           export UV_HTTP_TIMEOUT=300
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/single_card_test.sh
           single_card_exit_code=$?
@@ -158,24 +146,16 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
 
-      - name: Clone PaddleFleet
+      - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
-          git config --global --add safe.directory /paddle
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          echo "Install uv"
-          pip install uv
-          echo "uv sync"
-          git submodule update --init --recursive
-          uv sync --group ci -v > /dev/null
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
+          export UV_HTTP_TIMEOUT=300
+          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -183,11 +163,6 @@ jobs:
       - name: Multi-card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          export WITH_COVERAGE=ON
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
-          export UV_HTTP_TIMEOUT=300
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/multi-card_test.sh
@@ -259,13 +234,6 @@ jobs:
           nvidia-smi
           rm -rf * .[^.]*
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git
-          cd PaddleFleet
-          git config --global --add safe.directory /workspace/PaddleFleet
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
@@ -276,7 +244,8 @@ jobs:
           export UV_LOCK_TIMEOUT=300
           uv sync --group ci -v > /dev/null
           export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -394,23 +363,15 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git
-          cd PaddleFleet
-          git config --global --add safe.directory /workspace/PaddleFleet
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
           echo "Install uv"
           pip install uv
           echo "uv sync"
-          git submodule update --init --recursive
-          uv sync --group ci -v > /dev/null
           export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -597,23 +558,15 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git
-          cd PaddleFleet
-          git config --global --add safe.directory /workspace/PaddleFleet
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
           echo "Install uv"
           pip install uv
           echo "uv sync"
-          git submodule update --init --recursive
-          uv sync --group ci > /dev/null
           export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -648,27 +601,6 @@ jobs:
           fi
           '
 
-      # - name: GLM4.5 sft+lora
-      #   run: |
-      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
-      #     source /root/proxy
-      #     source /root/proxy
-      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-sft/.coverage
-      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-      #     bash -x PaddleFleet/ci/integration_test/glm45_sft_a100.sh
-      #     glm45_exit_code=$?
-      #     ls -a /workspace/PaddleFleet/coveragedata-sft
-      #     source /workspace/PaddleFleet/.venv/bin/activate
-      #     uv run coverage combine
-      #     uv run coverage xml -o /workspace/PaddleFleet/coveragedata-sft/coverage.xml
-      #     uv run coverage report -m
-      #     if [[ "$glm45_exit_code" != "0" ]]; then
-      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-      #       exit 1
-      #     else
-      #       echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-      #     fi
-      #     '
 
       - name: Terminate and delete the container
         if: ${{ always() }}
