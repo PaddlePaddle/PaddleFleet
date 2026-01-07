@@ -174,14 +174,11 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          pip install uv
-          uv venv
-          source .venv/bin/activate
-          pip install coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           '
 
       - name: Single card test
@@ -191,10 +188,7 @@ jobs:
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
-          export UV_HTTP_TIMEOUT=300
-          uv pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/single_card_test.sh
           single_card_exit_code=$?
@@ -216,8 +210,6 @@ jobs:
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
@@ -286,12 +278,10 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          uv venv
-          source .venv/bin/activate
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -302,18 +292,15 @@ jobs:
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
-          export UV_HTTP_TIMEOUT=300
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
           ls -a /paddle/coveragedata/
-          uv run coverage combine
-          uv run coverage xml -o /paddle/coveragedata/coverage.xml
-          uv run coverage report -m
+          coverage combine
+          coverage xml -o /paddle/coveragedata/coverage.xml
+          coverage report -m
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed.\033[0m"
             exit 1
@@ -328,16 +315,13 @@ jobs:
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /paddle/coveragedata/coverage.xml coverage.xml
-
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/multi-card"
-          uv run ${push_file} coverage.xml ${target_path}
+          python ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
@@ -412,15 +396,11 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          uv venv
           source .venv/bin/activate
-          export UV_LOCK_TIMEOUT=300
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl        
-          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          uv pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -470,9 +450,9 @@ jobs:
           glm45_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-single
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
-          uv run coverage report -m
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
+          coverage report -m
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
             exit 1
@@ -492,10 +472,7 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-qwen
-          source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen/coverage.xml
-          uv run coverage report -m
+
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
             exit 1
@@ -516,8 +493,8 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-qwen/coverage.xml coverage-qwen.xml
           target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
           target_path_qwen="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-qwen"
-          uv run ${push_file} coverage-single.xml ${target_path_single}
-          uv run ${push_file} coverage-qwen.xml ${target_path_qwen}
+          python ${push_file} coverage-single.xml ${target_path_single}
+          python ${push_file} coverage-qwen.xml ${target_path_qwen}
           '
 
       - name: Terminate and delete the container
@@ -581,15 +558,10 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          uv venv
-          source .venv/bin/activate
-          export UV_LOCK_TIMEOUT=300
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl        
-          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          uv pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -622,11 +594,10 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-pt
-          source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml
-          uv run coverage report -m
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -647,10 +618,9 @@ jobs:
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-sft
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml
-          uv run coverage report -m
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -671,10 +641,10 @@ jobs:
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-lora
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml
-          uv run coverage report -m
+          coverage --version
+          overage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -695,10 +665,10 @@ jobs:
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-dpo
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml
-          uv run coverage report -m
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
             exit 1
@@ -719,10 +689,10 @@ jobs:
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-fp8
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml
-          uv run coverage report -m
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -743,10 +713,10 @@ jobs:
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml
-          uv run coverage report -m
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
             exit 1
@@ -766,10 +736,10 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/qwen.sh pt
           ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-pt
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml
-          uv run coverage report -m
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml
+          coverage report -m
           '
 
       - name: Qwen sft
@@ -783,10 +753,10 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/qwen.sh sft
           ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-sft
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml
-          uv run coverage report -m
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml
+          coverage report -m
           '
 
       - name: Qwen lora
@@ -800,10 +770,10 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/qwen.sh lora
           ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-lora
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage --version
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml
-          uv run coverage report -m
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml
+          coverage report -m
           '
 
       - name: H20 Coverage Upload to BOS
@@ -824,15 +794,15 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
-          uv run ${push_file} coverage-multi-pt.xml ${target_path_multi}
-          uv run ${push_file} coverage-multi-sft.xml ${target_path_multi}
-          uv run ${push_file} coverage-multi-lora.xml ${target_path_multi}
-          uv run ${push_file} coverage-multi-fp8.xml ${target_path_multi}
-          uv run ${push_file} coverage-multi-grouped-gemm.xml ${target_path_multi}
-          uv run ${push_file} coverage-multi-dpo.xml ${target_path_multi}
-          uv run ${push_file} coverage-qwen-multi-pt.xml ${target_path_multi}
-          uv run ${push_file} coverage-qwen-multi-sft.xml ${target_path_multi}
-          uv run ${push_file} coverage-qwen-multi-lora.xml ${target_path_multi}
+          python ${push_file} coverage-multi-pt.xml ${target_path_multi}
+          python ${push_file} coverage-multi-sft.xml ${target_path_multi}
+          python ${push_file} coverage-multi-lora.xml ${target_path_multi}
+          python ${push_file} coverage-multi-fp8.xml ${target_path_multi}
+          python ${push_file} coverage-multi-grouped-gemm.xml ${target_path_multi}
+          python ${push_file} coverage-multi-dpo.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-multi-pt.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-multi-sft.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-multi-lora.xml ${target_path_multi}
           '
 
       - name: Terminate and delete the container
@@ -897,15 +867,10 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          uv venv
-          source .venv/bin/activate
-          export UV_LOCK_TIMEOUT=300
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl        
-          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          uv pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -936,9 +901,9 @@ jobs:
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-pt
           source /workspace/PaddleFleet/.venv/bin/activate
-          uv run coverage combine
-          uv run coverage xml -o /workspace/PaddleFleet/coveragedata-pt/coverage.xml
-          uv run coverage report -m
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-pt/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -958,9 +923,9 @@ jobs:
       #     glm45_exit_code=$?
       #     ls -a /workspace/PaddleFleet/coveragedata-sft
       #     source /workspace/PaddleFleet/.venv/bin/activate
-      #     uv run coverage combine
-      #     uv run coverage xml -o /workspace/PaddleFleet/coveragedata-sft/coverage.xml
-      #     uv run coverage report -m
+      #     coverage combine
+      #     coverage xml -o /workspace/PaddleFleet/coveragedata-sft/coverage.xml
+      #     coverage report -m
       #     if [[ "$glm45_exit_code" != "0" ]]; then
       #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
       #       exit 1
@@ -980,8 +945,7 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-pt/coverage.xml coverage-a-pt.xml
           # cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-a-sft.xml
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
-          uv run ${push_file} coverage-a-pt.xml ${target_path}
-          # uv run ${push_file} coverage-a-sft.xml ${target_path}
+          python ${push_file} coverage-a-pt.xml ${target_path}
           '
 
       - name: Terminate and delete the container
