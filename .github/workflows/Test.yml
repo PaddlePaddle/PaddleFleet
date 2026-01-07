@@ -35,10 +35,80 @@ jobs:
       workflow-name: 'test'
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
+  
+  build_whl:
+    name: Build Fleet whl
+    needs: check-bypass
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    runs-on:
+      group: GZ_BD-CPU
+    env:
+      container_name: fleet-ci-build-whl-${{ github.event.pull_request.number }}-$(date +%Y%m%d-%H%M%S)
+    steps:
+      - name: Check docker image and run container
+        run: |
+          docker pull $docker_image
+          docker run -d -t --name ${container_name} \
+            -v "/dev/shm:/dev/shm"  \
+            -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v ${{ github.workspace }}:/paddle \
+            -e BRANCH \
+            -e PR_ID \
+            -e COMMIT_ID \
+            -e PADDLE_ROOT \
+            -e ci_scripts \
+            -e no_proxy \
+            -e CI_name \
+            -w /paddle --network host ${docker_image}
+
+      - name: uv build whl
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          rm -rf * .[^.]*
+          source /root/proxy
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
+          git config --global --add safe.directory /paddle
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
+          git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
+          mkdir -p /home/.cache/pip
+          pip cache dir
+          echo "Install uv"
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          echo "uv build"
+          git submodule update --init --recursive
+          uv build --wheel
+          uv pip install --system dist/paddlefleet*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          '
+
+      - name: upload whl to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          export AK=paddle
+          export SK=paddle
+          cd /paddle/dist
+          if [ ! -f "bos/BosClient.py" ]; then
+            wget -q --no-proxy -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+            mkdir bos
+            tar xf bos_new.tar.gz -C bos
+          fi
+          whl_file=$(ls paddlefleet*.whl)
+          mv ${whl_file} paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          target_path="paddle-github-action/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}"
+          python bos/BosClient.py paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl ${target_path}
+          '
+      - name: Terminate and delete the container
+        if: ${{ always() }}
+        run: |
+          set +e
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker rm -f ${{ env.container_name }}
 
   single_card_test:
     name: Unit test (single card)
-    needs: check-bypass
+    needs: [check-bypass, build_whl]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
       group: Fleet-H-single-card
@@ -46,6 +116,7 @@ jobs:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
       TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-single-card-test
+
     steps:
       - name: Determine the runner
         run: |
@@ -94,15 +165,11 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          echo "Install uv"
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          echo "uv build"
-          git submodule update --init --recursive
-          uv build --wheel
-          uv pip install --system dist/paddlefleet*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          uv venv
+          source .venv/bin/activate
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           '
 
       - name: Single card test
@@ -157,7 +224,7 @@ jobs:
 
   multi-card_test:
     name: Unit test (multi-card)
-    needs: check-bypass
+    needs: [check-bypass, build_whl]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
       group: Fleet-H-multi-card
@@ -196,7 +263,7 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
 
-      - name: Clone PaddleFleet
+      - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
@@ -206,14 +273,11 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          echo "Install uv"
-          pip install uv
-          echo "uv sync"
-          git submodule update --init --recursive
-          uv sync --group ci -v > /dev/null
+          uv venv
+          source .venv/bin/activate
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -271,7 +335,7 @@ jobs:
 
 
   integration-test-H20-single-card:
-    needs: check-bypass
+    needs: [check-bypass, build_whl]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (H20, single card)
     runs-on:
@@ -320,6 +384,7 @@ jobs:
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -w /workspace --network host ${docker_image}
 
+
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -327,24 +392,17 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
-          cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          pip install --upgrade pip
-          echo "Install uv"
-          pip install uv
-          echo "uv sync"
-          git submodule update --init --recursive
-          export UV_LOCK_TIMEOUT=300
-          uv sync --group ci -v > /dev/null
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          uv venv
           source .venv/bin/activate
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          export UV_LOCK_TIMEOUT=300
+          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -452,7 +510,7 @@ jobs:
           docker rm -f ${{ env.container_name }}
 
   integration-test-H20-multi-card:
-    needs: check-bypass
+    needs: [check-bypass, build_whl]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (H20, multi-card)
     runs-on:
@@ -499,21 +557,16 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
-          cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          pip install --upgrade pip
-          echo "Install uv"
-          pip install uv
-          echo "uv sync"
-          git submodule update --init --recursive
-          uv sync --group ci -v > /dev/null
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1
+          uv venv
+          source .venv/bin/activate
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          export UV_LOCK_TIMEOUT=300
           uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
@@ -770,7 +823,7 @@ jobs:
 
 
   integration-test-a100:
-    needs: check-bypass
+    needs: [check-bypass, build_whl]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (A100)
     runs-on:
@@ -817,21 +870,16 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
-          cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          pip install --upgrade pip
-          echo "Install uv"
-          pip install uv
-          echo "uv sync"
-          git submodule update --init --recursive
-          uv sync --group ci > /dev/null
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1
+          uv venv
+          source .venv/bin/activate
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          export UV_LOCK_TIMEOUT=300
           uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
