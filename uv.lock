@@ -9,29 +9,30 @@ resolution-markers = [
 
 [[package]]
 name = "anyio"
-version = "4.12.0"
-source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
+version = "4.12.1"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
     { name = "idna" },
     { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/96/f0/5eb65b2bb0d09ac6776f2eb54adee6abe8228ea05b20a5ad0e4945de8aac/anyio-4.12.1.tar.gz", hash = "sha256:41cfcc3a4c85d3f05c932da7c26d0201ac36f72abd4435ba90d0464a3ffed703", size = 228685, upload-time = "2026-01-06T11:45:21.246Z" }
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/anyio/anyio-4.12.0-py3-none-any.whl" },
+    { url = "https://files.pythonhosted.org/packages/38/0e/27be9fdef66e72d64c0cdc3cc2823101b80585f8119b5c112c2e8f5f7dab/anyio-4.12.1-py3-none-any.whl", hash = "sha256:d405828884fc140aa80a3c667b8beed277f1dfedec42ba031bd6ac3db606ab6c", size = 113592, upload-time = "2026-01-06T11:45:19.497Z" },
 ]
 
 [[package]]
 name = "bce-python-sdk"
-version = "0.9.57"
+version = "0.9.59"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "future" },
     { name = "pycryptodome" },
     { name = "six" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/33/82/685a796d614fc3f0e6651439f800a01995f7580e61a4fbf8c053cafe9b7f/bce_python_sdk-0.9.57.tar.gz", hash = "sha256:efdee498e46f68183f5b7d419cf80524bcec2c0cd61def8005d358b4fecf4381", size = 278066, upload-time = "2025-12-29T03:37:35.228Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c1/8e/ddfacf065fd0a514bda38b489988ea21636ac3be09c79239f24cdc36d71b/bce_python_sdk-0.9.59.tar.gz", hash = "sha256:54ad09394b0a5baf8c8ef87ac919f9d111c1b0536086286b80ada71651d8e4c8", size = 278672, upload-time = "2026-01-05T11:46:14.19Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/69/7b1ff1581e2ca072dfca21f58bbc2f045cc717840af4b8953e4bf0c33939/bce_python_sdk-0.9.57-py3-none-any.whl", hash = "sha256:7be12c8b03d03c61ab027ea4d010fc34f6f37cc70088e7e205c87cebf3a09d4e", size = 394137, upload-time = "2025-12-29T03:37:30.537Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/b0/38ea413e3a4aa44c199ff74001b3b2510b6b0f237c7840237976094ab574/bce_python_sdk-0.9.59-py3-none-any.whl", hash = "sha256:9a63ffc36ac5cb984b79ce6909288f00862010eda576f7575c7f0fb7cdef419c", size = 394807, upload-time = "2026-01-05T11:45:59.752Z" },
 ]
 
 [[package]]
@@ -367,7 +368,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
 ]
 wheels = [
     { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/exceptiongroup/exceptiongroup-1.3.1-py3-none-any.whl" },
@@ -1068,7 +1069,7 @@ test = [
 
 [[package]]
 name = "paddlepaddle-gpu"
-version = "3.4.0.dev20260103"
+version = "3.4.0.dev20260105"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
 dependencies = [
     { name = "cuda-python", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1101,14 +1102,11 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp310-cp310-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp310-cp310-win_amd64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp311-cp311-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp311-cp311-win_amd64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp312-cp312-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp312-cp312-win_amd64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp313-cp313-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260103-cp313-cp313-win_amd64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp310-cp310-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp310-cp310-win_amd64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp311-cp311-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp313-cp313-linux_x86_64.whl" },
 ]
 
 [[package]]

@@ -300,7 +300,7 @@ def get_gpt_spec(
     rotary_base: int = 10000,
     rope_scaling: bool = False,
     parallel_output: bool = False,
-    share_embeddings_and_output_weights: bool = False,
+    tie_word_embeddings: bool = False,
 ):
     embedding_extra_kwargs = {
         "config": config,
@@ -310,8 +310,7 @@ def get_gpt_spec(
     }
 
     skip_weight_param_allocation = (
-        config.share_embeddings_and_output_weights
-        and config.pipeline_model_parallel_size == 1
+        config.tie_word_embeddings and config.pipeline_model_parallel_size == 1
     )
 
     language_embedding_spec = LayerSpec(layer=LanguageModelEmbedding)
@@ -354,7 +353,7 @@ def get_gpt_spec(
         layer=GPTModel,
         extra_kwargs={
             "config": config,
-            "share_embeddings_and_output_weights": share_embeddings_and_output_weights,
+            "tie_word_embeddings": tie_word_embeddings,
         },
         sublayers_spec=GPTSublayersSpec(
             embedding=LayerSpec(
