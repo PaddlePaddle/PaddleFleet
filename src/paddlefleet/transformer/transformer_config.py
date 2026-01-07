@@ -327,6 +327,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_dequant_input: bool = False
     """Whether to dequantize input."""
 
+    moe_expert_fusion: bool = True
+    """Whether to fuse experts."""
+
     moe_subbatch_token_num_before_dispatch: int | None = None
     """Whether to enable subbatch before dispatch, the value means the number of tokens in one subbatch."""
 
