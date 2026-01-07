@@ -89,7 +89,7 @@ class GPTEmbedding(FleetLayer):
         )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
-        
+
         # Deepstack
         deepstack_visual_embeds = None
         visual_pos_mask = None
@@ -126,7 +126,7 @@ class GPTEmbedding(FleetLayer):
                     )
                     visual_pos_masks = video_mask[..., 0]
                     deepstack_visual_embeds = deepstack_video_embeds
-                
+
                 if image_embeds is not None and video_embeds is not None:
                     image_mask = image_mask[..., 0]
                     video_mask = video_mask[..., 0]
@@ -134,8 +134,12 @@ class GPTEmbedding(FleetLayer):
                     deepstack_visual_embeds = []
                     image_mask_joint = image_mask[visual_pos_masks]
                     video_mask_joint = video_mask[visual_pos_masks]
-                    for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
-                        embed_joint = img_embed.new_zeros(visual_pos_masks.sum(), img_embed.shape[-1]).to(img_embed.device)
+                    for img_embed, vid_embed in zip(
+                        deepstack_image_embeds, deepstack_video_embeds
+                    ):
+                        embed_joint = img_embed.new_zeros(
+                            visual_pos_masks.sum(), img_embed.shape[-1]
+                        ).to(img_embed.device)
                         embed_joint[image_mask_joint, :] = img_embed
                         embed_joint[video_mask_joint, :] = vid_embed
                         deepstack_visual_embeds.append(embed_joint)
@@ -183,7 +187,7 @@ class GPTEmbedding(FleetLayer):
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,
         }
-        print("gpt_embedding_output ",preproc_output)
+        print("gpt_embedding_output ", preproc_output)
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:
                 preproc_output.pop(key)
@@ -212,25 +216,37 @@ class GPTEmbedding(FleetLayer):
             special_image_mask = inputs_embeds == self.embedding(
                 paddle.to_tensor(self.config.image_token_id, dtype="int64")
             )
-            print(f"inputs_embeds {inputs_embeds} image_token_id {self.config.image_token_id} special_image_mask{special_image_mask}")
+            print(
+                f"inputs_embeds {inputs_embeds} image_token_id {self.config.image_token_id} special_image_mask{special_image_mask}"
+            )
             special_image_mask = special_image_mask.all(-1)
             special_video_mask = inputs_embeds == self.embedding(
                 paddle.to_tensor(self.config.video_token_id, dtype="int64")
             )
-            print(f"inputs_embeds {inputs_embeds} image_token_id {self.config.video_token_id} special_video_mask {special_video_mask}")
+            print(
+                f"inputs_embeds {inputs_embeds} image_token_id {self.config.video_token_id} special_video_mask {special_video_mask}"
+            )
             special_video_mask = special_video_mask.all(-1)
         else:
             special_image_mask = input_ids == self.config.image_token_id
             special_video_mask = input_ids == self.config.video_token_id
 
-        print(f"inputs_embeds {inputs_embeds} image_token_id {self.config.image_token_id} special_image_mask{special_image_mask}")
-        print(f"inputs_embeds {inputs_embeds} video_token_id {self.config.video_token_id} special_video_mask {special_video_mask}")
+        print(
+            f"inputs_embeds {inputs_embeds} image_token_id {self.config.image_token_id} special_image_mask{special_image_mask}"
+        )
+        print(
+            f"inputs_embeds {inputs_embeds} video_token_id {self.config.video_token_id} special_video_mask {special_video_mask}"
+        )
         n_image_tokens = special_image_mask.sum()
         special_image_mask = special_image_mask.unsqueeze(-1).expand_as(
             inputs_embeds
         )
-        print(f"inputs_embeds_mask_features {inputs_embeds[special_image_mask]}")
-        print(f"n_image_tokens {special_image_mask.sum()} image_features {image_features}")
+        print(
+            f"inputs_embeds_mask_features {inputs_embeds[special_image_mask]}"
+        )
+        print(
+            f"n_image_tokens {special_image_mask.sum()} image_features {image_features}"
+        )
         if (
             image_features is not None
             and inputs_embeds[special_image_mask].numel()
