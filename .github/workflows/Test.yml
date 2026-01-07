@@ -110,6 +110,7 @@ jobs:
       - name: Terminate and delete the container
         if: ${{ always() }}
         run: |
+          exit 0
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
