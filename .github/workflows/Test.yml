@@ -35,7 +35,7 @@ jobs:
       workflow-name: 'test'
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
-  
+
   build_whl:
     name: Build Fleet whl
     needs: check-bypass
