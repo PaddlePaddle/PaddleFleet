@@ -52,26 +52,42 @@ def change_pwd():
 
 
 class CustomBdistWheel(_bdist_wheel):
-    # check whether the dir is all .o file with recursion
-    def is_all_o_files_with_subdirs(self, dir_path):
+    """Custom bdist_wheel that removes .o files from wheel before packaging."""
+
+    def _is_all_o_files(self, dir_path):
+        """Check if directory contains only .o files recursively."""
         for root, dirs, files in os.walk(dir_path):
             for file in files:
-                logging.info(f"Checking file: {os.path.join(root, file)}")
                 if not file.endswith(".o"):
                     return False
         return True
 
-    def run(self):
-        super().run()
-        logging.info(f"Cleaning up unwanted files in: {self.bdist_dir}")
-        path_to_remove = os.path.join(self.bdist_dir, "build")
-        if os.path.exists(path_to_remove) and self.is_all_o_files_with_subdirs(
-            path_to_remove
-        ):
-            logging.info(f"Removing unwanted directory: {path_to_remove}")
-            shutil.rmtree(path_to_remove)
-        else:
-            logging.info(f"No unwanted directory found at: {path_to_remove}")
+    def _clean_build_dir(self, wheel_dir):
+        """Remove build directory if it contains only .o files."""
+        build_dir = os.path.join(wheel_dir, "build")
+
+        if not os.path.exists(build_dir):
+            logging.debug(f"No build directory found at: {build_dir}")
+            return
+
+        if not self._is_all_o_files(build_dir):
+            logging.info(
+                f"Skipping removal of {build_dir} (contains non-.o files)"
+            )
+            return
+
+        try:
+            shutil.rmtree(build_dir)
+            logging.info(f"Removed build directory (all .o files): {build_dir}")
+        except Exception as e:
+            logging.warning(f"Failed to remove directory {build_dir}: {e}")
+
+    def write_wheelfile(self, wheel_path, archive_root):
+        """Override to clean .o files before writing wheel."""
+        # Clean build directory in the archive root before writing
+        self._clean_build_dir(archive_root)
+        # Proceed with normal wheel writing
+        super().write_wheelfile(wheel_path, archive_root)
 
 
 def setup_ops_extension():
