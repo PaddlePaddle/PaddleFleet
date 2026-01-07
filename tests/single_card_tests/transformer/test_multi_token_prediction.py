@@ -113,7 +113,7 @@ class TestMultiTokenPrediction(unittest.TestCase):
             transformer_layer_spec=transformer_layer_spec,
             vocab_size=100,
             max_sequence_length=64,
-            share_embeddings_and_output_weights=True,
+            tie_word_embeddings=True,
             position_embedding_type="rope",
             mtp_block_spec=mtp_block_spec,
         )
