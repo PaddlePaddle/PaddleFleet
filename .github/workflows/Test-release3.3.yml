@@ -376,6 +376,7 @@ jobs:
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           pip install -e .
+          pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -509,6 +510,7 @@ jobs:
           git config pull.rebase false
           git log -1
           pip install -e .
+          pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -710,6 +712,7 @@ jobs:
           git config pull.rebase false
           git log -1
           pip install -e .
+          pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
           '
 
