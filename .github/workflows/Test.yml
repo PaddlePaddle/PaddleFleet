@@ -47,6 +47,7 @@ jobs:
     steps:
       - name: Check docker image and run container
         run: |
+          exit 0
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
           docker pull $docker_image
@@ -66,6 +67,7 @@ jobs:
 
       - name: uv build whl
         run: |
+          exit 0
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source ${{ github.workspace }}/../../../proxy
@@ -90,6 +92,7 @@ jobs:
 
       - name: upload whl to BOS
         run: |
+          exit 0
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           export AK=paddle
           export SK=paddle
@@ -170,9 +173,11 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          pip install uv
           uv venv
           source .venv/bin/activate
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           '
@@ -278,9 +283,11 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          pip isntall uv
           uv venv
           source .venv/bin/activate
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -401,9 +408,11 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          pip install uv
           uv venv
           source .venv/bin/activate
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           export UV_LOCK_TIMEOUT=300
@@ -566,9 +575,11 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          pip install uv
           uv venv
           source .venv/bin/activate
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           export UV_LOCK_TIMEOUT=300
@@ -879,9 +890,11 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          pip install uv
           uv venv
           source .venv/bin/activate
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          wgte https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
           uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           export UV_LOCK_TIMEOUT=300

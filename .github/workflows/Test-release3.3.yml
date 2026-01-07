@@ -173,6 +173,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
+          pip install  uv
           uv venv
           source .venv/bin/activate
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
@@ -259,6 +260,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
+          pip install  uv
           uv venv
           source .venv/bin/activate
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
@@ -358,6 +360,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
+          pip install  uv
           export UV_SKIP_WHEEL_FILENAME_CHECK=1
           uv venv
           source .venv/bin/activate
@@ -492,6 +495,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
+          pip install  uv
           uv venv
           source .venv/bin/activate
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
@@ -695,6 +699,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
+          pip install  uv
           uv venv
           source .venv/bin/activate
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
