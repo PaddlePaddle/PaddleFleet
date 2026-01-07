@@ -420,6 +420,7 @@ jobs:
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
+          pip install --no-deps setuptools
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -580,6 +581,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
+          pip install --no-deps setuptools
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -880,6 +882,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
+          pip install --no-deps setuptools
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
