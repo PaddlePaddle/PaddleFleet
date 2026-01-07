@@ -60,9 +60,9 @@ def get_cuda_special_dependencies(cuda_major, cuda_minor):
         "filelock",  # for sonic_moe
     ]
     if cuda_major == 12:
-        deps.append("nvidia-nvshmem-cu12>=3.3.9,<3.5")  # for deep_ep build
+        deps.append("nvidia-nvshmem-cu12>=3.3.9,!=3.5.*")  # for deep_ep build
     elif cuda_major == 13:
-        deps.append("nvidia-nvshmem-cu13>=3.3.9,<3.5")  # for deep_ep build
+        deps.append("nvidia-nvshmem-cu13>=3.3.9,!=3.5.*")  # for deep_ep build
     else:
         raise ValueError(
             f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
