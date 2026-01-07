@@ -54,7 +54,8 @@ struct TypeMap<paddle::DataType::INT64> {
 };
 
 inline paddle::DataType TransToDataType(int64_t dtype) {
-  return phi::TransToPhiDataType(dtype);
+  // Caller must ensure dtype is a valid paddle::DataType enum value
+  return static_cast<paddle::DataType>(dtype);
 }
 
 inline int LimitGridDim(int64_t n) {
