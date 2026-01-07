@@ -273,7 +273,6 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
-            -e PF="${{ github.event.pull_request.base.ref }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -417,7 +416,6 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
-            -e PF="${{ github.event.pull_request.base.ref }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -628,7 +626,6 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
-            -e PF="${{ github.event.pull_request.base.ref }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
