@@ -82,12 +82,16 @@ class CustomBdistWheel(_bdist_wheel):
         except Exception as e:
             logging.warning(f"Failed to remove directory {build_dir}: {e}")
 
-    def write_wheelfile(self, wheel_path, archive_root):
+    def write_wheelfile(self, wheelfile_base, generator=None):
         """Override to clean .o files before writing wheel."""
-        # Clean build directory in the archive root before writing
-        self._clean_build_dir(archive_root)
-        # Proceed with normal wheel writing
-        super().write_wheelfile(wheel_path, archive_root)
+
+        if hasattr(self, "bdist_dir") and self.bdist_dir:
+            self._clean_build_dir(self.bdist_dir)
+
+        if generator is not None:
+            super().write_wheelfile(wheelfile_base, generator=generator)
+        else:
+            super().write_wheelfile(wheelfile_base)
 
 
 def setup_ops_extension():
