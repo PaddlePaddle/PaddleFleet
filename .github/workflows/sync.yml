@@ -1,4 +1,4 @@
-name: Auto Update uv.lock
+name: uv sync
 
 on: pull_request
 
@@ -6,13 +6,12 @@ permissions:
   contents: read
 
 jobs:
-jobs:
   build-whl:
     runs-on: ubuntu-latest
 
     container:
-      image: ${{ env.docker_image }}
-      options: --network host --shm-size 2g -v /home/data/cfs:/home/data/cfs
+      image: nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
+      options: --network host --shm-size 32g
       env:
         LD_LIBRARY_PATH: /usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
 
