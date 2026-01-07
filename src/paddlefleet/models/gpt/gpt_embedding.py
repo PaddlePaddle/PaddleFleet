@@ -89,7 +89,7 @@ class GPTEmbedding(FleetLayer):
         )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
-
+        visual_pos_masks = None
         # Deepstack
         deepstack_visual_embeds = None
         visual_pos_mask = None
