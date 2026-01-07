@@ -364,6 +364,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          set -x
+          python -m pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
@@ -496,6 +498,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          set -x
+          python -m pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
@@ -696,6 +700,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          set -x
+          python -m pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers

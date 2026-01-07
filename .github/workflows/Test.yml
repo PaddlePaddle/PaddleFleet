@@ -411,6 +411,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          set -x
+          python -m pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
@@ -420,7 +422,7 @@ jobs:
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
-          pip install -e . -v 2>&1 | tail -50
+          pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -572,6 +574,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          set -x
+          python -m pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
@@ -580,7 +584,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e . -v 2>&1 | tail -50
+          pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -873,6 +877,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          set -x
+          python -m pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
@@ -880,14 +886,13 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e . -v 2>&1 | tail -50
+          pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
 
       - name: GLM4.5 pre-train
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-pt/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
