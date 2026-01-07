@@ -414,12 +414,13 @@ jobs:
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
-          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           export UV_LOCK_TIMEOUT=300
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
+          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl        
+          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          uv pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -582,13 +583,13 @@ jobs:
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
-          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           export UV_LOCK_TIMEOUT=300
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
-          source .venv/bin/activate
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
+          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl        
+          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          uv pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -898,13 +899,13 @@ jobs:
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
-          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           export UV_LOCK_TIMEOUT=300
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
-          source .venv/bin/activate
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
+          # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl        
+          uv pip install --system paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          uv pip install --system https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           '
 

@@ -361,7 +361,9 @@ jobs:
           git config pull.rebase false
           git checkout ${BRANCH}
           pip install  uv
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1
+          export UV_LOCK_TIMEOUT=300
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1
           uv venv
           source .venv/bin/activate
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
@@ -498,8 +500,10 @@ jobs:
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
+          export UV_LOCK_TIMEOUT=300
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1
           uv pip install --system paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
@@ -702,8 +706,10 @@ jobs:
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           uv venv
           source .venv/bin/activate
+          export UV_LOCK_TIMEOUT=300
+          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          export UV_NO_SYNC=1
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1
           uv pip install --system paddlefleet-0.0.1-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
           source .venv/bin/activate
