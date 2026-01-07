@@ -167,12 +167,14 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
+          set -x
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
@@ -270,11 +272,13 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source /root/proxy
+          set -x
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
@@ -291,7 +295,6 @@ jobs:
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
           pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall
-          source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
@@ -387,14 +390,15 @@ jobs:
           nvidia-smi
           rm -rf * .[^.]*
           source /root/proxy
+          set -x
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           git config --global --add safe.directory /workspace/PaddleFleet
           cd PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          source .venv/bin/activate
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl        
           pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
@@ -416,7 +420,6 @@ jobs:
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
-          source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -447,7 +450,6 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-single
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
           coverage report -m
@@ -548,6 +550,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
+          set -x
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
@@ -555,6 +558,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl        
@@ -576,7 +580,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -615,7 +618,6 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-sft
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml
           coverage report -m
@@ -638,7 +640,6 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-lora
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage --version
           overage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml
@@ -662,7 +663,6 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-dpo
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage --version
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml
@@ -686,7 +686,6 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-fp8
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage --version
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml
@@ -710,7 +709,6 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage --version
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml
@@ -733,7 +731,6 @@ jobs:
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen.sh pt
           ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-pt
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage --version
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml
@@ -750,7 +747,6 @@ jobs:
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen.sh sft
           ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-sft
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage --version
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml
@@ -767,7 +763,6 @@ jobs:
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen.sh lora
           ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-lora
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage --version
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml
@@ -858,12 +853,14 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source /root/proxy
+          set -x
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           # wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/328/90150987fb109f086135aa20a2e31509071a9cdf/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl        
@@ -883,7 +880,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          source ../PaddleFleet/.venv/bin/activate
           pip install -e .
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -898,7 +894,6 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_pt_a100.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-pt
-          source /workspace/PaddleFleet/.venv/bin/activate
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-pt/coverage.xml
           coverage report -m
