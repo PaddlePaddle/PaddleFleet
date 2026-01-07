@@ -1,0 +1,34 @@
+name: Auto Update uv.lock
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+jobs:
+  build-whl:
+    runs-on: ubuntu-latest
+
+    container:
+      image: ${{ env.docker_image }}
+      options: --network host --shm-size 2g -v /home/data/cfs:/home/data/cfs
+      env:
+        LD_LIBRARY_PATH: /usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Build Wheel
+        run: |
+          export UV_HTTP_TIMEOUT=300
+          uv sync
