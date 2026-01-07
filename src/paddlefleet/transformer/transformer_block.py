@@ -23,19 +23,13 @@ from typing import TYPE_CHECKING
 import paddle
 from paddle import Tensor
 
-from paddlefleet import parallel_state, tensor_parallel
-from paddlefleet.pipeline_parallel.utils import (
-    is_vp_first_stage,
-    is_vp_last_stage,
-)
+from paddlefleet import tensor_parallel
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
-from paddlefleet.transformer.enums import LayerType
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
-    get_transformer_layer_offset,
 )
 from paddlefleet.utils import (
     WrappedTensor,
@@ -49,155 +43,6 @@ if TYPE_CHECKING:
 LayerNormImpl = WrappedPaddleNorm
 
 logger = logging.getLogger(__name__)
-
-
-def get_num_layers_to_build(
-    config: TransformerConfig,
-    vp_stage: int | None = None,
-    pp_rank: int | None = None,
-) -> int:
-    """
-    Determine the number of transformer layers to build for the current pipeline stage.
-    Args:
-        config (TransformerConfig): Configuration object containing transformer model parameters.
-        vp_stage (int | None): Virtual pipeline stage number.
-        pp_rank (int | None): Pipeline parallel rank.
-
-    Returns:
-        int: The number of layers to be built for the current pipeline stage.
-    """
-    # If we have a custom PP layout, straightforwardly
-    # return the number of decoders in the layout array.
-    if config.pipeline_model_parallel_layout is not None:
-        return config.pipeline_model_parallel_layout.get_num_layers_to_build(
-            layer_type=LayerType.decoder, vp_stage=vp_stage
-        )
-
-    # Fallback for legacy tests.
-    if pp_rank is None:
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-
-    is_first_pp_stage = pp_rank == 0
-    is_last_pp_stage = pp_rank == config.pipeline_model_parallel_size - 1
-
-    if (
-        config.num_layers_in_first_pipeline_stage is not None
-        or config.num_layers_in_last_pipeline_stage is not None
-    ):
-        assert not (
-            config.account_for_embedding_in_pipeline_split
-            or config.account_for_loss_in_pipeline_split
-        ), (
-            " \
-        Does not support standalone embedding stage and standalone loss stage with uneven pp"
-        )
-        # Number of layers to distribute over rest of pipeline stages
-        layers_to_distribute = config.num_hidden_layers
-        # Number of pipeline stages left for distributing transformer layers
-        pipeline_stages_left = config.pipeline_model_parallel_size
-
-        # If the uneven first (last) pipeline stage is enabled, remove the specified number
-        # of layers to calculate the number of layers on each middle pipeline stage.
-        if config.num_layers_in_first_pipeline_stage is not None:
-            layers_to_distribute -= config.num_layers_in_first_pipeline_stage
-            pipeline_stages_left -= 1
-
-        if config.num_layers_in_last_pipeline_stage is not None:
-            layers_to_distribute -= config.num_layers_in_last_pipeline_stage
-            pipeline_stages_left -= 1
-
-        # If pp_size <= 2, we do not have any intermediate pipeline stages, and we do not
-        # need to check if the left over layers are divisible by the left over stages.
-        if pipeline_stages_left > 0:
-            assert layers_to_distribute % pipeline_stages_left == 0, (
-                "With uneven pipelineing the left over layers must be divisible by left over stages"
-            )
-            num_layers_per_pipeline_rank = (
-                layers_to_distribute // pipeline_stages_left
-            )
-        else:
-            num_layers_per_pipeline_rank = 0
-
-        # If the uneven first (last) pipeline stage is enabled, return the specified number
-        # of layers for all virtual pipeline parallel stages within the first (last) pipeline
-        # parallel stage.
-
-        if (
-            is_first_pp_stage
-            and config.num_layers_in_first_pipeline_stage is not None
-        ):
-            num_layers_per_pipeline_rank = (
-                config.num_layers_in_first_pipeline_stage
-            )
-
-        if (
-            is_last_pp_stage
-            and config.num_layers_in_last_pipeline_stage is not None
-        ):
-            num_layers_per_pipeline_rank = (
-                config.num_layers_in_last_pipeline_stage
-            )
-    else:
-        # Include the embedding layer and loss layer into pipeline parallelism partition
-        num_hidden_layers = config.num_hidden_layers
-        if config.account_for_embedding_in_pipeline_split:
-            num_hidden_layers += 1
-
-        if config.account_for_loss_in_pipeline_split:
-            num_hidden_layers += 1
-
-        assert num_hidden_layers % config.pipeline_model_parallel_size == 0, (
-            "num_hidden_layers should be divisible by pipeline_model_parallel_size"
-        )
-        num_layers_per_pipeline_rank = (
-            num_hidden_layers // config.pipeline_model_parallel_size
-        )
-
-    vp_size = config.virtual_pipeline_model_parallel_size
-    if vp_size is not None and config.pipeline_model_parallel_size > 1:
-        # Interleaved pipeline parallelism:
-        # Number of layers in each model chunk is the number of layers in the stage,
-        # divided by the number of model chunks in a stage.
-        # With 8 layers, 2 stages, and 4 model chunks, we want an assignment of
-        # layers to stages like (each list is a model chunk):
-        # Stage 0: [0]  [2]  [4]  [6]
-        # Stage 1: [1]  [3]  [5]  [7]
-        # With 8 layers, 2 stages, and 2 virtual stages, we want an assignment of
-        # layers to stages like (each list is a model chunk):
-        # Stage 0: [0, 1]  [4, 5]
-        # Stage 1: [2, 3]  [6, 7]
-
-        assert num_layers_per_pipeline_rank % vp_size == 0, (
-            f"num_layers_per_pipeline_rank {num_layers_per_pipeline_rank} \
-            should be divisible by vp_size {vp_size}"
-        )
-        num_layers_per_virtual_stage = num_layers_per_pipeline_rank // vp_size
-
-        num_layers_to_build = num_layers_per_virtual_stage
-
-    else:
-        # Non-interleaved pipeline parallelism:
-        # Each stage gets a contiguous set of layers.
-        num_layers_to_build = num_layers_per_pipeline_rank
-
-    # The embedding (or loss) layer cannot function as a standalone transformer layer
-    # Reduce the number of layers to construct by 1 on the first (or last) stage if the
-    # embedding (or loss) layer is included in the pipeline parallelism partition and placement.
-    if config.account_for_embedding_in_pipeline_split:
-        if is_vp_first_stage(vp_stage, vp_size) and is_first_pp_stage:
-            num_layers_to_build -= 1
-            assert num_layers_to_build >= 0, (
-                "Not enough layers in the first virtual pipeline stage"
-            )
-
-    if config.account_for_loss_in_pipeline_split:
-        if is_vp_last_stage(vp_stage, vp_size) and is_last_pp_stage:
-            num_layers_to_build -= 1
-            assert num_layers_to_build >= 0, (
-                "Not enough layers in the last virtual pipeline stage"
-            )
-
-    return num_layers_to_build
 
 
 @dataclass
@@ -251,11 +96,9 @@ def _get_block_sublayers_spec(
         if issubclass(spec.layer, TransformerBlock):
             return spec.sublayers_spec
         elif issubclass(spec.layer, TransformerLayer):
-            num_hidden_layers = get_num_layers_to_build(
-                config, vp_stage, pp_rank
-            )
             return TransformerBlockSublayersSpec(
-                layer_specs=[spec] * num_hidden_layers, layer_norm=LayerNormImpl
+                layer_specs=[spec] * config.num_hidden_layers,
+                layer_norm=LayerNormImpl,
             )
         else:
             raise Exception(f"specialize for {spec.layer.__name__}.")
@@ -276,6 +119,9 @@ class TransformerBlock(FleetLayer):
         pg_collection: ProcessGroupCollection | None = None,
         vp_stage: int | None = None,
     ):
+        assert vp_stage is None, (
+            "pipeline parallel is not supported in TransformerBlock."
+        )
         super().__init__(config=config)
 
         if pg_collection is None:
@@ -293,7 +139,6 @@ class TransformerBlock(FleetLayer):
         self.post_layer_norm = post_layer_norm
         self.pre_process = pre_process
         self.post_process = post_process
-        self.vp_stage = vp_stage
 
         # required for pipeline parallel schedules
         self.input_tensor = None
@@ -313,15 +158,7 @@ class TransformerBlock(FleetLayer):
     def _build_layers(self):
         # Transformer layers.
         def _build_layer(layer_spec, layer_number):
-            global_layer_number = layer_number + get_transformer_layer_offset(
-                self.config, self.vp_stage, get_pg_rank(self.pg_collection.pp)
-            )  # 1-based index
-            if self.config.heterogeneous_block_specs:
-                layer_config = self.config.get_config_for_layer(
-                    global_layer_number
-                )
-            else:
-                layer_config = self.config
+            layer_config = self.config
 
             layer = build_layer(
                 layer_spec,

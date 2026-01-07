@@ -239,7 +239,7 @@ def _apply_rotary_pos_emb_thd(
             )
 
         freqs_packed = paddle.cat(freq_slices, axis=1)
-        # whye [seq,bs,num_heads,head_dim]->[seq,bs,1,num_heads,head_dim]?
+        # [seq,bs,num_heads,head_dim]
         return _apply_rotary_pos_emb_bshd(
             t,
             freqs_packed,

@@ -543,7 +543,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 total_input = all_gather_buffer
             else:
                 total_input = input
-        grad_input = grad_output.matmul(weight.t())
+        grad_input = grad_output.matmul(
+            weight.t().astype(grad_output.dtype)
+        ).astype(total_input.dtype)
 
         if ctx.sequence_parallel and wgrad_compute:
             # pylint: disable=possibly-used-before-assignment
@@ -612,7 +614,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 grad_weight = None
         else:
-            grad_weight = total_input.t().matmul(grad_output)
+            grad_weight = (
+                total_input.t()
+                .matmul(grad_output.astype(total_input.dtype))
+                .astype(weight.dtype)
+            )
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:
