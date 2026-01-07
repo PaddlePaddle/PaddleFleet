@@ -17,6 +17,7 @@ from setuptools import build_meta as orig
 from build_utils import (
     Artifact,
     EcosystemLibrary,
+    check_patchelf_exists,
     check_submodule_updated,
     get_cuda_version,
 )
@@ -99,6 +100,7 @@ def prepare_metadata_for_build_editable(
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+    check_patchelf_exists()  # for deep_ep_cpp.so to add-rpath
     check_submodule_updated()
     _prepare_ecosystem(use_symlinks=False)
     return orig.build_wheel(
@@ -109,6 +111,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
 def build_editable(
     wheel_directory, config_settings=None, metadata_directory=None
 ):
+    check_patchelf_exists()  # for deep_ep_cpp.so to add-rpath
     check_submodule_updated()
     _prepare_ecosystem(use_symlinks=True)
     return orig.build_editable(

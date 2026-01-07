@@ -40,6 +40,13 @@ from .utils import (
 #
 # Note: Ensure that any torch APIs used in 'new_module' are already implemented in Paddle.
 
+if "torch" in sys.modules and sys.modules["torch"] is None:
+    # Note: In paddleformer's __init__.py, it will set sys.modules["torch"] to None
+    # We should restore or delete it before enable_torch_proxy
+    del sys.modules["torch"]
+    if "torch_save" in sys.modules and sys.modules["torch_save"] is not None:
+        sys.modules["torch"] = sys.modules["torch_save"]
+
 logger = logging.getLogger(__name__)
 ops_dir = Path(__file__).parent
 cuda_capability = (
