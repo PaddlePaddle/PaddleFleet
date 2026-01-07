@@ -11,7 +11,7 @@ jobs:
 
     container:
       image: nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04
-      options: --network host --shm-size 32g
+      options: --shm-size 7g
       env:
         LD_LIBRARY_PATH: /usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
 
