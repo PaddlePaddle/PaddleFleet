@@ -16,6 +16,11 @@ jobs:
         LD_LIBRARY_PATH: /usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
 
     steps:
+      - name: Install System Dependencies
+        run: |
+          apt-get update
+          apt-get install -y git
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
