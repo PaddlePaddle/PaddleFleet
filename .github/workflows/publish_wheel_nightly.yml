@@ -20,7 +20,7 @@ on:
 permissions: read-all
 
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-all
   cancel-in-progress: true
 
 env:
