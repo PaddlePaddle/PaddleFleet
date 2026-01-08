@@ -217,7 +217,9 @@ class DotProductAttention(FleetLayer):
             return attn_output.reshape(
                 [0, 0, attn_output.shape[2] * attn_output.shape[3]]
             )
-        if query.dtype == paddle.bfloat16 or query.dtype == paddle.float16:
+        if (
+            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
+        ) and attn_mask_startend_row_indices is None:
             # Note:
             # attention_mask is None in default
             # is_causal is True in default

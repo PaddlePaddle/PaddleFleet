@@ -182,9 +182,6 @@ class TransformerConfig(ModelParallelConfig):
     rope_theta: float = 10000.0
     """The base period of the RoPE embeddings, default is 10000.0."""
 
-    high_precision_rope: bool = False
-    """High precision mode for RoPE,if set to True,rotary_pos_emb will compute in FP32"""
-
     apply_residual_connection_post_layernorm: bool = False
     """If True, uses the original BERT residue connection ordering."""
 
@@ -195,9 +192,6 @@ class TransformerConfig(ModelParallelConfig):
     glu_linear_offset: float = 0.0
     """Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). Only
     used when gated_linear_unit is True"""
-
-    high_precision_rope: bool = False
-    """High precision mode for RoPE,if set to True,rotary_pos_emb will compute in FP32"""
 
     apply_residual_connection_post_layernorm: bool = False
     """If True, uses the original BERT residue connection ordering."""

@@ -33,7 +33,6 @@ from paddlefleet.transformer.transformer_layer import (
 )
 from paddlefleet.utils import (
     WrappedTensor,
-    get_pg_rank,
 )
 
 if TYPE_CHECKING:
@@ -128,13 +127,8 @@ class TransformerBlock(FleetLayer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
-        pp_group = (
-            self.pg_collection.pp if hasattr(self.pg_collection, "pp") else None
-        )
-        pp_rank = get_pg_rank(pp_group)
-
         self.sublayers_spec = _get_block_sublayers_spec(
-            config, spec, vp_stage, pp_rank
+            config, spec, vp_stage, pp_rank=None
         )
         self.post_layer_norm = post_layer_norm
         self.pre_process = pre_process
@@ -142,11 +136,6 @@ class TransformerBlock(FleetLayer):
 
         # required for pipeline parallel schedules
         self.input_tensor = None
-
-        self.checkpoint_core_attention = (
-            self.config.recompute_granularity == "selective"
-            and "core_attn" in self.config.recompute_layers
-        )
 
         assert self.config.cpu_offloading is False
 
@@ -194,89 +183,6 @@ class TransformerBlock(FleetLayer):
 
     def _get_layer(self, layer_number: int):
         return self.layers[layer_number]
-
-    def _checkpointed_forward(
-        self,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        context: Tensor,
-        context_mask: Tensor,
-        rotary_pos_emb: Tensor,
-        attention_bias: Tensor,
-        packed_seq_params: PackedSeqParams,
-    ):
-        """Forward method with activation checkpointing."""
-
-        def custom(start: int, end: int):
-            def custom_forward(
-                hidden_states,
-                attention_mask,
-                context,
-                context_mask,
-                rotary_pos_emb,
-            ):
-                for index in range(start, end):
-                    layer = self._get_layer(index)
-
-                    hidden_states, context = layer(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        context=context,
-                        context_mask=context_mask,
-                        rotary_pos_emb=rotary_pos_emb,
-                        attention_bias=attention_bias,
-                        packed_seq_params=packed_seq_params,
-                    )
-                return hidden_states, context
-
-            return custom_forward
-
-        def checkpoint_handler(forward_func):
-            """Determines whether to use the `tensor_parallel.checkpoint`"""
-            return tensor_parallel.checkpoint(
-                forward_func,
-                self.config.distribute_saved_activations,
-                hidden_states,
-                attention_mask,
-                context,
-                context_mask,
-                rotary_pos_emb,
-            )
-
-        if self.config.recompute_method == "uniform":
-            # Uniformly divide the total number of Transformer layers and checkpoint
-            # the input activation of each divided chunk.
-            # A method to further reduce memory usage reducing checkpoints.
-            layer_idx = 0
-            while layer_idx < self.num_layers_per_pipeline_rank:
-                hidden_states, context = checkpoint_handler(
-                    custom(
-                        layer_idx, layer_idx + self.config.recompute_num_layers
-                    )
-                )
-
-                layer_idx += self.config.recompute_num_layers
-
-        elif self.config.recompute_method == "block":
-            # Checkpoint the input activation of only a set number of individual
-            # Transformer layers and skip the rest.
-            # A method fully use the device memory removing redundant re-computation.
-            recompute_skip_num_layers = 0
-            for layer_idx in range(self.num_layers_per_pipeline_rank):
-                # Skip recomputation when input grad computation is not needed.
-                # Need to have at least one input tensor with gradient computation
-                # for re-enterant autograd engine.
-                hidden_states, context = custom(layer_idx, layer_idx + 1)(
-                    hidden_states,
-                    attention_mask,
-                    context,
-                    context_mask,
-                    rotary_pos_emb,
-                )
-        else:
-            raise ValueError("Invalid activation recompute method.")
-
-        return hidden_states
 
     def set_input_tensor(self, input_tensor: Tensor):
         """Set input tensor to be used instead of forward()'s input.
@@ -342,41 +248,21 @@ class TransformerBlock(FleetLayer):
 
         with rng_context:
             # Forward pass.
-            if (
-                self.config.recompute_granularity == "full"
-                and self.training
-                and self.config.recompute
-            ):
-                hidden_states = self._checkpointed_forward(
+            for l_no, layer in enumerate(self.layers):
+                hidden_states, context = layer(
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     context=context,
                     context_mask=context_mask,
                     rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_cos=rotary_pos_cos,
+                    rotary_pos_sin=rotary_pos_sin,
                     attention_bias=attention_bias,
                     packed_seq_params=packed_seq_params,
                 )
-            else:
-                for l_no, layer in enumerate(self.layers):
-                    hidden_states, context = layer(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        context=context,
-                        context_mask=context_mask,
-                        rotary_pos_emb=rotary_pos_emb,
-                        rotary_pos_cos=rotary_pos_cos,
-                        rotary_pos_sin=rotary_pos_sin,
-                        attention_bias=attention_bias,
-                        packed_seq_params=packed_seq_params,
-                    )
 
         # Final layer norm.
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
-
-        # If this TransformerBlock is empty, input and output hidden states will be the same node
-        # on the computational graph and will lead to unexpected errors in pipeline schedules.
-        if not self.pre_process and len(self.layers) == 0 and not self.norm:
-            hidden_states = hidden_states.clone()
 
         return hidden_states
