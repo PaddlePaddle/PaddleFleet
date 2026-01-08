@@ -84,12 +84,8 @@ jobs:
           pip cache dir
           echo "Install uv"
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          echo "uv build"
           export WITH_COVERAGE=ON
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
-          export UV_HTTP_TIMEOUT=300
-          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/single_card_test.sh
@@ -151,11 +147,8 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source /root/proxy
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          export UV_NO_SYNC=1 # This environment variable prevents uv sync from being executed when running un run.
-          export UV_HTTP_TIMEOUT=300
-          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
+          pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -163,7 +156,6 @@ jobs:
       - name: Multi-card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source .venv/bin/activate
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
@@ -237,16 +229,9 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          echo "Install uv"
-          pip install uv
-          echo "uv sync"
           git submodule update --init --recursive
-          export UV_LOCK_TIMEOUT=300
-          uv sync --group ci -v > /dev/null
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
-          source .venv/bin/activate
+          pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -264,8 +249,10 @@ jobs:
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
-          source ../PaddleFleet/.venv/bin/activate
           pip install -e .
+          pip install bce-python-sdk==0.8.74
+          pip install coverage==7.6.1
+          pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -366,13 +353,8 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          echo "Install uv"
-          pip install uv
-          echo "uv sync"
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
-          source .venv/bin/activate
+          pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -389,8 +371,10 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          source ../PaddleFleet/.venv/bin/activate
           pip install -e .
+          pip install bce-python-sdk==0.8.74
+          pip install coverage==7.6.1
+          pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -561,13 +545,8 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          echo "Install uv"
-          pip install uv
-          echo "uv sync"
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1
-          uv pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
-          uv pip -n install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
-          source .venv/bin/activate
+          pip install paddlefleet -i https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall
           python -c "import paddle; print(paddle.version.commit)"
           '
 
@@ -582,8 +561,10 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          source ../PaddleFleet/.venv/bin/activate
           pip install -e .
+          pip install bce-python-sdk==0.8.74
+          pip install coverage==7.6.1
+          pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
           '
 
