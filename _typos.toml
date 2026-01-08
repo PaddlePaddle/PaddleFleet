@@ -1,6 +1,7 @@
 [files]
 # The following files will be excluded from spell check during commits
 extend-exclude = [
+    "third_party",
 ]
 
 [default]

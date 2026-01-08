@@ -1043,7 +1043,7 @@ requires-dist = [
     { name = "colorlog", specifier = ">=6.10.1" },
     { name = "filelock" },
     { name = "nvidia-cutlass-dsl", specifier = "==4.2.1" },
-    { name = "nvidia-nvshmem-cu12", specifier = ">=3.3.9,<3.5" },
+    { name = "nvidia-nvshmem-cu12", specifier = ">=3.3.9,!=3.5.*" },
     { name = "paddlepaddle-gpu", specifier = ">=3.3.0.dev0" },
     { name = "triton" },
 ]

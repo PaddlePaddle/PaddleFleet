@@ -47,6 +47,29 @@ def change_pwd():
         os.chdir(path)
 
 
+common_dependencies = [
+    "colorlog>=6.10.1",
+]
+
+
+def get_cuda_special_dependencies(cuda_major, cuda_minor):
+    deps = [
+        "paddlepaddle-gpu>=3.3.0.dev",
+        "triton",  # for deep_gemm, flashmask
+        "nvidia-cutlass-dsl==4.2.1",  # for sonic_moe
+        "filelock",  # for sonic_moe
+    ]
+    if cuda_major == 12:
+        deps.append("nvidia-nvshmem-cu12>=3.3.9,!=3.5.*")  # for deep_ep build
+    elif cuda_major == 13:
+        deps.append("nvidia-nvshmem-cu13>=3.3.9,!=3.5.*")  # for deep_ep build
+    else:
+        raise ValueError(
+            f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
+        )
+    return deps
+
+
 def setup_ops_extension():
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
@@ -78,7 +101,9 @@ def setup_ops_extension():
         )
     if cuda_major == 12 and cuda_minor < 8:
         nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
-
+    cuda_dependencies = common_dependencies + get_cuda_special_dependencies(
+        cuda_major, cuda_minor
+    )
     ext_module = CUDAExtension(
         sources=[
             # cpp files
@@ -115,6 +140,7 @@ def setup_ops_extension():
             "version_scheme": custom_version_scheme,
             "local_scheme": no_local_scheme,
         },
+        install_requires=cuda_dependencies,
     )
 
 
