@@ -76,7 +76,7 @@ jobs:
           bos_file: "/home/paddle/actions-runner/bos/BosClient.py"
         run: |
           cd ..
-          tar -I 'zstd -T0' -cf PaddleFleet.tar.gz PaddleFleet
+          tar -zcf PaddleFleet.tar.gz PaddleFleet
           echo "::group::Install bce-python-sdk"
           python -m pip install bce-python-sdk==0.8.74
           echo "::endgroup::"
