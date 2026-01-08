@@ -12,12 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-try:
-    from .version import __version__ as __version__, commit as commit
-except ModuleNotFoundError:
-    # Fallbacks for running directly from the source tree before _version.py is generated
-    commit = "unknown"
-    __version__ = "0.0.0"
+
+from .version import __version__ as __version__, commit as commit
 
 __package_name__ = "paddlefleet"
 __contact_names__ = "PaddlePaddle"

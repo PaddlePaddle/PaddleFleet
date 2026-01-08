@@ -52,7 +52,7 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 [project.optional-dependencies]
 
 [build-system]
-requires = ["setuptools>=66.1.0", "pip", "wheel", "setuptools-scm>=8"]
+requires = ["setuptools>=66.1.0", "pip", "wheel"]
 build-backend = "build_backend"
 backend-path = ["."]
 

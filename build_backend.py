@@ -54,11 +54,8 @@ def get_git_commit_date(cwd: Path | None) -> str:
 def _generate_version_info():
     """Generate version info file with git metadata."""
     version_file = _root / "version.txt"
-    if version_file.exists():
-        with open(version_file, "r") as f:
-            version = f.read().strip()
-    else:
-        version = "0.0.0"
+    with open(version_file, "r") as f:
+        version = f.read().strip()
 
     # Get git info
     git_commit_hash = get_git_commit_hash(_root)
@@ -84,7 +81,7 @@ def _generate_version_info():
         f.write(f'__version__ = "{final_version}"\n')
         f.write(f'commit = "{git_commit_hash}"\n')
     logger.info(f"Created version.py with version {final_version}")
-    return version
+    return final_version
 
 
 # Generate version info as soon as this module is imported
@@ -161,7 +158,7 @@ def get_requires_for_build_wheel(config_settings=None):
 
 
 def get_requires_for_build_sdist(config_settings=None):
-    return []
+    return get_cuda_special_build_deps(cuda_major, cuda_minor)
 
 
 def get_requires_for_build_editable(config_settings=None):
