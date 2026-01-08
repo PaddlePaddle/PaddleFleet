@@ -29,10 +29,10 @@ defaults:
 
 jobs:
   publish-wheel:
-    name: Publish wheel nightly (${{ matrix.CUDA_VERSION }})
+    name: Publish wheel nightly (${{ matrix.CUDA_VERSION }}, ${{ matrix.python_version }})
     if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
-      group: cpu-test
+      group: GZ_BD-CPU
     strategy:
       fail-fast: false
       matrix:
