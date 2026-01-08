@@ -74,6 +74,8 @@ jobs:
             -w /paddle --network host ${docker_image}
 
 
+
+
       - name: Single card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
