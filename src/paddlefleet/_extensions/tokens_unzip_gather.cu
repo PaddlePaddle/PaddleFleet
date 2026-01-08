@@ -16,13 +16,13 @@
 #include "paddle/phi/kernels/funcs/aligned_vector.h"
 #include "utils.h"  // NOLINT
 
-template <typename T, bool has_scale>
+template <typename T, typename ScaleT, bool has_scale>
 __global__ void tokens_unzip_gather_kernel(
     const T* __restrict__ x,
-    const float* __restrict__ x_scale,
+    const ScaleT* __restrict__ x_scale,
     const int* __restrict__ zipped_expertwise_rowmap,
     T* __restrict__ x_unzipped,
-    float* __restrict__ x_scale_unzipped,
+    ScaleT* __restrict__ x_scale_unzipped,
     int64_t* __restrict__ index_unzipped,
     int64_t unzipped_rows,
     int64_t zipped_rows,
@@ -37,11 +37,10 @@ __global__ void tokens_unzip_gather_kernel(
     if (unzipped_row_idx < 0) continue;
 
     unzipped_row_idx -= offset;
-    index_unzipped[unzipped_row_idx] = row;
     if constexpr (has_scale) {
-      vectorized_memcpy(x_scale + row * scale_length,
-                        x_scale_unzipped + unzipped_row_idx * scale_length,
-                        scale_length);
+      try_vectorized_memcpy(x_scale + row * scale_length,
+                            x_scale_unzipped + unzipped_row_idx * scale_length,
+                            scale_length);
     }
     vectorized_memcpy(x + row * token_length,
                       x_unzipped + unzipped_row_idx * token_length,
@@ -107,32 +106,39 @@ std::vector<paddle::Tensor> tokens_unzip_gather(
   int block = 1024;
   int grid = LimitGridDim(zipped_rows);
 
-#define LAUNCH_TOKENS_UNZIP_GATHER_KERNEL_IMPL(__cpp_dtype, __has_scale) \
-  do {                                                                   \
-    tokens_unzip_gather_kernel<__cpp_dtype, __has_scale>                 \
-        <<<grid, block, 0, stream>>>(                                    \
-            x.data<__cpp_dtype>(),                                       \
-            __has_scale ? x_scale.get().data<float>() : nullptr,         \
-            zipped_expertwise_rowmap.data<int>(),                        \
-            x_unzipped.data<__cpp_dtype>(),                              \
-            __has_scale ? x_scale_unzipped.data<float>() : nullptr,      \
-            index_unzipped.data<int64_t>(),                              \
-            tokens_per_expert[expert_id],                                \
-            zipped_rows,                                                 \
-            hidden_size,                                                 \
-            quanted_hidden_size,                                         \
-            num_experts,                                                 \
-            expert_id,                                                   \
-            offset);                                                     \
+#define LAUNCH_TOKENS_UNZIP_GATHER_KERNEL_IMPL(                             \
+    __cpp_dtype, __scale_dtype, __has_scale)                                \
+  do {                                                                      \
+    tokens_unzip_gather_kernel<__cpp_dtype, __scale_dtype, __has_scale>     \
+        <<<grid, block, 0, stream>>>(                                       \
+            x.data<__cpp_dtype>(),                                          \
+            __has_scale ? x_scale.get().data<__scale_dtype>() : nullptr,    \
+            zipped_expertwise_rowmap.data<int>(),                           \
+            x_unzipped.data<__cpp_dtype>(),                                 \
+            __has_scale ? x_scale_unzipped.data<__scale_dtype>() : nullptr, \
+            index_unzipped.data<int64_t>(),                                 \
+            tokens_per_expert[expert_id],                                   \
+            zipped_rows,                                                    \
+            hidden_size,                                                    \
+            quanted_hidden_size,                                            \
+            num_experts,                                                    \
+            expert_id,                                                      \
+            offset);                                                        \
   } while (0)
 
-#define LAUNCH_TOKENS_UNZIP_GATHER_KERNEL(__cpp_dtype)            \
-  do {                                                            \
-    if (has_scale) {                                              \
-      LAUNCH_TOKENS_UNZIP_GATHER_KERNEL_IMPL(__cpp_dtype, true);  \
-    } else {                                                      \
-      LAUNCH_TOKENS_UNZIP_GATHER_KERNEL_IMPL(__cpp_dtype, false); \
-    }                                                             \
+#define LAUNCH_TOKENS_UNZIP_GATHER_KERNEL(__cpp_dtype)                    \
+  do {                                                                    \
+    if (has_scale) {                                                      \
+      if (x_scale.get().dtype() == paddle::DataType::FLOAT32) {           \
+        LAUNCH_TOKENS_UNZIP_GATHER_KERNEL_IMPL(__cpp_dtype, float, true); \
+      } else if (x_scale.get().dtype() == paddle::DataType::INT32) {      \
+        LAUNCH_TOKENS_UNZIP_GATHER_KERNEL_IMPL(__cpp_dtype, int, true);   \
+      } else {                                                            \
+        PD_CHECK(false, "Unsupported scale dtype");                       \
+      }                                                                   \
+    } else {                                                              \
+      LAUNCH_TOKENS_UNZIP_GATHER_KERNEL_IMPL(__cpp_dtype, float, false);  \
+    }                                                                     \
   } while (0)
 
   if (grid > 0) {

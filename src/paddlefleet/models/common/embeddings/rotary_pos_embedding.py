@@ -32,7 +32,7 @@ from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 logger = logging.getLogger(__name__)
 
 
-__all__ = ["RotaryEmbedding"]
+__all__ = ["RotaryEmbedding", "MultimodalRotaryEmbedding"]
 
 
 class RotaryEmbedding(nn.Layer):
@@ -239,3 +239,111 @@ class RotaryEmbedding(nn.Layer):
             rotary_seq_len *= self.cp_group.world_size
 
         return rotary_seq_len
+
+
+class MultimodalRotaryEmbedding(nn.Layer):
+    """Multimodal Rotary Embedding for language model.
+    Based on https://github.com/alibaba/Pai-Megatron-Patch/blob/
+    efa5a752e845267936db9ae7df1b6aba92e9ff9a/megatron_patch/model/qwen2_vl/rotary_pos_embedding.py
+    Copyright (c) 2025 alibaba/Pai-Megatron-Patch. Apache 2.0 license.
+
+    Args:
+        head_dim (int): Projection weights dimension in multi-head attention. Obtained
+            from transformer config
+        rotary_percent (float): Percent of rotary dimension to use for rotary position
+            embeddings.
+        rotary_interleaved (bool, optional): If True, interleaved rotary position embeddings.
+            Defaults to False.
+        seq_len_interpolation_factor (float, optional): scale of linearly interpolating RoPE
+            for longer sequences. The value must be a float larger than 1.0. Defaults to None
+        rotary_base (int, optional): Base period for rotary position embeddings. Defaults to
+            10000.
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        rotary_percent: float,
+        rotary_interleaved: bool = False,
+        seq_len_interpolation_factor: float | None = None,
+        rotary_base: int = 10000,
+        rope_scaling: bool = False,
+        cp_group: paddle.distributed.communication.group.Group | None = None,
+    ) -> None:
+        super().__init__()
+
+        if rotary_percent < 1.0:
+            head_dim = int(head_dim * rotary_percent)
+        self.rotary_interleaved = rotary_interleaved
+
+        self.seq_len_interpolation_factor = seq_len_interpolation_factor
+        self.inv_freq = 1.0 / (
+            rotary_base
+            ** (paddle.arange(0, head_dim, 2, dtype=paddle.float32) / head_dim)
+        )
+
+        self.cp_group = (
+            cp_group
+            if cp_group is not None
+            else parallel_state.get_context_parallel_group(
+                check_initialized=False
+            )
+        )
+
+    def forward(
+        self, position_ids: paddle.Tensor, mrope_section: list[int]
+    ) -> Tensor:
+        """Forward pass of multimodal RoPE embedding.
+
+        Args:
+            position_ids (Paddle.Tensor): A position_id tensor with shape [3, batchsize, seqlens]
+            mrope_section (list[int]): Multimodal rope section is for channel dimension of temporal,
+                height and width in rope calculation.
+
+        Returns:
+            Tensor: Embeddings after applying RoPE.
+        """
+        assert mrope_section is not None, "Please provide mrope_section"
+
+        seq = position_ids.to(
+            device=self.inv_freq.place, dtype=self.inv_freq.dtype
+        )
+
+        if self.seq_len_interpolation_factor is not None:
+            seq *= 1 / self.seq_len_interpolation_factor
+
+        # shape (3, bs, dim, 1)
+        inv_freq_expanded = self.inv_freq[None, None, :, None].expand(
+            3, seq.shape[1], -1, 1
+        )
+        # shape (3, bs, 1, seq_length)
+        seq_expanded = seq[:, :, None, :].float()
+        # shape (3, bs, seq_length, dim)
+        freqs = (inv_freq_expanded @ seq_expanded).transpose(2, 3)
+        # first part even vector components, second part odd vector components,
+        #  2 * dim in dimension size
+        if not self.rotary_interleaved:
+            emb = paddle.cat(
+                (freqs, freqs), axis=-1
+            )  # shape (3, bs, seq_length, 2 * dim)
+        else:
+            bs = freqs.shape[1]
+            emb = paddle.stack(
+                (freqs.view(3, bs, -1, 1), freqs.view(3, bs, -1, 1)), axis=-1
+            ).view(3, bs, freqs.shape[0], -1)
+
+        # generate freqs with mrope_section
+        # shape (bs, seq_length, 2 * dim)
+        mrope_section = mrope_section * 2
+        # concat ([bs,1,seqlen,mrope_section[i]],...)
+        emb = paddle.cat(
+            [m[i % 3] for i, m in enumerate(emb.split(mrope_section, axis=-1))],
+            axis=-1,
+        )
+
+        # TODO: self.cp_group.world_size --> transformer_config.context_parallel_size
+        # rotary_seq_len *= transformer_config.context_parallel_size
+        if self.cp_group is not None and self.cp_group.world_size > 1:
+            emb *= self.cp_group.world_size
+
+        return emb

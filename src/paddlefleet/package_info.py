@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "0.0.1a0"
-__package_name__ = "fleet_core"
-__contact_names__ = "PadldePaddle"
+
+from .version import __version__ as __version__, commit as commit
+
+__package_name__ = "paddlefleet"
+__contact_names__ = "PaddlePaddle"
 __contact_emails__ = "Paddle-better@baidu.com"
 __homepage__ = (
     "https://www.paddlepaddle.org.cn/documentation/guides/index_cn.html"
