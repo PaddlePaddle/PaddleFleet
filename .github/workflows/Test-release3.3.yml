@@ -184,17 +184,38 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
           pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/single_card_test.sh
           single_card_exit_code=$?
+          ls -a /paddle/coveragedata/
+          coverage combine
+          coverage report -m
+          coverage xml -o /paddle/coveragedata/coverage.xml
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
             exit 1
           else
             echo -e "\033[32mSingle card test succeeded.\033[0m"
           fi
+          '
+
+      - name: Single card Coverage Upload to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/coveragedata/coverage.xml coverage.xml
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/single-card"
+          python ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
@@ -272,14 +293,35 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           export WITH_COVERAGE=ON
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
+          ls -a /paddle/coveragedata/
+          coverage combine
+          coverage xml -o /paddle/coveragedata/coverage.xml
+          coverage report -m
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed.\033[0m"
             exit 1
           else
             echo -e "\033[32mMulti card test succeeded.\033[0m"
           fi
+          '
+
+      - name: Multi-card Coverage Upload to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/coveragedata/coverage.xml coverage.xml
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/multi-card"
+          python ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
@@ -403,8 +445,15 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-single
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-single
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
+          coverage report -m
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
             exit 1
@@ -418,14 +467,37 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-qwen
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen/coverage.xml
+          coverage report -m
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
+          '
+
+      - name: H20 Coverage Upload to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cd /workspace/PaddleFleet
+          cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage-single.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen/coverage.xml coverage-qwen.xml
+          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
+          target_path_qwen="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-qwen"
+          python ${push_file} coverage-single.xml ${target_path_single}
+          python ${push_file} coverage-qwen.xml ${target_path_qwen}
           '
 
       - name: Terminate and delete the container
@@ -524,8 +596,16 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-pt
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-pt/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-pt
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -539,8 +619,15 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-sft
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-sft/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-sft
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -554,8 +641,16 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-lora
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-lora/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
           glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-lora
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -569,8 +664,16 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-dpo
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-dpo/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-dpo
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
             exit 1
@@ -584,8 +687,16 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-fp8
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-fp8/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-fp8
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -599,8 +710,16 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-grouped-gemm/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
             exit 1
@@ -614,7 +733,15 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-pt
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-pt/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-pt
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml
+          coverage report -m
           '
 
       - name: Qwen sft
@@ -622,7 +749,15 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-sft
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-sft/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-sft
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml
+          coverage report -m
           '
 
       - name: Qwen lora
@@ -630,7 +765,44 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-pt
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-lora/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-lora
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml
+          coverage report -m
+          '
+
+      - name: H20 Coverage Upload to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cd /workspace/PaddleFleet
+          cp /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml coverage-multi-pt.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml coverage-multi-sft.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml coverage-multi-lora.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml coverage-multi-grouped-gemm.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml coverage-multi-dpo.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml coverage-qwen-multi-pt.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
+          target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
+          python ${push_file} coverage-multi-pt.xml ${target_path_multi}
+          python ${push_file} coverage-multi-sft.xml ${target_path_multi}
+          python ${push_file} coverage-multi-lora.xml ${target_path_multi}
+          python ${push_file} coverage-multi-fp8.xml ${target_path_multi}
+          python ${push_file} coverage-multi-grouped-gemm.xml ${target_path_multi}
+          python ${push_file} coverage-multi-dpo.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-multi-pt.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-multi-sft.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-multi-lora.xml ${target_path_multi}
           '
 
       - name: Terminate and delete the container
@@ -727,8 +899,14 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-pt/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt_a100.sh
           glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-pt
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-pt/coverage.xml
+          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -737,27 +915,19 @@ jobs:
           fi
           '
 
-      # - name: GLM4.5 sft+lora
-      #   run: |
-      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
-      #     source /root/proxy
-      #     source /root/proxy
-      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-sft/.coverage
-      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-      #     bash -x PaddleFleet/ci/integration_test/glm45_sft_a100.sh
-      #     glm45_exit_code=$?
-      #     ls -a /workspace/PaddleFleet/coveragedata-sft
-      #     source /workspace/PaddleFleet/.venv/bin/activate
-      #     uv run coverage combine
-      #     uv run coverage xml -o /workspace/PaddleFleet/coveragedata-sft/coverage.xml
-      #     uv run coverage report -m
-      #     if [[ "$glm45_exit_code" != "0" ]]; then
-      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-      #       exit 1
-      #     else
-      #       echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-      #     fi
-      #     '
+      - name: A100 Coverage Upload to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cd /workspace/PaddleFleet
+          cp /workspace/PaddleFleet/coveragedata-pt/coverage.xml coverage-a-pt.xml
+          # cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-a-sft.xml
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
+          python ${push_file} coverage-a-pt.xml ${target_path}
+          '
 
       - name: Terminate and delete the container
         if: ${{ always() }}
@@ -765,3 +935,102 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
+
+  coverage_check:
+    name: Coverage Upload And Check
+    needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, check-bypass]
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_REPO_NAME: ${{ github.repository }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Fetch base branch
+        run: |
+          echo "Fetching base branch: ${{ github.event.pull_request.base.ref }}"
+          git fetch origin origin/${{ github.event.pull_request.base.ref }}...HEAD
+      - name: coverage file download
+        shell: bash
+        run: |
+          coverage_configs="
+          multi_coverage.xml:multi-card/coverage.xml
+          single_coverage.xml:single-card/coverage.xml
+          h20_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
+          h20_multi_sft_coverage.xml:h20-multi/coverage-multi-sft.xml
+          h20_multi_lora_coverage.xml:h20-multi/coverage-multi-lora.xml
+          h20_multi_dpo_coverage.xml:h20-multi/coverage-multi-dpo.xml
+          h20_multi_fp8_coverage.xml:h20-multi/coverage-multi-fp8.xml
+          h20_multi_grouped_gemm_coverage.xml:h20-multi/coverage-multi-grouped-gemm.xml
+          h20_single_coverage.xml:h20-single/coverage-single.xml
+          h20_qwen_coverage.xml:h20-qwen/coverage-qwen.xml
+          a100_pt_coverage.xml:a100/coverage-a-pt.xml
+          h20_qwen_multi_pt_coverage.xml:h20-multi/coverage-qwen-multi-pt.xml
+          h20_qwen_multi_sft_coverage.xml:h20-multi/coverage-qwen-multi-sft.xml
+          h20_qwen_multi_lora_coverage.xml:h20-multi/coverage-qwen-multi-lora.xml
+          "
+          base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
+
+          echo "$coverage_configs" | while IFS= read -r config; do
+            if [ -n "$config" ]; then
+                filename="${config%%:*}"
+                filepath="${config#*:}"
+                wget "${base_url}/${filepath}" -O "$filename" --no-proxy
+                sed -i "s|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|" "$filename"
+            fi
+          done
+          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD  --unified=0 > diff.txt
+          echo "=== DIFF FILE ==="
+          cat diff.txt
+          echo "================="
+          python -m pip install diff-cover
+          COVERAGE_EXIT_CODE=0
+          diff-cover multi_coverage.xml single_coverage.xml h20_multi_pt_coverage.xml h20_multi_sft_coverage.xml h20_multi_lora_coverage.xml h20_multi_dpo_coverage.xml h20_multi_fp8_coverage.xml h20_multi_grouped_gemm_coverage.xml \
+          h20_single_coverage.xml h20_qwen_coverage.xml a100_pt_coverage.xml h20_qwen_multi_pt_coverage.xml h20_qwen_multi_sft_coverage.xml h20_qwen_multi_lora_coverage.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
+          exit ${COVERAGE_EXIT_CODE}
+
+      - name: filter coverage files and remove backup files
+        if: always()
+        run: |
+          echo "=== CHECKING COVERAGE FILES ==="
+
+          COVERAGE_FILES=(
+            "multi_coverage.xml"
+            "single_coverage.xml"
+            "h20_multi_pt_coverage.xml"
+            "h20_multi_sft_coverage.xml"
+            "h20_multi_lora_coverage.xml"
+            "h20_multi_dpo_coverage.xml"
+            "h20_multi_fp8_coverage.xml"
+            "h20_multi_grouped_gemm_coverage.xml"
+            "h20_qwen_multi_pt_coverage.xml"
+            "h20_qwen_multi_sft_coverage.xml"
+            "h20_qwen_multi_lora_coverage.xml"
+            "h20_single_coverage.xml"
+            "h20_qwen_coverage.xml"
+            "a100_pt_coverage.xml"
+          )
+
+          for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
+            python ci/filter_coverage.py "$COVERAGE_FILE" diff.txt
+            BACKUP_FILE="${COVERAGE_FILE}.backup"
+            if [ -f "$BACKUP_FILE" ]; then
+              rm -f "$BACKUP_FILE"
+              echo "Removed backup: $BACKUP_FILE"
+            fi
+          done
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_pt_coverage.xml,./h20_multi_sft_coverage.xml,./h20_multi_lora_coverage.xml,./h20_multi_dpo_coverage.xml,./h20_qwen_multi_pt_coverage.xml,./h20_qwen_multi_sft_coverage.xml,./h20_qwen_multi_lora_coverage.xml,./h20_multi_fp8_coverage.xml,./h20_multi_grouped_gemm_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_pt_coverage.xml
+          flags: coverage_combine
+          name: "${{ env.TASK }}-${{ github.run_id }}"
+          fail_ci_if_error: true
+          verbose: true
