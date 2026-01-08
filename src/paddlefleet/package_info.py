@@ -19,7 +19,7 @@ except ModuleNotFoundError:
 
 __version__ = "0.0.1a0"
 __package_name__ = "fleet_core"
-__contact_names__ = "PadldePaddle"
+__contact_names__ = "PaddlePaddle"
 __contact_emails__ = "Paddle-better@baidu.com"
 __homepage__ = (
     "https://www.paddlepaddle.org.cn/documentation/guides/index_cn.html"
