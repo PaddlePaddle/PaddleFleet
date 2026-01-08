@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+try:
+    from ._version import __git_version__ as __git_version__
+except ModuleNotFoundError:
+    __git_version__ = "unknown"
+
 __version__ = "0.0.1a0"
 __package_name__ = "fleet_core"
 __contact_names__ = "PadldePaddle"

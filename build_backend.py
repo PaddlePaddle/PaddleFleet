@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import subprocess
+from pathlib import Path
+
 from setuptools import build_meta as orig
 
 from build_utils import (
@@ -21,6 +25,46 @@ from build_utils import (
     check_submodule_updated,
     get_cuda_version,
 )
+
+_root = Path(__file__).parent.resolve()
+
+
+def is_git_repo():
+    return (_root / ".git").is_dir()
+
+
+def get_git_commit_hash(cwd: Path | None, length: int = 10) -> str:
+    try:
+        cmd = ["git", "rev-parse", f"--short={length}", "HEAD"]
+        return subprocess.check_output(cmd, cwd=cwd).strip().decode("utf-8")
+    except Exception:
+        return "unknown"
+
+
+def _generate_git_commit_hash_info() -> str | None:
+    # Get git info
+    git_commit_hash = get_git_commit_hash(_root)
+
+    # Create version info in the source tree
+    package_dir = Path(__file__).parent / "src" / "paddlefleet"
+    _version_file = package_dir / "_version.py"
+
+    # If file exists and not in git repo (installing from sdist), keep existing file
+    if _version_file.exists() and not is_git_repo():
+        logging.info(
+            "The _version file already exists (not in git repo), keeping it"
+        )
+        return
+
+    # In git repo (editable) or file doesn't exist, create/update it
+    with open(_version_file, "w") as f:
+        f.write('"""Generate version info file with git metadata."""\n')
+        f.write(f'__git_version__ = "{git_commit_hash}"\n')
+    logging.info(f"Created _version file with version {git_commit_hash}")
+    return git_commit_hash
+
+
+_generate_git_commit_hash_info()
 
 cuda_major, cuda_minor = get_cuda_version()
 if cuda_major < 12:
