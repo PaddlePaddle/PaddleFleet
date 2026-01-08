@@ -187,7 +187,6 @@ class GPTEmbedding(FleetLayer):
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,
         }
-        print("gpt_embedding_output ", preproc_output)
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:
                 preproc_output.pop(key)
