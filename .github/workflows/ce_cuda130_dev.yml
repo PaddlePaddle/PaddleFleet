@@ -589,7 +589,7 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl--index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           python -c "import paddle; print(paddle.version.commit)"
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
