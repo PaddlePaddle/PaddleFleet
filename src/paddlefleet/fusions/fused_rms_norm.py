@@ -25,15 +25,10 @@ from paddlefleet.transformer import TransformerConfig
 
 HAVE_PERSIST_LAYER_NORM = False
 
-try:
-    from paddle.incubate.nn.functional.fused_layer_norm import fused_layer_norm
-
-    HAVE_FUSED_LAYER_NORM = True
-except ImportError:
-    HAVE_FUSED_LAYER_NORM = False
+from paddle.incubate.nn.functional.fused_rms_norm import fused_rms_norm
 
 
-class FusedLayerNorm(paddle.nn.Layer):
+class FusedRmsNorm(paddle.nn.Layer):
     """Layer Norm, fused into a single CUDA kernel.
 
     Args:
@@ -59,59 +54,19 @@ class FusedLayerNorm(paddle.nn.Layer):
         self,
         config: TransformerConfig,
         hidden_size: int,
-        eps: float = 1e-5,
-        persist_layer_norm: bool = True,
+        eps: float = 1e-6,
+        persist_layer_norm: bool = False,
         zero_centered_gamma: bool = False,
-        normalization: str = "LayerNorm",  # included to match TE interface
+        normalization: str = "RMSNorm",  # included to match TE interface
     ):
         super().__init__()
 
         self.config = config
 
         self.zero_centered_gamma = self.config.layernorm_zero_centered_gamma
-        assert self.config.normalization == "LayerNorm", (
-            f"({self.config.normalization}) is not supported in FusedLayerNorm"
+        assert self.config.normalization == "RMSNorm", (
+            f"({self.config.normalization}) is not supported in FusedRmsNorm"
         )
-
-        # List of hiddens sizes supported in the persistent layer norm kernel
-        # If the hidden size is not supported, fall back to the non-persistent
-        # kernel.
-        persist_ln_hidden_sizes = [
-            1024,
-            1536,
-            2048,
-            2304,
-            3072,
-            3840,
-            4096,
-            5120,
-            6144,
-            8192,
-            10240,
-            12288,
-            12800,
-            15360,
-            16384,
-            18432,
-            20480,
-            24576,
-            25600,
-            30720,
-            32768,
-            40960,
-            49152,
-            65536,
-        ]
-        persist_layer_norm = self.config.persist_layer_norm
-        if (
-            hidden_size not in persist_ln_hidden_sizes
-            or not HAVE_PERSIST_LAYER_NORM
-        ):
-            persist_layer_norm = False
-
-        if not persist_layer_norm and not HAVE_FUSED_LAYER_NORM:
-            # TODO: Add paddle only layer norm
-            raise ValueError("Apex must be installed to use FusedLayerNorm.")
 
         if isinstance(hidden_size, numbers.Integral):
             hidden_size = (hidden_size,)
@@ -166,12 +121,13 @@ class FusedLayerNorm(paddle.nn.Layer):
                 + ", but got input shape "
                 + str(input_shape)
             )
-        output = fused_layer_norm(
-            input,
-            weight.to(dtype="float32"),
-            self.bias.to(dtype="float32"),
+        output = fused_rms_norm(
+            input.cast("bfloat16"),
+            weight.cast("bfloat16"),
+            self.bias.cast("bfloat16"),
             self.eps,
             begin_norm_axis=begin_norm_axis,
         )
-
-        return output[0]
+        if isinstance(output, tuple):
+            output = output[0]
+        return output

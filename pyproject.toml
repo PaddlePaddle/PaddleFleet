@@ -69,6 +69,7 @@ include = ["paddlefleet*"]
 
 [tool.setuptools.dynamic]
 readme = { file = "README.md", content-type = "text/markdown" }
+version = { attr = "paddlefleet.version.__version__" }
 
 [dependency-groups]
 test = [
