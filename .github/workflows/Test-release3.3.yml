@@ -939,7 +939,7 @@ jobs:
 
   coverage_check:
     name: Coverage Upload And Check
-    needs: [single_card_test, check-bypass]
+    needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, check-bypass]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on: ubuntu-latest
     env:
@@ -955,11 +955,6 @@ jobs:
       - name: coverage file download
         shell: bash
         run: |
-          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD  --unified=0 > diff.txt
-          echo "=== DIFF FILE ==="
-          cat diff.txt
-          echo "================="
-          coverage_configs="
           multi_coverage.xml:multi-card/coverage.xml
           single_coverage.xml:single-card/coverage.xml
           h20_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
