@@ -29,15 +29,15 @@ defaults:
 
 jobs:
   publish-wheel:
-    name: Publish wheel nightly (${{ matrix.CUDA_VERSION }}, ${{ matrix.python_version }})
+    name: Publish wheel nightly (${{ matrix.CUDA_VERSION }}, python${{ matrix.python_version }})
     if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
       group: GZ_BD-CPU
     strategy:
       fail-fast: false
       matrix:
-        python_version: [3.10, 3.11, 3.12, 3.13, 3.9]
-        include:
+        python_version: ["3.10", "3.11", "3.12", "3.13", "3.9"]
+        cuda:
           - {CUDA_VERSION: CUDA12.6, IMAGE_TAG: cuda12.6-cudnn9.5-trt10.5-gcc11, bos_CUDA: cu126}
           - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129}
           - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
