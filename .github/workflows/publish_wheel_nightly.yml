@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  BRANCH: ${{ github.ref_name }}
+  BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
 
 defaults:
   run:
@@ -35,7 +35,7 @@ jobs:
     name: Clone PaddleFleet
     uses: ./.github/workflows/_clone.yml
     with:
-      clone_dir: ${{ github.ref_name }}
+      clone_dir: $BRANCH
 
   publish-wheel:
     name: Publish wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
