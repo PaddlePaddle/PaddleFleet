@@ -73,16 +73,31 @@ def _prepare_ecosystem(use_symlinks: bool):
         lib.install(use_symlinks=use_symlinks)
 
 
+def get_cuda_special_build_deps(cuda_major, cuda_minor):
+    deps = [
+        "paddlepaddle-gpu>=3.3.0.dev",
+    ]
+    if cuda_major == 12:
+        deps.append("nvidia-nvshmem-cu12>=3.3.9,!=3.5.*")  # for deep_ep build
+    elif cuda_major == 13:
+        deps.append("nvidia-nvshmem-cu13>=3.3.9,!=3.5.*")  # for deep_ep build
+    else:
+        raise ValueError(
+            f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
+        )
+    return deps
+
+
 def get_requires_for_build_wheel(config_settings=None):
-    return orig.get_requires_for_build_wheel(config_settings)
+    return get_cuda_special_build_deps(cuda_major, cuda_minor)
 
 
 def get_requires_for_build_sdist(config_settings=None):
-    return orig.get_requires_for_build_sdist(config_settings)
+    return []
 
 
 def get_requires_for_build_editable(config_settings=None):
-    return orig.get_requires_for_build_editable(config_settings)
+    return get_cuda_special_build_deps(cuda_major, cuda_minor)
 
 
 def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None):
