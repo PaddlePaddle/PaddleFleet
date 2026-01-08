@@ -1052,7 +1052,7 @@ requires-dist = [
 build = [
     { name = "packaging", specifier = ">=24.2" },
     { name = "pip" },
-    { name = "setuptools", specifier = ">=70.1.0" },
+    { name = "setuptools", specifier = ">=66.1.0" },
 ]
 ci = [
     { name = "bce-python-sdk" },
