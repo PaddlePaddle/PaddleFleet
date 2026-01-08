@@ -28,3 +28,6 @@ src/paddlefleet/ops/deep_ep
 src/paddlefleet/ops/deep_ep_cpp.so
 src/paddlefleet/ops/sonicmoe
 src/paddlefleet/ops/quack
+
+# Generated version files
+src/paddlefleet/version.py
