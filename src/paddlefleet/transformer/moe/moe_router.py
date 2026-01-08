@@ -501,11 +501,7 @@ class StandardMoERouter(nn.Layer):
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        topk_weight = (
-            scores.take_along_axis(topk_idx, axis=1)
-            if not self.training
-            else topk_weight
-        )
+        topk_weight = scores.take_along_axis(topk_idx, axis=1)
 
         return topk_weight, topk_idx
 
@@ -560,6 +556,11 @@ class TopKRouter(StandardMoERouter):
             )
 
         gates = self.gate_score_func(logits)
+        gates_ori = gates
+        if self.scoring_func == "sigmoid":
+            gates_ori = gates_ori / (
+                gates_ori.sum(axis=-1, keepdim=True) + 1e-20
+            )
 
         # top_gate: [B*S, K], top_idx: [B*S, K]
         top_gate, top_idx = self._call_topk_method(
@@ -601,7 +602,7 @@ class TopKRouter(StandardMoERouter):
         if self.config.router_aux_loss_coef:
             if self.routing_type == "seq_aux_loss":
                 l_aux = self._cal_seq_aux_loss(
-                    gates, self.num_experts_per_tok, mask, seq_len
+                    gates_ori, self.num_experts_per_tok, mask, seq_len
                 )
             else:
                 l_aux = self._cal_aux_loss(gates, mask)
