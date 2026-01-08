@@ -13,11 +13,12 @@
 # limitations under the License.
 
 try:
-    from ._version import __git_version__ as __git_version__
+    from .version import __version__ as __version__, commit as commit
 except ModuleNotFoundError:
-    __git_version__ = "unknown"
+    # Fallbacks for running directly from the source tree before _version.py is generated
+    commit = "unknown"
+    __version__ = "0.0.0"
 
-__version__ = "0.0.1a0"
 __package_name__ = "fleet_core"
 __contact_names__ = "PaddlePaddle"
 __contact_emails__ = "Paddle-better@baidu.com"

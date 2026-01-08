@@ -14,30 +14,6 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 import os
-import subprocess
-
-
-def get_version_from_txt():
-    version_file = os.path.join(os.path.dirname(__file__), "version.txt")
-    with open(version_file, "r") as f:
-        version = f.read().strip()
-    return version
-
-
-def custom_version_scheme(version):
-    base_version = get_version_from_txt()
-    date_str = (
-        subprocess.check_output(
-            ["git", "log", "-1", "--format=%cd", "--date=format:%Y%m%d"]
-        )
-        .decode()
-        .strip()
-    )
-    return f"{base_version}.dev{date_str}"
-
-
-def no_local_scheme(version):
-    return ""
 
 
 def change_pwd():
@@ -136,10 +112,6 @@ def setup_ops_extension():
     setup(
         name="paddlefleet._extensions.ops",
         ext_modules=[ext_module],
-        use_scm_version={
-            "version_scheme": custom_version_scheme,
-            "local_scheme": no_local_scheme,
-        },
         install_requires=cuda_dependencies,
     )
 
