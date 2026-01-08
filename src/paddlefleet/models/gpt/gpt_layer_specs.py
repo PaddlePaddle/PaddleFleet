@@ -228,12 +228,12 @@ def get_gpt_decoder_layers_spec(
     # Create the layer specs for the model.
     layer_specs = []
     for layer_number in range(config.num_hidden_layers):
-        real_layer_number = layer_number + config.remove_head_layers
-        if moe_layer_pattern[real_layer_number] == 1:
+        real_layer_number = layer_number + config.num_empty_layers_add_in_head
+        if moe_layer_pattern[layer_number] == 1:
             layer_specs.append(
                 moe_layer_spec_func(layer_number=real_layer_number)
             )
-        elif moe_layer_pattern[real_layer_number] == 0:
+        elif moe_layer_pattern[layer_number] == 0:
             layer_specs.append(
                 dense_layer_spec_func(layer_number=real_layer_number)
             )
@@ -301,7 +301,7 @@ def get_gpt_spec(
     rotary_base: int = 10000,
     rope_scaling: bool = False,
     parallel_output: bool = False,
-    share_embeddings_and_output_weights: bool = False,
+    tie_word_embeddings: bool = False,
 ):
     embedding_extra_kwargs = {
         "config": config,
@@ -311,8 +311,7 @@ def get_gpt_spec(
     }
 
     skip_weight_param_allocation = (
-        config.share_embeddings_and_output_weights
-        and config.pipeline_model_parallel_size == 1
+        config.tie_word_embeddings and config.pipeline_model_parallel_size == 1
     )
 
     language_embedding_spec = LayerSpec(layer=LanguageModelEmbedding)
@@ -338,7 +337,7 @@ def get_gpt_spec(
         layer=GPTModel,
         extra_kwargs={
             "config": config,
-            "share_embeddings_and_output_weights": share_embeddings_and_output_weights,
+            "tie_word_embeddings": tie_word_embeddings,
         },
         sublayers_spec=GPTSublayersSpec(
             embedding=LayerSpec(

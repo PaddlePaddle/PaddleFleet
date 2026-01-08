@@ -14,7 +14,19 @@
 
 from setuptools import build_meta as orig
 
-from build_utils import Artifact, EcosystemLibrary
+from build_utils import (
+    Artifact,
+    EcosystemLibrary,
+    check_patchelf_exists,
+    check_submodule_updated,
+    get_cuda_version,
+)
+
+cuda_major, cuda_minor = get_cuda_version()
+if cuda_major < 12:
+    raise ValueError(
+        f"CUDA version must be >= 12. Detected version: {cuda_major}.{cuda_minor}"
+    )
 
 LIBRARIES: list[EcosystemLibrary] = [
     EcosystemLibrary(
@@ -24,6 +36,31 @@ LIBRARIES: list[EcosystemLibrary] = [
             # Updated paths to point to the installation directory
             Artifact("deep_gemm", "deep_gemm"),
             Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
+        ],
+    ),
+    EcosystemLibrary(
+        name="DeepEP",
+        source_rel_path="third_party/DeepEP",
+        artifacts=[
+            Artifact("deep_ep", "deep_ep"),
+            Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
+        ],
+        extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
+        if (cuda_major == 12 and cuda_minor < 8)
+        else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0"},
+    ),
+    EcosystemLibrary(
+        name="sonic-moe",
+        source_rel_path="third_party/sonic-moe",
+        artifacts=[
+            Artifact("sonicmoe", "sonicmoe"),
+        ],
+    ),
+    EcosystemLibrary(
+        name="quack",
+        source_rel_path="third_party/quack",
+        artifacts=[
+            Artifact("quack", "quack"),
         ],
     ),
 ]
@@ -36,16 +73,31 @@ def _prepare_ecosystem(use_symlinks: bool):
         lib.install(use_symlinks=use_symlinks)
 
 
+def get_cuda_special_build_deps(cuda_major, cuda_minor):
+    deps = [
+        "paddlepaddle-gpu>=3.3.0.dev",
+    ]
+    if cuda_major == 12:
+        deps.append("nvidia-nvshmem-cu12>=3.3.9,!=3.5.*")  # for deep_ep build
+    elif cuda_major == 13:
+        deps.append("nvidia-nvshmem-cu13>=3.3.9,!=3.5.*")  # for deep_ep build
+    else:
+        raise ValueError(
+            f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
+        )
+    return deps
+
+
 def get_requires_for_build_wheel(config_settings=None):
-    return orig.get_requires_for_build_wheel(config_settings)
+    return get_cuda_special_build_deps(cuda_major, cuda_minor)
 
 
 def get_requires_for_build_sdist(config_settings=None):
-    return orig.get_requires_for_build_sdist(config_settings)
+    return []
 
 
 def get_requires_for_build_editable(config_settings=None):
-    return orig.get_requires_for_build_editable(config_settings)
+    return get_cuda_special_build_deps(cuda_major, cuda_minor)
 
 
 def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None):
@@ -63,6 +115,8 @@ def prepare_metadata_for_build_editable(
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+    check_patchelf_exists()  # for deep_ep_cpp.so to add-rpath
+    check_submodule_updated()
     _prepare_ecosystem(use_symlinks=False)
     return orig.build_wheel(
         wheel_directory, config_settings, metadata_directory
@@ -72,6 +126,8 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
 def build_editable(
     wheel_directory, config_settings=None, metadata_directory=None
 ):
+    check_patchelf_exists()  # for deep_ep_cpp.so to add-rpath
+    check_submodule_updated()
     _prepare_ecosystem(use_symlinks=True)
     return orig.build_editable(
         wheel_directory, config_settings, metadata_directory
@@ -79,4 +135,5 @@ def build_editable(
 
 
 def build_sdist(sdist_directory, config_settings=None):
+    check_submodule_updated()
     return orig.build_sdist(sdist_directory, config_settings)

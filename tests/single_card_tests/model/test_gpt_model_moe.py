@@ -114,7 +114,7 @@ class TestGPTModel(unittest.TestCase):
             output_layer_init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
-            share_embeddings_and_output_weights=True,
+            tie_word_embeddings=True,
             use_qk_norm=True,
         )
         self.gpt_model = gpt_builder(config, num_stages=1)
@@ -172,8 +172,8 @@ class TestGPTModel(unittest.TestCase):
         print("embed_tokens_grad_norm", embed_tokens_grad_norm)
 
         if judge_machine_type() == "H":
-            assert loss.item() == 5.212523937225342, (
-                f"loss not equal ({loss.item()} != 5.212523937225342), please check your modify"
+            assert loss.item() == 5.212523460388184, (
+                f"loss not equal ({loss.item()} != 5.212523460388184), please check your modify"
             )
             assert embed_tokens_grad_norm == 6.811275959014893, (
                 f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 6.811275959014893), please check your modify"

@@ -145,7 +145,7 @@ class TestPP(unittest.TestCase):
             attention_dropout=0.0,
             use_cpu_initialization=True,
             parallel_output=True,
-            share_embeddings_and_output_weights=True,
+            tie_word_embeddings=True,
             position_embedding_type="rope",
             rotary_percent=1.0,
             rotary_base=10000,
@@ -157,8 +157,8 @@ class TestPP(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             use_qk_norm=True,
-            num_layers_in_first_pipeline_stage=2,
-            num_layers_in_last_pipeline_stage=1,
+            num_empty_layers_add_in_head=1,
+            num_empty_layers_add_in_tail=2,
             pipeline_model_parallel_size=PP_DEGREE,
         )
 

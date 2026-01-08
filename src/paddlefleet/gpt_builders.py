@@ -39,7 +39,9 @@ def gpt_builder(config, **kwargs):
         transformer_layer_spec_func = _get_transformer_layer_spec_func(config)
         transformer_layers_spec = []
         for layer_number in range(config.num_hidden_layers):
-            real_layer_number = layer_number + config.remove_head_layers
+            real_layer_number = (
+                layer_number + config.num_empty_layers_add_in_head
+            )
             transformer_layers_spec.append(
                 transformer_layer_spec_func(layer_number=real_layer_number)
             )
@@ -67,13 +69,13 @@ def gpt_builder(config, **kwargs):
         )
 
     head_empty_layers_spec = []
-    for i in range(config.remove_head_layers):
+    for i in range(config.num_empty_layers_add_in_head):
         head_empty_layers_spec.append(
             LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
         )
 
     tail_empty_layers_spec = []
-    for i in range(config.remove_tail_layers):
+    for i in range(config.num_empty_layers_add_in_tail):
         tail_empty_layers_spec.append(
             LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
         )
@@ -85,7 +87,7 @@ def gpt_builder(config, **kwargs):
         tail_empty_layers_spec=tail_empty_layers_spec,
         mtp_layers_spec=mtp_layers_spec,
         vocab_size=config.vocab_size,
-        share_embeddings_and_output_weights=config.share_embeddings_and_output_weights,
+        tie_word_embeddings=config.tie_word_embeddings,
         max_sequence_length=config.max_sequence_length,
         position_embedding_type=config.position_embedding_type,
         rotary_percent=config.rotary_percent,
@@ -94,7 +96,15 @@ def gpt_builder(config, **kwargs):
         parallel_output=config.parallel_output,
     )
 
-    return build_layer(gpt_spec, loss_fn=LanguageLoss(config), **kwargs)
+    loss_fn = None
+    if "loss_fn" in kwargs:
+        loss_fn = kwargs.pop("loss_fn")
+
+    return build_layer(
+        gpt_spec,
+        loss_fn=LanguageLoss(config) if not loss_fn else loss_fn,
+        **kwargs,
+    )
 
 
 def _get_transformer_layer_spec_func(config):

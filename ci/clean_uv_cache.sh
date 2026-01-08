@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-readonly VERSION="1.6.0"
+day=$(date +%d)
 
-version=$(cpplint --version)
-
-if ! [[ $version == *"$VERSION"* ]]; then
-    pip install cpplint==1.6.0
+if [[ "$day" == "10" || "$day" == "20" || "$day" == "30" ]]; then
+    uv cache clean paddlepaddle-gpu
+    uv cache prune
+    dir="/root/.cache/uv/builds-v0"
+    if [ -d "$dir" ]; then
+        size=$(du -sBG "$dir" | awk '{print $1}' | sed 's/G//')
+        if [ "$size" -gt 30 ]; then
+            rm -rf "$dir"
+            echo "$dir has been deleted because its size was ${size}G."
+        fi
+    fi
 fi
-
-cpplint $@

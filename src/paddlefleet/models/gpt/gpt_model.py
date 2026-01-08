@@ -64,22 +64,22 @@ class GPTModel(PipelineLayer):
         **kwargs,
     ) -> None:
         self.config = kwargs["config"]
-        share_embeddings_and_output_weights = (
-            kwargs["share_embeddings_and_output_weights"]
+        tie_word_embeddings = (
+            kwargs["tie_word_embeddings"]
             and self.config.pipeline_model_parallel_size > 1
         )
         skip_weight_param_allocation = (
-            self.config.share_embeddings_and_output_weights
+            self.config.tie_word_embeddings
             and self.config.pipeline_model_parallel_size == 1
         )
         self._pipeline_name_mapping = None
         self._pp_to_single_mapping = None
         self._sequential_layers = self.get_layer_desc_list(
             sublayers_spec,
-            share_embeddings_and_output_weights,
+            tie_word_embeddings,
         )
         self.layers = self.get_sequential_layers()
-        del kwargs["share_embeddings_and_output_weights"]
+        del kwargs["tie_word_embeddings"]
         del kwargs["config"]
 
         topology = (
@@ -91,6 +91,7 @@ class GPTModel(PipelineLayer):
         super().__init__(
             layers=self.layers,
             topology=topology,
+            num_virtual_pipeline_stages=self.config.virtual_pipeline_model_parallel_size,
             **kwargs,
         )
 
@@ -102,9 +103,9 @@ class GPTModel(PipelineLayer):
                 if isinstance(layer, GPTLMHead):
                     layer.weight = shared_embed_weight
 
-    def get_layer_desc_list(self, spec, share_embeddings_and_output_weights):
+    def get_layer_desc_list(self, spec, tie_word_embeddings):
         layers = []
-        if share_embeddings_and_output_weights:
+        if tie_word_embeddings:
             self.add_sequential_layer(
                 layers,
                 SharedLayerDesc(
@@ -143,7 +144,7 @@ class GPTModel(PipelineLayer):
                 )
                 i += 1
 
-        if share_embeddings_and_output_weights:
+        if tie_word_embeddings:
             self.add_sequential_layer(
                 layers,
                 SharedLayerDesc(
@@ -189,7 +190,7 @@ class GPTModel(PipelineLayer):
         """
         return [x["layer"] for x in self._sequential_layers]
 
-    def get_sequential_name_prefixs(self):
+    def get_sequential_name_prefixes(self):
         """
         Retrieve name prefixes for all parallel layers in the sequential network.
 
@@ -233,7 +234,7 @@ class GPTModel(PipelineLayer):
                 and layer.layer_name == shared_layer_key
             ):
                 if self.get_stage_from_index(idx) == self._stage_id:
-                    return self.get_sequential_name_prefixs()[str(idx)]
+                    return self.get_sequential_name_prefixes()[str(idx)]
 
         # the prefix must be in the current stage, else raise error
         raise ValueError(
@@ -270,7 +271,7 @@ class GPTModel(PipelineLayer):
                 first_key[0].isdigit() and first_key[1].isdigit()
             )
 
-            prefixes = self.get_sequential_name_prefixs()
+            prefixes = self.get_sequential_name_prefixes()
             for k in state_dict_keys:
                 name_splited = k.split(".")
                 if use_virtual_pp_degree:
@@ -320,6 +321,43 @@ class GPTModel(PipelineLayer):
 
         return self._pipeline_name_mapping
 
+    def state_dict(self, *args, **kwargs):
+        """
+        Return a dictionary with Pipeline Stage mapping.
+        Args:
+            *args (tuple): Variable argument list passed to parent method.
+            **kwargs (dict): Optional keyword arguments passed to parent method.
+        Returns:
+            dict: Dictionary containing Pipeline Stage mapping.
+        """
+        state_dict = super().state_dict(*args, **kwargs)
+
+        if self._pipeline_name_mapping is None:
+            self._set_pipeline_name_mapping()
+        # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
+
+        for k in list(state_dict.keys()):
+            v = state_dict.pop(k)
+            state_dict[self._pp_to_single_mapping[k]] = v
+
+        return state_dict
+
+    def set_state_dict(self, state_dict, *args, **kwargs):
+        if self._pipeline_name_mapping is None:
+            self._set_pipeline_name_mapping()
+        assert len(self._pipeline_name_mapping) > 0, (
+            "The pipeline stage must have parameters!"
+        )
+
+        for k in list(state_dict.keys()):
+            v = state_dict.pop(k)
+            if k not in self._pipeline_name_mapping:
+                continue
+            state_dict[self._pipeline_name_mapping[k]] = v
+
+        ret = super().set_state_dict(state_dict, *args, **kwargs)
+        return ret
+
     def _check_shared_model_state(self):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
@@ -342,30 +380,6 @@ class GPTModel(PipelineLayer):
             if k != mapped_k:
                 missing_shared_keys[k] = mapped_k
         return missing_shared_keys
-
-    def state_dict(self, *args, **kwargs):
-        """
-        Return a dictionary with Pipeline Stage mapping.
-
-        Args:
-            *args (tuple): Variable argument list passed to parent method.
-            **kwargs (dict): Optional keyword arguments passed to parent method.
-
-        Returns:
-            dict: Dictionary containing Pipeline Stage mapping.
-
-        """
-        state_dict = super().state_dict(*args, **kwargs)
-
-        if self._pipeline_name_mapping is None:
-            self._set_pipeline_name_mapping()
-        # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
-
-        for k in list(state_dict.keys()):
-            v = state_dict.pop(k)
-            state_dict[self._pp_to_single_mapping[k]] = v
-
-        return state_dict
 
     def sharded_state_dict(self, *args, **kwargs):
         """
@@ -414,14 +428,29 @@ class GPTModel(PipelineLayer):
         return renamed_sharded_state_dict
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
-        for idx, layer in enumerate(self.run_function):
-            if isinstance(layer, TransformerLayer):
-                layer.fp8_quant_weight(
-                    batch_mode=batch_mode, quant_transpose=quant_transpose
-                )
+        if self._num_virtual_pipeline_stages > 1:
+            for idx, chunk in enumerate(self._model_chunks):
+                for idx, layer in enumerate(chunk):
+                    if isinstance(layer, TransformerLayer):
+                        layer.fp8_quant_weight(
+                            batch_mode=batch_mode,
+                            quant_transpose=quant_transpose,
+                        )
+        else:
+            for idx, layer in enumerate(self.run_function):
+                if isinstance(layer, TransformerLayer):
+                    layer.fp8_quant_weight(
+                        batch_mode=batch_mode, quant_transpose=quant_transpose
+                    )
 
     def use_fp8(self):
-        for idx, layer in enumerate(self.run_function):
-            if isinstance(layer, TransformerLayer) and layer.use_fp8():
-                return True
-        return False
+        if self._num_virtual_pipeline_stages > 1:
+            for idx, chunk in enumerate(self._model_chunks):
+                for idx, layer in enumerate(chunk):
+                    if isinstance(layer, TransformerLayer) and layer.use_fp8():
+                        return True
+        else:
+            for idx, layer in enumerate(self.run_function):
+                if isinstance(layer, TransformerLayer) and layer.use_fp8():
+                    return True
+            return False

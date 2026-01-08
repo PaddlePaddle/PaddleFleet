@@ -14,8 +14,6 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 import os
-import re
-import shutil
 import subprocess
 
 
@@ -49,35 +47,33 @@ def change_pwd():
         os.chdir(path)
 
 
+common_dependencies = [
+    "colorlog>=6.10.1",
+]
+
+
+def get_cuda_special_dependencies(cuda_major, cuda_minor):
+    deps = [
+        "paddlepaddle-gpu>=3.3.0.dev",
+        "triton",  # for deep_gemm, flashmask
+        "nvidia-cutlass-dsl==4.2.1",  # for sonic_moe
+        "filelock",  # for sonic_moe
+    ]
+    if cuda_major == 12:
+        deps.append("nvidia-nvshmem-cu12>=3.3.9,!=3.5.*")  # for deep_ep build
+    elif cuda_major == 13:
+        deps.append("nvidia-nvshmem-cu13>=3.3.9,!=3.5.*")  # for deep_ep build
+    else:
+        raise ValueError(
+            f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
+        )
+    return deps
+
+
 def setup_ops_extension():
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
-    try:
-        from wheel.bdist_wheel import bdist_wheel
-    except ImportError:
-        bdist_wheel = None
-
-    nvcc_path = shutil.which("nvcc")
-    if nvcc_path is None:
-        raise FileNotFoundError(
-            "nvcc command not found. Please make sure CUDA toolkit is installed and nvcc is in PATH."
-        )
-
-    result = subprocess.run(
-        ["nvcc", "--version"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    version_output = result.stdout
-
-    match = re.search(r"release (\d+)\.(\d+)", version_output)
-    if not match:
-        raise ValueError(
-            f"Cannot parse CUDA version from nvcc output:\n{version_output}"
-        )
-    cuda_major = int(match.group(1))
-    cuda_minor = int(match.group(2))
+    from build_utils import get_cuda_version
 
     # 定义 NVCC 编译参数
     nvcc_args = [
@@ -98,13 +94,16 @@ def setup_ops_extension():
         "-gencode=arch=compute_100,code=sm_100",
         "-DNDEBUG",
     ]
+    cuda_major, cuda_minor = get_cuda_version()
     if cuda_major < 12:
         raise ValueError(
             f"CUDA version must be >= 12. Detected version: {cuda_major}.{cuda_minor}"
         )
     if cuda_major == 12 and cuda_minor < 8:
         nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
-
+    cuda_dependencies = common_dependencies + get_cuda_special_dependencies(
+        cuda_major, cuda_minor
+    )
     ext_module = CUDAExtension(
         sources=[
             # cpp files
@@ -116,6 +115,7 @@ def setup_ops_extension():
             "./src/paddlefleet/_extensions/merge_subbatch_cast.cu",
             "./src/paddlefleet/_extensions/tokens_unzip_slice.cu",
             "./src/paddlefleet/_extensions/fuse_swiglu_scale.cu",
+            "./src/paddlefleet/_extensions/swiglu_kernel.cu",
         ],
         include_dirs=[
             os.path.join(os.getcwd(), "src/paddlefleet/_extensions"),
@@ -140,7 +140,7 @@ def setup_ops_extension():
             "version_scheme": custom_version_scheme,
             "local_scheme": no_local_scheme,
         },
-        setup_requires=["setuptools_scm"],
+        install_requires=cuda_dependencies,
     )
 
 

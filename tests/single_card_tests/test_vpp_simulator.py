@@ -78,9 +78,13 @@ class TestPPChunkRecorder(unittest.TestCase):
         pp_degree = 4  # Pipeline parallel degree
         vpp_degree = 4  # Virtual pipeline degree
         num_acc_steps = 16  # Gradient accumulation steps
-        num_hidden_layers = pp_degree * vpp_degree
-        remove_head_layers = 1  # Number of head layers to skip
-        remove_tail_layers = 1  # Number of tail layers to skip
+        num_empty_layers_add_in_head = 1  # Number of head layers to skip
+        num_empty_layers_add_in_tail = 1  # Number of tail layers to skip
+        num_hidden_layers = (
+            pp_degree * vpp_degree
+            - num_empty_layers_add_in_head
+            - num_empty_layers_add_in_tail
+        )
 
         # Initialize recorder with test configuration
         pp_chunk_recorder = PPChunkRecorder(
@@ -88,14 +92,16 @@ class TestPPChunkRecorder(unittest.TestCase):
             vpp_degree,
             num_acc_steps,
             num_hidden_layers,
-            remove_head_layers,
-            remove_tail_layers,
+            num_empty_layers_add_in_head,
+            num_empty_layers_add_in_tail,
         )
 
         # Simulate forward passes for all layers across a global_step
         for i in range(num_acc_steps):
             for j in range(num_hidden_layers):
-                pp_chunk_recorder.record_chunk_forward(j)
+                pp_chunk_recorder.record_chunk_forward(
+                    j + num_empty_layers_add_in_head
+                )
 
         # Verify each layer was executed exactly num_acc_steps times
         result = np.array(pp_chunk_recorder.acc_stamp)

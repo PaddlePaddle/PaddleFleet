@@ -47,13 +47,17 @@ class TransformerConfig(ModelParallelConfig):
     mtp_loss_scaling_factor: float = None
     """Weighting factor of Multi-Token Prediction (MTP) loss."""
 
-    num_layers_in_first_pipeline_stage: int = None
-    """Number of transformer layers on first pipeline stage.
-    None implies equal layer division across PP ranks."""
+    num_empty_layers_add_in_head: int = 0
+    """Number of EmptyLayer before the Decoder Layer.
+    num_empty_layers_add_in_head=2 Example:
+        EmptyLayer, EmptyLayer, Decoder, Dcoder, ...
+    0 implies equal layer division across PP ranks."""
 
-    num_layers_in_last_pipeline_stage: int = None
-    """Number of transformer layers on last pipeline stage.
-    None implies equal layer division across PP ranks."""
+    num_empty_layers_add_in_tail: int = 0
+    """Number of EmptyLayer after the Decoder Layer.
+    num_empty_layers_add_in_tail=2 Example:
+        ..., Decoder, Dcoder, EmptyLayer, EmptyLayer
+    0 implies equal layer division across PP ranks."""
 
     # Note: need to implement PipelineParallelLayerLayout and import
     # pipeline_model_parallel_layout: str | list | PipelineParallelLayerLayout = None
@@ -343,8 +347,12 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
+
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
+
+    moe_deep_gemm: bool = True
+    """Whether to use deep gemm. Only work when moe_grouped_gemm enabled."""
 
     ##################
     # Context Parallel
@@ -463,6 +471,8 @@ class TransformerConfig(ModelParallelConfig):
                 raise TypeError(
                     f"hidden_act must be str or callable, but get {type(value)}"
                 )
+        elif key == "dtype":
+            self.params_dtype = value
         else:
             setattr(self, key, value)
 
@@ -583,53 +593,3 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
-
-    def get_avg_num_layers(self):
-        assert (
-            self.num_hidden_layers
-            - self.num_layers_in_first_pipeline_stage
-            - self.num_layers_in_last_pipeline_stage
-        ) % self.pipeline_model_parallel_size, (
-            "Incorrect configuration, num_hidden_layers can not divided by stages except first/last stage"
-        )
-        remain_pp_size = self.pipeline_model_parallel_size
-        if remain_pp_size > 1:
-            if self.num_layers_in_first_pipeline_stage is not None:
-                remain_pp_size -= 1
-            if self.num_layers_in_last_pipeline_stage is not None:
-                remain_pp_size -= 1
-        assert remain_pp_size != 0, (
-            "Incorrect configuration, maybe both num_layers_in_first_pipeline_stage and num_layers_in_last_pipeline_stage are set in pp_degree=2"
-        )
-        avg_num_layers = (
-            self.num_hidden_layers
-            - self.num_layers_in_first_pipeline_stage
-            - self.num_layers_in_last_pipeline_stage
-        ) // remain_pp_size
-        return avg_num_layers
-
-    @property
-    def remove_head_layers(self):
-        if (
-            self.num_layers_in_first_pipeline_stage is None
-            or self.pipeline_model_parallel_size == 1
-        ):
-            return 0
-        avg_num_layers = self.get_avg_num_layers()
-        assert avg_num_layers >= self.num_layers_in_first_pipeline_stage, (
-            f"Incorrect configuration with {avg_num_layers=}, {self.num_layers_in_first_pipeline_stage=}"
-        )
-        return avg_num_layers - self.num_layers_in_first_pipeline_stage
-
-    @property
-    def remove_tail_layers(self):
-        if (
-            self.num_layers_in_last_pipeline_stage is None
-            or self.pipeline_model_parallel_size == 1
-        ):
-            return 0
-        avg_num_layers = self.get_avg_num_layers()
-        assert avg_num_layers >= self.num_layers_in_last_pipeline_stage, (
-            f"Incorrect configuration with {avg_num_layers=}, {self.num_layers_in_last_pipeline_stage}"
-        )
-        return avg_num_layers - self.num_layers_in_last_pipeline_stage

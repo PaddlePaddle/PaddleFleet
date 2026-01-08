@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
 import unittest
 
 
@@ -27,12 +26,10 @@ class TestOpsImport(unittest.TestCase):
         "tokens_zip_unique_add_subbatch",
         "fused_swiglu_scale",
         "fused_swiglu_scale_bwd",
+        "fused_swiglu_bwd",
     ]
 
     def setUp(self):
-        if "paddlefleet.ops" in sys.modules:
-            del sys.modules["paddlefleet.ops"]
-
         try:
             import paddlefleet.ops
 
@@ -73,16 +70,36 @@ class TestOpsImport(unittest.TestCase):
             )
 
 
-class TestDeeGEMMImport(unittest.TestCase):
+class TestDeepGEMMImport(unittest.TestCase):
     def test_deep_gemm_import(self):
+        import paddlefleet
         from paddlefleet.ops.deep_gemm import (  # noqa: F401
             cublaslt_gemm_tn,
             set_num_sms,
         )
 
+        print(paddlefleet.ops.deep_gemm)
+
     def test_error_import(self):
         with self.assertRaises(ImportError):
             from paddlefleet.ops.deep_gemm import xxxx  # noqa: F401
+
+
+class TestDeepEPImport(unittest.TestCase):
+    def test_deep_gemm_import(self):
+        import paddlefleet
+        from paddlefleet.ops.deep_ep import (  # noqa: F401
+            Buffer,
+            Config,
+            EventOverlap,
+            topk_idx_t,
+        )
+
+        print(paddlefleet.ops.deep_ep)
+
+    def test_error_import(self):
+        with self.assertRaises(ImportError):
+            from paddlefleet.ops.deep_ep import xxxx  # noqa: F401
 
 
 if __name__ == "__main__":
