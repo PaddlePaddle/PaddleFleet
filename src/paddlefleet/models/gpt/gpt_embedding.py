@@ -47,6 +47,7 @@ class GPTEmbedding(FleetLayer):
         rotary_percent: float = 1.0,
         rotary_base: int = 10000,
         rope_scaling: bool = False,
+        mrope_section: list[int] | None = None,
     ):
         super().__init__(config)
         self.embedding = build_layer(
@@ -57,6 +58,9 @@ class GPTEmbedding(FleetLayer):
             position_embedding_type=position_embedding_type,
         )
         self.rotary_pos_emb = None
+        self.multimodal_embedding = config.multimodal_embedding
+        self.mrope_section = mrope_section
+        self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
             self.rotary_pos_emb = build_layer(
                 sublayers_spec.rope_embedding,
@@ -86,15 +90,42 @@ class GPTEmbedding(FleetLayer):
 
         if decoder_input is None:
             decoder_input = self.embedding(
-                input_ids=input_ids, position_ids=position_ids
+                input_ids=input_ids,
+                position_ids=None
+                if self.multimodal_embedding
+                else position_ids,
             )
+            if self.multimodal_embedding:
+                image_embeds = dict_args.get("image_embeds", None)
+                video_embeds = dict_args.get("video_embeds", None)
+                if image_embeds is not None:
+                    image_mask, _ = self.get_placeholder_mask(
+                        input_ids,
+                        inputs_embeds=decoder_input,
+                        image_features=image_embeds,
+                    )
+                    decoder_input = decoder_input.masked_scatter(
+                        image_mask, image_embeds
+                    )
 
+                if video_embeds is not None:
+                    _, video_mask = self.get_placeholder_mask(
+                        input_ids,
+                        inputs_embeds=decoder_input,
+                        video_features=video_embeds,
+                    )
+                    decoder_input = decoder_input.masked_scatter(
+                        video_mask, video_embeds
+                    )
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
         rotary_pos_cos = None
         rotary_pos_sin = None
 
-        if self.rotary_pos_emb is not None:
+        if (
+            self.position_embedding_type == "rope"
+            and self.rotary_pos_emb is not None
+        ):
             rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
                 decoder_input, self.config, packed_seq_params
             )
@@ -103,6 +134,15 @@ class GPTEmbedding(FleetLayer):
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
             )
+        elif (
+            self.position_embedding_type == "mrope"
+            and self.rotary_pos_emb is not None
+        ):
+            rotary_pos_emb = self.rotary_pos_emb(
+                position_ids, self.mrope_section
+            )
+
+        if rotary_pos_emb is not None:
             if self.config.apply_rope_fusion:
                 rotary_pos_cos = paddle.cos(rotary_pos_emb)
                 rotary_pos_sin = paddle.sin(rotary_pos_emb)
@@ -123,5 +163,63 @@ class GPTEmbedding(FleetLayer):
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:
                 preproc_output.pop(key)
-
         return preproc_output
+
+    def get_placeholder_mask(
+        self,
+        input_ids: Tensor,
+        inputs_embeds: Tensor,
+        image_features: Tensor | None = None,
+        video_features: Tensor | None = None,
+    ):
+        """
+        Obtain the multimodal placeholder mask from the input and verify whether the number of placeholder tokens matches the length of the multimodal features.
+        If the lengths do not match, an error is thrown.
+        Args:
+            input_ids: Tensor of input token IDs```
+            inputs_embeds: input embedding tensor
+            image_features: Tensor of image features, optional```
+            video_features: Video feature tensor, optional
+        Returns:
+            tuple: (special_image_mask, special_video_mask) - Mask tensors for image and video tokens
+        """
+        if input_ids is None:
+            special_image_mask = inputs_embeds == self.embedding(
+                paddle.to_tensor(self.config.image_token_id, dtype="int64")
+            )
+            special_image_mask = special_image_mask.all(-1)
+            special_video_mask = inputs_embeds == self.embedding(
+                paddle.to_tensor(self.config.video_token_id, dtype="int64")
+            )
+            special_video_mask = special_video_mask.all(-1)
+        else:
+            special_image_mask = input_ids == self.config.image_token_id
+            special_video_mask = input_ids == self.config.video_token_id
+
+        n_image_tokens = special_image_mask.sum()
+        special_image_mask = special_image_mask.unsqueeze(-1).expand_as(
+            inputs_embeds
+        )
+        if (
+            image_features is not None
+            and inputs_embeds[special_image_mask].numel()
+            != image_features.numel()
+        ):
+            raise ValueError(
+                f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {image_features.shape[0]}"
+            )
+
+        n_video_tokens = special_video_mask.sum()
+        special_video_mask = special_video_mask.unsqueeze(-1).expand_as(
+            inputs_embeds
+        )
+        if (
+            video_features is not None
+            and inputs_embeds[special_video_mask].numel()
+            != video_features.numel()
+        ):
+            raise ValueError(
+                f"Videos features and video tokens do not match: tokens: {n_video_tokens}, features {video_features.shape[0]}"
+            )
+
+        return special_image_mask, special_video_mask

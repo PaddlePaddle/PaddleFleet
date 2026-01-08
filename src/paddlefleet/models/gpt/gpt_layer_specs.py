@@ -24,6 +24,7 @@ from paddlefleet.models.common.embeddings.language_model_embedding import (
     LanguageModelEmbedding,
 )
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+    MultimodalRotaryEmbedding,
     RotaryEmbedding,
 )
 from paddlefleet.models.gpt import GPTModel
@@ -327,6 +328,23 @@ def get_gpt_spec(
             **embedding_extra_kwargs,
             **rope_embedding_extra_kwargs,
         }
+    elif (
+        position_embedding_type == "mrope" and not config.multi_latent_attention
+    ):
+        rope_embedding_spec = LayerSpec(layer=MultimodalRotaryEmbedding)
+        rope_embedding_extra_kwargs = {
+            "rotary_percent": rotary_percent,
+            "rotary_base": rotary_base,
+            "rope_scaling": rope_scaling,
+            "mrope_section": config.mrope_section,
+        }
+        embedding_extra_kwargs = {
+            **embedding_extra_kwargs,
+            **rope_embedding_extra_kwargs,
+        }
+        assert config.mrope_section is not None, (
+            "mrope require mrope_section setting, but we got None from TransformerConfig"
+        )
 
     embedding_spec = GPTEmbeddingSpec(
         language_embedding=language_embedding_spec,
