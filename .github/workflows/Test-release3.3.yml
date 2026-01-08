@@ -955,6 +955,7 @@ jobs:
       - name: coverage file download
         shell: bash
         run: |
+          coverage_configs="
           multi_coverage.xml:multi-card/coverage.xml
           single_coverage.xml:single-card/coverage.xml
           h20_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
