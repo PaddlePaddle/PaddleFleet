@@ -67,4 +67,4 @@ jobs:
     name: Update precision formers
     needs: determine-whether-update
     if: needs.determine-whether-update.outputs.need_change == 'true'
-    uses: ./.github/workflows/publish_wheel_nightly.yml
+    uses: ./.github/workflows/precision_publish_wheel.yml

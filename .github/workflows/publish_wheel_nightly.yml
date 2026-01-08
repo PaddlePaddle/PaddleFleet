@@ -11,7 +11,11 @@ on:
           - publish-wheel
   schedule:
     - cron: '0 16 * * *'
-  workflow_call:
+  push:
+    branches:
+      - 'release/**'
+  pull_request:
+
 
 permissions: read-all
 
@@ -32,6 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        python_version: [3.10, 3.11, 3.12, 3.13, 3.9]
         include:
           - {CUDA_VERSION: CUDA12.6, IMAGE_TAG: cuda12.6-cudnn9.5-trt10.5-gcc11, bos_CUDA: cu126}
           - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129}
@@ -44,7 +49,7 @@ jobs:
       no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
     steps:
       - name: Check docker image and run container
-        if: github.event_name != 'push' || matrix.CUDA_VERSION == 'CUDA12.9'
+        # if: github.event_name == 'push'
         run: |
           docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:${{ matrix.IMAGE_TAG }}"
           docker pull $docker_image
@@ -69,8 +74,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /workspace
@@ -86,35 +91,25 @@ jobs:
       - name: Build wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
           git submodule update --init --recursive
           uv build --wheel
           '
 
-      - name: Upload wheel (and update precision)
+      - name: Upload wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
+          if
           python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.bos_CUDA }}/paddlefleet
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
-          if [[ ${{ github.event_name }} == 'push' ]]; then
-            export step="formers"
-            export AK=${{ secrets.AK }}
-            export SK=${{ secrets.SK }}
-            export GITHUB_TOKEN=${{ github.token }}
-            export COMMIT_ID=${{ github.sha }}
-            cd /workspace
-            source /root/proxy
-            git clone https://github.com/PaddlePaddle/PaddleFormers.git
-            bash -x /workspace/PaddleFormers/tests/integration_test/update_precision.sh
-          fi
           '
 
       - name: Cleanup
