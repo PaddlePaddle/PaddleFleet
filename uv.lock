@@ -368,7 +368,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
 ]
 wheels = [
     { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/exceptiongroup/exceptiongroup-1.3.1-py3-none-any.whl" },
@@ -1069,7 +1069,7 @@ test = [
 
 [[package]]
 name = "paddlepaddle-gpu"
-version = "3.4.0.dev20260105"
+version = "3.4.0.dev20260107"
 source = { registry = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/" }
 dependencies = [
     { name = "cuda-python", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1102,11 +1102,10 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp310-cp310-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp310-cp310-win_amd64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp311-cp311-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp312-cp312-linux_x86_64.whl" },
-    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260105-cp313-cp313-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260107-cp310-cp310-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260107-cp311-cp311-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260107-cp312-cp312-linux_x86_64.whl" },
+    { url = "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0.dev20260107-cp313-cp313-linux_x86_64.whl" },
 ]
 
 [[package]]
