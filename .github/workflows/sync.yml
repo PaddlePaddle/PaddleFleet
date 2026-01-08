@@ -46,7 +46,7 @@ jobs:
             nvidia/cuda:12.9.0-cudnn-devel-ubuntu22.04 \
             /bin/bash -c "
               apt-get update && \
-              apt-get install -y curl git && \
+              apt-get install -y curl git patchelf && \
               git config --global --add safe.directory /work && \
               curl -LsSf https://astral.sh/uv/install.sh | sh && \
               export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:/usr/local/cuda-12.9/targets/x86_64-linux/lib:$LD_LIBRARY_PATH  && \
