@@ -17,7 +17,6 @@ import os
 import subprocess
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
 from setuptools import build_meta as orig
 
 from build_utils import (
@@ -28,6 +27,7 @@ from build_utils import (
     get_cuda_version,
 )
 
+logger = logging.getLogger(__name__)
 _root = Path(__file__).parent.resolve()
 
 
