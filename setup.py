@@ -18,7 +18,7 @@ import os
 import shutil
 import subprocess
 
-from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
+from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 def get_version_from_txt():

@@ -80,7 +80,7 @@ test = [
 ]
 build = [
     "pip",
-    "setuptools>=70.1.0",
+    "setuptools>=66.1.0",
     "packaging>=24.2"
 ]
 linting = [
