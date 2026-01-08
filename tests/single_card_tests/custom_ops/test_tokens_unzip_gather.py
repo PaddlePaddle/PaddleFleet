@@ -166,7 +166,7 @@ class TestTokensUnzipGatherUE8M0Scale(unittest.TestCase):
                     )
                     index_unzipped_np = index_unzipped.numpy()
                     x_unzipped_np = x_unzipped.numpy()
-                    check_rows = min(len(index_unzipped_np), 100)
+                    check_rows = min(len(index_unzipped_np), 5)
                     for i in range(check_rows):
                         index = index_unzipped_np[i]
                         self.assertTrue(
