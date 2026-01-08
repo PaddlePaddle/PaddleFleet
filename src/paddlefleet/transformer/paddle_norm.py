@@ -16,7 +16,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import numpy as np
 import paddle
+from paddle.nn.functional import layer_norm
 
 try:
     from paddle.incubate.nn.functional.fused_rms_norm_ext import (
@@ -107,6 +109,51 @@ class RMSNorm(paddle.nn.Layer):
         mark_as_sequence_parallel_parameter(self.weight)
 
 
+class LayerNorm(paddle.nn.Layer):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        normalized_shape=None,
+        norm_eps=None,
+        input_is_parallel=False,
+        **kwargs,
+    ):
+        super().__init__()
+        self.normalized_shape = (
+            config.hidden_size if normalized_shape is None else normalized_shape
+        )
+        self.variance_epsilon = (
+            config.rms_norm_eps if norm_eps is None else norm_eps
+        )
+        self.weight = paddle.create_parameter(
+            shape=[self.normalized_shape],
+            dtype=paddle.get_default_dtype(),
+            default_initializer=paddle.nn.initializer.Constant(1.0),
+        )
+        param_shape = [np.prod(self.normalized_shape)]
+        self.bias = self.create_parameter(
+            shape=param_shape,
+            dtype=paddle.get_default_dtype(),
+            default_initializer=paddle.nn.initializer.Constant(0.0),
+            is_bias=True,
+        )
+        self.config = config
+        if input_is_parallel:
+            self.enable_sequence_parallel()
+
+    def forward(self, hidden_states: Tensor):
+        return layer_norm(
+            input,
+            normalized_shape=self.normalized_shape,
+            weight=self.weight,
+            bias=self.bias,
+            epsilon=self.variance_epsilon,
+        )
+
+    def enable_sequence_parallel(self):
+        mark_as_sequence_parallel_parameter(self.weight)
+
+
 class FusedRMSNorm(RMSNorm):
     def forward(self, hidden_states: Tensor):
         assert fused_rms_norm_ext is not None, (
@@ -127,6 +174,8 @@ class WrappedPaddleNorm:
     ):
         if config.normalization == "RMSNorm":
             norm_cls = RMSNorm
+        elif config.normalization == "LayerNorm":
+            norm_cls = LayerNorm
         else:
             raise Exception("Only RMSNorm for now.")
 
@@ -149,6 +198,8 @@ class WrappedFusedNorm:
     ):
         if config.normalization == "RMSNorm":
             norm_cls = FusedRMSNorm
+        elif config.normalization == "LayerNorm":
+            norm_cls = LayerNorm
         else:
             raise Exception("Only supports RMSNorm now.")
 
