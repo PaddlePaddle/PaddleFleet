@@ -56,7 +56,7 @@ except ImportError:
 
 
 try:
-    from paddle.incubate.fp8 import deep_gemm
+    from paddlefleet.ops import deep_gemm
 except:
     pass
 
@@ -144,7 +144,7 @@ def split_group_gemm(
 
         x_scale_tma_align = x_scale[start_idx:end_idx].T.contiguous().T
 
-        deep_gemm.gemm_fp8_fp8_bf16_nt(
+        deep_gemm.fp8_gemm_nt(
             (x_fp8[start_idx:end_idx], x_scale_tma_align),
             (w_fp8[i], w_scale[i]),
             gemm_out[start_idx:end_idx],
@@ -471,7 +471,7 @@ class ExpertsGroupGemmContiguousNode:
                     o1,
                 )
             else:
-                deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (x_fp8, x_scale),
                     (w1_t_quant, w1_t_scale),
                     o1,
@@ -599,7 +599,7 @@ class ExpertsGroupGemmContiguousNode:
                     o3,
                 )
             else:
-                deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (o2_fp8, o2_scale),
                     (w2_quant, w2_scale),
                     o3,
@@ -716,7 +716,7 @@ class ExpertsGroupGemmContiguousNode:
                     do2_s,
                 )
             else:
-                deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (unzipped_grad_fp8, unzipped_grad_scale),
                     (bw_w2_quant, bw_w2_scale),
                     do2_s,
@@ -831,7 +831,7 @@ class ExpertsGroupGemmContiguousNode:
                     dx,
                 )
             else:
-                deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+                paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (do1_fp8, do1_scale),
                     (bw_w1_quant, bw_w1_scale),
                     dx,
