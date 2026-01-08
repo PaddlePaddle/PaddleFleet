@@ -33,7 +33,7 @@ jobs:
   single_card_test:
     name: Unit test (single card)
     runs-on:
-      group: Fleet-H-single-card
+      group: H-Coverage
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -115,6 +115,7 @@ jobs:
     name: Unit test (multi-card)
     runs-on:
       group: Fleet-H-multi-card
+      labels: [self-hosted, 580]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       TASK: paddlefleet-CE-CUDA130-dev-multi-card_test-release
@@ -193,7 +194,7 @@ jobs:
   integration-test-H20-single-card:
     name: Integration test (H20, single card)
     runs-on:
-      group: Fleet-H-single-card
+      group: H-Coverage
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -335,6 +336,7 @@ jobs:
     name: Integration test (H20, multi-card)
     runs-on:
       group: Fleet-H-multi-card
+      labels: [self-hosted, 580]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -536,6 +538,7 @@ jobs:
     name: Integration test (A100)
     runs-on:
       group: Distribute
+      labels: [self-hosted, 580]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
