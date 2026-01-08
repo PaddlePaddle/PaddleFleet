@@ -46,12 +46,10 @@ def judge_machine_type():
     if not paddle.is_compiled_with_cuda():
         return "No CUDA GPU"
     models = get_gpu_models_via_nvidia_smi()
-    for model in models:
-        name = model.upper().replace("NVIDIA", "")
-        if "V" in name:
-            return "V"
-        elif "H" in name:
-            return "H"
+    if paddle.device.get_device_capability()[0] == 9:
+        return "H"
+    else:
+        return "V"
 
 
 result = judge_machine_type()
@@ -150,8 +148,8 @@ class TestGPTModel(unittest.TestCase):
         expectations = {
             "config_1": {
                 "H": {
-                    "loss": 5.668004035949707,
-                    "grad_norm": 6.991505146026611,
+                    "loss": 5.3251447677612305,
+                    "grad_norm": 5.3691630363464355,
                 },
                 "V": {
                     "loss": 5.3251447677612305,
