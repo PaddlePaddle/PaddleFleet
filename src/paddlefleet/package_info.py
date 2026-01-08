@@ -19,7 +19,7 @@ except ModuleNotFoundError:
     commit = "unknown"
     __version__ = "0.0.0"
 
-__package_name__ = "fleet_core"
+__package_name__ = "paddlefleet"
 __contact_names__ = "PaddlePaddle"
 __contact_emails__ = "Paddle-better@baidu.com"
 __homepage__ = (

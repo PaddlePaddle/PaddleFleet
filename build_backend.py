@@ -71,7 +71,7 @@ def _generate_version_info():
     # If file exists and not in git repo (installing from sdist), keep existing file
     if _version_file.exists() and not is_git_repo():
         logger.info(
-            "The _version file already exists (not in git repo), keeping it"
+            "The version.py file already exists (not in git repo), keeping it"
         )
         return version
 
@@ -83,7 +83,7 @@ def _generate_version_info():
         f.write('"""Generate version info file with git metadata."""\n')
         f.write(f'__version__ = "{final_version}"\n')
         f.write(f'commit = "{git_commit_hash}"\n')
-    logger.info(f"Created _version file with version {final_version}")
+    logger.info(f"Created version.py with version {final_version}")
     return version
 
 
