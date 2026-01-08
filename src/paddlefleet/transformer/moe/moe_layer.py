@@ -114,6 +114,7 @@ class MoELayer(nn.Layer):
         elif (
             self.expert_model_parallel_size > 1
             and self.tensor_model_parallel_size >= 1
+            or paddle.version.cuda() == "12.6"
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
@@ -149,6 +150,10 @@ class MoELayer(nn.Layer):
                 self.fp8_dispatch = False
 
         if self.fp8:
+            if paddle.version.cuda() == "12.6":
+                raise NotImplementedError(
+                    "fp8 is not supported when cuda version == 12.6."
+                )
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
             )
