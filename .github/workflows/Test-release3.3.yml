@@ -955,7 +955,6 @@ jobs:
       - name: Fetch base branch
         run: |
           echo "Fetching base branch: ${{ github.event.pull_request.base.ref }}"
-          git fetch origin origin/${{ github.event.pull_request.base.ref }}...HEAD
       - name: coverage file download
         shell: bash
         run: |
