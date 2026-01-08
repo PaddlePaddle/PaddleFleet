@@ -116,11 +116,21 @@ struct alignas(16) VectorType<uint8_t, 16> {
 };
 
 #ifdef __CUDACC__
+template <typename T>
+__device__ __forceinline__ void unrolled_memcpy(const T* src,
+                                                T* dst,
+                                                const int num_elements) {
+#pragma unroll
+  for (int idx = threadIdx.x; idx < num_elements; idx += blockDim.x) {
+    dst[idx] = src[idx];
+  }
+}
+
 // Helper function to perform vectorized memory copy
 template <typename T>
 __device__ __forceinline__ void vectorized_memcpy(const T* src,
                                                   T* dst,
-                                                  int num_elements) {
+                                                  const int num_elements) {
   constexpr int vector_size_in_bytes = 16;
   const int elements_per_vector = vector_size_in_bytes / sizeof(T);
 
@@ -143,6 +153,19 @@ __device__ __forceinline__ void vectorized_memcpy(const T* src,
     }
   }
 }
+
+template <typename T>
+__device__ __forceinline__ void try_vectorized_memcpy(const T* src,
+                                                      T* dst,
+                                                      const int num_elements) {
+  bool is_aligned_128bit =
+      ((uintptr_t)src & 0xF) == 0 && ((uintptr_t)dst & 0xF) == 0;
+  if (is_aligned_128bit) {
+    vectorized_memcpy(src, dst, num_elements);
+  } else {
+    unrolled_memcpy(src, dst, num_elements);
+  }
+}
 #endif
 
 #define PD_SWITCH_NUM_EXPERTS_IMPL(__num_expert, __max_num_experts, ...) \
@@ -163,3 +186,109 @@ __device__ __forceinline__ void vectorized_memcpy(const T* src,
     PD_SWITCH_NUM_EXPERTS_IMPL(__num_expert, 64, __VA_ARGS__);                \
     PD_THROW("Unsupported expert number %d", static_cast<int>(__num_expert)); \
   } while (0)
+
+#define DISPATCH_BOOL(condition, ConstName, ...) \
+  {                                              \
+    if (condition) {                             \
+      constexpr bool ConstName = true;           \
+      { __VA_ARGS__ }                            \
+    } else {                                     \
+      constexpr bool ConstName = false;          \
+      { __VA_ARGS__ }                            \
+    }                                            \
+  }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+#define BF16_MAX(a, b) __hmax(a, b)
+#define BF16_ABS(x) __habs(x)
+#else
+#define BF16_MAX(a, b) \
+  __float2bfloat16(fmaxf(__bfloat162float(a), __bfloat162float(b)))
+#define BF16_ABS(x) __float2bfloat16(fabsf(__bfloat162float(x)))
+#endif
+
+template <typename T>
+struct FastDivMod {
+  T d_;
+
+  __host__ __device__ FastDivMod(T d) : d_(d) {}
+
+  __host__ __device__ T Div(T n) const { return n / d_; }
+};
+
+template <typename T>
+struct F8LimitsTrait;
+
+template <>
+struct F8LimitsTrait<__nv_fp8_e4m3> {
+  static constexpr float max = 448.0f;
+};
+// paddle::DataType::FLOAT8_E4M3FN maps to phi::float8_e4m3fn which is usually mapped to __nv_fp8_e4m3 on CUDA
+
+template <typename T, bool ForcePow2>
+struct HighPrecisionFloatScaleLimitsTrait;
+
+template <>
+struct HighPrecisionFloatScaleLimitsTrait<float, false> {
+  static constexpr float max = 3.402823466e+38f; // FLT_MAX
+};
+
+template <>
+struct HighPrecisionFloatScaleLimitsTrait<float, true> {
+  static constexpr float max = 0x1.0p127;
+};
+
+template <>
+struct HighPrecisionFloatScaleLimitsTrait<__nv_bfloat16, false> {
+  static constexpr float max = 0x1.FEp127;
+};
+
+template <>
+struct HighPrecisionFloatScaleLimitsTrait<__nv_bfloat16, true> {
+  static constexpr float max = 0x1.0p127;
+};
+
+template <typename IType, typename OType, bool Power2Scaling = false>
+__device__ __forceinline__ float ComputeScaleImpl(const float amax,
+                                                  const float eps) {
+  constexpr float fp8_max = F8LimitsTrait<OType>::max;
+  float amax_mod = fmaxf(amax, eps);
+  if (amax_mod == 0.f) {
+    return 1.f;
+  }
+  float scale = fp8_max / amax_mod;
+
+  if (isinf(scale)) {
+    return HighPrecisionFloatScaleLimitsTrait<IType, Power2Scaling>::max;
+  }
+  if (scale == 0.0) {
+    return scale;
+  }
+  if constexpr (Power2Scaling) {
+    uint32_t scale_bits = *reinterpret_cast<uint32_t *>(&scale);
+    uint8_t exp = scale_bits >> 23;
+    int32_t normal_biased_exp = static_cast<int32_t>(exp) - 127;
+    // __builtin_assume(exp != 0); 
+    scale = ldexpf(1.0f, normal_biased_exp);
+  }
+  return scale;
+}
+
+template <bool Power2Scaling>
+__device__ __forceinline__ float RoundPower2Scale(float scale) {
+#ifdef __CUDA_ARCH__
+  return __CUDA_ARCH__ != 900 && Power2Scaling &&
+                 (scale == static_cast<float>(0x1.0p127))
+             ? static_cast<float>(1.0f)
+             : scale;
+#else
+  return scale;
+#endif
+}
+
+template <typename IType, typename OType, bool Power2Scaling = false>
+__device__ __forceinline__ float ComputeScale(const float amax,
+                                              const float eps) {
+  return RoundPower2Scale<Power2Scaling>(
+      ComputeScaleImpl<IType, OType, Power2Scaling>(amax, eps));
+}
