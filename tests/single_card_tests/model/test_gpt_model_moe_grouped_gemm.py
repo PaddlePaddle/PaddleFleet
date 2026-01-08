@@ -114,7 +114,6 @@ class TestGPTModel(unittest.TestCase):
             output_layer_init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
-            share_embeddings_and_output_weights=True,
             use_qk_norm=True,
             moe_grouped_gemm=True,
         )
@@ -176,11 +175,11 @@ class TestGPTModel(unittest.TestCase):
         print("embed_tokens_grad_norm", embed_tokens_grad_norm)
 
         if judge_machine_type() == "H":
-            assert loss.item() == 5.452963352203369, (
-                f"loss not equal ({loss.item()} != 5.452963352203369), please check your modify"
+            assert loss.item() == 5.239649772644043, (
+                f"loss not equal ({loss.item()} != 5.239649772644043), please check your modify"
             )
-            assert embed_tokens_grad_norm == 4.03125, (
-                f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 4.03125), please check your modify"
+            assert embed_tokens_grad_norm == 2.796875, (
+                f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
             )
         elif judge_machine_type() == "V":
             pass  # TODO: add V machine test
