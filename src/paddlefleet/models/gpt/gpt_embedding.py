@@ -210,42 +210,24 @@ class GPTEmbedding(FleetLayer):
         Returns:
             tuple: (special_image_mask, special_video_mask) - Mask tensors for image and video tokens
         """
-        print(f"get_placeholder_mask input_ids : {input_ids} ")
         if input_ids is None:
             special_image_mask = inputs_embeds == self.embedding(
                 paddle.to_tensor(self.config.image_token_id, dtype="int64")
             )
-            print(
-                f"inputs_embeds {inputs_embeds} image_token_id {self.config.image_token_id} special_image_mask{special_image_mask}"
-            )
             special_image_mask = special_image_mask.all(-1)
             special_video_mask = inputs_embeds == self.embedding(
                 paddle.to_tensor(self.config.video_token_id, dtype="int64")
-            )
-            print(
-                f"inputs_embeds {inputs_embeds} image_token_id {self.config.video_token_id} special_video_mask {special_video_mask}"
             )
             special_video_mask = special_video_mask.all(-1)
         else:
             special_image_mask = input_ids == self.config.image_token_id
             special_video_mask = input_ids == self.config.video_token_id
 
-        print(
-            f"inputs_embeds {inputs_embeds} image_token_id {self.config.image_token_id} special_image_mask{special_image_mask}"
-        )
-        print(
-            f"inputs_embeds {inputs_embeds} video_token_id {self.config.video_token_id} special_video_mask {special_video_mask}"
-        )
         n_image_tokens = special_image_mask.sum()
         special_image_mask = special_image_mask.unsqueeze(-1).expand_as(
             inputs_embeds
         )
-        print(
-            f"inputs_embeds_mask_features {inputs_embeds[special_image_mask]}"
-        )
-        print(
-            f"n_image_tokens {special_image_mask.sum()} image_features {image_features}"
-        )
+
         if (
             image_features is not None
             and inputs_embeds[special_image_mask].numel()
