@@ -147,7 +147,7 @@ class TestTokensUnzipGatherUE8M0Scale(unittest.TestCase):
                     )
                     x_scale_unzipped_np = x_scale_unzipped.numpy()
                     # Test tokens_unzip_gather with float32 scale
-                    (x_unzipped, x_scale_fp32_unzipped, index_unzipped) = (
+                    (x_unzipped, x_scale_fp32_unzipped, index_unzipped_fp32) = (
                         tokens_unzip_gather(
                             hidden_states,
                             scale_fp32,
@@ -164,6 +164,16 @@ class TestTokensUnzipGatherUE8M0Scale(unittest.TestCase):
                             x_scale_fp32_unzipped.astype("int32").numpy(),
                         )
                     )
+                    index_unzipped_np = index_unzipped.numpy()
+                    x_unzipped_np = x_unzipped.numpy()
+                    check_rows = min(len(index_unzipped_np), 5)
+                    for i in range(check_rows):
+                        index = index_unzipped_np[i]
+                        self.assertTrue(
+                            np.allclose(
+                                x_unzipped_np[i], hidden_states.numpy()[index]
+                            )
+                        )
 
 
 if __name__ == "__main__":

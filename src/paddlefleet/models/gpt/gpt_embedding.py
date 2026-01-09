@@ -222,10 +222,12 @@ class GPTEmbedding(FleetLayer):
         else:
             special_image_mask = input_ids == self.config.image_token_id
             special_video_mask = input_ids == self.config.video_token_id
+
         n_image_tokens = special_image_mask.sum()
         special_image_mask = special_image_mask.unsqueeze(-1).expand_as(
             inputs_embeds
         )
+
         if (
             image_features is not None
             and inputs_embeds[special_image_mask].numel()
