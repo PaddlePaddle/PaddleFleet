@@ -38,7 +38,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA130-dev-single-card-test
+      TASK: paddlefleet-CE-CUDA130-RELEASE-single-card-test
     steps:
       - name: Determine the runner
         run: |
@@ -122,7 +122,7 @@ jobs:
       labels: [self-hosted, 580]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
-      TASK: paddlefleet-CE-CUDA130-dev-multi-card_test-release
+      TASK: paddlefleet-CE-CUDA130-RELEASE-multi-card_test-release
     steps:
       - name: Check docker image and run container
         run: |
@@ -203,7 +203,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA130-dev-integration-test-single-card-release
+      TASK: paddlefleet-CE-CUDA130-RELEASE-integration-test-single-card-release
     steps:
       - name: Determine the runner
         run: |
@@ -345,7 +345,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA130-dev-integration-test-multi-card-release
+      TASK: paddlefleet-CE-CUDA130-RELEASE-integration-test-multi-card-release
     steps:
       - name: Check docker image and run container
         run: |
@@ -547,7 +547,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA130-dev-integration-test-A100-release
+      TASK: paddlefleet-CE-CUDA130-RELEASE-integration-test-A100-release
     steps:
       - name: Check docker image and run container
         run: |
