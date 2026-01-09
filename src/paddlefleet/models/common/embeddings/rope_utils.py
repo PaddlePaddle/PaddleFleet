@@ -27,6 +27,8 @@ from paddle.incubate.nn.functional import (
     fused_rotary_position_embedding as fused_rope,
 )
 
+from paddlefleet.utils import get_pg_rank, get_pg_size
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -49,8 +51,8 @@ def get_pos_emb_on_this_cp_rank(
         raise ValueError(
             "cp_group must be provided to get positional embedding per CP rank"
         )
-    cp_size = cp_group.size()
-    cp_rank = cp_group.rank()
+    cp_size = get_pg_size(cp_group)
+    cp_rank = get_pg_rank(cp_group)
     cp_idx = paddle.to_tensor([cp_rank, (2 * cp_size - cp_rank - 1)])
     pos_emb = pos_emb.view(
         *pos_emb.shape[:seq_dim],
@@ -197,14 +199,9 @@ def _apply_rotary_pos_emb_thd(
     Returns:
         Tensor: Shape [t, h, d]. The input tensor after applying RoPE.
     """
+    cp_size = get_pg_size(cp_group)
+    cp_rank = get_pg_rank(cp_group)
 
-    if cp_group is None:
-        # raise ValueError("cp_group must be provided for THD format RoPE")
-        cp_size = 1
-        cp_rank = 0
-    else:
-        cp_size = cp_group.size()
-        cp_rank = cp_group.rank()
     seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
 
     # Handle two different frequency tensor formats:
