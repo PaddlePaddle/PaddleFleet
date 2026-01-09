@@ -424,6 +424,12 @@ jobs:
           pip install -e .
           pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
+          cd /workspace
+          wget -q --no-proxy -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir bos
+          tar xf bos_new.tar.gz -C bos
+          pip install bce-python-sdk==0.8.74
+          pip install coverage==7.6.1
           '
 
       - name: Proprocess for integration test
@@ -590,6 +596,12 @@ jobs:
           pip install -e .
           pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
+          cd /workspace
+          wget -q --no-proxy -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir bos
+          tar xf bos_new.tar.gz -C bos
+          pip install bce-python-sdk==0.8.74
+          pip install coverage==7.6.1
           '
 
       - name: GLM4.5 pre-train
@@ -894,6 +906,12 @@ jobs:
           pip install -e .
           pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
+          cd /workspace
+          wget -q --no-proxy -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir bos
+          tar xf bos_new.tar.gz -C bos
+          pip install bce-python-sdk==0.8.74
+          pip install coverage==7.6.1
           '
 
       - name: GLM4.5 pre-train
