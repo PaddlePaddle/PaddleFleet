@@ -92,7 +92,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           python -c "import paddle; print(paddle.version.commit)"
@@ -163,7 +163,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git submodule update --init --recursive
-          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -253,7 +253,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -383,7 +383,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
