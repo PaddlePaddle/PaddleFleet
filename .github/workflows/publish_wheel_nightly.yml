@@ -17,6 +17,8 @@ on:
     tags:
       - 'v*'
 
+  pull_request:
+
 
 permissions: read-all
 
