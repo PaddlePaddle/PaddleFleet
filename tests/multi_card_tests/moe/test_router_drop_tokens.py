@@ -1,0 +1,208 @@
+# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+
+import random
+import unittest
+
+import numpy as np
+import paddle
+import paddle.nn.functional as F
+import pytest
+from paddle.distributed import fleet
+
+from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
+from paddlefleet.training.initialize import initialize_fleet
+from paddlefleet.transformer.moe.moe_layer import MoELayer
+from paddlefleet.transformer.transformer_config import TransformerConfig
+
+n_routed_experts = 4
+hidden_size = 16
+
+
+class TestTop2Router(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.n_routed_experts = 4
+        cls.hidden_size = 16
+        cls.transformer_config = TransformerConfig(
+            hidden_size=cls.hidden_size,
+            num_attention_heads=4,
+            n_routed_experts=cls.n_routed_experts,
+            use_cpu_initialization=False,
+            num_experts_per_tok=2,
+            tensor_model_parallel_size=1,
+            expert_model_parallel_size=1,
+            sequence_parallel=False,
+            bf16=True,
+            params_dtype=paddle.bfloat16,
+            moe_intermediate_size=24,
+            gated_linear_unit=True,
+            n_shared_experts=0,
+            hidden_act=F.silu,
+            bias_activation_fusion=True,
+        )
+
+        seed = 123
+        random.seed(seed)
+        np.random.seed(seed)
+        paddle.seed(seed)
+        paddle.manual_seed(seed)
+
+        strategy = fleet.DistributedStrategy()
+        strategy.hybrid_configs = {
+            "dp_degree": 1,
+            "mp_degree": 4,
+            "pp_degree": 1,
+            "sharding_degree": 2,
+            "sep_degree": 1,
+            "cp_degree": 1,
+            "ep_degree": 1,
+            "order": [
+                "sharding",
+                "moe_sharding",
+                "pp",
+                "sep",
+                "cp",
+                "dp",
+                "ep",
+                "mp",
+            ],
+        }
+        initialize_fleet(strategy=strategy)
+        model_parallel_cuda_manual_seed(seed)
+        cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+
+        transformer_layer_spec = get_gpt_layer_local_spec(
+            num_experts=cls.n_routed_experts, moe_grouped_gemm=False
+        )
+        cls.sequential_mlp = MoELayer(
+            cls.transformer_config,
+            transformer_layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
+            cls.pg_collection,
+        )
+        cls.router = cls.sequential_mlp.gate
+
+    @pytest.mark.internal
+    def test_token_dropping_none_probs(self):
+        num_tokens = 32
+        self.router = self.router.cuda()
+        self.router.moe_expert_capacity_factor = None
+        self.router.moe_token_drop_policy = "probs"
+        self.router.drop_tokens = False
+
+        hidden_states = paddle.randn(
+            (1, num_tokens, self.router.hidden_size),
+            dtype=paddle.bfloat16,
+        )
+        hidden_states.requires_grad = True
+
+        _, _, _, probs, routing_map, _, _, _ = self.router(hidden_states)
+        assert (
+            routing_map.sum().item()
+            == num_tokens * self.router.num_experts_per_tok
+        )
+
+    @pytest.mark.internal
+    def test_token_dropping_none_position(self):
+        num_tokens = 32
+        self.router = self.router.cuda()
+        self.router.moe_expert_capacity_factor = None
+        self.router.moe_token_drop_policy = "position"
+        self.router.drop_tokens = False
+
+        hidden_states = paddle.randn(
+            (1, num_tokens, self.router.hidden_size),
+            dtype=paddle.bfloat16,
+        )
+        hidden_states.requires_grad = True
+
+        _, _, _, probs, routing_map, _, _, _ = self.router(hidden_states)
+        assert (
+            routing_map.sum().item()
+            == num_tokens * self.router.num_experts_per_tok
+        )
+
+    @pytest.mark.internal
+    def test_token_dropping_1_0_probs(self):
+        num_tokens = 32
+        self.router = self.router.cuda()
+        self.router.moe_expert_capacity_factor = 1.0
+        self.router.moe_token_drop_policy = "probs"
+        self.router.drop_tokens = True
+
+        hidden_states = paddle.randn(
+            (1, num_tokens, self.router.hidden_size),
+            dtype=paddle.bfloat16,
+        )
+        hidden_states.requires_grad = True
+
+        _, _, _, probs, routing_map, _, _, _ = self.router(hidden_states)
+        assert (
+            routing_map.sum().item()
+            <= num_tokens * self.router.num_experts_per_tok * 1.0
+        )
+
+    @pytest.mark.internal
+    def test_token_dropping_1_0_position(self):
+        num_tokens = 32
+        self.router = self.router.cuda()
+        self.router.moe_expert_capacity_factor = 1.0
+        self.router.moe_token_drop_policy = "position"
+        self.router.drop_tokens = True
+
+        hidden_states = paddle.randn(
+            (1, num_tokens, self.router.hidden_size),
+            dtype=paddle.bfloat16,
+        )
+        hidden_states.requires_grad = True
+
+        _, _, _, probs, routing_map, _, _, _ = self.router(hidden_states)
+        assert (
+            routing_map.sum().item()
+            <= num_tokens * self.router.num_experts_per_tok * 1.0
+        )
+
+    @pytest.mark.internal
+    def test_token_dropping_2_0_probs(self):
+        num_tokens = 32
+        self.router = self.router.cuda()
+        self.router.moe_expert_capacity_factor = 2.0
+        self.router.moe_token_drop_policy = "probs"
+        self.router.drop_tokens = True
+
+        hidden_states = paddle.randn(
+            (1, num_tokens, self.router.hidden_size),
+            dtype=paddle.bfloat16,
+        )
+        hidden_states.requires_grad = True
+
+        _, _, _, probs, routing_map, _, _, _ = self.router(hidden_states)
+        assert (
+            routing_map.sum().item()
+            <= num_tokens * self.router.num_experts_per_tok * 2.0
+        )
+
+    @pytest.mark.internal
+    def test_token_dropping_2_0_position(self):
+        num_tokens = 32
+        self.router = self.router.cuda()
+        self.router.moe_expert_capacity_factor = 2.0
+        self.router.moe_token_drop_policy = "position"
+        self.router.drop_tokens = True
+
+        hidden_states = paddle.randn(
+            (1, num_tokens, self.router.hidden_size),
+            dtype=paddle.bfloat16,
+        )
+        hidden_states.requires_grad = True
+
+        _, _, _, probs, routing_map, _, _, _ = self.router(hidden_states)
+        assert (
+            routing_map.sum().item()
+            <= num_tokens * self.router.num_experts_per_tok * 2.0
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

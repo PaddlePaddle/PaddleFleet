@@ -102,6 +102,13 @@ class StandardMoERouter(nn.Layer):
         self.scoring_func = config.scoring_func
 
         self.routing_type = config.moe_router_load_balancing_type
+        self.moe_expert_capacity_factor = config.moe_expert_capacity_factor
+        self.moe_token_drop_policy = config.moe_token_drop_policy
+        self.drop_tokens = (
+            self.moe_expert_capacity_factor is not None
+            and self.moe_expert_capacity_factor != 0.0
+        )
+        self.moe_group = pg_collection.ep if pg_collection else None
 
         if self.routing_type != "seq_aux_loss" and config.get("seq_aux", False):
             raise ValueError(
@@ -156,8 +163,6 @@ class StandardMoERouter(nn.Layer):
         self,
         gates: paddle.Tensor,
         capacity_factor: float,
-        max_capacity: int,
-        min_capacity: int,
     ) -> paddle.Tensor:
         """Calculate the capacity for each expert based on the gates and capacity factor.
 
@@ -177,10 +182,6 @@ class StandardMoERouter(nn.Layer):
         num_tokens = gates.shape[0]
         num_experts = gates.shape[1]
         capacity = int((num_tokens // num_experts) * capacity_factor)
-        if capacity < min_capacity:
-            capacity = min_capacity
-        if capacity > max_capacity:
-            capacity = max_capacity
         assert capacity > 0, (
             f"requires capacity > 0, capacity_factor: {capacity_factor}, input_shape: {gates.shape}"
         )
@@ -309,82 +310,73 @@ class StandardMoERouter(nn.Layer):
 
         return (token_priority > 0.0).astype("float32")
 
-    def _probs_drop_policy(
+    def apply_router_token_dropping(
         self,
-        scores: paddle.Tensor,
-        capacity: int,
-    ) -> paddle.Tensor:
-        """
-        Implements the Probability-based (Probs) drop policy to enforce expert capacity.
+        routing_probs: paddle.Tensor,
+        routing_map: paddle.Tensor,
+        router_topk: int,
+        new_capacity: int,
+        drop_policy: str = "probs",
+    ):
+        """Apply token dropping to top-k expert selection.
 
-        A token is assigned (mask value 1.0) to an expert if:
-        1. It chose that expert (score > 0). (Implicitly handled by input scores).
-        2. Its score for that expert is among the top 'capacity' scores for that expert.
+        This function enforces expert capacity limits by dropping tokens that exceed
+        the capacity and optionally padding to capacity.
 
         Args:
-            scores (paddle.Tensor): [num_tokens, num_total_experts].
-                                This should already contain zeros for non-selected
-                                experts (i.e., the result of top-K gating).
-            capacity (int): The maximum number of tokens any single expert can handle.
-                                    (Not strictly used here, but good practice to include).
+            routing_probs (paddle.Tensor): Tensor of shape [num_tokens, num_experts]
+                containing the routing probabilities for selected experts.
+            routing_map (paddle.Tensor): Boolean tensor of shape [num_tokens, num_experts]
+                indicating which experts were selected for each token.
+            router_topk (int): Number of experts selected per token.
+            new_capacity (int): New capacity limit for each expert.
+            drop_policy (str): Policy to drop tokens - "probs" or "position".
 
         Returns:
-            paddle.Tensor: [num_tokens, num_total_experts] boolean mask (converted to float).
-                        1.0 = Assigned and within capacity. 0.0 = Dropped or unassigned.
+            Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+                - final_probs: Routing probabilities after applying capacity constraints
+                - final_map: Boolean mask after applying capacity constraints
+                - top_idx: Tensor of shape [num_tokens, router_topk] containing the expert IDs
+                selected for each token after capacity constraints
+                - top_weights: Tensor of shape [num_tokens, router_topk] containing the routing
+                probabilities corresponding to the selected expert IDs
         """
-        num_tokens, num_experts = scores.shape
+        assert routing_probs.ndim == 2 and routing_map.ndim == 2
+        num_tokens, num_experts = routing_probs.shape
 
-        # --- Step 1: Find the 'capacity' best tokens for *each* expert ---
+        # Create capacity mask based on drop policy
+        if drop_policy == "probs":
+            _, capacity_indices = paddle.topk(
+                routing_probs, k=new_capacity, dim=0, sorted=False
+            )
+            capacity_mask = paddle.zeros_like(routing_probs).scatter(
+                0, capacity_indices, 1
+            )
+        elif drop_policy == "position":
+            _, capacity_indices = paddle.topk(
+                routing_map.int(), k=new_capacity, dim=0, sorted=False
+            )
+            capacity_mask = paddle.zeros_like(routing_probs).scatter(
+                0, capacity_indices, 1
+            )
+        else:
+            raise ValueError(f"Invalid drop_policy: {drop_policy}")
 
-        # Use paddle.topk along dim=0 (the token dimension) to find the indices
-        # of the tokens that have the highest scores for each expert (column).
-        # Since 'scores' has shape [Tokens, Experts], dim=0 returns the token indices.
-
-        # topk_token_indices has shape [capacity, num_total_experts]
-        # It tells us WHICH tokens (row indices) are prioritized by capacity.
-
-        # We use min(num_tokens, capacity) just in case there are fewer tokens than capacity.
-        k_to_use = min(num_tokens, capacity)
-
-        # We only care about the indices of the selected tokens
-        _, topk_token_indices = paddle.topk(
-            scores,
-            k=k_to_use,
-            dim=0,
-            sorted=True,  # Sorted=True is usually faster, but we only use the indices.
+        # Get exceed mask and maskout exceeded probs and indices
+        final_map = paddle.logical_and(
+            routing_map.cast(paddle.bool), capacity_mask.cast(paddle.bool)
         )
+        final_probs = routing_probs * final_map.cast(routing_probs.dtype)
 
-        # --- Step 2: Create the final assignment mask using scatter ---
+        # Extract top-k expert indices and weights for each token
+        top_weights, top_idx = paddle.topk(final_probs, k=router_topk, dim=1)
 
-        # Initialize the mask to all zeros (tokens are initially dropped/unassigned).
-        # We use boolean type for efficient scattering, then convert to float later.
-        final_mask = paddle.zeros(num_tokens, num_experts, dtype=paddle.bool)
-
-        # 2a. Create the column indices for the assignment.
-        # We need a tensor of shape [k_to_use, num_experts] where each row is [0, 1, 2, ..., num_experts-1].
-        col_indices = (
-            paddle.arange(num_experts)
-            .unsqueeze(0)
-            .expand_as(topk_token_indices)
+        return (
+            final_probs,
+            final_map.cast(routing_map.dtype),
+            top_idx,
+            top_weights,
         )
-
-        # 2b. Flatten the row (token) and column (expert) indices for advanced indexing.
-        token_indices_flat = topk_token_indices.flatten()
-        col_indices_flat = col_indices.flatten()
-
-        # 2c. Use advanced indexing to set the mask positions to True.
-        # This sets mask[token_index, expert_index] = True for all prioritized tokens.
-        final_mask[token_indices_flat, col_indices_flat] = True
-
-        # --- Step 3: Ensure only originally selected tokens are kept ---
-
-        # Since paddle.topk can pick up tokens with score 0 if num_tokens < capacity,
-        # we must ensure that we only keep tokens that had a positive score initially.
-        # This step implicitly cleans up any spurious assignments made by topk on zero scores.
-
-        token_priority_mask = final_mask.float() * (scores > 0).float()
-
-        return token_priority_mask
 
     def _topk_greedy(
         self, scores: paddle.Tensor, k: int
@@ -597,6 +589,34 @@ class TopKRouter(StandardMoERouter):
         gates_masked = paddle.zeros_like(gates).put_along_axis(
             top_idx, top_gate.cast(gates.dtype), axis=1
         )
+
+        if self.drop_tokens:
+            capacity = self._capacity(
+                gates,
+                self.moe_expert_capacity_factor * self.num_experts_per_tok,
+            )
+            if capacity < seq_len:
+                gates_masked, mask, top_idx, top_gate = (
+                    self.apply_router_token_dropping(
+                        gates_masked,
+                        mask,
+                        router_topk=self.num_experts_per_tok,
+                        new_capacity=capacity,
+                        drop_policy=self.moe_token_drop_policy,
+                    )
+                )
+        else:
+            # Do not drop tokens - set capacity according to current expert assignments
+            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
+            local_capacity = paddle.max(exp_counts)
+            # TODO: currently not need capacity to be the same across all ranks
+            # if self.moe_group is not None:
+            #     paddle.distributed.all_reduce(
+            #         local_capacity,
+            #         op=paddle.distributed.ReduceOp.MAX,
+            #         group=self.moe_group,
+            #     )
+            capacity = int(local_capacity)
 
         # aux_loss
         if self.config.router_aux_loss_coef:
