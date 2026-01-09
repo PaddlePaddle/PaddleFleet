@@ -184,6 +184,7 @@ jobs:
           conda init bash
           conda create -n python${{ matrix.python }} python=${{ matrix.python }} -y
           conda activate python${{ matrix.python }}
+          '
 
       - name: Install PaddleFleet
         run: |
@@ -293,6 +294,7 @@ jobs:
           conda init bash
           conda create -n python${{ matrix.python }} python=${{ matrix.python }} -y
           conda activate python${{ matrix.python }}
+          '
 
       - name: Install PaddleFleet
         run: |
@@ -453,6 +455,7 @@ jobs:
           conda init bash
           conda create -n python${{ matrix.python }} python=${{ matrix.python }} -y
           conda activate python${{ matrix.python }}
+          '
 
       - name: Install PaddleFleet
         run: |
@@ -703,6 +706,7 @@ jobs:
           conda init bash
           conda create -n python${{ matrix.python }} python=${{ matrix.python }} -y
           conda activate python${{ matrix.python }}
+          '
 
       - name: Install PaddleFleet
         run: |
