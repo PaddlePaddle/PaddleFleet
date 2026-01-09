@@ -1,4 +1,4 @@
-name: Publish wheel nightly
+name: Precision update wheel
 
 on:
   workflow_call:
