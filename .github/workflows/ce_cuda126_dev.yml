@@ -251,9 +251,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          python -c "import paddle; print(paddle.version.commit)"
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -272,7 +269,10 @@ jobs:
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
-          pip install -e .
+          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          python -c "import paddle; print(paddle.version.commit)"
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
           pip install librosa==0.11.0
@@ -383,9 +383,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          python -c "import paddle; print(paddle.version.commit)"
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -403,7 +400,10 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e .
+          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          python -c "import paddle; print(paddle.version.commit)"
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
           pip install librosa==0.11.0
@@ -572,9 +572,6 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          python -c "import paddle; print(paddle.version.commit)"
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -590,7 +587,10 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e .
+          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          python -c "import paddle; print(paddle.version.commit)"
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
           pip install librosa==0.11.0
