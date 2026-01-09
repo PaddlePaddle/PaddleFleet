@@ -31,7 +31,17 @@ from paddle._C_ops import matmul_grad
 from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
+def print_grad(forward_name, message=""):
+    def _print_grad(grad):
+        print(f"\nprint_grad {forward_name}")
+        print(f"[local  g {message}] {grad} {grad.shape} {grad.dtype} {grad._md5sum()}")
+    return _print_grad
 
+def print_tensor(x, message=""): 
+    return 
+    print(f"\nprint_tensor {x.name}")
+    print(f"[local  {message}] {x} {x.shape} {x.dtype} {x._md5sum()}")
+    x.register_hook(print_grad(x.name, message))
 
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     @staticmethod
@@ -205,7 +215,7 @@ class StandardMoERouter(nn.Layer):
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
         return aux_loss
 
-    def _cal_seq_aux_loss(self, probs, top_k, routing_map, max_seq_len):
+    def _cal_seq_aux_loss(self, probs, top_k, routing_map, max_seq_len, batch_size):
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
             self.tensor_model_parallel_size > 1
@@ -245,11 +255,11 @@ class StandardMoERouter(nn.Layer):
         else:
             # [B, S, E]
             if len(probs.shape) == 2:
-                probs = probs.reshape([1, *probs.shape])
+                probs = probs.reshape([batch_size, max_seq_len, -1])
             batch_size, local_seq_len, _ = probs.shape
             all_probs = probs
             routing_map = routing_map.reshape([batch_size, local_seq_len, -1])
-
+        print("self.num_experts:", self.num_experts)
         seq_axis = 1
         # Both cost_coeff and seq_aux_loss must be computed with the global sequence length visible to all workers.
         # [B, E]
@@ -475,37 +485,29 @@ class StandardMoERouter(nn.Layer):
         scores_for_choice = scores.reshape(
             [bsz_seq_len, -1]
         ) + self.e_score_correction_bias.detach().unsqueeze(0)
-        if n_group == 1 and self.config.moe_router_fusion:
-            topk_weight, topk_idx = paddle.topk(
-                scores_for_choice, k=k, axis=-1, sorted=True
-            )
-        else:
-            group_scores = (
-                scores_for_choice.reshape([bsz_seq_len, self.n_group, -1])
-                .topk(2, axis=-1)[0]
-                .sum(axis=-1)
-            )  # fmt:skip [n, n_group]
-            group_idx = paddle.topk(
-                group_scores, k=topk_group, axis=-1, sorted=True
-            )[1]  # [n, top_k_group]
-            group_mask = paddle.zeros_like(group_scores).put_along_axis(group_idx, paddle.to_tensor(1.0, dtype="float32"), axis=-1)  # fmt:skip
-            score_mask = (
-                group_mask.unsqueeze(-1)
-                .expand([bsz_seq_len, n_group, n_experts // n_group])
-                .reshape([bsz_seq_len, -1])
-            )  # [n, e]
-            tmp_scores = scores_for_choice * score_mask  # [n, e]
-            topk_weight, topk_idx = paddle.topk(
-                tmp_scores, k=k, axis=-1, sorted=True
-            )
+
+        group_scores = (
+            scores_for_choice.reshape([bsz_seq_len, self.n_group, -1])
+            .topk(2, axis=-1)[0]
+            .sum(axis=-1)
+        )  # fmt:skip [n, n_group]
+        group_idx = paddle.topk(
+            group_scores, k=topk_group, axis=-1, sorted=True
+        )[1]  # [n, top_k_group]
+        group_mask = paddle.zeros_like(group_scores).put_along_axis(group_idx, paddle.to_tensor(1.0, dtype="float32"), axis=-1)  # fmt:skip
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand([bsz_seq_len, n_group, n_experts // n_group])
+            .reshape([bsz_seq_len, -1])
+        )  # [n, e]
+        tmp_scores = scores_for_choice * score_mask  # [n, e]
+        topk_weight, topk_idx = paddle.topk(
+            tmp_scores, k=k, axis=-1, sorted=True
+        )
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        topk_weight = (
-            scores.take_along_axis(topk_idx, axis=1)
-            if not self.training
-            else topk_weight
-        )
+        topk_weight = scores.take_along_axis(topk_idx, axis=1)
 
         return topk_weight, topk_idx
 
@@ -561,7 +563,7 @@ class StandardMoERouter(nn.Layer):
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = hidden_states.shape
             else:
-                seq_len, batch, d_model = hidden_states.shape
+                seq_len, batch_size, d_model = hidden_states.shape
             hidden_states = hidden_states.reshape([-1, d_model])
         elif len(hidden_states.shape) == 2:
             raise ValueError(
@@ -582,7 +584,7 @@ class StandardMoERouter(nn.Layer):
                 gates_ori.sum(axis=-1, keepdim=True) + 1e-20
             )
 
-        l_zloss = self._cal_z_loss(gates)
+        l_zloss = None
 
         if self.topk_method == "greedy":
             top_gate, top_idx = self._topk_greedy(
@@ -616,10 +618,10 @@ class StandardMoERouter(nn.Layer):
         mask = paddle.zeros_like(gates).put_along_axis(
             top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
         )
-
+        print("routing_type: ", self.routing_type)
         if self.routing_type == "seq_aux_loss":
             l_aux = self._cal_seq_aux_loss(
-                gates_ori, self.num_experts_per_tok, mask, seq_len
+                gates_ori, self.num_experts_per_tok, mask, seq_len, batch_size
             )
         else:
             l_aux = self._cal_aux_loss(gates, mask)

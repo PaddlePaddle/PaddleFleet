@@ -231,7 +231,9 @@ class Attention(FleetLayer, ABC):
         attn_mask_type = self.attn_mask_type
         block_table = None
         query, key, value = qkv_output
-
+        # print("before query: ", query, query._md5sum())
+        # print("before key: ", key, key._md5sum())
+        # print("before value: ", value, value._md5sum())
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
@@ -249,7 +251,9 @@ class Attention(FleetLayer, ABC):
                     cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
-
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
             if (
                 self.config.apply_rope_fusion
                 and q_pos_emb is not None
@@ -294,6 +298,8 @@ class Attention(FleetLayer, ABC):
                         cp_group=self.pg_collection.cp,
                     )
 
+        # print("apply_rotary_pos_emb query_states: ", query, query._md5sum())
+        # print("apply_rotary_pos_emb key_states: ", key, key._md5sum())
         # ==================================
         # core attention computation
         # ==================================
@@ -459,7 +465,9 @@ class SelfAttention(Attention):
         # [sq, b, ng, (np/ng + 2) * hn]
         # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
         (query, key, value) = paddle.split(mixed_qkv, split_arg_list, axis=3)
-
+        # print("query_states: ", query, query._md5sum())
+        # print("key_states: ", key, key._md5sum())
+        # print("value_states: ", value, value._md5sum())
         # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
         query = query.reshape(
             query.shape[0],

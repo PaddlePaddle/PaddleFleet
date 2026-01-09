@@ -43,6 +43,17 @@ from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 logger = logging.getLogger(__name__)
 
 from .moe_utils import permute, unpermute
+def print_grad(forward_name, message=""):
+    def _print_grad(grad):
+        print(f"\nprint_grad {forward_name}")
+        print(f"[local  g {message}] {grad} {grad.shape} {grad.dtype} {grad._md5sum()}")
+    return _print_grad
+
+def print_tensor(x, message=""):
+    return
+    print(f"\nprint_tensor {x.name}")
+    print(f"[local  {message}] {x} {x.shape} {x.dtype} {x._md5sum()}")
+    x.register_hook(print_grad(x.name, message))
 
 
 @dataclass
@@ -153,7 +164,7 @@ class MoELayer(nn.Layer):
                     False  # TODO: Support EP>1 alltoall moe_grouped_gemm
                 )
                 self.fp8_dispatch = False
-
+        self.moe_use_fusion_node = False
         if self.fp8:
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
@@ -356,7 +367,9 @@ class MoELayer(nn.Layer):
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
     ):
+        print_tensor(hidden_states, "before dispatch hidden_states")
         hidden_states, _ = self.dispatch(hidden_states, probs, routing_map)
+        print_tensor(hidden_states, "before router_expert hidden_states")
         hidden_states = self.routed_experts_compute(hidden_states)
         return self.combine(hidden_states)
 
@@ -433,14 +446,16 @@ class MoELayer(nn.Layer):
             }
         else:
             combine_overlap_handle = None
+        print_tensor(hidden_states, "mlp hidden_states")
+        print_tensor(gates_masked, "mlp gates_masked")
 
         if self.expert_model_parallel_size > 1:
-            if self.moe_use_fusion_node:
-                output = self.fusion_moe_forward(
-                    hidden_states, gates_masked, mask, combine_overlap_handle
-                )
-            else:
-                output = self.custom_forward(hidden_states, gates_masked, mask)
+            # if self.moe_use_fusion_node:
+            #     output = self.fusion_moe_forward(
+            #         hidden_states, gates_masked, mask, combine_overlap_handle
+            #     )
+            # else:
+            output = self.custom_forward(hidden_states, gates_masked, mask)
         else:
             if len(hidden_states.shape) == 3:
                 batch_size, seq_len, d_model = hidden_states.shape
@@ -455,7 +470,7 @@ class MoELayer(nn.Layer):
                 output = self._forward_single_card_moe(
                     reshaped_input, topk_indices, topk_weights
                 )
-
+        print_tensor(aux_loss, "aux loss")
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * self.router_aux_loss_coef
             output = AddAuxiliaryLoss.apply(output, aux_loss)

@@ -362,7 +362,7 @@ class TransformerLayer(nn.Layer):
             )
         else:
             input_layernorm_output = self.input_layernorm(hidden_states)
-
+        #print("Transformers input_layernorm_output hidden_states: ", input_layernorm_output, input_layernorm_output._md5sum())
         # Self attention.
         attention_output_with_bias = self.self_attn(
             input_layernorm_output,

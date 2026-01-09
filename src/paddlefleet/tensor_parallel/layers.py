@@ -288,6 +288,8 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         Args:
             input_ (paddle.Tensor): Input tensor.
         """
+        output_parallel = F.embedding(input_, self.weight)
+        return output_parallel
         if get_pg_size(self.tp_group) > 1:
             # Build the mask.
             input_mask = (input_ < self.vocab_start_index) | (
@@ -1037,27 +1039,29 @@ class ColumnParallelLinear(paddle.nn.Layer):
                         self.config.cpu_offloading_activations
                     )
 
-        output_parallel = self._forward_impl(
-            input=input_parallel,
-            weight=weight,
-            bias=bias,
-            gradient_accumulation_fusion=self.gradient_accumulation_fusion,
-            allreduce_dgrad=allreduce_dgrad,
-            sequence_parallel=False
-            if self.explicit_expert_comm
-            else self.sequence_parallel,
-            grad_output_buffer=(
-                self.grad_output_buffer
-                if self.config.defer_embedding_wgrad_compute
-                else None
-            ),
-            wgrad_deferral_limit=(
-                self.config.wgrad_deferral_limit
-                if self.config.defer_embedding_wgrad_compute
-                else None
-            ),
-            tp_group=self.tp_group,
-        )
+        # output_parallel = self._forward_impl(
+        #     input=input_parallel,
+        #     weight=weight,
+        #     bias=bias,
+        #     gradient_accumulation_fusion=self.gradient_accumulation_fusion,
+        #     allreduce_dgrad=allreduce_dgrad,
+        #     sequence_parallel=False
+        #     if self.explicit_expert_comm
+        #     else self.sequence_parallel,
+        #     grad_output_buffer=(
+        #         self.grad_output_buffer
+        #         if self.config.defer_embedding_wgrad_compute
+        #         else None
+        #     ),
+        #     wgrad_deferral_limit=(
+        #         self.config.wgrad_deferral_limit
+        #         if self.config.defer_embedding_wgrad_compute
+        #         else None
+        #     ),
+        #     tp_group=self.tp_group,
+        # )
+        output_parallel = paddle.nn.functional.linear(x=input_parallel, weight=weight, bias=bias)
+        return output_parallel, None
 
         gather_output = self.gather_output
         # Use the runtime gather output if it's set explicitly.
@@ -1301,17 +1305,18 @@ class RowParallelLinear(paddle.nn.Layer):
                         self.config.cpu_offloading_activations
                     )
 
-        output_parallel = self._forward_impl(
-            input=input_parallel,
-            weight=self.weight,
-            bias=None,
-            gradient_accumulation_fusion=self.gradient_accumulation_fusion,
-            allreduce_dgrad=allreduce_dgrad,
-            sequence_parallel=False,
-            tp_group=None,
-            grad_output_buffer=None,
-        )
-
+        # output_parallel = self._forward_impl(
+        #     input=input_parallel,
+        #     weight=self.weight,
+        #     bias=None,
+        #     gradient_accumulation_fusion=self.gradient_accumulation_fusion,
+        #     allreduce_dgrad=allreduce_dgrad,
+        #     sequence_parallel=False,
+        #     tp_group=None,
+        #     grad_output_buffer=None,
+        # )
+        output_parallel = paddle.nn.functional.linear(x=input_parallel, weight=self.weight, bias=self.bias)
+        return output_parallel, None
         # All-reduce across all the partitions.
         if self.explicit_expert_comm:
             assert self.skip_bias_add

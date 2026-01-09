@@ -23,7 +23,17 @@ from paddlefleet.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
     _initialize_affine_weight_gpu,
 )
+def print_grad(forward_name, message=""):
+    def _print_grad(grad):
+        print(f"\nprint_grad {forward_name}")
+        print(f"[local  g {message}] {grad} {grad.shape} {grad.dtype} {grad._md5sum()}")
+    return _print_grad
 
+def print_tensor(x, message=""):
+    return
+    print(f"\nprint_tensor {x.name}")
+    print(f"[local  {message}] {x} {x.shape} {x.dtype} {x._md5sum()}")
+    x.register_hook(print_grad(x.name, message))
 
 class GPTLMHead(ColumnParallelLinear):
     def __init__(self, **kwargs):
@@ -83,7 +93,11 @@ class GPTLMHead(ColumnParallelLinear):
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
-        logits, _ = super().forward(hidden_states, self.weight.T)
+        # logits, _ = super().forward(hidden_states, self.weight.T)
+        print_tensor(hidden_states, "[LM_head]hidden_states")
+        logits = paddle.matmul(hidden_states, self.weight, transpose_y=True)
+        # logits = paddle.incubate.nn.functional.fused_linear(hidden_states, self.weight, transpose_weight=True)
+        print_tensor(logits, "[LM_head]logits")
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
         return logits

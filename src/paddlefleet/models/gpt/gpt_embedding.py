@@ -102,6 +102,7 @@ class GPTEmbedding(FleetLayer):
                 rotary_seq_len,
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
+                position_ids=position_ids,
             )
             if self.config.apply_rope_fusion:
                 rotary_pos_cos = paddle.cos(rotary_pos_emb)

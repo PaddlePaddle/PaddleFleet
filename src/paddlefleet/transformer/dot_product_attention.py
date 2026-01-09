@@ -223,6 +223,9 @@ class DotProductAttention(FleetLayer):
         ) and attn_mask_startend_row_indices is not None:
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
             flashmask_attention_func = flashmask_attention
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),

@@ -181,8 +181,8 @@ class LanguageModelEmbedding(FleetLayer):
             assert self.tokentype_embeddings is None
 
         # If the input flag for fp32 residual connection is set, convert for float.
-        if self.config.fp32_residual_connection:
-            embeddings = embeddings.float()
+        # if self.config.fp32_residual_connection:
+        #     embeddings = embeddings.float()
 
         # Dropout.
         if self.config.sequence_parallel:

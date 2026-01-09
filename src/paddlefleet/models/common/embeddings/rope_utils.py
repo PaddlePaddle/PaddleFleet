@@ -102,6 +102,9 @@ def _apply_rotary_pos_emb_bshd(
     Returns:
         Tensor: The input tensor after applying RoPE
     """
+    freqs = freqs.squeeze(0)
+    # print("freqs: ", freqs, freqs._md5sum())
+
     rot_dim = freqs.shape[-1]
 
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
@@ -116,8 +119,17 @@ def _apply_rotary_pos_emb_bshd(
     # second part is sine component, need to change signs with _rotate_half method
     cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
     sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
+    # print("t: ",t, t._md5sum())
+    # print("t_pass: ", t_pass, t_pass._md5sum())
 
+    # print("cos:", cos_, cos_._md5sum())
+    # print("sin:", sin_, sin_._md5sum())
+    # t = t.transpose(1, 2)
+    # print("t transpose: ",t, t._md5sum())
+    # cos_ = paddle.reshape(cos_, [t.shape[0],1,8192,64])
+    # sin_ = paddle.reshape(sin_, [t.shape[0],1,8192,64])
     t = (t * cos_) + (_rotate_half(t, rotary_interleaved) * sin_)
+    # t = t.transpose(1, 2)
     return paddle.cat((t, t_pass), axis=-1)
 
 

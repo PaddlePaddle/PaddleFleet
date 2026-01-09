@@ -192,9 +192,11 @@ class MLP(FleetLayer):
             else:
                 if self.hidden_act == F.gelu:
                     if self.config.gated_linear_unit:
-                        intermediate_parallel = bias_geglu_impl(
-                            intermediate_parallel, bias_parallel
-                        )
+                        # intermediate_parallel = bias_geglu_impl(
+                        #     intermediate_parallel, bias_parallel
+                        # )
+                        gate, x = intermediate_parallel.chunk(2, axis=-1)
+                        intermediate_parallel = self.act_fn(gate) * x
                     else:
                         assert self.config.use_bias is True
                         intermediate_parallel = bias_gelu_impl(
@@ -213,9 +215,12 @@ class MLP(FleetLayer):
                         and False,
                     )
                     """
-                    intermediate_parallel = bias_swiglu_impl(
-                        intermediate_parallel, bias_parallel
-                    )
+                    # intermediate_parallel = bias_swiglu_impl(
+                    #     intermediate_parallel, bias_parallel
+                    # )
+                    gate, x = intermediate_parallel.chunk(2, axis=-1)
+                    intermediate_parallel = paddle.nn.functional.silu(gate) * x
+
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")
         else:
