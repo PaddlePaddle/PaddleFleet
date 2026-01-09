@@ -143,16 +143,19 @@ class RotaryEmbedding(nn.Layer):
         return inv_freq_llama
 
     def get_freqs_non_repeated(
-        self, max_seq_len: int, offset: int = 0
+        self, max_seq_len: int, offset: int = 0, position_ids: Tensor = None
     ) -> Tensor:
         """Generates matrix of frequencies based on positions in the sequence,
         used to create positional encodings"""
-        seq = paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
+        
+        self.inv_freq = self.inv_freq.cast(paddle.bfloat16)
+        with paddle.amp.auto_cast(enable=False):
 
-        if self.seq_len_interpolation_factor is not None:
-            seq *= 1 / self.seq_len_interpolation_factor
+            inv_freq_expanded = self.inv_freq[None, :, None].float().expand([position_ids.shape[0], -1, 1])
 
-        freqs = paddle.outer(seq, self.inv_freq)  # [seq len, dim]
+            position_ids_expanded = position_ids[:, None, :].float()
+
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
 
         return freqs
 
@@ -167,7 +170,7 @@ class RotaryEmbedding(nn.Layer):
         return cos, sin
 
     def forward(
-        self, max_seq_len: int, offset: int = 0, packed_seq: bool = False
+        self, max_seq_len: int, offset: int = 0, packed_seq: bool = False, position_ids: Tensor = None
     ) -> Tensor:
         """Forward pass of RoPE embedding.
 
@@ -179,7 +182,7 @@ class RotaryEmbedding(nn.Layer):
         Returns:
             Tensor: Embeddings after applying RoPE.
         """
-        freqs = self.get_freqs_non_repeated(max_seq_len, offset)
+        freqs = self.get_freqs_non_repeated(max_seq_len, offset, position_ids=position_ids)
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size
         if not self.rotary_interleaved:

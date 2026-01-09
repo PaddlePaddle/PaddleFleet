@@ -24,7 +24,6 @@ from paddlefleet.tensor_parallel.layers import (
     _initialize_affine_weight_gpu,
 )
 
-
 class GPTLMHead(ColumnParallelLinear):
     def __init__(self, **kwargs):
         self.config = kwargs["config"]
@@ -83,7 +82,9 @@ class GPTLMHead(ColumnParallelLinear):
 
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
-        logits, _ = super().forward(hidden_states, self.weight.T)
+        # logits, _ = super().forward(hidden_states, self.weight.T)
+        logits = paddle.matmul(hidden_states, self.weight, transpose_y=True)
+        # logits = paddle.incubate.nn.functional.fused_linear(hidden_states, self.weight, transpose_weight=True)
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
         return logits

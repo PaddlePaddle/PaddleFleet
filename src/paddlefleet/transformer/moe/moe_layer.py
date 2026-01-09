@@ -153,7 +153,7 @@ class MoELayer(nn.Layer):
                     False  # TODO: Support EP>1 alltoall moe_grouped_gemm
                 )
                 self.fp8_dispatch = False
-
+        self.moe_use_fusion_node = False
         if self.fp8:
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
@@ -435,12 +435,12 @@ class MoELayer(nn.Layer):
             combine_overlap_handle = None
 
         if self.expert_model_parallel_size > 1:
-            if self.moe_use_fusion_node:
-                output = self.fusion_moe_forward(
-                    hidden_states, gates_masked, mask, combine_overlap_handle
-                )
-            else:
-                output = self.custom_forward(hidden_states, gates_masked, mask)
+            # if self.moe_use_fusion_node:
+            #     output = self.fusion_moe_forward(
+            #         hidden_states, gates_masked, mask, combine_overlap_handle
+            #     )
+            # else:
+            output = self.custom_forward(hidden_states, gates_masked, mask)
         else:
             if len(hidden_states.shape) == 3:
                 batch_size, seq_len, d_model = hidden_states.shape

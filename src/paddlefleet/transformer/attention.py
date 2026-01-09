@@ -249,7 +249,9 @@ class Attention(FleetLayer, ABC):
                     cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
-
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
             if (
                 self.config.apply_rope_fusion
                 and q_pos_emb is not None
