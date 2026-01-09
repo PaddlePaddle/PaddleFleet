@@ -1,4 +1,4 @@
-name: CE-CUDA-CUDA-130-Dev
+name: CE-CUDA-130-Release
 
 on:
   pull_request:
