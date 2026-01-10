@@ -300,10 +300,6 @@ class TransformerLayer(nn.Layer):
                     )
             else:
                 raise ValueError("recompute_modules must be list or dict")
-        print(
-            f"self.layer_id norm {self.layer_number} {self.recompute_input_layernorm}"
-        )
-        print(f"self.layer_id mlp {self.layer_number} {self.recompute_mlp}")
 
     def forward(
         self,

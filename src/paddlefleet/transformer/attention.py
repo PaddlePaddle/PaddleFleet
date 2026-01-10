@@ -198,10 +198,6 @@ class Attention(FleetLayer, ABC):
                     self.config,
                     self.config.recompute_modules["flash_attn"],
                 )
-        print(f"layer_id {self.layer_number} {self.use_rr_flash_attention}")
-        print(
-            f"self.layer_id core_attm {self.layer_number} {self.recompute_core_attention}"
-        )
         # Output.
         self.o_proj = build_layer(
             sublayers_spec.o_proj,
