@@ -545,8 +545,6 @@ class TopKRouter(StandardMoERouter):
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
             )
 
-        input = input.reshape([-1, input.shape[-1]])
-
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
                 input,
@@ -577,26 +575,31 @@ class TopKRouter(StandardMoERouter):
         else:
             l_zloss = None
 
-        # norm
-        if self.num_experts_per_tok > 1 and self.norm_topk_prob:
-            denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
-            top_gate = top_gate / denominator
-
-        if abs(self.routed_scaling_factor - 1.0) > 1e-6:
-            top_gate = top_gate * self.routed_scaling_factor
-
         mask = paddle.zeros_like(gates).put_along_axis(
             top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
         )
+
+        gates_masked = gates * mask
+
+        # norm
+        if self.norm_topk_prob:
+            denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+            top_gate = top_gate / denominator
+            if self.num_experts_per_tok > 1:
+                gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
+                denom_s = paddle.clip(
+                    gates_s, min=paddle.finfo(gates_masked.dtype).eps
+                )
+                gates_masked = gates_masked / denom_s
+
+        if abs(self.routed_scaling_factor - 1.0) > 1e-6:
+            top_gate = top_gate * self.routed_scaling_factor
+            gates_masked *= self.routed_scaling_factor
 
         if self.topk_method == "noaux_tc":
             exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
             with paddle.no_grad():
                 self.expert_usage += exp_counts
-
-        gates_masked = paddle.zeros_like(gates).put_along_axis(
-            top_idx, top_gate.cast(gates.dtype), axis=1
-        )
 
         # aux_loss
         if self.config.router_aux_loss_coef:

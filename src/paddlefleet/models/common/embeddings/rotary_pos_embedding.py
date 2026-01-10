@@ -305,6 +305,9 @@ class MultimodalRotaryEmbedding(nn.Layer):
         """
         assert mrope_section is not None, "Please provide mrope_section"
 
+        seqlens = position_ids.shape[2]
+        position_ids = position_ids.reshape([3, -1, seqlens])
+
         seq = position_ids.to(
             device=self.inv_freq.place, dtype=self.inv_freq.dtype
         )
