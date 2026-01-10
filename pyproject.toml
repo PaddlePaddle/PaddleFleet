@@ -14,7 +14,7 @@
 
 [project]
 name = "paddlefleet"
-dynamic = ["version", "readme"]
+dynamic = ["version", "readme", "dependencies"]
 description = "Fleet Core - Core Functional Library for Large Scale Distributed Training"
 requires-python = ">=3.10"
 license = { text = "Apache 2.0" }
@@ -26,7 +26,6 @@ keywords = [
     "deep",
     "gpu",
     "language",
-    "learning",
     "learning",
     "machine",
     "Nlp",
@@ -45,12 +44,6 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-dependencies = [
-    "colorlog>=6.10.1",
-    "paddlepaddle-gpu>=3.3.0.dev",
-    "triton",
-    "nvidia-nvshmem-cu12>=3.3.9", # for deep_ep build
-]
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
@@ -58,9 +51,8 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 [project.optional-dependencies]
 
-
 [build-system]
-requires = ["setuptools>=61.0.0", "pybind11", "wheel", "packaging>=24.2", "paddlepaddle-gpu>=3.3.0.dev", "setuptools-scm>=8", "nvidia-nvshmem-cu12>=3.3.9"]
+requires = ["setuptools>=66.1.0", "pip", "wheel"]
 build-backend = "build_backend"
 backend-path = ["."]
 
@@ -77,6 +69,7 @@ include = ["paddlefleet*"]
 
 [tool.setuptools.dynamic]
 readme = { file = "README.md", content-type = "text/markdown" }
+version = { attr = "paddlefleet.version.__version__" }
 
 [dependency-groups]
 test = [
@@ -84,10 +77,11 @@ test = [
     "matplotlib",
     "pytest",
     "pyyaml",
+    "parameterized",
 ]
 build = [
     "pip",
-    "setuptools>=61.0.0",
+    "setuptools>=66.1.0",
     "packaging>=24.2"
 ]
 linting = [
@@ -106,7 +100,6 @@ index-strategy = "unsafe-best-match"
 
 [tool.uv.pip]
 prerelease = "allow"
-
 
 [tool.ruff]
 exclude = ["third_party"]

@@ -4,3 +4,9 @@
 [submodule "third_party/DeepEP"]
 	path = third_party/DeepEP
 	url = https://github.com/PFCCLab/DeepEP.git
+[submodule "third_party/quack"]
+	path = third_party/quack
+	url = https://github.com/PFCCLab/quack.git
+[submodule "third_party/sonic-moe"]
+	path = third_party/sonic-moe
+	url = https://github.com/PFCCLab/sonic-moe.git

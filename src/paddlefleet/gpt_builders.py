@@ -87,7 +87,7 @@ def gpt_builder(config, **kwargs):
         tail_empty_layers_spec=tail_empty_layers_spec,
         mtp_layers_spec=mtp_layers_spec,
         vocab_size=config.vocab_size,
-        share_embeddings_and_output_weights=config.share_embeddings_and_output_weights,
+        tie_word_embeddings=config.tie_word_embeddings,
         max_sequence_length=config.max_sequence_length,
         position_embedding_type=config.position_embedding_type,
         rotary_percent=config.rotary_percent,

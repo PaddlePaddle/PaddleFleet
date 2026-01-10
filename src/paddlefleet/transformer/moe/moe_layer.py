@@ -101,7 +101,6 @@ class MoELayer(nn.Layer):
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
-        self.moe_deep_gemm = config.moe_deep_gemm
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -129,9 +128,11 @@ class MoELayer(nn.Layer):
         elif (
             self.expert_model_parallel_size > 1
             and self.tensor_model_parallel_size >= 1
+            or paddle.version.cuda() == "12.6"
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
+        self.moe_deep_gemm = True
         if (
             not paddle.device.current_device_is_cpu
             and paddle.device.get_device_capability()[0] < 9
@@ -164,6 +165,10 @@ class MoELayer(nn.Layer):
                 self.fp8_dispatch = False
 
         if self.fp8:
+            if paddle.version.cuda() == "12.6":
+                raise NotImplementedError(
+                    "fp8 is not supported when cuda version == 12.6."
+                )
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
             )

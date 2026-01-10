@@ -17,12 +17,18 @@ from copy import deepcopy
 
 import paddle
 import paddle.nn.functional as F
+from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
+    build_sharded_state_dict,
+    shard_weight,
+)
 
 from paddlefleet import utils
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+from .moe_utils import k_grouped_bf16_gemm_tn_contiguous_aligned
 
 try:
     from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
@@ -96,12 +102,12 @@ class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
         dx = paddle.cast(dx, paddle.float)
 
         dy = paddle.zeros_like(y, dtype=paddle.float)
-        paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+        k_grouped_bf16_gemm_tn_contiguous_aligned(
             a=x,
             b=grad,
             d=dy,
             ks=paddle.tolist(batch_sizes),
-            ks_tensor=batch_sizes,
+            ks_tensor=batch_sizes.cast("int32"),
             c=paddle.zeros_like(y, dtype=paddle.float),
         )
 
@@ -205,6 +211,8 @@ class GroupedMLPExpert(FleetLayer):
             dtype=dtype,
             default_initializer=initializer,
         )
+        self.weight1.is_distributed = self.expert_parallel
+        self.weight2.is_distributed = self.expert_parallel
 
     def forward(
         self,
@@ -268,6 +276,39 @@ class GroupedMLPExpert(FleetLayer):
         Empty implementation for compatibility with SequentialMLP and TEGroupedMLP.
         """
         pass
+
+    def sharded_state_dict(
+        self,
+        structured_name_prefix: str = "",
+    ):
+        state_dict = self.state_dict(structured_name_prefix="")
+        w1 = state_dict["weight1"].reshape(-1, self.weight1.shape[-1])
+        w2 = state_dict["weight2"].reshape(-1, self.weight2.shape[-1])
+        w1.name = self.weight1.name
+        w2.name = self.weight2.name
+        state_dict["weight1"] = w1
+        state_dict["weight2"] = w2
+        sharded_dict = {}
+        full_key1 = f"{structured_name_prefix}weight1"
+        full_key2 = f"{structured_name_prefix}weight2"
+        if self.ep_group is None:
+            sharded_dict = build_sharded_state_dict(
+                state_dict, None, structured_name_prefix
+            )
+        else:
+            sharded_dict[full_key1] = shard_weight(
+                key=full_key1,
+                weight=state_dict["weight1"],
+                axis=0,
+                group=self.ep_group,
+            )
+            sharded_dict[full_key2] = shard_weight(
+                key=full_key2,
+                weight=state_dict["weight2"],
+                axis=0,
+                group=self.ep_group,
+            )
+        return sharded_dict
 
 
 class StandardMLPExpert(MLP):

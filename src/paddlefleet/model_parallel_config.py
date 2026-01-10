@@ -376,6 +376,10 @@ class ModelParallelConfig:
         See https://docs.python.org/3/library/dataclasses.html#post-init-processing for more
         details.
         """
+
+        if self.tensor_model_parallel_size <= 1:
+            self.sequence_parallel = False
+
         if self.sequence_parallel:
             if self.tensor_model_parallel_size <= 1:
                 raise ValueError(
