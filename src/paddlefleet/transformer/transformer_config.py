@@ -488,6 +488,8 @@ class TransformerConfig(ModelParallelConfig):
             return
 
         if key == "hidden_act":
+            if value == "gelu_pytorch_tanh":
+                value = "gelu"
             if isinstance(value, str):
                 func = getattr(F, value)
                 setattr(self, key, func)
