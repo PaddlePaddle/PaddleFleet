@@ -16,6 +16,9 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -99,17 +102,24 @@ def patch_module_namespace(source_name: str, target_prefix: str):
             sys.modules[new_name] = module
 
 
+def clean_module_namespace(module_name: str):
+    for name in list(sys.modules.keys()):
+        if name == module_name:
+            sys.modules.pop(name)
+
+
 class HardwareIncompatibleBlocker(importlib.abc.MetaPathFinder):
-    def __init__(self, capability: tuple[int, int]):
-        self.capability = capability
+    """Blocks imports for modules that do not meet runtime requirements."""
+
+    def __init__(self, error_messages: dict[str, str]):
+        self.error_messages = error_messages
 
     def find_spec(self, fullname, path, target=None):
-        if fullname in ["paddlefleet.ops.deep_gemm", "paddlefleet.ops.deep_ep"]:
-            raise RuntimeError(
-                f"Blocking import of '{fullname}'. "
-                f"Your GPU compute capability is {self.capability[0]}.{self.capability[1]}, "
-                f"but >= 9.0 (Hopper architecture) is required for this module."
-            )
+        for module_name, error_msg in self.error_messages.items():
+            if fullname == module_name or fullname.startswith(
+                module_name + "."
+            ):
+                raise RuntimeError(error_msg)
 
 
 # Wheel specific: the wheels only include the soname of the host library `libnvshmem_host.so.X`
@@ -121,3 +131,28 @@ def get_nvshmem_host_lib_path(base_dir):
         f"Could not locate 'libnvshmem_host.so.*' within the expected directory: {path}. "
         "Please ensure nvidia-nvshmem is installed correctly."
     )
+
+
+def get_cuda_version():
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path is None:
+        raise FileNotFoundError(
+            "nvcc command not found. Please make sure CUDA toolkit is installed and nvcc is in PATH."
+        )
+
+    result = subprocess.run(
+        ["nvcc", "--version"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    version_output = result.stdout
+
+    match = re.search(r"release (\d+)\.(\d+)", version_output)
+    if not match:
+        raise ValueError(
+            f"Cannot parse CUDA version from nvcc output:\n{version_output}"
+        )
+    cuda_major = int(match.group(1))
+    cuda_minor = int(match.group(2))
+    return cuda_major, cuda_minor

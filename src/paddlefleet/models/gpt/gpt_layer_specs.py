@@ -24,6 +24,7 @@ from paddlefleet.models.common.embeddings.language_model_embedding import (
     LanguageModelEmbedding,
 )
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+    MultimodalRotaryEmbedding,
     RotaryEmbedding,
 )
 from paddlefleet.models.gpt import GPTModel
@@ -100,8 +101,10 @@ def get_gpt_layer_local_spec(
         moe_grouped_gemm=moe_grouped_gemm,
     )
 
+    transformer_layer = getattr(config, "specific_layer", TransformerLayer)
+
     return LayerSpec(
-        layer=TransformerLayer,
+        layer=transformer_layer,
         sublayers_spec=TransformerLayerSublayersSpec(
             input_layernorm=layer_norm,
             self_attn=LayerSpec(
@@ -261,11 +264,7 @@ def get_gpt_mtp_layers_spec_for_backend(
     spec: list[LayerSpec],
     backend: BackendSpecProvider,
 ) -> list[LayerSpec]:
-    assert (
-        isinstance(spec, list)
-        and isinstance(spec[-1], LayerSpec)
-        and spec[-1].layer == TransformerLayer
-    )
+    assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
     transformer_layer_spec = spec[-1]
 
     mtp_layer_spec_func = partial(
@@ -301,7 +300,7 @@ def get_gpt_spec(
     rotary_base: int = 10000,
     rope_scaling: bool = False,
     parallel_output: bool = False,
-    share_embeddings_and_output_weights: bool = False,
+    tie_word_embeddings: bool = False,
 ):
     embedding_extra_kwargs = {
         "config": config,
@@ -311,8 +310,7 @@ def get_gpt_spec(
     }
 
     skip_weight_param_allocation = (
-        config.share_embeddings_and_output_weights
-        and config.pipeline_model_parallel_size == 1
+        config.tie_word_embeddings and config.pipeline_model_parallel_size == 1
     )
 
     language_embedding_spec = LayerSpec(layer=LanguageModelEmbedding)
@@ -328,6 +326,23 @@ def get_gpt_spec(
             **embedding_extra_kwargs,
             **rope_embedding_extra_kwargs,
         }
+    elif (
+        position_embedding_type == "mrope" and not config.multi_latent_attention
+    ):
+        rope_embedding_spec = LayerSpec(layer=MultimodalRotaryEmbedding)
+        rope_embedding_extra_kwargs = {
+            "rotary_percent": rotary_percent,
+            "rotary_base": rotary_base,
+            "rope_scaling": rope_scaling,
+            "mrope_section": config.mrope_section,
+        }
+        embedding_extra_kwargs = {
+            **embedding_extra_kwargs,
+            **rope_embedding_extra_kwargs,
+        }
+        assert config.mrope_section is not None, (
+            "mrope require mrope_section setting, but we got None from TransformerConfig"
+        )
 
     embedding_spec = GPTEmbeddingSpec(
         language_embedding=language_embedding_spec,
@@ -338,7 +353,7 @@ def get_gpt_spec(
         layer=GPTModel,
         extra_kwargs={
             "config": config,
-            "share_embeddings_and_output_weights": share_embeddings_and_output_weights,
+            "tie_word_embeddings": tie_word_embeddings,
         },
         sublayers_spec=GPTSublayersSpec(
             embedding=LayerSpec(

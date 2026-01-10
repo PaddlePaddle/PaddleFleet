@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
 import unittest
 
 
@@ -31,9 +30,6 @@ class TestOpsImport(unittest.TestCase):
     ]
 
     def setUp(self):
-        if "paddlefleet.ops" in sys.modules:
-            del sys.modules["paddlefleet.ops"]
-
         try:
             import paddlefleet.ops
 
