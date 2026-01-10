@@ -42,7 +42,21 @@ from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
 
-from .moe_utils import permute, unpermute
+from sonicmoe.enums import ActivationType
+from sonicmoe.functional import (
+    _DownProjection,
+    _UpProjection,
+)
+
+from .moe_utils import (
+    count_cumsum,
+    filter_scores,
+    fused_expert_parallel_TC_topk_router_metadata,
+    permute,
+    unpermute,
+)
+
+paddle.enable_compat(scope={"sonicmoe", "quack", "triton"})
 
 
 @dataclass
@@ -83,6 +97,7 @@ class MoELayer(nn.Layer):
         self.fp8 = config.fp8
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
+        self.using_sonic_moe = self.config.using_sonic_moe
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
@@ -361,7 +376,6 @@ class MoELayer(nn.Layer):
         routing_map: paddle.Tensor,
         combine_overlap_handle: dict,
     ):
-        # TODO(deepllz): add fp8 dispatch config && implementation
         dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
             hidden_states, probs, routing_map
         )
@@ -370,23 +384,91 @@ class MoELayer(nn.Layer):
         )
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
 
-        hidden_states = FusionMoePyLayer.apply(
-            dispatched_hidden_states,
-            dispatched_probs,
-            dispatched_indices,
-            self,
-            self.num_experts_per_tok,
-            use_fp8_mlp=self.fp8,
-            moe_deep_gemm=self.moe_deep_gemm,
-            moe_grouped_gemm=self.moe_grouped_gemm,
-            recompute_moe_gate_up=self.recompute_moe_gate_up,
-            recompute_moe_premute=self.recompute_moe_premute,
-            fp8_dispatched_handle=fp8_dispatched_handle,
-            use_bf16_gemm_weight_grad=not self.fp8_wgrad,
-        )
+        if self.using_sonic_moe:
+            T = dispatched_hidden_states.shape[0]
+            K = self.num_experts_per_tok
+            stream_id = paddle.device.cuda.current_stream().cuda_stream
+            topk_scores, w1_transposed = filter_scores(
+                dispatched_probs,
+                dispatched_indices,
+                self.grouped_gemm_experts.weight1,
+            )
+            expert_frequency, expert_frequency_offset = count_cumsum(
+                dispatched_indices, self.num_experts_per_device, do_cumsum=True
+            )
+            activation_type = ActivationType("swiglu")
+
+            (
+                expert_frequency_offset,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+            ) = fused_expert_parallel_TC_topk_router_metadata(
+                dispatched_indices,
+                expert_frequency_offset,
+                K,
+            )
+
+            TK = s_scatter_idx.shape[0]
+            is_varlen_K = True
+
+            # TODO(xingmingyyj) check input tensor dtype
+            y1, z = _UpProjection.apply(
+                dispatched_hidden_states,
+                w1_transposed,
+                None,  # No use for bias
+                expert_frequency_offset,
+                TK,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                is_varlen_K,
+                activation_type,
+                is_inference_mode_enabled=False,
+            )
+
+            w2 = self.grouped_gemm_experts.weight2
+            hidden_states = _DownProjection.apply(
+                y1,
+                z,
+                w2.permute(1, 2, 0),
+                None,
+                topk_scores,
+                expert_frequency_offset,
+                T,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                is_varlen_K,
+                activation_type,
+            )
+        else:
+            hidden_states = FusionMoePyLayer.apply(
+                dispatched_hidden_states,
+                dispatched_probs,
+                dispatched_indices,
+                self,
+                self.num_experts_per_tok,
+                use_fp8_mlp=self.fp8,
+                moe_deep_gemm=self.moe_deep_gemm,
+                moe_grouped_gemm=self.moe_grouped_gemm,
+                recompute_moe_gate_up=self.recompute_moe_gate_up,
+                recompute_moe_premute=self.recompute_moe_premute,
+                fp8_dispatched_handle=fp8_dispatched_handle,
+                use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+            )
+
         hidden_states = self.token_dispatcher._comm_manager.combine(
             hidden_states, combine_overlap_handle
         )
+
         return hidden_states
 
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
@@ -539,21 +621,95 @@ class MoELayer(nn.Layer):
         Returns:
             output: Output hidden states, shape: [seq_len, hidden_size]
         """
-        tokens_per_expert = routing_map.sum(axis=0)
-        permuted_local_hidden_states, sorted_indices = permute(
-            hidden_states, routing_map, tokens_per_expert
-        )
-        grouped_expert_out = self.grouped_gemm_experts(
-            permuted_local_hidden_states, tokens_per_expert
-        )[0]
-        final_hidden_states = unpermute(
-            grouped_expert_out,
-            sorted_indices,
-            restore_shape=hidden_states.shape,
-            probs=probs,
-            routing_map=routing_map,
-        )
-        return final_hidden_states.cast(hidden_states.dtype)
+
+        def _convert_routing_map_and_probs(
+            routing_map: paddle.Tensor, probs: paddle.Tensor, topk: int
+        ):
+            routing_map = routing_map.astype("bool")
+            masked_probs = probs * routing_map.astype("float32")
+            weights, indices = paddle.topk(masked_probs, k=topk, axis=-1)
+            return indices, weights
+
+        if self.using_sonic_moe:
+            T = hidden_states.shape[0]
+            K = self.num_experts_per_tok
+            stream_id = paddle.device.cuda.current_stream().cuda_stream
+            selected_indices, topk_scores = _convert_routing_map_and_probs(
+                routing_map, probs, self.num_experts_per_tok
+            )
+            activation_type = ActivationType("swiglu")
+            expert_frequency, expert_frequency_offset = count_cumsum(
+                selected_indices, self.num_experts_per_device, do_cumsum=True
+            )
+
+            (
+                expert_frequency_offset,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+            ) = fused_expert_parallel_TC_topk_router_metadata(
+                selected_indices,
+                expert_frequency_offset,
+                K,
+            )
+
+            s_scatter_idx.stop_gradient = True
+
+            w1 = self.grouped_gemm_experts.weight1
+
+            y1, z = _UpProjection.apply(
+                hidden_states,
+                w1.permute([1, 2, 0]),
+                None,
+                expert_frequency_offset,
+                T * K,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                False,
+                activation_type,
+                is_inference_mode_enabled=False,
+            )
+
+            w2 = self.grouped_gemm_experts.weight2
+            hidden_states = _DownProjection.apply(
+                y1,
+                z,
+                w2.permute([1, 2, 0]),
+                None,
+                topk_scores,
+                expert_frequency_offset,
+                T,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                False,
+                activation_type,
+            )
+            return hidden_states
+        else:
+            tokens_per_expert = routing_map.sum(axis=0)
+            permuted_local_hidden_states, sorted_indices = permute(
+                hidden_states, routing_map, tokens_per_expert
+            )
+            grouped_expert_out = self.grouped_gemm_experts(
+                permuted_local_hidden_states, tokens_per_expert
+            )[0]
+            final_hidden_states = unpermute(
+                grouped_expert_out,
+                sorted_indices,
+                restore_shape=hidden_states.shape,
+                probs=probs,
+                routing_map=routing_map,
+            )
+            return final_hidden_states.cast(hidden_states.dtype)
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         if not (self.moe_use_fusion_node and self.fp8):

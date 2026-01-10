@@ -25,6 +25,7 @@ try:
 except ImportError:
     scatter_add_ = None
 import paddle.distributed as dist
+from paddle.autograd.py_layer import PyLayer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -324,3 +325,59 @@ def manual_backward(f: Callable, is_first_fwd: bool, *args: list[Any]):
         return tuple([t.grad for t in detached_args if is_tensor(t)])
 
     return bwd_f, out
+
+
+class FilterScores(PyLayer):
+    @staticmethod
+    def forward(ctx, probs, indices, w1):
+        topk_scores = paddle._C_ops._run_custom_op(
+            "filter_scores", probs, indices
+        )[0]
+        ctx.save_for_backward(probs, indices, topk_scores, w1)
+        return topk_scores
+
+    @staticmethod
+    def backward(ctx, grad_topk_scores, grad_w1_transposed):
+        probs, indices, topk_scores = ctx.saved_tensor()
+        grads = paddle._C_ops._run_custom_op(
+            "filter_scores_grad",
+            probs,
+            indices,
+            topk_scores,
+            grad_topk_scores,
+            grad_w1_transposed,
+        )
+        grad_probs = grads[0]
+        w1_grad = grads[2]
+        return grad_probs, None, w1_grad
+
+
+def fused_expert_parallel_TC_topk_router_metadata(
+    dispatched_indices,
+    expert_frequency_offset,
+    K,
+):
+    return paddle._C_ops._run_custom_op(
+        "router_metadata", dispatched_indices, expert_frequency_offset, K
+    )
+
+
+def count_cumsum(
+    dispatched_indices,
+    num_experts_per_device,
+    do_cumsum,
+):
+    return paddle._C_ops._run_custom_op(
+        "count_cumsum",
+        dispatched_indices,
+        num_experts_per_device,
+        do_cumsum,
+    )
+
+
+def filter_scores(
+    dispatched_probs,
+    dispatched_indices,
+    w1,
+):
+    return FilterScores.apply(dispatched_probs, dispatched_indices, w1)
