@@ -199,10 +199,17 @@ class MoELayer(nn.Layer):
                     self.moe_group,
                 )
             elif self.moe_token_dispatcher_type == "alltoall":
+                local_expert_indices = list(
+                    range(
+                        self.moe_rank * self.num_experts_per_device,
+                        (self.moe_rank + 1) * self.num_experts_per_device,
+                    )
+                )
                 self.token_dispatcher = AllToAllTokenDispatcher(
                     self.moe_group,
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
+                    local_expert_indices,
                 )
             else:
                 raise NotImplementedError(
