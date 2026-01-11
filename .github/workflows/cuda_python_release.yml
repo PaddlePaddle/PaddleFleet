@@ -38,7 +38,7 @@ jobs:
       group: Fleet-H-single-card
     strategy:
       matrix:
-        python: [3.11]
+        python: [3.11, 3.12, 3.13]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -141,7 +141,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       matrix:
-        python: [3.11]
+        python: [3.11, 3.12, 3.13]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       TASK: paddlefleet-CE-PYTHON-RELEASE-multi-card_test-${{ matrix.python }}
@@ -249,7 +249,7 @@ jobs:
       group: Fleet-H-single-card
     strategy:
       matrix:
-        python: [3.11]
+        python: [3.11, 3.12, 3.13]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -422,7 +422,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       matrix:
-        python: [3.11]
+        python: [3.11, 3.12, 3.13]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -672,7 +672,7 @@ jobs:
       group: Distribute
     strategy:
       matrix:
-        python: [3.11]
+        python: [3.11, 3.12, 3.13]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
