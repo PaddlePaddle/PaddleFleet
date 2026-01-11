@@ -113,6 +113,7 @@ class MoELayer(nn.Layer):
         elif (
             self.expert_model_parallel_size > 1
             and self.tensor_model_parallel_size >= 1
+            or paddle.version.cuda() == "12.6"
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
@@ -137,7 +138,7 @@ class MoELayer(nn.Layer):
         self.moe_use_fusion_node = False
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
-                self.moe_use_fusion_node = True
+                self.moe_use_fusion_node = config.moe_use_fusion_node
             else:
                 if self.moe_grouped_gemm:
                     logger.warning(
@@ -149,6 +150,10 @@ class MoELayer(nn.Layer):
                 self.fp8_dispatch = False
 
         if self.fp8:
+            if paddle.version.cuda() == "12.6":
+                raise NotImplementedError(
+                    "fp8 is not supported when cuda version == 12.6."
+                )
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
             )

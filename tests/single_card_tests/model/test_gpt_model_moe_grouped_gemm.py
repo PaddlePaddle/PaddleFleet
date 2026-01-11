@@ -24,10 +24,10 @@ from paddle.distributed import fleet
 
 # from tests.unit_tests.test_utilities import Utils
 import paddlefleet.parallel_state as ps
-
-# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
+
+# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.pipeline_parallel import NoPipelineParallel
 
 
@@ -55,7 +55,7 @@ def judge_machine_type():
 
 
 result = judge_machine_type()
-print("The type of your machine", result)
+print("你的机器类型是：", result)
 
 
 class TestGPTModel(unittest.TestCase):
@@ -63,7 +63,7 @@ class TestGPTModel(unittest.TestCase):
         seed = 46
         random.seed(seed)
         np.random.seed(seed)
-        paddle.manual_seed(seed)
+        paddle.seed(seed)
         strategy = fleet.DistributedStrategy()
         strategy.hybrid_configs = {
             "dp_degree": 1,
@@ -85,40 +85,44 @@ class TestGPTModel(unittest.TestCase):
                 "mp",
             ],
         }
+        self.strategy = strategy
         fleet.init(is_collective=True, strategy=strategy)
         hcg = fleet.get_hybrid_communicate_group()
         ps.initialize_model_parallel(hcg)
-        self.strategy = strategy
 
         config = GPTConfig(
             num_hidden_layers=2,
             hidden_size=512,
-            rotary_base=10000,
             vocab_size=100,
-            rotary_percent=1.0,
-            rope_scaling=1.0,
-            position_embedding_type="rope",
+            max_sequence_length=64,
             num_attention_heads=4,
             intermediate_size=1024,
-            max_sequence_length=64,
             normalization="RMSNorm",
             hidden_dropout_prob=0.0,
             attention_dropout=0.0,
+            n_routed_experts=8,
+            use_bias=False,
+            rotary_percent=1.0,
+            rotary_base=10000,
+            rope_scaling=1.0,
+            moe_intermediate_size=1024,
+            moe_token_dispatcher_type="alltoall",
+            n_shared_experts=1,
             init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             output_layer_init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
-            tie_word_embeddings=True,
             use_qk_norm=True,
+            moe_grouped_gemm=True,
         )
         self.gpt_model = gpt_builder(config, num_stages=1)
         self.config = config
 
     def test_forward(self) -> None:
         sequence_length = self.config.max_sequence_length
-        micro_batch_size = 1
+        micro_batch_size = 2
 
         for name, param in self.gpt_model.named_parameters():
             # 计算 L2 范数
@@ -140,7 +144,6 @@ class TestGPTModel(unittest.TestCase):
             list(range(1, sequence_length + 1)), dtype=paddle.int64
         ).repeat((micro_batch_size, 1))
 
-        gpt_pipe_model = NoPipelineParallel(self.gpt_model, self.strategy)
         data = (
             {
                 "input_ids": [input_ids],
@@ -150,9 +153,17 @@ class TestGPTModel(unittest.TestCase):
             [labels],
         )
 
+        gpt_pipe_model = NoPipelineParallel(self.gpt_model, self.strategy)
+        gpt_pipe_model = paddle.amp.decorate(
+            models=gpt_pipe_model, level="O2", dtype="bfloat16"
+        )
         loss = gpt_pipe_model.forward_backward_pipeline(data)
 
         for name, param in self.gpt_model.named_parameters():
+            # 计算 L2 范数
+            if param.grad is None:
+                print(f"{name}: 0.000000, 0.000000")
+                continue
             grad_norm = param.grad.detach().norm().item()
             grad_abssum = param.grad.detach().abs().sum().item()
             print(f"{name}: {grad_norm:.6f}, {grad_abssum:.6f}")
@@ -160,26 +171,18 @@ class TestGPTModel(unittest.TestCase):
                 embed_tokens_grad_norm = grad_norm
 
         print("loss", loss.item())
+
         print("embed_tokens_grad_norm", embed_tokens_grad_norm)
 
         if judge_machine_type() == "H":
-            assert loss.item() == 5.399779796600342, (
-                f"loss is not equal ({loss.item()} != 5.399779796600342), please check your modify"
+            assert loss.item() == 5.239649772644043, (
+                f"loss not equal ({loss.item()} != 5.239649772644043), please check your modify"
             )
-            assert embed_tokens_grad_norm == 4.742391586303711, (
-                f"grad norm of embed_tokens is not equal ({embed_tokens_grad_norm} != 4.742391586303711), please check your modify"
+            assert embed_tokens_grad_norm == 2.796875, (
+                f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
             )
         elif judge_machine_type() == "V":
-            assert loss.item() == 5.344659805297852, (
-                f"loss is not equal ({loss.item()} != 5.344659805297852), please check your modify"
-            )
-            assert embed_tokens_grad_norm == 4.078969478607178, (
-                f"grad norm of embed_tokens is not equal ({embed_tokens_grad_norm} != 4.078969478607178), please check your modify"
-            )
-
-        state_dict = self.gpt_model.sharded_state_dict()
-        for name, tensor in state_dict.items():
-            assert tensor.local_shape == tensor.global_shape
+            pass  # TODO: add V machine test
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
+from .moe_utils import k_grouped_bf16_gemm_tn_contiguous_aligned
+
 try:
     from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
 except (ImportError, RuntimeError):
@@ -100,7 +102,7 @@ class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
         dx = paddle.cast(dx, paddle.float)
 
         dy = paddle.zeros_like(y, dtype=paddle.float)
-        paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+        k_grouped_bf16_gemm_tn_contiguous_aligned(
             a=x,
             b=grad,
             d=dy,
@@ -264,6 +266,8 @@ class GroupedMLPExpert(FleetLayer):
         state_dict = self.state_dict(structured_name_prefix="")
         w1 = state_dict["weight1"].reshape(-1, self.weight1.shape[-1])
         w2 = state_dict["weight2"].reshape(-1, self.weight2.shape[-1])
+        w1.name = self.weight1.name
+        w2.name = self.weight2.name
         state_dict["weight1"] = w1
         state_dict["weight2"] = w2
         sharded_dict = {}

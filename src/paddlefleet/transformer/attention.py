@@ -33,6 +33,10 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_concentration_factor_from_config,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import (
+    need_recompute_in_block,
+    need_recompute_in_first_n,
+)
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import divide, get_pg_size
@@ -138,12 +142,62 @@ class Attention(FleetLayer, ABC):
             softmax_scale=self.config.softmax_scale,
             pg_collection=self.pg_collection,
         )
-
-        self.recompute_core_attention = (
-            self.config.recompute_granularity == "selective"
-            and "core_attn" in self.config.recompute_modules
-        )
-
+        self.use_rr_flash_attention = False
+        self.recompute_core_attention = False
+        if self.config.recompute_granularity == "selective":
+            if isinstance(self.config.recompute_modules, list):
+                if self.config.recompute_num_layers is None:
+                    # selective all submodels to recompute
+                    if "core_attn" in self.config.recompute_modules:
+                        self.recompute_core_attention = True
+                else:
+                    # selective submodels in special layers to recompute
+                    assert self.config.recompute_method in ["first_n", "block"]
+                    if "core_attn" in self.config.recompute_modules:
+                        self.recompute_core_attention = (
+                            need_recompute_in_block(
+                                self.layer_number,
+                                self.config,
+                                self.config.recompute_num_layers,
+                            )
+                            if self.config.recompute_method == "block"
+                            else need_recompute_in_first_n(
+                                self.layer_number,
+                                self.config,
+                                self.config.recompute_num_layers,
+                            )
+                        )
+            elif isinstance(self.config.recompute_modules, dict):
+                assert self.config.recompute_method in ["first_n", "block"]
+                if "core_attn" in self.config.recompute_modules:
+                    self.recompute_core_attention = (
+                        need_recompute_in_block(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_modules["core_attn"],
+                        )
+                        if self.config.recompute_method == "block"
+                        else need_recompute_in_first_n(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_modules["core_attn"],
+                        )
+                    )
+        if (
+            self.config.recompute_modules is not None
+            and "flash_attn" in self.config.recompute_modules
+        ):
+            assert self.config.recompute_granularity is not None, (
+                "rr must be used when recompute is enabled"
+            )
+            if isinstance(self.config.recompute_modules, list):
+                self.use_rr_flash_attention = True
+            elif isinstance(self.config.recompute_modules, dict):
+                self.use_rr_flash_attention = not need_recompute_in_first_n(
+                    self.layer_number,
+                    self.config,
+                    self.config.recompute_modules["flash_attn"],
+                )
         # Output.
         self.o_proj = build_layer(
             sublayers_spec.o_proj,
@@ -265,6 +319,8 @@ class Attention(FleetLayer, ABC):
                     mscale=None,
                     cp_group=self.pg_collection.cp,
                 )
+            # elif self.config.apply_vision_rope:
+            #     query, key = apply_rotary_pos_emb_vision(query,key,rotary_pos_cos,rotary_pos_sin)
             else:
                 if q_pos_emb is not None:
                     query = apply_rotary_pos_emb(
@@ -312,11 +368,14 @@ class Attention(FleetLayer, ABC):
                 query,
                 key,
                 value,
-                attention_mask,
-                attn_mask_startend_row_indices,
+                attention_mask.clone() if attention_mask is not None else None,
+                attn_mask_startend_row_indices.clone()
+                if attn_mask_startend_row_indices is not None
+                else None,
                 attn_mask_type=attn_mask_type,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
+                use_rr_flash_attention=self.use_rr_flash_attention,
             )
         else:
             # Static batching attention kernel.
@@ -329,20 +388,10 @@ class Attention(FleetLayer, ABC):
                 attn_mask_type=attn_mask_type,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
+                use_rr_flash_attention=self.use_rr_flash_attention,
             )
-
-        if (
-            packed_seq_params is not None
-            and packed_seq_params.qkv_format == "thd"
-        ):
-            # reshape to same output shape as unpacked case
-            # (t, np, hn) -> (t, b=1, h=np*hn)
-            # t is the pack size = sum (sq_i)
-            # note that batch is a dummy dimension in the packed case
-            core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
-
         # =================
-        # Output. [sq, b, h]
+        # Output. [b, sq, h]
         # =================
 
         if self.config.sequence_parallel:
@@ -424,10 +473,10 @@ class SelfAttention(Attention):
         Derives `query`, `key` and `value` tensors from `hidden_states`. If `split_qkv=False`, then
         the unsplit mixed_qkv tensor is returned.
         """
-        # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
+        # Attention heads [b, sq, h] --> [b, sq, ng * (np/ng + 2) * hn)]
         mixed_qkv, _ = self.qkv_proj(hidden_states)
 
-        # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
+        # [b, sq, hp] --> [b, sq, ng, (np/ng + 2) * hn]
         new_tensor_shape = (
             *mixed_qkv.shape[:-1],
             self.num_query_groups_per_partition,
@@ -456,11 +505,11 @@ class SelfAttention(Attention):
         if not split_qkv:
             return mixed_qkv, split_arg_list
 
-        # [sq, b, ng, (np/ng + 2) * hn]
-        # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
+        # [b, sq, ng, (np/ng + 2) * hn]
+        # --> [b, sq, ng, np/ng * hn], [b, sq, ng, hn], [b, sq, ng, hn]
         (query, key, value) = paddle.split(mixed_qkv, split_arg_list, axis=3)
 
-        # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
+        # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
         query = query.reshape(
             query.shape[0],
             query.shape[1],
@@ -568,10 +617,10 @@ class CrossAttention(Attention):
         # [sk, b, np, 2 * hn] --> 2 [sk, b, np, hn]
         (key, value) = tensor_parallel.split_tensor_along_last_dim(mixed_kv, 2)
 
-        # Attention head [sq, b, h] --> [sq, b, hp]
+        # Attention head [b, sq, h] --> [b, sq, hp]
         query, _ = self.linear_q(hidden_states)
 
-        # [sq, b, hp] --> [sq, b, np, hn]
+        # [b, sq, hp] --> [b, sq, np, hn]
         new_tensor_shape = (
             *query.size()[:-1],
             self.num_attention_heads_per_partition,
