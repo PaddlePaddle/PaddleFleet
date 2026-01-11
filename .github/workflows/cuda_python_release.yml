@@ -113,7 +113,7 @@ jobs:
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
-          url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+          url_info=paddlepaddle_gpu-3.3.0cp${version}-cp${version}-linux_x86_64.whl
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
@@ -209,7 +209,7 @@ jobs:
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
-          url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+          url_info=paddlepaddle_gpu-3.3.0cp${version}-cp${version}-linux_x86_64.whl
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
@@ -325,7 +325,7 @@ jobs:
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
-          url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
+          url_info="paddlepaddle_gpu-3.3.0cp${version}-cp${version}-linux_x86_64.whl"
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -352,7 +352,7 @@ jobs:
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
-          url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
+          url_info="paddlepaddle_gpu-3.3.0cp${version}-cp${version}-linux_x86_64.whl"
           pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
@@ -494,7 +494,7 @@ jobs:
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
-          url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
+          url_info="paddlepaddle_gpu-3.3.0cp${version}-cp${version}-linux_x86_64.whl"
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -520,7 +520,7 @@ jobs:
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
-          url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+          url_info=paddlepaddle_gpu-3.3.0cp${version}-cp${version}-linux_x86_64.whl
           pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
@@ -755,7 +755,7 @@ jobs:
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
-          url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
+          url_info="paddlepaddle_gpu-3.3.0cp${version}-cp${version}-linux_x86_64.whl"
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -779,7 +779,7 @@ jobs:
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
-          url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
+          url_info="paddlepaddle_gpu-3.3.0cp${version}-cp${version}-linux_x86_64.whl"
           pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
