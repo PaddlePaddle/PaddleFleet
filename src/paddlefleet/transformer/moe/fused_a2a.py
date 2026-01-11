@@ -14,17 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import hashlib
-import logging
-
-
-def get_md5(x):
-    if isinstance(x, bytes):
-        return hashlib.md5(x).hexdigest()
-    return hashlib.md5(str(x).encode()).hexdigest()
-
+import paddle
+from paddle import framework
+from paddle.autograd import PyLayer
+from paddle.distributed.communication.group import Group
 
 from paddlefleet.ops import is_deep_ep_available
+
+from .moe_utils import manual_backward
 
 if is_deep_ep_available():
     from paddlefleet.ops import deep_ep
@@ -33,13 +30,6 @@ if is_deep_ep_available():
 else:
     deep_ep = None
     HAVE_DEEP_EP = False
-
-import paddle
-from paddle import framework
-from paddle.autograd import PyLayer
-from paddle.distributed.communication.group import Group
-
-from .moe_utils import manual_backward
 
 _buffer = None
 
@@ -115,27 +105,6 @@ def fused_dispatch_forward_func(
     async_finish=False,
     allocate_on_comm_stream=False,
 ):
-    logging.info(f"input fused_dispatch_forward_func x: {get_md5(x)}")
-    logging.info(
-        f"input fused_dispatch_forward_func token_indices: {get_md5(token_indices)}"
-    )
-    logging.info(
-        f"input fused_dispatch_forward_func token_probs: {get_md5(token_probs)}"
-    )
-    logging.info(
-        f"input fused_dispatch_forward_func num_experts: {get_md5(num_experts)}"
-    )
-    logging.info(f"input fused_dispatch_forward_func group: {get_md5(group)}")
-    logging.info(
-        f"input fused_dispatch_forward_func previous_event: {previous_event}"
-    )
-    logging.info(
-        f"input fused_dispatch_forward_func async_finish: {async_finish}"
-    )
-    logging.info(
-        f"input fused_dispatch_forward_func allocate_on_comm_stream: {allocate_on_comm_stream}"
-    )
-
     """Forward pass of fused dispatch."""
     barrier_ep(group)
     # Calculate layout before actual dispatch
@@ -185,16 +154,7 @@ def fused_dispatch_forward_func(
     states["dispatched_indices"] = recv_token_indices
     states["tokens_per_expert"] = num_recv_tokens_per_expert_list
     states["handle"] = handle
-    logging.info(
-        f"output fused_dispatch_forward_func recv_x: {get_md5(recv_x)}"
-    )
-    logging.info(
-        f"output fused_dispatch_forward_func recv_token_probs: {get_md5(recv_token_probs)}"
-    )
-    logging.info(
-        f"output fused_dispatch_forward_func states: {get_md5(states)}"
-    )
-    logging.info(f"output fused_dispatch_forward_func event: {get_md5(event)}")
+
     return recv_x, recv_token_probs, states, event
 
 
@@ -207,25 +167,6 @@ def fused_dispatch_backward_func(
     async_finish=False,
     allocate_on_comm_stream=False,
 ):
-    logging.info(
-        f"input fused_dispatch_backward_func grad_output: {get_md5(grad_output)}"
-    )
-    logging.info(
-        f"input fused_dispatch_backward_func grad_token_probs: {get_md5(grad_token_probs)}"
-    )
-    logging.info(f"input fused_dispatch_backward_func group: {get_md5(group)}")
-    logging.info(
-        f"input fused_dispatch_backward_func handle: {get_md5(handle)}"
-    )
-    logging.info(
-        f"input fused_dispatch_backward_func previous_event: {previous_event}"
-    )
-    logging.info(
-        f"input fused_dispatch_backward_func async_finish: {async_finish}"
-    )
-    logging.info(
-        f"input fused_dispatch_backward_func allocate_on_comm_stream: {allocate_on_comm_stream}"
-    )
     """Backward pass of fused dispatch."""
     barrier_ep(group)
 
@@ -239,12 +180,6 @@ def fused_dispatch_backward_func(
         async_finish=async_finish,
         allocate_on_comm_stream=allocate_on_comm_stream,
     )
-    logging.info(
-        f"output fused_dispatch_backward_func grad_x: {get_md5(grad_x)}"
-    )
-    logging.info(
-        f"output fused_dispatch_backward_func grad_token_probs: {get_md5(grad_token_probs)}"
-    )
     return grad_x, None, grad_token_probs
 
 
@@ -256,18 +191,6 @@ def fused_combine_forward_func(
     async_finish=False,
     allocate_on_comm_stream=False,
 ):
-    logging.info(f"input fused_combine_forward_func x: {get_md5(x)}")
-    logging.info(f"input fused_combine_forward_func states: {get_md5(states)}")
-    logging.info(f"input fused_combine_forward_func group: {get_md5(group)}")
-    logging.info(
-        f"input fused_combine_forward_func previous_event: {previous_event}"
-    )
-    logging.info(
-        f"input fused_combine_forward_func async_finish: {async_finish}"
-    )
-    logging.info(
-        f"input fused_combine_forward_func allocate_on_comm_stream: {allocate_on_comm_stream}"
-    )
     """Forward pass of fused combine."""
     barrier_ep(group)
 
@@ -280,9 +203,6 @@ def fused_combine_forward_func(
         previous_event=previous_event,
         allocate_on_comm_stream=allocate_on_comm_stream,
     )
-    logging.info(
-        f"output fused_combine_forward_func combined_x: {get_md5(combined_x)}"
-    )
     return combined_x
 
 
@@ -294,20 +214,6 @@ def fused_combine_backward_func(
     async_finish=False,
     allocate_on_comm_stream=False,
 ):
-    logging.info(
-        f"input fused_combine_backward_func grad_output: {get_md5(grad_output)}"
-    )
-    logging.info(f"input fused_combine_backward_func group: {get_md5(group)}")
-    logging.info(f"input fused_combine_backward_func handle: {get_md5(handle)}")
-    logging.info(
-        f"input fused_combine_backward_func previous_event: {previous_event}"
-    )
-    logging.info(
-        f"input fused_combine_backward_func async_finish: {async_finish}"
-    )
-    logging.info(
-        f"input fused_combine_backward_func allocate_on_comm_stream: {allocate_on_comm_stream}"
-    )
     """Backward pass of fused combine."""
     barrier_ep(group)
 
@@ -329,9 +235,6 @@ def fused_combine_backward_func(
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
         )
-    logging.info(
-        f"output fused_combine_backward_func grad_x: {get_md5(grad_x)}"
-    )
     return grad_x
 
 
