@@ -34,6 +34,10 @@ from paddlefleet.context_parallel_utils import flashmask_attention_cp
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.refined_recompute import (
+    RefinedRcomputeFlashMaskAttention as rr_flashmask_attention,
+    RefinedRcomputeFlashMaskCpAttention as rr_flashmask_attention_cp,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.utils import (
@@ -172,6 +176,7 @@ class DotProductAttention(FleetLayer):
                 self.softmax_offset = config.init_method(self.softmax_offset)
         else:
             raise ValueError("Softmax type not supported")
+        self.rr_flashmask_attention_func = rr_flashmask_attention()
 
     def forward(
         self,
@@ -183,16 +188,41 @@ class DotProductAttention(FleetLayer):
         attn_mask_type: AttnMaskType = None,
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
+        use_rr_flash_attention: bool = False,
     ):
         """Forward."""
-        assert packed_seq_params is None, (
-            "Packed sequence is not supported by DotProductAttention."
-            "Please use TEDotProductAttention instead."
-        )
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
-
+        if packed_seq_params is not None:
+            assert (
+                query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
+            ), "attention only support fp16/bf16 when use packed_seq_params"
+            lengths = (
+                packed_seq_params.cu_seqlens_kv[1:]
+                - packed_seq_params.cu_seqlens_kv[:-1]
+            )
+            splits = [
+                paddle.split(tensor, lengths.tolist(), axis=1)
+                for tensor in (query, key, value)
+            ]
+            attn_outputs = []
+            for q, k, v in zip(*splits):
+                attn_outputs.append(
+                    paddle.nn.functional.scaled_dot_product_attention(
+                        q,
+                        k,
+                        v,
+                        None,
+                        self.config.attention_dropout,
+                        is_causal=False,
+                    )
+                )
+            # [b,s,h_n,h_dim]
+            attn_output = paddle.cat(attn_outputs, axis=1)
+            return attn_output.reshape(
+                [0, 0, attn_output.shape[2] * attn_output.shape[3]]
+            )
         if (
             query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
         ) and attn_mask_startend_row_indices is None:
@@ -223,7 +253,11 @@ class DotProductAttention(FleetLayer):
         ) and attn_mask_startend_row_indices is not None:
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
-            flashmask_attention_func = flashmask_attention
+            flashmask_attention_func = (
+                self.rr_flashmask_attention_func
+                if use_rr_flash_attention
+                else flashmask_attention
+            )
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -384,6 +418,7 @@ class CPDotProductAttention(FleetLayer):
         self.layer_number = max(1, layer_number)
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
+        self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
 
     def forward(
         self,
@@ -395,6 +430,7 @@ class CPDotProductAttention(FleetLayer):
         attn_mask_type: AttnMaskType = None,
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
+        use_rr_flash_attention: bool = False,
     ):
         """Forward."""
         assert packed_seq_params is None, (
@@ -454,8 +490,12 @@ class CPDotProductAttention(FleetLayer):
             raise ValueError(
                 "Invalid attention mask shape, when using context parallel, attn_mask_startend_row_indices.shape[-1] must be either 1 or 2"
             )
-
-        attn_output = flashmask_attention_cp(
+        flashmask_attention_func = (
+            self.rr_flashmask_attention_cp_func
+            if use_rr_flash_attention
+            else flashmask_attention_cp
+        )
+        attn_output = flashmask_attention_func(
             self.config,
             query.astype(value.dtype),
             key.astype(value.dtype),

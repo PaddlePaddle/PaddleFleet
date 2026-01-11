@@ -112,6 +112,8 @@ class EcosystemLibrary:
             str(self.install_dir),
             "--no-deps",
             "--no-build-isolation",
+            "--upgrade",
+            "-v",
         ]
 
         try:
@@ -160,9 +162,21 @@ def check_submodule_updated():
     if not (
         (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists()
         and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
+        and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
+        and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
     ):
         logger.error(
             "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
+        )
+        sys.exit(1)
+
+
+def check_patchelf_exists():
+    """Checks if patchelf is installed."""
+    if shutil.which("patchelf") is None:
+        logger.error(
+            "\033[31m Error: 'patchelf' not found in PATH.\033[0m\n"
+            "\033[31m Please install 'patchelf' using your package manager (apt, yum, conda, uv, etc.) before proceeding.\033[0m"
         )
         sys.exit(1)
 

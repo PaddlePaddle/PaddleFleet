@@ -1,9 +1,8 @@
-name: Test
+name: CE-CUDA-126-Release
 
 on:
-  pull_request:
-    branches:
-      - develop
+  schedule:
+    - cron: '0 19 * * *'
 
 permissions: read-all
 
@@ -20,107 +19,22 @@ env:
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   CI_name: test
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
-  docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
+  docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda126-dev"
+  paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/cbf3469113cd76b7d5f4cba7b8d7d5f55d9e9911/paddlepaddle_gpu-3.3.0-cp310-cp310-linux_x86_64.whl"
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  check-bypass:
-    name: Check bypass
-    if: ${{ inputs.can-skip != 'true' }}
-    uses: ./.github/workflows/check-bypass.yml
-    with:
-      workflow-name: 'test'
-    secrets:
-      github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  build_whl:
-    name: Build Fleet whl
-    needs: check-bypass
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
-    runs-on:
-      group: GZ_BD-CPU
-    env:
-      TASK: fleet-ci-build-whl-${{ github.event.pull_request.number }}
-    steps:
-      - name: Check docker image and run container
-        run: |
-          container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
-          echo "container_name=${container_name}" >> ${{ github.env }}
-          docker pull $docker_image
-          docker run -d -t --name ${container_name} \
-            -v "/dev/shm:/dev/shm"  \
-            -v "/home/data/cfs:/home/data/cfs" \
-            -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-            -v ${{ github.workspace }}:/paddle \
-            -e BRANCH \
-            -e PR_ID \
-            -e COMMIT_ID \
-            -e PADDLE_ROOT \
-            -e ci_scripts \
-            -e no_proxy \
-            -e CI_name \
-            -w /paddle --network host ${docker_image}
-
-      - name: uv build whl
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          rm -rf * .[^.]*
-          source ${{ github.workspace }}/../../../proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
-          set -x
-          git config --global --add safe.directory /paddle
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          echo "Install uv"
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          echo "uv build"
-          export UV_HTTP_TIMEOUT=300
-          git submodule update --init --recursive
-          export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
-          uv build --wheel
-          '
-
-      - name: upload whl to BOS
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          export AK=paddle
-          export SK=paddle
-          cd /paddle/dist
-          if [ ! -f "bos/BosClient.py" ]; then
-            wget -q --no-proxy -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
-            mkdir bos
-            tar xf bos_new.tar.gz -C bos
-          fi
-          whl_file=$(ls paddlefleet*.whl)
-          mv ${whl_file} paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          target_path="paddle-github-action/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}"
-          python bos/BosClient.py paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl ${target_path}
-          '
-      - name: Terminate and delete the container
-        if: ${{ always() }}
-        run: |
-          set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
-          docker rm -f ${{ env.container_name }}
-
   single_card_test:
     name: Unit test (single card)
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
       group: Fleet-H-single-card
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-single-card-test
-
+      TASK: paddlefleet-CE-CUDA126-RELEASE-single-card-test
     steps:
       - name: Determine the runner
         run: |
@@ -144,44 +58,40 @@ jobs:
             -e PR_ID \
             -e COMMIT_ID \
             -e PADDLE_ROOT \
+            -e paddle_url \
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
-            -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
-            -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
 
-      - name: Install PaddleFleet
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          rm -rf * .[^.]*
-          set -x
-          source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
-          git config --global --add safe.directory /paddle
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          '
 
       - name: Single card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
+          rm -rf * .[^.]*
+          set -x
+          source /root/proxy
+          mkdir -p /home/.cache/pip
+          pip cache dir
+          echo "Install uv"
           export WITH_COVERAGE=ON
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install --upgrade pip
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
+          git config --global --add safe.directory /paddle
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
+          git config pull.rebase false
+          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           python -c "import paddle; print(paddle.version.commit)"
           bash ci/single_card_test.sh
           single_card_exit_code=$?
@@ -202,13 +112,11 @@ jobs:
 
   multi-card_test:
     name: Unit test (multi-card)
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
       group: Fleet-H-multi-card
     env:
       PIP_CACHE_DIR: /home/.cache/pip
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-multi-card_test
+      TASK: paddlefleet-CE-CUDA126-RELEASE-multi-card_test-release
     steps:
       - name: Check docker image and run container
         run: |
@@ -225,6 +133,7 @@ jobs:
             -e PR_ID \
             -e COMMIT_ID \
             -e PADDLE_ROOT \
+            -e paddle_url \
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
@@ -233,10 +142,8 @@ jobs:
             -e work_dir \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
-            -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -w /paddle --network host ${docker_image}
@@ -244,22 +151,19 @@ jobs:
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
           rm -rf * .[^.]*
           source /root/proxy
-          set -x
+          pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
           git submodule update --init --recursive
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
-          pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
-          python -c "import paddle; print(paddle.version.commit)"
+          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt pytest matplotlib==3.10.8
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -267,6 +171,8 @@ jobs:
       - name: Multi-card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          python -c "import paddle; print(paddle.version.commit)"
+          export PYTHONPATH=/paddle:$PYTHONPATH
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
           if [[ "$multi_card_exit_code" != "0" ]]; then
@@ -286,15 +192,13 @@ jobs:
 
 
   integration-test-H20-single-card:
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (H20, single card)
     runs-on:
       group: Fleet-H-single-card
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-single-card
+      TASK: paddlefleet-CE-CUDA126-RELEASE-integration-test-single-card-release
     steps:
       - name: Determine the runner
         run: |
@@ -319,6 +223,7 @@ jobs:
             -e PR_ID \
             -e COMMIT_ID \
             -e PADDLE_ROOT \
+            -e paddle_url \
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
@@ -326,44 +231,39 @@ jobs:
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
-            -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -w /workspace --network host ${docker_image}
-
 
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           nvidia-smi
           rm -rf * .[^.]*
-          source /root/proxy
           set -x
+          source /root/proxy
+          mkdir -p /home/.cache/pip
+          pip cache dir
+          pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
-          git config --global --add safe.directory /workspace/PaddleFleet
           cd PaddleFleet
+          git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
-          python -c "import paddle; print(paddle.version.commit)"
+          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
           '
 
       - name: Install PaddleFormers
         id: formers_install
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
           set -x
-          python -m pip install --upgrade pip
+          source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
@@ -373,7 +273,12 @@ jobs:
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
-          pip install -e .
+          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          python -c "import paddle; print(paddle.version.commit)"
+          pip install bce-python-sdk==0.8.74
+          pip install coverage==7.6.1
           pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -431,15 +336,13 @@ jobs:
           docker rm -f ${{ env.container_name }}
 
   integration-test-H20-multi-card:
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (H20, multi-card)
     runs-on:
       group: Fleet-H-multi-card
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-multi-card
+      TASK: paddlefleet-CE-CUDA126-RELEASE-integration-test-multi-card-release
     steps:
       - name: Check docker image and run container
         run: |
@@ -456,6 +359,7 @@ jobs:
             -e PR_ID \
             -e COMMIT_ID \
             -e PADDLE_ROOT \
+            -e paddle_url \
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
@@ -463,13 +367,10 @@ jobs:
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
-            -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -478,27 +379,26 @@ jobs:
           rm -rf * .[^.]*
           set -x
           source /root/proxy
+          mkdir -p /home/.cache/pip
+          pip cache dir
+          pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
-          python -c "import paddle; print(paddle.version.commit)"
+          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
           '
 
       - name: Install PaddleFormers
         id: formers_install
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
           set -x
-          python -m pip install --upgrade pip
+          source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
@@ -507,7 +407,12 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e .
+          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          python -c "import paddle; print(paddle.version.commit)"
+          pip install bce-python-sdk==0.8.74
+          pip install coverage==7.6.1
           pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -572,22 +477,8 @@ jobs:
           fi
           '
 
-      - name: Integration test (GLM4.5 multi-card FP8)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
-          fi
-          '
 
-      - name: Integration test (GLM4.5 multi-card Grouped GEMM)
+      - name: GLM4.5 pre-train (Grouped GEMM)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -633,16 +524,15 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
+
   integration-test-a100:
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     name: Integration test (A100)
     runs-on:
       group: Distribute
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CI-${{ github.event.pull_request.number }}-integration-test-A100
+      TASK: paddlefleet-CE-CUDA126-RELEASE-integration-test-A100-release
     steps:
       - name: Check docker image and run container
         run: |
@@ -657,6 +547,7 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             -e BRANCH \
             -e PR_ID \
+            -e paddle_url \
             -e COMMIT_ID \
             -e PADDLE_ROOT \
             -e ci_scripts \
@@ -666,41 +557,39 @@ jobs:
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-            -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
-            -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
-          source /root/proxy
           set -x
+          source /root/proxy
+          mkdir -p /home/.cache/pip
+          pip cache dir
+          pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
-          python -c "import paddle; print(paddle.version.commit)"
+          pip install colorlog>=6.10.1
+          pip uninstall paddlefleet -y
+          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
           '
 
       - name: Install PaddleFormers
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
           set -x
-          python -m pip install --upgrade pip
+          source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
@@ -708,7 +597,12 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e .
+          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          python -c "import paddle; print(paddle.version.commit)"
+          pip install bce-python-sdk==0.8.74
+          pip install coverage==7.6.1
           pip install librosa==0.11.0
           python -c "import paddle; print(paddle.version.commit)"
           '
@@ -717,10 +611,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-
           bash -x PaddleFormers/tests/integration_test/glm45_pt_a100.sh
           glm45_exit_code=$?
-
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -728,6 +620,7 @@ jobs:
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
           '
+
 
       - name: Terminate and delete the container
         if: ${{ always() }}
