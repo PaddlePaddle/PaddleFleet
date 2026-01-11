@@ -84,7 +84,6 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             moe_router_force_load_balancing=True,
             moe_grouped_gemm=True,
             bias_activation_fusion=True,
-            moe_deep_gemm=True,
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(

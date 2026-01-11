@@ -185,14 +185,38 @@ class DotProductAttention(FleetLayer):
         packed_seq_params: PackedSeqParams | None = None,
     ):
         """Forward."""
-        assert packed_seq_params is None, (
-            "Packed sequence is not supported by DotProductAttention."
-            "Please use TEDotProductAttention instead."
-        )
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
-
+        if packed_seq_params is not None:
+            assert (
+                query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
+            ), "attention only support fp16/bf16 when use packed_seq_params"
+            lengths = (
+                packed_seq_params.cu_seqlens_kv[1:]
+                - packed_seq_params.cu_seqlens_kv[:-1]
+            )
+            splits = [
+                paddle.split(tensor, lengths.tolist(), axis=1)
+                for tensor in (query, key, value)
+            ]
+            attn_outputs = []
+            for q, k, v in zip(*splits):
+                attn_outputs.append(
+                    paddle.nn.functional.scaled_dot_product_attention(
+                        q,
+                        k,
+                        v,
+                        None,
+                        self.config.attention_dropout,
+                        is_causal=False,
+                    )
+                )
+            # [b,s,h_n,h_dim]
+            attn_output = paddle.cat(attn_outputs, axis=1)
+            return attn_output.reshape(
+                [0, 0, attn_output.shape[2] * attn_output.shape[3]]
+            )
         if (
             query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
         ) and attn_mask_startend_row_indices is None:
