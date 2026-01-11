@@ -109,11 +109,13 @@ class _DeepepManager(_DispatchManager):
         router_topk: int,
         num_experts: int | None = None,
         num_local_experts: int | None = None,
+        moe_ep_barrier: bool = True,
     ):
         self.group = group
         self.router_topk = router_topk
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
+        self.moe_ep_barrier = moe_ep_barrier
 
         # Metadata
         self.token_indices = None
@@ -146,6 +148,7 @@ class _DeepepManager(_DispatchManager):
             self.num_experts,
             self.group,
             fp8_dispatch=fp8_dispatch,
+            moe_ep_barrier=self.moe_ep_barrier,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -200,7 +203,12 @@ class _DeepepManager(_DispatchManager):
         combine_overlap_handle: dict | None = None,
     ) -> paddle.Tensor:
         hidden_states = fused_combine(
-            hidden_states, self.group, self.handle, None, combine_overlap_handle
+            hidden_states,
+            self.group,
+            self.handle,
+            None,
+            combine_overlap_handle,
+            moe_ep_barrier=self.moe_ep_barrier,
         )
         # Release the handle after combine operation
         self.handle = None
@@ -306,6 +314,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         num_experts_per_tok: int,
         n_routed_experts: int,
         ep_group: Group,
+        moe_ep_barrier: bool = True,
     ):
         super().__init__(ep_group)
 
@@ -316,6 +325,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             router_topk=num_experts_per_tok,
             num_experts=n_routed_experts,
             num_local_experts=self.num_local_experts,
+            moe_ep_barrier=moe_ep_barrier,
         )
 
     def dispatch_preprocess(

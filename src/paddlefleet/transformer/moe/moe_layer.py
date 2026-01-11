@@ -86,6 +86,7 @@ class MoELayer(nn.Layer):
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
+        self.moe_ep_barrier = config.moe_ep_barrier
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -197,6 +198,7 @@ class MoELayer(nn.Layer):
                     self.num_experts_per_tok,
                     self.num_experts,
                     self.moe_group,
+                    self.moe_ep_barrier,
                 )
             elif self.moe_token_dispatcher_type == "alltoall":
                 self.token_dispatcher = AllToAllTokenDispatcher(

@@ -382,6 +382,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
+    moe_ep_barrier: bool = True
+    """Whether to use barrier for expert parallelism."""
+
     ##################
     # Context Parallel
     ##################

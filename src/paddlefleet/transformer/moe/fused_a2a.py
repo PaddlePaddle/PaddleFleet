@@ -101,9 +101,11 @@ def fused_dispatch_forward_func(
     previous_event=None,
     async_finish=False,
     allocate_on_comm_stream=False,
+    moe_ep_barrier: bool = True,
 ):
     """Forward pass of fused dispatch."""
-    barrier_ep(group)
+    if moe_ep_barrier:
+        barrier_ep(group)
     # Calculate layout before actual dispatch
     if isinstance(x, tuple):
         buffer = get_buffer(group, get_hidden_bytes(x[0]))
@@ -163,9 +165,11 @@ def fused_dispatch_backward_func(
     previous_event=None,
     async_finish=False,
     allocate_on_comm_stream=False,
+    moe_ep_barrier: bool = True,
 ):
     """Backward pass of fused dispatch."""
-    barrier_ep(group)
+    if moe_ep_barrier:
+        barrier_ep(group)
 
     buffer = get_buffer(group, get_hidden_bytes(grad_output))
 
@@ -187,9 +191,11 @@ def fused_combine_forward_func(
     previous_event=None,
     async_finish=False,
     allocate_on_comm_stream=False,
+    moe_ep_barrier: bool = True,
 ):
     """Forward pass of fused combine."""
-    barrier_ep(group)
+    if moe_ep_barrier:
+        barrier_ep(group)
 
     handle = states["handle"]
     buffer = get_buffer(group, get_hidden_bytes(x))
@@ -210,9 +216,11 @@ def fused_combine_backward_func(
     previous_event=None,
     async_finish=False,
     allocate_on_comm_stream=False,
+    moe_ep_barrier: bool = True,
 ):
     """Backward pass of fused combine."""
-    barrier_ep(group)
+    if moe_ep_barrier:
+        barrier_ep(group)
 
     if isinstance(grad_output, tuple):
         buffer = get_buffer(group, get_hidden_bytes(grad_output[0]))
@@ -248,6 +256,7 @@ class FusedDispatch(PyLayer):
         group,
         previous_event=None,
         fp8_dispatch: bool = False,
+        moe_ep_barrier: bool = True,
     ):
         """Forward pass of fused dispatch."""
         if fp8_dispatch:
@@ -261,13 +270,20 @@ class FusedDispatch(PyLayer):
             scale = scale.T
             x = (x_fp8, scale)
         recv_x, recv_token_probs, states, event = fused_dispatch_forward_func(
-            x, token_indices, token_probs, num_experts, group, previous_event
+            x,
+            token_indices,
+            token_probs,
+            num_experts,
+            group,
+            previous_event,
+            moe_ep_barrier=moe_ep_barrier,
         )
 
         ctx.group = group
         ctx.handle = states["handle"]
         ctx.event = event
         ctx.set_grad_in_dtype_consistent(False)
+        ctx.moe_ep_barrier = moe_ep_barrier
         if fp8_dispatch:
             recv_x, scale = recv_x
             return recv_x, recv_token_probs, states, {"scale": scale}
@@ -277,7 +293,11 @@ class FusedDispatch(PyLayer):
     def backward(ctx, grad_output, grad_token_probs):
         """Backward pass of fused dispatch."""
         return fused_dispatch_backward_func(
-            grad_output, grad_token_probs, ctx.group, ctx.handle
+            grad_output,
+            grad_token_probs,
+            ctx.group,
+            ctx.handle,
+            moe_ep_barrier=ctx.moe_ep_barrier,
         )
 
 
@@ -285,15 +305,18 @@ class FusedCombine(PyLayer):
     """Fused combine operation for MoE output combining computation and communication."""
 
     @staticmethod
-    def forward(ctx, x, group, states, previous_event=None):
+    def forward(
+        ctx, x, group, states, previous_event=None, moe_ep_barrier: bool = True
+    ):
         """Forward pass of fused combine."""
         combined_x = fused_combine_forward_func(
-            x, group, states, previous_event
+            x, group, states, previous_event, moe_ep_barrier=moe_ep_barrier
         )
 
         ctx.handle = states["handle"]
         ctx.group = group
         ctx.previous_event = previous_event
+        ctx.moe_ep_barrier = moe_ep_barrier
 
         return combined_x
 
@@ -301,7 +324,11 @@ class FusedCombine(PyLayer):
     def backward(ctx, grad_output):
         """Backward pass of fused combine."""
         return fused_combine_backward_func(
-            grad_output, ctx.group, ctx.handle, ctx.previous_event
+            grad_output,
+            ctx.group,
+            ctx.handle,
+            ctx.previous_event,
+            moe_ep_barrier=ctx.moe_ep_barrier,
         )
 
 
@@ -362,6 +389,7 @@ if HAVE_DEEP_EP:
         group: Group,
         previous_event=None,
         fp8_dispatch: bool = False,
+        moe_ep_barrier: bool = True,
     ):
         """Perform fused dispatch operation if deep_ep is available.
 
@@ -372,6 +400,7 @@ if HAVE_DEEP_EP:
             num_experts: Number of experts
             group: Process group
             previous_event: Previous CUDA event
+            moe_ep_barrier: Whether to use barrier for expert parallelism
 
         Returns:
             Result of FusedDispatch
@@ -384,10 +413,16 @@ if HAVE_DEEP_EP:
             group,
             previous_event,
             fp8_dispatch,
+            moe_ep_barrier,
         )
 
     def fused_combine(
-        x, group, handle, previous_event=None, combine_overlap_handle=None
+        x,
+        group,
+        handle,
+        previous_event=None,
+        combine_overlap_handle=None,
+        moe_ep_barrier: bool = True,
     ):
         """Perform fused combine operation if deep_ep is available.
 
@@ -396,6 +431,8 @@ if HAVE_DEEP_EP:
             group: Process group
             handle: Communication handle
             previous_event: Previous CUDA event
+            combine_overlap_handle: Handle for overlapping with shared experts
+            moe_ep_barrier: Whether to use barrier for expert parallelism
 
         Returns:
             Result of FusedCombine
@@ -403,7 +440,9 @@ if HAVE_DEEP_EP:
         states = {}
         states["handle"] = handle
         if combine_overlap_handle is None:
-            return FusedCombine.apply(x, group, states, previous_event)
+            return FusedCombine.apply(
+                x, group, states, previous_event, moe_ep_barrier
+            )
         else:
             assert previous_event is None
             assert isinstance(combine_overlap_handle, dict)
