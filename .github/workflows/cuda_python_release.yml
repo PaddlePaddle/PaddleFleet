@@ -212,7 +212,9 @@ jobs:
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           chmod +x /usr/local/bin/yq
+
           '
 
       - name: Multi-card test
