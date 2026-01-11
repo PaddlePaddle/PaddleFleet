@@ -205,22 +205,17 @@ class StandardMoERouter(nn.Layer):
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
         return aux_loss
 
-    def _cal_seq_aux_loss(self, probs, top_k, routing_map, max_seq_len):
+    def _cal_seq_aux_loss(self, probs, top_k, routing_map, seq_len):
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
             self.tensor_model_parallel_size > 1
             or self.context_parallel_size > 1
         ):
-            local_seq_len = max_seq_len
-            if self.sequence_parallel and self.tensor_model_parallel_size > 1:
-                assert local_seq_len % self.tensor_model_parallel_size == 0
-                local_seq_len = local_seq_len // self.tensor_model_parallel_size
-            if self.context_parallel_size > 1:
-                assert local_seq_len % self.context_parallel_size == 0
-                local_seq_len = local_seq_len // self.context_parallel_size
+            local_seq_len = seq_len
             # [B*S, E]
             if self.sequence_parallel and self.tensor_model_parallel_size > 1:
                 all_probs = AllGatherOp.apply(probs)
+                local_seq_len = local_seq_len * self.tensor_model_parallel_size
             else:
                 all_probs = probs
             # [B, S, E]
@@ -228,20 +223,22 @@ class StandardMoERouter(nn.Layer):
                 all_probs = all_probs.reshape(
                     [
                         -1,
-                        max_seq_len // self.context_parallel_size,
+                        local_seq_len,
                         self.num_experts,
                     ]
                 )
                 # [B, S, E]
                 all_probs = ContextParallelAllGatherOp.apply(all_probs, axis=1)
+                local_seq_len = local_seq_len * self.context_parallel_size
             else:
                 # [B, S, E]
                 all_probs = all_probs.reshape(
-                    [-1, max_seq_len, self.num_experts]
+                    [-1, local_seq_len, self.num_experts]
                 )
             batch_size = all_probs.shape[0]
             # [B, S, E]
-            routing_map = routing_map.reshape([batch_size, local_seq_len, -1])
+            routing_map = routing_map.reshape([batch_size, seq_len, -1])
+            max_seq_len = local_seq_len
         else:
             # [B, S, E]
             if len(probs.shape) == 2:
@@ -249,6 +246,7 @@ class StandardMoERouter(nn.Layer):
             batch_size, local_seq_len, _ = probs.shape
             all_probs = probs
             routing_map = routing_map.reshape([batch_size, local_seq_len, -1])
+            max_seq_len = local_seq_len
 
         seq_axis = 1
         # Both cost_coeff and seq_aux_loss must be computed with the global sequence length visible to all workers.
@@ -545,8 +543,6 @@ class TopKRouter(StandardMoERouter):
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
             )
 
-        input = input.reshape([-1, input.shape[-1]])
-
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
                 input,
@@ -577,26 +573,31 @@ class TopKRouter(StandardMoERouter):
         else:
             l_zloss = None
 
-        # norm
-        if self.num_experts_per_tok > 1 and self.norm_topk_prob:
-            denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
-            top_gate = top_gate / denominator
-
-        if abs(self.routed_scaling_factor - 1.0) > 1e-6:
-            top_gate = top_gate * self.routed_scaling_factor
-
         mask = paddle.zeros_like(gates).put_along_axis(
             top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
         )
+
+        gates_masked = gates * mask
+
+        # norm
+        if self.norm_topk_prob:
+            denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+            top_gate = top_gate / denominator
+            if self.num_experts_per_tok > 1:
+                gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
+                denom_s = paddle.clip(
+                    gates_s, min=paddle.finfo(gates_masked.dtype).eps
+                )
+                gates_masked = gates_masked / denom_s
+
+        if abs(self.routed_scaling_factor - 1.0) > 1e-6:
+            top_gate = top_gate * self.routed_scaling_factor
+            gates_masked *= self.routed_scaling_factor
 
         if self.topk_method == "noaux_tc":
             exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
             with paddle.no_grad():
                 self.expert_usage += exp_counts
-
-        gates_masked = paddle.zeros_like(gates).put_along_axis(
-            top_idx, top_gate.cast(gates.dtype), axis=1
-        )
 
         # aux_loss
         if self.config.router_aux_loss_coef:

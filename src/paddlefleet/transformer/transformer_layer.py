@@ -25,7 +25,11 @@ from paddle import Tensor, nn
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.recompute_utils import need_full_recompute
+from paddlefleet.recompute_utils import (
+    need_full_recompute,
+    need_recompute_in_block,
+    need_recompute_in_first_n,
+)
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
@@ -210,15 +214,92 @@ class TransformerLayer(nn.Layer):
                 self.layer_number, self.config
             )
         elif self.config.recompute_granularity == "selective":
-            if "norm" in self.config.recompute_modules:
-                if not isinstance(self.input_layernorm, IdentityOp):
-                    self.recompute_input_layernorm = True
+            if isinstance(self.config.recompute_modules, list):
+                if self.config.recompute_num_layers is None:
+                    # selective all submodels to recompute
+                    if "norm" in self.config.recompute_modules:
+                        if not isinstance(self.input_layernorm, IdentityOp):
+                            self.recompute_input_layernorm = True
 
-                if not isinstance(self.post_attention_layernorm, IdentityOp):
-                    self.recompute_post_attention_layernorm = True
+                        if not isinstance(
+                            self.post_attention_layernorm, IdentityOp
+                        ):
+                            self.recompute_post_attention_layernorm = True
+                    if "mlp" in self.config.recompute_modules:
+                        self.recompute_mlp = True
+                else:
+                    # selective submodels in special layers to recompute
+                    assert self.config.recompute_method in ["first_n", "block"]
+                    if "norm" in self.config.recompute_modules:
+                        if not isinstance(self.input_layernorm, IdentityOp):
+                            self.recompute_input_layernorm = (
+                                need_recompute_in_block(
+                                    self.layer_number,
+                                    self.config,
+                                    self.config.recompute_num_layers,
+                                )
+                                if self.config.recompute_method == "block"
+                                else need_recompute_in_first_n(
+                                    self.layer_number,
+                                    self.config,
+                                    self.config.recompute_num_layers,
+                                )
+                            )
+                            self.recompute_post_attention_layernorm = (
+                                self.recompute_input_layernorm
+                            )
 
-            if "mlp" in self.config.recompute_modules:
-                self.recompute_mlp = True
+                    if "mlp" in self.config.recompute_modules:
+                        self.recompute_mlp = (
+                            need_recompute_in_block(
+                                self.layer_number,
+                                self.config,
+                                self.config.recompute_num_layers,
+                            )
+                            if self.config.recompute_method == "block"
+                            else need_recompute_in_first_n(
+                                self.layer_number,
+                                self.config,
+                                self.config.recompute_num_layers,
+                            )
+                        )
+            elif isinstance(self.config.recompute_modules, dict):
+                assert self.config.recompute_method in ["first_n", "block"]
+                if "norm" in self.config.recompute_modules:
+                    if not isinstance(self.input_layernorm, IdentityOp):
+                        self.recompute_input_layernorm = (
+                            need_recompute_in_block(
+                                self.layer_number,
+                                self.config,
+                                self.config.recompute_modules["norm"],
+                            )
+                            if self.config.recompute_method == "block"
+                            else need_recompute_in_first_n(
+                                self.layer_number,
+                                self.config,
+                                self.config.recompute_modules["norm"],
+                            )
+                        )
+                        self.recompute_post_attention_layernorm = (
+                            self.recompute_input_layernorm
+                        )
+
+                if "mlp" in self.config.recompute_modules:
+                    self.recompute_mlp = (
+                        need_recompute_in_block(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_modules["mlp"],
+                        )
+                        if self.config.recompute_method == "block"
+                        else need_recompute_in_first_n(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_modules["mlp"],
+                        )
+                    )
+            else:
+                raise ValueError("recompute_modules must be list or dict")
 
     def forward(
         self,

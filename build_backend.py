@@ -138,9 +138,15 @@ def _prepare_ecosystem(use_symlinks: bool):
         lib.install(use_symlinks=use_symlinks)
 
 
+import sys
+
+
 def get_cuda_special_build_deps(cuda_major, cuda_minor):
+    major = sys.version_info.major
+    minor = sys.version_info.minor
+    ver_str = f"{major}{minor}"
     deps = [
-        "paddlepaddle-gpu>=3.3.0.dev",
+        f"paddlepaddle-gpu @ https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/cbf3469113cd76b7d5f4cba7b8d7d5f55d9e9911/paddlepaddle_gpu-3.3.0-cp{ver_str}-cp{ver_str}-linux_x86_64.whl",
     ]
     if cuda_major == 12:
         deps.append("nvidia-nvshmem-cu12>=3.3.9,!=3.5.*")  # for deep_ep build

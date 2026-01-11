@@ -33,6 +33,10 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_concentration_factor_from_config,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import (
+    need_recompute_in_block,
+    need_recompute_in_first_n,
+)
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import divide, get_pg_size
@@ -138,12 +142,62 @@ class Attention(FleetLayer, ABC):
             softmax_scale=self.config.softmax_scale,
             pg_collection=self.pg_collection,
         )
-
-        self.recompute_core_attention = (
-            self.config.recompute_granularity == "selective"
-            and "core_attn" in self.config.recompute_modules
-        )
-
+        self.use_rr_flash_attention = False
+        self.recompute_core_attention = False
+        if self.config.recompute_granularity == "selective":
+            if isinstance(self.config.recompute_modules, list):
+                if self.config.recompute_num_layers is None:
+                    # selective all submodels to recompute
+                    if "core_attn" in self.config.recompute_modules:
+                        self.recompute_core_attention = True
+                else:
+                    # selective submodels in special layers to recompute
+                    assert self.config.recompute_method in ["first_n", "block"]
+                    if "core_attn" in self.config.recompute_modules:
+                        self.recompute_core_attention = (
+                            need_recompute_in_block(
+                                self.layer_number,
+                                self.config,
+                                self.config.recompute_num_layers,
+                            )
+                            if self.config.recompute_method == "block"
+                            else need_recompute_in_first_n(
+                                self.layer_number,
+                                self.config,
+                                self.config.recompute_num_layers,
+                            )
+                        )
+            elif isinstance(self.config.recompute_modules, dict):
+                assert self.config.recompute_method in ["first_n", "block"]
+                if "core_attn" in self.config.recompute_modules:
+                    self.recompute_core_attention = (
+                        need_recompute_in_block(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_modules["core_attn"],
+                        )
+                        if self.config.recompute_method == "block"
+                        else need_recompute_in_first_n(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_modules["core_attn"],
+                        )
+                    )
+        if (
+            self.config.recompute_modules is not None
+            and "flash_attn" in self.config.recompute_modules
+        ):
+            assert self.config.recompute_granularity is not None, (
+                "rr must be used when recompute is enabled"
+            )
+            if isinstance(self.config.recompute_modules, list):
+                self.use_rr_flash_attention = True
+            elif isinstance(self.config.recompute_modules, dict):
+                self.use_rr_flash_attention = not need_recompute_in_first_n(
+                    self.layer_number,
+                    self.config,
+                    self.config.recompute_modules["flash_attn"],
+                )
         # Output.
         self.o_proj = build_layer(
             sublayers_spec.o_proj,
@@ -314,11 +368,14 @@ class Attention(FleetLayer, ABC):
                 query,
                 key,
                 value,
-                attention_mask,
-                attn_mask_startend_row_indices,
+                attention_mask.clone() if attention_mask is not None else None,
+                attn_mask_startend_row_indices.clone()
+                if attn_mask_startend_row_indices is not None
+                else None,
                 attn_mask_type=attn_mask_type,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
+                use_rr_flash_attention=self.use_rr_flash_attention,
             )
         else:
             # Static batching attention kernel.
@@ -331,6 +388,7 @@ class Attention(FleetLayer, ABC):
                 attn_mask_type=attn_mask_type,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
+                use_rr_flash_attention=self.use_rr_flash_attention,
             )
         # =================
         # Output. [b, sq, h]
