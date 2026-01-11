@@ -117,7 +117,7 @@ class MoELayer(nn.Layer):
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
-        self.moe_deep_gemm = True
+        self.moe_deep_gemm = False  # Paddle batched_gemm has better performance than DeepGEMM, so disable DeepGEMM.
         if (
             not paddle.device.current_device_is_cpu
             and paddle.device.get_device_capability()[0] < 9
