@@ -309,11 +309,11 @@ class TransformerConfig(ModelParallelConfig):
     """The type of token dispatcher to use. The default is 'allgather'.
     Options are 'allgather','alltoall' and 'deepep'."""
 
-    moe_use_fusion_node: bool | None = None
-    """Whether to use fusion node for MoE layer. If None, will be set to True when moe_token_dispatcher_type is deepep"""
+    moe_use_fusion_node: bool = True
+    """Whether to use fusion node for MoE layer. Default is True""
 
     moe_router_load_balancing_type: str = "aux_loss"
-    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn"""
+    """ "Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn" ""
 
     moe_layer_freq: int | list[int] | None = None
     """Frequency between MoE layers and Dense layers. Accepts either:
