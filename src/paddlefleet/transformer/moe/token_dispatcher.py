@@ -426,7 +426,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         self.num_experts = (
             self.num_experts_per_device * self.expert_model_parallel_size
         )
-        mask = mask.to(paddle.int64)
+        mask = mask.to(paddle.int32)
 
         if len(hidden_states.shape) == 3:
             batch_size, seq_len, d_model = hidden_states.shape
@@ -447,10 +447,10 @@ class AllToAllTokenDispatcher(nn.Layer):
         ).reshape(self.expert_model_parallel_size, self.num_experts)
         num_global_tokens_per_local_expert = num_global_tokens_per_expert[
             :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
-        ].contiguous()
+        ].clone()
 
         # Can also use the two AllToAll functions below instead of the above AllGather
-        # It will be a little bit faster , but also has a little more accuracy diff with DeepEP version
+        # It will save memory , but also has more accuracy diff with DeepEP version
         # global_tokens_per_expert = _AllToAll.apply(
         #     [tokens_per_expert.shape[0]],
         #     tokens_per_expert,
@@ -471,7 +471,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         )
 
         self.output_splits = num_global_tokens_per_rank.cpu().tolist()
-        num_local_tokens_per_expert = self.routing_map.sum(dim=0).long()
+        num_local_tokens_per_expert = self.routing_map.sum(dim=0)
         self.input_split_sizes = num_local_tokens_per_expert.reshape(
             self.expert_model_parallel_size, self.num_local_experts
         ).sum(axis=1)
