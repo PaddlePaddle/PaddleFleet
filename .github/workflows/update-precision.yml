@@ -37,12 +37,6 @@ jobs:
     if: needs.determine-whether-update.outputs.need_change == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Clone PaddleFormers
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.ref }}
-          fetch-depth: 100
-
       - name: Setup python3.10
         uses: actions/setup-python@v5
         with:
@@ -61,6 +55,9 @@ jobs:
           mkdir bos
           tar xf bos_new.tar.gz -C bos
           export step="fleet"
+          apt-get update
+          apt-get install jq -y
+          git clone https://github.com/PaddlePaddle/PaddleFormers.git .
           bash -x tests/integration_test/update_precision.sh
 
   update-precision-formers:
@@ -68,3 +65,4 @@ jobs:
     needs: determine-whether-update
     if: needs.determine-whether-update.outputs.need_change == 'true'
     uses: ./.github/workflows/precision_publish_wheel.yml
+    secrets: inherit

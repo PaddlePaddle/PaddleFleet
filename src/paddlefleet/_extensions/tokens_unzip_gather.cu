@@ -37,6 +37,10 @@ __global__ void tokens_unzip_gather_kernel(
     if (unzipped_row_idx < 0) continue;
 
     unzipped_row_idx -= offset;
+    // Guard against out-of-bounds access on index_unzipped and *_unzipped
+    // buffers.
+    if (unzipped_row_idx < 0 || unzipped_row_idx >= unzipped_rows) continue;
+    index_unzipped[unzipped_row_idx] = row;
     if constexpr (has_scale) {
       try_vectorized_memcpy(x_scale + row * scale_length,
                             x_scale_unzipped + unzipped_row_idx * scale_length,

@@ -143,7 +143,7 @@ class LayerNorm(paddle.nn.Layer):
 
     def forward(self, hidden_states: Tensor):
         return layer_norm(
-            input,
+            hidden_states,
             normalized_shape=self.normalized_shape,
             weight=self.weight,
             bias=self.bias,
