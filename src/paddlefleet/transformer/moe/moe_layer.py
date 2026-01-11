@@ -154,6 +154,8 @@ class MoELayer(nn.Layer):
                 )
                 self.fp8_dispatch = False
 
+        self.moe_shared_expert_overlap = False
+        self.moe_use_fusion_node = False
         if self.fp8:
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
@@ -356,6 +358,8 @@ class MoELayer(nn.Layer):
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
     ):
+        # print(f"moe_input: {hidden_states.dtype} {hidden_states.shape} {hidden_states._md5sum()}")
+        
         hidden_states, _ = self.dispatch(hidden_states, probs, routing_map)
         hidden_states = self.routed_experts_compute(hidden_states)
         return self.combine(hidden_states)

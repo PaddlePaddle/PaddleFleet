@@ -102,6 +102,7 @@ def _apply_rotary_pos_emb_bshd(
     Returns:
         Tensor: The input tensor after applying RoPE
     """
+    freqs = freqs.squeeze(0)
     rot_dim = freqs.shape[-1]
 
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
@@ -273,9 +274,9 @@ def apply_rotary_pos_emb(
     """
     if config.apply_rope_fusion:
         # Paddle fused_rope not support cu_seqlens or cp_group
-        if cu_seqlens or (cp_group and cp_group.nranks > 1):
+        if cu_seqlens:
             raise NotImplementedError(
-                "cu_seqlens or cp_group not be supported when using fused_rope"
+                "cu_seqlens not be supported when using fused_rope"
             )
         else:
             assert isinstance(t, tuple), (
@@ -286,6 +287,7 @@ def apply_rotary_pos_emb(
                 sin=sin,
                 cos=cos,
                 rotary_emb_base=config.rope_theta,
+                use_neox_rotary_style=config.rotary_interleaved,
                 time_major=config.sequence_parallel,
             )
 

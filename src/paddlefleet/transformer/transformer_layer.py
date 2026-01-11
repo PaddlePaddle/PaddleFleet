@@ -246,6 +246,8 @@ class TransformerLayer(nn.Layer):
             context = dict_args.get("context", None)
             context_mask = dict_args.get("context_mask", None)
             rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
+            rotary_pos_cos = dict_args.get("rotary_pos_cos", None)
+            rotary_pos_sin = dict_args.get("rotary_pos_sin", None)
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
             outputs = recompute(
@@ -259,6 +261,12 @@ class TransformerLayer(nn.Layer):
                 context_mask=context_mask,
                 rotary_pos_emb=rotary_pos_emb.clone()  # Clone is necessary!
                 if rotary_pos_emb is not None
+                else None,
+                rotary_pos_cos=rotary_pos_cos.clone()  # Clone is necessary!
+                if rotary_pos_cos is not None
+                else None,
+                rotary_pos_sin=rotary_pos_sin.clone()  # Clone is necessary!
+                if rotary_pos_sin is not None
                 else None,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
@@ -291,6 +299,7 @@ class TransformerLayer(nn.Layer):
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
     ):
+        print(f"input: {hidden_states.dtype} {hidden_states.shape} {hidden_states._md5sum()} {hidden_states.norm()}")
         hidden_states, context = self._forward_attention(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -303,7 +312,9 @@ class TransformerLayer(nn.Layer):
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
         )
+        print(f"attn_out: {hidden_states.dtype} {hidden_states.shape} {hidden_states._md5sum()} {hidden_states.norm()}")
         output = self._forward_mlp(hidden_states)
+        print(f"mlp_out: {output.dtype} {output.shape} {output._md5sum()} {output.norm()}")
         if context is not None:
             return output, context
         return output
@@ -424,6 +435,8 @@ class TransformerLayer(nn.Layer):
             post_attention_layernorm_output = self.post_attention_layernorm(
                 hidden_states
             )
+        # print(f"post_attn_norm_output: {post_attention_layernorm_output.dtype} {post_attention_layernorm_output.shape} {post_attention_layernorm_output._md5sum()} {post_attention_layernorm_output.norm()}")
+        # print(f"self.mlp: {self.mlp.__class__}")
 
         if self.recompute_mlp:
 

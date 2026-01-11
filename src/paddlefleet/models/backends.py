@@ -117,7 +117,7 @@ class LocalSpecProvider(BackendSpecProvider):
         return None
 
     def layer_norm(
-        self, rms_norm: bool = False, for_qk: bool = False, fused: bool = True
+        self, rms_norm: bool = False, for_qk: bool = False, fused: bool = False
     ) -> type:
         """Which module to use for layer norm"""
         if rms_norm:

@@ -55,6 +55,8 @@ class LanguageLoss(FleetLayer):
 
     def forward(self, logits: Tensor, labels: Tensor) -> Tensor:
         loss = self.loss_func(logits.cast("float32"), labels)
+        print(f"loss: {loss.dtype} {loss.shape} {loss._md5sum()} {loss.norm()}")
+        exit()
 
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(loss, axis=1)

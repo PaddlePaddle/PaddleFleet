@@ -205,7 +205,7 @@ class StandardMoERouter(nn.Layer):
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
         return aux_loss
 
-    def _cal_seq_aux_loss(self, probs, top_k, routing_map, max_seq_len):
+    def _cal_seq_aux_loss(self, probs, top_k, routing_map, max_seq_len, batch_size):
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
             self.tensor_model_parallel_size > 1
@@ -245,11 +245,10 @@ class StandardMoERouter(nn.Layer):
         else:
             # [B, S, E]
             if len(probs.shape) == 2:
-                probs = probs.reshape([1, *probs.shape])
+                probs = probs.reshape([batch_size, max_seq_len, -1])
             batch_size, local_seq_len, _ = probs.shape
             all_probs = probs
             routing_map = routing_map.reshape([batch_size, local_seq_len, -1])
-
         seq_axis = 1
         # Both cost_coeff and seq_aux_loss must be computed with the global sequence length visible to all workers.
         # [B, E]
@@ -475,37 +474,29 @@ class StandardMoERouter(nn.Layer):
         scores_for_choice = scores.reshape(
             [bsz_seq_len, -1]
         ) + self.e_score_correction_bias.detach().unsqueeze(0)
-        if n_group == 1 and self.config.moe_router_fusion:
-            topk_weight, topk_idx = paddle.topk(
-                scores_for_choice, k=k, axis=-1, sorted=True
-            )
-        else:
-            group_scores = (
-                scores_for_choice.reshape([bsz_seq_len, self.n_group, -1])
-                .topk(2, axis=-1)[0]
-                .sum(axis=-1)
-            )  # fmt:skip [n, n_group]
-            group_idx = paddle.topk(
-                group_scores, k=topk_group, axis=-1, sorted=True
-            )[1]  # [n, top_k_group]
-            group_mask = paddle.zeros_like(group_scores).put_along_axis(group_idx, paddle.to_tensor(1.0, dtype="float32"), axis=-1)  # fmt:skip
-            score_mask = (
-                group_mask.unsqueeze(-1)
-                .expand([bsz_seq_len, n_group, n_experts // n_group])
-                .reshape([bsz_seq_len, -1])
-            )  # [n, e]
-            tmp_scores = scores_for_choice * score_mask  # [n, e]
-            topk_weight, topk_idx = paddle.topk(
-                tmp_scores, k=k, axis=-1, sorted=True
-            )
+
+        group_scores = (
+            scores_for_choice.reshape([bsz_seq_len, self.n_group, -1])
+            .topk(2, axis=-1)[0]
+            .sum(axis=-1)
+        )  # fmt:skip [n, n_group]
+        group_idx = paddle.topk(
+            group_scores, k=topk_group, axis=-1, sorted=True
+        )[1]  # [n, top_k_group]
+        group_mask = paddle.zeros_like(group_scores).put_along_axis(group_idx, paddle.to_tensor(1.0, dtype="float32"), axis=-1)  # fmt:skip
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand([bsz_seq_len, n_group, n_experts // n_group])
+            .reshape([bsz_seq_len, -1])
+        )  # [n, e]
+        tmp_scores = scores_for_choice * score_mask  # [n, e]
+        topk_weight, topk_idx = paddle.topk(
+            tmp_scores, k=k, axis=-1, sorted=True
+        )
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        topk_weight = (
-            scores.take_along_axis(topk_idx, axis=1)
-            if not self.training
-            else topk_weight
-        )
+        topk_weight = scores.take_along_axis(topk_idx, axis=1)
 
         return topk_weight, topk_idx
 
@@ -561,8 +552,8 @@ class StandardMoERouter(nn.Layer):
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = hidden_states.shape
             else:
-                seq_len, batch, d_model = hidden_states.shape
-            hidden_states = hidden_states.reshape([-1, d_model])
+                seq_len, batch_size, d_model = hidden_states.shape
+            # hidden_states = hidden_states.reshape([-1, d_model])
         elif len(hidden_states.shape) == 2:
             raise ValueError(
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
@@ -581,6 +572,8 @@ class StandardMoERouter(nn.Layer):
             gates_ori = gates_ori / (
                 gates_ori.sum(axis=-1, keepdim=True) + 1e-20
             )
+
+        gates = gates.reshape([-1, gates.shape[-1]])
 
         l_zloss = self._cal_z_loss(gates)
 
@@ -617,9 +610,19 @@ class StandardMoERouter(nn.Layer):
             top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
         )
 
+        # normalize gates
+        gates_masked = gates * mask
+        # if self.training:
+        gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
+        denom_s = paddle.clip(gates_s, min=paddle.finfo(gates_masked.dtype).eps)
+        if self.norm_topk_prob:
+            gates_masked = gates_masked / denom_s
+        gates_masked *= self.routed_scaling_factor
+
+        print("routing_type: ", self.routing_type)
         if self.routing_type == "seq_aux_loss":
             l_aux = self._cal_seq_aux_loss(
-                gates_ori, self.num_experts_per_tok, mask, seq_len
+                gates_ori, self.num_experts_per_tok, mask, seq_len, batch_size
             )
         else:
             l_aux = self._cal_aux_loss(gates, mask)
@@ -632,14 +635,6 @@ class StandardMoERouter(nn.Layer):
         capacity = int(local_capacity)
         token_priority = self._priority(top_idx, capacity)
 
-        # normalize gates
-        gates_masked = gates * mask
-        # if self.training:
-        gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
-        denom_s = paddle.clip(gates_s, min=paddle.finfo(gates_masked.dtype).eps)
-        if self.norm_topk_prob:
-            gates_masked = gates_masked / denom_s
-        gates_masked *= self.routed_scaling_factor
         return (
             capacity,  # new capacity
             top_gate,  # weights of selected experts for each token [num_tokens, num_experts_per_token]
@@ -648,7 +643,7 @@ class StandardMoERouter(nn.Layer):
                 paddle.float32
             ),  # masked gates. for each token, the selected experts are remainded with their original values, others are 0 [num_tokens, num_experts]
             mask,  # mask. for each token, the selected experts are marked with 1s [num_tokens, num_experts]
-            token_priority.take_along_axis(top_idx, axis=-1),  # token priority
+            None,  # token priority
             l_aux,
             l_zloss,
         )
