@@ -222,6 +222,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
+          export PYTHONPATH=/paddle:$PYTHONPATH
           python -c "import paddle; print(paddle.version.commit)"
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           bash ci/multi-card_test.sh
