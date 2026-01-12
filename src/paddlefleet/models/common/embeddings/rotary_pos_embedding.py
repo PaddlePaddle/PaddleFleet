@@ -308,45 +308,35 @@ class MultimodalRotaryEmbedding(nn.Layer):
         seqlens = position_ids.shape[2]
         position_ids = position_ids.reshape([3, -1, seqlens])
 
-        seq = position_ids.to(
-            device=self.inv_freq.place, dtype=self.inv_freq.dtype
-        )
+        with paddle.amp.auto_cast(False):
+            inv_freq_expanded = (
+                self.inv_freq.unsqueeze(0)
+                .unsqueeze(-1)
+                .cast(paddle.float32)
+                .expand([3, position_ids.shape[1], -1, 1])
+            )
+            position_ids_expanded = position_ids.unsqueeze(2).cast(paddle.float32)
 
-        if self.seq_len_interpolation_factor is not None:
-            seq *= 1 / self.seq_len_interpolation_factor
-
-        # shape (3, bs, dim, 1)
-        inv_freq_expanded = self.inv_freq[None, None, :, None].expand(
-            3, seq.shape[1], -1, 1
-        )
-        # shape (3, bs, 1, seq_length)
-        seq_expanded = seq[:, :, None, :].float()
-        # shape (3, bs, seq_length, dim)
-        freqs = (inv_freq_expanded @ seq_expanded).transpose(2, 3)
-        # first part even vector components, second part odd vector components,
-        #  2 * dim in dimension size
-        if not self.rotary_interleaved:
-            emb = paddle.cat(
-                (freqs, freqs), axis=-1
-            )  # shape (3, bs, seq_length, 2 * dim)
-        else:
-            bs = freqs.shape[1]
-            emb = paddle.stack(
-                (freqs.view(3, bs, -1, 1), freqs.view(3, bs, -1, 1)), axis=-1
-            ).view(3, bs, freqs.shape[0], -1)
-
-        # generate freqs with mrope_section
-        # shape (bs, seq_length, 2 * dim)
-        mrope_section = mrope_section * 2
-        # concat ([bs,1,seqlen,mrope_section[i]],...)
-        emb = paddle.cat(
-            [m[i % 3] for i, m in enumerate(emb.split(mrope_section, axis=-1))],
-            axis=-1,
-        )
-
-        # TODO: self.cp_group.world_size --> transformer_config.context_parallel_size
-        # rotary_seq_len *= transformer_config.context_parallel_size
-        if self.cp_group is not None and self.cp_group.world_size > 1:
-            emb *= self.cp_group.world_size
+            freqs = paddle.matmul(inv_freq_expanded, position_ids_expanded).transpose([0, 1, 3, 2])
+            
+            freqs = self.apply_interleaved_mrope(freqs, mrope_section)
+            emb = paddle.cat((freqs, freqs), axis=-1)
 
         return emb
+    
+    def apply_interleaved_mrope(self, freqs, mrope_section):
+        """Apply interleaved MRoPE to 3D rotary embeddings.
+        Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
+        interleaved [THWTHWTHW...TT], preserving frequency continuity.
+        args:
+            x: (3, bs, seq_len, head_dim // 2)
+            mrope_section: (3,)
+        returns:
+            x_t: (bs, seq_len, head_dim // 2)
+        """
+        freqs_t = freqs[0]  # just overwrite the first dimension T
+        for dim, offset in enumerate((1, 2), start=1):  # H, W
+            length = mrope_section[dim] * 3
+            idx = slice(offset, length, 3)
+            freqs_t[..., idx] = freqs[dim, ..., idx]
+        return freqs_t
