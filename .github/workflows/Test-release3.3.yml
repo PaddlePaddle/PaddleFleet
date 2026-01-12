@@ -586,6 +586,7 @@ jobs:
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFormers
           git log -1
+          git reset --hard a9ad423c76c09abb55d847de60d72e7774636b0d
           pip install -e .
           pip install librosa==0.11.0
           echo "paddlefleet commit:"
