@@ -139,7 +139,7 @@ class AddAuxiliaryLoss(paddle.autograd.PyLayer):
         assert paddle.numel(loss) == 1
         ctx.dtype = loss.dtype
         ctx.required_aux_loss = not loss.stop_gradient
-        return x
+        return x.clone()
 
     @staticmethod
     def backward(ctx, grad_output):

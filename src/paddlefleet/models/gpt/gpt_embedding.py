@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 import paddle
 
+from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -74,6 +75,9 @@ class GPTEmbedding(FleetLayer):
     @property
     def embedding_weight(self):
         return self.embedding.embedding_weight
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="GPTEmbedding")
 
     def forward(
         self,

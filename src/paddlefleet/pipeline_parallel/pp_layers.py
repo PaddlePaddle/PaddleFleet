@@ -58,6 +58,10 @@ from paddle.incubate.distributed.fleet import recompute_hybrid
 
 from paddlefleet.spec_utils import LayerSpec, build_layer
 
+from .pp_utils.forward_backward_overlap_utils import (
+    ScheduleChunk,
+)
+
 __all__ = []
 
 
@@ -292,6 +296,7 @@ class PipelineLayer(nn.Layer):
                 "virtual_pipeline_stage should be None or an int"
             )
             if num_virtual_pipeline_stages > 1:
+                assert num_stages > 1, "Cannot enable vpp under no pp."
                 logger.info(
                     "set num_virtual_pipeline_stages > 1 means using interleave scheduler instead of 1f1b scheduler"
                 )
@@ -915,6 +920,29 @@ class PipelineLayer(nn.Layer):
             "overlap_schedule_mode requires recompute_interval==0."
         )
         return self.build_schedule_nodes(0, len(self.run_function))
+
+    def build_schedule_nodes(self, start, end):
+        run_function = self.run_function
+
+        def check_overlap_schedule_mode():
+            overlap_schedule_mode = False
+            for layer in run_function[start:end]:
+                if hasattr(layer, "build_schedule_node"):
+                    overlap_schedule_mode = True
+                    break
+            for layer in run_function[start:end]:
+                assert not (
+                    overlap_schedule_mode
+                    and not hasattr(layer, "build_schedule_node")
+                )
+            return overlap_schedule_mode
+
+        assert check_overlap_schedule_mode()
+        nodes = []
+        for layer in run_function[start:end]:
+            nodes.append(layer.build_schedule_node())
+        schedule_chunk = ScheduleChunk(nodes=nodes)
+        return schedule_chunk
 
     def forward(self, input, chunk_id=None):
         self.update_run_function(chunk_id)

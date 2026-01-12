@@ -14,19 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-try:
-    from paddle.distributed.communication import deep_ep
-
-    HAVE_DEEP_EP = True
-except ImportError:
-    HAVE_DEEP_EP = False
-
 import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
 
+from paddlefleet.ops import is_deep_ep_available
+
 from .moe_utils import manual_backward
+
+if is_deep_ep_available():
+    from paddlefleet.ops import deep_ep
+
+    HAVE_DEEP_EP = True
+else:
+    deep_ep = None
+    HAVE_DEEP_EP = False
 
 _buffer = None
 
@@ -256,6 +259,8 @@ class FusedDispatch(PyLayer):
         group,
         previous_event=None,
         fp8_dispatch: bool = False,
+        async_finish: bool = False,
+        allocate_on_comm_stream: bool = False,
         moe_ep_barrier: bool = True,
     ):
         """Forward pass of fused dispatch."""
@@ -276,12 +281,16 @@ class FusedDispatch(PyLayer):
             num_experts,
             group,
             previous_event,
+            async_finish,
+            allocate_on_comm_stream,
             moe_ep_barrier=moe_ep_barrier,
         )
 
         ctx.group = group
         ctx.handle = states["handle"]
         ctx.event = event
+        ctx.async_finish = async_finish
+        ctx.allocate_on_comm_stream = allocate_on_comm_stream
         ctx.set_grad_in_dtype_consistent(False)
         ctx.moe_ep_barrier = moe_ep_barrier
         if fp8_dispatch:
@@ -297,6 +306,9 @@ class FusedDispatch(PyLayer):
             grad_token_probs,
             ctx.group,
             ctx.handle,
+            None,  # previous_event
+            ctx.async_finish,
+            ctx.allocate_on_comm_stream,
             moe_ep_barrier=ctx.moe_ep_barrier,
         )
 
@@ -306,7 +318,14 @@ class FusedCombine(PyLayer):
 
     @staticmethod
     def forward(
-        ctx, x, group, states, previous_event=None, moe_ep_barrier: bool = True
+        ctx,
+        x,
+        group,
+        states,
+        previous_event=None,
+        async_finish=False,
+        allocate_on_comm_stream=False,
+        moe_ep_barrier: bool = True,
     ):
         """Forward pass of fused combine."""
         combined_x = fused_combine_forward_func(
@@ -316,6 +335,8 @@ class FusedCombine(PyLayer):
         ctx.handle = states["handle"]
         ctx.group = group
         ctx.previous_event = previous_event
+        ctx.async_finish = async_finish
+        ctx.allocate_on_comm_stream = allocate_on_comm_stream
         ctx.moe_ep_barrier = moe_ep_barrier
 
         return combined_x
@@ -328,6 +349,8 @@ class FusedCombine(PyLayer):
             ctx.group,
             ctx.handle,
             ctx.previous_event,
+            ctx.async_finish,
+            ctx.allocate_on_comm_stream,
             moe_ep_barrier=ctx.moe_ep_barrier,
         )
 
@@ -389,6 +412,8 @@ if HAVE_DEEP_EP:
         group: Group,
         previous_event=None,
         fp8_dispatch: bool = False,
+        async_finish=False,
+        allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
     ):
         """Perform fused dispatch operation if deep_ep is available.
@@ -413,6 +438,8 @@ if HAVE_DEEP_EP:
             group,
             previous_event,
             fp8_dispatch,
+            async_finish,
+            allocate_on_comm_stream,
             moe_ep_barrier,
         )
 
@@ -422,6 +449,7 @@ if HAVE_DEEP_EP:
         handle,
         previous_event=None,
         combine_overlap_handle=None,
+        async_finish=False,
         moe_ep_barrier: bool = True,
     ):
         """Perform fused combine operation if deep_ep is available.
@@ -441,7 +469,7 @@ if HAVE_DEEP_EP:
         states["handle"] = handle
         if combine_overlap_handle is None:
             return FusedCombine.apply(
-                x, group, states, previous_event, moe_ep_barrier
+                x, group, states, previous_event, async_finish, moe_ep_barrier
             )
         else:
             assert previous_event is None

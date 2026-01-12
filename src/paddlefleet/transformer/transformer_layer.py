@@ -22,8 +22,10 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor, nn
+from paddle.distributed.communication import deep_ep
 from paddle.distributed.fleet.utils import recompute
 
+from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     need_full_recompute,
@@ -301,6 +303,14 @@ class TransformerLayer(nn.Layer):
             else:
                 raise ValueError("recompute_modules must be list or dict")
 
+    def build_schedule_node(self):
+        return TransformerLayerNode(
+            self,
+            self.config,
+            name="TransformerLayerNode",
+            layer_number=self.layer_number,
+        )
+
     def forward(
         self,
         dict_args: dict,
@@ -550,3 +560,306 @@ class TransformerLayer(nn.Layer):
     def use_fp8(self):
         if isinstance(self.mlp, MoELayer):
             return self.mlp.use_fp8()
+
+
+class TransformerLayerWithOverlap(TransformerLayer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert not self.full_recompute
+        assert not self.recompute_mlp
+        assert not self.recompute_input_layernorm
+        assert not self.recompute_post_attention_layernorm
+        assert isinstance(self.mlp, MoELayer), (
+            "By enabling `forward_backward_overlap_scheduler`, you should run a moe model."
+        )
+        assert self.mlp.expert_model_parallel_size > 1, (
+            "By enabling `forward_backward_overlap_scheduler`, you should use expert parallel."
+        )
+        assert self.mlp.moe_token_dispatcher_type == "deepep", (
+            "By enabling `forward_backward_overlap_scheduler`, you should use deepep for dispatching tokens."
+        )
+
+    def compute_attention(self, dict_args):
+        return self._forward_attention(**dict_args)
+
+    def compute_mlp(self, hidden_states):
+        return self._forward_mlp(hidden_states)
+
+    def pre_process_compute(self, hidden_states):
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        residuals = hidden_states
+        (
+            capacity,
+            topk_weights,
+            topk_indices,
+            gates_masked,
+            mask,
+            priorities,
+            aux_loss,
+            z_loss,
+        ) = self.mlp.compute_gate(hidden_states)
+        return (
+            residual,
+            hidden_states,
+            residuals,
+            topk_weights,
+            topk_indices,
+            aux_loss,
+        )
+
+    def dispatch_preprocess_compute(self, args):
+        hidden_states, topk_weights, topk_indices = args
+
+        hidden_states, token_indices, token_weights = (
+            self.mlp.dispatch_preprocess(
+                (hidden_states, topk_weights, topk_indices)
+            )
+        )
+        return hidden_states, token_indices, token_weights
+
+    def post_process_compute(self, args):
+        mlp_output, residual = args
+        with paddle.enable_grad():
+            output = self.mlp_bda(
+                self.training, self.config.bias_dropout_fusion
+            )((mlp_output, None), residual, self.hidden_dropout_prob)
+        return output
+
+
+class TransformerLayerNode(ScheduleNode):
+    def __init__(self, node, config, name="", layer_number=1):
+        super().__init__(fwd_func=None, name=name)
+        self.config = config
+        self.layer_number = layer_number
+        self.attn_node = ScheduleNode(
+            node.compute_attention, name="attn_compute"
+        )
+        assert isinstance(node.mlp, MoELayer)
+        self.pre_process_node = ScheduleNode(
+            node.pre_process_compute, name="pre_process_compute"
+        )
+        self.dispatch_preprocess_node = ScheduleNode(
+            node.dispatch_preprocess_compute, name="dispatch_preprocess_compute"
+        )
+        self.gate_node = ScheduleNode(
+            node.mlp.compute_gate, name="gate_compute"
+        )
+        self.dispatch_node = ScheduleNode(
+            node.mlp.compute_dispatch, name="dispatch_compute"
+        )
+        self.mlp_node = ScheduleNode(
+            node.mlp.compute_experts, name="mlp_compute"
+        )
+        self.combine_node = ScheduleNode(
+            node.mlp.compute_combine, name="combine_compute"
+        )
+        self.aux_loss_node = ScheduleNode(
+            node.mlp.aux_loss_compute, name="aux_loss_compute"
+        )
+        self.post_process_node = ScheduleNode(
+            node.post_process_compute, name="post_process_compute"
+        )
+        self.group_id = node.mlp.token_dispatcher._comm_manager.group.id
+
+    def forward(self, inputs):
+        inputs.pop("dynamic_inference_decode_only", None)
+        hidden_states, context = self.attn_node.forward(inputs)
+        (
+            residual,
+            hidden_states,
+            residuals,
+            topk_weights,
+            topk_indices,
+            aux_loss,
+        ) = self.pre_process_node.forward(hidden_states)
+
+        hidden_states, token_indices, token_weights = (
+            self.dispatch_preprocess_node.forward(
+                (hidden_states, topk_weights, topk_indices)
+            )
+        )
+
+        hidden_states = self.dispatch_node.forward(
+            (hidden_states, token_indices, token_weights),
+            async_finish=True,
+        )
+        dispatch_fw_event = deep_ep.get_event_from_comm_stream(self.group_id)
+        dispatch_fw_event.calc_stream_wait(self.group_id)
+
+        hidden_states = self.mlp_node.forward(hidden_states)
+
+        hidden_states = self.combine_node.forward(
+            hidden_states, async_finish=True
+        )
+        combine_fw_event = deep_ep.get_event_from_comm_stream(self.group_id)
+        combine_fw_event.calc_stream_wait(self.group_id)
+
+        hidden_states = self.aux_loss_node.forward(
+            (hidden_states, aux_loss, residuals)
+        )
+
+        output = self.post_process_node.forward((hidden_states, residual))
+        rst = {"hidden_states": output}
+        if context is not None:
+            rst["context"] = context
+        rst = {**inputs, **rst}
+        return rst
+
+    def backward(self, output_grad):
+        output_grad, residual_grad = self.post_process_node.backward(
+            output_grad
+        )
+
+        output_grad, aux_loss_grad, residuals_grad = (
+            self.aux_loss_node.backward(output_grad)
+        )
+
+        output_grad = self.combine_node.backward(output_grad)
+        combine_bw_event = deep_ep.get_event_from_comm_stream(self.group_id)
+        combine_bw_event.calc_stream_wait(self.group_id)
+        output_grad = self.mlp_node.backward(output_grad)
+
+        (output_grad, token_indices_grad, token_weights_grad) = (
+            self.dispatch_node.backward(output_grad)
+        )
+        dispatch_bw_event = deep_ep.get_event_from_comm_stream(self.group_id)
+        dispatch_bw_event.calc_stream_wait(self.group_id)
+
+        (
+            output_grad,
+            topk_weights_grad,
+            topk_indices_grad,
+        ) = self.dispatch_preprocess_node.backward(
+            (output_grad, token_indices_grad, token_weights_grad)
+        )
+
+        output_grad = self.pre_process_node.backward(
+            (
+                residual_grad,
+                output_grad,
+                residuals_grad,
+                topk_weights_grad,
+                topk_indices_grad,
+                aux_loss_grad,
+            )
+        )
+
+        output_grad = self.attn_node.backward(output_grad)
+        return output_grad
+
+
+class TransformerLayerOverlappedScheduleNode(ScheduleNode):
+    """Overlap schedule for TransformerLayer"""
+
+    def __init__(self, forward_node, backward_node, name=""):
+        assert isinstance(forward_node, TransformerLayerNode)
+        assert isinstance(backward_node, TransformerLayerNode)
+        super().__init__(fwd_func=None, name=name)
+        self.forward_node = forward_node
+        self.backward_node = backward_node
+        self.config = forward_node.config
+
+    def forward_backward(self, inputs, output_grad, split_bw=False):
+        assert not split_bw
+        # 1. POST(B)
+        output_grad, residual_grad = (
+            self.backward_node.post_process_node.backward(output_grad)
+        )
+        output_grad, aux_loss_grad, residuals_grad = (
+            self.backward_node.aux_loss_node.backward(output_grad)
+        )
+
+        # 2. COMBINE(B)
+        output_grad = self.backward_node.combine_node.backward(output_grad)
+        combine_bw_event = deep_ep.get_event_from_comm_stream(
+            self.backward_node.group_id
+        )
+
+        # 3. ATTN(F)
+        hidden_states, context = self.forward_node.attn_node.forward(inputs)
+        (
+            residual,
+            hidden_states,
+            residuals,
+            topk_weights,
+            topk_indices,
+            aux_loss,
+        ) = self.forward_node.pre_process_node.forward(hidden_states)
+
+        hidden_states, token_indices, token_weights = (
+            self.forward_node.dispatch_preprocess_node.forward(
+                (hidden_states, topk_weights, topk_indices)
+            )
+        )
+
+        # 4. DISPATCH(F)
+        hidden_states = self.forward_node.dispatch_node.forward(
+            (hidden_states, token_indices, token_weights),
+            async_finish=True,
+        )
+        dispatch_fw_event = deep_ep.get_event_from_comm_stream(
+            self.forward_node.group_id
+        )
+
+        # 5. MLP(B)
+        combine_bw_event.calc_stream_wait(self.backward_node.group_id)
+        output_grad = self.backward_node.mlp_node.backward(output_grad)
+
+        # 6. DISPATCH(B)
+        output_grad, token_indices_grad, token_weights_grad = (
+            self.backward_node.dispatch_node.backward(output_grad)
+        )
+        dispatch_bw_event = deep_ep.get_event_from_comm_stream(
+            self.backward_node.group_id
+        )
+
+        # 7. MLP(F)
+        dispatch_fw_event.calc_stream_wait(self.forward_node.group_id)
+        hidden_states = self.forward_node.mlp_node.forward(hidden_states)
+
+        # 8. COMBINE(F)
+        hidden_states = self.forward_node.combine_node.forward(
+            hidden_states, async_finish=True
+        )
+        combine_fw_event = deep_ep.get_event_from_comm_stream(
+            self.forward_node.group_id
+        )
+
+        # 9. ATTN(B)
+        dispatch_bw_event.calc_stream_wait(self.backward_node.group_id)
+        (
+            output_grad,
+            topk_weights_grad,
+            topk_indices_grad,
+        ) = self.backward_node.dispatch_preprocess_node.backward(
+            (output_grad, token_indices_grad, token_weights_grad)
+        )
+
+        output_grad = self.backward_node.pre_process_node.backward(
+            (
+                residual_grad,
+                output_grad,
+                residuals_grad,
+                topk_weights_grad,
+                topk_indices_grad,
+                aux_loss_grad,
+            )
+        )
+        output_grad = self.backward_node.attn_node.backward(output_grad)
+
+        # 10. POST(F)
+        combine_fw_event.calc_stream_wait(self.forward_node.group_id)
+        hidden_states = self.forward_node.aux_loss_node.forward(
+            (hidden_states, aux_loss, residuals)
+        )
+        output = self.forward_node.post_process_node.forward(
+            (hidden_states, residual)
+        )
+
+        rst = {"hidden_states": output}
+        if context is not None:
+            rst["context"] = context
+        rst = {**inputs, **rst}
+
+        return rst, output_grad
