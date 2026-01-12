@@ -217,6 +217,7 @@ class TransformerConfig(ModelParallelConfig):
     """If True, run attention masking and softmax in fp32. This should be True if
     apply_query_key_layer_scaling is True."""
 
+    high_precision_rope: bool = False
     ####################
     # fusion
     ####################

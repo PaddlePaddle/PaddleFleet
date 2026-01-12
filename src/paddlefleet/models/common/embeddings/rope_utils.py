@@ -86,12 +86,20 @@ def _rotate_half(x: Tensor, rotary_interleaved: bool) -> Tensor:
         return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
 
 
+def get_unsqueeze_dim(t, freqs):
+    # x: [b,seq,head_nums,head_dim] or [b,head_nums,seq,head_dim]
+    # freqs: [b,seq,head_dim]
+    seq_len = freqs.shape[1]
+    return 2 if t.shape[1] == seq_len else 1
+
+
 def _apply_rotary_pos_emb_bshd(
     t: Tensor,
     freqs: Tensor,
     rotary_interleaved: bool = False,
     multi_latent_attention: bool = False,
     mscale: float = 1.0,
+    high_precision_rope: bool = False,
 ) -> Tensor:
     """Apply rotary positional embedding to input tensor T.
 
@@ -116,15 +124,21 @@ def _apply_rotary_pos_emb_bshd(
 
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
-    sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
-    if len(cos_.shape) < len(t.shape):
-        # [b,s,h]->[b,s,1,h]
-        cos_.unsqueeze_(-2)
-        sin_.unsqueeze_(-2)
+    with paddle.amp.auto_cast(not high_precision_rope):
+        orig_t_dtype = t.dtype
+        if high_precision_rope:
+            t = t.astype(dtype="float32")
+            t_pass = t_pass.astype(dtype="float32")
+        cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
+        sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
+        if len(cos_.shape) < len(t.shape):
+            # [b,s,h]->[b,s,1,h]
+            unsqueeze_dim = get_unsqueeze_dim(t, cos_)
+            cos_.unsqueeze_(unsqueeze_dim)
+            sin_.unsqueeze_(unsqueeze_dim)
 
-    t = (t * cos_) + (_rotate_half(t, rotary_interleaved) * sin_)
-    return paddle.cat((t, t_pass), axis=-1)
+        t = (t * cos_) + (_rotate_half(t, rotary_interleaved) * sin_)
+        return paddle.cat((t, t_pass), axis=-1).astype(orig_t_dtype)
 
 
 def _get_thd_freqs_on_this_cp_rank(
@@ -186,6 +200,7 @@ def _apply_rotary_pos_emb_thd(
     multi_latent_attention: bool = False,
     mscale: float = 1.0,
     cp_group: Group = None,
+    high_precision_rope: bool = False,
 ) -> Tensor:
     """A baseline implementation of applying RoPE for `thd` format.
 
@@ -231,6 +246,7 @@ def _apply_rotary_pos_emb_thd(
             rotary_interleaved=rotary_interleaved,
             multi_latent_attention=multi_latent_attention,
             mscale=mscale,
+            high_precision_rope=high_precision_rope,
         )
     else:
         # CASE 2: Traditional mapping without offsets
@@ -250,6 +266,7 @@ def _apply_rotary_pos_emb_thd(
             rotary_interleaved=rotary_interleaved,
             multi_latent_attention=multi_latent_attention,
             mscale=mscale,
+            high_precision_rope=high_precision_rope,
         )
 
 
@@ -304,6 +321,7 @@ def apply_rotary_pos_emb(
             rotary_interleaved=config.rotary_interleaved,
             multi_latent_attention=config.multi_latent_attention,
             mscale=mscale,
+            high_precision_rope=config.high_precision_rope,
         )
     else:
         return _apply_rotary_pos_emb_thd(
@@ -314,4 +332,5 @@ def apply_rotary_pos_emb(
             multi_latent_attention=config.multi_latent_attention,
             mscale=mscale,
             cp_group=cp_group,
+            high_precision_rope=config.high_precision_rope,
         )
