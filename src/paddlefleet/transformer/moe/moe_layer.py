@@ -138,7 +138,7 @@ class MoELayer(nn.Layer):
         self.moe_use_fusion_node = False
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
-                self.moe_use_fusion_node = True
+                self.moe_use_fusion_node = config.moe_use_fusion_node
             else:
                 if self.moe_grouped_gemm:
                     logger.warning(

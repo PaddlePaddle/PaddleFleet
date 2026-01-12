@@ -15,9 +15,9 @@
 # Referred to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
-
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -310,6 +310,9 @@ class TransformerConfig(ModelParallelConfig):
     """The type of token dispatcher to use. The default is 'allgather'.
     Options are 'allgather','alltoall' and 'deepep'."""
 
+    moe_use_fusion_node: bool = True
+    """Whether to use fusion node for MoE layer. Default is True"""
+
     moe_router_load_balancing_type: str = "aux_loss"
     """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn"""
 
@@ -490,7 +493,10 @@ class TransformerConfig(ModelParallelConfig):
 
         if key == "hidden_act":
             if isinstance(value, str):
-                func = getattr(F, value)
+                if value == "gelu_pytorch_tanh":
+                    func = functools.partial(F.gelu, approximate=True)
+                else:
+                    func = getattr(F, value)
                 setattr(self, key, func)
             elif callable(value):
                 setattr(self, key, value)

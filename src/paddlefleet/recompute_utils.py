@@ -21,6 +21,10 @@ def need_recompute_in_block(layer_number, config, recompute_num_layers):
     assert recompute_num_layers is not None, (
         "recompute_num_layers cannot be none"
     )
+
+    if recompute_num_layers < 0:
+        return True
+
     total_num_hidden_layers = (
         config.num_empty_layers_add_in_head
         + config.num_hidden_layers
