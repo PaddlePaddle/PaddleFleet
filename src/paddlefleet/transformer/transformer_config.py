@@ -15,9 +15,9 @@
 # Referred to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
-
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -492,7 +492,10 @@ class TransformerConfig(ModelParallelConfig):
 
         if key == "hidden_act":
             if isinstance(value, str):
-                func = getattr(F, value)
+                if value == "gelu_pytorch_tanh":
+                    func = functools.partial(F.gelu, approximate=True)
+                else:
+                    func = getattr(F, value)
                 setattr(self, key, func)
             elif callable(value):
                 setattr(self, key, value)
