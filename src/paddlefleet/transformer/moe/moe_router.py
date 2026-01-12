@@ -603,7 +603,11 @@ class TopKRouter(StandardMoERouter):
         if self.config.router_aux_loss_coef:
             if self.routing_type == "seq_aux_loss":
                 l_aux = self._cal_seq_aux_loss(
-                    gates_ori, self.num_experts_per_tok, mask, seq_len, batch_size
+                    gates_ori,
+                    self.num_experts_per_tok,
+                    mask,
+                    seq_len,
+                    batch_size,
                 )
             else:
                 l_aux = self._cal_aux_loss(gates, mask)
