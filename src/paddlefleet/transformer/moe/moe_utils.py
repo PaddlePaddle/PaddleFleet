@@ -36,6 +36,11 @@ if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
 
+def barrier_ep(ep_group):
+    """barrier_ep"""
+    paddle.distributed.barrier(ep_group)
+
+
 def permute(
     tokens,
     routing_map,
@@ -184,6 +189,7 @@ class _AllToAll(paddle.autograd.PyLayer):
         output = paddle.empty(
             output_shape, dtype=input.dtype, requires_grad=True
         )
+        paddle.distributed.barrier(group)
         task = dist.alltoall_single(
             output,
             input,
@@ -207,6 +213,7 @@ class _AllToAll(paddle.autograd.PyLayer):
             tuple[Tensor]: A tuple containing a tensor that holds the gradients of all input tensors.
         """
         # return grad_output
+        paddle.distributed.barrier(ctx.group)
         return _AllToAll.apply(
             ctx.input_shape,
             *grad_output,
@@ -507,6 +514,7 @@ class AllGatherGroupOp(paddle.autograd.PyLayer):
             Tensor: Assembled tensor after All-Gather with shape [s, b, h],
                    containing full parameter from all devices
         """
+        paddle.distributed.barrier(group)
         ctx.group = group
         return all_gather_group(input, group=group)
 
@@ -519,4 +527,5 @@ class AllGatherGroupOp(paddle.autograd.PyLayer):
             Tensor: Scattered gradient with shape [s/n, b, h],
                    distributing reduced gradients to each device
         """
+        paddle.distributed.barrier(ctx.group)
         return reduce_scatter_group(grad, group=ctx.group)

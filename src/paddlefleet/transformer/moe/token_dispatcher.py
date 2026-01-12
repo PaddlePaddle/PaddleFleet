@@ -458,6 +458,11 @@ class AllToAllTokenDispatcher(nn.Layer):
         # )
         # num_global_tokens_per_local_expert = global_tokens_per_expert.reshape(self.expert_model_parallel_size, self.num_local_experts)
 
+        if num_global_tokens_per_local_expert.sum().item() == 0:
+            self.is_empty_tokens = True
+        else:
+            self.is_empty_tokens = False
+
         self.tokens_per_expert = num_global_tokens_per_local_expert.sum(axis=0)
 
         num_global_tokens_per_rank = num_global_tokens_per_local_expert.sum(
@@ -520,19 +525,19 @@ class AllToAllTokenDispatcher(nn.Layer):
             self.num_local_experts, -1
         ).T.ravel()
 
-        global_input_tokens, global_probs = sort_chunks_by_idxs(
-            global_input_tokens,
-            self.num_global_tokens_per_local_expert.ravel(),
-            self.sort_input_by_local_experts,
-            probs=None,
-        )
+        if self.num_local_experts > 1 and not self.is_empty_tokens:
+            global_input_tokens, global_probs = sort_chunks_by_idxs(
+                global_input_tokens,
+                self.num_global_tokens_per_local_expert.ravel(),
+                self.sort_input_by_local_experts,
+                probs=None,
+            )
         sorted_tokens = global_input_tokens
         self.tokens_per_expert_post_gather = self.tokens_per_expert
-
         return sorted_tokens, self.tokens_per_expert_post_gather
 
     def combine_preprocess(self, hidden_states: paddle.Tensor):
-        if self.num_local_experts > 1:
+        if self.num_local_experts > 1 and not self.is_empty_tokens:
             hidden_states, _ = sort_chunks_by_idxs(
                 hidden_states,
                 self.num_global_tokens_per_local_expert.T.ravel(),
