@@ -1,10 +1,6 @@
 name: CE-CUDA-130-PYTHON-RELEASE
 
 on:
-  pull_request:
-    branches:
-      - develop
-      - release/**
   schedule:
     - cron: '0 19 * * 6'
   workflow_dispatch: # 可选：允许手动点 Run
