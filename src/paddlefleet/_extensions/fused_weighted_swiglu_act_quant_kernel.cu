@@ -22,10 +22,10 @@ __host__ __device__ __forceinline__ int ceil_div(int x, int y) {
   return (x + y - 1) / y;
 }
 
-inline paddle::Tensor GetEmptyTensor(const common::DDim &dims,
-                                     const paddle::DataType &dtype,
-                                     const paddle::Place &place) {
-  auto *allocator = paddle::GetAllocator(place);
+inline paddle::Tensor GetEmptyTensor(const common::DDim& dims,
+                                     const paddle::DataType& dtype,
+                                     const paddle::Place& place) {
+  auto* allocator = paddle::GetAllocator(place);
   phi::DenseTensor dense_tensor;
   dense_tensor.Resize(dims);
   dense_tensor.AllocateFrom(
@@ -33,11 +33,11 @@ inline paddle::Tensor GetEmptyTensor(const common::DDim &dims,
   return paddle::Tensor(std::make_shared<phi::DenseTensor>(dense_tensor));
 }
 
-inline paddle::Tensor GetEmptyTensor(const common::DDim &dims,
-                                     const common::DDim &strides,
-                                     const paddle::DataType &dtype,
-                                     const paddle::Place &place) {
-  auto *allocator = paddle::GetAllocator(place);
+inline paddle::Tensor GetEmptyTensor(const common::DDim& dims,
+                                     const common::DDim& strides,
+                                     const paddle::DataType& dtype,
+                                     const paddle::Place& place) {
+  auto* allocator = paddle::GetAllocator(place);
   phi::DenseTensor dense_tensor;
   dense_tensor.Resize(dims);
   dense_tensor.AllocateFrom(
@@ -46,18 +46,21 @@ inline paddle::Tensor GetEmptyTensor(const common::DDim &dims,
   return paddle::Tensor(std::make_shared<phi::DenseTensor>(dense_tensor));
 }
 
-#define LAUNCH_FUSED_SPAQ(__using_pow2_scaling, __with_prob)          \
-  do {                                                                \
-    auto kernel = FusedSPAQKernel<__using_pow2_scaling, __with_prob, ScaleT, use_ue8m0>; \
-    kernel<<<grid, block, 0, stream>>>(                               \
-        x_data, prob_data, out_data, scale_data, rows, cols);         \
+#define LAUNCH_FUSED_SPAQ(__using_pow2_scaling, __with_prob)                   \
+  do {                                                                         \
+    auto kernel =                                                              \
+        FusedSPAQKernel<__using_pow2_scaling, __with_prob, ScaleT, use_ue8m0>; \
+    kernel<<<grid, block, 0, stream>>>(                                        \
+        x_data, prob_data, out_data, scale_data, rows, cols);                  \
   } while (0)
 
 #define LAUNCH_FUSED_SPAQ_VEC4(__using_pow2_scaling, __with_prob)         \
   do {                                                                    \
     auto kernel = FusedSPAQKernelVec4<__using_pow2_scaling,               \
                                       __with_prob,                        \
-                                      thread_per_block, ScaleT, use_ue8m0>;                  \
+                                      thread_per_block,                   \
+                                      ScaleT,                             \
+                                      use_ue8m0>;                         \
     kernel<<<grid, block, 0, stream>>>(                                   \
         x_data, prob_data, out_data, scale_data, rows, cols, scale_cols); \
   } while (0)
@@ -76,16 +79,14 @@ typedef struct __align__(8) {
   __nv_bfloat16 y;
   __nv_bfloat16 z;
   __nv_bfloat16 w;
-}
-bfloat16x4_t;
+} bfloat16x4_t;
 
 typedef struct __align__(4) {
   __nv_fp8_e4m3 x;
   __nv_fp8_e4m3 y;
   __nv_fp8_e4m3 z;
   __nv_fp8_e4m3 w;
-}
-fp8_e4m3x4_t;
+} fp8_e4m3x4_t;
 
 __device__ __forceinline__ float fast_swiglu(const __nv_bfloat16 x,
                                              const __nv_bfloat16 y) {
@@ -96,8 +97,8 @@ __device__ __forceinline__ float fast_swiglu(const __nv_bfloat16 x,
   return result;
 }
 
-__device__ __forceinline__ float4 fast_swiglu_vec4(const bfloat16x4_t &lhs,
-                                                   const bfloat16x4_t &rhs) {
+__device__ __forceinline__ float4 fast_swiglu_vec4(const bfloat16x4_t& lhs,
+                                                   const bfloat16x4_t& rhs) {
   const float x_f_x = __bfloat162float(lhs.x);
   const float x_f_y = __bfloat162float(lhs.y);
   const float x_f_z = __bfloat162float(lhs.z);
@@ -116,24 +117,28 @@ __device__ __forceinline__ float4 fast_swiglu_vec4(const bfloat16x4_t &lhs,
   return {silu_x * y_f_x, silu_y * y_f_y, silu_z * y_f_z, silu_w * y_f_w};
 }
 
-__device__ __forceinline__ float amax_float4(const float4 &vec) {
+__device__ __forceinline__ float amax_float4(const float4& vec) {
   return fmaxf(fmaxf(fabsf(vec.x), fabsf(vec.y)),
                fmaxf(fabsf(vec.z), fabsf(vec.w)));
 }
 
 __device__ __forceinline__ fp8_e4m3x4_t
-scale_fp32x4_to_fp8x4(const float4 &vec, const float scale) {
+scale_fp32x4_to_fp8x4(const float4& vec, const float scale) {
   return {static_cast<__nv_fp8_e4m3>(vec.x * scale),
           static_cast<__nv_fp8_e4m3>(vec.y * scale),
           static_cast<__nv_fp8_e4m3>(vec.z * scale),
           static_cast<__nv_fp8_e4m3>(vec.w * scale)};
 }
 
-template <bool using_pow2_scaling, bool with_prob, int thread_per_block, typename ScaleT, bool ue8m0>
-__global__ void FusedSPAQKernelVec4(const phi::bfloat16 *__restrict__ Xin,
-                                    const float *__restrict__ prob,
-                                    phi::float8_e4m3fn *__restrict__ out,
-                                    ScaleT *__restrict__ scales,
+template <bool using_pow2_scaling,
+          bool with_prob,
+          int thread_per_block,
+          typename ScaleT,
+          bool ue8m0>
+__global__ void FusedSPAQKernelVec4(const phi::bfloat16* __restrict__ Xin,
+                                    const float* __restrict__ prob,
+                                    phi::float8_e4m3fn* __restrict__ out,
+                                    ScaleT* __restrict__ scales,
                                     const int64_t rows,
                                     const int64_t cols,
                                     const int64_t scale_cols) {
@@ -164,17 +169,17 @@ __global__ void FusedSPAQKernelVec4(const phi::bfloat16 *__restrict__ Xin,
       if (lane == 0) p_t0 = prob[in_y_idx];
     }
 
-    const __nv_bfloat16 *X = reinterpret_cast<const __nv_bfloat16 *>(Xin);
+    const __nv_bfloat16* X = reinterpret_cast<const __nv_bfloat16*>(Xin);
 
     // Initialize activation storage
     float4 act_f32x4;
     bfloat16x4_t lhs_bf16x4, rhs_bf16x4;
 
     // Reinterpret input pointer as bfloat16x4_t* for vectorized loading
-    const bfloat16x4_t *X_lhs_vec =
-        reinterpret_cast<const bfloat16x4_t *>(X + src_idx);
-    const bfloat16x4_t *X_rhs_vec =
-        reinterpret_cast<const bfloat16x4_t *>(X + src_idx + cols / 2);
+    const bfloat16x4_t* X_lhs_vec =
+        reinterpret_cast<const bfloat16x4_t*>(X + src_idx);
+    const bfloat16x4_t* X_rhs_vec =
+        reinterpret_cast<const bfloat16x4_t*>(X + src_idx + cols / 2);
 
     lhs_bf16x4 = *X_lhs_vec;
     rhs_bf16x4 = *X_rhs_vec;
@@ -208,17 +213,19 @@ __global__ void FusedSPAQKernelVec4(const phi::bfloat16 *__restrict__ Xin,
     const float inv_scale = __frcp_rn(scale);
 
     const fp8_e4m3x4_t act_fp8x4 = scale_fp32x4_to_fp8x4(act_f32x4, scale);
-    fp8_e4m3x4_t *const out_vec_addr =
-        reinterpret_cast<fp8_e4m3x4_t *>(out + in_y_idx * cols / 2 + in_x_idx);
+    fp8_e4m3x4_t* const out_vec_addr =
+        reinterpret_cast<fp8_e4m3x4_t*>(out + in_y_idx * cols / 2 + in_x_idx);
     *out_vec_addr = act_fp8x4;
 
     if (lane == 0) {
       if constexpr (ue8m0) {
         const size_t row_idx = in_y_idx;
         const size_t col_idx = in_x_idx >> 7;
-        const size_t idx = (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
-        const uint8_t exp = (reinterpret_cast<const int &>(inv_scale) >> 23) & 0xFF;
-        uint8_t * const dst = reinterpret_cast<uint8_t *>(scales) + idx;
+        const size_t idx =
+            (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
+        const uint8_t exp =
+            (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
+        uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
         *dst = exp;
       } else {
         const int64_t scale_idx = in_y_idx * scale_stride + in_x_idx / 128;
@@ -229,10 +236,10 @@ __global__ void FusedSPAQKernelVec4(const phi::bfloat16 *__restrict__ Xin,
 }
 
 template <bool using_pow2_scaling, bool with_prob, typename ScaleT, bool ue8m0>
-__global__ void FusedSPAQKernel(const phi::bfloat16 *__restrict__ Xin,
-                                const float *__restrict__ prob,
-                                phi::float8_e4m3fn *__restrict__ out,
-                                ScaleT *__restrict__ scales,
+__global__ void FusedSPAQKernel(const phi::bfloat16* __restrict__ Xin,
+                                const float* __restrict__ prob,
+                                phi::float8_e4m3fn* __restrict__ out,
+                                ScaleT* __restrict__ scales,
                                 const int rows,
                                 const int cols) {
   // Configure shared memory
@@ -242,7 +249,7 @@ __global__ void FusedSPAQKernel(const phi::bfloat16 *__restrict__ Xin,
   __shared__ __nv_bfloat16
       quant_block_amax[2];  // Shared memory for quant block maxima
 
-  const __nv_bfloat16 *X = reinterpret_cast<const __nv_bfloat16 *>(Xin);
+  const __nv_bfloat16* X = reinterpret_cast<const __nv_bfloat16*>(Xin);
   const int x_offset = threadIdx.x;
   const int quant_block_idx =
       threadIdx.x / 128;  // 0 or 1, two quant blocks per block
@@ -326,33 +333,35 @@ __global__ void FusedSPAQKernel(const phi::bfloat16 *__restrict__ Xin,
       if constexpr (ue8m0) {
         const size_t row_idx = g_output_y_offset;
         const size_t col_idx = in_x_idx >> 7;
-        const size_t idx = (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
-        const uint8_t exp = (reinterpret_cast<const int &>(inv_scale) >> 23) & 0xFF;
-        uint8_t * const dst = reinterpret_cast<uint8_t *>(scales) + idx;
+        const size_t idx =
+            (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
+        const uint8_t exp =
+            (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
+        uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
         *dst = exp;
       } else {
         // Only one thread per quant block writes the scale
-        scales[g_output_y_offset * scale_stride + in_x_idx / 128] = inv_scale;        
+        scales[g_output_y_offset * scale_stride + in_x_idx / 128] = inv_scale;
       }
     }
   }
 }
 
-template<typename ScaleT, bool use_ue8m0>
-void dispatch_fused_spaq(const phi::bfloat16 *x_data,
-                         const float *prob_data,
-                         phi::float8_e4m3fn *out_data,
-                         void *void_scale_data,
+template <typename ScaleT, bool use_ue8m0>
+void dispatch_fused_spaq(const phi::bfloat16* x_data,
+                         const float* prob_data,
+                         phi::float8_e4m3fn* out_data,
+                         void* void_scale_data,
                          cudaStream_t stream,
                          const int rows,
                          const int cols,
-                         const bool &using_pow2_scaling,
-                         const bool &with_prob) {
+                         const bool& using_pow2_scaling,
+                         const bool& with_prob) {
   constexpr int thread_per_block = 256;
   dim3 grid;
   dim3 block;
 
-  ScaleT *scale_data = static_cast<ScaleT*>(void_scale_data);
+  ScaleT* scale_data = static_cast<ScaleT*>(void_scale_data);
 
   if (cols % 8 == 0) {
     // Use mixed vectorizing strategy, while cols size be 8x (4x2)
@@ -385,11 +394,10 @@ void dispatch_fused_spaq(const phi::bfloat16 *x_data,
 }
 
 std::vector<paddle::Tensor> FusedWeightedSwigluActQuantKernel(
-                         const paddle::Tensor& x,
-                         const paddle::optional<paddle::Tensor>& prob,
-                         const bool using_pow2_scaling,
-                         const bool use_ue8m0
-                      ) {
+    const paddle::Tensor& x,
+    const paddle::optional<paddle::Tensor>& prob,
+    const bool using_pow2_scaling,
+    const bool use_ue8m0) {
   auto place = x.place();
   auto stream = x.stream();
 
@@ -439,30 +447,31 @@ std::vector<paddle::Tensor> FusedWeightedSwigluActQuantKernel(
     const int hidden_size = input_dim[1];
 
     PADDLE_ENFORCE(hidden_size % 1024 == 0,
-                 "hidden_size must be divisible by 1024");
+                   "hidden_size must be divisible by 1024");
     const int hidden_size_scale = hidden_size / 2 / 128;
-    out = GetEmptyTensor({token_num , hidden_size / 2},
-                       phi::DataType::FLOAT8_E4M3FN,
-                       x.place());
+    out = GetEmptyTensor(
+        {token_num, hidden_size / 2}, phi::DataType::FLOAT8_E4M3FN, x.place());
     const int tma_alignment_bytes = 16;
     const int tma_alignment_elements = tma_alignment_bytes / sizeof(float);
 
     int padded_token_num =
-      ((token_num + tma_alignment_elements - 1) / tma_alignment_elements) *
-      tma_alignment_elements;
+        ((token_num + tma_alignment_elements - 1) / tma_alignment_elements) *
+        tma_alignment_elements;
     scale = GetEmptyTensor({padded_token_num, ceil_div(hidden_size_scale, 4)},
-                       {1, padded_token_num},
-                       paddle::DataType::INT32,
-                       x.place());
+                           {1, padded_token_num},
+                           paddle::DataType::INT32,
+                           x.place());
   } else {
-    scale = paddle::experimental::full({rows, (cols / 2 + 127) / 128}, 0, phi::DataType::FLOAT32, place);
-    out = paddle::experimental::full({rows, cols / 2}, 0, phi::DataType::FLOAT8_E4M3FN, place);
+    scale = paddle::experimental::full(
+        {rows, (cols / 2 + 127) / 128}, 0, phi::DataType::FLOAT32, place);
+    out = paddle::experimental::full(
+        {rows, cols / 2}, 0, phi::DataType::FLOAT8_E4M3FN, place);
   }
 
   // Get data pointers
-  const auto *x_data = x.data<phi::bfloat16>();
-  const float *prob_data = prob ? prob.get().data<float>() : nullptr;
-  auto *out_data = out.data<phi::float8_e4m3fn>();
+  const auto* x_data = x.data<phi::bfloat16>();
+  const float* prob_data = prob ? prob.get().data<float>() : nullptr;
+  auto* out_data = out.data<phi::float8_e4m3fn>();
 
   void* scale_data;
 
@@ -475,35 +484,31 @@ std::vector<paddle::Tensor> FusedWeightedSwigluActQuantKernel(
 
   if (use_ue8m0 && cols % 8 == 0) {
     dispatch_fused_spaq<phi::float8_e4m3fn, true>(x_data,
-                      prob_data,
-                      out_data,
-                      scale_data,
-                      stream,
-                      rows,
-                      cols,
-                      using_pow2_scaling,
-                      !!prob);    
+                                                  prob_data,
+                                                  out_data,
+                                                  scale_data,
+                                                  stream,
+                                                  rows,
+                                                  cols,
+                                                  using_pow2_scaling,
+                                                  !!prob);
   } else {
     dispatch_fused_spaq<float, false>(x_data,
-                      prob_data,
-                      out_data,
-                      scale_data,
-                      stream,
-                      rows,
-                      cols,
-                      using_pow2_scaling,
-                      !!prob);
+                                      prob_data,
+                                      out_data,
+                                      scale_data,
+                                      stream,
+                                      rows,
+                                      cols,
+                                      using_pow2_scaling,
+                                      !!prob);
   }
 
   return {out, scale};
-
 }
 
-
 PD_BUILD_OP(fused_weighted_swiglu_act_quant_custom)
-  .Inputs({"expert_out_list",
-           paddle::Optional("prob")
-           })
-  .Attrs({"using_pow2_scaling: bool", "use_ue8m0: bool"})
-  .Outputs({"out", "scale"})
-  .SetKernelFn(PD_KERNEL(FusedWeightedSwigluActQuantKernel));
+    .Inputs({"expert_out_list", paddle::Optional("prob")})
+    .Attrs({"using_pow2_scaling: bool", "use_ue8m0: bool"})
+    .Outputs({"out", "scale"})
+    .SetKernelFn(PD_KERNEL(FusedWeightedSwigluActQuantKernel));
