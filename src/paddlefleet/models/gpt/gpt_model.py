@@ -391,10 +391,11 @@ class GPTModel(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        for k in list(sharded_state_dict.keys()):
-            v = sharded_state_dict.pop(k)
-            v.key = self._pp_to_single_mapping[k]
-            sharded_state_dict[self._pp_to_single_mapping[k]] = v
+        if "qwen3_vl" not in self.config.model_type:
+            for k in list(sharded_state_dict.keys()):
+                v = sharded_state_dict.pop(k)
+                v.key = self._pp_to_single_mapping[k]
+                sharded_state_dict[self._pp_to_single_mapping[k]] = v
 
         def increment_expert_number(s, increment):
             import re
