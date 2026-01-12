@@ -401,6 +401,7 @@ class TransformerLayer(nn.Layer):
             rotary_pos_sin=rotary_pos_sin,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
+            in_recompute=self.full_recompute,
         )
         output = self._forward_mlp(hidden_states)
         if context is not None:
@@ -419,6 +420,7 @@ class TransformerLayer(nn.Layer):
         rotary_pos_sin: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
+        in_recompute: bool = False,
     ):
         """
         Perform a forward pass through the attention layer and the layernorms before and after
@@ -464,6 +466,7 @@ class TransformerLayer(nn.Layer):
             rotary_pos_sin=rotary_pos_sin,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
+            in_recompute=in_recompute,
         )
 
         with paddle.enable_grad():
