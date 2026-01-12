@@ -93,6 +93,47 @@ def get_unsqueeze_dim(t, freqs):
     return 2 if t.shape[1] == seq_len else 1
 
 
+def _apply_rotary_pos_emb_bshd_fp32(
+    t: Tensor,
+    t_pass: Tensor,
+    freqs: Tensor,
+    rotary_interleaved: bool = False,
+    mscale: float = 1.0,
+) -> Tensor:
+    """Apply rotary positional embedding to input tensor T.
+
+    check https://kexue.fm/archives/8265 for detailed formulas
+
+    Args:
+        t (Tensor): Input tensor T is of shape [seq_length, ... , dim]
+        t_pass (Tensor): Rotary Positional embedding tensor freq is of shape [seq_length, ..., dim]
+
+    Returns:
+        Tensor: The input tensor after applying RoPE
+    """
+
+    # first part is cosine component
+    # second part is sine component, need to change signs with _rotate_half method
+    with paddle.amp.auto_cast(False):
+        orig_t_dtype = t.dtype
+        t = t.astype(dtype="float32")
+        t_pass = t_pass.astype(dtype="float32")
+        rotate_t = _rotate_half(t, rotary_interleaved)
+        cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
+        sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
+
+        if len(cos_.shape) < len(t.shape):
+            # [b,s,h]->[b,s,1,h]
+            unsqueeze_dim = get_unsqueeze_dim(t, cos_)
+            cos_.unsqueeze_(unsqueeze_dim)
+            sin_.unsqueeze_(unsqueeze_dim)
+        if len(rotate_t.shape) < len(t.shape):
+            rotate_t.reshape_(t.shape)
+
+        t = (t * cos_) + (rotate_t * sin_)
+        return paddle.cat((t, t_pass), axis=-1).astype(orig_t_dtype)
+
+
 def _apply_rotary_pos_emb_bshd(
     t: Tensor,
     freqs: Tensor,
@@ -122,23 +163,25 @@ def _apply_rotary_pos_emb_bshd(
         x2 = t[..., 1::2]
         t = paddle.cat((x1, x2), axis=-1)
 
+    if high_precision_rope:
+        return _apply_rotary_pos_emb_bshd_fp32(
+            t,
+            t_pass=t_pass,
+            freqs=freqs,
+            rotary_interleaved=rotary_interleaved,
+            mscale=mscale,
+        )
     # first part is cosine component
     # second part is sine component, need to change signs with _rotate_half method
-    with paddle.amp.auto_cast(not high_precision_rope):
-        orig_t_dtype = t.dtype
-        if high_precision_rope:
-            t = t.astype(dtype="float32")
-            t_pass = t_pass.astype(dtype="float32")
-        cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
-        sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
-        if len(cos_.shape) < len(t.shape):
-            # [b,s,h]->[b,s,1,h]
-            unsqueeze_dim = get_unsqueeze_dim(t, cos_)
-            cos_.unsqueeze_(unsqueeze_dim)
-            sin_.unsqueeze_(unsqueeze_dim)
+    cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
+    sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
+    if len(cos_.shape) < len(t.shape):
+        # [b,s,h]->[b,s,1,h]
+        cos_.unsqueeze_(-2)
+        sin_.unsqueeze_(-2)
 
-        t = (t * cos_) + (_rotate_half(t, rotary_interleaved) * sin_)
-        return paddle.cat((t, t_pass), axis=-1).astype(orig_t_dtype)
+    t = (t * cos_) + (_rotate_half(t, rotary_interleaved) * sin_)
+    return paddle.cat((t, t_pass), axis=-1)
 
 
 def _get_thd_freqs_on_this_cp_rank(
