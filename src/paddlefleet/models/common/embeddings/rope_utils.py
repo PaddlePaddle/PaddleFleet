@@ -177,8 +177,9 @@ def _apply_rotary_pos_emb_bshd(
     sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
     if len(cos_.shape) < len(t.shape):
         # [b,s,h]->[b,s,1,h]
-        cos_.unsqueeze_(-2)
-        sin_.unsqueeze_(-2)
+        unsqueeze_dim = get_unsqueeze_dim(t, cos_)
+        cos_.unsqueeze_(unsqueeze_dim)
+        sin_.unsqueeze_(unsqueeze_dim)
 
     t = (t * cos_) + (_rotate_half(t, rotary_interleaved) * sin_)
     return paddle.cat((t, t_pass), axis=-1)
