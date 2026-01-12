@@ -38,6 +38,7 @@ jobs:
     runs-on:
       group: Fleet-H-single-card
     strategy:
+      fail-fast: false
       max-parallel: 1
       matrix:
         python: [3.11, 3.12, 3.13]
@@ -142,6 +143,7 @@ jobs:
     runs-on:
       group: Fleet-H-multi-card
     strategy:
+      fail-fast: false
       max-parallel: 1
       matrix:
         python: [3.11, 3.12, 3.13]
@@ -251,6 +253,7 @@ jobs:
     runs-on:
       group: Fleet-H-single-card
     strategy:
+      fail-fast: false
       max-parallel: 1
       matrix:
         python: [3.11, 3.12, 3.13]
@@ -425,6 +428,7 @@ jobs:
     runs-on:
       group: Fleet-H-multi-card
     strategy:
+      fail-fast: false
       max-parallel: 1
       matrix:
         python: [3.11, 3.12, 3.13]
@@ -676,6 +680,7 @@ jobs:
     runs-on:
       group: Distribute
     strategy:
+      fail-fast: false
       max-parallel: 1
       matrix:
         python: [3.11, 3.12, 3.13]
