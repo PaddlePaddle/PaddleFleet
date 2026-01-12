@@ -15,12 +15,14 @@
 
 import paddle
 from paddle import Tensor
+from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.context_parallel_utils import ContextParallelGatherOp
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
 )
+from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -53,7 +55,7 @@ class LanguageLoss(FleetLayer):
                 reduction="none",
             )
 
-    def forward(self, logits: Tensor, labels: Tensor) -> Tensor:
+    def forward_impl(self, logits: Tensor, labels: Tensor) -> Tensor:
         loss = self.loss_func(logits.cast("float32"), labels)
 
         if get_context_parallel_world_size() > 1:
@@ -71,3 +73,14 @@ class LanguageLoss(FleetLayer):
             loss = loss / lossmask.sum()
 
         return loss
+
+    def forward(self, logits: Tensor, labels: Tensor) -> Tensor:
+        if (
+            self.config.recompute_modules is not None
+            and "loss_fn" in self.config.recompute_modules
+        ):
+            return recompute(self.forward_impl, logits, labels)
+        return self.forward_impl(logits, labels)
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="LanguageLoss")

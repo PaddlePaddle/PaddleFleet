@@ -18,6 +18,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 )
 from paddle.nn.parameter import Parameter
 
+from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     _initialize_affine_weight_cpu,
@@ -81,9 +82,24 @@ class GPTLMHead(ColumnParallelLinear):
                     )
             self.weight.is_distributed = True if self.world_size > 1 else False
 
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="GPTLMHead")
+
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
-        logits, _ = super().forward(hidden_states, self.weight.T)
+        if (
+            self.config.recompute_modules is not None
+            and "lm_head" in self.config.recompute_modules
+        ):
+            recompute_func = super().forward
+
+            def recompute_handler(hidden_states, weight):
+                logits, _ = recompute_func(hidden_states, weight)
+                return logits
+
+            logits = recompute_handler(hidden_states, self.weight.T)
+        else:
+            logits, _ = super().forward(hidden_states, self.weight.T)
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
         return logits

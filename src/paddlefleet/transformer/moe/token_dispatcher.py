@@ -54,7 +54,10 @@ class _DispatchManager(ABC):
 
     @abstractmethod
     def dispatch(
-        self, hidden_states: paddle.Tensor, fp8_dispatch: bool
+        self,
+        hidden_states: paddle.Tensor,
+        fp8_dispatch: bool,
+        async_finish: bool,
     ) -> paddle.Tensor:
         """Dispatch the hidden_states according to the routing_map."""
         pass
@@ -141,8 +144,35 @@ class _DeepepManager(_DispatchManager):
             probs, self.router_topk, axis=-1
         )
 
+    def dispatch_overlap(
+        self,
+        hidden_states: paddle.Tensor,
+        token_indices: paddle.Tensor,
+        token_weights: paddle.Tensor,
+        fp8_dispatch: bool = False,
+        async_finish: bool = False,
+    ) -> paddle.Tensor:
+        hidden_states, dispatched_probs, states, scale = fused_dispatch(
+            hidden_states,
+            token_indices,
+            token_weights,
+            self.num_experts,
+            self.group,
+            fp8_dispatch=fp8_dispatch,
+            async_finish=async_finish,
+        )
+        self.handle = states["handle"]
+        self.tokens_per_expert = states["tokens_per_expert"]
+        self.dispatched_indices = states["dispatched_indices"]
+        self.dispatched_probs = dispatched_probs
+
+        return hidden_states, scale
+
     def dispatch(
-        self, hidden_states: paddle.Tensor, fp8_dispatch: bool = False
+        self,
+        hidden_states: paddle.Tensor,
+        fp8_dispatch: bool = False,
+        async_finish: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -151,6 +181,7 @@ class _DeepepManager(_DispatchManager):
             self.num_experts,
             self.group,
             fp8_dispatch=fp8_dispatch,
+            async_finish=async_finish,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -203,9 +234,15 @@ class _DeepepManager(_DispatchManager):
         self,
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
+        async_finish: bool = False,
     ) -> paddle.Tensor:
         hidden_states = fused_combine(
-            hidden_states, self.group, self.handle, None, combine_overlap_handle
+            hidden_states,
+            self.group,
+            self.handle,
+            None,
+            combine_overlap_handle,
+            async_finish,
         )
         # Release the handle after combine operation
         self.handle = None
@@ -334,8 +371,43 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         self._comm_manager.setup_metadata(routing_map, probs)
         return hidden_states
 
-    def token_dispatch(self, hidden_states: paddle.Tensor, fp8_dispatch: bool):
-        return self._comm_manager.dispatch(hidden_states, fp8_dispatch)
+    def dispatch_preprocess_overlap(
+        self,
+        hidden_states: paddle.Tensor,
+        token_probs: paddle.Tensor,
+        token_indices: paddle.Tensor,
+    ):
+        self.hidden_shape = hidden_states.shape
+        hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
+        self._comm_manager.token_probs = token_probs
+        self._comm_manager.token_indices = token_indices
+        return hidden_states
+
+    def token_dispatch_overlap(
+        self,
+        hidden_states: paddle.Tensor,
+        token_indices: paddle.Tensor,
+        token_weights: paddle.Tensor,
+        fp8_dispatch: bool,
+        async_finish: bool = False,
+    ):
+        return self._comm_manager.dispatch_overlap(
+            hidden_states,
+            token_indices,
+            token_weights,
+            fp8_dispatch,
+            async_finish,
+        )
+
+    def token_dispatch(
+        self,
+        hidden_states: paddle.Tensor,
+        fp8_dispatch: bool,
+        async_finish: bool = False,
+    ):
+        return self._comm_manager.dispatch(
+            hidden_states, fp8_dispatch, async_finish
+        )
 
     def dispatch_postprocess(
         self,
@@ -355,8 +427,10 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             hidden_states
         )
 
-    def token_combine(self, hidden_states: paddle.Tensor):
-        return self._comm_manager.combine(hidden_states)
+    def token_combine(self, hidden_states: paddle.Tensor, async_finish=False):
+        return self._comm_manager.combine(
+            hidden_states, async_finish=async_finish
+        )
 
     def combine_postprocess(self, hidden_states: paddle.Tensor):
         return hidden_states.reshape(self.hidden_shape)
@@ -499,6 +573,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         self,
         permutated_local_input_tokens: paddle.Tensor,
         fp8_dispatch: bool = False,
+        async_finish: bool = False,
     ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
         global_input_tokens = _AllToAll.apply(
@@ -549,6 +624,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         self,
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
+        async_finish: bool = False,
     ):
         permutated_local_input_tokens = _AllToAll.apply(
             self.permutated_local_input_tokens_shape,
