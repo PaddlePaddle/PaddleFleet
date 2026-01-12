@@ -189,7 +189,7 @@ jobs:
           # pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           echo "paddle commit:"
           python -c "import paddle; print(paddle.version.commit)"
-          bash ci/single_card_test.sh
+          timeout 10m bash ci/single_card_test.sh
           single_card_exit_code=$?
           ls -a /paddle/coveragedata/
           coverage combine
@@ -292,7 +292,7 @@ jobs:
           export WITH_COVERAGE=ON
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
-          bash ci/multi-card_test.sh
+          timeout 10m bash ci/multi-card_test.sh
           multi_card_exit_code=$?
           ls -a /paddle/coveragedata/
           coverage combine
@@ -451,7 +451,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-single
           coverage combine
@@ -473,7 +473,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-qwen
           coverage combine
@@ -607,7 +607,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-pt
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-pt/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-pt
           coverage --version
@@ -630,7 +630,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-sft
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-sft/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-sft
           coverage combine
@@ -652,7 +652,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-lora
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-lora/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-lora
           coverage --version
@@ -675,7 +675,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-dpo
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-dpo/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-dpo
           coverage --version
@@ -698,7 +698,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-fp8
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-fp8/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-fp8
           coverage --version
@@ -721,7 +721,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-grouped-gemm/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
           coverage --version
@@ -744,7 +744,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-pt
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-pt/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen.sh pt
           ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-pt
           coverage --version
           coverage combine
@@ -760,7 +760,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-sft
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-sft/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen.sh sft
           ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-sft
           coverage --version
           coverage combine
@@ -776,7 +776,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-pt
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-lora/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen.sh lora
           ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-lora
           coverage --version
           coverage combine
@@ -917,7 +917,7 @@ jobs:
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-pt/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_a100.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_a100.sh
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-pt
           coverage combine
