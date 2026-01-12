@@ -993,7 +993,9 @@ jobs:
                 filename="${config%%:*}"
                 filepath="${config#*:}"
                 wget "${base_url}/${filepath}" -O "$filename" --no-proxy
-                sed -i "s|<source>/paddle/paddlefleet</source>|<source>paddlefleet</source>|" "$filename"
+                sed -i "s|<source></source>|<source>paddlefleet</source>|" "$filename"
+                sed -i "s|/usr/local/lib/python3.10/dist-packages/|src/|" "$filename"
+                sed -i "s|.usr.local.lib.python3.10.dist-packages.paddlefleet|src|" "$filename"
             fi
           done
           git diff origin/${{ github.event.pull_request.base.ref }}...HEAD  --unified=0 > diff.txt
