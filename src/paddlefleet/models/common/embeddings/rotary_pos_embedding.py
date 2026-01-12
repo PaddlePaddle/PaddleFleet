@@ -315,15 +315,19 @@ class MultimodalRotaryEmbedding(nn.Layer):
                 .cast(paddle.float32)
                 .expand([3, position_ids.shape[1], -1, 1])
             )
-            position_ids_expanded = position_ids.unsqueeze(2).cast(paddle.float32)
+            position_ids_expanded = position_ids.unsqueeze(2).cast(
+                paddle.float32
+            )
 
-            freqs = paddle.matmul(inv_freq_expanded, position_ids_expanded).transpose([0, 1, 3, 2])
-            
+            freqs = paddle.matmul(
+                inv_freq_expanded, position_ids_expanded
+            ).transpose([0, 1, 3, 2])
+
             freqs = self.apply_interleaved_mrope(freqs, mrope_section)
             emb = paddle.cat((freqs, freqs), axis=-1)
 
         return emb
-    
+
     def apply_interleaved_mrope(self, freqs, mrope_section):
         """Apply interleaved MRoPE to 3D rotary embeddings.
         Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
