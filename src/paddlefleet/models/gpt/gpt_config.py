@@ -33,7 +33,7 @@ class GPTConfig(TransformerConfig):
 
     max_sequence_length: int = 64
 
-    share_embeddings_and_output_weights: bool = False
+    tie_word_embeddings: bool = False
 
     moe_grouped_gemm: bool = False
 

@@ -13,31 +13,11 @@
 # limitations under the License.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
+import logging
 import os
-import subprocess
+import shutil
 
-
-def get_version_from_txt():
-    version_file = os.path.join(os.path.dirname(__file__), "version.txt")
-    with open(version_file, "r") as f:
-        version = f.read().strip()
-    return version
-
-
-def custom_version_scheme(version):
-    base_version = get_version_from_txt()
-    date_str = (
-        subprocess.check_output(
-            ["git", "log", "-1", "--format=%cd", "--date=format:%Y%m%d"]
-        )
-        .decode()
-        .strip()
-    )
-    return f"{base_version}.dev{date_str}"
-
-
-def no_local_scheme(version):
-    return ""
+from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 def change_pwd():
@@ -45,6 +25,77 @@ def change_pwd():
     path = os.path.dirname(__file__)
     if path:
         os.chdir(path)
+
+
+common_dependencies = [
+    "colorlog>=6.10.1",
+]
+
+import sys
+
+
+def get_cuda_special_dependencies(cuda_major, cuda_minor):
+    major = sys.version_info.major
+    minor = sys.version_info.minor
+    ver_str = f"{major}{minor}"
+    deps = [
+        f"paddlepaddle-gpu @ https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/cbf3469113cd76b7d5f4cba7b8d7d5f55d9e9911/paddlepaddle_gpu-3.3.0-cp{ver_str}-cp{ver_str}-linux_x86_64.whl",
+        "triton",  # for deep_gemm, flashmask
+        "nvidia-cutlass-dsl==4.2.1",  # for sonic_moe
+        "filelock",  # for sonic_moe
+    ]
+    if cuda_major == 12:
+        deps.append("nvidia-nvshmem-cu12>=3.3.9,!=3.5.*")  # for deep_ep build
+    elif cuda_major == 13:
+        deps.append("nvidia-nvshmem-cu13>=3.3.9,!=3.5.*")  # for deep_ep build
+    else:
+        raise ValueError(
+            f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
+        )
+    return deps
+
+
+class CustomBdistWheel(_bdist_wheel):
+    """Custom bdist_wheel that removes .o files from wheel before packaging."""
+
+    def _is_all_o_files(self, dir_path):
+        """Check if directory contains only .o files recursively."""
+        for root, dirs, files in os.walk(dir_path):
+            for file in files:
+                if not file.endswith(".o"):
+                    return False
+        return True
+
+    def _clean_build_dir(self, wheel_dir):
+        """Remove build directory if it contains only .o files."""
+        build_dir = os.path.join(wheel_dir, "build")
+
+        if not os.path.exists(build_dir):
+            logging.debug(f"No build directory found at: {build_dir}")
+            return
+
+        if not self._is_all_o_files(build_dir):
+            logging.info(
+                f"Skipping removal of {build_dir} (contains non-.o files)"
+            )
+            return
+
+        try:
+            shutil.rmtree(build_dir)
+            logging.info(f"Removed build directory (all .o files): {build_dir}")
+        except Exception as e:
+            logging.warning(f"Failed to remove directory {build_dir}: {e}")
+
+    def write_wheelfile(self, wheelfile_base, generator=None):
+        """Override to clean .o files before writing wheel."""
+
+        if hasattr(self, "bdist_dir") and self.bdist_dir:
+            self._clean_build_dir(self.bdist_dir)
+
+        if generator is not None:
+            super().write_wheelfile(wheelfile_base, generator=generator)
+        else:
+            super().write_wheelfile(wheelfile_base)
 
 
 def setup_ops_extension():
@@ -78,7 +129,9 @@ def setup_ops_extension():
         )
     if cuda_major == 12 and cuda_minor < 8:
         nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
-
+    cuda_dependencies = common_dependencies + get_cuda_special_dependencies(
+        cuda_major, cuda_minor
+    )
     ext_module = CUDAExtension(
         sources=[
             # cpp files
@@ -112,11 +165,8 @@ def setup_ops_extension():
     setup(
         name="paddlefleet._extensions.ops",
         ext_modules=[ext_module],
-        use_scm_version={
-            "version_scheme": custom_version_scheme,
-            "local_scheme": no_local_scheme,
-        },
-        setup_requires=["setuptools_scm"],
+        cmdclass={"bdist_wheel": CustomBdistWheel},
+        install_requires=cuda_dependencies,
     )
 
 

@@ -15,8 +15,13 @@
 from .language_model_embedding import (
     LanguageModelEmbedding as LanguageModelEmbedding,
 )
-from .rope_utils import apply_rotary_pos_emb as apply_rotary_pos_emb
-from .rotary_pos_embedding import RotaryEmbedding as RotaryEmbedding
+from .rope_utils import (
+    apply_rotary_pos_emb as apply_rotary_pos_emb,
+)
+from .rotary_pos_embedding import (
+    MultimodalRotaryEmbedding as MultimodalRotaryEmbedding,
+    RotaryEmbedding as RotaryEmbedding,
+)
 from .yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding as YarnRotaryEmbedding,
 )

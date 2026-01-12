@@ -65,7 +65,7 @@ class LLaVAModel(FleetLayer):
             missing when loading a checkpoint. Default False.
         parallel_output (bool): Keep outputs split across tensor parallel ranks.
             This is typically True for training and False for inference.
-        share_embeddings_and_output_weights (bool): Input embedding and output layer share weights.
+        tie_word_embeddings (bool): Input embedding and output layer share weights.
         language_position_embedding_type (str): Language model position embedding type.
         language_rotary_percent (float): RoPE percent. Defaults to 1.0.
         pre_process (bool): Include embedding layer in the decoder (used with pipeline parallel).
@@ -101,7 +101,7 @@ class LLaVAModel(FleetLayer):
         vision_projection_type: str = "mlp",
         allow_missing_vision_projection_checkpoint: bool = False,
         parallel_output: bool = True,
-        share_embeddings_and_output_weights: bool = False,
+        tie_word_embeddings: bool = False,
         language_position_embedding_type: str = "learned_absolute",
         language_rotary_percent: float = 1.0,
         pre_process: bool = True,
@@ -177,9 +177,7 @@ class LLaVAModel(FleetLayer):
 
         # This attribute is needed to check if an all-reduce is required
         # on the word embeddings inside `finalize_model_grads._allreduce_word_embedding_grads`.
-        self.share_embeddings_and_output_weights = (
-            share_embeddings_and_output_weights
-        )
+        self.tie_word_embeddings = tie_word_embeddings
 
         if self.add_decoder:
             if getattr(
@@ -209,7 +207,7 @@ class LLaVAModel(FleetLayer):
                     rope_scaling=language_rope_scaling,
                     rope_scaling_factor=language_rope_scaling_factor,
                     scatter_embedding_sequence_parallel=False,
-                    share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+                    tie_word_embeddings=tie_word_embeddings,
                     pg_collection=self.pg_collection,
                     vp_stage=self.vp_stage,
                 )

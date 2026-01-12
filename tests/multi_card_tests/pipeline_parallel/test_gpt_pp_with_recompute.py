@@ -205,7 +205,7 @@ class TestPPWithRecompute(unittest.TestCase):
             attention_dropout=0.0,
             use_cpu_initialization=True,
             parallel_output=True,
-            share_embeddings_and_output_weights=True,
+            tie_word_embeddings=True,
             position_embedding_type="rope",
             rotary_percent=1.0,
             rotary_base=10000,

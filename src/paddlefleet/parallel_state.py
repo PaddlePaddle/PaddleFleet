@@ -147,7 +147,11 @@ def get_tensor_model_parallel_world_size():
     global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
     if _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE is not None:
         return _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
-    return get_tensor_model_parallel_group().nranks
+    return (
+        1
+        if get_tensor_model_parallel_group(False) is None
+        else get_tensor_model_parallel_group().nranks
+    )
 
 
 def get_tensor_model_parallel_rank():

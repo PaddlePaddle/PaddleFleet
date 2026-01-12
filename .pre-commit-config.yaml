@@ -30,7 +30,7 @@ repos:
         language: system
         files: \.(c|cc|cxx|cpp|cu|h|cuh|hpp|hxx|py|pyi|sh)$
   - repo: https://github.com/PFCCLab/typos-pre-commit-mirror.git
-    rev: v1.39.2
+    rev: v1.41.0
     hooks:
       - id: typos
         args: [--force-exclude]
@@ -75,10 +75,3 @@ repos:
           (?x)^(
             \.clang-format
           )$
-
-  - repo: https://github.com/astral-sh/uv-pre-commit
-    # uv version.
-    rev: 0.9.10
-    hooks:
-      # Update the uv lockfile
-      - id: uv-lock
