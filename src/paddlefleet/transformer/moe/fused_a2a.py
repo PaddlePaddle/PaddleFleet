@@ -440,7 +440,7 @@ if HAVE_DEEP_EP:
             fp8_dispatch,
             async_finish,
             allocate_on_comm_stream,
-            moe_ep_barrier,
+            moe_ep_barrier=moe_ep_barrier,
         )
 
     def fused_combine(
@@ -469,7 +469,12 @@ if HAVE_DEEP_EP:
         states["handle"] = handle
         if combine_overlap_handle is None:
             return FusedCombine.apply(
-                x, group, states, previous_event, async_finish, moe_ep_barrier
+                x,
+                group,
+                states,
+                previous_event,
+                async_finish,
+                moe_ep_barrier=moe_ep_barrier,
             )
         else:
             assert previous_event is None
