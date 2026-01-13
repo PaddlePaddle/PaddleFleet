@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
+  pull_request:
+    branches:
+      - develop
+      - release/**
 
 permissions: read-all
 
