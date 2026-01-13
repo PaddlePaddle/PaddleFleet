@@ -12,13 +12,14 @@ on:
       commit:
         required: false
         type: string
+  pull_request:
 
 
 
 permissions: read-all
 
 concurrency:
-  group: ${{ github.workflow }}-all
+  group: ${{ github.workflow }}-all-test
   cancel-in-progress: true
 
 env:
@@ -36,7 +37,7 @@ jobs:
     uses: ./.github/workflows/_clone.yml
     with:
       clone_dir: manual
-      ref: ${{ inputs.commit }}
+      ref: 6fb0b7066d0abf38a512b0be64e0be0bea8cbee2
 
   publish-wheel:
     name: Publish wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
@@ -78,8 +79,8 @@ jobs:
             -e PR_ID \
             -e COMMIT_ID \
             -e BRANCH \
-            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
-            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
+            -e AK=paddle \
+            -e SK=paddle \
             -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
             -e GITHUB_REPO_NAME=${{ github.repository }} \
             -w /workspace --network=host $docker_image
