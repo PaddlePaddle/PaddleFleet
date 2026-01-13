@@ -391,7 +391,7 @@ class GPTModel(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        if "qwen3_vl" not in self.config.model_type:
+        if "qwen3_vl" not in getattr(self.config, "model_type", ""):
             for k in list(sharded_state_dict.keys()):
                 v = sharded_state_dict.pop(k)
                 v.key = self._pp_to_single_mapping[k]
