@@ -207,7 +207,6 @@ std::vector<paddle::Tensor> FilterScoresGradGPU(
   return {grad_probs};
 }
 
-// check int overflow
 PD_BUILD_OP(filter_scores)
     .Inputs({"Probs", "Indices"})
     .Outputs({"TopkScores"})

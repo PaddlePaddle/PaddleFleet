@@ -332,8 +332,6 @@ std::vector<paddle::Tensor> RouterMetadataDispatch(
   }
 }
 
-// TODO(xingmingyyj) add tests and comments
-// check int overflow
 PD_BUILD_OP(router_metadata)
     .Inputs({"TopkRouterIndices", "ExpertFrequencyOffset"})
     .Outputs({"PaddedExpertFrequencyOffset",
