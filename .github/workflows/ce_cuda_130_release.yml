@@ -1,6 +1,10 @@
 name: CE-CUDA-130-Release
 
 on:
+  pull_request:
+    branches:
+      - develop
+      - release/**
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -91,6 +95,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git pull --no-edit origin pull/388/head
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
