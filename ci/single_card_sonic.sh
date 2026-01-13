@@ -23,7 +23,7 @@ test_cases_list=(
 
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
-export RUN_IN_PADDLE_CI=1
+export RUN_IN_PADDLE_CI=0
 
 run_count=0
 failed_tests=()
