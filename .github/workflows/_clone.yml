@@ -11,6 +11,9 @@ on:
         type: string
         required: false
         default: 'false'
+      ref:
+        required: true
+        type: string
 
 permissions: read-all
 
@@ -34,7 +37,7 @@ jobs:
       - name: Clone paddle
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: ${{ inputs.ref }}
           submodules: 'recursive'
           fetch-depth: 1000
 
