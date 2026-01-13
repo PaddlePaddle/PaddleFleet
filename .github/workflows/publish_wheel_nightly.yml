@@ -142,6 +142,8 @@ jobs:
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet
             curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           else
+            export AK=paddle
+            export SK=paddle
             python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
             python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
           fi

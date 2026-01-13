@@ -12,14 +12,12 @@ on:
       commit:
         required: false
         type: string
-  pull_request:
-
 
 
 permissions: read-all
 
 concurrency:
-  group: ${{ github.workflow }}-all-test
+  group: ${{ github.workflow }}-all
   cancel-in-progress: true
 
 env:
@@ -37,7 +35,7 @@ jobs:
     uses: ./.github/workflows/_clone.yml
     with:
       clone_dir: manual
-      ref: 6fb0b7066d0abf38a512b0be64e0be0bea8cbee2
+      ref: ${{ inputs.commit }}
 
   publish-wheel:
     name: Publish wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
