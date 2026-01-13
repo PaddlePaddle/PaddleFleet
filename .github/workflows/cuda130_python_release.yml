@@ -115,7 +115,7 @@ jobs:
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
