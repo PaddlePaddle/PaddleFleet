@@ -42,7 +42,7 @@ jobs:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on:
-      group: cpu-test
+      group: GZ_BD-CPU
     env:
       TASK: fleet-ci-paddle-release-build-whl-${{ github.event.pull_request.number }}
     steps:
