@@ -15,6 +15,7 @@
 
 import functools
 import random
+import re
 import subprocess
 import unittest
 
@@ -56,6 +57,34 @@ def judge_machine_type():
 
 result = judge_machine_type()
 print("你的机器类型是：", result)
+
+
+def get_cuda_version(get_major_version=False):
+    try:
+        result = subprocess.run(
+            ["nvcc", "-V"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    # Look for: "release 13.0,"
+    if get_major_version:
+        match = re.search(r"release\s+(\d+)\.\d+", result.stdout)
+        if match:
+            return match.group(1)  # "13"
+    else:
+        match = re.search(r"release\s+(\d+\.\d+)", result.stdout)
+        if match:
+            return match.group(1)  # "13.0"
+
+    return None
+
+
+version = get_cuda_version()
+print("CUDA version:", version)
 
 
 class TestGPTModel(unittest.TestCase):
@@ -175,12 +204,20 @@ class TestGPTModel(unittest.TestCase):
         print("embed_tokens_grad_norm", embed_tokens_grad_norm)
 
         if judge_machine_type() == "H":
-            assert loss.item() == 5.239707946777344, (
-                f"loss not equal ({loss.item()} != 5.239707946777344), please check your modify"
-            )
-            assert embed_tokens_grad_norm == 2.796875, (
-                f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
-            )
+            if get_cuda_version(get_major_version=True) == "13":
+                assert loss.item() == 5.239149570465088, (
+                    f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
+                )
+                assert embed_tokens_grad_norm == 2.796875, (
+                    f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
+                )
+            else:  # 12.X
+                assert loss.item() == 5.239707946777344, (
+                    f"loss not equal ({loss.item()} != 5.239707946777344), please check your modify"
+                )
+                assert embed_tokens_grad_norm == 2.796875, (
+                    f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
+                )
         elif judge_machine_type() == "V":
             pass  # TODO: add V machine test
 
