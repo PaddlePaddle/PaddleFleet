@@ -1,4 +1,4 @@
-name: CE-CUDA-129-PYTHON-RELEASE
+name: CE-Sonic-Release-Test
 
 on:
   pull_request:
