@@ -323,6 +323,7 @@ def apply_rotary_pos_emb(
     cu_seqlens: Tensor | None = None,
     mscale: float = 1.0,
     cp_group: Group = None,
+    position_ids: Tensor | None = None,
 ):
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
@@ -353,6 +354,7 @@ def apply_rotary_pos_emb(
                 sin=sin,
                 cos=cos,
                 rotary_emb_base=config.rope_theta,
+                position_ids=position_ids,
                 use_neox_rotary_style=config.rotary_interleaved,
                 time_major=config.sequence_parallel,
             )

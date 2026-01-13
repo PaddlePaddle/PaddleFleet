@@ -339,6 +339,7 @@ class TransformerLayer(nn.Layer):
             rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
             rotary_pos_cos = dict_args.get("rotary_pos_cos", None)
             rotary_pos_sin = dict_args.get("rotary_pos_sin", None)
+            position_ids = dict_args.get("position_ids", None)
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
             outputs = recompute(
@@ -358,6 +359,9 @@ class TransformerLayer(nn.Layer):
                 else None,
                 rotary_pos_sin=rotary_pos_sin.clone()  # Clone is necessary!
                 if rotary_pos_sin is not None
+                else None,
+                position_ids=position_ids.clone()  # Clone is necessary!
+                if position_ids is not None
                 else None,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
@@ -387,6 +391,7 @@ class TransformerLayer(nn.Layer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
     ):
@@ -399,6 +404,7 @@ class TransformerLayer(nn.Layer):
             rotary_pos_emb=rotary_pos_emb,
             rotary_pos_cos=rotary_pos_cos,
             rotary_pos_sin=rotary_pos_sin,
+            position_ids=position_ids,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
             in_recompute=self.full_recompute,
@@ -418,6 +424,7 @@ class TransformerLayer(nn.Layer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         in_recompute: bool = False,
@@ -464,6 +471,7 @@ class TransformerLayer(nn.Layer):
             rotary_pos_emb=rotary_pos_emb,
             rotary_pos_cos=rotary_pos_cos,
             rotary_pos_sin=rotary_pos_sin,
+            position_ids=position_ids,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
             in_recompute=in_recompute,
