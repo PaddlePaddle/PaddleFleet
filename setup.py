@@ -39,7 +39,7 @@ def get_cuda_special_dependencies(cuda_major, cuda_minor):
     minor = sys.version_info.minor
     ver_str = f"{major}{minor}"
     deps = [
-        "paddlepaddle-gpu>=3.3.0",
+        "paddlepaddle-gpu==3.3.0",
         "triton",  # for deep_gemm, flashmask
         "nvidia-cutlass-dsl==4.2.1",  # for sonic_moe
         "filelock",  # for sonic_moe
