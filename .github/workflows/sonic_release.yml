@@ -41,11 +41,11 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        python: [3.11, 3.12, 3.13]
+        python: [3.12]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA129-PYTHON-RELEASE-single-card-test-${{ matrix.python }}
+      TASK: paddlefleet-CE-Sonic-Release-Test-${{ matrix.python }}
     steps:
       - name: Determine the runner
         run: |
