@@ -109,6 +109,7 @@ jobs:
           conda activate python${{ matrix.python }}
           pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
+          git pull --no-edit origin pull/${PR_ID}/head
           git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
