@@ -44,8 +44,6 @@ from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
 
-paddle.enable_compat(scope={"sonicmoe", "quack", "triton"})
-
 if paddlefleet.ops.is_sonic_moe_available():
     from paddlefleet.ops.sonicmoe.enums import ActivationType
     from paddlefleet.ops.sonicmoe.functional import (
