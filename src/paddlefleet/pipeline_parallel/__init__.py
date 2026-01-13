@@ -22,6 +22,10 @@ from .pipeline_parallel_withinterleave_fthenb import (
     PipelineParallelWithInterleaveFthenB,
 )
 from .pp_layers import LayerDesc, PipelineLayer, SharedLayerDesc
+from .pp_utils.forward_backward_overlap_utils import (
+    ScheduleChunk,
+    ScheduleNode,
+)
 from .vpp_balanced_memory import VPPFhenBInBalancedMemory
 
 __all__ = [
@@ -34,4 +38,6 @@ __all__ = [
     "PipelineParallelWithInterleave",
     "PipelineParallelWithInterleaveFthenB",
     "VPPFhenBInBalancedMemory",
+    "ScheduleNode",
+    "ScheduleChunk",
 ]

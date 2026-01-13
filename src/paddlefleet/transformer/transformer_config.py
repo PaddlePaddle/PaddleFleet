@@ -217,6 +217,7 @@ class TransformerConfig(ModelParallelConfig):
     """If True, run attention masking and softmax in fp32. This should be True if
     apply_query_key_layer_scaling is True."""
 
+    high_precision_rope: bool = False
     ####################
     # fusion
     ####################
@@ -381,6 +382,9 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
+
+    moe_ep_barrier: bool = True
+    """Whether to use barrier for expert parallelism."""
 
     ##################
     # Context Parallel

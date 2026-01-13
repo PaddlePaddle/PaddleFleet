@@ -39,7 +39,7 @@ def get_cuda_special_dependencies(cuda_major, cuda_minor):
     minor = sys.version_info.minor
     ver_str = f"{major}{minor}"
     deps = [
-        f"paddlepaddle-gpu @ https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/cbf3469113cd76b7d5f4cba7b8d7d5f55d9e9911/paddlepaddle_gpu-3.3.0-cp{ver_str}-cp{ver_str}-linux_x86_64.whl",
+        "paddlepaddle-gpu==3.3.0",
         "triton",  # for deep_gemm, flashmask
         "nvidia-cutlass-dsl==4.2.1",  # for sonic_moe
         "filelock",  # for sonic_moe

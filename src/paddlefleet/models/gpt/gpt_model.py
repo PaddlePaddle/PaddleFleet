@@ -30,9 +30,94 @@ from paddle.distributed import fleet
 
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
-from paddlefleet.transformer.transformer_layer import TransformerLayer
+from paddlefleet.pipeline_parallel import ScheduleChunk
+from paddlefleet.transformer.transformer_layer import (
+    TransformerLayer,
+    TransformerLayerNode,
+    TransformerLayerOverlappedScheduleNode,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def build_overlapped_nodes(forward_chunk, backward_chunk):
+    """Build overlapped nodes for TransformerLayer."""
+    overlap_element_class = TransformerLayerNode
+    forward_decoder_layer_num = 0
+    backward_decoder_layer_num = 0
+
+    assert isinstance(forward_chunk, ScheduleChunk) and isinstance(
+        backward_chunk, ScheduleChunk
+    )
+    for n in forward_chunk.nodes:
+        if isinstance(n, overlap_element_class):
+            forward_decoder_layer_num += 1
+    for n in reversed(backward_chunk.nodes):
+        if isinstance(n, overlap_element_class):
+            backward_decoder_layer_num += 1
+
+    overlap_layers_num = min(
+        forward_decoder_layer_num, backward_decoder_layer_num
+    )
+
+    # construct forward pre- and post-chunks
+    forward_pre_layers = []
+    forward_post_layers = []
+    forward_overlap_layers = []
+    is_pre = True
+    for n in forward_chunk.nodes:
+        if not isinstance(n, overlap_element_class):
+            if is_pre:
+                forward_pre_layers.append(n)
+            else:
+                forward_post_layers.append(n)
+        else:
+            is_pre = False
+            if len(forward_overlap_layers) == overlap_layers_num:
+                forward_post_layers.append(n)
+            else:
+                forward_overlap_layers.append(n)
+
+    forward_pre_node = ScheduleChunk(forward_pre_layers)
+    forward_post_node = ScheduleChunk(forward_post_layers)
+
+    # construct backward pre- and post-chunks
+    backward_pre_layers = []
+    backward_post_layers = []
+    backward_overlap_layers = []
+    is_pre = True
+    for n in reversed(backward_chunk.nodes):
+        if not isinstance(n, overlap_element_class):
+            if is_pre:
+                backward_pre_layers.append(n)
+            else:
+                backward_post_layers.append(n)
+        else:
+            is_pre = False
+            if len(backward_overlap_layers) == overlap_layers_num:
+                backward_post_layers.append(n)
+            else:
+                backward_overlap_layers.append(n)
+
+    backward_pre_node = ScheduleChunk(list(reversed(backward_pre_layers)))
+    backward_post_node = ScheduleChunk(list(reversed(backward_post_layers)))
+
+    # construct overlap chunk
+    overlap_node = ScheduleChunk(
+        [
+            TransformerLayerOverlappedScheduleNode(forward_node, backward_node)
+            for forward_node, backward_node in zip(
+                forward_overlap_layers, backward_overlap_layers
+            )
+        ]
+    )
+    return (
+        forward_pre_node,
+        backward_pre_node,
+        overlap_node,
+        forward_post_node,
+        backward_post_node,
+    )
 
 
 @dataclass
@@ -160,6 +245,85 @@ class GPTModel(PipelineLayer):
             )
 
         return layers
+
+    def overlapped_forward_backward(
+        self,
+        forward_chunk,
+        forward_inputs,
+        forward_loss_fn_node,
+        backward_chunk,
+        backward_loss_fn_node,
+        backward_input_grads,
+        scaler,
+        p2p_async_handle,
+    ):
+        if backward_loss_fn_node is not None:
+            if scaler:
+                backward_input_grads = backward_loss_fn_node.backward(
+                    scaler=scaler
+                )
+            else:
+                backward_input_grads = backward_loss_fn_node.backward()
+
+        (
+            forward_pre_node,
+            backward_pre_node,
+            overlap_node,
+            forward_post_node,
+            backward_post_node,
+        ) = build_overlapped_nodes(forward_chunk, backward_chunk)
+
+        if len(overlap_node.nodes) > 0:
+            assert not any(
+                isinstance(node, TransformerLayerNode)
+                for node in overlap_node.nodes
+            )
+            # origin assert, why ?
+            # assert not any(
+            #     isinstance(node, TransformerLayerNode)
+            #     for node in forward_post_node.nodes
+            # )
+            # assert not any(
+            #     isinstance(node, TransformerLayerNode)
+            #     for node in backward_post_node.nodes
+            # )
+
+        if p2p_async_handle is not None:
+            p2p_async_handle.forward_handle_wait()
+            p2p_async_handle.backward_handle_wait()
+
+        forward_inputs = forward_pre_node.forward(forward_inputs)
+        backward_input_grads = backward_pre_node.backward(backward_input_grads)
+
+        for i, node in enumerate(overlap_node.nodes):
+            forward_inputs, backward_input_grads = node.forward_backward(
+                forward_inputs,
+                backward_input_grads,
+                # split_bw=(i == len(overlap_node.nodes) - 1),
+            )
+
+        forward_inputs = forward_post_node.forward(forward_inputs)
+        backward_input_grads = backward_post_node.backward(backward_input_grads)
+
+        # forward_inputs = forward_chunk.forward(forward_inputs)
+
+        if p2p_async_handle is not None:
+            p2p_async_handle.forward_async_comm(forward_inputs)
+            p2p_async_handle.backward_async_comm(backward_input_grads)
+
+        # backward_input_grads = backward_chunk.backward(backward_input_grads)
+
+        # used for bw split
+        # if len(overlap_node.nodes) > 0:
+        #     WeightGradStore.pop()
+        #     assert WeightGradStore.funcs_queue.empty()
+
+        if forward_loss_fn_node is not None:
+            forward_loss = forward_loss_fn_node.forward(forward_inputs)
+        else:
+            forward_loss = None
+
+        return forward_inputs, forward_loss, backward_input_grads
 
     def get_hardware_flops(self):
         return 989e3

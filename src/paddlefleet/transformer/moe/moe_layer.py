@@ -86,6 +86,7 @@ class MoELayer(nn.Layer):
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
+        self.moe_ep_barrier = config.moe_ep_barrier
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -117,7 +118,7 @@ class MoELayer(nn.Layer):
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
-        self.moe_deep_gemm = True
+        self.moe_deep_gemm = False  # Paddle batched_gemm has better performance than DeepGEMM, so disable DeepGEMM.
         if (
             not paddle.device.current_device_is_cpu
             and paddle.device.get_device_capability()[0] < 9
@@ -197,12 +198,20 @@ class MoELayer(nn.Layer):
                     self.num_experts_per_tok,
                     self.num_experts,
                     self.moe_group,
+                    self.moe_ep_barrier,
                 )
             elif self.moe_token_dispatcher_type == "alltoall":
+                local_expert_indices = list(
+                    range(
+                        self.moe_rank * self.num_experts_per_device,
+                        (self.moe_rank + 1) * self.num_experts_per_device,
+                    )
+                )
                 self.token_dispatcher = AllToAllTokenDispatcher(
                     self.moe_group,
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
+                    local_expert_indices,
                 )
             else:
                 raise NotImplementedError(
@@ -313,13 +322,16 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        async_finish: bool = False,
     ):
         hidden_states = self.token_dispatcher.dispatch_preprocess(
             hidden_states, probs, routing_map
         )
         hidden_states, fp8_dispatched_handle = (
             self.token_dispatcher.token_dispatch(
-                hidden_states, self.fp8_dispatch
+                hidden_states,
+                self.fp8_dispatch,
+                async_finish=async_finish,
             )
         )
         return hidden_states, fp8_dispatched_handle
@@ -333,8 +345,10 @@ class MoELayer(nn.Layer):
     def unpermute(self, hidden_states: paddle.Tensor):
         return self.token_dispatcher.combine_preprocess(hidden_states)
 
-    def combine(self, hidden_states: paddle.Tensor):
-        hidden_states = self.token_dispatcher.token_combine(hidden_states)
+    def combine(self, hidden_states: paddle.Tensor, async_finish: bool = False):
+        hidden_states = self.token_dispatcher.token_combine(
+            hidden_states, async_finish=async_finish
+        )
         return self.token_dispatcher.combine_postprocess(hidden_states)
 
     def routed_experts_compute(
@@ -394,6 +408,95 @@ class MoELayer(nn.Layer):
         )
         return hidden_states
 
+    def compute_gate(self, hidden_states):
+        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
+            hidden_states = GatherOp.apply(hidden_states)
+        return self.gate(hidden_states)
+
+    def dispatch_preprocess(self, args):
+        hidden_states, token_probs, token_indices = args
+        assert isinstance(self.token_dispatcher, MoEFlexTokenDispatcher)
+        hidden_states = self.token_dispatcher.dispatch_preprocess_overlap(
+            hidden_states, token_probs, token_indices
+        )
+        token_probs = self.token_dispatcher._comm_manager.token_probs
+        token_indices = self.token_dispatcher._comm_manager.token_indices
+        return hidden_states, token_indices, token_probs
+
+    def compute_dispatch(self, args, async_finish=False):
+        hidden_states, token_indices, token_weights = args
+        if self.moe_use_fusion_node:
+            dispatched_hidden_states, fp8_dispatched_handle = (
+                self.token_dispatcher.token_dispatch_overlap(
+                    hidden_states,
+                    token_indices,
+                    token_weights,
+                    self.fp8_dispatch,
+                    async_finish=async_finish,
+                )
+            )
+            dispatched_indices = (
+                self.token_dispatcher._comm_manager.dispatched_indices
+            )
+            dispatched_probs = (
+                self.token_dispatcher._comm_manager.dispatched_probs
+            )
+            return (
+                dispatched_hidden_states,
+                dispatched_indices,
+                dispatched_probs,
+                fp8_dispatched_handle,
+            )
+
+    def compute_experts(self, args):
+        if self.moe_use_fusion_node:
+            (
+                dispatched_hidden_states,
+                dispatched_indices,
+                dispatched_probs,
+                fp8_dispatched_handle,
+            ) = args
+            hidden_states = FusionMoePyLayer.apply(
+                dispatched_hidden_states,
+                dispatched_probs,
+                dispatched_indices,
+                self,
+                self.num_experts_per_tok,
+                use_fp8_mlp=self.fp8,
+                recompute_moe_gate_up=self.recompute_moe_gate_up,
+                recompute_moe_premute=self.recompute_moe_premute,
+                fp8_dispatched_handle=fp8_dispatched_handle,
+                use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+            )
+        else:
+            hidden_states, topk_weights = args
+            hidden_states = self.routed_experts_compute(hidden_states)
+        return hidden_states
+
+    def compute_combine(self, hidden_states, async_finish=False):
+        if self.moe_use_fusion_node:
+            hidden_states = self.token_dispatcher._comm_manager.combine(
+                hidden_states, None, async_finish=async_finish
+            )
+        else:
+            hidden_states = self.combine(hidden_states)
+        return hidden_states
+
+    def aux_loss_compute(self, args):
+        hidden_states, aux_loss, residuals = args
+        if self.training and self.router_aux_loss_coef:
+            aux_loss = aux_loss * self.router_aux_loss_coef
+            output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
+
+        output = output.reshape(residuals.shape)
+        if self.shared_experts is not None:
+            shared_output = self.shared_experts(residuals)[0]
+            output = output + shared_output
+
+        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
+            output = ScatterOp.apply(output)
+        return output
+
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         """
         Args:
@@ -432,7 +535,6 @@ class MoELayer(nn.Layer):
             }
         else:
             combine_overlap_handle = None
-
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(

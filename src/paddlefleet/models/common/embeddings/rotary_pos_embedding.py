@@ -143,7 +143,7 @@ class RotaryEmbedding(nn.Layer):
         return inv_freq_llama
 
     def get_freqs_non_repeated(
-        self, max_seq_len: int, offset: int = 0
+        self, max_seq_len: int, offset: int = 0, position_ids: Tensor = None
     ) -> Tensor:
         """Generates matrix of frequencies based on positions in the sequence,
         used to create positional encodings"""
@@ -167,7 +167,11 @@ class RotaryEmbedding(nn.Layer):
         return cos, sin
 
     def forward(
-        self, max_seq_len: int, offset: int = 0, packed_seq: bool = False
+        self,
+        max_seq_len: int,
+        offset: int = 0,
+        packed_seq: bool = False,
+        position_ids: Tensor = None,
     ) -> Tensor:
         """Forward pass of RoPE embedding.
 
@@ -179,7 +183,9 @@ class RotaryEmbedding(nn.Layer):
         Returns:
             Tensor: Embeddings after applying RoPE.
         """
-        freqs = self.get_freqs_non_repeated(max_seq_len, offset)
+        freqs = self.get_freqs_non_repeated(
+            max_seq_len, offset, position_ids=position_ids
+        )
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size
         if not self.rotary_interleaved:
