@@ -97,16 +97,15 @@ jobs:
           conda activate python${{ matrix.python }}
           '
 
-      - name: Single card sonic moe test
-        if: matrix.python == '3.12'
+      - name: Single card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
-          ls
           rm -rf * .[^.]*
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
+          export WITH_COVERAGE=ON
           pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
@@ -121,12 +120,12 @@ jobs:
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          bash ci/single_card_sonic.sh
+          bash ci/single_card_test.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
@@ -136,19 +135,19 @@ jobs:
           fi
           '
 
-      - name: Single card test
+      - name: Single card sonic moe test
+        if: matrix.python == '3.12'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
-          export WITH_COVERAGE=ON
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          bash ci/single_card_test.sh
+          bash ci/single_card_sonic.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
@@ -164,7 +163,6 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
-
   multi-card_test:
     name: Unit test (multi-card)
     runs-on:
