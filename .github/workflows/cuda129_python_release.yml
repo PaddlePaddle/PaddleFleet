@@ -152,6 +152,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          pwd
+          ls
           bash ci/single_card.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
