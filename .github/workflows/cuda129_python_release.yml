@@ -125,7 +125,10 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          bash ci/single_card_test.sh
+          cd ci
+          ls
+          cd ..
+          bash ci/single_card_sonic.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
