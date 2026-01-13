@@ -134,7 +134,6 @@ __global__ void count_cumsum_cuda_kernel(const scalar_t* x,
 
   __syncthreads();
 
-  // write the count_output to the global memory
   for (uint32_t i = threadIdx.x; i < E; i += blockDim.x) {
     atomicAdd(&count_output[i], shared_memory[i]);
   }
@@ -144,7 +143,6 @@ __global__ void count_cumsum_cuda_kernel(const scalar_t* x,
 
     cg::this_grid().sync();
 
-    // load counts to shared memory
     for (uint32_t i = threadIdx.x; i < E4; i += blockDim.x) {
       int32_t output_vec[4];
       load_128_bits<int32_t>(count_output, output_vec, i);
@@ -157,7 +155,6 @@ __global__ void count_cumsum_cuda_kernel(const scalar_t* x,
 
     __syncthreads();
 
-    // write cumsum output to global memory
     for (uint32_t i = global_thread_id; i < E4; i += grid_size) {
       int32_t output_vec[4];
       load_128_bits<int32_t>(shared_memory, output_vec, i);
@@ -231,6 +228,9 @@ std::vector<paddle::Tensor> CountCumsumCuda(const paddle::Tensor& x,
   PD_CHECK(E <= MAX_ALLOWED_E, "E exceeds MAX_ALLOWED_E.");
   PD_CHECK(E % 4 == 0, "E must be divisible by 4.");
 
+  // TODO(xingmingyyj): Refactor this kernel to remove the do_cumsum parameter
+  PD_CHECK(do_cumsum, "do_cumsum must be true.");
+
   const int64_t N = x.numel();
   auto place = x.place();
   cudaStream_t stream = x.stream();
@@ -256,9 +256,7 @@ std::vector<paddle::Tensor> CountCumsumCuda(const paddle::Tensor& x,
   return {count_output, cumsum_output};
 }
 
-// TODO(xingmingyyj) add test and comments
-// this op refers to SONICMOE, and comments
-// check int overflow
+// The implementation of this kernel is inspired by SonicMoE
 PD_BUILD_OP(count_cumsum)
     .Inputs({"X"})
     .Outputs({"CountOutput", "CumsumOutput"})

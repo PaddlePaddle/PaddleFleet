@@ -81,8 +81,7 @@ void count_valid_cuda_launcher(const int64_t* indices,
 }
 
 std::vector<paddle::Tensor> FilterScoresGPU(const paddle::Tensor& probs,
-                                            const paddle::Tensor& indices,
-                                            const paddle::Tensor& w1) {
+                                            const paddle::Tensor& indices) {
   PD_CHECK(probs.place().GetType() == phi::AllocationType::GPU,
            "probs must be a GPU tensor.");
   PD_CHECK(indices.place().GetType() == phi::AllocationType::GPU,
@@ -109,7 +108,6 @@ std::vector<paddle::Tensor> FilterScoresGPU(const paddle::Tensor& probs,
                            cudaMemcpyDeviceToHost,
                            stream) == cudaSuccess,
            "cudaMemcpyAsync total_valid_experts failed.");
-  paddle::Tensor w1_transposed = paddle::experimental::transpose(w1, {1, 2, 0});
   PD_CHECK(cudaStreamSynchronize(stream) == cudaSuccess,
            "cudaStreamSynchronize failed for total_valid_experts.");
   if (total_valid == 0) {
@@ -152,37 +150,29 @@ std::vector<paddle::Tensor> FilterScoresGPU(const paddle::Tensor& probs,
                                        topk_scores.data<data_t>(),
                                        total_elements);
                              }));
-  return {topk_scores, w1_transposed};
+  return {topk_scores};
 }
 
 std::vector<paddle::Tensor> FilterScoresGradGPU(
-    const paddle::Tensor& probs,
-    const paddle::Tensor& indices,
-    const paddle::Tensor& topk_scores,
-    const paddle::Tensor& grad_topk_scores,
-    const paddle::Tensor& grad_w1_transposed) {
-  PD_CHECK(probs.place().GetType() == phi::AllocationType::GPU,
-           "probs must be a GPU tensor.");
+    const paddle::Tensor& indices, const paddle::Tensor& grad_topk_scores) {
   PD_CHECK(indices.place().GetType() == phi::AllocationType::GPU,
            "indices must be a GPU tensor.");
   PD_CHECK(grad_topk_scores.place().GetType() == phi::AllocationType::GPU,
            "grad_topk_scores must be a GPU tensor.");
-  PD_CHECK(probs.shape() == indices.shape(),
-           "probs and indices must have the same shape.");
   PD_CHECK(indices.dtype() == paddle::DataType::INT64,
            "indices must be of type int64.");
-  cudaStream_t stream = probs.stream();
-  const int64_t total_elements = probs.numel();
-  auto grad_probs =
-      paddle::full(probs.shape(), 0, probs.dtype(), probs.place());
-  const int64_t total_valid = topk_scores.numel();
+  cudaStream_t stream = indices.stream();
+  const int64_t total_elements = indices.numel();
+  auto grad_probs = paddle::full(
+      indices.shape(), 0, grad_topk_scores.dtype(), grad_topk_scores.place());
+  const int64_t total_valid = grad_topk_scores.numel();
   if (total_elements == 0 || total_valid == 0) {
-    return {grad_probs, paddle::Tensor()};
+    return {grad_probs};
   }
-  auto mask =
-      paddle::empty({total_elements}, paddle::DataType::INT32, probs.place());
-  auto write_indices =
-      paddle::empty({total_elements}, paddle::DataType::INT32, probs.place());
+  auto mask = paddle::empty(
+      {total_elements}, paddle::DataType::INT32, grad_topk_scores.place());
+  auto write_indices = paddle::empty(
+      {total_elements}, paddle::DataType::INT32, grad_topk_scores.place());
   int block_size = 256;
   int grid_size = (total_elements + block_size - 1) / block_size;
   grid_size = std::min(grid_size, 4096);
@@ -197,7 +187,7 @@ std::vector<paddle::Tensor> FilterScoresGradGPU(
                                 total_elements);
   auto temp_storage = paddle::empty({static_cast<int64_t>(temp_storage_bytes)},
                                     paddle::DataType::UINT8,
-                                    probs.place());
+                                    grad_topk_scores.place());
   d_temp_storage = temp_storage.data<uint8_t>();
   cub::DeviceScan::ExclusiveSum(d_temp_storage,
                                 temp_storage_bytes,
@@ -205,36 +195,25 @@ std::vector<paddle::Tensor> FilterScoresGradGPU(
                                 write_indices.data<int>(),
                                 total_elements,
                                 stream);
-  PD_DISPATCH_FLOATING_TYPES(probs.dtype(), "scatter_grad_kernel", ([&] {
-                               scatter_grad_kernel<data_t>
-                                   <<<grid_size, block_size, 0, stream>>>(
-                                       grad_topk_scores.data<data_t>(),
-                                       indices.data<int64_t>(),
-                                       write_indices.data<int>(),
-                                       grad_probs.data<data_t>(),
-                                       total_elements);
-                             }));
-
-  paddle::Tensor grad_w1 =
-      paddle::experimental::transpose(grad_w1_transposed, {2, 0, 1});
-  auto grad_indices =
-      paddle::full(indices.shape(), 0, indices.dtype(), indices.place());
-  return {grad_probs, grad_indices, grad_w1};
+  PD_DISPATCH_FLOATING_TYPES(
+      grad_topk_scores.dtype(), "scatter_grad_kernel", ([&] {
+        scatter_grad_kernel<data_t><<<grid_size, block_size, 0, stream>>>(
+            grad_topk_scores.data<data_t>(),
+            indices.data<int64_t>(),
+            write_indices.data<int>(),
+            grad_probs.data<data_t>(),
+            total_elements);
+      }));
+  return {grad_probs};
 }
 
-// TODO(xingmingyyj) add test and comments
 // check int overflow
 PD_BUILD_OP(filter_scores)
-    .Inputs({"Probs", "Indices", "W1"})
-    .Outputs({"TopkScores", "W1Transposed"})
+    .Inputs({"Probs", "Indices"})
+    .Outputs({"TopkScores"})
     .SetKernelFn(PD_KERNEL(FilterScoresGPU));
 
 PD_BUILD_OP(filter_scores_grad)
-    .Inputs({"Probs",
-             "Indices",
-             "TopkScores",
-             "W1",
-             "TopkScoresGrad",
-             "W1TransposedGrad"})
-    .Outputs({"ProbsGrad", "IndicesGrad", "W1Grad"})
+    .Inputs({"Indices", "TopkScoresGrad"})
+    .Outputs({"ProbsGrad"})
     .SetKernelFn(PD_KERNEL(FilterScoresGradGPU));

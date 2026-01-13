@@ -25,20 +25,6 @@ __global__ void simple_arange_kernel(int* output, int64_t N) {
   }
 }
 
-cudaError_t launch_simple_arange(int* output,
-                                 int64_t N,
-                                 cudaStream_t stream = nullptr) {
-  if (N <= 0) return cudaSuccess;
-  const int threads_per_block = 256;
-  const int max_blocks = 1024;
-  const int needed_blocks =
-      static_cast<int>((N + threads_per_block - 1) / threads_per_block);
-  const int blocks = (needed_blocks < max_blocks) ? needed_blocks : max_blocks;
-
-  simple_arange_kernel<<<blocks, threads_per_block, 0, stream>>>(output, N);
-  return cudaGetLastError();
-}
-
 template <typename T>
 __global__ void CountValidExpertsKernel(const T* topk_router_indices,
                                         int* num_activated_per_token,
@@ -96,6 +82,20 @@ __global__ void ComputeXGatherIdxKernel(const int* s_scatter_idx_all,
   if (idx < n) {
     x_gather_idx_all[idx] = s_scatter_idx_all[idx] / K;
   }
+}
+
+cudaError_t launch_simple_arange(int* output,
+                                 int64_t N,
+                                 cudaStream_t stream = nullptr) {
+  if (N <= 0) return cudaSuccess;
+  const int threads_per_block = 256;
+  const int max_blocks = 1024;
+  const int needed_blocks =
+      static_cast<int>((N + threads_per_block - 1) / threads_per_block);
+  const int blocks = (needed_blocks < max_blocks) ? needed_blocks : max_blocks;
+
+  simple_arange_kernel<<<blocks, threads_per_block, 0, stream>>>(output, N);
+  return cudaGetLastError();
 }
 
 template <typename T>

@@ -26,6 +26,8 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
 )
 
+import paddlefleet
+
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.spec_utils import LayerSpec
@@ -42,11 +44,14 @@ from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
 
-from sonicmoe.enums import ActivationType
-from sonicmoe.functional import (
-    _DownProjection,
-    _UpProjection,
-)
+paddle.enable_compat(scope={"sonicmoe", "quack", "triton"})
+
+if paddlefleet.ops.is_sonic_moe_available():
+    from paddlefleet.ops.sonicmoe.enums import ActivationType
+    from paddlefleet.ops.sonicmoe.functional import (
+        _DownProjection,
+        _UpProjection,
+    )
 
 from .moe_utils import (
     count_cumsum,
@@ -55,8 +60,6 @@ from .moe_utils import (
     permute,
     unpermute,
 )
-
-paddle.enable_compat(scope={"sonicmoe", "quack", "triton"})
 
 
 @dataclass
@@ -98,6 +101,12 @@ class MoELayer(nn.Layer):
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
         self.using_sonic_moe = self.config.using_sonic_moe
+        if self.using_sonic_moe:
+            assert paddlefleet.ops.is_sonic_moe_available(), (
+                paddlefleet.ops.blocked_import_messages[
+                    "paddlefleet.ops.sonicmoe"
+                ]
+            )
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
@@ -393,10 +402,9 @@ class MoELayer(nn.Layer):
             T = dispatched_hidden_states.shape[0]
             K = self.num_experts_per_tok
             stream_id = paddle.device.cuda.current_stream().cuda_stream
-            topk_scores, w1_transposed = filter_scores(
+            topk_scores = filter_scores(
                 dispatched_probs,
                 dispatched_indices,
-                self.grouped_gemm_experts.weight1,
             )
             expert_frequency, expert_frequency_offset = count_cumsum(
                 dispatched_indices, self.num_experts_per_device, do_cumsum=True
@@ -417,12 +425,11 @@ class MoELayer(nn.Layer):
 
             TK = s_scatter_idx.shape[0]
             is_varlen_K = True
-
-            # TODO(xingmingyyj) check input tensor dtype
+            w1 = self.grouped_gemm_experts.weight1
             y1, z = _UpProjection.apply(
                 dispatched_hidden_states,
-                w1_transposed,
-                None,  # No use for bias
+                w1.permute(1, 2, 0),
+                None,
                 expert_frequency_offset,
                 TK,
                 K,

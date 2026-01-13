@@ -28,7 +28,9 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-from .moe_utils import k_grouped_bf16_gemm_tn_contiguous_aligned
+from .moe_utils import (
+    k_grouped_bf16_gemm_tn_contiguous_aligned,
+)
 
 try:
     from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm

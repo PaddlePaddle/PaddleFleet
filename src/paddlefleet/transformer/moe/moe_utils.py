@@ -333,27 +333,23 @@ def manual_backward(f: Callable, is_first_fwd: bool, *args: list[Any]):
 
 class FilterScores(PyLayer):
     @staticmethod
-    def forward(ctx, probs, indices, w1):
+    def forward(ctx, probs, indices):
         topk_scores = paddle._C_ops._run_custom_op(
             "filter_scores", probs, indices
         )[0]
-        ctx.save_for_backward(probs, indices, topk_scores, w1)
+        ctx.save_for_backward(indices)
         return topk_scores
 
     @staticmethod
-    def backward(ctx, grad_topk_scores, grad_w1_transposed):
-        probs, indices, topk_scores = ctx.saved_tensor()
+    def backward(ctx, grad_topk_scores):
+        (indices,) = ctx.saved_tensor()
         grads = paddle._C_ops._run_custom_op(
             "filter_scores_grad",
-            probs,
             indices,
-            topk_scores,
             grad_topk_scores,
-            grad_w1_transposed,
         )
         grad_probs = grads[0]
-        w1_grad = grads[2]
-        return grad_probs, None, w1_grad
+        return grad_probs, None
 
 
 def fused_expert_parallel_TC_topk_router_metadata(
@@ -382,10 +378,10 @@ def count_cumsum(
 def filter_scores(
     dispatched_probs,
     dispatched_indices,
-    w1,
 ):
-    return FilterScores.apply(dispatched_probs, dispatched_indices, w1)
-  
+    return FilterScores.apply(dispatched_probs, dispatched_indices)
+
+
 def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
     ALIGNMENT = paddlefleet_deep_gemm.get_mk_alignment_for_contiguous_layout()
 
