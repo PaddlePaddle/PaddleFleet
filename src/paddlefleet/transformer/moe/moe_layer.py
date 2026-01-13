@@ -390,6 +390,7 @@ class MoELayer(nn.Layer):
         routing_map: paddle.Tensor,
         combine_overlap_handle: dict,
     ):
+        # TODO(deepllz): add fp8 dispatch config && implementation
         dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
             hidden_states, probs, routing_map
         )
