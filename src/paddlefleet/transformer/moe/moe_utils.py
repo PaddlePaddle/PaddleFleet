@@ -36,6 +36,11 @@ if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
 
+def barrier_ep(ep_group):
+    """barrier_ep"""
+    paddle.distributed.barrier(ep_group)
+
+
 def permute(
     tokens,
     routing_map,
@@ -139,7 +144,7 @@ class AddAuxiliaryLoss(paddle.autograd.PyLayer):
         assert paddle.numel(loss) == 1
         ctx.dtype = loss.dtype
         ctx.required_aux_loss = not loss.stop_gradient
-        return x
+        return x.clone()
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -184,6 +189,7 @@ class _AllToAll(paddle.autograd.PyLayer):
         output = paddle.empty(
             output_shape, dtype=input.dtype, requires_grad=True
         )
+        paddle.distributed.barrier(group)
         task = dist.alltoall_single(
             output,
             input,
@@ -207,6 +213,7 @@ class _AllToAll(paddle.autograd.PyLayer):
             tuple[Tensor]: A tuple containing a tensor that holds the gradients of all input tensors.
         """
         # return grad_output
+        paddle.distributed.barrier(ctx.group)
         return _AllToAll.apply(
             ctx.input_shape,
             *grad_output,
@@ -396,3 +403,112 @@ def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
     )
 
     del a_padded, b_padded
+
+
+def sort_chunks_by_idxs(
+    input: paddle.Tensor,
+    split_sizes: paddle.Tensor,
+    sorted_idxs: paddle.Tensor,
+    probs: paddle.Tensor | None = None,
+    fused: bool = False,
+):
+    """Split and sort the input tensor based on the split_sizes and sorted indices."""
+    input = paddle.split(input, split_sizes.tolist(), axis=0)
+    output = paddle.cat([input[i] for i in sorted_idxs.tolist()], axis=0)
+    # TODO: support probs is not None
+    permuted_probs = None
+    return output, permuted_probs
+
+
+def all_gather_group(input, group=None, axis=0):
+    """Perform collective all-gather operation across a process group with axis control.
+
+    Functional Behavior:
+      - Aggregates input tensors from all processes in the specified group
+      - Supports concatenation along arbitrary dimensions (axis parameter)
+      - Optimizes for axis=0 via direct shape expansion to avoid concatenation overhead
+
+    Args:
+        input (Tensor):        Local tensor to be gathered (shape: [..., D, ...])
+        group (ProcessGroup):  Communication group (defaults to model parallel group)
+        axis (int):            Concatenation dimension (default=0)
+
+    Returns:
+        Tensor: Concatenated tensor combining inputs from all processes:
+                - When axis=0: shape [D*N, ...] (N = group size)
+                - Otherwise:   shape [..., D*N, ...] along specified axis
+    """
+    parallelism = group.nranks
+    if parallelism == 1:
+        return input.clone()
+    output_shape = input.shape
+    # TODO: Support only axis != 0
+    assert axis == 0
+    output_shape[axis] = output_shape[axis] * parallelism
+    output = paddle.empty(shape=output_shape, dtype=input.dtype)
+    dist.stream.all_gather(output, input, group=group, use_calc_stream=True)
+    return output
+
+
+def reduce_scatter_group(input, group=None):
+    """Perform reduce-scatter collective operation across a process group.
+
+    Functional Behavior:
+      - Aggregates (sums) input tensors across all processes in the group
+      - Scatters the reduced result equally to all participants
+      - Operates along the first dimension (axis=0) of the input tensor
+
+    Args:
+        input (Tensor):        Local tensor to reduce (shape: [N*K, ...] where N=group_size)
+        group (ProcessGroup): Communication group (defaults to model parallel group)
+
+    Returns:
+        Tensor: Scattered portion of reduced tensor with shape [K, ...]
+    """
+    parallelism = group.nranks
+    if parallelism == 1:
+        return input.clone()
+    output_shape = input.shape
+    assert input.shape[0] % parallelism == 0, (
+        f"Input sequence length {input.shape[0]} can't be divided exactly by sequence parallelism {parallelism}"
+    )
+    output_shape[0] = output_shape[0] // parallelism
+    output = paddle.empty(shape=output_shape, dtype=input.dtype)
+    dist.stream.reduce_scatter(
+        output, input, op=dist.ReduceOp.SUM, group=group, use_calc_stream=True
+    )
+    return output
+
+
+class AllGatherGroupOp(paddle.autograd.PyLayer):
+    """
+    Perform group allgather.
+    """
+
+    @staticmethod
+    def forward(ctx, input, group=None):
+        """Forward pass: All-Gather operation
+        Args:
+            input (Tensor):  Partitioned tensor with shape [s/n, b, h]
+                            The 's' dimension is distributed across devices
+            group (ProcessGroup): Model parallel process group,
+                                uses global group by default
+        Returns:
+            Tensor: Assembled tensor after All-Gather with shape [s, b, h],
+                   containing full parameter from all devices
+        """
+        paddle.distributed.barrier(group)
+        ctx.group = group
+        return all_gather_group(input, group=group)
+
+    @staticmethod
+    def backward(ctx, grad):
+        """Backward pass: Reduce-Scatter operation
+        Args:
+            grad (Tensor): Full gradient tensor with shape [s, b, h]
+        Returns:
+            Tensor: Scattered gradient with shape [s/n, b, h],
+                   distributing reduced gradients to each device
+        """
+        paddle.distributed.barrier(ctx.group)
+        return reduce_scatter_group(grad, group=ctx.group)

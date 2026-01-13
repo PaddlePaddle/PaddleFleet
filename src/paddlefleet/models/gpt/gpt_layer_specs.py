@@ -18,6 +18,9 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
+import paddle
+from paddle.distributed import fleet
+
 from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
 from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
 from paddlefleet.models.common.embeddings.language_model_embedding import (
@@ -49,6 +52,7 @@ from paddlefleet.transformer.paddle_norm import L2Norm
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSublayersSpec,
+    TransformerLayerWithOverlap,
 )
 
 if TYPE_CHECKING:
@@ -100,11 +104,19 @@ def get_gpt_layer_local_spec(
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
     )
-
-    transformer_layer = getattr(config, "specific_layer", TransformerLayer)
+    transformer_cls = getattr(config, "specific_layer", TransformerLayer)
+    if paddle.distributed.is_initialized():
+        use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
+            "pp_configs"
+        ].forward_backward_overlap_scheduler
+        if use_overlap:
+            assert transformer_cls.__name__ == TransformerLayer.__name__, (
+                "Only base TransformerLayer can be overlapped."
+            )
+            transformer_cls = TransformerLayerWithOverlap
 
     return LayerSpec(
-        layer=transformer_layer,
+        layer=transformer_cls,
         sublayers_spec=TransformerLayerSublayersSpec(
             input_layernorm=layer_norm,
             self_attn=LayerSpec(

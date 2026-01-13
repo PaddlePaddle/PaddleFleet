@@ -15,9 +15,9 @@
 # Referred to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
-
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -217,6 +217,7 @@ class TransformerConfig(ModelParallelConfig):
     """If True, run attention masking and softmax in fp32. This should be True if
     apply_query_key_layer_scaling is True."""
 
+    high_precision_rope: bool = False
     ####################
     # fusion
     ####################
@@ -382,6 +383,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
+    moe_ep_barrier: bool = True
+    """Whether to use barrier for expert parallelism."""
+
     ##################
     # Context Parallel
     ##################
@@ -492,7 +496,10 @@ class TransformerConfig(ModelParallelConfig):
 
         if key == "hidden_act":
             if isinstance(value, str):
-                func = getattr(F, value)
+                if value == "gelu_pytorch_tanh":
+                    func = functools.partial(F.gelu, approximate=True)
+                else:
+                    func = getattr(F, value)
                 setattr(self, key, func)
             elif callable(value):
                 setattr(self, key, value)

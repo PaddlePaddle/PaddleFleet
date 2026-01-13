@@ -24,10 +24,15 @@ from paddle import nn
 if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
-import numpy as np
 
 from .fused_a2a import fused_combine, fused_dispatch
-from .moe_utils import _AllToAll, permute, unpermute
+from .moe_utils import (
+    AllGatherGroupOp,
+    _AllToAll,
+    permute,
+    sort_chunks_by_idxs,
+    unpermute,
+)
 
 
 class _DispatchManager(ABC):
@@ -49,7 +54,10 @@ class _DispatchManager(ABC):
 
     @abstractmethod
     def dispatch(
-        self, hidden_states: paddle.Tensor, fp8_dispatch: bool
+        self,
+        hidden_states: paddle.Tensor,
+        fp8_dispatch: bool,
+        async_finish: bool,
     ) -> paddle.Tensor:
         """Dispatch the hidden_states according to the routing_map."""
         pass
@@ -109,11 +117,13 @@ class _DeepepManager(_DispatchManager):
         router_topk: int,
         num_experts: int | None = None,
         num_local_experts: int | None = None,
+        moe_ep_barrier: bool = True,
     ):
         self.group = group
         self.router_topk = router_topk
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
+        self.moe_ep_barrier = moe_ep_barrier
 
         # Metadata
         self.token_indices = None
@@ -136,8 +146,35 @@ class _DeepepManager(_DispatchManager):
             probs, self.router_topk, axis=-1
         )
 
+    def dispatch_overlap(
+        self,
+        hidden_states: paddle.Tensor,
+        token_indices: paddle.Tensor,
+        token_weights: paddle.Tensor,
+        fp8_dispatch: bool = False,
+        async_finish: bool = False,
+    ) -> paddle.Tensor:
+        hidden_states, dispatched_probs, states, scale = fused_dispatch(
+            hidden_states,
+            token_indices,
+            token_weights,
+            self.num_experts,
+            self.group,
+            fp8_dispatch=fp8_dispatch,
+            async_finish=async_finish,
+        )
+        self.handle = states["handle"]
+        self.tokens_per_expert = states["tokens_per_expert"]
+        self.dispatched_indices = states["dispatched_indices"]
+        self.dispatched_probs = dispatched_probs
+
+        return hidden_states, scale
+
     def dispatch(
-        self, hidden_states: paddle.Tensor, fp8_dispatch: bool = False
+        self,
+        hidden_states: paddle.Tensor,
+        fp8_dispatch: bool = False,
+        async_finish: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -146,6 +183,8 @@ class _DeepepManager(_DispatchManager):
             self.num_experts,
             self.group,
             fp8_dispatch=fp8_dispatch,
+            async_finish=async_finish,
+            moe_ep_barrier=self.moe_ep_barrier,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -198,9 +237,16 @@ class _DeepepManager(_DispatchManager):
         self,
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
+        async_finish: bool = False,
     ) -> paddle.Tensor:
         hidden_states = fused_combine(
-            hidden_states, self.group, self.handle, None, combine_overlap_handle
+            hidden_states,
+            self.group,
+            self.handle,
+            None,
+            combine_overlap_handle,
+            async_finish,
+            moe_ep_barrier=self.moe_ep_barrier,
         )
         # Release the handle after combine operation
         self.handle = None
@@ -306,6 +352,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         num_experts_per_tok: int,
         n_routed_experts: int,
         ep_group: Group,
+        moe_ep_barrier: bool = True,
     ):
         super().__init__(ep_group)
 
@@ -316,6 +363,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             router_topk=num_experts_per_tok,
             num_experts=n_routed_experts,
             num_local_experts=self.num_local_experts,
+            moe_ep_barrier=moe_ep_barrier,
         )
 
     def dispatch_preprocess(
@@ -329,8 +377,43 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         self._comm_manager.setup_metadata(routing_map, probs)
         return hidden_states
 
-    def token_dispatch(self, hidden_states: paddle.Tensor, fp8_dispatch: bool):
-        return self._comm_manager.dispatch(hidden_states, fp8_dispatch)
+    def dispatch_preprocess_overlap(
+        self,
+        hidden_states: paddle.Tensor,
+        token_probs: paddle.Tensor,
+        token_indices: paddle.Tensor,
+    ):
+        self.hidden_shape = hidden_states.shape
+        hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
+        self._comm_manager.token_probs = token_probs
+        self._comm_manager.token_indices = token_indices
+        return hidden_states
+
+    def token_dispatch_overlap(
+        self,
+        hidden_states: paddle.Tensor,
+        token_indices: paddle.Tensor,
+        token_weights: paddle.Tensor,
+        fp8_dispatch: bool,
+        async_finish: bool = False,
+    ):
+        return self._comm_manager.dispatch_overlap(
+            hidden_states,
+            token_indices,
+            token_weights,
+            fp8_dispatch,
+            async_finish,
+        )
+
+    def token_dispatch(
+        self,
+        hidden_states: paddle.Tensor,
+        fp8_dispatch: bool,
+        async_finish: bool = False,
+    ):
+        return self._comm_manager.dispatch(
+            hidden_states, fp8_dispatch, async_finish
+        )
 
     def dispatch_postprocess(
         self,
@@ -350,8 +433,10 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             hidden_states
         )
 
-    def token_combine(self, hidden_states: paddle.Tensor):
-        return self._comm_manager.combine(hidden_states)
+    def token_combine(self, hidden_states: paddle.Tensor, async_finish=False):
+        return self._comm_manager.combine(
+            hidden_states, async_finish=async_finish
+        )
 
     def combine_postprocess(self, hidden_states: paddle.Tensor):
         return hidden_states.reshape(self.hidden_shape)
@@ -401,11 +486,14 @@ class AllToAllTokenDispatcher(nn.Layer):
         moe_group: Group,
         expert_model_parallel_size: int,
         num_experts_per_device: int,
+        local_expert_indices: list,
     ):
         nn.Layer.__init__(self)
         self.moe_group = moe_group
         self.expert_model_parallel_size = expert_model_parallel_size
         self.num_experts_per_device = num_experts_per_device
+        self.local_expert_indices = local_expert_indices
+        self.num_local_experts = len(local_expert_indices)
 
     def dispatch_preprocess(
         self,
@@ -413,10 +501,12 @@ class AllToAllTokenDispatcher(nn.Layer):
         gates_masked: paddle.Tensor,  # probs
         mask: paddle.Tensor,  # routing_map
     ) -> tuple[paddle.Tensor, paddle.Tensor]:
+        self.routing_map = mask
         self.gates_masked = gates_masked
-        if self.expert_model_parallel_size <= 1:
-            return hidden_states
-        mask = mask.to(paddle.int64)
+        self.num_experts = (
+            self.num_experts_per_device * self.expert_model_parallel_size
+        )
+        mask = mask.to(paddle.int32)
 
         if len(hidden_states.shape) == 3:
             batch_size, seq_len, d_model = hidden_states.shape
@@ -426,142 +516,137 @@ class AllToAllTokenDispatcher(nn.Layer):
         self.d_model = d_model
         self.reshaped_input_shape = reshaped_input.shape
         tokens_per_expert = mask.sum(axis=0)  # Shape: [num_experts]
-        token_indices, expert_indices = paddle.where(mask == 1)
-        combined_key = expert_indices * seq_len + token_indices
-        sort_indices = paddle.argsort(combined_key)
-        self.sorted_token_indices = token_indices[sort_indices]
-        self.sorted_expert_indices = expert_indices[sort_indices]
-        # `sorted_tokens` are tokens that sorted by expert id.
-        # First `tokens_per_expert[0]` tokens belong to expert 0, next `tokens_per_expert[1]` tokens belong to expert 1, etc.
-        # Shape: [batch_size * seq_len * num_experts_per_token, d_model]
-        sorted_tokens = reshaped_input[self.sorted_token_indices]
-
         tokens_per_expert = tokens_per_expert.detach()
-        self.sorted_tokens_shape = sorted_tokens.shape
-
         tokens_per_ep_rank = tokens_per_expert.reshape(
             [self.expert_model_parallel_size, -1]
         ).sum(axis=1)
         # First All-to-All: Exchange expert token counts across ranks
-        # Returns `self.global_tokens_per_expert` is for current rank
-        self.global_tokens_per_expert = _AllToAll.apply(
-            [tokens_per_expert.shape[0]],
-            tokens_per_expert,
-            group=self.moe_group,
-        )
+        # Returns `tokens_per_expert_group` is for current rank
+        num_global_tokens_per_expert = AllGatherGroupOp.apply(
+            tokens_per_expert, group=self.moe_group
+        ).reshape(self.expert_model_parallel_size, self.num_experts)
+        num_global_tokens_per_local_expert = num_global_tokens_per_expert[
+            :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
+        ].clone()
 
-        if self.global_tokens_per_expert.sum().item() == 0:
+        # Can also use the two AllToAll functions below instead of the above AllGather
+        # It will save memory , but also has more accuracy diff with DeepEP version
+        # global_tokens_per_expert = _AllToAll.apply(
+        #     [tokens_per_expert.shape[0]],
+        #     tokens_per_expert,
+        #     group=self.moe_group,
+        # )
+        # num_global_tokens_per_local_expert = global_tokens_per_expert.reshape(self.expert_model_parallel_size, self.num_local_experts)
+
+        if num_global_tokens_per_local_expert.sum().item() == 0:
             self.is_empty_tokens = True
         else:
             self.is_empty_tokens = False
 
-        tokens_per_expert_group_sum = self.global_tokens_per_expert.reshape(
-            [self.expert_model_parallel_size, -1]
+        self.tokens_per_expert = num_global_tokens_per_local_expert.sum(axis=0)
+
+        num_global_tokens_per_rank = num_global_tokens_per_local_expert.sum(
+            axis=1
         )
-        self.output_splits = (
-            tokens_per_expert_group_sum.sum(axis=1).cpu().tolist()
+
+        self.num_global_tokens_per_local_expert = (
+            num_global_tokens_per_local_expert.reshape(
+                -1, self.num_local_experts
+            )
         )
-        self.input_split_sizes = tokens_per_ep_rank.cpu().tolist()
-        self.dispatch_output_shape = [
-            self.global_tokens_per_expert.sum(axis=0).cpu().item(),
-            sorted_tokens.shape[1],
+
+        self.output_splits = num_global_tokens_per_rank.cpu().tolist()
+        num_local_tokens_per_expert = self.routing_map.sum(dim=0)
+        self.input_split_sizes = num_local_tokens_per_expert.reshape(
+            self.expert_model_parallel_size, self.num_local_experts
+        ).sum(axis=1)
+        self.output_shape_tokens = [
+            num_global_tokens_per_rank.sum().cpu().item(),
+            d_model,
         ]
 
-        return sorted_tokens
+        (
+            permutated_local_input_tokens,
+            self.reversed_local_input_permutation_mapping,
+        ) = permute(reshaped_input, self.routing_map)
+        self.permutated_local_input_tokens_shape = (
+            permutated_local_input_tokens.shape
+        )
+
+        return permutated_local_input_tokens
 
     def token_dispatch(
-        self, sorted_tokens: paddle.Tensor, fp8_dispatch: bool = False
+        self,
+        permutated_local_input_tokens: paddle.Tensor,
+        fp8_dispatch: bool = False,
+        async_finish: bool = False,
     ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
-        gathered_tokens = _AllToAll.apply(
-            self.dispatch_output_shape,
-            sorted_tokens,
+        global_input_tokens = _AllToAll.apply(
+            self.output_shape_tokens,
+            permutated_local_input_tokens,  # sorted_tokens,
             out_split_sizes=self.output_splits,
             in_split_sizes=self.input_split_sizes,
             group=self.moe_group,
         )
-        return gathered_tokens, None
+
+        return global_input_tokens, None
 
     def dispatch_postprocess(
         self,
-        gathered_tokens: paddle.Tensor,
+        global_input_tokens: paddle.Tensor,
     ):
-        # Next, we should sort `gathered_tokens` by expert ids, so that the tokens for the same expert are contiguous.
-        tokens_per_expert_post_gather = self.global_tokens_per_expert.reshape(
-            [self.expert_model_parallel_size, self.num_experts_per_device]
-        ).sum(axis=0)
-        gatherd_idxs = np.zeros(
-            shape=(gathered_tokens.shape[0],), dtype=np.int32
-        )
-        s = 0
-        for i, k in enumerate(self.global_tokens_per_expert.cpu().numpy()):
-            gatherd_idxs[s : s + k] = i % self.num_experts_per_device
-            s += k
-        self.gatherd_idxs = gatherd_idxs.argsort()
-        sorted_tokens = gathered_tokens[self.gatherd_idxs]
+        input_chunk_idxs = paddle.arange(self.num_experts)
+        # [num_local_experts, ep_size]. Sort the input chunks by local experts.
+        self.sort_input_by_local_experts = input_chunk_idxs.reshape(
+            -1, self.num_local_experts
+        ).T.ravel()
+        # [ep_size, num_local_experts]. Restore the output chunks by local experts.
+        self.restore_output_by_local_experts = input_chunk_idxs.reshape(
+            self.num_local_experts, -1
+        ).T.ravel()
 
-        return sorted_tokens, tokens_per_expert_post_gather
+        if self.num_local_experts > 1 and not self.is_empty_tokens:
+            global_input_tokens, _ = sort_chunks_by_idxs(
+                global_input_tokens,
+                self.num_global_tokens_per_local_expert.ravel(),
+                self.sort_input_by_local_experts,
+            )
+        sorted_tokens = global_input_tokens
+        self.tokens_per_expert_post_gather = self.tokens_per_expert
+        return sorted_tokens, self.tokens_per_expert_post_gather
 
-    def combine_preprocess(self, expert_outs: paddle.Tensor):
-        # Restore the original order of tokens, prepare for the third All-to-All.
-        if self.is_empty_tokens:
-            new_x = expert_outs
-        else:
-            new_x = paddle.empty_like(expert_outs)
-            new_x[self.gatherd_idxs] = expert_outs
-        return new_x
+    def combine_preprocess(self, hidden_states: paddle.Tensor):
+        if self.num_local_experts > 1 and not self.is_empty_tokens:
+            hidden_states, _ = sort_chunks_by_idxs(
+                hidden_states,
+                self.num_global_tokens_per_local_expert.T.ravel(),
+                self.restore_output_by_local_experts,
+            )
+        return hidden_states
 
     def token_combine(
-        self, new_x: paddle.Tensor, combine_overlap_handle: dict | None = None
+        self,
+        hidden_states: paddle.Tensor,
+        combine_overlap_handle: dict | None = None,
+        async_finish: bool = False,
     ):
-        # Third All-to-All: Exchange expert outputs back to original rank. `gathered_tokens` are the tokens that originally belong to current rank
-        gathered_tokens = _AllToAll.apply(
-            self.sorted_tokens_shape,
-            new_x,
+        permutated_local_input_tokens = _AllToAll.apply(
+            self.permutated_local_input_tokens_shape,
+            hidden_states,
             out_split_sizes=self.input_split_sizes,
             in_split_sizes=self.output_splits,
             group=self.moe_group,
         )
-        return gathered_tokens
+        return permutated_local_input_tokens
 
-    def combine_postprocess(self, gathered_tokens: paddle.Tensor):
-        # For every processed token, need to multiply the expert weight.
-        expert_major_weights = self.gates_masked[
-            self.sorted_token_indices, self.sorted_expert_indices
-        ]  # shape [batch_size * seq_len * num_experts_per_token]
-        weighted_gathered_tokens = (
-            gathered_tokens
-            * expert_major_weights.unsqueeze(-1).to(gathered_tokens.dtype)
-        )  # shape [batch_size * seq_len * num_experts_per_token, d_model]
-
-        final_output_empty = paddle.zeros(
-            self.reshaped_input_shape, dtype=gathered_tokens.dtype
-        )
-        token_indices_for_scatter = self.sorted_token_indices.unsqueeze(
-            -1
-        ).expand(
-            -1, self.d_model
-        )  # shape [batch_size * seq_len * num_experts_per_token, d_model]
-
-        token_indices_for_scatter_single = token_indices_for_scatter[
-            :, 0:1
-        ].squeeze()  # shape [batch_size * seq_len * num_experts_per_token, 1]
-
-        final_output = paddle.scatter(
-            final_output_empty,
-            token_indices_for_scatter_single,
-            weighted_gathered_tokens,
-            overwrite=False,
+    def combine_postprocess(self, permutated_local_input_tokens: paddle.Tensor):
+        output = unpermute(
+            permutated_local_input_tokens,
+            self.reversed_local_input_permutation_mapping,
+            restore_shape=self.reshaped_input_shape,
+            probs=self.gates_masked,
+            routing_map=self.routing_map,
         )
 
-        # When using non-deterministic mode, index_add and scatter give similar precision.
-        # In deterministic mode, index_add yields more precise results — but it is significantly slower.
-        # For most use cases (where ultra-high precision isn’t required), scatter is recommended for better performance.
-        # final_output = paddle.index_add(
-        #     x=final_output_empty,
-        #     index=token_indices_for_scatter_single,
-        #     axis=0,
-        #     value=weighted_gathered_tokens,
-        # )
-
-        return final_output
+        return output
