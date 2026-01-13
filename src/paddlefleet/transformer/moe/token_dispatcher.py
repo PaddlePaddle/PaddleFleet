@@ -601,11 +601,10 @@ class AllToAllTokenDispatcher(nn.Layer):
         ).T.ravel()
 
         if self.num_local_experts > 1 and not self.is_empty_tokens:
-            global_input_tokens, global_probs = sort_chunks_by_idxs(
+            global_input_tokens, _ = sort_chunks_by_idxs(
                 global_input_tokens,
                 self.num_global_tokens_per_local_expert.ravel(),
                 self.sort_input_by_local_experts,
-                probs=None,
             )
         sorted_tokens = global_input_tokens
         self.tokens_per_expert_post_gather = self.tokens_per_expert

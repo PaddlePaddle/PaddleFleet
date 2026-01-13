@@ -415,13 +415,8 @@ def sort_chunks_by_idxs(
     """Split and sort the input tensor based on the split_sizes and sorted indices."""
     input = paddle.split(input, split_sizes.tolist(), axis=0)
     output = paddle.cat([input[i] for i in sorted_idxs.tolist()], axis=0)
-    if probs is not None:
-        probs = paddle.split(probs, split_sizes.tolist(), axis=0)
-        permuted_probs = paddle.cat(
-            [probs[i] for i in sorted_idxs.tolist()], axis=0
-        )
-    else:
-        permuted_probs = None
+    # TODO: support probs is not None
+    permuted_probs = None
     return output, permuted_probs
 
 
@@ -443,24 +438,15 @@ def all_gather_group(input, group=None, axis=0):
                 - When axis=0: shape [D*N, ...] (N = group size)
                 - Otherwise:   shape [..., D*N, ...] along specified axis
     """
-    if group is None:
-        hcg = paddle.distributed.fleet.get_hybrid_communicate_group()
-        group = hcg.get_model_parallel_group()
     parallelism = group.nranks
     if parallelism == 1:
         return input.clone()
     output_shape = input.shape
-    if axis == 0:
-        output_shape[axis] = output_shape[axis] * parallelism
-        output = paddle.empty(shape=output_shape, dtype=input.dtype)
-        dist.stream.all_gather(output, input, group=group, use_calc_stream=True)
-        return output
-    outputs = [
-        paddle.empty(output_shape, dtype=input.dtype)
-        for _ in range(parallelism)
-    ]
-    dist.stream.all_gather(outputs, input, group=group, use_calc_stream=True)
-    output = paddle.concat(outputs, axis=axis)
+    # TODO: Support only axis != 0
+    assert axis == 0
+    output_shape[axis] = output_shape[axis] * parallelism
+    output = paddle.empty(shape=output_shape, dtype=input.dtype)
+    dist.stream.all_gather(output, input, group=group, use_calc_stream=True)
     return output
 
 
@@ -479,9 +465,6 @@ def reduce_scatter_group(input, group=None):
     Returns:
         Tensor: Scattered portion of reduced tensor with shape [K, ...]
     """
-    if group is None:
-        hcg = paddle.distributed.fleet.get_hybrid_communicate_group()
-        group = hcg.get_model_parallel_group()
     parallelism = group.nranks
     if parallelism == 1:
         return input.clone()
