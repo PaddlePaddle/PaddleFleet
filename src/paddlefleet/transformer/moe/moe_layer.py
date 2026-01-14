@@ -529,25 +529,36 @@ class MoELayer(nn.Layer):
             dispatched_probs = (
                 self.token_dispatcher._comm_manager.dispatched_probs
             )
+            # NOTE: tokens_per_expert_list is stateful and should be saved for recompute.
+            tokens_per_expert = (
+                self.token_dispatcher._comm_manager.tokens_per_expert
+            )
             return (
                 dispatched_hidden_states,
                 dispatched_indices,
                 dispatched_probs,
                 fp8_dispatched_handle,
+                tokens_per_expert,
             )
 
-    def compute_experts(self, args):
+    def compute_experts(self, args, is_first_fwd=False):
         if self.moe_use_fusion_node:
             (
                 dispatched_hidden_states,
                 dispatched_indices,
                 dispatched_probs,
                 fp8_dispatched_handle,
+                tokens_per_expert,
             ) = args
+            self.token_dispatcher._comm_manager.tokens_per_expert = (
+                tokens_per_expert
+            )
             hidden_states = FusionMoePyLayer.apply(
                 dispatched_hidden_states,
                 dispatched_probs,
-                dispatched_indices,
+                dispatched_indices.clone()
+                if is_first_fwd
+                else dispatched_indices,
                 self,
                 self.num_experts_per_tok,
                 use_fp8_mlp=self.fp8,
@@ -556,6 +567,8 @@ class MoELayer(nn.Layer):
                 fp8_dispatched_handle=fp8_dispatched_handle,
                 use_bf16_gemm_weight_grad=not self.fp8_wgrad,
             )
+            if is_first_fwd:
+                hidden_states.stop_gradient = False
         else:
             hidden_states, topk_weights = args
             hidden_states = self.routed_experts_compute(hidden_states)

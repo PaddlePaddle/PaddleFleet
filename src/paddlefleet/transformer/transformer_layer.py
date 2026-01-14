@@ -45,6 +45,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def tensors_clone(outputs):
+    """
+    The tensors required for recompute_forward need to be cloned to prevent them from being released prematurely and becoming inaccessible.
+    """
+    if isinstance(outputs, paddle.Tensor):
+        return outputs.clone()
+    elif isinstance(outputs, (tuple, list)):
+        res = []
+        for item in outputs:
+            if isinstance(item, paddle.Tensor):
+                res_item = item.clone()
+                res.append(res_item)
+            else:
+                res.append(item)
+        if isinstance(outputs, tuple):
+            return tuple(res)
+        else:
+            return res
+    elif isinstance(outputs, dict):
+        res = {}
+        for key, value in outputs.items():
+            res[key] = value.clone()
+        return res
+    else:
+        raise ValueError(
+            f"Unsupported data type:{type(outputs)} in tensors_clone"
+        )
+
+
 @dataclass
 class TransformerLayerSublayersSpec:
     """
@@ -428,6 +457,7 @@ class TransformerLayer(nn.Layer):
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         in_recompute: bool = False,
+        is_first_fwd: bool = False,
     ):
         """
         Perform a forward pass through the attention layer and the layernorms before and after
@@ -509,9 +539,13 @@ class TransformerLayer(nn.Layer):
                 self.training, self.config.bias_dropout_fusion
             )(attention_output_with_bias, residual, self.hidden_dropout_prob)
 
+        # manually mark tensors that requires gradient in the first forward
+        if is_first_fwd:
+            hidden_states.stop_gradient = False
+
         return hidden_states, context
 
-    def _forward_mlp(self, hidden_states):
+    def _forward_mlp(self, hidden_states, is_first_fwd=False):
         """
         Perform a forward pass through the feed-forward layer.
 
@@ -576,7 +610,6 @@ class TransformerLayer(nn.Layer):
 class TransformerLayerWithOverlap(TransformerLayer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert not self.full_recompute
         assert not self.recompute_mlp
         assert not self.recompute_input_layernorm
         assert not self.recompute_post_attention_layernorm
@@ -590,8 +623,8 @@ class TransformerLayerWithOverlap(TransformerLayer):
             "By enabling `forward_backward_overlap_scheduler`, you should use deepep for dispatching tokens."
         )
 
-    def compute_attention(self, dict_args):
-        return self._forward_attention(**dict_args)
+    def compute_attention(self, dict_args, is_first_fwd=False):
+        return self._forward_attention(**dict_args, is_first_fwd=is_first_fwd)
 
     def compute_mlp(self, hidden_states):
         return self._forward_mlp(hidden_states)
@@ -629,12 +662,14 @@ class TransformerLayerWithOverlap(TransformerLayer):
         )
         return hidden_states, token_indices, token_weights
 
-    def post_process_compute(self, args):
+    def post_process_compute(self, args, is_first_fwd=False):
         mlp_output, residual = args
         with paddle.enable_grad():
             output = self.mlp_bda(
                 self.training, self.config.bias_dropout_fusion
             )((mlp_output, None), residual, self.hidden_dropout_prob)
+        if is_first_fwd:
+            output.stop_gradient = False
         return output
 
 
@@ -672,10 +707,16 @@ class TransformerLayerNode(ScheduleNode):
             node.post_process_compute, name="post_process_compute"
         )
         self.group_id = node.mlp.token_dispatcher._comm_manager.group.id
+        self.full_recompute = node.full_recompute
 
     def forward(self, inputs):
         inputs.pop("dynamic_inference_decode_only", None)
-        hidden_states, context = self.attn_node.forward(inputs)
+        if self.full_recompute:
+            attn_state = tensors_clone(inputs)
+            self.attn_recompute_args = attn_state
+        hidden_states, context = self.attn_node.forward(
+            inputs, is_first_fwd=self.full_recompute
+        )
         (
             residual,
             hidden_states,
@@ -698,7 +739,12 @@ class TransformerLayerNode(ScheduleNode):
         dispatch_fw_event = deep_ep.get_event_from_comm_stream(self.group_id)
         dispatch_fw_event.calc_stream_wait(self.group_id)
 
-        hidden_states = self.mlp_node.forward(hidden_states)
+        if self.full_recompute:
+            mlp_state = tensors_clone(hidden_states)
+            self.mlp_recompute_args = mlp_state
+        hidden_states = self.mlp_node.forward(
+            hidden_states, is_first_fwd=self.full_recompute
+        )
 
         hidden_states = self.combine_node.forward(
             hidden_states, async_finish=True
@@ -710,7 +756,10 @@ class TransformerLayerNode(ScheduleNode):
             (hidden_states, aux_loss, residuals)
         )
 
-        output = self.post_process_node.forward((hidden_states, residual))
+        self.post_process_recompute_args = (hidden_states, residual)
+        output = self.post_process_node.forward(
+            (hidden_states, residual), is_first_fwd=self.full_recompute
+        )
         rst = {"hidden_states": output}
         if context is not None:
             rst["context"] = context
@@ -718,6 +767,8 @@ class TransformerLayerNode(ScheduleNode):
         return rst
 
     def backward(self, output_grad):
+        if self.full_recompute:
+            self.recompute_forward()
         output_grad, residual_grad = self.post_process_node.backward(
             output_grad
         )
@@ -759,6 +810,17 @@ class TransformerLayerNode(ScheduleNode):
         output_grad = self.attn_node.backward(output_grad)
         return output_grad
 
+    def recompute_forward(self):
+        """Recompute the forwarding of mlp, attn and post_process"""
+        self.attn_node.forward(self.attn_recompute_args)
+        del self.attn_recompute_args
+
+        self.mlp_node.forward(self.mlp_recompute_args)
+        del self.mlp_recompute_args
+
+        self.post_process_node.forward(self.post_process_recompute_args)
+        del self.post_process_recompute_args
+
 
 class TransformerLayerOverlappedScheduleNode(ScheduleNode):
     """Overlap schedule for TransformerLayer"""
@@ -773,6 +835,8 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
 
     def forward_backward(self, inputs, output_grad, split_bw=False):
         assert not split_bw
+        if self.backward_node.full_recompute:
+            self.backward_node.recompute_forward()
         # 1. POST(B)
         output_grad, residual_grad = (
             self.backward_node.post_process_node.backward(output_grad)
@@ -788,7 +852,12 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
         )
 
         # 3. ATTN(F)
-        hidden_states, context = self.forward_node.attn_node.forward(inputs)
+        if self.forward_node.full_recompute:
+            attn_state = tensors_clone(inputs)
+            self.forward_node.attn_recompute_args = attn_state
+        hidden_states, context = self.forward_node.attn_node.forward(
+            inputs, is_first_fwd=self.forward_node.full_recompute
+        )
         (
             residual,
             hidden_states,
@@ -826,8 +895,13 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
         )
 
         # 7. MLP(F)
+        if self.forward_node.full_recompute:
+            mlp_state = tensors_clone(hidden_states)
+            self.forward_node.mlp_recompute_args = mlp_state
         dispatch_fw_event.calc_stream_wait(self.forward_node.group_id)
-        hidden_states = self.forward_node.mlp_node.forward(hidden_states)
+        hidden_states = self.forward_node.mlp_node.forward(
+            hidden_states, is_first_fwd=self.forward_node.full_recompute
+        )
 
         # 8. COMBINE(F)
         hidden_states = self.forward_node.combine_node.forward(
@@ -864,8 +938,14 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
         hidden_states = self.forward_node.aux_loss_node.forward(
             (hidden_states, aux_loss, residuals)
         )
+        if self.forward_node.full_recompute:
+            self.forward_node.post_process_recompute_args = (
+                hidden_states,
+                residual,
+            )
         output = self.forward_node.post_process_node.forward(
-            (hidden_states, residual)
+            (hidden_states, residual),
+            is_first_fwd=self.forward_node.full_recompute,
         )
 
         rst = {"hidden_states": output}

@@ -12,9 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import random
+
+import numpy as np
 import paddle
+from paddle import framework
+from paddle.distributed.fleet.meta_parallel.parallel_layers.random import (
+    get_rng_state_tracker,
+)
 
 from .utils import dict_to_tuple_helper
+
+logger = logging.getLogger(__name__)
+
+from paddle.distributed.fleet.recompute import custom_state_manager
+
+if custom_state_manager.custom_get_state_func is None:
+    assert custom_state_manager.custom_set_state_func is None
+    custom_get_state_func = lambda x=None: None
+    custom_set_state_func = lambda x=None: None
+    custom_state_manager.custom_get_state_func = custom_get_state_func
+    custom_state_manager.custom_set_state_func = custom_set_state_func
+
+from paddle.distributed.fleet.recompute.recompute import (
+    switch_rng_state_tracker,
+)
+from paddle.framework import core
 
 
 class ScheduleChunk:
@@ -128,15 +152,90 @@ class ScheduleNode:
         self.labels = None
         self.scale_loss_factor = None
 
-    def forward(self, inputs=(), **kwargs):
+        self.use_recompute = False
+
+    def first_forward(self, inputs=(), **kwargs):
+        """First forward with no grad and preserves RNG and AMP states."""
+        self.use_recompute = True
+
+        # preserve RNG state
+        self.fw_rng_state = paddle.get_rng_state()
+        self.fwd_rng_state_tracker = (
+            get_rng_state_tracker().get_states_tracker()
+        )
+        self.fwd_numpy_state = np.random.get_state()
+        self.fwd_random_state = random.getstate()
+        self.fwd_custom_state = custom_state_manager.custom_get_state_func()
+
+        # preserve AMP state
+        tracer = framework._dygraph_tracer()
+        self.is_fw_autocast = (
+            False if tracer._amp_level == core.AmpLevel.O0 else True
+        )
+        if tracer._amp_level == core.AmpLevel.O2:
+            self.amp_level = "O2"
+        elif tracer._amp_level in (core.AmpLevel.O1, core.AmpLevel.O0):
+            self.amp_level = "O1"
+        else:
+            raise ValueError(f"unsupported amp level: {tracer._amp_level}")
+
+        if tracer._amp_dtype == "float16":
+            self.amp_dtype = "float16"
+        elif tracer._amp_dtype in ("bfloat16", "float32"):
+            self.amp_dtype = "bfloat16"
+        else:
+            raise ValueError(f"unsupported amp dtype: {tracer._amp_dtype}")
+
+        self.amp_white_list, self.amp_black_list = tracer._get_amp_op_list()
+
+        # Forward without grad. No need to call super().forward because we don't
+        # preserve inputs or outputs in the first forward.
+        with paddle.no_grad():
+            outputs = self.fwd_func(inputs, is_first_fwd=True, **kwargs)
+        return outputs
+
+    def forward(self, inputs=(), *, is_first_fwd=False, **kwargs):
+        if is_first_fwd:
+            return self.first_forward(inputs, **kwargs)
         detached_inputs = detach_and_requires_grad(inputs)
         self.inputs = detached_inputs
-        if self.labels is not None:
-            outputs = self.fwd_func(self.inputs, self.labels, **kwargs)
+        if self.use_recompute:
+            with paddle.base.dygraph.guard():
+                tracer = framework._dygraph_tracer()
+                tracer._has_grad = True
+                with (
+                    switch_rng_state_tracker(
+                        self.fw_rng_state,
+                        self.fwd_rng_state_tracker,
+                        self.fwd_numpy_state,
+                        self.fwd_random_state,
+                        self.fwd_custom_state,
+                        custom_state_manager.custom_get_state_func,
+                        custom_state_manager.custom_set_state_func,
+                    ),
+                    paddle.amp.auto_cast(
+                        enable=self.is_fw_autocast,
+                        custom_white_list=self.amp_white_list,
+                        custom_black_list=self.amp_black_list,
+                        level=self.amp_level,
+                        dtype=self.amp_dtype,
+                    ),
+                ):
+                    if self.labels is not None:
+                        outputs = self.fwd_func(
+                            self.inputs, self.labels, **kwargs
+                        )
+                    else:
+                        outputs = self.fwd_func(self.inputs, **kwargs)
+                    if self.scale_loss_factor is not None:
+                        outputs /= self.scale_loss_factor
         else:
-            outputs = self.fwd_func(self.inputs, **kwargs)
-        if self.scale_loss_factor is not None:
-            outputs /= self.scale_loss_factor
+            if self.labels is not None:
+                outputs = self.fwd_func(self.inputs, self.labels, **kwargs)
+            else:
+                outputs = self.fwd_func(self.inputs, **kwargs)
+            if self.scale_loss_factor is not None:
+                outputs /= self.scale_loss_factor
 
         # Do not release the loss tensor.
         clear_dataptr = self.labels is None
