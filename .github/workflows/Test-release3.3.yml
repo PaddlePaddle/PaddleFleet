@@ -98,7 +98,7 @@ jobs:
           git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/8f6f5d431bca637bcfa7810c1d45661ff6d1b1bd/paddlepaddle_gpu-3.4.0.dev20260113-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/d99f03c5d52d253573faa8f825c0e733ffb95476/paddlepaddle_gpu-3.4.0.dev20260113-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "paddle commit:"
