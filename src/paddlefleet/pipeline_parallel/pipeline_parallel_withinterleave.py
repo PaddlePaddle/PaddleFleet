@@ -60,7 +60,6 @@ class P2PAsyncHandle:
         self.forward_handle_wait_fn()
 
     def forward_async_comm(self, output_tensor):
-        output_tensor = dict_to_tuple_helper(output_tensor)
         (
             self.next_forward_virtual_pp_rank,
             self.input_tensor,
