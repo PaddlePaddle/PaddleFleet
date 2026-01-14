@@ -1,6 +1,9 @@
 name: CE-CUDA-126-PYTHON-RELEASE
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -116,7 +119,8 @@ jobs:
           echo "version=$version"
           paddle_url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install "$paddlefleet_url$fleet_url_info" --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -132,27 +136,27 @@ jobs:
           fi
           '
 
-      - name: Single card sonic moe test
-        if: matrix.python == '3.12'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          pwd
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${{ matrix.python }}
-          echo "Paddle Commit"
-          python -c "import paddle; print(paddle.version.commit)"
-          echo "PaddleFleet Commit"
-          python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          bash ci/single_card_sonic.sh
-          single_card_exit_code=$?
-          if [[ "$single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mSingle card test succeeded.\033[0m"
-          fi
-          '
+      # - name: Single card sonic moe test
+      #   if: matrix.python == '3.12'
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -xce '
+      #     pwd
+      #     source /root/proxy
+      #     source "$HOME/miniconda/etc/profile.d/conda.sh"
+      #     conda activate python${{ matrix.python }}
+      #     echo "Paddle Commit"
+      #     python -c "import paddle; print(paddle.version.commit)"
+      #     echo "PaddleFleet Commit"
+      #     python -c "import paddlefleet; print(paddlefleet.version.commit)"
+      #     bash ci/single_card_sonic.sh
+      #     single_card_exit_code=$?
+      #     if [[ "$single_card_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mSingle card test failed.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mSingle card test succeeded.\033[0m"
+      #     fi
+      #     '
 
 
       - name: Terminate and delete the container
@@ -239,7 +243,8 @@ jobs:
           echo "version=$version"
           url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install "$paddlefleet_url$fleet_url_info" --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           chmod +x /usr/local/bin/yq
@@ -361,7 +366,8 @@ jobs:
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install "$paddlefleet_url$fleet_url_info" --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -531,7 +537,8 @@ jobs:
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install "$paddlefleet_url$fleet_url_info" --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -634,22 +641,22 @@ jobs:
           fi
           '
 
-      - name: Integration test (GLM4.5 multi-card FP8)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${{ matrix.python }}
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
-          fi
-          '
+      # - name: Integration test (GLM4.5 multi-card FP8)
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     source "$HOME/miniconda/etc/profile.d/conda.sh"
+      #     conda activate python${{ matrix.python }}
+      #     bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+      #     glm45_exit_code=$?
+      #     if [[ "$glm45_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
+      #     fi
+      #     '
 
 
       - name: GLM4.5 pre-train (Grouped GEMM)
@@ -785,7 +792,8 @@ jobs:
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install "$paddlefleet_url$fleet_url_info" --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '

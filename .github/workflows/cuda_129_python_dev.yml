@@ -1,4 +1,4 @@
-name: CE-CUDA-129-PYTHON-RELEASE
+name: CE-CUDA-129-PYTHON-develop
 
 on:
   schedule:
@@ -41,7 +41,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA129-PYTHON-RELEASE-single-card-test-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-single-card-test-${{ matrix.python }}
     steps:
       - name: Determine the runner
         run: |
@@ -170,7 +170,7 @@ jobs:
         python: [3.11, 3.12, 3.13]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
-      TASK: paddlefleet-CE-CUDA129-PYTHON-RELEASE-multi-card_test-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-multi-card_test-${{ matrix.python }}
     steps:
       - name: Check docker image and run container
         run: |
@@ -284,7 +284,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA129-PYTHON-RELEASE-integration-test-single-card-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-integration-test-single-card-${{ matrix.python }}
     steps:
       - name: Determine the runner
         run: |
@@ -462,7 +462,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA129-PYTHON-RELEASE-integration-test-multi-card-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-integration-test-multi-card-${{ matrix.python }}
     steps:
       - name: Check docker image and run container
         run: |
@@ -716,7 +716,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA129-PYTHON-RELEASE-integration-test-A100-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-integration-test-A100-${{ matrix.python }}
     steps:
       - name: Check docker image and run container
         run: |
