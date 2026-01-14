@@ -22,6 +22,7 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
 )
+from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -80,3 +81,6 @@ class LanguageLoss(FleetLayer):
         ):
             return recompute(self.forward_impl, logits, labels)
         return self.forward_impl(logits, labels)
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="LanguageLoss")

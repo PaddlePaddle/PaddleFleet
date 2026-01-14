@@ -99,7 +99,7 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
     input_ids = data[:, :-1]
     labels = data[:, 1:]
     position_ids = (
-        paddle.to_tensor(data, dtype=paddle.int64)
+        paddle.to_tensor(input_ids, dtype=paddle.int64)
         .repeat((batch_size, 1))
         .cuda()
     )
@@ -113,11 +113,15 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
         [labels],
     )
 
-    loss = gpt_pipe_model.forward_backward_pipeline(inputs)
-    loss.backward()
+    gpt_pipe_model = paddle.amp.decorate(
+        models=gpt_pipe_model, level="O2", dtype="bfloat16"
+    )
+    with paddle.amp.auto_cast(enable=True, dtype="bfloat16"):
+        loss = gpt_pipe_model.forward_backward_pipeline(inputs)
+        loss.backward()
 
     print(f"actual loss: {loss.item()}")
-    loss_baseline = 7.193428039550781
+    loss_baseline = 7.2271623611450195
     np.testing.assert_allclose(
         np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
     )
@@ -125,7 +129,7 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
 
 if __name__ == "__main__":
     seed = 46
-    batch_size = 2
+    batch_size = 1
     seq_len = 128
     vocab_size = 1024
     paddle.set_default_dtype("bfloat16")
@@ -139,7 +143,7 @@ if __name__ == "__main__":
         intermediate_size=1024,
         normalization="RMSNorm",
         fuse_rms_norm=False,
-        apply_rope_fusion=False,
+        apply_rope_fusion=True,
         hidden_dropout_prob=0.0,
         attention_dropout=0.0,
         use_cpu_initialization=False,

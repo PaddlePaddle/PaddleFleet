@@ -91,7 +91,7 @@ def gpt_builder(config, **kwargs):
         max_sequence_length=config.max_sequence_length,
         position_embedding_type=config.position_embedding_type,
         rotary_percent=config.rotary_percent,
-        rotary_base=config.rotary_base,
+        rotary_base=config.rope_theta,
         rope_scaling=config.rope_scaling,
         parallel_output=config.parallel_output,
     )
