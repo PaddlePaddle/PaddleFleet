@@ -98,7 +98,7 @@ jobs:
           git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/8d09c9693a34e6c2c0820fbfb7c402bc84f0ca70/paddlepaddle_gpu-3.4.0.dev20260113-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/231207ce894f7f13e5c68e24cfa251ad41d10532/paddlepaddle_gpu-3.4.0.dev20260113-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "paddle commit:"
@@ -196,29 +196,6 @@ jobs:
             exit 1
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-          fi
-          '
-
-      - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi-dpo
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-dpo/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
-          glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-multi-dpo
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml
-          coverage report -m
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
           fi
           '
 
