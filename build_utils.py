@@ -80,9 +80,22 @@ class EcosystemLibrary:
         self.artifacts = artifacts
         self._extra_env = extra_env or {}
 
+    def _clean_build_artifacts(self) -> None:
+        """Cleans up previous build artifacts in the source directory."""
+        patterns = ["build", "dist", "*.egg-info"]
+        for pattern in patterns:
+            for path in self.source_dir.glob(pattern):
+                logger.info(f"Removing old build artifact: {path}")
+                remove_path(path)
+
     def build(self) -> None:
         """Builds the library."""
         logger.info(f"Building ecosystem library: {self.name}")
+
+        # Clean previous artifacts to prevent nesting or stale builds
+        if self.name == "sonic-moe":
+            self._clean_build_artifacts()
+
         self.install_dir.mkdir(parents=True, exist_ok=True)
 
         # Special pre-build step for DeepGEMM: link CUTLASS headers into deep_gemm/include
