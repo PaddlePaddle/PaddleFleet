@@ -88,13 +88,13 @@ jobs:
           rm -rf * .[^.]*
           set -x
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git
+          cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git submodule update --init --recursive
-          git config --global --add safe.directory /workspace/PaddleFleet
           git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
