@@ -77,7 +77,7 @@ DEEP_EP_HINT = (
 
 SONIC_MOE_HINT = (
     "For developers: guard imports with `is_sonicmoe_available()` and only call `paddlefleet.ops.sonicmoe` when flag branch enabled.\n"
-    "For users: avoid `moe_token_dispatcher_type='deepep'` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 9.0 to enable."
+    "For users: set `using_sonic_moe=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 9.0 to enable."
 )
 
 
