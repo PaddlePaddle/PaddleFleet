@@ -118,8 +118,7 @@ jobs:
   multi-card_test:
     name: Unit test (multi-card)
     runs-on:
-      group: Fleet-H-multi-card
-      labels: [self-hosted, 580]
+      group: fleet-130
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       TASK: paddlefleet-CE-CUDA130-RELEASE-multi-card_test-release
@@ -347,8 +346,7 @@ jobs:
   integration-test-H20-multi-card:
     name: Integration test (H20, multi-card)
     runs-on:
-      group: Fleet-H-multi-card
-      labels: [self-hosted, 580]
+      group: fleet-130
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
