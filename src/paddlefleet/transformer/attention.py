@@ -230,8 +230,10 @@ class Attention(FleetLayer, ABC):
         rotary_pos_emb: Tensor | tuple[Tensor, Tensor] | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
+        in_recompute: bool = False,
     ) -> tuple[Tensor, Tensor]:
         """
         Perform a forward pass through the attention layer.
@@ -316,6 +318,7 @@ class Attention(FleetLayer, ABC):
                     rotary_pos_sin,
                     config=self.config,
                     cu_seqlens=cu_seqlens_q,
+                    position_ids=position_ids,
                     mscale=None,
                     cp_group=self.pg_collection.cp,
                 )
@@ -330,6 +333,7 @@ class Attention(FleetLayer, ABC):
                         None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_q,
+                        position_ids=position_ids,
                         mscale=_yarn_get_concentration_factor_from_config(
                             self.config
                         ),
@@ -344,6 +348,7 @@ class Attention(FleetLayer, ABC):
                         None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_kv,
+                        position_ids=position_ids,
                         mscale=_yarn_get_concentration_factor_from_config(
                             self.config
                         ),
@@ -388,7 +393,8 @@ class Attention(FleetLayer, ABC):
                 attn_mask_type=attn_mask_type,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
-                use_rr_flash_attention=self.use_rr_flash_attention,
+                use_rr_flash_attention=self.use_rr_flash_attention
+                and in_recompute,
             )
         # =================
         # Output. [b, sq, h]

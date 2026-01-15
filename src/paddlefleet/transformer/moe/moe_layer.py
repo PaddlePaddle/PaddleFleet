@@ -26,6 +26,8 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
 )
 
+import paddlefleet
+
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.spec_utils import LayerSpec
@@ -42,7 +44,20 @@ from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
 
-from .moe_utils import permute, unpermute
+if paddlefleet.ops.is_sonic_moe_available():
+    from paddlefleet.ops.sonicmoe.enums import ActivationType
+    from paddlefleet.ops.sonicmoe.functional import (
+        _DownProjection,
+        _UpProjection,
+    )
+
+from .moe_utils import (
+    count_cumsum,
+    filter_scores,
+    fused_expert_parallel_TC_topk_router_metadata,
+    permute,
+    unpermute,
+)
 
 
 @dataclass
@@ -83,9 +98,17 @@ class MoELayer(nn.Layer):
         self.fp8 = config.fp8
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
+        self.using_sonic_moe = self.config.using_sonic_moe
+        if self.using_sonic_moe:
+            assert paddlefleet.ops.is_sonic_moe_available(), (
+                paddlefleet.ops.blocked_import_messages[
+                    "paddlefleet.ops.sonicmoe"
+                ]
+            )
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
+        self.moe_ep_barrier = config.moe_ep_barrier
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -117,7 +140,7 @@ class MoELayer(nn.Layer):
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
-        self.moe_deep_gemm = True
+        self.moe_deep_gemm = False  # Paddle batched_gemm has better performance than DeepGEMM, so disable DeepGEMM.
         if (
             not paddle.device.current_device_is_cpu
             and paddle.device.get_device_capability()[0] < 9
@@ -197,12 +220,20 @@ class MoELayer(nn.Layer):
                     self.num_experts_per_tok,
                     self.num_experts,
                     self.moe_group,
+                    self.moe_ep_barrier,
                 )
             elif self.moe_token_dispatcher_type == "alltoall":
+                local_expert_indices = list(
+                    range(
+                        self.moe_rank * self.num_experts_per_device,
+                        (self.moe_rank + 1) * self.num_experts_per_device,
+                    )
+                )
                 self.token_dispatcher = AllToAllTokenDispatcher(
                     self.moe_group,
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
+                    local_expert_indices,
                 )
             else:
                 raise NotImplementedError(
@@ -313,13 +344,16 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        async_finish: bool = False,
     ):
         hidden_states = self.token_dispatcher.dispatch_preprocess(
             hidden_states, probs, routing_map
         )
         hidden_states, fp8_dispatched_handle = (
             self.token_dispatcher.token_dispatch(
-                hidden_states, self.fp8_dispatch
+                hidden_states,
+                self.fp8_dispatch,
+                async_finish=async_finish,
             )
         )
         return hidden_states, fp8_dispatched_handle
@@ -333,8 +367,10 @@ class MoELayer(nn.Layer):
     def unpermute(self, hidden_states: paddle.Tensor):
         return self.token_dispatcher.combine_preprocess(hidden_states)
 
-    def combine(self, hidden_states: paddle.Tensor):
-        hidden_states = self.token_dispatcher.token_combine(hidden_states)
+    def combine(self, hidden_states: paddle.Tensor, async_finish: bool = False):
+        hidden_states = self.token_dispatcher.token_combine(
+            hidden_states, async_finish=async_finish
+        )
         return self.token_dispatcher.combine_postprocess(hidden_states)
 
     def routed_experts_compute(
@@ -375,24 +411,179 @@ class MoELayer(nn.Layer):
         )
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
 
-        hidden_states = FusionMoePyLayer.apply(
-            dispatched_hidden_states,
-            dispatched_probs,
-            dispatched_indices,
-            self,
-            self.num_experts_per_tok,
-            use_fp8_mlp=self.fp8,
-            moe_deep_gemm=self.moe_deep_gemm,
-            moe_grouped_gemm=self.moe_grouped_gemm,
-            recompute_moe_gate_up=self.recompute_moe_gate_up,
-            recompute_moe_premute=self.recompute_moe_premute,
-            fp8_dispatched_handle=fp8_dispatched_handle,
-            use_bf16_gemm_weight_grad=not self.fp8_wgrad,
-        )
+        if self.using_sonic_moe:
+            T = dispatched_hidden_states.shape[0]
+            K = self.num_experts_per_tok
+            stream_id = paddle.device.cuda.current_stream().cuda_stream
+            topk_scores = filter_scores(
+                dispatched_probs,
+                dispatched_indices,
+            )
+            expert_frequency, expert_frequency_offset = count_cumsum(
+                dispatched_indices, self.num_experts_per_device, do_cumsum=True
+            )
+            activation_type = ActivationType("swiglu")
+
+            (
+                expert_frequency_offset,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+            ) = fused_expert_parallel_TC_topk_router_metadata(
+                dispatched_indices,
+                expert_frequency_offset,
+                K,
+            )
+
+            TK = s_scatter_idx.shape[0]
+            is_varlen_K = True
+            w1 = self.grouped_gemm_experts.weight1
+            y1, z = _UpProjection.apply(
+                dispatched_hidden_states,
+                w1.permute(1, 2, 0),
+                None,
+                expert_frequency_offset,
+                TK,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                is_varlen_K,
+                activation_type,
+                is_inference_mode_enabled=False,
+            )
+
+            w2 = self.grouped_gemm_experts.weight2
+            hidden_states = _DownProjection.apply(
+                y1,
+                z,
+                w2.permute(1, 2, 0),
+                None,
+                topk_scores,
+                expert_frequency_offset,
+                T,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                is_varlen_K,
+                activation_type,
+            )
+        else:
+            hidden_states = FusionMoePyLayer.apply(
+                dispatched_hidden_states,
+                dispatched_probs,
+                dispatched_indices,
+                self,
+                self.num_experts_per_tok,
+                use_fp8_mlp=self.fp8,
+                moe_deep_gemm=self.moe_deep_gemm,
+                moe_grouped_gemm=self.moe_grouped_gemm,
+                recompute_moe_gate_up=self.recompute_moe_gate_up,
+                recompute_moe_premute=self.recompute_moe_premute,
+                fp8_dispatched_handle=fp8_dispatched_handle,
+                use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+            )
+
         hidden_states = self.token_dispatcher._comm_manager.combine(
             hidden_states, combine_overlap_handle
         )
+
         return hidden_states
+
+    def compute_gate(self, hidden_states):
+        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
+            hidden_states = GatherOp.apply(hidden_states)
+        return self.gate(hidden_states)
+
+    def dispatch_preprocess(self, args):
+        hidden_states, token_probs, token_indices = args
+        assert isinstance(self.token_dispatcher, MoEFlexTokenDispatcher)
+        hidden_states = self.token_dispatcher.dispatch_preprocess_overlap(
+            hidden_states, token_probs, token_indices
+        )
+        token_probs = self.token_dispatcher._comm_manager.token_probs
+        token_indices = self.token_dispatcher._comm_manager.token_indices
+        return hidden_states, token_indices, token_probs
+
+    def compute_dispatch(self, args, async_finish=False):
+        hidden_states, token_indices, token_weights = args
+        if self.moe_use_fusion_node:
+            dispatched_hidden_states, fp8_dispatched_handle = (
+                self.token_dispatcher.token_dispatch_overlap(
+                    hidden_states,
+                    token_indices,
+                    token_weights,
+                    self.fp8_dispatch,
+                    async_finish=async_finish,
+                )
+            )
+            dispatched_indices = (
+                self.token_dispatcher._comm_manager.dispatched_indices
+            )
+            dispatched_probs = (
+                self.token_dispatcher._comm_manager.dispatched_probs
+            )
+            return (
+                dispatched_hidden_states,
+                dispatched_indices,
+                dispatched_probs,
+                fp8_dispatched_handle,
+            )
+
+    def compute_experts(self, args):
+        if self.moe_use_fusion_node:
+            (
+                dispatched_hidden_states,
+                dispatched_indices,
+                dispatched_probs,
+                fp8_dispatched_handle,
+            ) = args
+            hidden_states = FusionMoePyLayer.apply(
+                dispatched_hidden_states,
+                dispatched_probs,
+                dispatched_indices,
+                self,
+                self.num_experts_per_tok,
+                use_fp8_mlp=self.fp8,
+                recompute_moe_gate_up=self.recompute_moe_gate_up,
+                recompute_moe_premute=self.recompute_moe_premute,
+                fp8_dispatched_handle=fp8_dispatched_handle,
+                use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+            )
+        else:
+            hidden_states, topk_weights = args
+            hidden_states = self.routed_experts_compute(hidden_states)
+        return hidden_states
+
+    def compute_combine(self, hidden_states, async_finish=False):
+        if self.moe_use_fusion_node:
+            hidden_states = self.token_dispatcher._comm_manager.combine(
+                hidden_states, None, async_finish=async_finish
+            )
+        else:
+            hidden_states = self.combine(hidden_states)
+        return hidden_states
+
+    def aux_loss_compute(self, args):
+        hidden_states, aux_loss, residuals = args
+        if self.training and self.router_aux_loss_coef:
+            aux_loss = aux_loss * self.router_aux_loss_coef
+            output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
+
+        output = output.reshape(residuals.shape)
+        if self.shared_experts is not None:
+            shared_output = self.shared_experts(residuals)[0]
+            output = output + shared_output
+
+        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
+            output = ScatterOp.apply(output)
+        return output
 
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         """
@@ -432,7 +623,6 @@ class MoELayer(nn.Layer):
             }
         else:
             combine_overlap_handle = None
-
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
@@ -544,21 +734,95 @@ class MoELayer(nn.Layer):
         Returns:
             output: Output hidden states, shape: [seq_len, hidden_size]
         """
-        tokens_per_expert = routing_map.sum(axis=0)
-        permuted_local_hidden_states, sorted_indices = permute(
-            hidden_states, routing_map, tokens_per_expert
-        )
-        grouped_expert_out = self.grouped_gemm_experts(
-            permuted_local_hidden_states, tokens_per_expert
-        )[0]
-        final_hidden_states = unpermute(
-            grouped_expert_out,
-            sorted_indices,
-            restore_shape=hidden_states.shape,
-            probs=probs,
-            routing_map=routing_map,
-        )
-        return final_hidden_states.cast(hidden_states.dtype)
+
+        def _convert_routing_map_and_probs(
+            routing_map: paddle.Tensor, probs: paddle.Tensor, topk: int
+        ):
+            routing_map = routing_map.astype("bool")
+            masked_probs = probs * routing_map.astype("float32")
+            weights, indices = paddle.topk(masked_probs, k=topk, axis=-1)
+            return indices, weights
+
+        if self.using_sonic_moe:
+            T = hidden_states.shape[0]
+            K = self.num_experts_per_tok
+            stream_id = paddle.device.cuda.current_stream().cuda_stream
+            selected_indices, topk_scores = _convert_routing_map_and_probs(
+                routing_map, probs, self.num_experts_per_tok
+            )
+            activation_type = ActivationType("swiglu")
+            expert_frequency, expert_frequency_offset = count_cumsum(
+                selected_indices, self.num_experts_per_device, do_cumsum=True
+            )
+
+            (
+                expert_frequency_offset,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+            ) = fused_expert_parallel_TC_topk_router_metadata(
+                selected_indices,
+                expert_frequency_offset,
+                K,
+            )
+
+            s_scatter_idx.stop_gradient = True
+
+            w1 = self.grouped_gemm_experts.weight1
+
+            y1, z = _UpProjection.apply(
+                hidden_states,
+                w1.permute([1, 2, 0]),
+                None,
+                expert_frequency_offset,
+                T * K,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                False,
+                activation_type,
+                is_inference_mode_enabled=False,
+            )
+
+            w2 = self.grouped_gemm_experts.weight2
+            hidden_states = _DownProjection.apply(
+                y1,
+                z,
+                w2.permute([1, 2, 0]),
+                None,
+                topk_scores,
+                expert_frequency_offset,
+                T,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                False,
+                activation_type,
+            )
+            return hidden_states
+        else:
+            tokens_per_expert = routing_map.sum(axis=0)
+            permuted_local_hidden_states, sorted_indices = permute(
+                hidden_states, routing_map, tokens_per_expert
+            )
+            grouped_expert_out = self.grouped_gemm_experts(
+                permuted_local_hidden_states, tokens_per_expert
+            )[0]
+            final_hidden_states = unpermute(
+                grouped_expert_out,
+                sorted_indices,
+                restore_shape=hidden_states.shape,
+                probs=probs,
+                routing_map=routing_map,
+            )
+            return final_hidden_states.cast(hidden_states.dtype)
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         if not (self.moe_use_fusion_node and self.fp8):
