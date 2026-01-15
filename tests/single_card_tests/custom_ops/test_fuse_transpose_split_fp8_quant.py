@@ -17,7 +17,7 @@ import unittest
 import numpy as np
 import paddle
 
-from paddlefleet.ops import fused_transpose_split_quant_custom
+from paddlefleet.ops import fuse_transpose_split_fp8_quant
 
 
 def dequant_ref(
@@ -71,7 +71,7 @@ def test_fused_transpose_split_quant(
         out.append(paddle.empty([x.shape[1], tokens], dtype="float8_e4m3fn"))
         scale.append(paddle.empty([tokens // 128, x.shape[1]], dtype="float32"))
 
-    fused_transpose_split_quant_custom(
+    fuse_transpose_split_fp8_quant(
         x, xscale, out, scale, tokens_per_expert, pow_2_scales, use_ue8m0=False
     )
 

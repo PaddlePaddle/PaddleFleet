@@ -256,7 +256,7 @@ __global__ void __launch_bounds__(512)
       out_ptrs[expert_idx], off_m, tokens_per_expert[expert_idx], shm, K);
 }
 
-void fused_transpose_split_quant_custom(
+void fuse_transpose_split_fp8_quant(
     const paddle::Tensor& x,
     const paddle::optional<paddle::Tensor>& input_scales,
     std::vector<paddle::Tensor>& outs,
@@ -375,7 +375,7 @@ void fused_transpose_split_quant_custom(
 
 // }  // namespace phi
 
-PD_BUILD_OP(fused_transpose_split_quant_custom)
+PD_BUILD_OP(fuse_transpose_split_fp8_quant)
     .Inputs({"x",
              paddle::Optional("input_scales"),
              paddle::Vec("outs"),
@@ -383,4 +383,4 @@ PD_BUILD_OP(fused_transpose_split_quant_custom)
     .Attrs({"tokens_per_expert: std::vector<int64_t>",
             "pow_2_scales: bool",
             "use_ue8m0: bool"})
-    .SetKernelFn(PD_KERNEL(fused_transpose_split_quant_custom));
+    .SetKernelFn(PD_KERNEL(fuse_transpose_split_fp8_quant));
