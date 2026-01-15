@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
+from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.transformer.layer import FleetLayer
 
 
@@ -30,6 +31,9 @@ class EmptyLayer(FleetLayer):
 
     def __init__(self, config: TransformerConfig):
         super().__init__(config)
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="EmptyLayer")
 
     def forward(self, x):
         return x

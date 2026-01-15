@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 import paddle
 
+from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -75,6 +76,9 @@ class GPTEmbedding(FleetLayer):
     def embedding_weight(self):
         return self.embedding.embedding_weight
 
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="GPTEmbedding")
+
     def forward(
         self,
         dict_args: dict,
@@ -83,6 +87,9 @@ class GPTEmbedding(FleetLayer):
     ):
         input_ids = dict_args["input_ids"]
         position_ids = dict_args.get("position_ids", None)
+        position_ids = (
+            position_ids.to("gpu") if position_ids is not None else None
+        )
         attention_mask = dict_args.get("attention_mask", None)
         attn_mask_startend_row_indices = dict_args.get(
             "attn_mask_startend_row_indices", None
@@ -159,6 +166,7 @@ class GPTEmbedding(FleetLayer):
                 rotary_seq_len,
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
+                position_ids=position_ids,
             )
         elif (
             self.position_embedding_type == "mrope"
@@ -184,6 +192,7 @@ class GPTEmbedding(FleetLayer):
             "rotary_pos_emb": rotary_pos_emb,
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
+            "position_ids": position_ids,
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,
         }

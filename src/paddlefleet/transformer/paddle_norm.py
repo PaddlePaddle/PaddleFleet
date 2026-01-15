@@ -40,6 +40,7 @@ except ImportError:
 
 
 from paddlefleet.jit import jit_fuser
+from paddlefleet.pipeline_parallel import ScheduleNode
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -187,6 +188,9 @@ class WrappedPaddleNorm:
             input_is_parallel=input_is_parallel,
         )
 
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="WrappedPaddleNorm")
+
 
 class WrappedFusedNorm:
     def __new__(
@@ -227,6 +231,9 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
         return {"hidden_states": self.norm(hidden_states)}
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="WrappedPaddleNormPipe")
 
 
 class L2Norm(paddle.nn.Layer):
