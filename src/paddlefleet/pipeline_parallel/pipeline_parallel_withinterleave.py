@@ -89,10 +89,6 @@ class PipelineParallelWithInterleave(PipelineParallel):
             ].forward_backward_overlap_scheduler
         )
 
-        if self.overlap_schedule_mode:
-            assert not self._profiling, (
-                "Profiling is not compatible with overlap_schedule_mode."
-            )
         logger.info(f"Using {self._get_scheduler_name()}")
 
         assert layers.get_num_virtual_stages() > 1
@@ -443,6 +439,8 @@ class PipelineParallelWithInterleave(PipelineParallel):
                 self.forward_hooks.run_hook()
 
             forward_inputs = self._get_forward_input(forward_virtual_pp_rank)
+
+            input_tensor_dict, use_dict = tuple_to_dict_helper(forward_inputs)
             if self.is_pipeline_first_stage():
                 forward_inputs = next(micro_dataset)[0]
                 self._check_micro_batch_data_valid(forward_inputs)
@@ -494,7 +492,7 @@ class PipelineParallelWithInterleave(PipelineParallel):
             output_tensor, forward_loss, input_tensor_grad = (
                 self._layers.overlapped_forward_backward(
                     forward_chunk,
-                    forward_inputs,
+                    input_tensor_dict if use_dict else forward_inputs,
                     forward_loss_fn_node,
                     backward_chunk,
                     backward_loss_fn_node,
@@ -503,6 +501,9 @@ class PipelineParallelWithInterleave(PipelineParallel):
                     p2p_async_handle=p2p_async_handle,
                 )
             )
+
+            output_tensor_tuple = dict_to_tuple_helper(output_tensor)
+
             if self.processed_steps < g_profile_pipeline_details_steps:
                 profile_pipeline_details(
                     "[Pipeline details] After_forward_backward_step"
@@ -517,7 +518,7 @@ class PipelineParallelWithInterleave(PipelineParallel):
             self.set_virtual_pipeline_rank(forward_virtual_pp_rank)
             self._store_forward_outputs(
                 forward_virtual_pp_rank,
-                output_tensor,
+                output_tensor_tuple,
                 forward_chunk,
                 forward_loss_fn_node,
             )
@@ -540,7 +541,7 @@ class PipelineParallelWithInterleave(PipelineParallel):
             self.set_virtual_pipeline_rank(backward_virtual_pp_rank)
             self._overlap_comm_grads()
 
-            return output_tensor, input_tensor_grad
+            return output_tensor_tuple, input_tensor_grad
 
     def forward_backward_pipeline(
         self,

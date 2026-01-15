@@ -205,7 +205,7 @@ class StandardMoERouter(nn.Layer):
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
         return aux_loss
 
-    def _cal_seq_aux_loss(self, probs, top_k, routing_map, seq_len):
+    def _cal_seq_aux_loss(self, probs, top_k, routing_map, seq_len, batch_size):
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
             self.tensor_model_parallel_size > 1
@@ -242,7 +242,7 @@ class StandardMoERouter(nn.Layer):
         else:
             # [B, S, E]
             if len(probs.shape) == 2:
-                probs = probs.reshape([1, *probs.shape])
+                probs = probs.reshape([batch_size, seq_len, probs.shape[-1]])
             batch_size, local_seq_len, _ = probs.shape
             all_probs = probs
             routing_map = routing_map.reshape([batch_size, local_seq_len, -1])
@@ -536,7 +536,7 @@ class TopKRouter(StandardMoERouter):
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape
             else:
-                seq_len, batch, d_model = input.shape
+                seq_len, batch_size, d_model = input.shape
             input = input.reshape([-1, d_model])
         elif len(input.shape) == 2:
             raise ValueError(
@@ -603,7 +603,11 @@ class TopKRouter(StandardMoERouter):
         if self.config.router_aux_loss_coef:
             if self.routing_type == "seq_aux_loss":
                 l_aux = self._cal_seq_aux_loss(
-                    gates_ori, self.num_experts_per_tok, mask, seq_len
+                    gates_ori,
+                    self.num_experts_per_tok,
+                    mask,
+                    seq_len,
+                    batch_size,
                 )
             else:
                 l_aux = self._cal_aux_loss(gates, mask)

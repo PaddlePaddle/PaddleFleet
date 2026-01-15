@@ -15,9 +15,9 @@
 # Referred to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
-
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -217,6 +217,7 @@ class TransformerConfig(ModelParallelConfig):
     """If True, run attention masking and softmax in fp32. This should be True if
     apply_query_key_layer_scaling is True."""
 
+    high_precision_rope: bool = False
     ####################
     # fusion
     ####################
@@ -382,6 +383,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
+    moe_ep_barrier: bool = True
+    """Whether to use barrier for expert parallelism."""
+
     ##################
     # Context Parallel
     ##################
@@ -466,6 +470,9 @@ class TransformerConfig(ModelParallelConfig):
     """When set to True, clone the output of scatter_to_sequence_parallel_region in embedding layer
     to facilitate garbage collection of input."""
 
+    using_sonic_moe: bool = False
+    """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
+
     @classmethod
     def from_config(cls, config_dict):
         # note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
@@ -492,7 +499,10 @@ class TransformerConfig(ModelParallelConfig):
 
         if key == "hidden_act":
             if isinstance(value, str):
-                func = getattr(F, value)
+                if value == "gelu_pytorch_tanh":
+                    func = functools.partial(F.gelu, approximate=True)
+                else:
+                    func = getattr(F, value)
                 setattr(self, key, func)
             elif callable(value):
                 setattr(self, key, value)

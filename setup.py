@@ -39,7 +39,7 @@ def get_cuda_special_dependencies(cuda_major, cuda_minor):
     minor = sys.version_info.minor
     ver_str = f"{major}{minor}"
     deps = [
-        f"paddlepaddle-gpu @ https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/cbf3469113cd76b7d5f4cba7b8d7d5f55d9e9911/paddlepaddle_gpu-3.3.0-cp{ver_str}-cp{ver_str}-linux_x86_64.whl",
+        "paddlepaddle-gpu==3.3.0",
         "triton",  # for deep_gemm, flashmask
         "nvidia-cutlass-dsl==4.2.1",  # for sonic_moe
         "filelock",  # for sonic_moe
@@ -144,6 +144,9 @@ def setup_ops_extension():
             "./src/paddlefleet/_extensions/tokens_unzip_slice.cu",
             "./src/paddlefleet/_extensions/fuse_swiglu_scale.cu",
             "./src/paddlefleet/_extensions/swiglu_kernel.cu",
+            "./src/paddlefleet/_extensions/router_metadata.cu",
+            "./src/paddlefleet/_extensions/count_cumsum.cu",
+            "./src/paddlefleet/_extensions/filter_scores.cu",
             "./src/paddlefleet/_extensions/fuse_transpose_split_fp8_quant.cu",
         ],
         include_dirs=[
