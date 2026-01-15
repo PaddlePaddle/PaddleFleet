@@ -266,10 +266,9 @@ class FusedDispatch(PyLayer):
                 x,
                 quant_method="1x128",
                 input_transpose=False,
-                output_scale_transpose=True,
+                output_scale_transpose=False,
                 return_transpose_only=False,
             )
-            scale = scale.T
             x = (x_fp8, scale)
         recv_x, recv_token_probs, states, event = fused_dispatch_forward_func(
             x,
