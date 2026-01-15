@@ -97,6 +97,7 @@ def run_pp(
         "pp_configs": {
             "forward_backward_overlap_scheduler": forward_backward_overlap_scheduler,
             "overlap_p2p_comm": True,
+            "enable_dynamic_shape": True,
         },
     }
     micro_batch_size = 1
