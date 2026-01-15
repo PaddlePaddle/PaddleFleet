@@ -273,11 +273,13 @@ class ParallelBase(ABC):
 
 
 class NoPipelineParallel(nn.Layer, ParallelBase):
-    def __init__(self, layers, strategy):
+    def __init__(self, layers, strategy, hcg=None):
         assert isinstance(layers, PipelineLayer)
         super().__init__()
         self._layers = layers
         self._strategy = strategy
+        self._hcg = hcg
+
         self.micro_batch_size = self._strategy.pipeline_configs[
             "micro_batch_size"
         ]
@@ -295,6 +297,46 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
 
         # default loss function index
         self.loss_fn_idx = 0
+
+        if self._hcg is not None:
+            self.use_data_parallel = (
+                self._hcg.get_data_parallel_world_size() > 1
+            )
+            self.use_model_parallel = (
+                self._hcg.get_model_parallel_world_size() > 1
+            )
+            self.use_sep_parallel = self._hcg.get_sep_parallel_world_size() > 1
+            self.use_sharding_parallel = (
+                self._hcg.get_sharding_parallel_world_size() > 1
+            )
+            self.use_moe_sharding_parallel = (
+                self._hcg.get_moe_sharding_parallel_world_size() > 1
+            )
+
+            self.dp_group = self._hcg.get_data_parallel_group()
+            # fused sep and dp
+            if self.use_sep_parallel:
+                self.dp_group = self._hcg.get_dp_sep_parallel_group()
+
+            if self.use_model_parallel:
+                logger.info("start broadcast mp parameters")
+                broadcast_mp_parameters(self._layers, self._hcg)
+
+            if self.use_sep_parallel:
+                logger.info("start broadcast sep parameters")
+                broadcast_sep_parameters(self._layers, self._hcg)
+
+            if self.use_sharding_parallel:
+                logger.info("start broadcast sharding parameters")
+                broadcast_sharding_parameters(self._layers, self._hcg)
+
+            if self.use_data_parallel:
+                logger.info("start broadcast dp parameters")
+                broadcast_dp_parameters(self._layers, self._hcg)
+
+            if self.use_moe_sharding_parallel:
+                logger.info("start broadcast moe_sharding parameters")
+                broadcast_moe_sharding_parameters(self._layers, self._hcg)
 
     def is_pipeline_last_stage(self, ignore_virtual=False):
         return True
