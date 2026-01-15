@@ -280,7 +280,7 @@ jobs:
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
-          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"
@@ -413,7 +413,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
@@ -619,7 +619,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
