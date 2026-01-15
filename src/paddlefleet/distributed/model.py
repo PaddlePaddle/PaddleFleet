@@ -165,6 +165,6 @@ def distributed_model(model):
                 )
 
     else:
-        model = NoPipelineParallel(model, strategy=strategy)
+        model = NoPipelineParallel(model, strategy=strategy, hcg=fleet_env._hcg)
 
     return model
