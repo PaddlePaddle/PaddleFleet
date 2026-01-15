@@ -507,7 +507,7 @@ std::vector<paddle::Tensor> FusedWeightedSwigluActQuantKernel(
   return {out, scale};
 }
 
-PD_BUILD_OP(fused_weighted_swiglu_act_quant_custom)
+PD_BUILD_OP(fuse_weighted_swiglu_fp8_quant)
     .Inputs({"expert_out_list", paddle::Optional("prob")})
     .Attrs({"using_pow2_scaling: bool", "use_ue8m0: bool"})
     .Outputs({"out", "scale"})

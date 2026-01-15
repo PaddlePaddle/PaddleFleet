@@ -20,7 +20,7 @@ import paddle.incubate.nn.functional as F
 
 paddle.compat.enable_torch_proxy()
 
-from paddlefleet.ops import deep_gemm, fused_weighted_swiglu_act_quant_custom
+from paddlefleet.ops import deep_gemm, fuse_weighted_swiglu_fp8_quant
 from paddlefleet.ops.deep_gemm.testing import (
     get_arch_major,
 )
@@ -60,10 +60,8 @@ class TestSPAQ(unittest.TestCase):
 
         golden_res = F.swiglu(x) * prob
 
-        fp8_x_out_ref, fp32_x_scale_ref = (
-            fused_weighted_swiglu_act_quant_custom(
-                x, prob, using_pow2_scaling=False, use_ue8m0=False
-            )
+        fp8_x_out_ref, fp32_x_scale_ref = fuse_weighted_swiglu_fp8_quant(
+            x, prob, using_pow2_scaling=False, use_ue8m0=False
         )
 
         dequantized_res = self.dequantize_fp8_to_bf16(
@@ -105,10 +103,8 @@ class TestSPAQ(unittest.TestCase):
         weight_x.stop_gradient = False
 
         # spaq test with using_pow2_scaling=True, use_ue8m0=False
-        fp8_x_out_ref, fp32_x_scale_ref = (
-            fused_weighted_swiglu_act_quant_custom(
-                x, prob, using_pow2_scaling=True, use_ue8m0=False
-            )
+        fp8_x_out_ref, fp32_x_scale_ref = fuse_weighted_swiglu_fp8_quant(
+            x, prob, using_pow2_scaling=True, use_ue8m0=False
         )
         out_ref = paddle.empty([M, N], dtype="bfloat16")
         deep_gemm.fp8_gemm_nt(
@@ -118,7 +114,7 @@ class TestSPAQ(unittest.TestCase):
         )
 
         # spaq test with using_pow2_scaling=True, use_ue8m0=True
-        fp8_x_out, ue8m0_x_scale = fused_weighted_swiglu_act_quant_custom(
+        fp8_x_out, ue8m0_x_scale = fuse_weighted_swiglu_fp8_quant(
             x, prob, using_pow2_scaling=True, use_ue8m0=True
         )
         out = paddle.empty([M, N], dtype="bfloat16")

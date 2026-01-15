@@ -27,7 +27,7 @@ class TestOpsImport(unittest.TestCase):
         "fused_swiglu_scale",
         "fused_swiglu_scale_bwd",
         "fused_swiglu_bwd",
-        "fused_weighted_swiglu_act_quant_custom",
+        "fuse_weighted_swiglu_fp8_quant",
     ]
 
     def setUp(self):
