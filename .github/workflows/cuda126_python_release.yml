@@ -27,6 +27,7 @@ env:
   paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/cbf3469113cd76b7d5f4cba7b8d7d5f55d9e9911/"
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.1.0/latest/cu126/"
   fleet_branch: "release/0.1.0"
+  formers_branch: "release/v1.0"
 
 
 
@@ -303,6 +304,7 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
+            -e formers_branch \
             -e CI_name \
             -e paddle_url \
             -e fleet_branch \
@@ -370,7 +372,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git checkout c17cad10329e512b105f41c19fe14475bc012d55
+          git checkout $formers_branch
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
@@ -481,6 +483,7 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e paddle_url \
+            -e formers_branch \
             -e paddlefleet_url \
             -e fleet_branch \
             -e PIP_CACHE_DIR \
@@ -547,7 +550,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git checkout c17cad10329e512b105f41c19fe14475bc012d55
+          git checkout $formers_branch
           git log -1
           py="${{ matrix.python }}"
           version="${py//./}"
@@ -724,6 +727,7 @@ jobs:
             -e CACHE_DIR \
             -e paddle_url \
             -e paddlefleet_url \
+            -e formers_branch \
             -e fleet_branch \
             -e no_proxy \
             -e CI_name \
@@ -789,7 +793,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git checkout c17cad10329e512b105f41c19fe14475bc012d55
+          git checkout $formers_branch
           git log -1
           py="${{ matrix.python }}"
           version="${py//./}"
