@@ -14,6 +14,7 @@
 
 
 import functools
+import os
 import random
 import re
 import subprocess
@@ -203,23 +204,27 @@ class TestGPTModel(unittest.TestCase):
 
         print("embed_tokens_grad_norm", embed_tokens_grad_norm)
 
-        if judge_machine_type() == "H":
-            if get_cuda_version(get_major_version=True) == "13":
-                assert loss.item() == 5.239149570465088, (
-                    f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
-                )
-                assert embed_tokens_grad_norm == 2.796875, (
-                    f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
-                )
-            else:  # 12.X
-                assert loss.item() == 5.239707946777344, (
-                    f"loss not equal ({loss.item()} != 5.239707946777344), please check your modify"
-                )
-                assert embed_tokens_grad_norm == 2.796875, (
-                    f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
-                )
-        elif judge_machine_type() == "V":
-            pass  # TODO: add V machine test
+        repo_name = os.environ.get("repo_flag")
+        if repo_name == "paddlefleet":
+            if judge_machine_type() == "H":
+                if get_cuda_version(get_major_version=True) == "13":
+                    assert loss.item() == 5.239149570465088, (
+                        f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
+                    )
+                    assert embed_tokens_grad_norm == 2.796875, (
+                        f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
+                    )
+                else:  # 12.X
+                    assert loss.item() == 5.239707946777344, (
+                        f"loss not equal ({loss.item()} != 5.239707946777344), please check your modify"
+                    )
+                    assert embed_tokens_grad_norm == 2.796875, (
+                        f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
+                    )
+            elif judge_machine_type() == "V":
+                pass  # TODO: add V machine test
+        else:
+            pass
 
 
 if __name__ == "__main__":

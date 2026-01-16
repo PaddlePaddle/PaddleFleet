@@ -22,6 +22,9 @@ from paddlefleet.pipeline_parallel import (
     PipelineLayer,
     SharedLayerDesc,
 )
+from paddlefleet.pipeline_parallel.pp_utils.utils import (
+    dict_to_tuple_helper,
+)
 
 if TYPE_CHECKING:
     from paddlefleet.spec_utils import LayerSpec
@@ -308,6 +311,7 @@ class GPTModel(PipelineLayer):
         # forward_inputs = forward_chunk.forward(forward_inputs)
 
         if p2p_async_handle is not None:
+            forward_inputs = dict_to_tuple_helper(forward_inputs)
             p2p_async_handle.forward_async_comm(forward_inputs)
             p2p_async_handle.backward_async_comm(backward_input_grads)
 
