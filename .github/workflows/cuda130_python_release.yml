@@ -1,6 +1,9 @@
 name: CE-CUDA-130-PYTHON-RELEASE
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -381,6 +384,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout c17cad10329e512b105f41c19fe14475bc012d55
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
@@ -492,6 +496,7 @@ jobs:
             -e CI_name \
             -e paddle_url \
             -e paddlefleet_url \
+            -e fleet_branch \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
@@ -530,6 +535,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${fleet_branch}
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
@@ -555,6 +561,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout c17cad10329e512b105f41c19fe14475bc012d55
           git log -1
           py="${{ matrix.python }}"
           version="${py//./}"
@@ -748,6 +755,7 @@ jobs:
             -e CACHE_DIR \
             -e paddle_url \
             -e paddlefleet_url \
+            -e fleet_branch \
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
@@ -787,6 +795,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
           py="${{ matrix.python }}"
           version="${py//./}"
@@ -811,6 +820,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout c17cad10329e512b105f41c19fe14475bc012d55
           git log -1
           py="${{ matrix.python }}"
           version="${py//./}"
