@@ -275,9 +275,6 @@ __global__ void FusedSPAQKernelVec8(const phi::bfloat16* __restrict__ Xin,
     if (in_x_idx >= cols / 2) [[unlikely]]
       continue;
 
-    // // Mask for warp syncs, handle divergence
-    // const unsigned int mask = __activemask();
-
     float p_t0;
     if constexpr (with_prob) {
       // Prefetch prob
