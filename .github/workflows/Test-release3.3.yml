@@ -161,6 +161,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e repo_flag="paddlefleet" \
             -w /paddle --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -264,6 +265,7 @@ jobs:
             -e GITHUB_EVENT_PULL_REQUEST_NUMBER="${{ github.event.pull_request.number }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -e repo_flag="paddlefleet" \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
