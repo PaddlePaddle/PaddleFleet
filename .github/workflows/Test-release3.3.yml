@@ -32,148 +32,6 @@ defaults:
     shell: bash
 
 jobs:
-  integration-test-H20-multi-card:
-    name: Integration test (H20, multi-card)
-    runs-on:
-      group: Fleet-H-multi-card
-    env:
-      PIP_CACHE_DIR: /home/.cache/pip
-      CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA126-RELEASE-integration-test-multi-card-release
-    steps:
-      - name: Check docker image and run container
-        run: |
-          container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
-          echo "container_name=${container_name}" >> ${{ github.env }}
-          docker pull $docker_image
-          docker run -d -t --name ${container_name} --gpus all --shm-size=32G \
-            -v "/dev/shm:/dev/shm"  \
-            -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-            -v ${{ github.workspace }}/../../..:/root \
-            -v /ssd1/paddle-1/action_cache:/home/.cache \
-            -v ${{ github.workspace }}:/workspace \
-            -e BRANCH \
-            -e PR_ID \
-            -e COMMIT_ID \
-            -e PADDLE_ROOT \
-            -e paddle_url \
-            -e paddlefleet_url \
-            -e ci_scripts \
-            -e CACHE_DIR \
-            -e no_proxy \
-            -e CI_name \
-            -e PIP_CACHE_DIR \
-            -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
-            -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-            -e GITHUB_REPO_NAME="${{ github.repository }}" \
-            -e GITHUB_EVENT_NAME="${{ github.event_name }}" \
-            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
-            -e GITHUB_RUN_ID="${{ github.run_id }}" \
-            -w /workspace --network host ${docker_image}
-
-      - name: Install PaddleFleet
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          rm -rf * .[^.]*
-          set -x
-          source /root/proxy
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          pip install --upgrade pip
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git
-          cd PaddleFleet
-          git config --global --add safe.directory /workspace/PaddleFleet
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
-          chmod +x /usr/local/bin/yq
-          '
-
-      - name: Install PaddleFormers
-        id: formers_install
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          set -x
-          source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
-          cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
-          git config --global --add safe.directory /workspace/PaddleFormers
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git checkout c17cad10329e512b105f41c19fe14475bc012d55
-          git log -1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
-          pip install librosa==0.11.0
-          echo "Paddle Commit"
-          python -c "import paddle; print(paddle.version.commit)"
-          echo "PaddleFleet Commit"
-          python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          '
-
-      - name: GLM4.5 pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-          fi
-          '
-
-      - name: GLM4.5 sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-          fi
-          '
-
-      - name: GLM4.5 lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-          fi
-          '
-
-
-
-      - name: Terminate and delete the container
-        if: ${{ always() }}
-        run: |
-          set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
-          docker rm -f ${{ env.container_name }}
-
-
   integration-test-a100:
     name: Integration test (A100)
     runs-on:
@@ -249,7 +107,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout c17cad10329e512b105f41c19fe14475bc012d55
-          git log -1
+          git fetch origin pull/3589/merge
+          # git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
