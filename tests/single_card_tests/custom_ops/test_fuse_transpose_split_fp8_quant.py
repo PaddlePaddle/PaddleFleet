@@ -52,7 +52,7 @@ def fused_transpose_split_quant_ref(x, xscale, tokens_per_expert, pow_2_scales):
     return out, scale
 
 
-def test_fused_transpose_split_quant(
+def simulate_fused_transpose_split_quant(
     tokens_per_expert, seq_len, pow_2_scales, using_fp8=False
 ):
     x = paddle.randn([sum(tokens_per_expert), seq_len], dtype="bfloat16")
@@ -90,34 +90,34 @@ class TestFusedTransposeSplitQuant(unittest.TestCase):
     def test_all(self):
         fp8_choice = [True, False]
         for using_fp8 in fp8_choice:
-            test_fused_transpose_split_quant(
+            simulate_fused_transpose_split_quant(
                 [0, 0], 1024, False, using_fp8=using_fp8
             )
-            test_fused_transpose_split_quant(
+            simulate_fused_transpose_split_quant(
                 [128, 2 * 128], 0, True, using_fp8=using_fp8
             )
-            test_fused_transpose_split_quant(
+            simulate_fused_transpose_split_quant(
                 [128], 1, False, using_fp8=using_fp8
             )
-            test_fused_transpose_split_quant(
+            simulate_fused_transpose_split_quant(
                 [0, 128, 0, 2 * 128], 127, True, using_fp8=using_fp8
             )
-            test_fused_transpose_split_quant(
+            simulate_fused_transpose_split_quant(
                 [3 * 128, 4 * 128, 5 * 128], 233, False, using_fp8=using_fp8
             )
-            test_fused_transpose_split_quant(
+            simulate_fused_transpose_split_quant(
                 [24 * 128, 128, 50 * 128, 16 * 128],
                 2162,
                 True,
                 using_fp8=using_fp8,
             )
-            test_fused_transpose_split_quant(
+            simulate_fused_transpose_split_quant(
                 [7 * 128, 29 * 128, 3 * 128, 128 * 128, 13 * 128],
                 4000,
                 False,
                 using_fp8=using_fp8,
             )
-            test_fused_transpose_split_quant(
+            simulate_fused_transpose_split_quant(
                 [
                     18 * 128,
                     5 * 128,

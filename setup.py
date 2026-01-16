@@ -136,6 +136,7 @@ def setup_ops_extension():
         sources=[
             # cpp files
             # cuda files
+            "./src/paddlefleet/_extensions/fuse_transpose_split_fp8_quant.cu",
             "./src/paddlefleet/_extensions/tokens_stable_unzip.cu",
             "./src/paddlefleet/_extensions/tokens_unzip_gather.cu",
             "./src/paddlefleet/_extensions/tokens_zip_unique_add.cu",
@@ -147,7 +148,6 @@ def setup_ops_extension():
             "./src/paddlefleet/_extensions/router_metadata.cu",
             "./src/paddlefleet/_extensions/count_cumsum.cu",
             "./src/paddlefleet/_extensions/filter_scores.cu",
-            "./src/paddlefleet/_extensions/fuse_transpose_split_fp8_quant.cu",
         ],
         include_dirs=[
             os.path.join(os.getcwd(), "src/paddlefleet/_extensions"),
