@@ -289,6 +289,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout c17cad10329e512b105f41c19fe14475bc012d55
+          sed -i '15a import importlib.metadata' paddleformers/utils/import_utils.py
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
@@ -296,10 +297,6 @@ jobs:
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
-          D=/tmp/pyfix
-          mkdir -p "$D"
-          printf '%s\n' 'import importlib,importlib.metadata;importlib.metadata=importlib.metadata' > "$D/sitecustomize.py"
-          export PYTHONPATH="$D:$PYTHONPATH"
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -435,14 +432,11 @@ jobs:
           git config pull.rebase false
           git checkout c17cad10329e512b105f41c19fe14475bc012d55
           git log -1
+          sed -i '15a import importlib.metadata' paddleformers/utils/import_utils.py
           pip install blinker==1.9.0 --ignore-installed
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
-          D=/tmp/pyfix
-          mkdir -p "$D"
-          printf '%s\n' 'import importlib,importlib.metadata;importlib.metadata=importlib.metadata' > "$D/sitecustomize.py"
-          export PYTHONPATH="$D:$PYTHONPATH"
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -648,14 +642,11 @@ jobs:
           git config pull.rebase false
           git checkout c17cad10329e512b105f41c19fe14475bc012d55
           git log -1
+          sed -i '15a import importlib.metadata' paddleformers/utils/import_utils.py
           pip install blinker==1.9.0 --ignore-installed
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
-          D=/tmp/pyfix
-          mkdir -p "$D"
-          printf '%s\n' 'import importlib,importlib.metadata;importlib.metadata=importlib.metadata' > "$D/sitecustomize.py"
-          export PYTHONPATH="$D:$PYTHONPATH"
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
