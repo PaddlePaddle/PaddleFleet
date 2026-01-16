@@ -107,7 +107,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout c17cad10329e512b105f41c19fe14475bc012d55
-          git fetch origin pull/3589/merge
+          sed -i -e '15a\' -e 'import importlib.metadata' paddleformers/utils/import_utils.py
           # git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
