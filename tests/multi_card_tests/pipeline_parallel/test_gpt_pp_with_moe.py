@@ -206,7 +206,7 @@ class TestPP(unittest.TestCase):
 
         print(overlap_loss._md5sum())
 
-        rst = []
+        rst = {}
 
         for name, param in overlap_gpt_model.named_parameters():
             rst[name] = param.grad._md5sum()
