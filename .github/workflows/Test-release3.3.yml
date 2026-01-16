@@ -107,14 +107,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout c17cad10329e512b105f41c19fe14475bc012d55
-          python - << 'EOF'
-          from pathlib import Path
-          p = Path('paddleformers/utils/import_utils.py')
-          lines = p.read_text().splitlines()
-          lines.insert(15, 'import importlib.metadata')
-          p.write_text('\n'.join(lines) + '\n')
-          EOF
-          "
+          cp ../PaddleFleet/ci/change.sh .
+          bash change.sh
           # git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
