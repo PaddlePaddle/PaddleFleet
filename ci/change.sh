@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ILE="paddleformers/utils/import_utils.py"
+FILE="paddleformers/utils/import_utils.py"
 LINE=15
 TEXT="import importlib.metadata"
 
