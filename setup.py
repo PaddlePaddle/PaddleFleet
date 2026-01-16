@@ -75,13 +75,13 @@ class CustomBdistWheel(_bdist_wheel):
             logging.debug(f"No build directory found at: {build_dir}")
             return
 
-        for file in (Path(wheel_dir) / "paddlefleet" / "_extensions").glob(
-            "*.{cu,h,txt}"
-        ):
-            try:
-                os.remove(file)
-            except:
-                pass
+        extensions_path = Path(wheel_dir) / "paddlefleet" / "_extensions"
+        for ext in (".cu", ".h", ".txt"):
+            for file in extensions_path.glob(f"*{ext}"):
+                try:
+                    os.remove(file)
+                except Exception:
+                    pass
 
         if not self._is_all_o_files(build_dir):
             logging.info(
