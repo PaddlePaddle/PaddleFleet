@@ -389,13 +389,15 @@ jobs:
           version="${py//./}"
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
-          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: Proprocess for integration test
@@ -559,7 +561,7 @@ jobs:
           version="${py//./}"
           echo "version=$version"
           url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
@@ -568,6 +570,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: GLM4.5 pre-train
@@ -812,7 +816,7 @@ jobs:
           version="${py//./}"
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
-          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
@@ -821,6 +825,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: GLM4.5 pre-train
