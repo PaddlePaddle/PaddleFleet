@@ -144,9 +144,11 @@ def setup_ops_extension():
             "./src/paddlefleet/_extensions/tokens_unzip_slice.cu",
             "./src/paddlefleet/_extensions/fuse_swiglu_scale.cu",
             "./src/paddlefleet/_extensions/swiglu_kernel.cu",
+            "./src/paddlefleet/_extensions/fuse_weighted_swiglu_fp8_quant.cu",
             "./src/paddlefleet/_extensions/router_metadata.cu",
             "./src/paddlefleet/_extensions/count_cumsum.cu",
             "./src/paddlefleet/_extensions/filter_scores.cu",
+            "./src/paddlefleet/_extensions/fuse_stack_transpose_fp8_quant.cu",
         ],
         include_dirs=[
             os.path.join(os.getcwd(), "src/paddlefleet/_extensions"),

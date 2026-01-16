@@ -281,8 +281,8 @@ class ScheduleNode:
         # grad = tuple([e.grad if e is not None and not e.stop_gradient else None for e in inputs])
         self._reset_states()
 
-        if len(grad) == 1:
-            grad = grad[0]
+        # if len(grad) == 1:
+        #     grad = grad[0]
         return grad
 
     def _reset_states(self):
