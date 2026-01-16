@@ -194,11 +194,6 @@ class TestFusedStackTransposeQuant(unittest.TestCase):
 
         scale_false_np = scale_false.numpy()
         scale_true_np = scale_true.numpy()
-        scale_32_false_np = scale_32_false.numpy()
-
-        print(f"Scale False shape: {scale_false_np.shape}")
-        print(f"Scale True shape: {scale_true_np.shape}")
-        print(f"Scale 32 True shape: {scale_32_false_np.shape}")
 
         scale_false_T = scale_false_np.T
 
@@ -259,11 +254,6 @@ class TestFusedStackTransposeQuant(unittest.TestCase):
 
         scale_false_np = scale_false.numpy()
         scale_true_np = scale_true.numpy()
-        scale_32_false_np = scale_32_false.numpy()
-
-        print(f"Scale False shape: {scale_false_np.shape}")
-        print(f"Scale True shape: {scale_true_np.shape}")
-        print(f"Scale 32 True shape: {scale_32_false_np.shape}")
 
         scale_false_T = scale_false_np.T
 
