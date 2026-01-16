@@ -16,6 +16,7 @@
 import logging
 import os
 import shutil
+from pathlib import Path
 
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
@@ -91,6 +92,15 @@ class CustomBdistWheel(_bdist_wheel):
 
         if hasattr(self, "bdist_dir") and self.bdist_dir:
             self._clean_build_dir(self.bdist_dir)
+            extensions_path = (
+                Path(self.bdist_dir) / "paddlefleet" / "_extensions"
+            )
+            for ext in (".cu", ".h", ".txt"):
+                for file in extensions_path.glob(f"*{ext}"):
+                    try:
+                        os.remove(file)
+                    except Exception:
+                        pass
 
         if generator is not None:
             super().write_wheelfile(wheelfile_base, generator=generator)
