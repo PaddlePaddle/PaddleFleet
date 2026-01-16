@@ -75,14 +75,6 @@ class CustomBdistWheel(_bdist_wheel):
             logging.debug(f"No build directory found at: {build_dir}")
             return
 
-        extensions_path = Path(wheel_dir) / "paddlefleet" / "_extensions"
-        for ext in (".cu", ".h", ".txt"):
-            for file in extensions_path.glob(f"*{ext}"):
-                try:
-                    os.remove(file)
-                except Exception:
-                    pass
-
         if not self._is_all_o_files(build_dir):
             logging.info(
                 f"Skipping removal of {build_dir} (contains non-.o files)"
@@ -100,6 +92,15 @@ class CustomBdistWheel(_bdist_wheel):
 
         if hasattr(self, "bdist_dir") and self.bdist_dir:
             self._clean_build_dir(self.bdist_dir)
+            extensions_path = (
+                Path(self.bdist_dir) / "paddlefleet" / "_extensions"
+            )
+            for ext in (".cu", ".h", ".txt"):
+                for file in extensions_path.glob(f"*{ext}"):
+                    try:
+                        os.remove(file)
+                    except Exception:
+                        pass
 
         if generator is not None:
             super().write_wheelfile(wheelfile_base, generator=generator)
