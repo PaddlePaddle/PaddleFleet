@@ -15,7 +15,6 @@
 
 import logging
 import os
-import shutil
 
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
@@ -56,46 +55,24 @@ def get_cuda_special_dependencies(cuda_major, cuda_minor):
 
 
 class CustomBdistWheel(_bdist_wheel):
-    """Custom bdist_wheel that removes .o files from wheel before packaging."""
+    def _should_remove(self, filename):
+        return filename.endswith(".o") or filename.endswith(".cu")
 
-    def _is_all_o_files(self, dir_path):
-        """Check if directory contains only .o files recursively."""
-        for root, dirs, files in os.walk(dir_path):
+    def _clean_files(self, wheel_dir):
+        if not os.path.exists(wheel_dir):
+            return
+
+        for root, dirs, files in os.walk(wheel_dir):
             for file in files:
-                if not file.endswith(".o"):
-                    return False
-        return True
-
-    def _clean_build_dir(self, wheel_dir):
-        """Remove build directory if it contains only .o files."""
-        build_dir = os.path.join(wheel_dir, "build")
-
-        if not os.path.exists(build_dir):
-            logging.debug(f"No build directory found at: {build_dir}")
-            return
-
-        if not self._is_all_o_files(build_dir):
-            logging.info(
-                f"Skipping removal of {build_dir} (contains non-.o files)"
-            )
-            return
-
-        try:
-            shutil.rmtree(build_dir)
-            logging.info(f"Removed build directory (all .o files): {build_dir}")
-        except Exception as e:
-            logging.warning(f"Failed to remove directory {build_dir}: {e}")
-
-    def write_wheelfile(self, wheelfile_base, generator=None):
-        """Override to clean .o files before writing wheel."""
-
-        if hasattr(self, "bdist_dir") and self.bdist_dir:
-            self._clean_build_dir(self.bdist_dir)
-
-        if generator is not None:
-            super().write_wheelfile(wheelfile_base, generator=generator)
-        else:
-            super().write_wheelfile(wheelfile_base)
+                if self._should_remove(file):
+                    file_path = os.path.join(root, file)
+                    try:
+                        os.remove(file_path)
+                        logging.debug(f"Removed source/temp file: {file_path}")
+                    except Exception as e:
+                        logging.warning(
+                            f"Failed to remove file {file_path}: {e}"
+                        )
 
 
 def setup_ops_extension():
