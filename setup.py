@@ -16,6 +16,7 @@
 import logging
 import os
 import shutil
+from pathlib import Path
 
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
@@ -73,6 +74,14 @@ class CustomBdistWheel(_bdist_wheel):
         if not os.path.exists(build_dir):
             logging.debug(f"No build directory found at: {build_dir}")
             return
+
+        for file in (Path(wheel_dir) / "paddlefleet" / "_extensions").glob(
+            "*.{cu,h,txt}"
+        ):
+            try:
+                os.remove(file)
+            except:
+                pass
 
         if not self._is_all_o_files(build_dir):
             logging.info(
