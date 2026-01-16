@@ -73,6 +73,15 @@ class CustomBdistWheel(_bdist_wheel):
                         logging.warning(
                             f"Failed to remove file {file_path}: {e}"
                         )
+    def write_wheelfile(self, wheelfile_base, generator=None):
+        if hasattr(self, "bdist_dir") and self.bdist_dir:
+            logging.info(f"Cleaning .o and .cu files from {self.bdist_dir}...")
+            self._clean_files(self.bdist_dir)
+
+        if generator is not None:
+            super().write_wheelfile(wheelfile_base, generator=generator)
+        else:
+            super().write_wheelfile(wheelfile_base)
 
 
 def setup_ops_extension():
