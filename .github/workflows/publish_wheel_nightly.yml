@@ -21,7 +21,7 @@ on:
 permissions: read-all
 
 concurrency:
-  group: ${{ github.workflow }}-all
+  group: ${{ github.workflow }}-all-${{ github.ref_type }}
   cancel-in-progress: true
 
 env:
