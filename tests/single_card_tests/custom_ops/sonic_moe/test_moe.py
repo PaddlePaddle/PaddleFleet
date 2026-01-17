@@ -27,7 +27,12 @@ _SEED = 42
 
 import os
 
-RUN_IN_PADDLE_CI = os.getenv("RUN_IN_PADDLE_CI", None) is not None
+RUN_IN_PADDLE_CI = os.getenv("RUN_IN_PADDLE_CI", "").lower() in (
+    "1",
+    "true",
+    "on",
+    "yes",
+)
 
 problem_shapes = [
     (8192, 768, 256, 128, 8),
