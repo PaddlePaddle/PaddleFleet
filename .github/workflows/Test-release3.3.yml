@@ -106,7 +106,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git checkout 6d59a1ea9fee66de0c3cbdba5e2c0a6651e2c9a5
+          git checkout a61629f52b60210e50ff5213375bf00380b06760
           cp ../PaddleFleet/ci/change.sh .
           bash change.sh
           # git log -1
