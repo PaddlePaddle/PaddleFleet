@@ -134,8 +134,8 @@ class GPTSublayersSpec:
     head_empty_layers: list[LayerSpec] | None = None
     transformer_layers: list[LayerSpec] | None = None
     tail_empty_layers: list[LayerSpec] | None = None
-    layer_norm: LayerSpec | None = None
     mtp: list[LayerSpec] | None = None
+    layer_norm: LayerSpec | None = None
     lm_head: LayerSpec | None = None
 
 
@@ -223,7 +223,6 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(tail_empty_layer), f"model.layers.{i}"
             )
             i += 1
-        self.add_sequential_layer(layers, LayerDesc(spec.layer_norm), "model")
 
         if spec.mtp is not None:
             for mtp_spec in spec.mtp:
@@ -231,6 +230,8 @@ class GPTModel(PipelineLayer):
                     layers, LayerDesc(mtp_spec), f"model.layers.{i}"
                 )
                 i += 1
+
+        self.add_sequential_layer(layers, LayerDesc(spec.layer_norm), "model")
 
         if tie_word_embeddings:
             self.add_sequential_layer(

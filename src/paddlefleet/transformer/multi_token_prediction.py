@@ -24,6 +24,7 @@ import paddle
 from paddle import Tensor
 
 from paddlefleet import tensor_parallel
+from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
@@ -34,8 +35,6 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from paddlefleet.models.backends import BackendSpecProvider
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -46,107 +45,6 @@ SUPPORTED_ATTN_MASK = [
     AttnMaskType.no_mask,
     AttnMaskType.padding_causal,
 ]
-
-
-def roll_tensor(tensor, shifts=-1, dims=-1, cp_group=None):
-    """Roll the tensor input along the sequence dimension with Context Parallelism (CP) support.
-
-    This function extends the original roll_tensor to support Context Parallelism, which allows
-    MTP to work with CP > 1. When CP is enabled, the sequence dimension is split across CP ranks,
-    and tensor rolling requires communication between adjacent CP ranks to properly handle the
-    boundary conditions.
-
-    For CP=1 (default behavior): Uses standard paddle.roll with zero padding
-    For CP>1: Splits tensor into chunks, performs rolling within each chunk, then exchanges
-    boundary elements between adjacent CP ranks to maintain sequence continuity.
-
-    Args:
-        tensor (Tensor): The input tensor to roll.
-        shifts (int): The shift of the tensor (typically -1 for MTP).
-        dims (int): The dimension to roll (typically -1 for sequence dimension).
-        cp_group (Group): The context parallelism process group. If None or size=1,
-                               falls back to standard rolling behavior.
-    Returns:
-        tuple: (rolled_tensor, sum_of_rolled_tensor)
-    """
-    # Standard rolling behavior when CP is not enabled (cp_group is None or size=1)
-    if cp_group is None or cp_group.nranks == 1:
-        rolled_tensor = paddle.roll(tensor, shifts=shifts, dims=dims)
-        rolled_tensor.index_fill_(paddle.to_tensor([dims]), shifts, 0)
-        return rolled_tensor, rolled_tensor.sum()
-
-    # CP-enabled rolling: Split tensor into chunks and handle boundary communication
-    # This matches the batch splitting logic in get_batch_on_this_cp_rank() function
-    tensor_list = tensor.chunk(2, dim=dims)
-    rolled_tensor_list = []
-    for i in range(len(tensor_list)):
-        rolled_tensor_list.append(
-            paddle.roll(tensor_list[i], shifts=shifts, dims=dims)
-        )
-
-    # Prepare tensors for communication between CP ranks
-    # Each CP rank needs to send boundary elements to adjacent ranks
-    tensor_send_list = []
-    tensor_recv_list = []
-    for i in range(len(rolled_tensor_list)):
-        tensor_send_list.append(
-            rolled_tensor_list[i].select(dims, shifts).contiguous()
-        )
-        empty_tensor = paddle.empty(
-            tensor_send_list[i].shape,
-            dtype=tensor_send_list[i].dtype,
-            device=paddle.cuda.current_device(),
-        )
-        tensor_recv_list.append(empty_tensor)
-
-    # Get the global rank of next and prev process in the cp group
-    global_ranks = paddle.distributed.get_process_group_ranks(group=cp_group)
-    local_rank = paddle.distributed.get_rank(group=cp_group)
-    next_rank = global_ranks[(local_rank + 1) % len(global_ranks)]
-    prev_rank = global_ranks[(local_rank - 1) % len(global_ranks)]
-
-    # Start send and recv ops
-    ops = []
-    if local_rank != 0:
-        req_send_first_part = paddle.distributed.isend(
-            tensor=tensor_send_list[0], dst=prev_rank
-        )
-        ops.append(req_send_first_part)
-        req_recv_second_part = paddle.distributed.irecv(
-            tensor=tensor_recv_list[1], src=prev_rank
-        )
-        ops.append(req_recv_second_part)
-    else:
-        # Inserted elements are set to be 0.0.
-        tensor_recv_list[1] = 0
-    if local_rank != len(global_ranks) - 1:
-        req_recv_first_part = paddle.distributed.irecv(
-            tensor=tensor_recv_list[0], src=next_rank
-        )
-        ops.append(req_recv_first_part)
-        req_send_second_part = paddle.distributed.isend(
-            tensor=tensor_send_list[1], dst=next_rank
-        )
-        ops.append(req_send_second_part)
-    else:
-        # For the last CP rank, the removed elements of second part go into the first part
-        tensor_recv_list[0] = tensor_send_list[1]
-
-    # Wait for all communication operations to complete
-    for op in ops:
-        op.wait()
-
-    # Splicing: Replace boundary elements with received elements from adjacent ranks
-    # This ensures proper sequence continuity across CP boundaries
-    index = [slice(None)] * rolled_tensor_list[0].dim()
-    index[dims] = shifts
-    for i in range(len(rolled_tensor_list)):
-        rolled_tensor_list[i][tuple(index)] = tensor_recv_list[i]
-
-    # Concatenate the processed chunks back into a single tensor
-    rolled_tensor = paddle.cat(rolled_tensor_list, dim=dims)
-
-    return rolled_tensor, rolled_tensor.sum()
 
 
 class MTPLossLoggingHelper:
@@ -398,7 +296,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         # For the linear projection at the (k - 1)-th MTP layer, the input is the concatenation
         # of the i-th token's hidden states and the (i + K)-th token's decoder input,
         # so the input's shape is [s, b, 2*h].
-        # The output will be send to the following transformer layer,
+        # The output will be sent to the following transformer layer,
         # so the output's shape should be [s, b, h].
         self.eh_proj = build_layer(
             self.sublayers_spec.eh_proj,
@@ -423,41 +321,6 @@ class MultiTokenPredictionLayer(FleetLayer):
             eps=self.config.rms_norm_eps,
         )
         self.offload_context = nullcontext()
-
-    def _get_embeddings(
-        self,
-        input_ids: paddle.Tensor,
-        position_ids: paddle.Tensor,
-        embedding: Callable,
-        hidden_states: paddle.Tensor,
-    ):
-        """
-        Preprocesses input data for the Multi-Token Prediction (MTP) layers.
-
-        This function computes the decoder input and sends updated input_ids and position_ids to
-        the next layer.
-
-        Args:
-            input_ids (paddle.Tensor): The input token IDs.
-            position_ids (paddle.Tensor): The position IDs corresponding to the input tokens.
-            embedding (Callable): The embedding layer
-                from gpt model to compute the decoder input.
-            hidden_states (paddle.Tensor): hidden states tensor of shape [s, b, h] where s is the
-                sequence length, b is the batch size, and h is the hidden size.
-        """
-        # Calc logits for the current Multi-Token Prediction (MTP) layers.
-        input_ids, _ = roll_tensor(
-            input_ids, shifts=-1, dims=-1, cp_group=self.cp_group
-        )
-        position_ids, _ = roll_tensor(
-            position_ids, shifts=-1, dims=-1, cp_group=self.cp_group
-        )
-        # embedding
-        decoder_input = embedding(
-            input_ids=input_ids, position_ids=position_ids
-        )
-
-        return input_ids, position_ids, decoder_input, hidden_states
 
     def _concat_embeddings(
         self, hidden_states: paddle.Tensor, decoder_input: paddle.Tensor
@@ -494,6 +357,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         rotary_pos_sin: paddle.Tensor | None = None,
         attention_bias: paddle.Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
+        **kwargs,
     ) -> paddle.Tensor:
         """
         Concatenates embeddings with hidden states and then applies transformer layer forward.
@@ -508,29 +372,21 @@ class MultiTokenPredictionLayer(FleetLayer):
                 hidden_states, decoder_input
             )
 
-            hidden_states, _ = self.transformer_layer(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                context=context,
-                context_mask=context_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-            )
+            input_dict = {
+                "hidden_states": hidden_states,
+                "attention_mask": attention_mask,
+                "context": context,
+                "context_mask": context_mask,
+                "rotary_pos_emb": rotary_pos_emb,
+                "rotary_pos_cos": rotary_pos_cos,
+                "rotary_pos_sin": rotary_pos_sin,
+                "attention_bias": attention_bias,
+                "packed_seq_params": packed_seq_params,
+            }
 
-        hidden_states = self._postprocess(hidden_states)
+            rst_dict = self.transformer_layer(input_dict)
 
-        return hidden_states
-
-    def _postprocess(self, hidden_states: paddle.Tensor):
-        """
-        Postprocesses the output of the transformer layers.
-        """
-
-        # Layer norm before shared head layer.
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm(rst_dict["hidden_states"])
 
         return hidden_states
 
@@ -563,84 +419,31 @@ class MultiTokenPredictionLayer(FleetLayer):
 
         return outputs
 
-    def forward(
-        self,
-        input_ids: Tensor,
-        position_ids: Tensor,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        context: Tensor = None,
-        context_mask: Tensor = None,
-        rotary_pos_emb: Tensor = None,
-        rotary_pos_cos: Tensor = None,
-        rotary_pos_sin: Tensor = None,
-        attention_bias: Tensor = None,
-        packed_seq_params: PackedSeqParams = None,
-        embedding=None,
-    ):
-        """
-        Execute the forward pass through the Multi-Token Prediction (MTP) layer.
-
-        Args:
-            input_ids (Tensor): Input token IDs .
-            position_ids (Tensor): Positional IDs of the input tokens.
-            hidden_states (Tensor): Hidden states tensor of shape [s, b, h] where s is the
-                sequence length, b is the batch size, and h is the hidden size.
-            attention_mask (Tensor): Boolean tensor of shape [1, 1, s, s] for masking
-                self-attention.
-            context (Tensor, optional): Context tensor for cross-attention, if applicable.
-            context_mask (Tensor, optional): Mask for cross-attention context, if applicable.
-            rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
-            rotary_pos_cos (Tensor, optional): Cosine component of rotary positional embeddings.
-            rotary_pos_sin (Tensor, optional): Sine component of rotary positional embeddings.
-            embedding (Callable): The embedding layer from gpt model to compute the decoder input.
-
-        Returns:
-            Union[Tensor, Tuple[Tensor, Tensor]]: The output hidden states tensor of shape
-            [s, b, h], and optionally the updated context tensor if cross-attention is used.
-        """
-        assert context is None, (
-            "multi token prediction + cross attention is not yet supported."
-        )
-        assert packed_seq_params is None, (
-            "multi token prediction + sequence packing is not yet supported."
-        )
-
-        input_ids, position_ids, decoder_input, hidden_states = (
-            self._get_embeddings(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                embedding=embedding,
-                hidden_states=hidden_states,
+    def forward(self, dict_args: dict):
+        if "context" in dict_args:
+            assert dict_args["context"] is None, (
+                "multi token prediction + cross attention is not yet supported."
             )
-        )
+        if "packed_seq_params" in dict_args:
+            assert dict_args["packed_seq_params"] is None, (
+                "multi token prediction + sequence packing is not yet supported."
+            )
+
+        key = f"decoder_input_{self.layer_number}"
+        assert key in dict_args
+        dict_args["decoder_input"] = dict_args[key]
 
         if self.config.recompute_granularity == "full" and self.training:
             hidden_states = self._checkpointed_forward(
-                self._proj_and_transformer_layer,
-                hidden_states=hidden_states,
-                decoder_input=decoder_input,
-                attention_mask=attention_mask,
-                context=context,
-                context_mask=context_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
+                self._proj_and_transformer_layer, **dict_args
             )
         else:
-            hidden_states = self._proj_and_transformer_layer(
-                hidden_states=hidden_states,
-                decoder_input=decoder_input,
-                attention_mask=attention_mask,
-                context=context,
-                context_mask=context_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-            )
+            hidden_states = self._proj_and_transformer_layer(**dict_args)
 
-        return hidden_states, input_ids, position_ids
+        dict_args.pop("decoder_input")
+        dict_args[key] = hidden_states
+
+        return dict_args
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="MultiTokenPredictionLayer")

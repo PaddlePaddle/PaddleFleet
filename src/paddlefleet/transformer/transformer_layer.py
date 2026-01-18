@@ -427,6 +427,7 @@ class TransformerLayer(nn.Layer):
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
+        **kwargs,
     ):
         hidden_states, context = self._forward_attention(
             hidden_states=hidden_states,
@@ -462,6 +463,7 @@ class TransformerLayer(nn.Layer):
         packed_seq_params: PackedSeqParams | None = None,
         in_recompute: bool = False,
         is_first_fwd: bool = False,
+        **kwargs,
     ):
         """
         Perform a forward pass through the attention layer and the layernorms before and after
@@ -549,7 +551,7 @@ class TransformerLayer(nn.Layer):
 
         return hidden_states, context
 
-    def _forward_mlp(self, hidden_states, is_first_fwd=False):
+    def _forward_mlp(self, hidden_states, is_first_fwd=False, **kwargs):
         """
         Perform a forward pass through the feed-forward layer.
 
@@ -720,6 +722,16 @@ class TransformerLayerNode(ScheduleNode):
 
     def forward(self, inputs):
         inputs.pop("dynamic_inference_decode_only", None)
+        mtp_tmp_dict = None
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            mtp_tmp_dict = {}
+            for i in range(self.config.num_nextn_predict_layers):
+                key = f"decoder_input_{i}"
+                assert key in inputs
+                mtp_tmp_dict[key] = inputs.pop(key)
         if self._is_sparse:
             if self.full_recompute:
                 attn_state = tensors_clone(inputs)
@@ -790,11 +802,22 @@ class TransformerLayerNode(ScheduleNode):
         if context is not None:
             rst["context"] = context
         rst = {**inputs, **rst}
+        if mtp_tmp_dict is not None:
+            rst = {**rst, **mtp_tmp_dict}
         return rst
 
     def backward(self, output_grad):
         if self.full_recompute:
             self.recompute_forward()
+        mtp_tmp_grad = None
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            # maybe error, fix this by concat and split
+            assert len(output_grad) == self.config.num_nextn_predict_layers + 1
+            mtp_tmp_grad = output_grad[1:]
+            output_grad = [output_grad[0]]
         if self._is_sparse:
             output_grad, residual_grad = self.post_process_node.backward(
                 output_grad
@@ -840,6 +863,9 @@ class TransformerLayerNode(ScheduleNode):
         else:
             output_grad = self.mlp_node.backward(output_grad)
             output_grad = self.attn_node.backward(output_grad)
+
+        if mtp_tmp_grad is not None:
+            output_grad = output_grad + tuple(mtp_tmp_grad)
         return output_grad
 
     def recompute_forward(self):
@@ -874,6 +900,21 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
 
     def forward_backward(self, inputs, output_grad, split_bw=False):
         assert not split_bw
+        mtp_tmp_dict = None
+        mtp_tmp_grad = None
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            # maybe error, fix this by concat and split
+            assert len(output_grad) == self.config.num_nextn_predict_layers + 1
+            mtp_tmp_dict = {}
+            mtp_tmp_grad = output_grad[1:]
+            output_grad = [output_grad[0]]
+            for i in range(self.config.num_nextn_predict_layers):
+                key = f"decoder_input_{i}"
+                assert key in inputs
+                mtp_tmp_dict[key] = inputs.pop(key)
         if self.forward_node._is_sparse and self.backward_node._is_sparse:
             if self.backward_node.full_recompute:
                 self.backward_node.recompute_forward()
@@ -997,4 +1038,8 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
 
             # 1b
             output_grad = self.backward_node.backward(output_grad)
+
+        if mtp_tmp_dict is not None:
+            rst = {**rst, **mtp_tmp_dict}
+            output_grad = output_grad + tuple(mtp_tmp_grad)
         return rst, output_grad

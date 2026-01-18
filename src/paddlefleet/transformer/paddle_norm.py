@@ -224,13 +224,22 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
         input_is_parallel: bool = False,
     ):
         super().__init__()
+        self.config = config
         self.norm = WrappedPaddleNorm(
             config, hidden_size, eps, input_is_parallel
         )
 
     def forward(self, dict_args: dict):
-        hidden_states = dict_args["hidden_states"]
-        return {"hidden_states": self.norm(hidden_states)}
+        rst = {"hidden_states": self.norm(dict_args["hidden_states"])}
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            for i in range(self.config.num_nextn_predict_layers):
+                key = f"decoder_input_{i}"
+                assert key in dict_args
+                rst[key] = self.norm(dict_args[key])
+        return rst
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="WrappedPaddleNormPipe")

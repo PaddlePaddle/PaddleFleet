@@ -17,6 +17,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import paddle
+from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+    ScatterOp,
+)
 
 from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.spec_utils import LayerSpec, build_layer
@@ -58,6 +61,16 @@ class GPTEmbedding(FleetLayer):
             max_sequence_length=max_sequence_length,
             position_embedding_type=position_embedding_type,
         )
+        self.sequence_parallel = self.config.sequence_parallel
+        if (
+            config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and self.sequence_parallel
+        ):
+            self.embedding.embed_tokens.reduce_scatter_embeddings = False
+            self.embedding.scatter_to_sequence_parallel = False
+            self.embedding.reduce_scatter_embeddings = False
+            self.embedding.sequence_parallel = False
         self.rotary_pos_emb = None
         self.multimodal_embedding = config.multimodal_embedding
         self.mrope_section = mrope_section
@@ -100,6 +113,7 @@ class GPTEmbedding(FleetLayer):
         # Deepstack
         deepstack_visual_embeds = None
         visual_pos_mask = None
+        mtp_emb_res = None
         if decoder_input is None:
             decoder_input = self.embedding(
                 input_ids=input_ids,
@@ -107,6 +121,55 @@ class GPTEmbedding(FleetLayer):
                 if self.multimodal_embedding
                 else position_ids,
             )
+            if (
+                self.config.num_nextn_predict_layers is not None
+                and self.config.num_nextn_predict_layers > 0
+            ):
+                assert not self.multimodal_embedding, (
+                    "MTP not support mm for now."
+                )
+                inputs_embeds_extra = decoder_input[
+                    :, -self.config.num_nextn_predict_layers :, :
+                ]  # [B, S, H]
+                inputs_embeds = decoder_input[
+                    :, : -self.config.num_nextn_predict_layers, :
+                ]
+                inputs_embeds_ori = inputs_embeds
+                batch_size, seq_length, hidden_size = inputs_embeds.shape
+
+                if self.sequence_parallel:
+                    inputs_embeds = inputs_embeds.reshape(
+                        [-1, inputs_embeds.shape[-1]]
+                    )
+                    inputs_embeds = ScatterOp.apply(inputs_embeds)
+                    inputs_embeds = (
+                        inputs_embeds.reshape([batch_size, -1, hidden_size])
+                        .permute(1, 0, 2)
+                        .contiguous()
+                    )  # change to [S, B, H]
+                mtp_emb_res = [inputs_embeds]
+                for depth in range(self.config.num_nextn_predict_layers):
+                    inputs_embeds_mtp = paddle.concat(
+                        [
+                            inputs_embeds_ori[:, (depth + 1) :, :],
+                            inputs_embeds_extra[:, : (depth + 1), :],
+                        ],
+                        axis=1,
+                    )
+                    if self.sequence_parallel:
+                        inputs_embeds_mtp = inputs_embeds_mtp.reshape(
+                            [-1, inputs_embeds_mtp.shape[-1]]
+                        )
+                        inputs_embeds_mtp = ScatterOp.apply(inputs_embeds_mtp)
+                        inputs_embeds_mtp = (
+                            inputs_embeds_mtp.reshape(
+                                [batch_size, -1, hidden_size]
+                            )
+                            .permute(1, 0, 2)
+                            .contiguous()
+                        )  # change to [S, B, H]
+                    mtp_emb_res.append(inputs_embeds_mtp)
+
             if self.multimodal_embedding:
                 image_embeds = dict_args.get("image_embeds", None)
                 video_embeds = dict_args.get("video_embeds", None)
@@ -159,8 +222,9 @@ class GPTEmbedding(FleetLayer):
             self.position_embedding_type == "rope"
             and self.rotary_pos_emb is not None
         ):
+            rope_base = decoder_input if mtp_emb_res is None else mtp_emb_res[0]
             rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
-                decoder_input, self.config, packed_seq_params
+                rope_base, self.config, packed_seq_params
             )
             rotary_pos_emb = self.rotary_pos_emb(
                 rotary_seq_len,
@@ -196,6 +260,17 @@ class GPTEmbedding(FleetLayer):
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,
         }
+        if mtp_emb_res is not None:
+            new_output = {"hidden_states": mtp_emb_res[0]}
+            assert (
+                self.config.num_nextn_predict_layers is not None
+                and self.config.num_nextn_predict_layers > 0
+            )
+            assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
+            for i in range(self.config.num_nextn_predict_layers):
+                new_output[f"decoder_input_{i}"] = mtp_emb_res[i + 1]
+            preproc_output = {**preproc_output, **new_output}
+
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:
                 preproc_output.pop(key)
