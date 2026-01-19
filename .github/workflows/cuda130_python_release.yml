@@ -432,7 +432,7 @@ jobs:
       - name: Integration test (GLM4.5 single-card)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
@@ -455,7 +455,7 @@ jobs:
       - name: Integration test (Qwen3-30B-A3B single-card)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
