@@ -17,6 +17,7 @@ import unittest
 
 class TestOpsImport(unittest.TestCase):
     TARGET_OPS = [
+        "fuse_transpose_split_fp8_quant",
         "tokens_unzip_gather",
         "tokens_unzip_slice",
         "tokens_unzip_stable",
