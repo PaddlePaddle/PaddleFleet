@@ -2,7 +2,7 @@ name: CE-CUDA-126-PYTHON-RELEASE
 
 on:
   schedule:
-    - cron: '0 19 * * *'
+    - cron: '0 19 * * 6'
   workflow_dispatch: # 可选：允许手动点 Run
 
 permissions: read-all
