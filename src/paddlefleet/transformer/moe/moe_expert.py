@@ -28,7 +28,9 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-from .moe_utils import k_grouped_bf16_gemm_tn_contiguous_aligned
+from .moe_utils import (
+    k_grouped_bf16_gemm_tn_contiguous_aligned,
+)
 
 try:
     from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
@@ -133,6 +135,7 @@ class GroupedMLPExpert(FleetLayer):
         self.config.hidden_act = F.silu
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
+        self.using_sonic_moe = self.config.using_sonic_moe
         assert not config.use_bias, (
             "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
         )
@@ -173,27 +176,44 @@ class GroupedMLPExpert(FleetLayer):
 
         fc2_input_size = self.config.moe_intermediate_size
 
-        self.weight1 = paddle.create_parameter(
-            shape=[
+        initializer = paddle.nn.initializer.Uniform(-0.001, 0.001)
+        # default_initializer=paddle.nn.initializer.Normal(mean=0.0, std=0.01),
+
+        dtype = "bfloat16"
+        if self.using_sonic_moe:
+            w1_shape = [
+                self.num_local_experts,
+                fc1_output_size,
+                self.config.hidden_size,
+            ]
+            w2_shape = [
+                self.num_local_experts,
+                self.config.hidden_size,
+                fc2_input_size,
+            ]
+        else:
+            w1_shape = [
                 self.num_local_experts,
                 self.config.hidden_size,
                 fc1_output_size,
-            ],
-            dtype="bfloat16",
-            default_initializer=paddle.nn.initializer.Uniform(-0.001, 0.001),
-            # default_initializer=paddle.nn.initializer.Normal(mean=0.0, std=0.01),
-        )
-        self.weight1.is_distributed = self.expert_parallel
-        self.weight2 = paddle.create_parameter(
-            shape=[
+            ]
+            w2_shape = [
                 self.num_local_experts,
                 fc2_input_size,
                 self.config.hidden_size,
-            ],
-            dtype="bfloat16",
-            default_initializer=paddle.nn.initializer.Uniform(-0.001, 0.001),
-            # default_initializer=paddle.nn.initializer.Normal(mean=0.0, std=0.01),
+            ]
+
+        self.weight1 = paddle.create_parameter(
+            shape=w1_shape,
+            dtype=dtype,
+            default_initializer=initializer,
         )
+        self.weight2 = paddle.create_parameter(
+            shape=w2_shape,
+            dtype=dtype,
+            default_initializer=initializer,
+        )
+        self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 
     def forward(

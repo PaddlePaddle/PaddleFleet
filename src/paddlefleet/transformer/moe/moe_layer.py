@@ -21,10 +21,13 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import nn
+from paddle.autograd import PyLayer
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
     ScatterOp,
 )
+
+import paddlefleet
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -42,7 +45,50 @@ from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
 
-from .moe_utils import permute, unpermute
+if paddlefleet.ops.is_sonic_moe_available():
+    from paddlefleet.ops.sonicmoe.enums import ActivationType
+    from paddlefleet.ops.sonicmoe.functional import (
+        _DownProjection,
+        _UpProjection,
+    )
+
+from .moe_utils import (
+    count_cumsum,
+    filter_scores,
+    fused_expert_parallel_TC_topk_router_metadata,
+    permute,
+    unpermute,
+)
+
+
+class GradDtypeGuard(PyLayer):
+    """Guard the grad's dtype if different from input's dtype."""
+
+    @staticmethod
+    def forward(ctx, x, dtype):
+        """forward"""
+        return paddle.empty([0], dtype=dtype), {"x": x}
+
+    @staticmethod
+    def backward(ctx, grad):
+        """backward"""
+        return grad
+
+
+class GradDtypeUnguard(PyLayer):
+    """Remove grad dtype guard."""
+
+    @staticmethod
+    def forward(ctx, x, status):
+        """forward"""
+        if hasattr(ctx, "set_grad_in_dtype_consistent"):
+            ctx.set_grad_in_dtype_consistent(False)
+        return status["x"]
+
+    @staticmethod
+    def backward(ctx, grad):
+        """backward"""
+        return grad
 
 
 @dataclass
@@ -83,6 +129,13 @@ class MoELayer(nn.Layer):
         self.fp8 = config.fp8
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
+        self.using_sonic_moe = self.config.using_sonic_moe
+        if self.using_sonic_moe:
+            assert paddlefleet.ops.is_sonic_moe_available(), (
+                paddlefleet.ops.blocked_import_messages[
+                    "paddlefleet.ops.sonicmoe"
+                ]
+            )
 
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
@@ -389,23 +442,89 @@ class MoELayer(nn.Layer):
         )
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
 
-        hidden_states = FusionMoePyLayer.apply(
-            dispatched_hidden_states,
-            dispatched_probs,
-            dispatched_indices,
-            self,
-            self.num_experts_per_tok,
-            use_fp8_mlp=self.fp8,
-            moe_deep_gemm=self.moe_deep_gemm,
-            moe_grouped_gemm=self.moe_grouped_gemm,
-            recompute_moe_gate_up=self.recompute_moe_gate_up,
-            recompute_moe_premute=self.recompute_moe_premute,
-            fp8_dispatched_handle=fp8_dispatched_handle,
-            use_bf16_gemm_weight_grad=not self.fp8_wgrad,
-        )
+        if self.using_sonic_moe:
+            T = dispatched_hidden_states.shape[0]
+            K = self.num_experts_per_tok
+            stream_id = paddle.device.cuda.current_stream().cuda_stream
+            topk_scores = filter_scores(
+                dispatched_probs,
+                dispatched_indices,
+            )
+            expert_frequency, expert_frequency_offset = count_cumsum(
+                dispatched_indices, self.num_experts_per_device, do_cumsum=True
+            )
+            activation_type = ActivationType("swiglu")
+
+            (
+                expert_frequency_offset,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+            ) = fused_expert_parallel_TC_topk_router_metadata(
+                dispatched_indices,
+                expert_frequency_offset,
+                K,
+            )
+
+            TK = s_scatter_idx.shape[0]
+            is_varlen_K = True
+            w1 = self.grouped_gemm_experts.weight1
+            y1, z = _UpProjection.apply(
+                dispatched_hidden_states,
+                w1.permute(1, 2, 0),
+                None,
+                expert_frequency_offset,
+                TK,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                is_varlen_K,
+                activation_type,
+                is_inference_mode_enabled=False,
+            )
+
+            w2 = self.grouped_gemm_experts.weight2
+            hidden_states = _DownProjection.apply(
+                y1,
+                z,
+                w2.permute(1, 2, 0),
+                None,
+                topk_scores,
+                expert_frequency_offset,
+                T,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                is_varlen_K,
+                activation_type,
+            )
+        else:
+            hidden_states = FusionMoePyLayer.apply(
+                dispatched_hidden_states,
+                dispatched_probs,
+                dispatched_indices,
+                self,
+                self.num_experts_per_tok,
+                use_fp8_mlp=self.fp8,
+                moe_deep_gemm=self.moe_deep_gemm,
+                moe_grouped_gemm=self.moe_grouped_gemm,
+                recompute_moe_gate_up=self.recompute_moe_gate_up,
+                recompute_moe_premute=self.recompute_moe_premute,
+                fp8_dispatched_handle=fp8_dispatched_handle,
+                use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+            )
+
         hidden_states = self.token_dispatcher._comm_manager.combine(
             hidden_states, combine_overlap_handle
         )
+
         return hidden_states
 
     def compute_gate(self, hidden_states):
@@ -441,25 +560,47 @@ class MoELayer(nn.Layer):
             dispatched_probs = (
                 self.token_dispatcher._comm_manager.dispatched_probs
             )
+            # NOTE: tokens_per_expert_list is stateful and should be saved for recompute.
+            tokens_per_expert = (
+                self.token_dispatcher._comm_manager.tokens_per_expert
+            )
+            # dispatched_hidden_states's dtype is fp8, but its gradient's dtype is bf16, so type separation is required; the actual values are passed via a dictionary.
+            dispatched_hidden_states, guard_status = GradDtypeGuard.apply(
+                dispatched_hidden_states, hidden_states.dtype
+            )
+            guard_status["x"].stop_gradient = True
+
             return (
                 dispatched_hidden_states,
                 dispatched_indices,
                 dispatched_probs,
                 fp8_dispatched_handle,
+                tokens_per_expert,
+                guard_status,
             )
 
-    def compute_experts(self, args):
+    def compute_experts(self, args, is_first_fwd=False):
         if self.moe_use_fusion_node:
             (
                 dispatched_hidden_states,
                 dispatched_indices,
                 dispatched_probs,
                 fp8_dispatched_handle,
+                tokens_per_expert,
+                guard_status,
             ) = args
+            self.token_dispatcher._comm_manager.tokens_per_expert = (
+                tokens_per_expert
+            )
+            dispatched_hidden_states = GradDtypeUnguard.apply(
+                dispatched_hidden_states, guard_status
+            )
             hidden_states = FusionMoePyLayer.apply(
                 dispatched_hidden_states,
                 dispatched_probs,
-                dispatched_indices,
+                dispatched_indices.clone()
+                if is_first_fwd
+                else dispatched_indices,
                 self,
                 self.num_experts_per_tok,
                 use_fp8_mlp=self.fp8,
@@ -468,6 +609,8 @@ class MoELayer(nn.Layer):
                 fp8_dispatched_handle=fp8_dispatched_handle,
                 use_bf16_gemm_weight_grad=not self.fp8_wgrad,
             )
+            if is_first_fwd:
+                hidden_states.stop_gradient = False
         else:
             hidden_states, topk_weights = args
             hidden_states = self.routed_experts_compute(hidden_states)
@@ -646,21 +789,95 @@ class MoELayer(nn.Layer):
         Returns:
             output: Output hidden states, shape: [seq_len, hidden_size]
         """
-        tokens_per_expert = routing_map.sum(axis=0)
-        permuted_local_hidden_states, sorted_indices = permute(
-            hidden_states, routing_map, tokens_per_expert
-        )
-        grouped_expert_out = self.grouped_gemm_experts(
-            permuted_local_hidden_states, tokens_per_expert
-        )[0]
-        final_hidden_states = unpermute(
-            grouped_expert_out,
-            sorted_indices,
-            restore_shape=hidden_states.shape,
-            probs=probs,
-            routing_map=routing_map,
-        )
-        return final_hidden_states.cast(hidden_states.dtype)
+
+        def _convert_routing_map_and_probs(
+            routing_map: paddle.Tensor, probs: paddle.Tensor, topk: int
+        ):
+            routing_map = routing_map.astype("bool")
+            masked_probs = probs * routing_map.astype("float32")
+            weights, indices = paddle.topk(masked_probs, k=topk, axis=-1)
+            return indices, weights
+
+        if self.using_sonic_moe:
+            T = hidden_states.shape[0]
+            K = self.num_experts_per_tok
+            stream_id = paddle.device.cuda.current_stream().cuda_stream
+            selected_indices, topk_scores = _convert_routing_map_and_probs(
+                routing_map, probs, self.num_experts_per_tok
+            )
+            activation_type = ActivationType("swiglu")
+            expert_frequency, expert_frequency_offset = count_cumsum(
+                selected_indices, self.num_experts_per_device, do_cumsum=True
+            )
+
+            (
+                expert_frequency_offset,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+            ) = fused_expert_parallel_TC_topk_router_metadata(
+                selected_indices,
+                expert_frequency_offset,
+                K,
+            )
+
+            s_scatter_idx.stop_gradient = True
+
+            w1 = self.grouped_gemm_experts.weight1
+
+            y1, z = _UpProjection.apply(
+                hidden_states,
+                w1.permute([1, 2, 0]),
+                None,
+                expert_frequency_offset,
+                T * K,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                False,
+                activation_type,
+                is_inference_mode_enabled=False,
+            )
+
+            w2 = self.grouped_gemm_experts.weight2
+            hidden_states = _DownProjection.apply(
+                y1,
+                z,
+                w2.permute([1, 2, 0]),
+                None,
+                topk_scores,
+                expert_frequency_offset,
+                T,
+                K,
+                stream_id,
+                x_gather_idx,
+                s_scatter_idx,
+                s_reverse_scatter_idx,
+                num_activated_expert_per_token_offset,
+                False,
+                activation_type,
+            )
+            return hidden_states
+        else:
+            tokens_per_expert = routing_map.sum(axis=0)
+            permuted_local_hidden_states, sorted_indices = permute(
+                hidden_states, routing_map, tokens_per_expert
+            )
+            grouped_expert_out = self.grouped_gemm_experts(
+                permuted_local_hidden_states, tokens_per_expert
+            )[0]
+            final_hidden_states = unpermute(
+                grouped_expert_out,
+                sorted_indices,
+                restore_shape=hidden_states.shape,
+                probs=probs,
+                routing_map=routing_map,
+            )
+            return final_hidden_states.cast(hidden_states.dtype)
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         if not (self.moe_use_fusion_node and self.fp8):

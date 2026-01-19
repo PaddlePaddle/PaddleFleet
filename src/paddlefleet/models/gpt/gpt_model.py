@@ -22,6 +22,9 @@ from paddlefleet.pipeline_parallel import (
     PipelineLayer,
     SharedLayerDesc,
 )
+from paddlefleet.pipeline_parallel.pp_utils.utils import (
+    dict_to_tuple_helper,
+)
 
 if TYPE_CHECKING:
     from paddlefleet.spec_utils import LayerSpec
@@ -308,6 +311,7 @@ class GPTModel(PipelineLayer):
         # forward_inputs = forward_chunk.forward(forward_inputs)
 
         if p2p_async_handle is not None:
+            forward_inputs = dict_to_tuple_helper(forward_inputs)
             p2p_async_handle.forward_async_comm(forward_inputs)
             p2p_async_handle.backward_async_comm(backward_input_grads)
 
@@ -555,10 +559,11 @@ class GPTModel(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        for k in list(sharded_state_dict.keys()):
-            v = sharded_state_dict.pop(k)
-            v.key = self._pp_to_single_mapping[k]
-            sharded_state_dict[self._pp_to_single_mapping[k]] = v
+        if "qwen3_vl" not in getattr(self.config, "model_type", ""):
+            for k in list(sharded_state_dict.keys()):
+                v = sharded_state_dict.pop(k)
+                v.key = self._pp_to_single_mapping[k]
+                sharded_state_dict[self._pp_to_single_mapping[k]] = v
 
         def increment_expert_number(s, increment):
             import re

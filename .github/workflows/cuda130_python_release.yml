@@ -2,7 +2,7 @@ name: CE-CUDA-130-PYTHON-RELEASE
 
 on:
   schedule:
-    - cron: '0 19 * * 6'
+    - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
 
 permissions: read-all
@@ -22,6 +22,10 @@ env:
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev"
   paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/cbf3469113cd76b7d5f4cba7b8d7d5f55d9e9911/"
+  paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.1.0/latest/cu130/"
+  formers_branch: "release/v1.0"
+  fleet_branch: "release/0.1.0"
+
 
 
 defaults:
@@ -69,6 +73,8 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e paddle_url \
+            -e paddlefleet_url \
+            -e fleet_branch \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
@@ -108,19 +114,42 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${fleet_branch}
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
           url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
-          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
+          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           bash ci/single_card_test.sh
+          single_card_exit_code=$?
+          if [[ "$single_card_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mSingle card test succeeded.\033[0m"
+          fi
+          '
+
+      - name: Single card sonic moe test
+        if: matrix.python == '3.12'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          pwd
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          echo "Paddle Commit"
+          python -c "import paddle; print(paddle.version.commit)"
+          echo "PaddleFleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          bash ci/single_card_sonic.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
@@ -140,8 +169,7 @@ jobs:
   multi-card_test:
     name: Unit test (multi-card)
     runs-on:
-      group: Fleet-H-multi-card
-      labels: [self-hosted, 580]
+      group: fleet-130
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -170,6 +198,8 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e paddle_url \
+            -e paddlefleet_url \
+            -e fleet_branch \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
@@ -209,13 +239,14 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git submodule update --init --recursive
+          git checkout ${fleet_branch}
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
           url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
-          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
+          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           chmod +x /usr/local/bin/yq
@@ -291,8 +322,11 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
+            -e fleet_branch \
+            -e formers_branch \
             -e CI_name \
             -e paddle_url \
+            -e paddlefleet_url \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
@@ -331,12 +365,14 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout $fleet_branch
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
-          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -354,6 +390,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout $formers_branch
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
@@ -361,14 +398,15 @@ jobs:
           version="${py//./}"
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
-          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: Proprocess for integration test
@@ -432,8 +470,7 @@ jobs:
   integration-test-H20-multi-card:
     name: Integration test (H20, multi-card)
     runs-on:
-      group: Fleet-H-multi-card
-      labels: [self-hosted, 580]
+      group: fleet-130
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -464,6 +501,9 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e paddle_url \
+            -e paddlefleet_url \
+            -e fleet_branch \
+            -e formers_branch \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
@@ -502,12 +542,14 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${fleet_branch}
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
-          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -526,13 +568,13 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout $formers_branch
           git log -1
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
           url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
@@ -541,6 +583,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: GLM4.5 pre-train
@@ -717,6 +761,9 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e paddle_url \
+            -e paddlefleet_url \
+            -e fleet_branch \
+            -e formers_branch \
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
@@ -756,13 +803,15 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
-          pip install paddlefleet --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -779,13 +828,13 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout $formers_branch
           git log -1
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
-          pip install -e . --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
@@ -794,6 +843,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: GLM4.5 pre-train

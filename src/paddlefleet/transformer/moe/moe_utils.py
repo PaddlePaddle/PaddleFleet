@@ -29,6 +29,7 @@ try:
 except ImportError:
     scatter_add_ = None
 import paddle.distributed as dist
+from paddle.autograd.py_layer import PyLayer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -335,6 +336,57 @@ def manual_backward(f: Callable, is_first_fwd: bool, *args: list[Any]):
         return tuple([t.grad for t in detached_args if is_tensor(t)])
 
     return bwd_f, out
+
+
+class FilterScores(PyLayer):
+    @staticmethod
+    def forward(ctx, probs, indices):
+        topk_scores = paddle._C_ops._run_custom_op(
+            "filter_scores", probs, indices
+        )[0]
+        ctx.save_for_backward(indices)
+        return topk_scores
+
+    @staticmethod
+    def backward(ctx, grad_topk_scores):
+        (indices,) = ctx.saved_tensor()
+        grads = paddle._C_ops._run_custom_op(
+            "filter_scores_grad",
+            indices,
+            grad_topk_scores,
+        )
+        grad_probs = grads[0]
+        return grad_probs, None
+
+
+def fused_expert_parallel_TC_topk_router_metadata(
+    dispatched_indices,
+    expert_frequency_offset,
+    K,
+):
+    return paddle._C_ops._run_custom_op(
+        "router_metadata", dispatched_indices, expert_frequency_offset, K
+    )
+
+
+def count_cumsum(
+    dispatched_indices,
+    num_experts_per_device,
+    do_cumsum,
+):
+    return paddle._C_ops._run_custom_op(
+        "count_cumsum",
+        dispatched_indices,
+        num_experts_per_device,
+        do_cumsum,
+    )
+
+
+def filter_scores(
+    dispatched_probs,
+    dispatched_indices,
+):
+    return FilterScores.apply(dispatched_probs, dispatched_indices)
 
 
 def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):

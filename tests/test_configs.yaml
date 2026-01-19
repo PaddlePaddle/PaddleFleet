@@ -19,6 +19,9 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe.py]
     products:
       - num_gpus: 8
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_recompute.py]
+    products:
+      - num_gpus: 8
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_recompute.py]
     products:
       - num_gpus: 4

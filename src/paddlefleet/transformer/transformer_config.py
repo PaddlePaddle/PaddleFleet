@@ -470,6 +470,9 @@ class TransformerConfig(ModelParallelConfig):
     """When set to True, clone the output of scatter_to_sequence_parallel_region in embedding layer
     to facilitate garbage collection of input."""
 
+    using_sonic_moe: bool = False
+    """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
+
     @classmethod
     def from_config(cls, config_dict):
         # note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
