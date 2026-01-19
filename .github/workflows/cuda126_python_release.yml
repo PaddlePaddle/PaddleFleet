@@ -610,8 +610,14 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
+            wget https://paddle-qa.bj.bcebos.com/fleet/ce_cuda126_glm45_lora_loss.txt
+            python PaddleFormers/tests/integration_test/check_loss.py --log_file glm45_lora.txt --gt_file ce_cuda126_glm45_lora_loss.txt
+            if [[ "$?" != "0" ]]; then
+              echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+              exit 1
+            else
+              echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+            fi
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
