@@ -27,9 +27,7 @@ _SEED = 42
 
 import os
 
-RUN_IN_PADDLE_CI = bool(
-    paddle.utils.strtobool(os.getenv("RUN_IN_PADDLE_CI", "0"))
-)
+RUN_IN_PADDLE_CI = paddle.utils.strtobool(os.getenv("RUN_IN_PADDLE_CI", "0"))
 
 problem_shapes = [
     (8192, 768, 256, 128, 8),
