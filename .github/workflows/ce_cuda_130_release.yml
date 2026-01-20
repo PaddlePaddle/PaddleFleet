@@ -1,6 +1,9 @@
 name: CE-CUDA-130-Release
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -95,8 +98,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout $fleet_branch
-          wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
+          pip install paddlefleet --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -170,10 +173,9 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git checkout $fleet_branch
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
           git submodule update --init --recursive
-          wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
+          pip install paddlefleet --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt pytest matplotlib==3.10.8
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -269,9 +271,8 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git checkout $fleet_branch
-          wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
+          pip install paddlefleet --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -292,7 +293,8 @@ jobs:
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           pip install blinker==1.9.0 --ignore-installed
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/paddleformers-1.0.0-py3-none-any.whl
+          pip install paddleformers-1.0.0-py3-none-any.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"
@@ -422,9 +424,8 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git checkout $fleet_branch
-          wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
+          pip install paddlefleet --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -444,7 +445,8 @@ jobs:
           git checkout $formers_branch
           git log -1
           pip install blinker==1.9.0 --ignore-installed
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/paddleformers-1.0.0-py3-none-any.whl
+          pip install paddleformers-1.0.0-py3-none-any.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"
@@ -633,10 +635,10 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git checkout $fleet_branch
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
           pip install colorlog>=6.10.1
-          wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
+          pip uninstall paddlefleet -y
+          pip install paddlefleet --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -654,7 +656,8 @@ jobs:
           git checkout $formers_branch
           git log -1
           pip install blinker==1.9.0 --ignore-installed
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/paddleformers-1.0.0-py3-none-any.whl
+          pip install paddleformers-1.0.0-py3-none-any.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"

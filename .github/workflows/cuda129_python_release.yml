@@ -1,6 +1,9 @@
 name: CE-CUDA-129-PYTHON-RELEASE
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -119,8 +122,8 @@ jobs:
           echo "version=$version"
           url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
+          pip install paddlefleet  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -244,8 +247,8 @@ jobs:
           echo "version=$version"
           url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
+          pip install paddlefleet  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           chmod +x /usr/local/bin/yq
@@ -370,8 +373,8 @@ jobs:
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
+          pip install paddlefleet --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -397,7 +400,8 @@ jobs:
           version="${py//./}"
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/paddleformers-1.0.0-py3-none-any.whl
+          pip install paddleformers-1.0.0-py3-none-any.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"
@@ -547,8 +551,8 @@ jobs:
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
+          pip install paddlefleet --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -573,7 +577,8 @@ jobs:
           version="${py//./}"
           echo "version=$version"
           url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/paddleformers-1.0.0-py3-none-any.whl
+          pip install paddleformers-1.0.0-py3-none-any.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
@@ -806,8 +811,8 @@ jobs:
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          git checkout c3bb1fea215a1afe642b986704ede8dfff33ae3e
+          pip install paddlefleet --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -830,7 +835,8 @@ jobs:
           version="${py//./}"
           echo "version=$version"
           url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/paddleformers-1.0.0-py3-none-any.whl
+          pip install paddleformers-1.0.0-py3-none-any.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
