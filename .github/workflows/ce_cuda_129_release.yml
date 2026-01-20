@@ -298,6 +298,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: Proprocess for integration test
@@ -437,6 +439,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: GLM4.5 pre-train
@@ -647,6 +651,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: GLM4.5 pre-train
