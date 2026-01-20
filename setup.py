@@ -146,6 +146,7 @@ def setup_ops_extension():
         sources=[
             # cpp files
             # cuda files
+            "./src/paddlefleet/_extensions/fuse_transpose_split_fp8_quant.cu",
             "./src/paddlefleet/_extensions/tokens_stable_unzip.cu",
             "./src/paddlefleet/_extensions/tokens_unzip_gather.cu",
             "./src/paddlefleet/_extensions/tokens_zip_unique_add.cu",
