@@ -24,7 +24,7 @@ env:
   CI_name: test
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
-  paddle_fleet: "https://paddle-github-action.bj.bcebos.com/PR/h-coverage/77356/cd4c66bee53604c02dd6a20c17b56172f4185269/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
+  paddle_url: "https://paddle-github-action.bj.bcebos.com/PR/h-coverage/77356/cd4c66bee53604c02dd6a20c17b56172f4185269/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
 
 defaults:
   run:
