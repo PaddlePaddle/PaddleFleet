@@ -91,7 +91,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           python -m pip install https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlefleet/paddlefleet-0.1.0.dev20260115-cp310-cp310-linux_x86_64.whl --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/0376cfc4e40aec96e330d10b0abca6285d27d1ad/paddlepaddle_gpu-3.4.0.dev20260115-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -112,7 +111,7 @@ jobs:
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/0376cfc4e40aec96e330d10b0abca6285d27d1ad/paddlepaddle_gpu-3.4.0.dev20260115-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"
@@ -227,7 +226,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           python -m pip install https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlefleet/paddlefleet-0.1.0.dev20260115-cp310-cp310-linux_x86_64.whl --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/0376cfc4e40aec96e330d10b0abca6285d27d1ad/paddlepaddle_gpu-3.4.0.dev20260115-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -247,7 +245,7 @@ jobs:
           git checkout c17cad10329e512b105f41c19fe14475bc012d55
           git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/0376cfc4e40aec96e330d10b0abca6285d27d1ad/paddlepaddle_gpu-3.4.0.dev20260115-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
@@ -437,7 +435,6 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           python -m pip install https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlefleet/paddlefleet-0.1.0.dev20260115-cp310-cp310-linux_x86_64.whl --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/0376cfc4e40aec96e330d10b0abca6285d27d1ad/paddlepaddle_gpu-3.4.0.dev20260115-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -455,7 +452,7 @@ jobs:
           git checkout c17cad10329e512b105f41c19fe14475bc012d55
           git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+                    pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/0376cfc4e40aec96e330d10b0abca6285d27d1ad/paddlepaddle_gpu-3.4.0.dev20260115-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
