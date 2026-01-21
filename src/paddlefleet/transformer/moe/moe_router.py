@@ -624,3 +624,6 @@ class TopKRouter(StandardMoERouter):
             l_aux,
             l_zloss,
         )
+
+    def set_layer_number(self, layer_number):
+        self.layer_number = layer_number
