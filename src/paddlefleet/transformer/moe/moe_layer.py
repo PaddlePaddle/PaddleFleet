@@ -973,5 +973,7 @@ class MoELayer(nn.Layer):
 
     def set_layer_number(self, layer_number):
         self.layer_number = layer_number
-        if hasattr(self.gate, "layer_number"):
-            self.gate.set_layer_number(layer_number)
+        assert hasattr(self.gate, "set_layer_number"), (
+            "expect gate has method 'set_layer_number'"
+        )
+        self.gate.set_layer_number(layer_number)
