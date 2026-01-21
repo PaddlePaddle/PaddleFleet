@@ -108,24 +108,24 @@ class StandardMoERouter(nn.Layer):
                 f"seq_aux is True but routing_type is {self.routing_type}. Please check."
             )
 
-        # According to the shape of gate weights in model checkpoint
-        self.weight = paddle.create_parameter(
-            shape=[self.num_experts, self.hidden_size],
-            dtype="float32",
-            default_initializer=paddle.nn.initializer.Uniform(),
-        )
+        # # According to the shape of gate weights in model checkpoint
+        # self.weight = paddle.create_parameter(
+        #     shape=[self.num_experts, self.hidden_size],
+        #     dtype="float32",
+        #     default_initializer=paddle.nn.initializer.Uniform(),
+        # )
 
-        if self.topk_method == "noaux_tc":
-            self.register_buffer(
-                "e_score_correction_bias",
-                paddle.zeros((self.num_experts,), dtype=paddle.float32),
-            )
-            self._cast_to_low_precision = False
-            self.expert_usage = paddle.zeros(
-                shape=[self.num_experts],
-                dtype=paddle.int64,
-            )  # Used in MoECorrectionBiasAdjustCallback
-            self.expert_usage.stop_gradient = True
+        # if self.topk_method == "noaux_tc":
+        #     self.register_buffer(
+        #         "e_score_correction_bias",
+        #         paddle.zeros((self.num_experts,), dtype=paddle.float32),
+        #     )
+        #     self._cast_to_low_precision = False
+        #     self.expert_usage = paddle.zeros(
+        #         shape=[self.num_experts],
+        #         dtype=paddle.int64,
+        #     )  # Used in MoECorrectionBiasAdjustCallback
+        #     self.expert_usage.stop_gradient = True
 
     def gate_score_func(
         self, logits: paddle.Tensor, logits_type_promotion: bool = True
@@ -530,6 +530,32 @@ class StandardMoERouter(nn.Layer):
 class TopKRouter(StandardMoERouter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        
+        
+        
+    
+    def fake_balanced_routing(self, input):
+        n_experts = self.num_experts
+        n_topk = self.num_experts_per_tok
+        n_tokens = input.size(0)
+        top_gate = paddle.ones([n_tokens, n_topk], dtype=paddle.float32) / n_topk
+        top_idx = paddle.arange(n_tokens * n_topk).view(-1, n_topk) % n_experts
+        # mask = paddle.zeros([n_tokens, n_experts]).put_along_axis(
+        #     top_idx, paddle.to_tensor(1.0, dtype=paddle.float32), axis=1
+        # )
+        # gates = paddle.ones([n_tokens, n_experts], dtype=paddle.float32) / n_topk
+        # masked_gates = gates * mask
+
+        return (
+            None,
+            top_gate,
+            top_idx,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
     def forward(self, input):
         if len(input.shape) == 3:
@@ -542,6 +568,9 @@ class TopKRouter(StandardMoERouter):
             raise ValueError(
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
             )
+
+        if self.config.moe_router_force_load_balancing:
+            return self.fake_balanced_routing(input)
 
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
