@@ -60,9 +60,9 @@ jobs:
           git clone https://github.com/PaddlePaddle/PaddleFormers.git .
           bash -x tests/integration_test/update_precision.sh
 
-  update-precision-formers:
-    name: Update precision formers
-    needs: determine-whether-update
-    if: needs.determine-whether-update.outputs.need_change == 'true'
-    uses: ./.github/workflows/precision_publish_wheel.yml
-    secrets: inherit
+  # update-precision-formers:
+  #   name: Update precision formers
+  #   needs: determine-whether-update
+  #   if: needs.determine-whether-update.outputs.need_change == 'true'
+  #   uses: ./.github/workflows/precision_publish_wheel.yml
+  #   secrets: inherit

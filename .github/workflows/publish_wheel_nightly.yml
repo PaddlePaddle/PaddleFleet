@@ -21,7 +21,7 @@ on:
 permissions: read-all
 
 concurrency:
-  group: ${{ github.workflow }}-all-${{ github.ref_type }}
+  group: ${{ github.workflow }}-all-${{ github.sha }}
   cancel-in-progress: true
 
 env:
@@ -116,9 +116,9 @@ jobs:
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
           git submodule update --init --recursive
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "branch" ]]; then
-            export PADDLEFLEET_VERSION=0.0.0
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+          # if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "branch" ]]; then
+          #   export PADDLEFLEET_VERSION=0.0.0
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
             export PADDLEFLEET_VERSION=$VERSION
@@ -145,7 +145,10 @@ jobs:
             export AK=paddle
             export SK=paddle
             python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            PY_VERSION="${{ matrix.python_version }}"
+            PY_VERSION_SHORT="${PY_VERSION//./}"
+            mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
+            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
           fi
           '
 
