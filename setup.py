@@ -47,6 +47,8 @@ def get_special_setup_deps():
     elif backends.IS_XPU:
         deps = []
         return deps
+    else:
+        return []
 
 
 class CustomBdistWheel(_bdist_wheel):
