@@ -153,7 +153,7 @@ def run_pp(
 
 @unittest.skipIf(
     SKIP_TESTS,
-    f"跳过测试：repo_flag={REPO_FLAG} 不是 paddlefleet，且分支 {BRANCH} 是 develop",
+    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet') and branch '{BRANCH}' is 'develop'",
 )
 class TestPP(unittest.TestCase):
     def setUp(self):
