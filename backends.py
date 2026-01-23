@@ -26,10 +26,11 @@ IS_METAX_GPU = False
 def init_backend_type():
     global IS_NVIDIA, IS_XPU, IS_ILUVATAR_GPU, IS_METAX_GPU
 
-    IS_NVIDIA = os.environ.get("IS_NVIDIA")
-    IS_XPU = os.environ.get("IS_XPU")
-    IS_ILUVATAR_GPU = os.environ.get("IS_ILUVATAR_GPU")
-    IS_METAX_GPU = os.environ.get("IS_METAX_GPU")
+    typelist = {"on", "yes", "1", "true"}
+    IS_NVIDIA = os.environ.get("IS_NVIDIA", "0").lower() in typelist
+    IS_XPU = os.environ.get("IS_XPU", "0").lower() in typelist
+    IS_ILUVATAR_GPU = os.environ.get("IS_ILUVATAR_GPU", "0").lower() in typelist
+    IS_METAX_GPU = os.environ.get("IS_METAX_GPU", "0").lower() in typelist
     if IS_NVIDIA or IS_XPU or IS_ILUVATAR_GPU or IS_METAX_GPU:
         return
 

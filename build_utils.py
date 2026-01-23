@@ -285,3 +285,4 @@ def get_libs():
             ],
         ),
     ]
+    return LIBRARIES
