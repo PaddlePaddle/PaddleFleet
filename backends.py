@@ -13,6 +13,7 @@
 # limitations under the License.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
+import logging
 import os
 import subprocess
 
@@ -33,7 +34,7 @@ def init_backend_type():
         return
 
     try:
-        output = subprocess.check_output(["nvidia-smi"])
+        subprocess.check_output(["nvidia-smi"])
         IS_NVIDIA = True
         print("Backend is NVIDIA. IS_NVIDIA =", IS_NVIDIA)
         return
@@ -41,7 +42,7 @@ def init_backend_type():
         # print("Backend is not NVIDIA")
         pass
     try:
-        output = subprocess.check_output(["xpu-smi"])
+        subprocess.check_output(["xpu-smi"])
         IS_XPU = True
         print("Backend is XPU. IS_XPU =", IS_XPU)
         return
@@ -50,7 +51,7 @@ def init_backend_type():
         pass
 
     try:
-        output = subprocess.check_output(["ixsmi"])
+        subprocess.check_output(["ixsmi"])
         IS_ILUVATAR_GPU = True
         print("Backend is ILUVATAR-GPU. IS_ILUVATAR_GPU =", IS_ILUVATAR_GPU)
         return
@@ -59,7 +60,7 @@ def init_backend_type():
         pass
 
     try:
-        output = subprocess.check_output(["mx-smi"])
+        subprocess.check_output(["mx-smi"])
         IS_METAX_GPU = True
         print("Backend is Metax-GPU. IS_METAX_GPU =", IS_METAX_GPU)
         return
@@ -67,6 +68,6 @@ def init_backend_type():
         # print("Backend is not Metax-GPU")
         pass
     if not (IS_NVIDIA or IS_XPU or IS_ILUVATAR_GPU or IS_METAX_GPU):
-        print(
+        logging.getLogger(
             "Please verify your environment and ensure that device information retrieval commands are functional. NVIDIA(nvidia-smi), XPU(xpu-smi), MetaX-GPU(mx-smi), and Iluvatar-GPU(ixsmi) are supported! You may also configure environment variables manually: IS_NVIDIA/IS_XPU/IS_ILUVATAR_GPU/IS_METAX_GPU"
         )

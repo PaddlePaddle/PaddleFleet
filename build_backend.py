@@ -98,7 +98,6 @@ def _prepare_ecosystem(use_symlinks: bool):
             lib.install(use_symlinks=use_symlinks)
     elif backends.IS_XPU:
         # xpu specific preparations
-        print("xpu specific preparations")
         pass
     elif backends.IS_ILUVATAR_GPU:
         # ILUVATAR_GPU specific preparations

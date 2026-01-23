@@ -221,7 +221,6 @@ def get_special_build_deps():
         cuda_major, cuda_minor = get_cuda_version()
         major = sys.version_info.major
         minor = sys.version_info.minor
-        ver_str = f"{major}{minor}"
         deps = [
             "paddlepaddle-gpu==3.3.0",
         ]
@@ -243,6 +242,8 @@ def get_special_build_deps():
             "paddlepaddle-xpu>=3.3.0",
         ]
         return deps
+    else:
+        return []
 
 
 def get_libs():
