@@ -16,7 +16,6 @@
 import functools
 import os
 import random
-import re
 import subprocess
 import unittest
 
@@ -28,6 +27,7 @@ from paddle.distributed import fleet
 import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
+from paddlefleet.ops.utils import get_cuda_version
 
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.pipeline_parallel import NoPipelineParallel
@@ -58,33 +58,7 @@ def judge_machine_type():
 
 result = judge_machine_type()
 print("你的机器类型是：", result)
-
-
-def get_cuda_version(get_major_version=False):
-    try:
-        result = subprocess.run(
-            ["nvcc", "-V"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-
-    # Look for: "release 13.0,"
-    if get_major_version:
-        match = re.search(r"release\s+(\d+)\.\d+", result.stdout)
-        if match:
-            return match.group(1)  # "13"
-    else:
-        match = re.search(r"release\s+(\d+\.\d+)", result.stdout)
-        if match:
-            return match.group(1)  # "13.0"
-
-    return None
-
-
-version = get_cuda_version()
+version, _ = get_cuda_version()
 print("CUDA version:", version)
 
 
@@ -207,7 +181,7 @@ class TestGPTModel(unittest.TestCase):
         repo_name = os.environ.get("repo_flag")
         if repo_name == "paddlefleet":
             if judge_machine_type() == "H":
-                if get_cuda_version(get_major_version=True) == "13":
+                if version == 13:
                     assert loss.item() == 5.239149570465088, (
                         f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
                     )

@@ -20,6 +20,9 @@ from pathlib import Path
 
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
+import backends
+from build_utils import get_special_build_deps
+
 
 def change_pwd():
     """change_pwd"""
@@ -32,28 +35,18 @@ common_dependencies = [
     "colorlog>=6.10.1",
 ]
 
-import sys
 
-
-def get_cuda_special_dependencies(cuda_major, cuda_minor):
-    major = sys.version_info.major
-    minor = sys.version_info.minor
-    ver_str = f"{major}{minor}"
-    deps = [
-        "paddlepaddle-gpu==3.3.0",
-        "triton",  # for deep_gemm, flashmask
-        "nvidia-cutlass-dsl==4.2.1",  # for sonic_moe
-        "filelock",  # for sonic_moe
-    ]
-    if cuda_major == 12:
-        deps.append("nvidia-nvshmem-cu12>=3.3.9,!=3.5.*")  # for deep_ep build
-    elif cuda_major == 13:
-        deps.append("nvidia-nvshmem-cu13>=3.3.9,!=3.5.*")  # for deep_ep build
-    else:
-        raise ValueError(
-            f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
-        )
-    return deps
+def get_special_setup_deps():
+    if backends.IS_NVIDIA:
+        deps = [
+            "triton",  # for deep_gemm, flashmask
+            "nvidia-cutlass-dsl==4.2.1",  # for sonic_moe
+            "filelock",  # for sonic_moe
+        ]
+        return deps
+    elif backends.IS_XPU:
+        deps = []
+        return deps
 
 
 class CustomBdistWheel(_bdist_wheel):
@@ -133,15 +126,10 @@ def setup_ops_extension():
         "-DNDEBUG",
     ]
     cuda_major, cuda_minor = get_cuda_version()
-    if cuda_major < 12:
-        raise ValueError(
-            f"CUDA version must be >= 12. Detected version: {cuda_major}.{cuda_minor}"
-        )
+
     if cuda_major == 12 and cuda_minor < 8:
         nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
-    cuda_dependencies = common_dependencies + get_cuda_special_dependencies(
-        cuda_major, cuda_minor
-    )
+
     ext_module = CUDAExtension(
         sources=[
             # cpp files
@@ -181,8 +169,26 @@ def setup_ops_extension():
         name="paddlefleet._extensions.ops",
         ext_modules=[ext_module],
         cmdclass={"bdist_wheel": CustomBdistWheel},
-        install_requires=cuda_dependencies,
+        install_requires=dependencies,
     )
 
 
-setup_ops_extension()
+# This func is for no extension ops backends
+def setup_install_no_extension():
+    from setuptools import setup
+
+    setup(
+        name="paddlefleet",
+        # ext_modules=[ext_module],
+        setup_requires=["setuptools_scm>=8"],
+        install_requires=dependencies,
+    )
+
+
+dependencies = (
+    common_dependencies + get_special_build_deps() + get_special_setup_deps()
+)
+if backends.IS_NVIDIA:
+    setup_ops_extension()
+elif backends.IS_XPU:
+    setup_install_no_extension()

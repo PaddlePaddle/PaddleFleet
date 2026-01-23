@@ -23,6 +23,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import backends
+
 logger = logging.getLogger(__name__)
 
 
@@ -159,16 +161,19 @@ class EcosystemLibrary:
 
 
 def check_submodule_updated():
-    if not (
-        (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists()
-        and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
-        and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
-        and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
-    ):
-        logger.error(
-            "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
-        )
-        sys.exit(1)
+    if backends.IS_NVIDIA:
+        if not (
+            (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
+        ):
+            logger.error(
+                "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
+            )
+            sys.exit(1)
+    elif backends.IS_XPU:
+        pass
 
 
 def check_patchelf_exists():
@@ -203,4 +208,79 @@ def get_cuda_version():
         )
     cuda_major = int(match.group(1))
     cuda_minor = int(match.group(2))
+
+    if cuda_major < 12:
+        raise ValueError(
+            f"CUDA version must be >= 12. Detected version: {cuda_major}.{cuda_minor}"
+        )
     return cuda_major, cuda_minor
+
+
+def get_special_build_deps():
+    if backends.IS_NVIDIA:
+        cuda_major, cuda_minor = get_cuda_version()
+        major = sys.version_info.major
+        minor = sys.version_info.minor
+        ver_str = f"{major}{minor}"
+        deps = [
+            "paddlepaddle-gpu==3.3.0",
+        ]
+        if cuda_major == 12:
+            deps.append(
+                "nvidia-nvshmem-cu12>=3.3.9,!=3.5.*"
+            )  # for deep_ep build
+        elif cuda_major == 13:
+            deps.append(
+                "nvidia-nvshmem-cu13>=3.3.9,!=3.5.*"
+            )  # for deep_ep build
+        else:
+            raise ValueError(
+                f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
+            )
+        return deps
+    elif backends.IS_XPU:
+        deps = [
+            "paddlepaddle-xpu>=3.3.0",
+        ]
+        return deps
+
+
+def get_libs():
+    cuda_major, cuda_minor = get_cuda_version()
+
+    LIBRARIES: list[EcosystemLibrary] = [
+        EcosystemLibrary(
+            name="DeepGEMM",
+            source_rel_path="third_party/DeepGEMM",
+            artifacts=[
+                # Updated paths to point to the installation directory
+                Artifact("deep_gemm", "deep_gemm"),
+                Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
+            ],
+        ),
+        EcosystemLibrary(
+            name="DeepEP",
+            source_rel_path="third_party/DeepEP",
+            artifacts=[
+                Artifact("deep_ep", "deep_ep"),
+                Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
+            ],
+            extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
+            if (cuda_major == 12 and cuda_minor < 8)
+            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0"},
+        ),
+        EcosystemLibrary(
+            name="sonic-moe",
+            source_rel_path="third_party/sonic-moe",
+            artifacts=[
+                Artifact("sonicmoe", "sonicmoe"),
+            ],
+        ),
+        EcosystemLibrary(
+            name="quack",
+            source_rel_path="third_party/quack",
+            artifacts=[
+                Artifact("quack", "quack"),
+            ],
+        ),
+    ]

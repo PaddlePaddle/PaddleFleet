@@ -95,11 +95,22 @@ ci = [
 [tool.uv]
 default-groups = ["build", "test"]
 link-mode = "copy"
-extra-index-url = ["https://www.paddlepaddle.org.cn/packages/stable/cu129/"]
 index-strategy = "unsafe-best-match"
 
-[tool.uv.pip]
-prerelease = "allow"
+[tool.uv.sources]
+paddlepaddle-gpu = {index = "paddlepaddle-gpu"}
+paddlepaddle-xpu = {index = "paddlepaddle-xpu"}
+
+
+[[tool.uv.index]]
+name = "paddlepaddle-gpu"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu129/"
+explicit = true
+
+[[tool.uv.index]]
+name = "paddlepaddle-xpu"
+url = "https://www.paddlepaddle.org.cn/packages/nightly/xpu-p800/"
+explicit = true
 
 [tool.ruff]
 exclude = ["third_party"]
