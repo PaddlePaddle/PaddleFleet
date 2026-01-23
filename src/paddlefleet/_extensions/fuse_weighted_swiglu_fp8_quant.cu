@@ -65,6 +65,17 @@ inline paddle::Tensor GetEmptyTensor(const common::DDim& dims,
         x_data, prob_data, out_data, scale_data, rows, cols, scale_cols); \
   } while (0)
 
+#define LAUNCH_FUSED_SPAQ_VEC8(__using_pow2_scaling, __with_prob)         \
+  do {                                                                    \
+    auto kernel = FusedSPAQKernelVec8<__using_pow2_scaling,               \
+                                      __with_prob,                        \
+                                      thread_per_block,                   \
+                                      ScaleT,                             \
+                                      use_ue8m0>;                         \
+    kernel<<<grid, block, 0, stream>>>(                                   \
+        x_data, prob_data, out_data, scale_data, rows, cols, scale_cols); \
+  } while (0)
+
 #define DISPATCH_BOOL(cond, k_name, ...) \
   if (cond) {                            \
     constexpr bool k_name = true;        \
@@ -235,6 +246,125 @@ __global__ void FusedSPAQKernelVec4(const phi::bfloat16* __restrict__ Xin,
   }
 }
 
+template <bool using_pow2_scaling,
+          bool with_prob,
+          int thread_per_block,
+          typename ScaleT,
+          bool ue8m0>
+__global__ void FusedSPAQKernelVec8(const phi::bfloat16* __restrict__ Xin,
+                                    const float* __restrict__ prob,
+                                    phi::float8_e4m3fn* __restrict__ out,
+                                    ScaleT* __restrict__ scales,
+                                    const int64_t rows,
+                                    const int64_t cols,
+                                    const int64_t scale_cols) {
+  constexpr int elements_per_thread = 8;
+  constexpr int warp_num = thread_per_block / 32;
+  const int lane = threadIdx.x & 31;
+  const int64_t x_offset =
+      static_cast<int64_t>(threadIdx.x) * elements_per_thread;
+  const unsigned int mask = 0xffffffff;
+
+  for (int64_t base_y = blockIdx.y; base_y < rows; base_y += gridDim.y) {
+    const int64_t in_x_idx =
+        ((static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x)) *
+         elements_per_thread) +
+        x_offset;
+    const int64_t src_idx = base_y * cols + in_x_idx;
+
+    if (in_x_idx >= cols / 2) [[unlikely]]
+      continue;
+
+    float p_t0;
+    if constexpr (with_prob) {
+      // Prefetch prob
+      if (lane == 0) p_t0 = prob[base_y];
+    }
+
+    const __nv_bfloat16* X = reinterpret_cast<const __nv_bfloat16*>(Xin);
+
+    // Initialize activation storage (2x vec4 = vec8)
+    float4 act_f32x4_0, act_f32x4_1;
+    bfloat16x4_t lhs_bf16x4_0, lhs_bf16x4_1;
+    bfloat16x4_t rhs_bf16x4_0, rhs_bf16x4_1;
+
+    // Reinterpret input pointer as int4* for 128-bit vectorized loading
+    const int4 lhs_packed = *reinterpret_cast<const int4*>(X + src_idx);
+    const int4 rhs_packed =
+        *reinterpret_cast<const int4*>(X + src_idx + cols / 2);
+
+    lhs_bf16x4_0 = *reinterpret_cast<const bfloat16x4_t*>(&lhs_packed.x);
+    lhs_bf16x4_1 = *reinterpret_cast<const bfloat16x4_t*>(&lhs_packed.z);
+    rhs_bf16x4_0 = *reinterpret_cast<const bfloat16x4_t*>(&rhs_packed.x);
+    rhs_bf16x4_1 = *reinterpret_cast<const bfloat16x4_t*>(&rhs_packed.z);
+
+    act_f32x4_0 = fast_swiglu_vec4(lhs_bf16x4_0, rhs_bf16x4_0);
+    act_f32x4_1 = fast_swiglu_vec4(lhs_bf16x4_1, rhs_bf16x4_1);
+
+    if constexpr (with_prob) {
+      // Warp level sync to avoid syncthreads
+      const float p = __shfl_sync(mask, p_t0, 0);
+      act_f32x4_0.x *= p;
+      act_f32x4_0.y *= p;
+      act_f32x4_0.z *= p;
+      act_f32x4_0.w *= p;
+      act_f32x4_1.x *= p;
+      act_f32x4_1.y *= p;
+      act_f32x4_1.z *= p;
+      act_f32x4_1.w *= p;
+    }
+
+    // Phase 2: Block Reduction to find per-quant block absolute maxima
+    // Compute absolute values for 8 elements
+    float thread_amax =
+        fmaxf(amax_float4(act_f32x4_0), amax_float4(act_f32x4_1));
+
+    // All-Reduce within 16-thread sub-groups (128 elements per group)
+    // Use XOR sync to reduce independent groups: [0-15] and [16-31]
+#pragma unroll
+    for (int offset = 8; offset > 0; offset >>= 1) {
+      const float val = __shfl_xor_sync(mask, thread_amax, offset);
+      thread_amax = fmaxf(thread_amax, val);
+    }
+
+    // Phase 3: Compute scales and quantize the outputs
+    const float scale = ComputeScale<float, __nv_fp8_e4m3, using_pow2_scaling>(
+        thread_amax, 0.0f);
+
+    union {
+      struct {
+        fp8_e4m3x4_t v0;
+        fp8_e4m3x4_t v1;
+      } vec;
+      uint64_t packed;
+    } out_packer;
+
+    out_packer.vec.v0 = scale_fp32x4_to_fp8x4(act_f32x4_0, scale);
+    out_packer.vec.v1 = scale_fp32x4_to_fp8x4(act_f32x4_1, scale);
+
+    // Store 64 bits at once
+    *reinterpret_cast<uint64_t*>(out + base_y * (cols >> 1) + in_x_idx) =
+        out_packer.packed;
+
+    // Write scale (one scale per 16 threads / 128 elements)
+    if (lane % 16 == 0) {
+      const float inv_scale = __frcp_rn(scale);
+      if constexpr (ue8m0) {
+        const size_t col_idx = in_x_idx >> 7;
+        const size_t idx =
+            (col_idx >> 2) * (rows << 2) + base_y * 4 + (col_idx & 0x3);
+        const uint8_t exp =
+            (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
+        uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
+        *dst = exp;
+      } else {
+        const int64_t scale_idx = base_y * scale_cols + (in_x_idx >> 7);
+        scales[scale_idx] = inv_scale;
+      }
+    }
+  }
+}
+
 template <bool using_pow2_scaling, bool with_prob, typename ScaleT, bool ue8m0>
 __global__ void FusedSPAQKernel(const phi::bfloat16* __restrict__ Xin,
                                 const float* __restrict__ prob,
@@ -363,7 +493,19 @@ void dispatch_fused_spaq(const phi::bfloat16* x_data,
 
   ScaleT* scale_data = static_cast<ScaleT*>(void_scale_data);
 
-  if (cols % 8 == 0) {
+  if (cols % 16 == 0) {
+    block.x = thread_per_block;
+    constexpr int vec_numel = 8;
+    const int scale_cols = (cols / 2 + 127) / 128;
+    DISPATCH_BOOL(
+        using_pow2_scaling,
+        k_using_pow2_scaling,
+        DISPATCH_BOOL(
+            with_prob, k_with_prob, grid.y = rows > 65535 ? 65535 : rows;
+            grid.x =
+                ((cols / 2) + block.x * vec_numel - 1) / (block.x * vec_numel);
+            LAUNCH_FUSED_SPAQ_VEC8(k_using_pow2_scaling, k_with_prob);))
+  } else if (cols % 8 == 0) {
     // Use mixed vectorizing strategy, while cols size be 8x (4x2)
     // Each thread process 4 bfloat16 element in same row, each warp handles
     // 1x128 vector Each block handles several sub-row (numel = 4 x blockDim.x)
@@ -462,10 +604,9 @@ std::vector<paddle::Tensor> FusedWeightedSwigluActQuantKernel(
                            paddle::DataType::INT32,
                            x.place());
   } else {
-    scale = paddle::experimental::full(
-        {rows, (cols / 2 + 127) / 128}, 0, phi::DataType::FLOAT32, place);
-    out = paddle::experimental::full(
-        {rows, cols / 2}, 0, phi::DataType::FLOAT8_E4M3FN, place);
+    scale = GetEmptyTensor(
+        {rows, (cols / 2 + 127) / 128}, phi::DataType::FLOAT32, place);
+    out = GetEmptyTensor({rows, cols / 2}, phi::DataType::FLOAT8_E4M3FN, place);
   }
 
   // Get data pointers
