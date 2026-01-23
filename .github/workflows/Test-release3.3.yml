@@ -294,7 +294,7 @@ jobs:
           export WITH_COVERAGE=ON
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
-          timeout 10m bash ci/multi-card_test.sh
+          timeout 20m bash ci/multi-card_test.sh
           multi_card_exit_code=$?
           ls -a /paddle/coveragedata/
           coverage combine

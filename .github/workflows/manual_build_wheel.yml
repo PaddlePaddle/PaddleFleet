@@ -36,6 +36,7 @@ jobs:
     with:
       clone_dir: manual
       ref: ${{ inputs.commit }}
+      commit: ${{ inputs.commit }}
 
   publish-wheel:
     name: Publish wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
@@ -126,7 +127,7 @@ jobs:
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
-          python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/manual/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+          python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}
           '
 
       - name: Cleanup

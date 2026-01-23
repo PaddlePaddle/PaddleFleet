@@ -64,9 +64,10 @@ class LanguageModelEmbedding(FleetLayer):
         self.add_position_embedding: bool = (
             position_embedding_type == "learned_absolute"
         )
+        self.sequence_parallel = self.config.sequence_parallel
         self.num_tokentypes = num_tokentypes
         self.scatter_to_sequence_parallel = scatter_to_sequence_parallel
-        if config.sequence_parallel:
+        if self.sequence_parallel:
             assert self.scatter_to_sequence_parallel is True, (
                 "If sequence parallel is turned on, scatter_to_sequence_parallel "
                 "must be set to True."
@@ -75,7 +76,7 @@ class LanguageModelEmbedding(FleetLayer):
         self.reduce_scatter_embeddings = (
             (not self.add_position_embedding)
             and self.num_tokentypes <= 0
-            and self.config.sequence_parallel
+            and self.sequence_parallel
             and self.scatter_to_sequence_parallel
         )
 
@@ -158,7 +159,7 @@ class LanguageModelEmbedding(FleetLayer):
 
         if (
             not self.reduce_scatter_embeddings
-            and self.config.sequence_parallel
+            and self.sequence_parallel
             and self.scatter_to_sequence_parallel
         ):
             # Data format change to avoid explicit transposes : [b s h] --> [s b h].
@@ -169,10 +170,7 @@ class LanguageModelEmbedding(FleetLayer):
             # [b s h] -> [s b h] (So that it can be added with embeddings)
             # tokentype_embedding = self.tokentype_embeddings(tokentype_ids).permute(1, 0, 2)
             tokentype_embedding = self.tokentype_embeddings(tokentype_ids)
-            if (
-                self.config.sequence_parallel
-                and self.scatter_to_sequence_parallel
-            ):
+            if self.sequence_parallel and self.scatter_to_sequence_parallel:
                 tokentype_embedding = tokentype_embedding.permute(
                     1, 0, 2
                 ).contiguous()
@@ -185,7 +183,7 @@ class LanguageModelEmbedding(FleetLayer):
             embeddings = embeddings.float()
 
         # Dropout.
-        if self.config.sequence_parallel:
+        if self.sequence_parallel:
             if (
                 not self.reduce_scatter_embeddings
                 and self.scatter_to_sequence_parallel

@@ -376,6 +376,7 @@ def get_gpt_spec(
             head_empty_layers=head_empty_layers_spec,
             transformer_layers=transformer_layers_spec,
             tail_empty_layers=tail_empty_layers_spec,
+            mtp=mtp_layers_spec,
             layer_norm=LayerSpec(
                 layer=WrappedPaddleNormPipe,
                 extra_kwargs={
@@ -384,7 +385,6 @@ def get_gpt_spec(
                     "eps": config.rms_norm_eps,
                 },
             ),
-            mtp=mtp_layers_spec,
             lm_head=LayerSpec(
                 layer=GPTLMHead,
                 extra_kwargs={

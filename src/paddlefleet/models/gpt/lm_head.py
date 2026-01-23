@@ -85,8 +85,7 @@ class GPTLMHead(ColumnParallelLinear):
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="GPTLMHead")
 
-    def forward(self, dict_args: dict):
-        hidden_states = dict_args["hidden_states"]
+    def _forward(self, hidden_states: paddle.Tensor):
         if (
             self.config.recompute_modules is not None
             and "lm_head" in self.config.recompute_modules
@@ -103,6 +102,20 @@ class GPTLMHead(ColumnParallelLinear):
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
         return logits
+
+    def forward(self, dict_args: dict):
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            logits = [self._forward(dict_args["hidden_states"])]
+            for i in range(self.config.num_nextn_predict_layers):
+                key = f"decoder_input_{i}"
+                assert key in dict_args
+                logits.append(self._forward(dict_args[key]))
+            return logits
+        else:
+            return self._forward(dict_args["hidden_states"])
 
     @property
     def embedding_weight(self):

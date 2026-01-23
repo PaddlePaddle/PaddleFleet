@@ -604,6 +604,8 @@ class MoELayer(nn.Layer):
                 self,
                 self.num_experts_per_tok,
                 use_fp8_mlp=self.fp8,
+                moe_deep_gemm=self.moe_deep_gemm,
+                moe_grouped_gemm=self.moe_grouped_gemm,
                 recompute_moe_gate_up=self.recompute_moe_gate_up,
                 recompute_moe_premute=self.recompute_moe_premute,
                 fp8_dispatched_handle=fp8_dispatched_handle,
@@ -968,3 +970,10 @@ class MoELayer(nn.Layer):
         if self.moe_use_fusion_node and self.fp8:
             return True
         return False
+
+    def set_layer_number(self, layer_number):
+        self.layer_number = layer_number
+        assert hasattr(self.gate, "set_layer_number"), (
+            "expect gate has method 'set_layer_number'"
+        )
+        self.gate.set_layer_number(layer_number)

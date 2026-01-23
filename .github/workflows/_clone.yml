@@ -14,6 +14,9 @@ on:
       ref:
         required: true
         type: string
+      commit:
+        type: string
+        required: false
 
 permissions: read-all
 
@@ -83,7 +86,11 @@ jobs:
           echo "::group::Install bce-python-sdk"
           python -m pip install bce-python-sdk==0.8.74
           echo "::endgroup::"
-          python ${bos_file} PaddleFleet.tar.gz paddle-github-action/PaddleFleet/${{ inputs.clone_dir }}/${PR_ID}/${COMMIT_ID}
+          if [ -n "${{ inputs.commit }}" ]; then
+            python ${bos_file} PaddleFleet.tar.gz paddle-github-action/PaddleFleet/${{ inputs.clone_dir }}/${PR_ID}/${{ inputs.commit }}
+          else
+            python ${bos_file} PaddleFleet.tar.gz paddle-github-action/PaddleFleet/${{ inputs.clone_dir }}/${PR_ID}/${COMMIT_ID}
+          fi
 
       - name: Clean environment
         if: always()

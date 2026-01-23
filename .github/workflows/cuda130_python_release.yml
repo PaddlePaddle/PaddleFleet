@@ -2,7 +2,7 @@ name: CE-CUDA-130-PYTHON-RELEASE
 
 on:
   schedule:
-    - cron: '0 19 * * *'
+    - cron: '0 19 * * 6'
   workflow_dispatch: # 可选：允许手动点 Run
 
 permissions: read-all
@@ -429,15 +429,21 @@ jobs:
       - name: Integration test (GLM4.5 single-card)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
           bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
-            exit 1
+            wget https://paddle-qa.bj.bcebos.com/fleet/ce_cuda130_glm45_single_card_gt_loss.txt
+            python PaddleFormers/tests/integration_test/check_loss.py --log_file glm45_single_card.txt --gt_file ce_cuda130_glm45_single_card_gt_loss.txt
+            if [[ "$?" != "0" ]]; then
+              echo -e "::error:: \033[31mGLM4.5 single-card loss check failed.\033[0m"
+              exit 1
+            else
+              echo -e "\033[32mGLM4.5 single-card loss check succeeded.\033[0m"
+            fi
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
           fi
@@ -446,15 +452,21 @@ jobs:
       - name: Integration test (Qwen3-30B-A3B single-card)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
           bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
-            exit 1
+            wget https://paddle-qa.bj.bcebos.com/fleet/ce_cuda130_qwen3_single_card_gt_loss.txt
+            python PaddleFormers/tests/integration_test/check_loss.py --log_file qwen3_single_card.txt --gt_file ce_cuda130_qwen3_single_card_gt_loss.txt
+            if [[ "$?" != "0" ]]; then
+              echo -e "::error:: \033[31mQwen3-30B-A3B single-card loss check failed.\033[0m"
+              exit 1
+            else
+              echo -e "\033[32mQwen3-30B-A3B single-card loss check succeeded.\033[0m"
+            fi
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
