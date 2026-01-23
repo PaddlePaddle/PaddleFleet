@@ -31,7 +31,10 @@ from paddlefleet.training.initialize import initialize_fleet
 PP_DEGREE = 4
 MTP_DEGREE = 3
 
-SKIP_TESTS = os.getenv("repo_flag", "no") != "paddlefleet"
+
+REPO_FLAG = os.getenv("repo_flag")
+BRANCH = os.getenv("BRANCH")
+SKIP_TESTS = (REPO_FLAG != "paddlefleet") and (BRANCH == "develop")
 
 
 def _set_random_seed(
@@ -150,7 +153,7 @@ def run_pp(
 
 @unittest.skipIf(
     SKIP_TESTS,
-    f"跳过测试：repo_flag={os.getenv('repo_flag', 'no')}，需要 repo_flag=paddlefleet",
+    f"跳过测试：repo_flag={REPO_FLAG} 不是 paddlefleet，且分支 {BRANCH} 是 develop",
 )
 class TestPP(unittest.TestCase):
     def setUp(self):
