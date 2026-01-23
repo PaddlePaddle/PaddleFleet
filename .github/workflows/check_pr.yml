@@ -32,4 +32,6 @@ jobs:
       - name: Fail if description is empty
         # 如果描述为空，则使此步骤失败，从而让整个检查失败
         if: steps.check-description.outputs.is_empty == 'true'
-        run: exit 1
+        run: |
+          echo "PR 描述为空，请补充说明本次更改的目的和内容。"
+          exit 1
