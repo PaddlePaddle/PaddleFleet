@@ -13,14 +13,16 @@
 // limitations under the License.
 
 #include "paddle/phi/kernels/funcs/fast_divmod.h"
+#include "paddle/phi/kernels/funcs/segmented_array.h"
 #include "paddle/phi/kernels/fusion/gpu/quant_utils.h"
 #include "paddle/phi/kernels/primitive/datamover_primitives.h"
-#include "paddle/phi/kernels/funcs/segmented_array.h"
 
 using FastDivMod = phi::funcs::FastDivMod<int64_t>;
 
 template <typename ScaleT, bool using_ue8m0_scale>
-__device__ __forceinline__ void StoreScaleFleetCustom(ScaleT* ptr, size_t idx, float val) {
+__device__ __forceinline__ void StoreScaleFleetCustom(ScaleT* ptr,
+                                                      size_t idx,
+                                                      float val) {
   if constexpr (using_ue8m0_scale) {
     int exp = (__float_as_int(val) >> 23) & 0xFF;
     reinterpret_cast<uint8_t*>(ptr)[idx] = static_cast<uint8_t>(exp);
@@ -31,10 +33,10 @@ __device__ __forceinline__ void StoreScaleFleetCustom(ScaleT* ptr, size_t idx, f
 
 template <typename ArrayT>
 __device__ void BlockLoadFleetCustom(ArrayT input_array,
-                          __nv_bfloat16 x[8][4],
-                          size_t K,
-                          size_t block_y,
-                          size_t block_x) {
+                                     __nv_bfloat16 x[8][4],
+                                     size_t K,
+                                     size_t block_y,
+                                     size_t block_x) {
   const __nv_bfloat16* input =
       reinterpret_cast<const __nv_bfloat16*>(input_array.data[blockIdx.z]);
 
@@ -54,6 +56,7 @@ __device__ void BlockLoadFleetCustom(ArrayT input_array,
 template <int Width = 32>
 __device__ __nv_bfloat16 WarpReduceMaxFleetCustom(__nv_bfloat16 x) {
   constexpr unsigned mask = (uint64_t(1) << Width) - 1;
+#pragma unroll
   for (int offset = Width / 2; offset > 0; offset /= 2) {
     __nv_bfloat16 t = __shfl_down_sync(mask, x, offset);
     x = __hmax(x, t);
@@ -62,8 +65,10 @@ __device__ __nv_bfloat16 WarpReduceMaxFleetCustom(__nv_bfloat16 x) {
 }
 
 template <typename OutT, bool Power2Scaling = false>
-__device__ float BlockReduceScaleFleetCustom(__nv_bfloat16 x[8][4], float eps = 1e-10f) {
+__device__ float BlockReduceScaleFleetCustom(__nv_bfloat16 x[8][4],
+                                             float eps = 1e-10f) {
   __nv_bfloat16 local_max = 0.0;
+#pragma unroll
   for (uint32_t i = 0; i < 8; i++) {
     __nv_bfloat162 v0 = *reinterpret_cast<__nv_bfloat162*>(&x[i][0]);
     __nv_bfloat162 v1 = *reinterpret_cast<__nv_bfloat162*>(&x[i][2]);
@@ -107,11 +112,11 @@ __global__ void __launch_bounds__(512, 4)
 __global__ void __launch_bounds__(512)
 #endif
     FusedStackQuantGPUKernelFleetCustom(ArrayT input_array,
-                             OutT* __restrict__ out,
-                             ScaleT* __restrict__ scale,
-                             size_t M,
-                             size_t K,
-                             FastDivMod K_div_128) {
+                                        OutT* __restrict__ out,
+                                        ScaleT* __restrict__ scale,
+                                        size_t M,
+                                        size_t K,
+                                        FastDivMod K_div_128) {
   size_t block_y = K_div_128.Div(blockIdx.x);
   size_t block_x = static_cast<size_t>(blockIdx.x) - block_y * (K / 128);
 
@@ -143,7 +148,8 @@ __global__ void __launch_bounds__(512)
         // [N*M, K/128]
         idx = global_row * (K / 128) + block_x;
       }
-      StoreScaleFleetCustom<ScaleT, using_ue8m0_scale>(scale, idx, __frcp_rn(block_scale));
+      StoreScaleFleetCustom<ScaleT, using_ue8m0_scale>(
+          scale, idx, __frcp_rn(block_scale));
     }
   } else {
     if (tid == 0) {
@@ -156,7 +162,8 @@ __global__ void __launch_bounds__(512)
         // [N*M/128, K/128]
         idx = (blockIdx.z * (M / 128) + block_y) * (K / 128) + block_x;
       }
-      StoreScaleFleetCustom<ScaleT, using_ue8m0_scale>(scale, idx, __frcp_rn(block_scale));
+      StoreScaleFleetCustom<ScaleT, using_ue8m0_scale>(
+          scale, idx, __frcp_rn(block_scale));
     }
   }
 
@@ -192,11 +199,11 @@ __global__ void __launch_bounds__(512, 4)
 __global__ void __launch_bounds__(512)
 #endif
     FusedStackTransposeQuantGPUKernelFleetCustom(ArrayT input_array,
-                                      OutT* __restrict__ out,
-                                      ScaleT* __restrict__ scale,
-                                      size_t M,
-                                      size_t K,
-                                      FastDivMod K_div_128) {
+                                                 OutT* __restrict__ out,
+                                                 ScaleT* __restrict__ scale,
+                                                 size_t M,
+                                                 size_t K,
+                                                 FastDivMod K_div_128) {
   size_t block_y = K_div_128.Div(blockIdx.x);
   size_t block_x = static_cast<size_t>(blockIdx.x) - block_y * (K / 128);
 
@@ -228,7 +235,8 @@ __global__ void __launch_bounds__(512)
         // [N*K, M/128]
         idx = global_row * (M / 128) + block_y;
       }
-      StoreScaleFleetCustom<ScaleT, using_ue8m0_scale>(scale, idx, __frcp_rn(block_scale));
+      StoreScaleFleetCustom<ScaleT, using_ue8m0_scale>(
+          scale, idx, __frcp_rn(block_scale));
     }
   } else {
     if (tid == 0) {
@@ -241,7 +249,8 @@ __global__ void __launch_bounds__(512)
         // [N*K/128, M/128]
         idx = (blockIdx.z * (K / 128) + block_x) * (M / 128) + block_y;
       }
-      StoreScaleFleetCustom<ScaleT, using_ue8m0_scale>(scale, idx, __frcp_rn(block_scale));
+      StoreScaleFleetCustom<ScaleT, using_ue8m0_scale>(
+          scale, idx, __frcp_rn(block_scale));
     }
   }
 
@@ -453,50 +462,84 @@ std::vector<paddle::Tensor> fuse_stack_transpose_fp8_quant_fleet_custom(
   dim3 block(32, 16);
 
   FastDivMod K_div_128(K / 128);
-{
-  using namespace phi;
+  {
+    using namespace phi;  // NOLINT(build/namespaces)
 
-#define LAUNCH_KERN(ScaleT, POW2, UE8M0, TRANS) \
-      if (Transpose) { \
-        FusedStackTransposeQuantGPUKernelFleetCustom<phi::float8_e4m3fn, decltype(array), ScaleT, POW2, UE8M0, TRANS> \
-          <<<grid, block, 0, X[0].stream()>>>(array, out.data<phi::float8_e4m3fn>(), reinterpret_cast<ScaleT*>(scale.data<ScaleT>()), M, K, K_div_128); \
-      } else { \
-        FusedStackQuantGPUKernelFleetCustom<phi::float8_e4m3fn, decltype(array), ScaleT, POW2, UE8M0, TRANS> \
-          <<<grid, block, 0, X[0].stream()>>>(array, out.data<phi::float8_e4m3fn>(), reinterpret_cast<ScaleT*>(scale.data<ScaleT>()), M, K, K_div_128); \
-      }
-
-  switch (funcs::CalcArraySize(N)) {
-    SEGMENTED_ARRAY_KERNEL_HELPER({
-      funcs::ConstPointerArray<phi::bfloat16, kArraySize> array;
-      std::vector<const phi::bfloat16*> ptrs(X.size());
-      for (int i = 0; i < X.size(); ++i) {
-        ptrs[i] = X[i].data<phi::bfloat16>();
-      }
-      const phi::bfloat16** dev_ptr = nullptr;
-      array.Set(ptrs, dev_ptr);
-
-      if (using_pow2_scaling) {
-        if (using_ue8m0_scale) {
-          if (output_scale_transpose) { LAUNCH_KERN(int, true, true, true); }
-          else                        { LAUNCH_KERN(int, true, true, false); }
-        } else {
-          if (output_scale_transpose) { LAUNCH_KERN(float, true, false, true); }
-          else                        { LAUNCH_KERN(float, true, false, false); }
-        }
-      } else {
-        if (using_ue8m0_scale) {
-          if (output_scale_transpose) { LAUNCH_KERN(int, false, true, true); }
-          else                        { LAUNCH_KERN(int, false, true, false); }
-        } else {
-          if (output_scale_transpose) { LAUNCH_KERN(float, false, false, true); }
-          else                        { LAUNCH_KERN(float, false, false, false); }
-        }
-      }
-    });
+#define LAUNCH_KERN(ScaleT, POW2, UE8M0, TRANS)                      \
+  if (Transpose) {                                                   \
+    FusedStackTransposeQuantGPUKernelFleetCustom<phi::float8_e4m3fn, \
+                                                 decltype(array),    \
+                                                 ScaleT,             \
+                                                 POW2,               \
+                                                 UE8M0,              \
+                                                 TRANS>              \
+        <<<grid, block, 0, X[0].stream()>>>(                         \
+            array,                                                   \
+            out.data<phi::float8_e4m3fn>(),                          \
+            reinterpret_cast<ScaleT*>(scale.data<ScaleT>()),         \
+            M,                                                       \
+            K,                                                       \
+            K_div_128);                                              \
+  } else {                                                           \
+    FusedStackQuantGPUKernelFleetCustom<phi::float8_e4m3fn,          \
+                                        decltype(array),             \
+                                        ScaleT,                      \
+                                        POW2,                        \
+                                        UE8M0,                       \
+                                        TRANS>                       \
+        <<<grid, block, 0, X[0].stream()>>>(                         \
+            array,                                                   \
+            out.data<phi::float8_e4m3fn>(),                          \
+            reinterpret_cast<ScaleT*>(scale.data<ScaleT>()),         \
+            M,                                                       \
+            K,                                                       \
+            K_div_128);                                              \
   }
 
+    switch (funcs::CalcArraySize(N)) {
+      SEGMENTED_ARRAY_KERNEL_HELPER({
+        funcs::ConstPointerArray<phi::bfloat16, kArraySize> array;
+        std::vector<const phi::bfloat16*> ptrs(X.size());
+        for (int i = 0; i < X.size(); ++i) {
+          ptrs[i] = X[i].data<phi::bfloat16>();
+        }
+        const phi::bfloat16** dev_ptr = nullptr;
+        array.Set(ptrs, dev_ptr);
+
+        if (using_pow2_scaling) {
+          if (using_ue8m0_scale) {
+            if (output_scale_transpose) {
+              LAUNCH_KERN(int, true, true, true);
+            } else {
+              LAUNCH_KERN(int, true, true, false);
+            }
+          } else {
+            if (output_scale_transpose) {
+              LAUNCH_KERN(float, true, false, true);
+            } else {
+              LAUNCH_KERN(float, true, false, false);
+            }
+          }
+        } else {
+          if (using_ue8m0_scale) {
+            if (output_scale_transpose) {
+              LAUNCH_KERN(int, false, true, true);
+            } else {
+              LAUNCH_KERN(int, false, true, false);
+            }
+          } else {
+            if (output_scale_transpose) {
+              LAUNCH_KERN(float, false, false, true);
+            } else {
+              LAUNCH_KERN(float, false, false, false);
+            }
+          }
+        }
+      });
+    }
+
 #undef LAUNCH_KERN
-}
+  }
 
   return {out, scale};
 }
