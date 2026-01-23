@@ -39,6 +39,7 @@ class LanguageLoss(FleetLayer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
+        self.config = config
         self.ignored_index = -100
         self.enable_parallel_cross_entropy = (
             paddle.distributed.is_initialized()
@@ -74,13 +75,56 @@ class LanguageLoss(FleetLayer):
 
         return loss
 
-    def forward(self, logits: Tensor, labels: Tensor) -> Tensor:
+    def _forward(self, logits: Tensor, labels: Tensor):
         if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules
         ):
             return recompute(self.forward_impl, logits, labels)
         return self.forward_impl(logits, labels)
+
+    def forward(self, logits: Tensor | list, labels: Tensor) -> Tensor:
+        if isinstance(logits, list):
+            assert (
+                self.config.num_nextn_predict_layers is not None
+                and self.config.num_nextn_predict_layers > 0
+            )
+            assert len(logits) == self.config.num_nextn_predict_layers + 1
+            labels_ori = labels
+            lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+            seq_length = lm_labels.shape[1]
+
+            lm_loss = self._forward(logits[0], lm_labels)
+
+            mtp_loss = []
+            mtp_logits = logits[1:]
+            for depth in range(self.config.num_nextn_predict_layers):
+                logits_cur_depth = mtp_logits[depth]
+                labels_cur_depth = labels_ori[
+                    :, (depth + 1) : (depth + 1 + seq_length)
+                ]
+                loss_cur_depth = self._forward(
+                    logits_cur_depth,
+                    labels_cur_depth,
+                )
+                mtp_loss.append(loss_cur_depth)
+
+            def add_loss(main_loss, loss):
+                if self.config.add_mtp_loss:
+                    return main_loss + loss - loss.detach()
+                else:
+                    return main_loss
+
+            loss = add_loss(
+                lm_loss,
+                self.config.mtp_loss_scaling_factor
+                * sum(mtp_loss)
+                / len(mtp_loss),
+            )
+
+            return loss
+        else:
+            return self._forward(logits, labels)
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="LanguageLoss")

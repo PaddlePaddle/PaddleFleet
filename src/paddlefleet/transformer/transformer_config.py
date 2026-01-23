@@ -41,11 +41,14 @@ class TransformerConfig(ModelParallelConfig):
     num_hidden_layers: int = 1
     """Number of transformer layers in a transformer block."""
 
-    num_nextn_predict_layers: int = None
+    num_nextn_predict_layers: int = 0
     """Number of Multi-Token Prediction (MTP) Layers."""
 
-    mtp_loss_scaling_factor: float = None
+    mtp_loss_scaling_factor: float = 0.3
     """Weighting factor of Multi-Token Prediction (MTP) loss."""
+
+    add_mtp_loss: bool = True
+    """Add mtp loss to final loss to enable mtp backward and weight update."""
 
     num_empty_layers_add_in_head: int = 0
     """Number of EmptyLayer before the Decoder Layer.

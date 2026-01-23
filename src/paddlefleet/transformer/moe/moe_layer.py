@@ -970,3 +970,10 @@ class MoELayer(nn.Layer):
         if self.moe_use_fusion_node and self.fp8:
             return True
         return False
+
+    def set_layer_number(self, layer_number):
+        self.layer_number = layer_number
+        assert hasattr(self.gate, "set_layer_number"), (
+            "expect gate has method 'set_layer_number'"
+        )
+        self.gate.set_layer_number(layer_number)

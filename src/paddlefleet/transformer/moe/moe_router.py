@@ -526,6 +526,9 @@ class StandardMoERouter(nn.Layer):
             raise NotImplementedError(f"Invalid topk_method: {topk_method}")
         return top_gate, top_idx
 
+    def set_layer_number(self, layer_number):
+        self.layer_number = layer_number
+
 
 class TopKRouter(StandardMoERouter):
     def __init__(self, *args, **kwargs):
