@@ -54,16 +54,19 @@ class BMMFunction(paddle.autograd.PyLayer):
         batch_sizes = ctx.batch_sizes
         trans_y = ctx.trans_y
 
-        dx = None
-        dx = paddle.incubate.nn.functional.batched_gemm(
-            grad, y, batch_sizes, trans_rhs=not trans_y
-        )
-
-        dy = None
-        lhs, rhs = (grad, x) if trans_y else (x, grad)
-        dy = paddle.incubate.nn.functional.batched_gemm(
-            lhs, rhs, batch_sizes, trans_lhs=True, trans_rhs=False
-        )
+        if x.stop_gradient:
+            dx = None
+        else:
+            dx = paddle.incubate.nn.functional.batched_gemm(
+                grad, y, batch_sizes, trans_rhs=not trans_y
+            )
+        if y.stop_gradient:
+            dy = None
+        else:
+            lhs, rhs = (grad, x) if trans_y else (x, grad)
+            dy = paddle.incubate.nn.functional.batched_gemm(
+                lhs, rhs, batch_sizes, trans_lhs=True, trans_rhs=False
+            )
         return dx, dy
 
 
