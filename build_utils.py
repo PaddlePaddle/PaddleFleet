@@ -101,7 +101,7 @@ class EcosystemLibrary:
             for src, dst in links.items():
                 create_symlink(src, dst)
 
-        # pip install . --target  <install_dir> --no-deps --no-build-isolation
+        # pip install . --target  <install_dir> --no-deps --no-build-isolation --no-compile
         cmd = [
             sys.executable,
             "-m",
@@ -112,6 +112,7 @@ class EcosystemLibrary:
             str(self.install_dir),
             "--no-deps",
             "--no-build-isolation",
+            "--no-compile",
             "--upgrade",
             "-v",
         ]
