@@ -63,6 +63,9 @@ include-package-data = true
 [tool.setuptools.package-data]
 "paddlefleet.ops" = ["*", "**/*"]
 
+[tool.setuptools.exclude-package-data]
+"paddlefleet.ops" = ["*.pyc", "**/*.pyc", "__pycache__/*", "**/__pycache__/*"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["paddlefleet*"]
