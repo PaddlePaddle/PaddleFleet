@@ -65,6 +65,7 @@ jobs:
             -e BRANCH \
             -e PR_ID \
             -e COMMIT_ID \
+            -e repo_flag="paddlefleet" \
             -e PADDLE_ROOT \
             -e ci_scripts \
             -e CACHE_DIR \
@@ -194,6 +195,7 @@ jobs:
             -e no_proxy \
             -e paddle_url \
             -e CI_name \
+            -e repo_flag="paddlefleet" \
             -e PIP_CACHE_DIR \
             -e work_dir \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \

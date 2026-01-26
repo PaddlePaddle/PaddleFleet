@@ -65,6 +65,7 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
+            -e repo_flag="paddlefleet" \
             -e PIP_CACHE_DIR \
             -e work_dir \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
@@ -144,6 +145,7 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
+            -e repo_flag="paddlefleet" \s
             -e work_dir \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
