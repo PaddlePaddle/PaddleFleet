@@ -3,3 +3,4 @@ test_llava_model.py
 test_clip_vit_model.py
 test_moe.py
 test_count_cumsum.py
+test_rr_attn_estimate_triton_op.py
