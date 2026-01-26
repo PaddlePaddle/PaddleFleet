@@ -1,9 +1,6 @@
 name: CE-CUDA-CUDA-126-Dev
 
 on:
-  pull_request:
-    branches:
-      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -145,7 +142,7 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
-            -e repo_flag="paddlefleet" \s
+            -e repo_flag="paddlefleet" \
             -e work_dir \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
