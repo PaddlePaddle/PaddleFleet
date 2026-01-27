@@ -117,7 +117,7 @@ jobs:
           source /root/proxy
           git submodule update --init --recursive
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "branch" ]]; then
-            export PADDLEFLEET_VERSION=0.0.0
+            export PADDLEFLEET_VERSION=$(cat version.txt).post$(git log -1 --format=%cd --date=format:%Y%m%d)+$(git rev-parse --short=11 HEAD)
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
@@ -137,16 +137,19 @@ jobs:
           cd dist
           if [[ "${{ github.event_name }}" != "push" ]]; then
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
-            curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet
-            curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           else
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
             export AK=paddle
             export SK=paddle
             python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            PYTHON_VERSION=${{ matrix.python_version }}
+            PYTHON_VERSION_NODOT="${PYTHON_VERSION//./}"
+            mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PYTHON_VERSION_NODOT}-cp${PYTHON_VERSION_NODOT}-linux_x86_64.whl
             python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
           fi
+          curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
 
       - name: Cleanup
