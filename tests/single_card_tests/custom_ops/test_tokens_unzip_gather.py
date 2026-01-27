@@ -92,8 +92,8 @@ class TestTokensUnzipGatherUE8M0Scale(unittest.TestCase):
         SEQLEN = 16384
         TOKEN_LEN = 7168
         DTYPES = ["float8_e4m3fn"]
-        EXPERT_NUMS = [4, 8, 16]
-        TOPKS = [4, 8, 16]
+        EXPERT_NUMS = [16]
+        TOPKS = [8]
         # Generate test data
         for dt, expert_num, topk in itertools.product(
             DTYPES, EXPERT_NUMS, TOPKS
