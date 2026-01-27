@@ -123,6 +123,7 @@ jobs:
             VERSION="${TAG_NAME#v}"
             export PADDLEFLEET_VERSION=$VERSION
           fi
+          export IS_NVIDIA=True
           uv build --wheel -v
           '
 
