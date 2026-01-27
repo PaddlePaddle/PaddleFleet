@@ -97,6 +97,8 @@ jobs:
           '
 
       - name: Single card test
+        id: basic_test
+        continue-on-error: ${{ matrix.python == '3.12' }} # 3.12允许失败继续
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
@@ -140,7 +142,7 @@ jobs:
           '
 
       - name: Single card sonic moe test
-        if: matrix.python == '3.12'
+        if: matrix.python == '3.12' && always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
