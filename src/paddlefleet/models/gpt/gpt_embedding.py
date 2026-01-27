@@ -261,15 +261,13 @@ class GPTEmbedding(FleetLayer):
             "visual_pos_masks": visual_pos_masks,
         }
         if mtp_emb_res is not None:
-            new_output = {"hidden_states": mtp_emb_res[0]}
             assert (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
             )
             assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
-            for i in range(self.config.num_nextn_predict_layers):
-                new_output[f"decoder_input_{i}"] = mtp_emb_res[i + 1]
-            preproc_output = {**preproc_output, **new_output}
+            hidden_states_concat = paddle.concat(mtp_emb_res)
+            preproc_output["hidden_states"] = hidden_states_concat
 
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:

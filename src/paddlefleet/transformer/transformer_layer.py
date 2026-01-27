@@ -360,6 +360,19 @@ class TransformerLayer(nn.Layer):
         dict_args.pop("dynamic_inference_decode_only", None)
         keys = tuple(dict_args.keys())
         values = tuple(dict_args.values())
+        is_mtp = dict_args.pop("is_mtp", False)
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not is_mtp
+        ):
+            hidden_states_concat = dict_args["hidden_states"]
+            tensor_list = paddle.split(
+                hidden_states_concat, self.config.num_nextn_predict_layers + 1
+            )
+            hidden_states = tensor_list[0]
+            mtp_input = tuple(tensor_list[1:])
+            dict_args["hidden_states"] = hidden_states
 
         if self.full_recompute:
             hidden_states = dict_args["hidden_states"]
@@ -409,6 +422,14 @@ class TransformerLayer(nn.Layer):
 
         rst = OrderedDict()
         rst = {"hidden_states": output}
+        # 如果开了mtp, 需要将输出和mtp_input拼起来
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not is_mtp
+        ):
+            hidden_states_concat = paddle.concat([output, *mtp_input])
+            rst["hidden_states"] = hidden_states_concat
         if context is not None:
             rst["context"] = context
         rst = {**dict_args, **rst}
@@ -725,16 +746,27 @@ class TransformerLayerNode(ScheduleNode):
 
     def forward(self, inputs):
         inputs.pop("dynamic_inference_decode_only", None)
-        mtp_tmp_dict = None
+        # mtp_tmp_dict = None
+        # if (
+        #     self.config.num_nextn_predict_layers is not None
+        #     and self.config.num_nextn_predict_layers > 0
+        # ):
+        #     mtp_tmp_dict = {}
+        #     for i in range(self.config.num_nextn_predict_layers):
+        #         key = f"decoder_input_{i}"
+        #         assert key in inputs
+        #         mtp_tmp_dict[key] = inputs.pop(key)
+        mtp_tmp = None
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
         ):
-            mtp_tmp_dict = {}
-            for i in range(self.config.num_nextn_predict_layers):
-                key = f"decoder_input_{i}"
-                assert key in inputs
-                mtp_tmp_dict[key] = inputs.pop(key)
+            hidden_states_concat = inputs.pop("hidden_states")
+            tensor_list = paddle.split(
+                hidden_states_concat, self.config.num_nextn_predict_layers + 1
+            )
+            inputs["hidden_states"] = tensor_list[0]
+            mtp_tmp = tuple(tensor_list[1:])
         if self._is_sparse:
             if self.full_recompute:
                 attn_state = tensors_clone(inputs)
@@ -759,7 +791,7 @@ class TransformerLayerNode(ScheduleNode):
 
             hidden_states = self.dispatch_node.forward(
                 (hidden_states, token_indices, token_weights),
-                async_finish=True,
+                async_finish=False,
             )
             dispatch_fw_event = deep_ep.get_event_from_comm_stream(
                 self.group_id
@@ -774,7 +806,7 @@ class TransformerLayerNode(ScheduleNode):
             )
 
             hidden_states = self.combine_node.forward(
-                hidden_states, async_finish=True
+                hidden_states, async_finish=False
             )
             combine_fw_event = deep_ep.get_event_from_comm_stream(self.group_id)
             combine_fw_event.calc_stream_wait(self.group_id)
@@ -805,8 +837,11 @@ class TransformerLayerNode(ScheduleNode):
         if context is not None:
             rst["context"] = context
         rst = {**inputs, **rst}
-        if mtp_tmp_dict is not None:
-            rst = {**rst, **mtp_tmp_dict}
+        if mtp_tmp is not None:
+            hidden_states_concat = paddle.concat([output, *mtp_tmp])
+            rst["hidden_states"] = hidden_states_concat
+        # if mtp_tmp_dict is not None:
+        #     rst = {**rst, **mtp_tmp_dict}
         return rst
 
     def backward(self, output_grad):
@@ -818,9 +853,14 @@ class TransformerLayerNode(ScheduleNode):
             and self.config.num_nextn_predict_layers > 0
         ):
             # maybe error, fix this by concat and split
-            assert len(output_grad) == self.config.num_nextn_predict_layers + 1
-            mtp_tmp_grad = output_grad[1:]
-            output_grad = [output_grad[0]]
+            # assert len(output_grad) == self.config.num_nextn_predict_layers + 1
+            # mtp_tmp_grad = output_grad[1:]
+            # output_grad = [output_grad[0]]
+            grad_list = paddle.split(
+                output_grad[0], self.config.num_nextn_predict_layers + 1
+            )
+            output_grad = grad_list[0]
+            mtp_tmp_grad = grad_list[1:]
         if self._is_sparse:
             output_grad, residual_grad = self.post_process_node.backward(
                 output_grad
@@ -868,7 +908,8 @@ class TransformerLayerNode(ScheduleNode):
             output_grad = self.attn_node.backward(output_grad)
 
         if mtp_tmp_grad is not None:
-            output_grad = output_grad + tuple(mtp_tmp_grad)
+            output_grad_concat = paddle.concat([*output_grad, *mtp_tmp_grad])
+            output_grad = (output_grad_concat,)
         return output_grad
 
     def recompute_forward(self):
@@ -903,21 +944,36 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
 
     def forward_backward(self, inputs, output_grad, split_bw=False):
         assert not split_bw
-        mtp_tmp_dict = None
+        mtp_tmp = None
         mtp_tmp_grad = None
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
         ):
             # maybe error, fix this by concat and split
-            assert len(output_grad) == self.config.num_nextn_predict_layers + 1
-            mtp_tmp_dict = {}
-            mtp_tmp_grad = output_grad[1:]
-            output_grad = [output_grad[0]]
-            for i in range(self.config.num_nextn_predict_layers):
-                key = f"decoder_input_{i}"
-                assert key in inputs
-                mtp_tmp_dict[key] = inputs.pop(key)
+            # assert len(output_grad) == self.config.num_nextn_predict_layers + 1
+            # mtp_tmp_dict = {}
+            # mtp_tmp_grad = output_grad[1:]
+            # output_grad = [output_grad[0]]
+            # for i in range(self.config.num_nextn_predict_layers):
+            #     key = f"decoder_input_{i}"
+            #     assert key in inputs
+            #     mtp_tmp_dict[key] = inputs.pop(key)
+            # process fwd inputs
+            hidden_states_concat = inputs.pop("hidden_states")
+            tensor_list = paddle.split(
+                hidden_states_concat, self.config.num_nextn_predict_layers + 1
+            )
+            inputs["hidden_states"] = tensor_list[0]
+            mtp_tmp = tuple(tensor_list[1:])
+
+            # process bwd output_grad
+            grad_list = paddle.split(
+                output_grad[0], self.config.num_nextn_predict_layers + 1
+            )
+            output_grad = grad_list[0]
+            mtp_tmp_grad = grad_list[1:]
+
         if self.forward_node._is_sparse and self.backward_node._is_sparse:
             if self.backward_node.full_recompute:
                 self.backward_node.recompute_forward()
@@ -960,7 +1016,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
             # 4. DISPATCH(F)
             hidden_states = self.forward_node.dispatch_node.forward(
                 (hidden_states, token_indices, token_weights),
-                async_finish=True,
+                async_finish=False,
             )
             dispatch_fw_event = deep_ep.get_event_from_comm_stream(
                 self.forward_node.group_id
@@ -989,7 +1045,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
 
             # 8. COMBINE(F)
             hidden_states = self.forward_node.combine_node.forward(
-                hidden_states, async_finish=True
+                hidden_states, async_finish=False
             )
             combine_fw_event = deep_ep.get_event_from_comm_stream(
                 self.forward_node.group_id
@@ -1042,7 +1098,15 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
             # 1b
             output_grad = self.backward_node.backward(output_grad)
 
-        if mtp_tmp_dict is not None:
-            rst = {**rst, **mtp_tmp_dict}
-            output_grad = output_grad + tuple(mtp_tmp_grad)
+        # if mtp_tmp is not None:
+        #     rst = {**rst, **mtp_tmp_dict}
+        #     output_grad = output_grad + tuple(mtp_tmp_grad)
+        if mtp_tmp is not None:
+            hidden_states_concat = paddle.concat([output, *mtp_tmp])
+            rst["hidden_states"] = hidden_states_concat
+
+        if mtp_tmp_grad is not None:
+            output_grad_concat = paddle.concat([*output_grad, *mtp_tmp_grad])
+            output_grad = (output_grad_concat,)
+
         return rst, output_grad

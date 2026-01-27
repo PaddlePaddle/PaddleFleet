@@ -108,11 +108,11 @@ class GPTLMHead(ColumnParallelLinear):
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
         ):
-            logits = [self._forward(dict_args["hidden_states"])]
+            hidden_states_concat = dict_args["hidden_states"]
+            tensor_list = paddle.split(hidden_states_concat, self.config.num_nextn_predict_layers + 1)
+            logits = [self._forward(tensor_list[0])]
             for i in range(self.config.num_nextn_predict_layers):
-                key = f"decoder_input_{i}"
-                assert key in dict_args
-                logits.append(self._forward(dict_args[key]))
+                logits.append(self._forward(tensor_list[i + 1]))
             return logits
         else:
             return self._forward(dict_args["hidden_states"])
