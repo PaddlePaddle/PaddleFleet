@@ -136,7 +136,7 @@ class MoELayer(nn.Layer):
                     "paddlefleet.ops.sonicmoe"
                 ]
             )
-
+        self.moe_use_pfcc_deepep = config.moe_use_pfcc_deepep
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
         self.moe_ep_barrier = config.moe_ep_barrier
@@ -246,6 +246,17 @@ class MoELayer(nn.Layer):
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
+                if self.moe_use_pfcc_deepep:
+                    from .fused_a2a import (
+                        set_pfcc_deep_ep_backend as set_pfcc_deep_ep_backend_a2a,
+                    )
+
+                    set_pfcc_deep_ep_backend_a2a()
+                    from paddlefleet.transformer.transformer_layer import (
+                        set_pfcc_deep_ep_backend as set_pfcc_deep_ep_backend_layer,
+                    )
+
+                    set_pfcc_deep_ep_backend_layer()
                 self.token_dispatcher = MoEFlexTokenDispatcher(
                     self.num_experts_per_device,
                     self.num_experts_per_tok,

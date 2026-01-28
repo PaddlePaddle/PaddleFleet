@@ -313,6 +313,9 @@ class TransformerConfig(ModelParallelConfig):
     """The type of token dispatcher to use. The default is 'allgather'.
     Options are 'allgather','alltoall' and 'deepep'."""
 
+    moe_use_pfcc_deepep: bool = False
+    """Whether to use PFCC DeepEP for the MoE layer. If False, Paddle DeepEP is used. This argument takes effect only when moe_token_dispatcher_type is set to 'deepep'."""
+
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
 
