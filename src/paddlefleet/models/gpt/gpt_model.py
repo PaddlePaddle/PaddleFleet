@@ -504,10 +504,10 @@ class GPTModel(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
         # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
-
-        for k in list(state_dict.keys()):
-            v = state_dict.pop(k)
-            state_dict[self._pp_to_single_mapping[k]] = v
+        if "qwen3_vl" not in getattr(self.config, "model_type", ""):
+            for k in list(state_dict.keys()):
+                v = state_dict.pop(k)
+                state_dict[self._pp_to_single_mapping[k]] = v
 
         return state_dict
 
