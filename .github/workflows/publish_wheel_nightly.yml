@@ -118,7 +118,7 @@ jobs:
           git submodule update --init --recursive
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "branch" ]]; then
             export PADDLEFLEET_VERSION=$(cat version.txt).post$(git log -1 --format=%cd --date=format:%Y%m%d)+$(git rev-parse --short=11 HEAD)
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
             export PADDLEFLEET_VERSION=$VERSION
