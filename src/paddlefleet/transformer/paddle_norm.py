@@ -230,15 +230,27 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
         )
 
     def forward(self, dict_args: dict):
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            hidden_states_concat = dict_args["hidden_states"]
+            tensor_list = paddle.split(
+                hidden_states_concat, self.config.num_nextn_predict_layers + 1
+            )
+            dict_args["hidden_states"] = tensor_list[0]
         rst = {"hidden_states": self.norm(dict_args["hidden_states"])}
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
         ):
+            rst_list = []
             for i in range(self.config.num_nextn_predict_layers):
-                key = f"decoder_input_{i}"
-                assert key in dict_args
-                rst[key] = self.norm(dict_args[key])
+                rst_list.append(self.norm(tensor_list[i + 1]))
+            hidden_states_concat = paddle.concat(
+                [rst["hidden_states"], *rst_list]
+            )
+            rst["hidden_states"] = hidden_states_concat
         return rst
 
     def build_schedule_node(self):

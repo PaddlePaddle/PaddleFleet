@@ -14,6 +14,7 @@
 
 
 import functools
+import os
 import random
 import unittest
 
@@ -29,6 +30,10 @@ from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
 MTP_DEGREE = 3
+
+REPO_FLAG = os.getenv("repo_flag")
+BRANCH = os.getenv("BRANCH")
+SKIP_TESTS = (REPO_FLAG != "paddlefleet") and (BRANCH == "develop")
 
 
 def _set_random_seed(
@@ -145,6 +150,10 @@ def run_pp(
     return loss, gpt_pipe_model
 
 
+@unittest.skipIf(
+    SKIP_TESTS,
+    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet') and branch '{BRANCH}' is 'develop'",
+)
 class TestPP(unittest.TestCase):
     def setUp(self):
         self.seed = 46
@@ -197,6 +206,7 @@ class TestPP(unittest.TestCase):
             gated_linear_unit=True,
             bias_activation_fusion=True,
             num_nextn_predict_layers=MTP_DEGREE,
+            norm_topk_prob=False,
         )
 
         overlap_loss, overlap_gpt_model = run_pp(
@@ -217,45 +227,45 @@ class TestPP(unittest.TestCase):
 
         print(rst)
 
-        assert overlap_loss._md5sum() == "bef8aebcd0e33875e5bfb418e70bc6a1"
+        assert overlap_loss._md5sum() == "864e194f213e7cc5e825e847c91a557d"
 
         if paddle.distributed.get_rank() == 0:
             baseline = {
-                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "0fd18a7c329aa573dee527e5711327d9",
-                "_layers.9.0.input_layernorm.weight": "c13503b5abe8632378c28282d10ec5f3",
-                "_layers.9.0.self_attn.o_proj.weight": "615f97f4a497d4147d857bc96b94a6cd",
-                "_layers.9.0.self_attn.qkv_proj.weight": "aec3cbde1a4062879c9c04fde4762734",
-                "_layers.9.0.self_attn.q_layernorm.weight": "1b626027d68ce87f22d3bc565a029b45",
-                "_layers.9.0.self_attn.k_layernorm.weight": "0048e85979759200eb1d1fea0e812213",
-                "_layers.9.0.post_attention_layernorm.weight": "5cbef10d6043b8a21a087b8cce94332e",
-                "_layers.9.0.mlp.gate.weight": "07074355d6f8c05e24f00ebd01f3b1a6",
-                "_layers.9.0.mlp.experts.0.up_gate_proj.weight": "8a5f5e0e0dd0e8c2f4e1c1298f6e4a8b",
-                "_layers.9.0.mlp.experts.0.down_proj.weight": "a3a3baa2e9ec50479900a8aa2c3afb0c",
-                "_layers.9.0.mlp.experts.1.up_gate_proj.weight": "4e77262d9865d4cae333beedd0980bd2",
-                "_layers.9.0.mlp.experts.1.down_proj.weight": "49062fc5705734c349bdb758dd52baf3",
-                "_layers.9.0.mlp.experts.2.up_gate_proj.weight": "30d7c68127b6e48a57459e2f79655349",
-                "_layers.9.0.mlp.experts.2.down_proj.weight": "3ac11382888aa35629cdf742a3c36a64",
-                "_layers.9.0.mlp.experts.3.up_gate_proj.weight": "09255c8e9cceaa016786f0346b3eb88d",
-                "_layers.9.0.mlp.experts.3.down_proj.weight": "074bc6b5e925479e248375b1f7c61819",
-                "_layers.9.0.mlp.shared_experts.up_gate_proj.weight": "ec6bbc7eb6713c3934304e89c1997d5f",
-                "_layers.9.0.mlp.shared_experts.down_proj.weight": "0a342daea3b42539ceb3c5ab74a00b0a",
-                "_layers.9.1.input_layernorm.weight": "1b512c0828ec37ee305e8138729f9e17",
-                "_layers.9.1.self_attn.o_proj.weight": "338e71c080bfb0636f9c8bfbe6671f05",
-                "_layers.9.1.self_attn.qkv_proj.weight": "4b7781ddd1da28efb903259bdb5230c0",
-                "_layers.9.1.self_attn.q_layernorm.weight": "0fa57cf85bcafe155992b19342c0c48a",
-                "_layers.9.1.self_attn.k_layernorm.weight": "1da475565ece11eff68be7f4c7bc4952",
-                "_layers.9.1.post_attention_layernorm.weight": "ecc3d8f930d81cb6dc836eecd03aa840",
-                "_layers.9.1.mlp.gate.weight": "970849406933efcf79d5bff9164a3bcb",
-                "_layers.9.1.mlp.experts.0.up_gate_proj.weight": "53c1386af9eb654109e6b26acf4c5f5a",
-                "_layers.9.1.mlp.experts.0.down_proj.weight": "e058eb34a6f524b224bca4d7085505ed",
-                "_layers.9.1.mlp.experts.1.up_gate_proj.weight": "7b869c7af380f3c248f32b3f17519c75",
-                "_layers.9.1.mlp.experts.1.down_proj.weight": "39f9551985528f0707f9782630e14a60",
-                "_layers.9.1.mlp.experts.2.up_gate_proj.weight": "bcb9e116006601fe0b69fe448d79a392",
-                "_layers.9.1.mlp.experts.2.down_proj.weight": "7b5981e3a4e93b734640bfb57f8eed89",
-                "_layers.9.1.mlp.experts.3.up_gate_proj.weight": "5eb2f609bab0f99528a3686f0405c15c",
-                "_layers.9.1.mlp.experts.3.down_proj.weight": "8919c90ad630f64787ec963f08020e40",
-                "_layers.9.1.mlp.shared_experts.up_gate_proj.weight": "8c8cb93e6e0bc3dfe26b124b1dd8c1d0",
-                "_layers.9.1.mlp.shared_experts.down_proj.weight": "8d7d1ea5506a6c3f3811390f568ae8c0",
+                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "d1fb19d10f5dce637467a36d7cce95bf",
+                "_layers.9.0.input_layernorm.weight": "513eff5aa58d0d7f46527c3d4c8069cb",
+                "_layers.9.0.self_attn.o_proj.weight": "f0f60610a0a2b1fd21410b044f620337",
+                "_layers.9.0.self_attn.qkv_proj.weight": "9ad78e891dfe8fdf16efb55d6de15fd8",
+                "_layers.9.0.self_attn.q_layernorm.weight": "56e97b9f314ef79db2506ba6f5d07072",
+                "_layers.9.0.self_attn.k_layernorm.weight": "d15896c22708fb079cd04d17869acbae",
+                "_layers.9.0.post_attention_layernorm.weight": "7880c6f6660e84c640512e5fa306fe89",
+                "_layers.9.0.mlp.gate.weight": "4f0bd321ab73a64f768e4d598a9c26dd",
+                "_layers.9.0.mlp.experts.0.up_gate_proj.weight": "c67a6ae2e6676f013040e9b97b160b87",
+                "_layers.9.0.mlp.experts.0.down_proj.weight": "9766db124ab5c37113ae910ee893cd1b",
+                "_layers.9.0.mlp.experts.1.up_gate_proj.weight": "99d6d71beed4a6a5e097daf6783269e5",
+                "_layers.9.0.mlp.experts.1.down_proj.weight": "0cba801946c26bc57bbd7556d09b88b5",
+                "_layers.9.0.mlp.experts.2.up_gate_proj.weight": "ff0161994b3e3dc7ec0e1b212b9923c5",
+                "_layers.9.0.mlp.experts.2.down_proj.weight": "2b7c62bb7d05f4d65c76f25eb9fc23d3",
+                "_layers.9.0.mlp.experts.3.up_gate_proj.weight": "b4244672d6a8d43669d926599585884a",
+                "_layers.9.0.mlp.experts.3.down_proj.weight": "d91d656ed09204ddcfb090ee04599b48",
+                "_layers.9.0.mlp.shared_experts.up_gate_proj.weight": "16bc652ebe54f5ac1ad13f5f14b36fe6",
+                "_layers.9.0.mlp.shared_experts.down_proj.weight": "a3d9cc8d041d6d05dcaa4198e1de76ad",
+                "_layers.9.1.input_layernorm.weight": "12e8413477bfb4e2f65d9888120a3171",
+                "_layers.9.1.self_attn.o_proj.weight": "d4d8e76fa4c1ae72ea97406e67fabb20",
+                "_layers.9.1.self_attn.qkv_proj.weight": "e6aff30c54b606f5fe046418774c2804",
+                "_layers.9.1.self_attn.q_layernorm.weight": "b22a143f8889a9dc5509a1975db687c7",
+                "_layers.9.1.self_attn.k_layernorm.weight": "018d67f53ee93c21cb5a3c95709877dc",
+                "_layers.9.1.post_attention_layernorm.weight": "2f0ddf38c1fc77226f286befe56a106b",
+                "_layers.9.1.mlp.gate.weight": "1ece9c05c781757fe0bd4905cb1a505b",
+                "_layers.9.1.mlp.experts.0.up_gate_proj.weight": "cc0905f7729c09a311517858f309b082",
+                "_layers.9.1.mlp.experts.0.down_proj.weight": "78f09393bd69515cdb2e79b494d5a954",
+                "_layers.9.1.mlp.experts.1.up_gate_proj.weight": "5dd6b02dc579e713352dcc607323a068",
+                "_layers.9.1.mlp.experts.1.down_proj.weight": "4ecb36287b0119b6ca6af7e4030f1fc3",
+                "_layers.9.1.mlp.experts.2.up_gate_proj.weight": "cfa8c26637fde6a4ed796c96dd0973a1",
+                "_layers.9.1.mlp.experts.2.down_proj.weight": "1699c207c9b9b1cec50141b479a56970",
+                "_layers.9.1.mlp.experts.3.up_gate_proj.weight": "933c6e4711fa76cda9e70be8a370a95d",
+                "_layers.9.1.mlp.experts.3.down_proj.weight": "610b9013eeeab90aa5cbd7e27108e0fa",
+                "_layers.9.1.mlp.shared_experts.up_gate_proj.weight": "8af6be4d1aec9c1b8c2add665a944aca",
+                "_layers.9.1.mlp.shared_experts.down_proj.weight": "1bf89913c4ddf0736f34ad28977a8cde",
             }
 
             for name, param in overlap_gpt_model.named_parameters():

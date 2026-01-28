@@ -1,0 +1,26 @@
+name: Require PR Description
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches: [develop, release/*]
+
+jobs:
+  check-pr-description:
+    name: Check PR Description
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if PR description is empty
+        id: check-description
+        # 使用 GitHub Actions 的内置上下文检查 PR 内容
+        run: |
+          DESCRIPTION=$(echo "${{ github.event.pull_request.body }}" | tr -d '\n\r' | xargs)
+
+          if [ -z "$DESCRIPTION" ]; then
+            echo "❌ PR 描述为空，请补充说明本次更改的目的和内容。"
+            echo "::error title=缺少PR描述::请在此 Pull Request 的「Description」区域填写更改说明，例如：%0A%0A- **更改目的**：修复了什么 bug？增加了什么功能？%0A- **测试说明**：如何验证此更改有效？%0A- **相关 Issue**：关联的 Issue 编号（如有）"
+            exit 1
+          else
+            echo "✅ PR 描述符合要求。"
+            echo "字数统计: ${#DESCRIPTION} 个字符"
+          fi

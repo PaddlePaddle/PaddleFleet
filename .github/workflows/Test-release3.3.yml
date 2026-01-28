@@ -88,6 +88,7 @@ jobs:
           git submodule update --init --recursive
           export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
           export PADDLEFLEET_VERSION=0.0.0
+          export IS_NVIDIA=True
           uv build --wheel
           '
 

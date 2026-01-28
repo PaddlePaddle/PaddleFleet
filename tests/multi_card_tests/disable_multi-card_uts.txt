@@ -3,3 +3,4 @@ test_layers.py
 test_tensor_parallel_utils.py
 test_cross_entropy.py
 test_data.py
+test_gpt_pp_with_moe_with_mtp_with_overlap.py

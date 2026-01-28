@@ -382,6 +382,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "rotary_pos_sin": rotary_pos_sin,
                 "attention_bias": attention_bias,
                 "packed_seq_params": packed_seq_params,
+                "is_mtp": True,
             }
 
             rst_dict = self.transformer_layer(input_dict)
@@ -429,9 +430,12 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "multi token prediction + sequence packing is not yet supported."
             )
 
-        key = f"decoder_input_{self.layer_number}"
-        assert key in dict_args
-        dict_args["decoder_input"] = dict_args[key]
+        hidden_states_concat = dict_args["hidden_states"]
+        tensor_list = paddle.split(
+            hidden_states_concat, self.config.num_nextn_predict_layers + 1
+        )
+        dict_args["hidden_states"] = tensor_list[0]
+        dict_args["decoder_input"] = tensor_list[self.layer_number + 1]
 
         if self.config.recompute_granularity == "full" and self.training:
             hidden_states = self._checkpointed_forward(
@@ -440,9 +444,10 @@ class MultiTokenPredictionLayer(FleetLayer):
         else:
             hidden_states = self._proj_and_transformer_layer(**dict_args)
 
+        tensor_list[self.layer_number + 1] = hidden_states
+        hidden_states_concat = paddle.concat(tensor_list)
+        dict_args["hidden_states"] = hidden_states_concat
         dict_args.pop("decoder_input")
-        dict_args[key] = hidden_states
-
         return dict_args
 
     def build_schedule_node(self):

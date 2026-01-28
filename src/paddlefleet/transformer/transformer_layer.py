@@ -361,6 +361,20 @@ class TransformerLayer(nn.Layer):
         keys = tuple(dict_args.keys())
         values = tuple(dict_args.values())
 
+        is_mtp = dict_args.pop("is_mtp", False)
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not is_mtp
+        ):
+            hidden_states_concat = dict_args["hidden_states"]
+            tensor_list = paddle.split(
+                hidden_states_concat, self.config.num_nextn_predict_layers + 1
+            )
+            hidden_states = tensor_list[0]
+            mtp_input = tuple(tensor_list[1:])
+            dict_args["hidden_states"] = hidden_states
+
         if self.full_recompute:
             hidden_states = dict_args["hidden_states"]
             attention_mask = dict_args.get("attention_mask", None)
@@ -409,6 +423,13 @@ class TransformerLayer(nn.Layer):
 
         rst = OrderedDict()
         rst = {"hidden_states": output}
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not is_mtp
+        ):
+            hidden_states_concat = paddle.concat([output, *mtp_input])
+            rst["hidden_states"] = hidden_states_concat
         if context is not None:
             rst["context"] = context
         rst = {**dict_args, **rst}
@@ -623,6 +644,9 @@ class TransformerLayerWithOverlap(TransformerLayer):
         assert not self.recompute_input_layernorm
         assert not self.recompute_post_attention_layernorm
         if isinstance(self.mlp, MoELayer):
+            assert not self.mlp.gate.norm_topk_prob, (
+                "By enabling `forward_backward_overlap_scheduler`, you should not use `norm_topk_prob` in TopKRouter."
+            )
             assert self.mlp.expert_model_parallel_size > 1, (
                 "By enabling `forward_backward_overlap_scheduler`, you should use expert parallel."
             )
@@ -723,6 +747,12 @@ class TransformerLayerNode(ScheduleNode):
     def forward(self, inputs):
         inputs.pop("dynamic_inference_decode_only", None)
         mtp_tmp_dict = None
+        assert (
+            self.config.num_nextn_predict_layers is None
+            or self.config.num_nextn_predict_layers == 0
+        ), (
+            f"current support num_nextn_predict_layers == 0, but get {self.config.num_nextn_predict_layers}"
+        )
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0

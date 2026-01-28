@@ -49,19 +49,19 @@ classifiers = [
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
 Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
-[project.optional-dependencies]
-
 [build-system]
 requires = ["setuptools>=66.1.0", "pip", "wheel"]
 build-backend = "build_backend"
 backend-path = ["."]
-
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.package-data]
 "paddlefleet.ops" = ["*", "**/*"]
+
+[tool.setuptools.exclude-package-data]
+"paddlefleet.ops" = ["*.pyc", "**/*.pyc", "__pycache__/*", "**/__pycache__/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -95,11 +95,20 @@ ci = [
 [tool.uv]
 default-groups = ["build", "test"]
 link-mode = "copy"
-extra-index-url = ["https://www.paddlepaddle.org.cn/packages/stable/cu129/"]
 index-strategy = "unsafe-best-match"
 
-[tool.uv.pip]
-prerelease = "allow"
+[tool.uv.sources]
+paddlepaddle-gpu = {index = "paddlepaddle-gpu"}
+paddlepaddle-xpu = {index = "paddlepaddle-xpu"}
+
+
+[[tool.uv.index]]
+name = "paddlepaddle-gpu"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu129/"
+
+[[tool.uv.index]]
+name = "paddlepaddle-xpu"
+url = "https://www.paddlepaddle.org.cn/packages/nightly/xpu-p800/"
 
 [tool.ruff]
 exclude = ["third_party"]
