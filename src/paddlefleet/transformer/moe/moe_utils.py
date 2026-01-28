@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 import paddle
 from paddle import Tensor, framework
 
+import paddlefleet
+
 try:
     from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
 except (ImportError, RuntimeError):
@@ -341,20 +343,14 @@ def manual_backward(f: Callable, is_first_fwd: bool, *args: list[Any]):
 class FilterScores(PyLayer):
     @staticmethod
     def forward(ctx, probs, indices):
-        topk_scores = paddle._C_ops._run_custom_op(
-            "filter_scores", probs, indices
-        )[0]
+        topk_scores = paddlefleet.ops.filter_scores(probs, indices)[0]
         ctx.save_for_backward(indices)
         return topk_scores
 
     @staticmethod
     def backward(ctx, grad_topk_scores):
         (indices,) = ctx.saved_tensor()
-        grads = paddle._C_ops._run_custom_op(
-            "filter_scores_grad",
-            indices,
-            grad_topk_scores,
-        )
+        grads = paddlefleet.ops.filter_scores_grad(indices, grad_topk_scores)
         grad_probs = grads[0]
         return grad_probs, None
 
@@ -364,8 +360,10 @@ def fused_expert_parallel_TC_topk_router_metadata(
     expert_frequency_offset,
     K,
 ):
-    return paddle._C_ops._run_custom_op(
-        "router_metadata", dispatched_indices, expert_frequency_offset, K
+    return paddlefleet.ops.router_metadata(
+        dispatched_indices,
+        expert_frequency_offset,
+        K,
     )
 
 
@@ -374,8 +372,7 @@ def count_cumsum(
     num_experts_per_device,
     do_cumsum,
 ):
-    return paddle._C_ops._run_custom_op(
-        "count_cumsum",
+    return paddlefleet.ops.count_cumsum(
         dispatched_indices,
         num_experts_per_device,
         do_cumsum,
