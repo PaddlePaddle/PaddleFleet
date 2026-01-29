@@ -242,7 +242,7 @@ class ExpertsGroupGemmContiguousNode:
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
         """
-        if not moe_grouped_gemm:
+        if not moe_grouped_gemm or use_fp8_mlp:
             if expert_id is None:
                 self.experts = custom_map.experts
             else:
@@ -259,8 +259,6 @@ class ExpertsGroupGemmContiguousNode:
         self.input_scale = None
         self.o1 = None
         self.fp8_fused_ops_configs = {}
-        self.is_split_group_gemm = True
-        # self.is_split_group_gemm = has_config(self.fp8_fused_ops_configs, "split_group_gemm")
         self.group = group
         self.moe_subbatch_token_num_after_dispatch = (
             moe_subbatch_token_num_after_dispatch
@@ -338,10 +336,6 @@ class ExpertsGroupGemmContiguousNode:
         """
         fwd_gate_up bf16
         """
-        if self.is_split_group_gemm is False:
-            raise NotImplementedError(
-                "fuse node do not support group gemm currently"
-            )
 
         if x is None:
             assert self.input is not None
@@ -415,7 +409,7 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, n] = [m_sum, k] * [num_groups, k, n] (m_sum = sum(tokens_per_expert))
         """
 
-        if not self.is_split_group_gemm:
+        if self.moe_grouped_gemm:
             self.m_indices = self.gen_m_indices(tokens_per_expert)
         # concat w1, shape is [num_groups, n, k]
         w1_t_quant, w1_t_scale = fused_stack_quant(expert_w1, transpose=True)
@@ -461,7 +455,7 @@ class ExpertsGroupGemmContiguousNode:
             [x_fp8.shape[0], w1_t_quant.shape[1]], dtype=expert_w1[0].dtype
         )
         if numpy.prod(x_fp8.shape) != 0:
-            if self.is_split_group_gemm:
+            if not self.moe_grouped_gemm:
                 split_group_gemm(
                     x_fp8,
                     x_scale,
@@ -493,10 +487,6 @@ class ExpertsGroupGemmContiguousNode:
         """
         fwd_down_bf16
         """
-        if self.is_split_group_gemm is False:
-            raise NotImplementedError(
-                "fuse node do not support group gemm currently"
-            )
 
         o2 = fused_swiglu_scale(o1, unzipped_probs)
 
@@ -589,7 +579,7 @@ class ExpertsGroupGemmContiguousNode:
         else:
             o3 = paddle.empty(o3_shape, dtype=o1.dtype)
         if numpy.prod(o2_fp8.shape) != 0:
-            if self.is_split_group_gemm:
+            if not self.moe_grouped_gemm:
                 split_group_gemm(
                     o2_fp8,
                     o2_scale,
@@ -706,7 +696,7 @@ class ExpertsGroupGemmContiguousNode:
             dtype=unzipped_grad.dtype,
         )
         if numpy.prod(unzipped_grad_fp8.shape) != 0:
-            if self.is_split_group_gemm:
+            if not self.moe_grouped_gemm:
                 split_group_gemm(
                     unzipped_grad_fp8,
                     unzipped_grad_scale,
@@ -821,7 +811,7 @@ class ExpertsGroupGemmContiguousNode:
             assert dx.shape == dx_shape, f"{dx.shape} vs {dx_shape}"
             dx.zero_()
         if numpy.prod(do1_fp8.shape) != 0:
-            if self.is_split_group_gemm:
+            if not self.moe_grouped_gemm:
                 split_group_gemm(
                     do1_fp8,
                     do1_scale,
@@ -998,7 +988,7 @@ class ExpertsGroupGemmContiguousNode:
             o3 = paddle.zeros(shape, dtype=dtype)
             return o3
         # get w1/w2
-        if self.moe_grouped_gemm:
+        if self.moe_grouped_gemm and not self.use_fp8_mlp:
             expert_w1 = self.grouped_gemm_experts.weight1
             expert_w2 = self.grouped_gemm_experts.weight2
         else:
@@ -1048,7 +1038,7 @@ class ExpertsGroupGemmContiguousNode:
             dx = paddle.zeros_like(out_grad)
             probs_grad = paddle.zeros_like(unzipped_probs)
 
-            if not self.moe_grouped_gemm:
+            if not self.moe_grouped_gemm or self.use_fp8_mlp:
                 for expert in self.experts:
                     if expert is None:
                         continue

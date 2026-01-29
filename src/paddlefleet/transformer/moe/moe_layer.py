@@ -214,7 +214,9 @@ class MoELayer(nn.Layer):
             assert self.moe_use_fusion_node, (
                 "fp8 can only be used when moe_use_fusion_node = True."
             )
-            self.moe_grouped_gemm = False  # fp8 has its own implementation
+            assert not self.using_sonic_moe, (
+                "fp8 and sonic_moe cannot be used at the same time."
+            )
 
         expert_args = {}
         expert_args["config"] = routed_expert_config
@@ -222,7 +224,7 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
 
-        if self.moe_grouped_gemm:
+        if self.moe_grouped_gemm and not self.fp8:
             self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
@@ -300,7 +302,7 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            if self.moe_grouped_gemm:
+            if self.moe_grouped_gemm and not self.fp8:
                 for p in self.grouped_gemm_experts.parameters():
                     p.is_moe_param = True
                     p.color = {
@@ -966,6 +968,7 @@ class MoELayer(nn.Layer):
                 quantize_weights(
                     expert_w2_list, expert_w2_list[0], quant_transpose
                 )
+
         else:
             # Individual mode: process each expert's weights separately
             for expert in self.experts:
