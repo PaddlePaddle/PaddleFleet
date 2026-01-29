@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -76,6 +77,12 @@ def tensors_clone(outputs):
         raise ValueError(
             f"Unsupported data type:{type(outputs)} in tensors_clone"
         )
+
+
+def set_pfcc_deep_ep_backend():
+    global deep_ep
+    pfcc_deep_ep = importlib.import_module("paddlefleet.ops.deep_ep")
+    deep_ep = pfcc_deep_ep
 
 
 @dataclass
