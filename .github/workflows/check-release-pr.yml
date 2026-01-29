@@ -1,4 +1,4 @@
-name: Check Release PR
+name: Check Dev PR
 
 on:
   pull_request:
@@ -11,6 +11,7 @@ on:
 
 jobs:
   validate:
+    name: Validate Dev PR
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
