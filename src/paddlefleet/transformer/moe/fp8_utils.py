@@ -410,7 +410,9 @@ class ExpertsGroupGemmContiguousNode:
         """
 
         if self.moe_grouped_gemm:
+            raise RuntimeError("test ci")
             self.m_indices = self.gen_m_indices(tokens_per_expert)
+        raise RuntimeError("test ci")
         # concat w1, shape is [num_groups, n, k]
         w1_t_quant, w1_t_scale = fused_stack_quant(expert_w1, transpose=True)
         w1_t_quant = w1_t_quant.reshape([num_expert, -1, w1_t_quant.shape[-1]])
