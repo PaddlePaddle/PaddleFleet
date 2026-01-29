@@ -53,8 +53,8 @@ class SelfAttentionSublayersSpec:
     qkv_proj: LayerSpec | type = None
     core_attention: LayerSpec | type = None
     o_proj: LayerSpec | type = None
-    q_layernorm: LayerSpec | type = None
-    k_layernorm: LayerSpec | type = None
+    q_norm: LayerSpec | type = None
+    k_norm: LayerSpec | type = None
 
 
 @dataclass
@@ -452,25 +452,25 @@ class SelfAttention(Attention):
             tp_group=self.pg_collection.tp,
         )
 
-        if sublayers_spec.q_layernorm is not None:
-            self.q_layernorm = build_layer(
-                sublayers_spec.q_layernorm,
+        if sublayers_spec.q_norm is not None:
+            self.q_norm = build_layer(
+                sublayers_spec.q_norm,
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
             )
         else:
-            self.q_layernorm = None
+            self.q_norm = None
 
-        if sublayers_spec.k_layernorm is not None:
-            self.k_layernorm = build_layer(
-                sublayers_spec.k_layernorm,
+        if sublayers_spec.k_norm is not None:
+            self.k_norm = build_layer(
+                sublayers_spec.k_norm,
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
             )
         else:
-            self.k_layernorm = None
+            self.k_norm = None
 
     def get_query_key_value_tensors(
         self, hidden_states, key_value_states=None, split_qkv=True
@@ -523,11 +523,11 @@ class SelfAttention(Attention):
             self.hidden_size_per_attention_head,
         )
 
-        if self.q_layernorm is not None:
-            query = self.q_layernorm(query)
+        if self.q_norm is not None:
+            query = self.q_norm(query)
 
-        if self.k_layernorm is not None:
-            key = self.k_layernorm(key)
+        if self.k_norm is not None:
+            key = self.k_norm(key)
 
         return query, key, value
 

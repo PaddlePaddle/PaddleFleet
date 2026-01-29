@@ -193,6 +193,10 @@ class GPTModel(PipelineLayer):
 
     def get_layer_desc_list(self, spec, tie_word_embeddings):
         layers = []
+        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+            name_prefix = "model.language_model"
+        else:
+            name_prefix = "model"
         if tie_word_embeddings:
             self.add_sequential_layer(
                 layers,
@@ -201,37 +205,41 @@ class GPTModel(PipelineLayer):
                     spec.embedding,
                     shared_weight_attr="embedding_weight",
                 ),
-                "model",
+                name_prefix,
             )
         else:
             self.add_sequential_layer(
-                layers, LayerDesc(spec.embedding), "model"
+                layers, LayerDesc(spec.embedding), name_prefix
             )
         i = 0
         for head_empty_layer in spec.head_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(head_empty_layer), f"model.layers.{i}"
+                layers, LayerDesc(head_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(transformer_layer_spec), f"model.layers.{i}"
+                layers,
+                LayerDesc(transformer_layer_spec),
+                f"{name_prefix}.layers.{i}",
             )
             i += 1
         for tail_empty_layer in spec.tail_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(tail_empty_layer), f"model.layers.{i}"
+                layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
 
         if spec.mtp is not None:
             for mtp_spec in spec.mtp:
                 self.add_sequential_layer(
-                    layers, LayerDesc(mtp_spec), f"model.layers.{i}"
+                    layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"
                 )
                 i += 1
 
-        self.add_sequential_layer(layers, LayerDesc(spec.layer_norm), "model")
+        self.add_sequential_layer(
+            layers, LayerDesc(spec.layer_norm), name_prefix
+        )
 
         if tie_word_embeddings:
             self.add_sequential_layer(
@@ -241,11 +249,11 @@ class GPTModel(PipelineLayer):
                     spec.lm_head,
                     shared_weight_attr="embedding_weight",
                 ),
-                "model.shared_head",
+                f"{name_prefix}.shared_head",
             )
         else:
             self.add_sequential_layer(
-                layers, LayerDesc(spec.lm_head), "model.lm_head"
+                layers, LayerDesc(spec.lm_head), f"{name_prefix}.lm_head"
             )
 
         return layers
@@ -501,14 +509,22 @@ class GPTModel(PipelineLayer):
         """
         state_dict = super().state_dict(*args, **kwargs)
 
+        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+            name_prefix = "model.language_model."
+        else:
+            name_prefix = ""
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
         # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
-        if "qwen3_vl" not in getattr(self.config, "model_type", ""):
-            for k in list(state_dict.keys()):
-                v = state_dict.pop(k)
-                state_dict[self._pp_to_single_mapping[k]] = v
-
+        for k in list(state_dict.keys()):
+            v = state_dict.pop(k)
+            if name_prefix and k.startswith(name_prefix):
+                k = k[len(name_prefix) :]
+            if k not in self._pp_to_single_mapping:
+                state_dict[k] = v
+                continue
+            v.key = self._pp_to_single_mapping[k]
+            state_dict[self._pp_to_single_mapping[k]] = v
         return state_dict
 
     def set_state_dict(self, state_dict, *args, **kwargs):
@@ -560,11 +576,21 @@ class GPTModel(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        if "qwen3_vl" not in getattr(self.config, "model_type", ""):
-            for k in list(sharded_state_dict.keys()):
-                v = sharded_state_dict.pop(k)
-                v.key = self._pp_to_single_mapping[k]
-                sharded_state_dict[self._pp_to_single_mapping[k]] = v
+        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+            name_prefix = "model.language_model."
+        else:
+            name_prefix = ""
+
+        for k in list(sharded_state_dict.keys()):
+            v = sharded_state_dict.pop(k)
+            # remove name_prefix
+            if name_prefix and k.startswith(name_prefix):
+                k = k[len(name_prefix) :]
+            if k not in self._pp_to_single_mapping:
+                sharded_state_dict[k] = v
+                continue
+            v.key = self._pp_to_single_mapping[k]
+            sharded_state_dict[self._pp_to_single_mapping[k]] = v
 
         def increment_expert_number(s, increment):
             import re
