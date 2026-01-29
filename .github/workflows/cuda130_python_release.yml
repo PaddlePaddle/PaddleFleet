@@ -22,12 +22,9 @@ env:
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev"
   paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
-  paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.1.0/latest/cu130/"
-  formers_branch: "release/v1.0"
-  fleet_branch: "release/0.1.0"
-
-
-
+  paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/cu130/"
+  formers_branch: "develop"
+  fleet_branch: "release/0.2"
 defaults:
   run:
     shell: bash
@@ -74,6 +71,7 @@ jobs:
             -e no_proxy \
             -e paddle_url \
             -e paddlefleet_url \
+            -e repo_flag="paddlefleet" \
             -e fleet_branch \
             -e CI_name \
             -e PIP_CACHE_DIR \
@@ -122,7 +120,7 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
+          # pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -139,7 +137,7 @@ jobs:
           '
 
       - name: Single card sonic moe test
-        if: matrix.python == '3.12'
+        if: matrix.python == '3.12' && always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
@@ -199,6 +197,7 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e paddle_url \
+            -e repo_flag="paddlefleet" \
             -e paddlefleet_url \
             -e fleet_branch \
             -e CI_name \
@@ -248,7 +247,7 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
+          # pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           chmod +x /usr/local/bin/yq
@@ -375,7 +374,7 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
+          # pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -395,6 +394,7 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
+          git pull --no-edit origin pull/3671/head
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           py="${{ matrix.python }}"
@@ -472,6 +472,20 @@ jobs:
             fi
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
+          fi
+          '
+      - name: Qwen3-vl-8k-single-card
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
+          exit_code=$?
+          if [[ "$exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: Qwen3-vl-8k-single-card.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-single-card.\033[0m"
           fi
           '
 
@@ -565,7 +579,7 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
+          # pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -586,6 +600,7 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
+          git pull --no-edit origin pull/3671/head
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
@@ -735,6 +750,38 @@ jobs:
           conda activate python${{ matrix.python }}
           bash -x PaddleFormers/tests/integration_test/qwen.sh lora
           '
+      - name: Qwen vl sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+          '
+
+      - name: Qwen vl lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+          '
+          '
+
+      - name: Qwen vl moe
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+          '
+
+      - name: Qwen3-vl-8k-fsdp
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+          '
 
       - name: Terminate and delete the container
         if: ${{ always() }}
@@ -828,12 +875,13 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
+          # pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu130/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
 
       - name: Install PaddleFormers
+        id: formers_install
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -847,6 +895,7 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
+          git pull --no-edit origin pull/3671/head
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
@@ -878,6 +927,31 @@ jobs:
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
+          '
+
+      - name: Qwen vl sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
+          '
+
+      - name: Qwen vl lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
+          '
+
+
+      - name: Qwen vl moe
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
           '
 
 
