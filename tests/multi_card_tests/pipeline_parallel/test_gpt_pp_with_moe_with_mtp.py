@@ -32,8 +32,8 @@ PP_DEGREE = 4
 MTP_DEGREE = 3
 
 
-REPO_NAME = os.getenv("GITHUB_REPO_NAME")
-SKIP_IN_PADDLE = REPO_NAME == "PaddlePaddle/Paddle"
+REPO_FLAG = os.getenv("repo_flag")
+SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
 def _set_random_seed(
@@ -151,8 +151,8 @@ def run_pp(
 
 
 @unittest.skipIf(
-    SKIP_IN_PADDLE,
-    f"skip test, PaddlePaddle/Paddle, repo: {REPO_NAME}",
+    SKIP_TESTS,
+    f"skip test, repo_flag={REPO_FLAG} (not 'paddlefleet')",
 )
 class TestPP(unittest.TestCase):
     def setUp(self):
