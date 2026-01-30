@@ -29,9 +29,8 @@ from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
-REPO_FLAG = os.getenv("repo_flag")
-BRANCH = os.getenv("BRANCH")
-SKIP_TESTS = (REPO_FLAG != "paddlefleet") and (BRANCH == "develop")
+REPO_NAME = os.getenv("GITHUB_REPO_NAME")
+SKIP_IN_PADDLE = REPO_NAME == "PaddlePaddle/Paddle"
 
 
 def _set_random_seed(
@@ -147,8 +146,8 @@ def run_pp(
 
 
 @unittest.skipIf(
-    SKIP_TESTS,
-    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet') and branch '{BRANCH}' is 'develop'",
+    SKIP_IN_PADDLE,
+    f"skip test, PaddlePaddle/Paddle, repo: {REPO_NAME}",
 )
 class TestPP(unittest.TestCase):
     def setUp(self):
