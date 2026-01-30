@@ -1,6 +1,9 @@
 name: CE-CUDA-126-PYTHON-RELEASE
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * 6'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -24,7 +27,7 @@ env:
   paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/cu126/"
   fleet_branch: "release/0.2"
-  formers_branch: "develop"
+  formers_branch: "release/1.1"
 
 
 

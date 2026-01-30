@@ -1,6 +1,9 @@
 name: CE-CUDA-130-Release
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -24,7 +27,7 @@ env:
   paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/cu130/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl"
   fleet_branch: "release/0.2"
-  formers_branch: "develop"
+  formers_branch: "release/1.1"
 
 defaults:
   run:
