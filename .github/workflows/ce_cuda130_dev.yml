@@ -599,7 +599,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git
+          git clone -b develop https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
