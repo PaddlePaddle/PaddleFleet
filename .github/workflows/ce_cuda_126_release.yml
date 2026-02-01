@@ -1,9 +1,6 @@
 name: CE-CUDA-126-Release
 
 on:
-  pull_request:
-    branches:
-      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -123,8 +120,6 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          echo "::notice::Paddle Commit: $(python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::PaddleFleet Commit: $(python -c "import paddlefleet; print(paddlefleet.version.commit)" 2>/dev/null || echo '获取失败')"
           bash ci/single_card_test.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
@@ -216,8 +211,6 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          echo "::notice::Paddle Commit: $(python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::PaddleFleet Commit: $(python -c "import paddlefleet; print(paddlefleet.version.commit)" 2>/dev/null || echo '获取失败')"
           export PYTHONPATH=/paddle:$PYTHONPATH
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
@@ -341,9 +334,6 @@ jobs:
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "PaddleFormers Commit"
           python -c "import paddleformers; print(paddleformers.version.commit)"
-          echo "::notice::Paddle Commit: $(python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::PaddleFleet Commit: $(python -c "import paddlefleet; print(paddlefleet.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::paddleformers Commit: $(python -c "import paddleformers; print(paddleformers.version.commit)" 2>/dev/null || echo '获取失败')"
           '
 
       - name: Proprocess for integration test
@@ -510,9 +500,6 @@ jobs:
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "PaddleFormers Commit"
           python -c "import paddleformers; print(paddleformers.version.commit)"
-          echo "::notice::Paddle Commit: $(python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::PaddleFleet Commit: $(python -c "import paddlefleet; print(paddlefleet.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::paddleformers Commit: $(python -c "import paddleformers; print(paddleformers.version.commit)" 2>/dev/null || echo '获取失败')"
           '
 
       - name: GLM4.5 pre-train
@@ -755,9 +742,6 @@ jobs:
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "PaddleFormers Commit"
           python -c "import paddleformers; print(paddleformers.version.commit)"
-          echo "::notice::Paddle Commit: $(python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::PaddleFleet Commit: $(python -c "import paddlefleet; print(paddlefleet.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::paddleformers Commit: $(python -c "import paddleformers; print(paddleformers.version.commit)" 2>/dev/null || echo '获取失败')"
           '
 
       - name: GLM4.5 pre-train
