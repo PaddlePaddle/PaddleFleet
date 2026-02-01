@@ -423,9 +423,12 @@ jobs:
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"
-          echo "::notice::Paddle Commit: $(python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::PaddleFleet Commit: $(python -c "import paddlefleet; print(paddlefleet.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::paddleformers Commit: $(python -c "import paddleformers; print(paddleformers.version.commit)" 2>/dev/null || echo '获取失败')"
+          echo "Paddle Commit"
+          python -c "import paddle; print(paddle.version.commit)"
+          echo "PaddleFleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: Proprocess for integration test
@@ -640,9 +643,12 @@ jobs:
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "paddleformers Commit"
           python -c "import paddleformers; print(paddleformers.version.commit)"
-          echo "::notice::Paddle Commit: $(python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::PaddleFleet Commit: $(python -c "import paddlefleet; print(paddlefleet.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::paddleformers Commit: $(python -c "import paddleformers; print(paddleformers.version.commit)" 2>/dev/null || echo '获取失败')"
+          echo "Paddle Commit"
+          python -c "import paddle; print(paddle.version.commit)"
+          echo "PaddleFleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: GLM4.5 pre-train
@@ -946,9 +952,12 @@ jobs:
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
           pip install librosa==0.11.0
-          echo "::notice::Paddle Commit: $(python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::PaddleFleet Commit: $(python -c "import paddlefleet; print(paddlefleet.version.commit)" 2>/dev/null || echo '获取失败')"
-          echo "::notice::paddleformers Commit: $(python -c "import paddleformers; print(paddleformers.version.commit)" 2>/dev/null || echo '获取失败')"
+          echo "Paddle Commit"
+          python -c "import paddle; print(paddle.version.commit)"
+          echo "PaddleFleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddleformers Commit"
+          python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
       - name: GLM4.5 pre-train
