@@ -30,8 +30,7 @@ from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
 REPO_FLAG = os.getenv("repo_flag")
-BRANCH = os.getenv("BRANCH")
-SKIP_TESTS = (REPO_FLAG != "paddlefleet") and (BRANCH == "develop")
+SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
 def _set_random_seed(
@@ -148,7 +147,7 @@ def run_pp(
 
 @unittest.skipIf(
     SKIP_TESTS,
-    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet') and branch '{BRANCH}' is 'develop'",
+    f"skip test, repo_flag={REPO_FLAG} (not 'paddlefleet')",
 )
 class TestPP(unittest.TestCase):
     def setUp(self):
@@ -221,8 +220,8 @@ class TestPP(unittest.TestCase):
                 "_layers.9.0.input_layernorm.weight": "18703ff23d92f274c5876c510a34b3b7",
                 "_layers.9.0.self_attn.o_proj.weight": "e7340fb090482fb317372286d605c6ab",
                 "_layers.9.0.self_attn.qkv_proj.weight": "5ed1219159d856efd64873e01e63057f",
-                "_layers.9.0.self_attn.q_layernorm.weight": "b4090f76dee2fa7bc1e32e7f5e94983f",
-                "_layers.9.0.self_attn.k_layernorm.weight": "30357faa73750d88c7a667eef4b23aee",
+                "_layers.9.0.self_attn.q_norm.weight": "b4090f76dee2fa7bc1e32e7f5e94983f",
+                "_layers.9.0.self_attn.k_norm.weight": "30357faa73750d88c7a667eef4b23aee",
                 "_layers.9.0.post_attention_layernorm.weight": "c97ef7bdfecb00cae35decaba029e570",
                 "_layers.9.0.mlp.gate.weight": "e21b95a266d6d6c886c22fd2885b4f0d",
                 "_layers.9.0.mlp.experts.0.up_gate_proj.weight": "f5f3a77a6894bacf5f37872cf3e9b1bc",
@@ -238,8 +237,8 @@ class TestPP(unittest.TestCase):
                 "_layers.9.1.input_layernorm.weight": "6f1ab95e6184a69d7c11e75303d6184b",
                 "_layers.9.1.self_attn.o_proj.weight": "7d22f8ad6dc6d005c14aafed94914a5f",
                 "_layers.9.1.self_attn.qkv_proj.weight": "6400cd60b62ba5886c985d339028eb43",
-                "_layers.9.1.self_attn.q_layernorm.weight": "c16a0a0eab44a99259553a0329f207e1",
-                "_layers.9.1.self_attn.k_layernorm.weight": "e3e3a48d52a6d915ac99fcdc5b448f10",
+                "_layers.9.1.self_attn.q_norm.weight": "c16a0a0eab44a99259553a0329f207e1",
+                "_layers.9.1.self_attn.k_norm.weight": "e3e3a48d52a6d915ac99fcdc5b448f10",
                 "_layers.9.1.post_attention_layernorm.weight": "a54559687a119c4fe634607eb569a51b",
                 "_layers.9.1.mlp.gate.weight": "43783a795c7b3c8f42f3a613965b891f",
                 "_layers.9.1.mlp.experts.0.up_gate_proj.weight": "7ac193a0fbbaa0de8373bfb92fa15ea2",

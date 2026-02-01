@@ -198,12 +198,9 @@ class MoELayer(nn.Layer):
                 self.moe_use_fusion_node = config.moe_use_fusion_node
             else:
                 if self.moe_grouped_gemm:
-                    logger.warning(
-                        "moe_grouped_gemm is not supported when moe_token_dispatcher_type != 'deepep'."
+                    raise ValueError(
+                        "moe_grouped_gemm is only supported when moe_token_dispatcher_type is 'deepep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
                     )
-                self.moe_grouped_gemm = (
-                    False  # TODO: Support EP>1 alltoall moe_grouped_gemm
-                )
                 self.fp8_dispatch = False
 
         if self.fp8:

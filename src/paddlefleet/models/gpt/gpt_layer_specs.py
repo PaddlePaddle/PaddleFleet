@@ -126,12 +126,12 @@ def get_gpt_layer_local_spec(
                     qkv_proj=backend.column_parallel_linear(),
                     core_attention=backend.core_attention(),
                     o_proj=backend.row_parallel_linear(),
-                    q_layernorm=(
+                    q_norm=(
                         L2Norm
                         if qk_l2_norm
                         else (qk_norm if use_qk_norm else IdentityOp)
                     ),
-                    k_layernorm=(
+                    k_norm=(
                         L2Norm
                         if qk_l2_norm
                         else (qk_norm if use_qk_norm else IdentityOp)
