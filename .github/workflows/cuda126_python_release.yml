@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: '0 19 * * 6'
   workflow_dispatch: # 可选：允许手动点 Run
+    inputs:
+      use_release:
+        description: '是否使用预编译的Release版本'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+        required: false
 
 permissions: read-all
 
@@ -25,6 +34,7 @@ env:
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/cu126/"
   fleet_branch: "release/0.2"
   formers_branch: "release/1.1"
+  use_release: ${{ inputs.use_release || 'true' }}
 
 
 
@@ -72,6 +82,7 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
+            -e use_release \
             -e paddle_url \
             -e fleet_branch \
             -e paddlefleet_url \
@@ -123,7 +134,10 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install "$paddle_url$paddle_url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$paddle_url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/ --force-reinstall --no-cache-dir
+          fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -177,6 +191,7 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
+            -e use_release \
             -e paddle_url \
             -e paddlefleet_url \
             -e repo_flag="paddlefleet" \
@@ -228,7 +243,10 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           chmod +x /usr/local/bin/yq
@@ -306,6 +324,7 @@ jobs:
             -e no_proxy \
             -e formers_branch \
             -e CI_name \
+            -e use_release \
             -e paddle_url \
             -e fleet_branch \
             -e paddlefleet_url \
@@ -355,7 +374,10 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -375,7 +397,6 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
-          git pull --no-edit origin pull/3671/head
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           py="${{ matrix.python }}"
@@ -450,6 +471,9 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
+          cd /workspace/PaddleFormers
+          git pull --no-edit origin pull/3671/head
+          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -502,6 +526,7 @@ jobs:
             -e CI_name \
             -e paddle_url \
             -e formers_branch \
+            -e use_release \
             -e paddlefleet_url \
             -e fleet_branch \
             -e PIP_CACHE_DIR \
@@ -550,7 +575,10 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -571,7 +599,6 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
-          git pull --no-edit origin pull/3671/head
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
@@ -713,6 +740,9 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
+          cd /workspace/PaddleFormers
+          git pull --no-edit origin pull/3671/head
+          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           '
 
@@ -789,6 +819,7 @@ jobs:
             -e paddle_url \
             -e paddlefleet_url \
             -e formers_branch \
+            -e use_release \
             -e fleet_branch \
             -e no_proxy \
             -e CI_name \
@@ -838,7 +869,10 @@ jobs:
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
           pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -858,7 +892,6 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
-          git pull --no-edit origin pull/3671/head
           py="${{ matrix.python }}"
           version="${py//./}"
           echo "version=$version"
@@ -898,6 +931,9 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
+          cd /workspace/PaddleFormers
+          git pull --no-edit origin pull/3671/head
+          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           '
 

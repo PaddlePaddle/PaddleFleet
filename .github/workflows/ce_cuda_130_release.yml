@@ -316,7 +316,6 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
-          git pull --no-edit origin pull/3671/head
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           pip install blinker==1.9.0 --ignore-installed
@@ -393,6 +392,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          cd /workspace/PaddleFormers
+          git pull --no-edit origin pull/3671/head
+          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -492,7 +494,6 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
-          git pull --no-edit origin pull/3671/head
           pip install blinker==1.9.0 --ignore-installed
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
@@ -624,6 +625,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          cd /workspace/PaddleFormers
+          git pull --no-edit origin pull/3671/head
+          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           '
 
@@ -742,7 +746,6 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
-          git pull --no-edit origin pull/3671/head
           pip install blinker==1.9.0 --ignore-installed
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
@@ -774,6 +777,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          cd /workspace/PaddleFormers
+          git pull --no-edit origin pull/3671/head
+          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           '
 
