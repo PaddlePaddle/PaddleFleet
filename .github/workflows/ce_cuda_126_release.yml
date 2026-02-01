@@ -1,9 +1,21 @@
 name: CE-CUDA-126-Release
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
+    inputs:
+      use_release:
+        description: '是否使用预编译的Release版本'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+        required: false
 
 permissions: read-all
 
@@ -25,6 +37,7 @@ env:
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/cu126/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl"
   fleet_branch: "release/0.2"
   formers_branch: "release/1.1"
+  use_release: ${{ inputs.use_release || 'true' }}
 
 defaults:
   run:
@@ -67,6 +80,7 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
+            -e use_release \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
@@ -100,7 +114,10 @@ jobs:
           git checkout $fleet_branch
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
           pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -149,6 +166,7 @@ jobs:
             -e paddle_url \
             -e paddlefleet_url \
             -e ci_scripts \
+            -e use_release \
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
@@ -180,7 +198,10 @@ jobs:
           git submodule update --init --recursive
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
           pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt pytest matplotlib==3.10.8
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -247,6 +268,7 @@ jobs:
             -e paddle_url \
             -e paddlefleet_url \
             -e ci_scripts \
+            -e use_release \
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
@@ -280,7 +302,10 @@ jobs:
           git checkout $fleet_branch
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
           pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -412,6 +437,7 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
+            -e use_release \
             -e formers_branch \
             -e PIP_CACHE_DIR \
             -e fleet_branch \
@@ -441,7 +467,10 @@ jobs:
           git checkout $fleet_branch
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
           pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -637,6 +666,7 @@ jobs:
             -v /ssd1/paddle-1/action_cache:/home/.cache \
             -v ${{ github.workspace }}:/workspace \
             -e BRANCH \
+            -e use_release \
             -e PR_ID \
             -e paddle_url \
             -e paddlefleet_url \
@@ -677,7 +707,10 @@ jobs:
           pip uninstall paddlefleet -y
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
           pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu126/
-          # pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '

@@ -380,7 +380,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
           git config user.name "PaddleCI"
@@ -553,7 +553,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFormers
@@ -808,7 +808,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
           git config user.name "PaddleCI"

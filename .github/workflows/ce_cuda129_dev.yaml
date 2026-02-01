@@ -270,7 +270,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
           git config user.name "PaddleCI"
@@ -406,7 +406,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFormers
@@ -615,7 +615,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
           git config user.name "PaddleCI"
