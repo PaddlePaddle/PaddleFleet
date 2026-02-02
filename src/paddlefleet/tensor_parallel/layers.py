@@ -252,7 +252,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         if config.use_cpu_initialization:
             self.weight = self.create_parameter(
                 shape=[self.num_embeddings_per_partition, self.embedding_dim],
-                dtype=self.config.params_dtype,
+                dtype=config.params_dtype,
                 is_bias=False,
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
@@ -271,7 +271,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         else:
             self.weight = self.create_parameter(
                 shape=[self.num_embeddings_per_partition, self.embedding_dim],
-                dtype=self.config.params_dtype,
+                dtype=config.params_dtype,
                 is_bias=False,
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
@@ -861,7 +861,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             if config.use_cpu_initialization:
                 self.weight = self.create_parameter(
                     shape=[self.input_size, self.output_size_per_partition],
-                    dtype=self.config.params_dtype,
+                    dtype=config.params_dtype,
                     is_bias=False,
                     default_initializer=paddle.nn.initializer.Constant(0.0),
                 )
@@ -882,7 +882,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             else:
                 self.weight = self.create_parameter(
                     shape=[self.input_size, self.output_size_per_partition],
-                    dtype=self.config.params_dtype,
+                    dtype=config.params_dtype,
                     is_bias=False,
                     default_initializer=paddle.nn.initializer.Constant(0.0),
                 )
@@ -905,7 +905,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
         if bias:
             self.bias = self.create_parameter(
                 shape=[self.output_size_per_partition],
-                dtype=self.config.params_dtype,
+                dtype=config.params_dtype,
                 is_bias=True,
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
@@ -1186,7 +1186,7 @@ class RowParallelLinear(paddle.nn.Layer):
         if config.use_cpu_initialization:
             self.weight = self.create_parameter(
                 shape=[self.input_size_per_partition, self.output_size],
-                dtype=self.config.params_dtype,
+                dtype=config.params_dtype,
                 is_bias=False,
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
@@ -1207,7 +1207,7 @@ class RowParallelLinear(paddle.nn.Layer):
         else:
             self.weight = self.create_parameter(
                 shape=[self.input_size_per_partition, self.output_size],
-                dtype=self.config.params_dtype,
+                dtype=config.params_dtype,
                 is_bias=False,
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
@@ -1225,7 +1225,7 @@ class RowParallelLinear(paddle.nn.Layer):
         if bias:
             self.bias = self.create_parameter(
                 shape=[self.output_size],
-                dtype=self.config.params_dtype,
+                dtype=config.params_dtype,
                 is_bias=True,
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
