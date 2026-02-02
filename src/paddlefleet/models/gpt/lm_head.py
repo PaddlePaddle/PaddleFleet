@@ -16,7 +16,6 @@ import paddle
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
-from paddle.nn.parameter import Parameter
 
 from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.tensor_parallel.layers import (
@@ -46,11 +45,16 @@ class GPTLMHead(ColumnParallelLinear):
 
         if not self.skip_weight_param_allocation:
             if self.config.use_cpu_initialization:
-                self.weight = Parameter(
-                    paddle.empty(
-                        [self.output_size_per_partition, self.input_size],
-                        dtype=self.config.params_dtype,
-                    )
+                # self.weight = Parameter(
+                #     paddle.empty(
+                #         [self.output_size_per_partition, self.input_size],
+                #         dtype=self.config.params_dtype,
+                #     )
+                # )
+                self.weight = self.create_parameter(
+                    shape=[self.output_size_per_partition, self.input_size],
+                    dtype=self.config.params_dtype,
+                    is_bias=False,
                 )
                 if self.config.perform_initialization:
                     self.master_weight = _initialize_affine_weight_cpu(
@@ -66,11 +70,16 @@ class GPTLMHead(ColumnParallelLinear):
                         world_size=self.world_size,
                     )
             else:
-                self.weight = Parameter(
-                    paddle.empty(
-                        [self.output_size_per_partition, self.input_size],
-                        dtype=self.config.params_dtype,
-                    )
+                # self.weight = Parameter(
+                #     paddle.empty(
+                #         [self.output_size_per_partition, self.input_size],
+                #         dtype=self.config.params_dtype,
+                #     )
+                # )
+                self.weight = self.create_parameter(
+                    shape=[self.output_size_per_partition, self.input_size],
+                    dtype=self.config.params_dtype,
+                    is_bias=False,
                 )
                 if self.config.perform_initialization:
                     _initialize_affine_weight_gpu(
