@@ -55,6 +55,7 @@ class GPTLMHead(ColumnParallelLinear):
                     shape=[self.output_size_per_partition, self.input_size],
                     dtype=self.config.params_dtype,
                     is_bias=False,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
                 )
                 if self.config.perform_initialization:
                     self.master_weight = _initialize_affine_weight_cpu(
@@ -80,7 +81,9 @@ class GPTLMHead(ColumnParallelLinear):
                     shape=[self.output_size_per_partition, self.input_size],
                     dtype=self.config.params_dtype,
                     is_bias=False,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
                 )
+
                 if self.config.perform_initialization:
                     _initialize_affine_weight_gpu(
                         self.weight,
