@@ -45,12 +45,6 @@ class GPTLMHead(ColumnParallelLinear):
 
         if not self.skip_weight_param_allocation:
             if self.config.use_cpu_initialization:
-                # self.weight = Parameter(
-                #     paddle.empty(
-                #         [self.output_size_per_partition, self.input_size],
-                #         dtype=self.config.params_dtype,
-                #     )
-                # )
                 self.weight = self.create_parameter(
                     shape=[self.output_size_per_partition, self.input_size],
                     dtype=self.config.params_dtype,
@@ -71,12 +65,6 @@ class GPTLMHead(ColumnParallelLinear):
                         world_size=self.world_size,
                     )
             else:
-                # self.weight = Parameter(
-                #     paddle.empty(
-                #         [self.output_size_per_partition, self.input_size],
-                #         dtype=self.config.params_dtype,
-                #     )
-                # )
                 self.weight = self.create_parameter(
                     shape=[self.output_size_per_partition, self.input_size],
                     dtype=self.config.params_dtype,
