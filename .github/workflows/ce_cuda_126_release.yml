@@ -387,7 +387,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           cd /workspace/PaddleFormers
-          git pull --no-edit origin pull/3671/head
+          git pull --no-edit origin pull/3799/head
           cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
@@ -608,7 +608,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           cd /workspace/PaddleFormers
-          git pull --no-edit origin pull/3671/head
+          git pull --no-edit origin pull/3799/head
           cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           '
@@ -730,7 +730,6 @@ jobs:
           git config pull.rebase false
           git checkout $formers_branch
           git log -1
-          git pull --no-edit origin pull/3671/head
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
@@ -764,7 +763,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           cd /workspace/PaddleFormers
-          git pull --no-edit origin pull/3671/head
+          git pull --no-edit origin pull/3799/head
           cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           '
