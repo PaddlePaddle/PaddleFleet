@@ -1,8 +1,8 @@
-name: CE-CUDA-129-PYTHON-develop
+name: CE-CUDA-130-PYTHON-develop
 
 on:
   schedule:
-    - cron: '0 19 * * *'
+    - cron: '0 19 * * 0'
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
@@ -28,8 +28,8 @@ env:
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   CI_name: test
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
-  docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
-  paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
+  docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev"
+  paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   use_release: ${{ inputs.use_release || 'true' }}
 defaults:
   run:
@@ -48,7 +48,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-single-card-test-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA130-PYTHON-DEV-single-card-test-${{ matrix.python }}
     steps:
       - name: Determine the runner
         run: |
@@ -92,8 +92,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          # wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-          # bash miniconda.sh -b -p $HOME/miniconda
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
@@ -118,14 +118,14 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             py="${{ matrix.python }}"
             version="${py//./}"
             echo "version=$version"
             echo "Using pre-built paddle package from develop branch."
             paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           pip install colorlog>=6.10.1
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
@@ -134,28 +134,6 @@ jobs:
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           bash ci/single_card_test.sh
-          single_card_exit_code=$?
-          if [[ "$single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mSingle card test succeeded.\033[0m"
-          fi
-          '
-
-      - name: Single card sonic moe test
-        if: matrix.python == '3.12' && always()
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          pwd
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${{ matrix.python }}
-          echo "Paddle Commit"
-          python -c "import paddle; print(paddle.version.commit)"
-          echo "PaddleFleet Commit"
-          python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          bash ci/single_card_sonic.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
@@ -183,7 +161,7 @@ jobs:
         python: [3.11, 3.12, 3.13]
     env:
       PIP_CACHE_DIR: /home/.cache/pip
-      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-multi-card_test-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA130-PYTHON-DEV-multi-card_test-${{ matrix.python }}
     steps:
       - name: Check docker image and run container
         run: |
@@ -221,8 +199,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          # wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-          # bash miniconda.sh -b -p $HOME/miniconda
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
@@ -246,14 +224,14 @@ jobs:
           git config pull.rebase false
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             py="${{ matrix.python }}"
             version="${py//./}"
             echo "version=$version"
             paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
@@ -301,7 +279,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-integration-test-single-card-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA130-PYTHON-DEV-integration-test-single-card-${{ matrix.python }}
     steps:
       - name: Determine the runner
         run: |
@@ -345,8 +323,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          # wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-          # bash miniconda.sh -b -p $HOME/miniconda
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
@@ -371,7 +349,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -396,14 +374,14 @@ jobs:
           version="${py//./}"
           echo "version=$version"
           paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           if [ "${use_release}" == "true" ]; then
             py="${{ matrix.python }}"
             version="${py//./}"
             echo "version=$version"
             paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
             echo "Using pre-built paddle package from develop branch."
-            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
@@ -485,7 +463,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-integration-test-multi-card-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA130-PYTHON-DEV-integration-test-multi-card-${{ matrix.python }}
     steps:
       - name: Check docker image and run container
         run: |
@@ -547,7 +525,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -567,14 +545,14 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           if [ "${use_release}" == "true" ]; then
             py="${{ matrix.python }}"
             version="${py//./}"
             echo "version=$version"
             paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
             echo "Using pre-built paddle package from develop branch."
-            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
@@ -741,7 +719,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-CUDA129-PYTHON-DEV-integration-test-A100-${{ matrix.python }}
+      TASK: paddlefleet-CE-CUDA130-PYTHON-DEV-integration-test-A100-${{ matrix.python }}
     steps:
       - name: Check docker image and run container
         run: |
@@ -801,7 +779,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -820,14 +798,14 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           if [ "${use_release}" == "true" ]; then
             py="${{ matrix.python }}"
             version="${py//./}"
             echo "version=$version"
             paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
             echo "Using pre-built paddle package from develop branch."
-            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
