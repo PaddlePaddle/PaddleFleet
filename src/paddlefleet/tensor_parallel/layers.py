@@ -29,7 +29,6 @@ from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
-from paddle.nn.parameter import Parameter
 
 from ..parallel_state import (
     get_global_memory_buffer,
@@ -251,11 +250,11 @@ class VocabParallelEmbedding(paddle.nn.Layer):
 
         # Allocate weights and initialize.
         if config.use_cpu_initialization:
-            self.weight = Parameter(
-                paddle.empty(
-                    [self.num_embeddings_per_partition, self.embedding_dim],
-                    dtype=config.params_dtype,
-                )
+            self.weight = self.create_parameter(
+                shape=[self.num_embeddings_per_partition, self.embedding_dim],
+                dtype=config.params_dtype,
+                is_bias=False,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             if config.perform_initialization:
                 _initialize_affine_weight_cpu(
@@ -270,11 +269,11 @@ class VocabParallelEmbedding(paddle.nn.Layer):
                     world_size=get_pg_size(self.tp_group),
                 )
         else:
-            self.weight = Parameter(
-                paddle.empty(
-                    [self.num_embeddings_per_partition, self.embedding_dim],
-                    dtype=config.params_dtype,
-                )
+            self.weight = self.create_parameter(
+                shape=[self.num_embeddings_per_partition, self.embedding_dim],
+                dtype=config.params_dtype,
+                is_bias=False,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             if config.perform_initialization:
                 _initialize_affine_weight_gpu(
@@ -860,12 +859,13 @@ class ColumnParallelLinear(paddle.nn.Layer):
         # should be transposed.
         if not skip_weight_param_allocation:
             if config.use_cpu_initialization:
-                self.weight = Parameter(
-                    paddle.empty(
-                        [self.input_size, self.output_size_per_partition],
-                        dtype=config.params_dtype,
-                    )
+                self.weight = self.create_parameter(
+                    shape=[self.input_size, self.output_size_per_partition],
+                    dtype=config.params_dtype,
+                    is_bias=False,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
                 )
+
                 if config.perform_initialization:
                     self.master_weight = _initialize_affine_weight_cpu(
                         self.weight,
@@ -880,11 +880,11 @@ class ColumnParallelLinear(paddle.nn.Layer):
                         world_size=self.world_size,
                     )
             else:
-                self.weight = Parameter(
-                    paddle.empty(
-                        [self.input_size, self.output_size_per_partition],
-                        dtype=config.params_dtype,
-                    )
+                self.weight = self.create_parameter(
+                    shape=[self.input_size, self.output_size_per_partition],
+                    dtype=config.params_dtype,
+                    is_bias=False,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
                 )
                 if config.perform_initialization:
                     _initialize_affine_weight_gpu(
@@ -903,20 +903,13 @@ class ColumnParallelLinear(paddle.nn.Layer):
             self.weight = None
 
         if bias:
-            if config.use_cpu_initialization:
-                self.bias = Parameter(
-                    paddle.empty(
-                        [self.output_size_per_partition],
-                        dtype=config.params_dtype,
-                    )
-                )
-            else:
-                self.bias = Parameter(
-                    paddle.empty(
-                        [self.output_size_per_partition],
-                        dtype=config.params_dtype,
-                    )
-                )
+            self.bias = self.create_parameter(
+                shape=[self.output_size_per_partition],
+                dtype=config.params_dtype,
+                is_bias=True,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+
             set_tensor_model_parallel_attributes(self.bias, True, 0, stride)
             if config.perform_initialization:
                 # Always initialize bias to zero.
@@ -1191,11 +1184,11 @@ class RowParallelLinear(paddle.nn.Layer):
         # be transposed back in the forward function of linear.
         # Initialize weight.
         if config.use_cpu_initialization:
-            self.weight = Parameter(
-                paddle.empty(
-                    [self.input_size_per_partition, self.output_size],
-                    dtype=config.params_dtype,
-                )
+            self.weight = self.create_parameter(
+                shape=[self.input_size_per_partition, self.output_size],
+                dtype=config.params_dtype,
+                is_bias=False,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             if config.perform_initialization:
                 self.master_weight = _initialize_affine_weight_cpu(
@@ -1212,11 +1205,11 @@ class RowParallelLinear(paddle.nn.Layer):
                     world_size=self.world_size,
                 )
         else:
-            self.weight = Parameter(
-                paddle.empty(
-                    [self.input_size_per_partition, self.output_size],
-                    dtype=config.params_dtype,
-                )
+            self.weight = self.create_parameter(
+                shape=[self.input_size_per_partition, self.output_size],
+                dtype=config.params_dtype,
+                is_bias=False,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             if config.perform_initialization:
                 _initialize_affine_weight_gpu(
@@ -1230,17 +1223,12 @@ class RowParallelLinear(paddle.nn.Layer):
         self.weight.is_distributed = True if self.world_size > 1 else False
 
         if bias:
-            if config.use_cpu_initialization:
-                self.bias = Parameter(
-                    paddle.empty([self.output_size], dtype=config.params_dtype)
-                )
-            else:
-                self.bias = Parameter(
-                    paddle.empty(
-                        [self.output_size],
-                        dtype=config.params_dtype,
-                    )
-                )
+            self.bias = self.create_parameter(
+                shape=[self.output_size],
+                dtype=config.params_dtype,
+                is_bias=True,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
 
             if config.perform_initialization:
                 # Always initialize bias to zero.
