@@ -4,7 +4,15 @@ on:
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
-
+    inputs:
+      use_release:
+        description: '是否使用预编译的develop版本'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+        required: false
 permissions: read-all
 
 concurrency:
@@ -22,7 +30,7 @@ env:
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
   paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
-
+  use_release: ${{ inputs.use_release || 'true' }}
 defaults:
   run:
     shell: bash
@@ -69,6 +77,7 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e paddle_url \
+            -e use_release \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
@@ -109,19 +118,16 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          py="${{ matrix.python }}"
-          version="${py//./}"
-          echo "version=$version"
-          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          url_info=py="${{ matrix.python }}"
-          version="${py//./}"
-          echo "version=$version"
-          paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          if [ "${use_release}" == "true" ]; then
+            py="${{ matrix.python }}"
+            version="${py//./}"
+            echo "version=$version"
+            echo "Using pre-built paddle package from develop branch."
+            paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          python -m pip install --pre paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -197,6 +203,7 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
+            -e use_release \
             -e paddle_url \
             -e CI_name \
             -e repo_flag="paddlefleet" \
@@ -238,14 +245,16 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git submodule update --init --recursive
-          py="${{ matrix.python }}"
-          version="${py//./}"
-          echo "version=$version"
-          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          if [ "${use_release}" == "true" ]; then
+            echo "Using pre-built paddle package from develop branch."
+            py="${{ matrix.python }}"
+            version="${py//./}"
+            echo "version=$version"
+            paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           chmod +x /usr/local/bin/yq
@@ -262,7 +271,6 @@ jobs:
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           export PYTHONPATH=/paddle:$PYTHONPATH
-          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           bash ci/multi-card_test.sh
           multi_card_exit_code=$?
           if [[ "$multi_card_exit_code" != "0" ]]; then
@@ -323,6 +331,7 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e paddle_url \
+            -e use_release \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
@@ -361,14 +370,8 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          py="${{ matrix.python }}"
-          version="${py//./}"
-          echo "version=$version"
-          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -394,6 +397,14 @@ jobs:
           echo "version=$version"
           paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          if [ "${use_release}" == "true" ]; then
+            py="${{ matrix.python }}"
+            version="${py//./}"
+            echo "version=$version"
+            paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+            echo "Using pre-built paddle package from develop branch."
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
           echo "Paddle Commit"
@@ -492,6 +503,7 @@ jobs:
             -e COMMIT_ID \
             -e PADDLE_ROOT \
             -e ci_scripts \
+            -e use_release \
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
@@ -534,14 +546,8 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          py="${{ matrix.python }}"
-          version="${py//./}"
-          echo "version=$version"
-          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -561,11 +567,15 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          py="${{ matrix.python }}"
-          version="${py//./}"
-          echo "version=$version"
-          url_info=paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          if [ "${use_release}" == "true" ]; then
+            py="${{ matrix.python }}"
+            version="${py//./}"
+            echo "version=$version"
+            paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+            echo "Using pre-built paddle package from develop branch."
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
@@ -751,6 +761,7 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e paddle_url \
+            -e use_release \
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
@@ -789,14 +800,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          py="${{ matrix.python }}"
-          version="${py//./}"
-          echo "version=$version"
-          fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
-          paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -815,11 +820,15 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          py="${{ matrix.python }}"
-          version="${py//./}"
-          echo "version=$version"
-          url_info="paddlepaddle_gpu-3.3.0-cp${version}-cp${version}-linux_x86_64.whl"
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          if [ "${use_release}" == "true" ]; then
+            py="${{ matrix.python }}"
+            version="${py//./}"
+            echo "version=$version"
+            paddle_url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
+            echo "Using pre-built paddle package from develop branch."
+            pip install "$paddle_url$paddle_url_info" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1

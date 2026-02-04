@@ -493,7 +493,7 @@ jobs:
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
           cd /workspace/PaddleFormers
-          git pull --no-edit origin pull/3671/head
+          git pull --no-edit origin pull/3799/head
           cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
@@ -778,7 +778,7 @@ jobs:
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
           cd /workspace/PaddleFormers
-          git pull --no-edit origin pull/3671/head
+          git pull --no-edit origin pull/3799/head
           cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           '
@@ -967,7 +967,7 @@ jobs:
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
           cd /workspace/PaddleFormers
-          git pull --no-edit origin pull/3671/head
+          git pull --no-edit origin pull/3799/head
           cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           '

@@ -31,6 +31,7 @@ class GPTLMHead(ColumnParallelLinear):
         self.skip_weight_param_allocation = kwargs[
             "skip_weight_param_allocation"
         ]
+        self._dtype = self.config.params_dtype
 
         kwargs["skip_weight_param_allocation"] = True
         super().__init__(**kwargs)
