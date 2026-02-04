@@ -231,6 +231,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         self.embedding_dim = embedding_dim
         self.reduce_scatter_embeddings = reduce_scatter_embeddings
         self.tp_group = tp_group
+        self._dtype = config.params_dtype
 
         self.tp_group = get_tensor_model_parallel_group_if_none(
             self.tp_group, check_initialized=False
@@ -842,6 +843,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
         self.config = config
         self.disable_grad_reduce = disable_grad_reduce
         self.tp_group = tp_group
+        self._dtype = config.params_dtype
 
         self.tp_group = get_tensor_model_parallel_group_if_none(
             self.tp_group, is_expert=self.is_expert, check_initialized=False
@@ -1167,6 +1169,7 @@ class RowParallelLinear(paddle.nn.Layer):
         self.gradient_accumulation_fusion = False
         self.sequence_parallel = config.sequence_parallel
         self.tp_group = tp_group
+        self._dtype = config.params_dtype
 
         if self.sequence_parallel and not self.input_is_parallel:
             raise RuntimeError(
