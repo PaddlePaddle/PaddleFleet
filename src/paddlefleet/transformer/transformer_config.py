@@ -310,7 +310,7 @@ class TransformerConfig(ModelParallelConfig):
     """Options are greedy, group_limited_greedy, no_auxtc"""
 
     moe_token_dispatcher_type: str = "deepep"
-    """The type of token dispatcher to use. The default is 'allgather'.
+    """The type of token dispatcher to use. The default is 'deepep'.
     Options are 'allgather','alltoall' and 'deepep'."""
 
     moe_use_pfcc_deepep: bool = True
