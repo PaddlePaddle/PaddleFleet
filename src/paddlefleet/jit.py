@@ -13,8 +13,6 @@
 # limitations under the License.
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
-import paddle
-
 # TODO(Ruibiao): enable to_static later, just return original function now.
 # jit_fuser = paddle.jit.to_static(backend="CINN")
 jit_fuser = lambda fn: fn
