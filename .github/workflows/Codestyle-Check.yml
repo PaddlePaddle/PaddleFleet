@@ -46,7 +46,7 @@ jobs:
         if: steps.check-bypass.outputs.can-skip != 'true'
         run: |
           pip install pre-commit==2.17.0
-          pip install ast-grep-py==0.40.0
+          pip install ast-grep-cli==0.40.0
 
       - name: Run ast-grep unit tests
         if: steps.check-bypass.outputs.can-skip != 'true'
