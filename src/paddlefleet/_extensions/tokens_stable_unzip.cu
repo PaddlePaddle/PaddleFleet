@@ -265,10 +265,12 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
   if (XScale) {
     PD_CHECK(XScale->dtype() == paddle::DataType::FLOAT32);
   }
-  // TODO(large-tensor): downstream functors may still use int; guard until upgraded.
+  // TODO(large-tensor): downstream functors may still use int; guard until
+  // upgraded.
   int64_t rows = X.shape()[0];
 
-  // TODO(large-tensor): downstream functors may still use int; guard until upgraded.
+  // TODO(large-tensor): downstream functors may still use int; guard until
+  // upgraded.
   int64_t cols = X.shape()[1];
 
   const int quanted_cols = (XScale) ? XScale->shape()[1] : 0;
@@ -298,9 +300,9 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
         }
 
         const int output_rows = tokens_cumulated;
-        // TODO(large-tensor): downstream functors may still use int; guard until upgraded.
+        // TODO(large-tensor): downstream functors may still use int; guard
+        // until upgraded.
         int64_t topk_calculated = expert_routemap_topk.shape()[1];
-
 
         if (XScale && fill_x) {
           XScale_unzipped = paddle::empty(
