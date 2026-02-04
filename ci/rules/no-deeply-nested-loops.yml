@@ -20,8 +20,8 @@ message: |
   If it is a false positive, please contact SigureMo or zrr1999 for more information.
 note: Refactor deeply nested loops using itertools.product for better readability
 files:
-  - test/**
-  - python/**
+  - tests/**
+  - src/paddlefleet/**
 
 rule:
   pattern: |

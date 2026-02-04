@@ -8,7 +8,7 @@ message: |
   If it is a false positive, please contact SigureMo (Recommend) or zrr1999 for more information.
 note: Use np.testing methods for more informative assertion messages
 files:
-  - test/**
+  - tests/**
 
 rule:
   any:

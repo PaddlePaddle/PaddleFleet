@@ -1,11 +1,7 @@
 id: no-int32-type-dims
 language: cpp
 files:
-  - paddle/**
-ignores:
-  - paddle/phi/kernels/legacy/**
-  - paddle/phi/kernels/xpu/**
-  - paddle/phi/kernels/custom/**
+  - src/paddlefleet/**
 severity: error
 message: |
   Use int64_t instead of int/int32_t for dims/shape/strides/numel/offset (large tensor support).
