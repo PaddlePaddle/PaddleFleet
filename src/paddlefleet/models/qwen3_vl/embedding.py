@@ -215,4 +215,7 @@ class VisionEmbedding(FleetLayer):
         )
 
     def forward(self, dict_args: dict):
-        pass
+        pixel_values = dict_args["pixel_values"]
+        grid_thw = dict_args["grid_thw"]
+        hidden_states = self.patch_embed(pixel_values).view()
+        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
