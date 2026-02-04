@@ -30,8 +30,7 @@ from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
 REPO_FLAG = os.getenv("repo_flag")
-BRANCH = os.getenv("BRANCH")
-SKIP_TESTS = (REPO_FLAG != "paddlefleet") and (BRANCH == "develop")
+SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
 def _set_random_seed(
@@ -148,7 +147,7 @@ def run_pp(
 
 @unittest.skipIf(
     SKIP_TESTS,
-    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet') and branch '{BRANCH}' is 'develop'",
+    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')",
 )
 class TestPP(unittest.TestCase):
     def setUp(self):
