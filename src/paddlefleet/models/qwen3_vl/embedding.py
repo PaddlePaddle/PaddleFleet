@@ -217,5 +217,29 @@ class VisionEmbedding(FleetLayer):
     def forward(self, dict_args: dict):
         pixel_values = dict_args["pixel_values"]
         grid_thw = dict_args["grid_thw"]
+
         hidden_states = self.patch_embed(pixel_values).view()
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+        hidden_states = hidden_states + pos_embeds
+
+        seq_len, _ = hidden_states.size()
+        hidden_states = hidden_states.reshape([seq_len, -1])
+        hidden_states = hidden_states.unsqueeze(0)
+
+        rotary_pos_emb = self.rotary_pos_emb(grid_thw)
+        rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cos_sin(
+            grid_thw
+        )
+
+        packed_seq_params = self.get_packed_seq_params(grid_thw)
+
+        preproc_output = {
+            "hidden_states": hidden_states,
+            "attention_mask": dict_args.get("attention_mask", None),
+            "rotary_pos_emb": rotary_pos_emb,
+            "rotary_pos_cos": rotary_pos_cos,
+            "rotary_pos_sin": rotary_pos_sin,
+            "packed_seq_params": packed_seq_params,
+        }
+
+        return preproc_output

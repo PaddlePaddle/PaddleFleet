@@ -161,9 +161,7 @@ class TransformerEncoder(PipelineLayer):
 
         self.get_encoder_layer_desc_list(layers, spec, name_prefix)
 
-        self.add_sequential_layer(
-            layers, LayerDesc(spec.layer_norm), name_prefix
-        )
+        self.add_sequential_layer(layers, (spec.layer_norm), name_prefix)
 
         return layers
 
