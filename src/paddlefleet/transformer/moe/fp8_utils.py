@@ -19,10 +19,7 @@ import numpy
 import paddle
 import paddle.nn.functional as F
 
-from paddlefleet.ops import (
-    fused_swiglu_scale,
-    fused_swiglu_scale_bwd,
-)
+from paddlefleet.fusions.fused_swiglu_scale import (fused_swiglu_scale_forward, fused_swiglu_scale_backward)
 
 try:
     from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
@@ -488,7 +485,7 @@ class ExpertsGroupGemmContiguousNode:
         fwd_down_bf16
         """
 
-        o2 = fused_swiglu_scale(o1, unzipped_probs)
+        o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
 
         if clear_o1:
             o1._clear_to_zero_allocation()
@@ -644,8 +641,8 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        o2_s = fused_swiglu_scale(o1, unzipped_probs)
-        do1, probs_grad = fused_swiglu_scale_bwd(o1, unzipped_probs, do2_s)
+        o2_s = fused_swiglu_scale_forward(o1, unzipped_probs)
+        do1, probs_grad = fused_swiglu_scale_backward(o1, unzipped_probs, do2_s)
 
         return do1, o2_s, probs_grad
 

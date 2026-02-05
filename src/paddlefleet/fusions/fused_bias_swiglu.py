@@ -17,9 +17,10 @@
 
 import paddle
 import paddle.nn.functional as F
+from .. import hardware_backend as backends
+
 
 from paddlefleet.jit import jit_fuser
-from paddlefleet.ops import fused_swiglu_bwd
 from paddlefleet.utils import nvtx_decorator
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
@@ -76,7 +77,14 @@ def swiglu_back(g, y):
         paddle.Tensor: Gradient with respect to the input tensor, computed using the
             chain rule and the derivative of the SiLU activation function.
     """
-    return fused_swiglu_bwd(g, y)
+    if backends.IS_NVIDIA:
+        from paddlefleet.ops import fused_swiglu_bwd
+
+        return fused_swiglu_bwd(g, y)
+    else:
+        logger.error(
+                "\033[91m fused_swiglu_bwd is not implemented for this backend! \033[0m"
+            )
 
 
 @jit_fuser

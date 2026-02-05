@@ -19,7 +19,7 @@ from pathlib import Path
 
 from setuptools import build_meta as orig
 
-import backends
+import src.paddlefleet.hardware_backend as backends
 from build_utils import (
     check_patchelf_exists,
     check_submodule_updated,

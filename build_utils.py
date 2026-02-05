@@ -23,7 +23,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import backends
+import src.paddlefleet.hardware_backend  as backends
 
 logger = logging.getLogger(__name__)
 
