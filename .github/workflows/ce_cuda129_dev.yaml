@@ -69,7 +69,7 @@ jobs:
             -e PADDLE_ROOT \
             -e repo_flag="paddlefleet" \
             -e ci_scripts \
-            -e user_release \
+            -e use_release \
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
@@ -152,7 +152,7 @@ jobs:
             -e PADDLE_ROOT \
             -e ci_scripts \
             -e CACHE_DIR \
-            -e user_release \
+            -e use_release \
             -e no_proxy \
             -e CI_name \
             -e PIP_CACHE_DIR \
@@ -181,7 +181,7 @@ jobs:
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          if [ "${user_release}" == "true" ]; then
+          if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
