@@ -100,6 +100,7 @@ def get_qwen3_vl_vision_layer_local_spec(
             "hidden_dropout_prob": config.hidden_dropout_prob
             if config is not None
             else None,
+            "modal": "vision_model",
         },
     )
 
@@ -176,7 +177,7 @@ def get_qwen3_vl_vision_layer_spec(
 
     return LayerSpec(
         layer=Qwen3VLVisionModel,
-        extra_kwargs={"config": config},
+        extra_kwargs={"config": config, "modal": "vision_model"},
         sublayers_spec=Qwen3VLVisionSublayersSpec(
             embedding=LayerSpec(
                 layer=VisionEmbedding,

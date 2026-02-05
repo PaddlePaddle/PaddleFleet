@@ -83,6 +83,7 @@ class Qwen3VLVisionTransformerLayer(TransformerLayer):
         layer_number: int = 1,
         hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        modal: str | None = None,
     ):
         super().__init__(
             config=config,
@@ -96,6 +97,7 @@ class Qwen3VLVisionTransformerLayer(TransformerLayer):
             self.deepstack_merger = build_layer(
                 sublayers_spec.deepstack_merger,
             )
+        self.modal = modal
 
     def forward(
         self,
