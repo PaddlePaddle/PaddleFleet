@@ -21,7 +21,9 @@ def fused_swiglu_scale_forward(x, scale):
 
         return fused_swiglu_scale(x, scale)
     else:
-        raise NotImplementedError
+        raise NotImplementedError(
+            "fused_swiglu_scale not implemented on this backend!"
+        )
 
 
 def fused_swiglu_scale_backward(x, scale, out_grad):
@@ -30,4 +32,6 @@ def fused_swiglu_scale_backward(x, scale, out_grad):
 
         return fused_swiglu_scale_bwd(x, scale, out_grad)
     else:
-        raise NotImplementedError
+        raise NotImplementedError(
+            "fused_swiglu_scale_backward not implemented on this backend!"
+        )
