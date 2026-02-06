@@ -503,7 +503,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen3vl-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen3vl-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           ls -a /workspace/PaddleFleet/coveragedata-qwen3vl-single
           coverage combine
           coverage xml -o /workspace/PaddleFleet/coveragedata-qwen3vl-single/coverage.xml
@@ -939,6 +939,7 @@ jobs:
           '
 
       - name: Install PaddleFormers
+        id: formers_install
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
