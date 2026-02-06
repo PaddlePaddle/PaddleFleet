@@ -499,8 +499,6 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
-          cd /workspace/PaddleFormers
-          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -788,8 +786,6 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
-          cd /workspace/PaddleFormers
-          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           '
 
@@ -980,7 +976,6 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
-          cd /workspace/PaddleFormers
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           '
 

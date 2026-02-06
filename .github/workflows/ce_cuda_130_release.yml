@@ -392,8 +392,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          cd /workspace/PaddleFormers
-          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -624,8 +622,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          cd /workspace/PaddleFormers
-          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           '
 
@@ -775,8 +771,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          cd /workspace/PaddleFormers
-          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           '
 
