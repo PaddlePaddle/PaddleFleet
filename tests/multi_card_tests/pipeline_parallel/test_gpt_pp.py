@@ -14,7 +14,7 @@
 
 
 import functools
-import os
+import pprint
 import random
 import unittest
 
@@ -185,33 +185,39 @@ class TestPP(unittest.TestCase):
             config,
         )
 
-        repo_name = os.environ.get("repo_flag")
-        if repo_name == "paddlefleet":
-            assert overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
-            if paddle.distributed.get_rank() == 0:
-                baseline = {
-                    "_layers.shared_layers.embed.embedding.embed_tokens.weight": "a05bf38eaa5f28b6e79f3df45941b396",
-                    "_layers.9.0.input_layernorm.weight": "7b4816fdae7d3df0e0c3f7261550aaf0",
-                    "_layers.9.0.self_attn.o_proj.weight": "7731ffe4060feaacaf71b84623eb045f",
-                    "_layers.9.0.self_attn.qkv_proj.weight": "e21db4ef9d0031291bf10f0d2891130c",
-                    "_layers.9.0.self_attn.q_norm.weight": "b093c0029ee425d8932f4767e762d3ee",
-                    "_layers.9.0.self_attn.k_norm.weight": "dd51d26b410a1acc7fc0c09b75119b14",
-                    "_layers.9.0.post_attention_layernorm.weight": "83301a39eb8f689ed4bf0a63c6765ee0",
-                    "_layers.9.0.mlp.up_gate_proj.weight": "db95761551fbf7aadec1ee6b99511b76",
-                    "_layers.9.0.mlp.down_proj.weight": "752dcedc986974687a6b969df201df98",
-                    "_layers.9.1.input_layernorm.weight": "f6e217ef20bdd57d023bfb1342229d25",
-                    "_layers.9.1.self_attn.o_proj.weight": "4640bb9563fa0f63b10d6008c8b425fb",
-                    "_layers.9.1.self_attn.qkv_proj.weight": "13e3abe4d6e597e06bb67947e7ccf897",
-                    "_layers.9.1.self_attn.q_norm.weight": "1b53ae1438558dba62da24049d730088",
-                    "_layers.9.1.self_attn.k_norm.weight": "459774af0e0b36db81c8581dc7a45e09",
-                    "_layers.9.1.post_attention_layernorm.weight": "7c21d0531529c10b4029b38d84f93ac2",
-                    "_layers.9.1.mlp.up_gate_proj.weight": "5fb1cdafde7e42d49ae7d71e830e2380",
-                    "_layers.9.1.mlp.down_proj.weight": "c72f73fafcea7a583a0f103da4fd75e4",
-                }
-                for name, p in overlap_gpt_model.named_parameters():
-                    assert p.grad._md5sum() == baseline[name]
-        else:
-            pass
+        print("Overlap PP loss MD5:", overlap_loss._md5sum())
+        rst = {}
+        for name, param in overlap_gpt_model.named_parameters():
+            if param.grad is not None:
+                rst[name] = param.grad._md5sum()
+
+        pp = pprint.PrettyPrinter(depth=None, width=200, compact=False)
+        pp.pprint(rst)
+
+        assert overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
+
+        if paddle.distributed.get_rank() == 0:
+            baseline = {
+                "_layers.9.0.input_layernorm.weight": "501258cec315cb78a8ee9e63f5066396",
+                "_layers.9.0.mlp.down_proj.weight": "56005e1e5bd6ac59748a658a9fe5b46d",
+                "_layers.9.0.mlp.up_gate_proj.weight": "c8df6287aad81f3b54b763818477118c",
+                "_layers.9.0.post_attention_layernorm.weight": "51bb0e05628fce8cf41b2c5f7ffbcc95",
+                "_layers.9.0.self_attn.k_norm.weight": "1f793bd2ce6614093ec186d31341056d",
+                "_layers.9.0.self_attn.o_proj.weight": "117b4c42d33e7db01547d8003bc82d39",
+                "_layers.9.0.self_attn.q_norm.weight": "b4d1c92ee7ed06e61cf4667508861093",
+                "_layers.9.0.self_attn.qkv_proj.weight": "70adb77e1680d7b8c38e8be91f439e09",
+                "_layers.9.1.input_layernorm.weight": "7e3a92d5ca53fe2f6902667f5f3fd33e",
+                "_layers.9.1.mlp.down_proj.weight": "65c219403359dba8bf9c53ef74a8f1e7",
+                "_layers.9.1.mlp.up_gate_proj.weight": "a32b4353f5b0547a2d34fd9c4a7c0e85",
+                "_layers.9.1.post_attention_layernorm.weight": "453e36caa0f9007710381757ea4d4479",
+                "_layers.9.1.self_attn.k_norm.weight": "963bdd76309b2a0bf35f458445b7a367",
+                "_layers.9.1.self_attn.o_proj.weight": "e3d5b74bed8b47725961202b41787623",
+                "_layers.9.1.self_attn.q_norm.weight": "75a36db183b3b676423bbb35c2127485",
+                "_layers.9.1.self_attn.qkv_proj.weight": "da92c4047a99953688efcb8fce415bde",
+                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "161fb3e084d8dfb71046a13310dd7857",
+            }
+            for name, p in overlap_gpt_model.named_parameters():
+                assert p.grad._md5sum() == baseline[name]
 
 
 if __name__ == "__main__":
