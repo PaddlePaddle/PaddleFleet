@@ -14,6 +14,7 @@
 
 
 import functools
+import pprint
 import random
 import unittest
 
@@ -190,7 +191,8 @@ class TestPP(unittest.TestCase):
             if param.grad is not None:
                 rst[name] = param.grad._md5sum()
 
-        print(rst)
+        pp = pprint.PrettyPrinter(depth=None, width=200, compact=False)
+        pp.pprint(rst)
 
         assert overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
 
