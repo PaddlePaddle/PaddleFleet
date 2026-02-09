@@ -84,8 +84,8 @@ def swiglu_back(g, y):
 
         return fused_swiglu_bwd(g, y)
     else:
-        logger.error(
-            "\033[91m fused_swiglu_bwd is not implemented for this backend! \033[0m"
+        raise NotImplementedError(
+            "fused_swiglu_bwd is not implemented for non-CUDA backends."
         )
 
 

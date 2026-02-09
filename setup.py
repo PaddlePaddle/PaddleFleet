@@ -192,9 +192,7 @@ try:
         + get_special_setup_deps()
     )
 except Exception as e:
-    # Fallback if dependency resolution fails
-    dependencies = common_dependencies
-    logging.warning(
+    raise Exception(
         f"Failed to resolve special dependencies: {e}, using common dependencies only"
     )
 
