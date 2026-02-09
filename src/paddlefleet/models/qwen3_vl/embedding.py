@@ -34,6 +34,7 @@ class VisionEmbedding(FleetLayer):
         config: TransformerConfig,
         sublayers_spec: VisionEmbeddingSpec,
     ):
+        super().__init__(config)
         self.spatial_merge_size = config.spatial_merge_size
         self.spatial_merge_unit = (
             self.spatial_merge_size * self.spatial_merge_size
@@ -65,10 +66,6 @@ class VisionEmbedding(FleetLayer):
         if sublayers_spec.rope_embedding:
             self.rotary_pos_emb = build_layer(
                 sublayers_spec.rope_embedding,
-                rotary_base=config.rotary_theta,
-                rotary_percent=config.rotary_percent,
-                rotary_interleaved=config.rotary_interleaved,
-                rope_scaling=config.rope_scaling,
             )
 
     def rot_pos_emb(self, grid_thw):

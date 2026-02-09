@@ -11,33 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass
 from functools import partial
-
-from paddle.nn import functional as F
 
 from ...fusions.fused_bias_dropout import get_bias_dropout_add
 from ...spec_utils import LayerSpec
 from ...transformer.attention import SelfAttention, SelfAttentionSublayersSpec
 from ...transformer.identity_op import IdentityOp
-from ...transformer.mlp import MLP, MLPSublayersSpec
 from ...transformer.transformer_config import TransformerConfig
 from ..backends import LocalSpecProvider
 from ..common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from ..gpt.gpt_layer_specs import get_mlp_layer_spec_for_backend
 from .embedding import VisionEmbedding, VisionEmbeddingSpec
+from .patch_merger import Qwen3VLVisionPatchMergerSpec, Qwen3VLVisionPathMerger
 from .qwen3_vl_model import (
     Qwen3VLVisionModel,
     Qwen3VLVisionSublayersSpec,
     Qwen3VLVisionTransformerLayer,
     Qwen3VLVsisionTransformerSubLayerSpec,
 )
-
-
-@dataclass
-class Qwen3VLVisionPatchMergerSpec:
-    norm: LayerSpec = IdentityOp
-    mlp: LayerSpec = None
 
 
 def get_qwen3_vl_vision_layer_local_spec(
@@ -52,24 +43,16 @@ def get_qwen3_vl_vision_layer_local_spec(
     mlp = get_mlp_layer_spec_for_backend(
         backend=backend,
     )
-    transformer_cls = (Qwen3VLVisionTransformerLayer,)
-    merger_spec = Qwen3VLVisionPatchMergerSpec(
-        norm=layer_norm,
-        mlp=LayerSpec(
-            layer=MLP,
-            sublayers_spec=MLPSublayersSpec(
-                up_gate_proj=backend.column_parallel_linear(),
-                down_proj=backend.row_parallel_linear(),
-                hidden_act=F.gelu,
-            ),
-            extra_kwargs={
-                "input_size": config.hidden_size,
-                "intermediate_size": config.hidden_size,
-                "hidden_size": config.out_hidden_size,
-            },
+    transformer_cls = Qwen3VLVisionTransformerLayer
+    merger_spec = LayerSpec(
+        layer=Qwen3VLVisionPathMerger,
+        sublayers_spec=Qwen3VLVisionPatchMergerSpec(
+            backend.layer_norm(
+                rms_norm=(config.normalization == "RMSNorm"), for_qk=False
+            )
         ),
+        extra_kwargs={"config": config, "use_postshuffle_norm": True},
     )
-
     return LayerSpec(
         layer=transformer_cls,
         sublayers_spec=Qwen3VLVsisionTransformerSubLayerSpec(
@@ -107,13 +90,11 @@ def get_qwen3_vl_vision_layer_local_spec(
 
 def get_qwen3vl_vision_encoder_layers_spec(
     config: TransformerConfig,
-    normalization: str | None = None,
 ) -> list[LayerSpec]:
     layer_spec_func = partial(
         get_qwen3_vl_vision_layer_local_spec,
         config=config,
         use_qk_norm=config.use_qk_norm,
-        normalization=normalization,
     )
     layer_specs = []
     append_deepstack = False
@@ -145,34 +126,28 @@ def get_qwen3_vl_vision_spec(
     rotary_emb_extra_kwargs = {
         "head_dim": config.head_dim // 2,
         "rotary_base": rotary_base,
-        "rotaty_scaling": rope_scaling,
+        "rope_scaling": rope_scaling,
         "rotary_percent": rotary_percent,
     }
-    embedding_extra_kwargs = {
-        **embedding_extra_kwargs,
-        **rotary_emb_extra_kwargs,
-    }
     embedding_spec = VisionEmbeddingSpec(
-        rope_embedding=LayerSpec(layer=RotaryEmbedding)
+        rope_embedding=LayerSpec(
+            layer=RotaryEmbedding,
+            extra_kwargs=rotary_emb_extra_kwargs,
+        )
     )
     merger_norm = backend.layer_norm(
         rms_norm=(config.normalization == "RMSNorm"), for_qk=False
     )
-    merger_spec = Qwen3VLVisionPatchMergerSpec(
-        norm=merger_norm,
-        mlp=LayerSpec(
-            layer=MLP,
-            sublayers_spec=MLPSublayersSpec(
-                up_gate_proj=backend.column_parallel_linear(),
-                down_proj=backend.row_parallel_linear(),
-                hidden_act=F.gelu,
-            ),
-            extra_kwargs={
-                "input_size": config.hidden_size,
-                "intermediate_size": config.hidden_size,
-                "hidden_size": config.out_hidden_size,
-            },
+    merger_spec = LayerSpec(
+        layer=Qwen3VLVisionPathMerger,
+        sublayers_spec=Qwen3VLVisionPatchMergerSpec(
+            norm=merger_norm,
         ),
+        extra_kwargs={
+            "config": config,
+            "dim": config.out_hidden_size,
+            "context_dim": config.hidden_size,
+        },
     )
 
     return LayerSpec(
@@ -185,8 +160,8 @@ def get_qwen3_vl_vision_spec(
                 extra_kwargs=embedding_extra_kwargs,
             ),
             head_empty_layers=head_empty_layers_spec,
-            transformer_layers_spec=transformer_layers_spec,
-            tail_empty_layer=tail_empty_layer_spec,
+            transformer_layers=transformer_layers_spec,
+            tail_empty_layers=tail_empty_layer_spec,
             merger=merger_spec,
         ),
     )

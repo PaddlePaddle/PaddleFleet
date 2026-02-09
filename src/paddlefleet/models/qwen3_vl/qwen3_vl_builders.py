@@ -21,7 +21,7 @@ from .layer_specs import (
 
 def qwen3_vl_vision_builder(config, **kwargs):
     transformer_layer_specs = get_qwen3vl_vision_encoder_layers_spec(
-        config=config, normalization=config.normalization
+        config=config
     )
 
     head_empty_layers_spec = []
@@ -41,7 +41,7 @@ def qwen3_vl_vision_builder(config, **kwargs):
         head_empty_layers_spec=head_empty_layers_spec,
         transformer_layers_spec=transformer_layer_specs,
         tail_empty_layer_spec=tail_empty_layers_spec,
-        rotary_base=config.rpoe_theta,
+        rotary_base=config.rope_theta,
         rotary_percent=config.rotary_percent,
         rope_scaling=config.rope_scaling,
     )

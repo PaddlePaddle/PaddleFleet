@@ -38,8 +38,8 @@ class Qwen3VLVisionSublayersSpec:
 
     embedding: LayerSpec = None
     head_empty_layers: list[LayerSpec] = None
-    transforer_layers: list[LayerSpec] = None
-    tail_empty_layer: list[LayerSpec] = None
+    transformer_layers: list[LayerSpec] = None
+    tail_empty_layers: list[LayerSpec] = None
     merger: LayerSpec = None
 
 
@@ -64,13 +64,6 @@ class Qwen3VLVisionModel(TransformerEncoder):
         self.add_sequential_layer(
             layers, LayerDesc(spec.merger), f"{name_prefix}.merger"
         )
-
-        for i, deepstack_layer_spec in enumerate(spec.deepstack_merger_list):
-            self.add_sequential_layer(
-                layers,
-                LayerDesc(deepstack_layer_spec),
-                f"{name_prefix}.deepstack_merger_list.{i}",
-            )
 
         return layers
 

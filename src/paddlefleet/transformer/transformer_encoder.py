@@ -17,11 +17,6 @@
 import logging
 
 from paddle.distributed import fleet
-from transformer_layer import (
-    TransformerLayer,
-    TransformerLayerNode,
-    TransformerLayerOverlappedScheduleNode,
-)
 
 from ..pipeline_parallel import (
     LayerDesc,
@@ -30,6 +25,11 @@ from ..pipeline_parallel import (
     SharedLayerDesc,
 )
 from ..pipeline_parallel.pp_utils.utils import dict_to_tuple_helper
+from .transformer_layer import (
+    TransformerLayer,
+    TransformerLayerNode,
+    TransformerLayerOverlappedScheduleNode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ class TransformerEncoder(PipelineLayer):
         **kwargs,
     ) -> None:
         self.config = kwargs["config"]
-        self.modal = kwargs.get("modal", None)
+        self.modal = kwargs.pop("modal", None)
         self._pipeline_name_mapping = None
         self._pp_to_single_mapping = None
         self._sequential_layers = self.get_layer_desc_list(
