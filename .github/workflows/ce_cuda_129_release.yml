@@ -679,6 +679,7 @@ jobs:
             -e no_proxy \
             -e CI_name \
             -e formers_branch \
+            -e use_release \
             -e fleet_branch \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
