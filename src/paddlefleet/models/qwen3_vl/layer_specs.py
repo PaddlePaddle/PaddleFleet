@@ -131,7 +131,7 @@ def get_qwen3vl_vision_encoder_layers_spec(
     return layer_specs
 
 
-def get_qwen3_vl_vision_layer_spec(
+def get_qwen3_vl_vision_spec(
     config: TransformerConfig,
     transformer_layers_spec: list[LayerSpec],
     head_empty_layers_spec: list[LayerSpec] | None = None,
