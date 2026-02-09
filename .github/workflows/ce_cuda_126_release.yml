@@ -386,17 +386,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          cd /workspace/PaddleFormers
-          git pull --no-edit origin pull/3799/head
-          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
-          exit_code=$?
-          if [[ "$exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: Qwen3-vl-8k-single-card.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-single-card.\033[0m"
-          fi
           '
 
       - name: Terminate and delete the container
@@ -562,6 +552,14 @@ jobs:
           fi
           '
 
+      - name: GLM4.5 dpo_lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+          '
+
 
       - name: GLM4.5 pre-train (Grouped GEMM)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
@@ -607,9 +605,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          cd /workspace/PaddleFormers
-          git pull --no-edit origin pull/3799/head
-          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           '
 
@@ -619,7 +614,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
-          '
           '
 
       - name: Qwen vl moe
@@ -762,9 +756,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          cd /workspace/PaddleFormers
-          git pull --no-edit origin pull/3799/head
-          cd /workspace
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           '
 
