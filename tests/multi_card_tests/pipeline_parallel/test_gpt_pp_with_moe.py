@@ -212,6 +212,14 @@ class TestPP(unittest.TestCase):
             forward_backward_overlap_scheduler=False,
         )
 
+        print("Overlap PP loss MD5:", overlap_loss._md5sum())
+        rst = {}
+        for name, param in overlap_gpt_model.named_parameters():
+            if param.grad is not None:
+                rst[name] = param.grad._md5sum()
+
+        print(rst)
+
         assert overlap_loss._md5sum() == "864e194f213e7cc5e825e847c91a557d"
 
         if paddle.distributed.get_rank() == 0:
