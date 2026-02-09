@@ -16,7 +16,6 @@ import paddle
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
-from paddle.nn.parameter import Parameter
 
 from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.tensor_parallel.layers import (
