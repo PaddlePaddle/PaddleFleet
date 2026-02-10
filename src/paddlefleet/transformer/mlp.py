@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 # (TODO): need adapt to flex_checkpoint
 # dist_checkpoint in paddle is flex_checkpoint which have many difference.
@@ -41,7 +42,6 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -127,7 +127,7 @@ class MLP(FleetLayer):
         # see https://arxiv.org/pdf/2002.05202.pdf
         if self.config.gated_linear_unit:
             intermediate_size *= 2
-        self.up_gate_proj = build_layer(
+        self.up_gate_proj = build_spec_layer(
             sublayers_spec.up_gate_proj,
             self.input_size,
             intermediate_size,
@@ -142,7 +142,7 @@ class MLP(FleetLayer):
 
         self.hidden_act = self.config.hidden_act
 
-        self.down_proj = build_layer(
+        self.down_proj = build_spec_layer(
             sublayers_spec.down_proj,
             self.config.intermediate_size,
             self.config.hidden_size,

@@ -19,14 +19,15 @@ import numpy as np
 import paddle
 from paddle import nn
 from paddle.distributed import fleet
-from paddle.nn import Layer
-
-from paddlefleet.pipeline_parallel import (
+from paddle.distributed.fleet.meta_parallel import (
     LayerDesc,
+    LayerSpec,
     NoPipelineParallel,
     PipelineLayer,
+    build_spec_layer,
 )
-from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddle.nn import Layer
+
 from paddlefleet.transformer.identity_op import IdentityOp
 
 
@@ -177,14 +178,14 @@ class TestPipeLayerAPI(unittest.TestCase):
 
     def test_pipelayer_desc(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(
+        pipe_model = build_spec_layer(
             alex_desc, num_stages=self.pipeline_parallel_size
         )
         np.testing.assert_array_equal(len(pipe_model.parameters()), 6)
 
     def test_pipelayer_desc_single(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(alex_desc, num_stages=1)
+        pipe_model = build_spec_layer(alex_desc, num_stages=1)
         np.testing.assert_array_equal(len(pipe_model.parameters()), 12)
         pipe_model = NoPipelineParallel(pipe_model, self.strategy)
         input = paddle.randn([256, 3, 224, 224])
@@ -194,7 +195,7 @@ class TestPipeLayerAPI(unittest.TestCase):
 
     def test_pipelayer_segment_method_list(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(
+        pipe_model = build_spec_layer(
             alex_desc, num_stages=self.pipeline_parallel_size, seg_method=[0, 4]
         )
         stage_id = self.hcg.get_stage_id()
@@ -205,7 +206,7 @@ class TestPipeLayerAPI(unittest.TestCase):
 
     def test_pipelayer_segment_method_spec(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(
+        pipe_model = build_spec_layer(
             alex_desc,
             num_stages=self.pipeline_parallel_size,
             seg_method="layer:Conv2D|MaxPool2D",
@@ -218,7 +219,7 @@ class TestPipeLayerAPI(unittest.TestCase):
 
     def test_pipelayer_segment_method_vpp(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(
+        pipe_model = build_spec_layer(
             alex_desc,
             num_stages=self.pipeline_parallel_size,
             seg_method="layer:Conv2D|MaxPool2D",
