@@ -646,7 +646,7 @@ class MoELayer(nn.Layer):
     def aux_loss_compute(self, args):
         hidden_states, aux_loss, residuals = args
         if self.training and self.router_aux_loss_coef:
-            aux_loss = aux_loss * self.router_aux_loss_coef
+            aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
         else:
             output = hidden_states
