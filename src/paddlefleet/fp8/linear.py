@@ -14,6 +14,7 @@
 
 
 import paddle
+from paddle.nn.parameter import Parameter
 
 from paddlefleet.ops import deep_gemm
 from paddlefleet.tensor_parallel import ColumnParallelLinear
@@ -51,7 +52,7 @@ class _FP8Gemm(paddle.autograd.Function):
             )
 
         if is_fp8_tensor(weight) is False:
-            weight_fp8, weight_scale = weight_quant_func(weight.T)
+            weight_fp8, weight_scale = weight_quant_func(weight)
         else:
             weight_fp8, weight_scale = weight
 
@@ -133,8 +134,8 @@ class _FP8Gemm(paddle.autograd.Function):
             main_grad = weight.grad
 
         deep_gemm.fp8_gemm_nt(
-            (inp_t_fp8, inp_t_scale),
             (grad_out_t_fp8, grad_out_t_scale),
+            (inp_t_fp8, inp_t_scale),
             main_grad,
             c=main_grad,
             recipe=(1, 1, 128),
@@ -196,7 +197,7 @@ class FP8Linear(ColumnParallelLinear):
         # and keep its shape consistent with [k, m]
         # print("==== self.weight before ====")
         # print(self.weight.strides)
-        # self.weight = Parameter(self.weight.T.contiguous().T)
+        self.weight = Parameter(self.weight.T.contiguous())
         # print("==== self.weight after ====")
         # print(self.weight.strides)
 

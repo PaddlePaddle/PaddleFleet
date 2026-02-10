@@ -60,9 +60,9 @@ class TestParallelMLP(unittest.TestCase):
             level="O2",
             dtype="bfloat16",
         )
-        self.fp8_linear.weight = paddle.nn.parameter.Parameter(
-            self.fp8_linear.weight.T.contiguous().T
-        )
+        # self.fp8_linear.weight = paddle.nn.parameter.Parameter(
+        #     self.fp8_linear.weight.T.contiguous().T
+        # )
         self.fp8_linear.weight.main_grad = None
 
         paddle.manual_seed(123)
@@ -150,7 +150,7 @@ class TestParallelMLP(unittest.TestCase):
             assert out_diff < 0.001, f"iter {i} failed, out_diff: {out_diff}"
 
             w_grad_diff = calc_diff(
-                self.fp32_linear.weight.grad, self.fp8_linear.weight.main_grad
+                self.fp32_linear.weight.grad, self.fp8_linear.weight.main_grad.T
             )
             x_grad_diff = calc_diff(pd_x_fp32.grad, pd_x_bf16.grad)
             assert w_grad_diff < 0.001, (
@@ -160,8 +160,6 @@ class TestParallelMLP(unittest.TestCase):
                 f"iter {i} failed, x_grad_diff: {x_grad_diff}"
             )
             # paddle.cuda.nvtx.range_pop()
-        # print("fp32_runtimes", fp32_runtimes)
-        # print("fp8_runtimes", fp8_runtimes)
 
 
 if __name__ == "__main__":
