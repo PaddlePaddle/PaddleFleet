@@ -41,10 +41,6 @@ from paddlefleet.utils import log_single_rank
 if is_deep_ep_available():
     from paddlefleet.ops import deep_ep
 
-    HAVE_DEEP_EP = True
-else:
-    HAVE_DEEP_EP = False
-
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
