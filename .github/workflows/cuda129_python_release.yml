@@ -131,10 +131,10 @@ jobs:
           url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
-            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
@@ -262,10 +262,10 @@ jobs:
           url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
-            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
@@ -393,10 +393,10 @@ jobs:
           url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
-            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -585,10 +585,10 @@ jobs:
           url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
-            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -897,10 +897,10 @@ jobs:
           url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
-            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --force-reinstall --no-cache-dir
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
