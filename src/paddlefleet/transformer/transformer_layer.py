@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -23,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor, nn
-from paddle.distributed.communication import deep_ep
+import paddlefleet.ops.deep_ep as deep_ep
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.pipeline_parallel import ScheduleNode
@@ -77,12 +76,6 @@ def tensors_clone(outputs):
         raise ValueError(
             f"Unsupported data type:{type(outputs)} in tensors_clone"
         )
-
-
-def set_pfcc_deep_ep_backend():
-    global deep_ep
-    pfcc_deep_ep = importlib.import_module("paddlefleet.ops.deep_ep")
-    deep_ep = pfcc_deep_ep
 
 
 @dataclass
