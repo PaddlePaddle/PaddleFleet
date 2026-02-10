@@ -650,7 +650,6 @@ class MoELayer(nn.Layer):
             output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
         else:
             output = hidden_states
-
         output = output.reshape(residuals.shape)
         if self.shared_experts is not None:
             shared_output = self.shared_experts(residuals)[0]
