@@ -16,6 +16,7 @@
 
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet.config_logger import (
     has_config_logger_enabled,
@@ -23,7 +24,6 @@ from paddlefleet.config_logger import (
 )
 from paddlefleet.models.common.vision_layer.vision_layer import VisionLayer
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.enums import ModelType
 from paddlefleet.transformer.transformer_block import TransformerBlock
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -113,7 +113,7 @@ class CLIPViTModel(VisionLayer):
         if isinstance(ln_pre_impl, LayerSpec):
             kwargs["config"] = transformer_config
         if model_subtype == "clip":
-            self.ln_pre = build_layer(
+            self.ln_pre = build_spec_layer(
                 ln_pre_impl,
                 normalized_shape=self.visual_hidden_size,
                 epsilon=transformer_config.rms_norm_eps,
@@ -122,7 +122,7 @@ class CLIPViTModel(VisionLayer):
             conv_bias = False
             padding = 0
         elif model_subtype == "siglip":
-            self.ln_post = build_layer(
+            self.ln_post = build_spec_layer(
                 ln_post_impl,
                 normalized_shape=self.visual_hidden_size,
                 epsilon=transformer_config.rms_norm_eps,

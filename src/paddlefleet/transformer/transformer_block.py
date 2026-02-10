@@ -22,10 +22,10 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet import tensor_parallel
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_layer import (
@@ -149,7 +149,7 @@ class TransformerBlock(FleetLayer):
         def _build_layer(layer_spec, layer_number):
             layer_config = self.config
 
-            layer = build_layer(
+            layer = build_spec_layer(
                 layer_spec,
                 config=layer_config,
                 layer_number=layer_number,
@@ -172,7 +172,7 @@ class TransformerBlock(FleetLayer):
             and self.post_process
             and self.post_layer_norm
         ):
-            self.norm = build_layer(
+            self.norm = build_spec_layer(
                 self.sublayers_spec.layer_norm,
                 config=self.config,
                 hidden_size=self.config.hidden_size,

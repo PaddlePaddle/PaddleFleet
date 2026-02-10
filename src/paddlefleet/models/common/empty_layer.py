@@ -20,7 +20,8 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-from paddlefleet.pipeline_parallel import ScheduleNode
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
+
 from paddlefleet.transformer.layer import FleetLayer
 
 

@@ -32,8 +32,9 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 import paddlefleet
 
 if TYPE_CHECKING:
+    from paddle.distributed.fleet.meta_parallel import LayerSpec
+
     from paddlefleet.process_groups_config import ProcessGroupCollection
-    from paddlefleet.spec_utils import LayerSpec
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils

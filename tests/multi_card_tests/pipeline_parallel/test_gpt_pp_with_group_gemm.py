@@ -20,9 +20,9 @@ import unittest
 import numpy as np
 import paddle
 from paddle.distributed import fleet
+from paddle.distributed.fleet import distributed_model
 
 import paddlefleet
-from paddlefleet.distributed.model import distributed_model
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.training.initialize import initialize_fleet

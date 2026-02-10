@@ -14,9 +14,10 @@
 
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+from paddle.distributed.fleet.meta_parallel import LayerSpec
+
 from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
 from paddlefleet.fusions.fused_layer_norm import FusedLayerNorm
-from paddlefleet.spec_utils import LayerSpec
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,

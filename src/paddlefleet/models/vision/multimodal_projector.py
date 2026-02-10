@@ -15,7 +15,8 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 
-from paddlefleet.spec_utils import build_layer
+from paddle.distributed.fleet.meta_parallel import build_spec_layer
+
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -56,7 +57,7 @@ class MultimodalProjector(FleetLayer):
                 tp_group=tp_group,
             )
         elif self.projector_type == "affine":
-            self.encoder = build_layer(
+            self.encoder = build_spec_layer(
                 sublayers_spec.linear_fc1,
                 input_size,
                 config.hidden_size,

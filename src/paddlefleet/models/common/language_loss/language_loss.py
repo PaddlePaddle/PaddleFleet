@@ -14,6 +14,10 @@
 
 
 import functools
+import paddle
+from paddle import Tensor
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
+from paddle.distributed.fleet.utils import recompute
 
 import numpy as np
 import paddle
@@ -33,7 +37,6 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
 )
-from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
