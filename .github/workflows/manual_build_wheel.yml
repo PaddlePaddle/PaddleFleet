@@ -10,15 +10,27 @@ on:
         options:
           - publish-wheel
       commit:
-        required: false
+        required: true
         type: string
+      cuda:
+        required: false
+        type: choice
+        options:
+          - CUDA12.6
+          - CUDA12.9
+          - CUDA13.0
+      python:
+        required: false
+        type: choice
+        options:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
 
 
 permissions: read-all
 
-concurrency:
-  group: ${{ github.workflow }}-all
-  cancel-in-progress: true
 
 env:
   PR_ID: ${{ github.event.pull_request.number || '0' }}
@@ -41,7 +53,7 @@ jobs:
   publish-wheel:
     name: Publish wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
     needs: clone
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: github.repository == 'PaddlePaddle/PaddleFleet' && (inputs.python == '' || inputs.python == matrix.python_version) && (inputs.cuda == '' || inputs.cuda == matrix.cuda.CUDA_VERSION)
     runs-on:
       group: GZ_BD-CPU
     strategy:
@@ -91,7 +103,7 @@ jobs:
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${{ inputs.commit }}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -112,9 +124,8 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
-          git checkout
           git submodule update --init --recursive
-          export PADDLEFLEET_VERSION="0.0.0"
+          export IS_NVIDIA=True
           uv build --wheel -v
           '
 
@@ -127,7 +138,10 @@ jobs:
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
-          python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}
+          fleet_whl=$(ls -t *.whl | head -1)
+          echo "fleet_whl=${fleet_whl}"
+          python ../bos/BosClient.py ${fleet_whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}
+          echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}/${fleet_whl}"
           '
 
       - name: Cleanup

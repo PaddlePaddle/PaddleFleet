@@ -30,7 +30,10 @@ __global__ void tokens_unzip_slice_kernel(
 
   const int64_t total = total_zipped_rows * static_cast<int64_t>(num_experts);
 
-  for (int64_t elem = blockIdx.x * blockDim.x + threadIdx.x; elem < total;
+  for (int64_t elem =
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
+       elem < total;
        elem += blockDim.x * gridDim.x) {
     int64_t row = elem / num_experts;
     int64_t u = zipped_expertwise_rowmap[elem];

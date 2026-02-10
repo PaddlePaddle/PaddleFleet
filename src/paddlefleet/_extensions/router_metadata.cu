@@ -103,8 +103,14 @@ std::vector<paddle::Tensor> RouterMetadataCuda(
     const paddle::Tensor& topk_router_indices,
     const paddle::Tensor& expert_frequency_offset,
     int K) {
-  const int num_tokens = topk_router_indices.shape()[0];
-  const int num_experts = expert_frequency_offset.shape()[0];
+  // TODO(large-tensor): downstream functors may still use int; guard until
+  // upgraded.
+  int64_t num_tokens = topk_router_indices.shape()[0];
+
+  // TODO(large-tensor): downstream functors may still use int; guard until
+  // upgraded.
+  int64_t num_experts = expert_frequency_offset.shape()[0];
+
   const int total_elements = num_tokens * K;
   auto place = topk_router_indices.place();
   cudaStream_t stream = topk_router_indices.stream();

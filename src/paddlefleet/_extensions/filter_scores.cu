@@ -21,7 +21,10 @@
 __global__ void count_valid_kernel(const int64_t* indices,
                                    int* valid_count,
                                    const int64_t total_elements) {
-  for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total_elements;
+  for (int64_t i =
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
+       i < total_elements;
        i += gridDim.x * blockDim.x) {
     if (indices[i] != -1) {
       atomicAdd(valid_count, 1);
@@ -32,7 +35,10 @@ __global__ void count_valid_kernel(const int64_t* indices,
 __global__ void create_mask_kernel(const int64_t* indices,
                                    int* mask,
                                    const int64_t total_elements) {
-  for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total_elements;
+  for (int64_t i =
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
+       i < total_elements;
        i += gridDim.x * blockDim.x) {
     mask[i] = (indices[i] != -1) ? 1 : 0;
   }
@@ -44,7 +50,10 @@ __global__ void scatter_scores_kernel(const scalar_t* probs,
                                       const int* write_indices,
                                       scalar_t* output_scores,
                                       const int64_t total_elements) {
-  for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total_elements;
+  for (int64_t i =
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
+       i < total_elements;
        i += gridDim.x * blockDim.x) {
     if (indices[i] != -1) {
       int write_idx = write_indices[i];
@@ -59,7 +68,10 @@ __global__ void scatter_grad_kernel(const scalar_t* grad_topk,
                                     const int* write_indices,
                                     scalar_t* grad_probs,
                                     const int64_t total_elements) {
-  for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total_elements;
+  for (int64_t i =
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
+       i < total_elements;
        i += gridDim.x * blockDim.x) {
     if (indices[i] != -1) {
       int write_idx = write_indices[i];
