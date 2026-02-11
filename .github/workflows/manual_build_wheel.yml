@@ -18,9 +18,9 @@ on:
         default: 'ALL'
         options:
           - ALL
-          - CUDA12.6
-          - CUDA12.9
-          - CUDA13.0
+          - "CUDA12.6"
+          - "CUDA12.9"
+          - "CUDA13.0"
       python:
         required: false
         type: choice
@@ -78,7 +78,7 @@ jobs:
       - name: Check docker image and run container
         id: check-skip
         run: |
-          if ! [[ ( "${{ inputs.python }}" == "ALL" || "${{ inputs.python }}" == "${{ matrix.python_version }}" ) && ( "${{ inputs.cuda }}" == "ALL" || "${{ inputs.cuda }}" == "${{ matrix.python_version }}" ) ]]; then
+          if ! [[ ( "${{ inputs.python }}" == "ALL" || "${{ inputs.python }}" == "${{ matrix.python_version }}" ) && ( "${{ inputs.cuda }}" == "ALL" || "${{ inputs.cuda }}" == "${{ matrix.cuda.CUDA_VERSION }}" ) ]]; then
             echo "no_build=true" >> $GITHUB_OUTPUT
             exit 0
           fi
