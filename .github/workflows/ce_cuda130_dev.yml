@@ -1,6 +1,9 @@
 name: CE-CUDA-CUDA-130-Dev
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -693,7 +696,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
           git config user.name "PaddleCI"

@@ -1,6 +1,9 @@
 name: CE-CUDA-126-Release
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -455,7 +458,7 @@ jobs:
           git config pull.rebase false
           git checkout $fleet_branch
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages//nightly/cu126/
+          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
             pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
@@ -701,7 +704,7 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages//nightly/cu126/
+          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
             pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
