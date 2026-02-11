@@ -9,6 +9,9 @@ on:
       - edited
       - synchronize
 
+env:
+  PR_BODY: ${{ github.event.pull_request.body }}
+
 jobs:
   validate:
     name: Validate Dev PR
@@ -16,8 +19,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check if PR description contains dev PR link
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           echo "Checking PR body: $PR_BODY"
           if ! echo "$PR_BODY" | grep -Eqi "dev.*#([0-9]+)"; then
@@ -30,7 +31,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          DEV_PR=$(echo "${{ github.event.pull_request.body }}" | grep -Eo "#[0-9]+" | head -1 | tr -d "#")
+          DEV_PR=$(echo "$PR_BODY" | grep -Eio "dev.*#([0-9]+)" | grep -Eo "#[0-9]+" | head -1 | tr -d "#")
           echo "Found dev PR: $DEV_PR"
 
           if [ -z "$DEV_PR" ]; then
