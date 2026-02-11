@@ -26,9 +26,6 @@ from .utils import is_fp8_tensor
 class _FP8Gemm(paddle.autograd.Function):
     """Forward and backward function for FP8 GEMM"""
 
-    def __init__(self):
-        super().__init__()
-
     @staticmethod
     def forward(ctx, inp, weight, inp_quant_func, weight_quant_func):
         """
@@ -128,10 +125,6 @@ class _FP8Gemm(paddle.autograd.Function):
                     weight, dtype=paddle.float32
                 )
             main_grad = weight.main_grad
-        else:
-            if weight.grad is None:
-                weight.grad = paddle.zeros_like(weight, dtype=paddle.float32)
-            main_grad = weight.grad
 
         deep_gemm.fp8_gemm_nt(
             (grad_out_t_fp8, grad_out_t_scale),

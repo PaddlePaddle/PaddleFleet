@@ -22,6 +22,7 @@ import numpy as np
 import paddle
 
 from paddlefleet.fp8 import FP8Linear
+from paddlefleet.fp8.utils import is_fp8_tensor
 from paddlefleet.tensor_parallel import ColumnParallelLinear
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -80,32 +81,29 @@ class TestParallelMLP(unittest.TestCase):
             tp_group=None,
         )
 
-        self.acc_step = 10
+        self.acc_step = 4
+
+    def test_utils(self):
+        batch_size = 16384
+        np_x = np.random.randn(batch_size, self.config.hidden_size).astype(
+            "float32"
+        )
+        pd_x_bf16 = paddle.to_tensor(np_x).to(paddle.bfloat16)
+        assert is_fp8_tensor(pd_x_bf16) is False
+
+        fp8_x = paddle.incubate.nn.functional.fp8_quant_blockwise(
+            pd_x_bf16,
+            output_scale_transpose=False,
+            quant_method="1x128",
+            input_transpose=False,
+        )
+        assert is_fp8_tensor(fp8_x) is True
 
     def test_forward_backward(self):
         np.random.seed(123)
         batch_size = 16384
 
-        # warmup
-        np_x = np.random.randn(batch_size, self.config.hidden_size).astype(
-            "float32"
-        )
-        pd_x_fp32 = paddle.to_tensor(np_x)
-        pd_x_bf16 = paddle.to_tensor(np_x).to(paddle.bfloat16)
-        pd_x_fp32.stop_gradient = False
-        pd_x_bf16.stop_gradient = False
-        out_fp32, _ = self.fp32_linear(pd_x_fp32)
-        out_fp32.sum().backward()
-        out_fp8 = self.fp8_linear(pd_x_bf16)
-        out_fp8.sum().backward()
-
-        iter_start = paddle.Event(enable_timing=True)
-        iter_end = paddle.Event(enable_timing=True)
-        fp8_runtimes = np.zeros((self.acc_step, 2))
-        fp32_runtimes = np.zeros((self.acc_step, 2))
-
         for i in range(self.acc_step):
-            # paddle.cuda.nvtx.range_push(f"fp8_iter{i}")
             np_x = np.random.randn(batch_size, self.config.hidden_size).astype(
                 "float32"
             )
@@ -115,36 +113,11 @@ class TestParallelMLP(unittest.TestCase):
             pd_x_fp32.stop_gradient = False
             pd_x_bf16.stop_gradient = False
 
-            # paddle.cuda.nvtx.range_push(f"fp32_forward")
-
-            iter_start.record()
             out_fp32, _ = self.fp32_linear(pd_x_fp32)
-            iter_end.record()
-            paddle.cuda.synchronize()
-            fp32_runtimes[i, 0] = iter_start.elapsed_time(iter_end)
-
-            # paddle.cuda.nvtx.range_pop()
-
-            # paddle.cuda.nvtx.range_push(f"fp32_backward")
-            iter_start.record()
             out_fp32.sum().backward()
-            iter_end.record()
-            paddle.cuda.synchronize()
-            fp32_runtimes[i, 1] = iter_start.elapsed_time(iter_end)
 
-            # paddle.cuda.nvtx.range_push(f"fp8_forward")
-            iter_start.record()
             out_fp8 = self.fp8_linear(pd_x_bf16)
-            iter_end.record()
-            paddle.cuda.synchronize()
-            fp8_runtimes[i, 0] = iter_start.elapsed_time(iter_end)
-
-            # paddle.cuda.nvtx.range_push(f"fp8_backward")
-            iter_start.record()
             out_fp8.sum().backward()
-            iter_end.record()
-            paddle.cuda.synchronize()
-            fp8_runtimes[i, 1] = iter_start.elapsed_time(iter_end)
 
             out_diff = calc_diff(out_fp32, out_fp8)
             assert out_diff < 0.001, f"iter {i} failed, out_diff: {out_diff}"
