@@ -224,11 +224,6 @@ class GPTModel(PipelineLayer):
                 f"{name_prefix}.layers.{i}",
             )
             i += 1
-        for tail_empty_layer in spec.tail_empty_layers:
-            self.add_sequential_layer(
-                layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
-            )
-            i += 1
 
         if spec.mtp is not None:
             for mtp_spec in spec.mtp:
@@ -236,6 +231,11 @@ class GPTModel(PipelineLayer):
                     layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"
                 )
                 i += 1
+        for tail_empty_layer in spec.tail_empty_layers:
+            self.add_sequential_layer(
+                layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
+            )
+            i += 1
 
         self.add_sequential_layer(
             layers, LayerDesc(spec.layer_norm), name_prefix
