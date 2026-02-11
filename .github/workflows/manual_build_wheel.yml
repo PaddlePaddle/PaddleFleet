@@ -15,14 +15,18 @@ on:
       cuda:
         required: false
         type: choice
+        default: 'ALL'
         options:
+          - ALL
           - CUDA12.6
           - CUDA12.9
           - CUDA13.0
       python:
         required: false
         type: choice
+        default: 'ALL'
         options:
+          - ALL
           - "3.10"
           - "3.11"
           - "3.12"
@@ -53,7 +57,7 @@ jobs:
   publish-wheel:
     name: Publish wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
     needs: clone
-    if: github.repository == 'PaddlePaddle/PaddleFleet' && (inputs.python == '' || inputs.python == matrix.python_version) && (inputs.cuda == '' || inputs.cuda == matrix.cuda.CUDA_VERSION)
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
       group: GZ_BD-CPU
     strategy:
@@ -72,7 +76,12 @@ jobs:
       no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
     steps:
       - name: Check docker image and run container
+        id: check-skip
         run: |
+          if ! [[ ( "${{ inputs.python }}" == "ALL" || "${{ inputs.python }}" == "${{ matrix.python_version }}" ) && ( "${{ inputs.cuda }}" == "ALL" || "${{ inputs.cuda }}" == "${{ matrix.python_version }}" ) ]]; then
+            echo "no_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:${{ matrix.cuda.IMAGE_TAG }}"
           docker pull $docker_image
           container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
@@ -97,6 +106,7 @@ jobs:
             -w /workspace --network=host $docker_image
 
       - name: Install PaddleFleet
+        if: steps.check-skip.outputs.no_build != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
@@ -118,6 +128,7 @@ jobs:
           '
 
       - name: Build wheel
+        if: steps.check-skip.outputs.no_build != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
@@ -130,6 +141,7 @@ jobs:
           '
 
       - name: Upload wheel
+        if: steps.check-skip.outputs.no_build != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
@@ -150,3 +162,4 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
+          exit 0

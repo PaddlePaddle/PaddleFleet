@@ -1,14 +1,14 @@
 name: Publish wheel nightly
 
 on:
-  workflow_dispatch:
-    inputs:
-      job-name:
-        required: true
-        default: 'publish-wheel'
-        type: choice
-        options:
-          - publish-wheel
+  # workflow_dispatch:
+  #   inputs:
+  #     job-name:
+  #       required: true
+  #       default: 'publish-wheel'
+  #       type: choice
+  #       options:
+  #         - publish-wheel
   schedule:
     - cron: '0 16 * * *'
   push:
