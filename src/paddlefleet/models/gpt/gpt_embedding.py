@@ -107,12 +107,6 @@ class GPTEmbedding(FleetLayer):
         attn_mask_startend_row_indices = dict_args.get(
             "attn_mask_startend_row_indices", None
         )
-        deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
-        deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
-        visual_pos_masks = None
-        # Deepstack
-        deepstack_visual_embeds = None
-        visual_pos_mask = None
         mtp_emb_res = None
         if decoder_input is None:
             decoder_input = self.embedding(
@@ -182,8 +176,6 @@ class GPTEmbedding(FleetLayer):
                     decoder_input = decoder_input.masked_scatter(
                         image_mask, image_embeds.astype(decoder_input.dtype)
                     )
-                    visual_pos_masks = image_mask[..., 0]
-                    deepstack_visual_embeds = deepstack_image_embeds
 
                 if video_embeds is not None:
                     _, video_mask = self.get_placeholder_mask(
@@ -194,25 +186,11 @@ class GPTEmbedding(FleetLayer):
                     decoder_input = decoder_input.masked_scatter(
                         video_mask, video_embeds.astype(decoder_input.dtype)
                     )
-                    visual_pos_masks = video_mask[..., 0]
-                    deepstack_visual_embeds = deepstack_video_embeds
 
                 if image_embeds is not None and video_embeds is not None:
                     image_mask = image_mask[..., 0]
                     video_mask = video_mask[..., 0]
-                    visual_pos_masks = image_mask | video_mask
-                    deepstack_visual_embeds = []
-                    image_mask_joint = image_mask[visual_pos_masks]
-                    video_mask_joint = video_mask[visual_pos_masks]
-                    for img_embed, vid_embed in zip(
-                        deepstack_image_embeds, deepstack_video_embeds
-                    ):
-                        embed_joint = img_embed.new_zeros(
-                            visual_pos_masks.sum(), img_embed.shape[-1]
-                        ).to(img_embed.device)
-                        embed_joint[image_mask_joint, :] = img_embed
-                        embed_joint[video_mask_joint, :] = vid_embed
-                        deepstack_visual_embeds.append(embed_joint)
+
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
         rotary_pos_cos = None
@@ -257,8 +235,6 @@ class GPTEmbedding(FleetLayer):
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
             "position_ids": position_ids,
-            "deepstack_visual_emb": deepstack_visual_embeds,
-            "visual_pos_masks": visual_pos_masks,
         }
         if mtp_emb_res is not None:
             assert (

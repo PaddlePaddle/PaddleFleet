@@ -104,7 +104,9 @@ def get_gpt_layer_local_spec(
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
     )
-    transformer_cls = getattr(config, "specific_layer", TransformerLayer)
+    transformer_cls = getattr(
+        config, "specific_transformer_layer", TransformerLayer
+    )
     if paddle.distributed.is_initialized():
         use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
             "pp_configs"
@@ -360,6 +362,7 @@ def get_gpt_spec(
         language_embedding=language_embedding_spec,
         rope_embedding=rope_embedding_spec,
     )
+    embedding_cls = getattr(config, "specific_embedding", GPTEmbedding)
 
     return LayerSpec(
         layer=GPTModel,
@@ -369,7 +372,7 @@ def get_gpt_spec(
         },
         sublayers_spec=GPTSublayersSpec(
             embedding=LayerSpec(
-                layer=GPTEmbedding,
+                layer=embedding_cls,
                 sublayers_spec=embedding_spec,
                 extra_kwargs=embedding_extra_kwargs,
             ),
