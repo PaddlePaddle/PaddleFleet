@@ -989,6 +989,132 @@ jobs:
           fi
           '
 
+      - name: GLM4.5 sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-sft/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
+          glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-sft
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-sft/coverage.xml
+          coverage report -m
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 sft.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 sft.\033[0m"
+          fi
+          '
+
+      - name: GLM4.5 lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-lora/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
+          glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-lora
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-lora/coverage.xml
+          coverage report -m
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 lora.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 lora.\033[0m"
+          fi
+          '
+
+      - name: GLM4.5 dpo
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-dpo/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
+          glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-dpo
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-dpo/coverage.xml
+          coverage report -m
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
+          fi
+          '
+
+      - name: GLM4.5 dpo_lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-dpo_lora/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
+          glm45_exit_code=$?
+          ls -a /workspace/PaddleFleet/coveragedata-dpo_lora
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-dpo_lora/coverage.xml
+          coverage report -m
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo lora.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo lora.\033[0m"
+          fi
+          '
+
+      - name: Qwen pre-train
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-pt/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
+          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-pt
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml
+          coverage report -m
+          '
+
+      - name: Qwen sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-sft/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
+          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-sft
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml
+          coverage report -m
+          '
+
+      - name: Qwen lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-lora/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
+          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-lora
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml
+          coverage report -m
+          '
+
       - name: Qwen vl sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
@@ -1041,11 +1167,25 @@ jobs:
           push_file=$(realpath bos_tools.py)
           cd /workspace/PaddleFleet
           cp /workspace/PaddleFleet/coveragedata-pt/coverage.xml coverage-a-pt.xml
+          cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-sft.xml
+          cp /workspace/PaddleFleet/coveragedata-lora/coverage.xml coverage-lora.xml
+          cp /workspace/PaddleFleet/coveragedata-dpo/coverage.xml coverage-dpo.xml
+          cp /workspace/PaddleFleet/coveragedata-dpo-lora/coverage.xml coverage-dpo-lora.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml coverage-qwen-multi-pt.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
           cp /workspace/PaddleFleet/coveragedata-qwen3vl-sft/coverage.xml coverage-qwen3vl-sft.xml
           cp /workspace/PaddleFleet/coveragedata-qwen3vl-lora/coverage.xml coverage-qwen3vl-lora.xml
           cp /workspace/PaddleFleet/coveragedata-qwen3vl-moe/coverage.xml coverage-qwen3vl-moe.xml
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
           python ${push_file} coverage-a-pt.xml ${target_path}
+          python ${push_file} coverage-sft.xml ${target_path}
+          python ${push_file} coverage-lora.xml ${target_path}
+          python ${push_file} coverage-dpo.xml ${target_path}
+          python ${push_file} coverage-dpo-lora.xml ${target_path}
+          python ${push_file} coverage-qwen-multi-pt.xml ${target_path}
+          python ${push_file} coverage-qwen-multi-sft.xml ${target_path}
+          python ${push_file} coverage-qwen-multi-lora.xml ${target_path}
           python ${push_file} coverage-qwen3vl-sft.xml ${target_path}
           python ${push_file} coverage-qwen3vl-lora.xml ${target_path}
           python ${push_file} coverage-qwen3vl-moe.xml ${target_path}
@@ -1090,6 +1230,13 @@ jobs:
           h20_qwen_coverage.xml:h20-single/coverage-qwen.xml
           h20_qwen3vl_sft_single_coverage.xml:h20-single/coverage-qwen3vl.xml
           a100_pt_coverage.xml:a100/coverage-a-pt.xml
+          a100_sft_coverage.xml:a100/coverage-sft.xml
+          a100_lora_coverage.xml:a100/coverage-lora.xml
+          a100_dpo_coverage.xml:a100/coverage-dpo.xml
+          a100_dpo_lora_coverage.xml:a100/coverage-dpo-lora.xml
+          a100_coverage-qwen-multi-pt.xml:a100/coverage-qwen-multi-pt.xml
+          a100_coverage-qwen-multi-sft.xml:a100/coverage-qwen-multi-sft.xml
+          a100_coverage-qwen-multi-lora.xml:a100/coverage-qwen-multi-lora.xml
           a100_qwen3vl_sft_coverage.xml:a100/coverage-qwen3vl-sft.xml
           a100_qwen3vl_lora_coverage.xml:a100/coverage-qwen3vl-lora.xml
           a100_qwen3vl_moe_coverage.xml:a100/coverage-qwen3vl-moe.xml
@@ -1140,6 +1287,13 @@ jobs:
             "h20_single_coverage.xml"
             "h20_qwen_coverage.xml"
             "a100_pt_coverage.xml"
+            "a100_sft_coverage.xml"
+            "a100_lora_coverage.xml"
+            "a100_dpo_coverage.xml"
+            "a100_dpo_lora_coverage.xml"
+            "a100_coverage-qwen-multi-pt.xml"
+            "a100_coverage-qwen-multi-sft.xml"
+            "a100_coverage-qwen-multi-lora.xml"
             "h20_qwen3vl_sft_single_coverage.xml"
             "a100_qwen3vl_moe_coverage.xml"
             "a100_qwen3vl_lora_coverage.xml"
@@ -1159,7 +1313,34 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: ./multi_coverage.xml,./single_coverage.xml,./h20_multi_pt_coverage.xml,./h20_multi_sft_coverage.xml,./h20_multi_lora_coverage.xml,./h20_multi_dpo_coverage.xml,./h20_dpo_lora_coverage.xml,./h20_qwen_multi_pt_coverage.xml,./h20_qwen_multi_sft_coverage.xml,./h20_qwen_multi_lora_coverage.xml,./h20_multi_fp8_coverage.xml,./h20_multi_grouped_gemm_coverage.xml,./h20_single_coverage.xml,./h20_qwen_coverage.xml,./a100_pt_coverage.xml,./a100_qwen3vl_sft_coverage.xml,./a100_qwen3vl_lora_coverage.xml,./a100_qwen3vl_moe_coverage.xml,./h20_qwen3vl_sft_single_coverage.xml
+          files: |
+            ./multi_coverage.xml,
+            ./single_coverage.xml,
+            ./h20_multi_pt_coverage.xml,
+            ./h20_multi_sft_coverage.xml,
+            ./h20_multi_lora_coverage.xml,
+            ./h20_multi_dpo_coverage.xml,
+            ./h20_dpo_lora_coverage.xml,
+            ./h20_qwen_multi_pt_coverage.xml,
+            ./h20_qwen_multi_sft_coverage.xml,
+            ./h20_qwen_multi_lora_coverage.xml,
+            ./h20_multi_fp8_coverage.xml,
+            ./h20_multi_grouped_gemm_coverage.xml,
+            ./h20_single_coverage.xml,
+            ./h20_qwen_coverage.xml,
+            ./a100_pt_coverage.xml,
+            ./a100_sft_coverage.xml,
+            ./a100_sft_coverage.xml,
+            ./a100_lora_coverage.xml,
+            ./a100_dpo_coverage.xml,
+            ./a100_dpo_lora_coverage.xml,
+            ./a100_coverage-qwen-multi-pt.xml,
+            ./a100_coverage-qwen-multi-sft.xml,
+            ./a100_coverage-qwen-multi-lora.xml,
+            ./a100_qwen3vl_sft_coverage.xml,
+            ./a100_qwen3vl_lora_coverage.xml,
+            ./a100_qwen3vl_moe_coverage.xml,
+            ./h20_qwen3vl_sft_single_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
