@@ -96,7 +96,7 @@ ci = [
 default-groups = ["build", "test"]
 link-mode = "copy"
 index-strategy = "unsafe-best-match"
-cache-keys = [{ file = "pyproject.toml" }, { file = "src/paddlefleet/_extensions/*.cu" }, { file = "third_party/*" }]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/paddlefleet/_extensions/*.cu" }, { file = "third_party/" }]
 
 
 [tool.uv.sources]
