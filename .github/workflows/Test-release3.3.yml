@@ -415,7 +415,7 @@ jobs:
           fi
           git log -1
           git config pull.rebase false
-          git pull --no-edit origin pull/3896/head
+          git pull --no-edit origin pull/3897/head
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           pip install -e .
@@ -612,7 +612,7 @@ jobs:
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFormers
           git config pull.rebase false
-          git pull --no-edit origin pull/3896/head
+          git pull --no-edit origin pull/3897/head
           git log -1
           pip install -e .
           pip install librosa==0.11.0
@@ -979,7 +979,7 @@ jobs:
           git config pull.rebase false
           git log -1
           git config pull.rebase false
-          git pull --no-edit origin pull/3896/head
+          git pull --no-edit origin pull/3897/head
           pip install -e .
           pip install librosa==0.11.0
           echo "paddle commit:"
