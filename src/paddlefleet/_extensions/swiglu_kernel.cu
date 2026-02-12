@@ -14,6 +14,7 @@
 
 // swiglu_kernel.cu
 #include <cuda_bf16.h>
+#include <limits>
 #include <vector>
 #include "paddle/extension.h"
 
@@ -81,12 +82,22 @@ __global__ void VectorizedSwiGLUBackKernel(const T* __restrict__ g,
 std::vector<paddle::Tensor> SwiGLUBackward(const paddle::Tensor& g,
                                            const paddle::Tensor& y) {
   auto y_shape = y.shape();
-  int rows = y.numel() / y_shape.back();
-  int input_dim = y_shape.back();
-  int hidden_size = input_dim / 2;
+  int64_t rows = y.numel() / y_shape.back();
+  int64_t input_dim = y_shape.back();
+  int64_t hidden_size = input_dim / 2;
   auto dx = paddle::empty_like(y);
 
-  int grid_size = rows;
+  if (rows == 0 || hidden_size == 0) {
+    return {dx};
+  }
+
+  PADDLE_ENFORCE_LE(
+      rows * input_dim,
+      static_cast<int64_t>(std::numeric_limits<int>::max()),
+      common::errors::InvalidArgument(
+          "rows * input_dim must be <= INT_MAX for fused_swiglu_bwd."));
+
+  int grid_size = static_cast<int>(rows);
   int block_size = 256;
   auto stream = y.stream();
 
