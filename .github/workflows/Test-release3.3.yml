@@ -1154,7 +1154,7 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-sft.xml
           cp /workspace/PaddleFleet/coveragedata-lora/coverage.xml coverage-lora.xml
           cp /workspace/PaddleFleet/coveragedata-dpo/coverage.xml coverage-dpo.xml
-          cp /workspace/PaddleFleet/coveragedata-dpo-lora/coverage.xml coverage-dpo-lora.xml
+          cp /workspace/PaddleFleet/coveragedata-dpo_lora/coverage.xml coverage-dpo-lora.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml coverage-qwen-multi-pt.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
