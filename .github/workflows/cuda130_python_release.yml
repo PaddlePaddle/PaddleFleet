@@ -959,7 +959,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
           '
@@ -968,7 +967,6 @@ jobs:
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
@@ -979,7 +977,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
           '
@@ -988,7 +985,6 @@ jobs:
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
@@ -1000,7 +996,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
           '
@@ -1009,7 +1004,6 @@ jobs:
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
@@ -1020,7 +1014,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
           '
@@ -1029,7 +1022,6 @@ jobs:
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
