@@ -975,7 +975,7 @@ jobs:
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-pt/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_a100.sh
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
           glm45_exit_code=$?
           ls -a /workspace/PaddleFleet/coveragedata-pt
           coverage combine
