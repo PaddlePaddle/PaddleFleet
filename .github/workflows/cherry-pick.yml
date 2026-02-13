@@ -203,4 +203,3 @@ jobs:
               gh pr edit "$PR_NUMBER" --repo "$REPO_NAME" --remove-label "$label"
             fi
           done <<< "$LABELS"
-
