@@ -436,8 +436,8 @@ class TransformerEncoder(PipelineLayer):
         """
         state_dict = super().state_dict(*args, **kwargs)
 
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
-            name_prefix = "model.language_model."
+        if self.modal is not None:
+            name_prefix = f"model.{self.modal}."
         else:
             name_prefix = ""
         if self._pipeline_name_mapping is None:
@@ -503,8 +503,8 @@ class TransformerEncoder(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
-            name_prefix = "model.language_model."
+        if self.modal is not None:
+            name_prefix = f"model.{self.modal}."
         else:
             name_prefix = ""
 

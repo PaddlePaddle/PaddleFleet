@@ -369,6 +369,7 @@ def get_gpt_spec(
         extra_kwargs={
             "config": config,
             "tie_word_embeddings": tie_word_embeddings,
+            "modal": "language_model" if config.multimodal_embedding else None,
         },
         sublayers_spec=GPTSublayersSpec(
             embedding=LayerSpec(

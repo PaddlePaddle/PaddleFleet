@@ -32,6 +32,22 @@ class VisionEmbeddingSpec:
     rope_embedding: LayerSpec = None
 
 
+class VisionRotaryEmbedding(nn.Layer):
+    inv_freq: paddle.Tensor
+
+    def __init__(self, dim: int, theta: float = 10000.0) -> None:
+        super().__init__()
+        inv_freq = 1.0 / (
+            theta ** (paddle.arange(0, dim, 2, dtype=paddle.float32) / dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistable=False)
+
+    def forward(self, seqlen: int) -> paddle.Tensor:
+        seq = paddle.arange(seqlen, dtype=self.inv_freq.dtype)
+        freqs = paddle.outer(seq, self.inv_freq)
+        return freqs
+
+
 class VisionEmbedding(FleetLayer):
     def __init__(
         self,
@@ -219,7 +235,20 @@ class VisionEmbedding(FleetLayer):
         pixel_values = dict_args["pixel_values"]
         grid_thw = dict_args["grid_thw"]
 
-        hidden_states = self.patch_embed(pixel_values).view()
+        target_dtype = self.patch_embed.weight.dtype
+        hidden_states = pixel_values.view(
+            -1,
+            self.in_channels,
+            self.temporal_patch_size,
+            self.patch_size,
+            self.patch_size,
+        )
+        hidden_states = (
+            self.patch_embed(hidden_states)
+            .to(dtype=target_dtype)
+            .view(-1, self.embed_dim)
+        )
+
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         hidden_states = hidden_states + pos_embeds
 
@@ -227,11 +256,14 @@ class VisionEmbedding(FleetLayer):
         hidden_states = hidden_states.reshape([seq_len, -1])
         hidden_states = hidden_states.unsqueeze(0)
 
-        rotary_pos_emb = self.rotary_pos_emb(grid_thw)
-        rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cos_sin(
-            grid_thw
-        )
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        rotary_pos_emb = paddle.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        rotary_pos_cos = rotary_pos_emb.cos()
+        rotary_pos_sin = rotary_pos_emb.sin()
+        rotary_pos_emb = rotary_pos_emb[:, None, None, :]
+        rotary_pos_emb = rotary_pos_emb.transpose([1, 0])
         packed_seq_params = self.get_packed_seq_params(grid_thw)
 
         preproc_output = {
@@ -246,7 +278,7 @@ class VisionEmbedding(FleetLayer):
         return preproc_output
 
 
-class TextEmbedding(GPTEmbedding):
+class Qwen3VLTextEmbedding(GPTEmbedding):
     def forward(
         self,
         dict_args: dict,
@@ -427,3 +459,6 @@ class TextEmbedding(GPTEmbedding):
             if preproc_output[key] is None:
                 preproc_output.pop(key)
         return preproc_output
+
+
+__all__ = ["Qwen3VLTextEmbedding"]

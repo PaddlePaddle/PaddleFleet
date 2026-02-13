@@ -155,9 +155,9 @@ class RotaryEmbedding(nn.Layer):
 
         return freqs
 
-    def get_cos_sin(
-        self, max_seq_len: int, offset: int = 0
-    ) -> (Tensor, Tensor):
+    def get_cos_sin(self, max_seq_len: int, offset: int = 0) -> tuple(
+        Tensor, Tensor
+    ):
         """Cosine and sine values for RoPE are precomputed for all positions up to the maximum
         sequence length"""
         freqs = self.get_freqs_non_repeated(max_seq_len, offset)

@@ -16,12 +16,16 @@ from functools import partial
 from ...fusions.fused_bias_dropout import get_bias_dropout_add
 from ...spec_utils import LayerSpec
 from ...transformer.attention import SelfAttention, SelfAttentionSublayersSpec
+from ...transformer.enums import AttnMaskType
 from ...transformer.identity_op import IdentityOp
 from ...transformer.transformer_config import TransformerConfig
 from ..backends import LocalSpecProvider
-from ..common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from ..gpt.gpt_layer_specs import get_mlp_layer_spec_for_backend
-from .embedding import VisionEmbedding, VisionEmbeddingSpec
+from .embedding import (
+    VisionEmbedding,
+    VisionEmbeddingSpec,
+    VisionRotaryEmbedding,
+)
 from .patch_merger import Qwen3VLVisionPatchMergerSpec, Qwen3VLVisionPathMerger
 from .qwen3_vl_model import (
     Qwen3VLVisionModel,
@@ -38,8 +42,8 @@ def get_qwen3_vl_vision_layer_local_spec(
     append_deepstack: bool = False,
 ) -> LayerSpec:
     backend = LocalSpecProvider()
-    layer_norm = backend.layer_norm(rms_norm=False, for_qk=False)
-    qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
+    layer_norm = backend.layer_norm(rms_norm=False, for_qk=False, fused=False)
+    qk_norm = backend.layer_norm(rms_norm=False, for_qk=True, fused=False)
     mlp = get_mlp_layer_spec_for_backend(
         backend=backend,
     )
@@ -48,7 +52,9 @@ def get_qwen3_vl_vision_layer_local_spec(
         layer=Qwen3VLVisionPathMerger,
         sublayers_spec=Qwen3VLVisionPatchMergerSpec(
             backend.layer_norm(
-                rms_norm=(config.normalization == "RMSNorm"), for_qk=False
+                rms_norm=(config.normalization == "RMSNorm"),
+                for_qk=False,
+                fused=False,
             )
         ),
         extra_kwargs={"config": config, "use_postshuffle_norm": True},
@@ -66,6 +72,7 @@ def get_qwen3_vl_vision_layer_local_spec(
                     q_norm=qk_norm if use_qk_norm else IdentityOp,
                     k_norm=qk_norm if use_qk_norm else IdentityOp,
                 ),
+                extra_kwargs={"attn_mask_type": AttnMaskType.no_mask},
             ),
             self_attn_bda=get_bias_dropout_add,
             post_attention_layernorm=layer_norm,
@@ -97,8 +104,8 @@ def get_qwen3vl_vision_encoder_layers_spec(
         use_qk_norm=config.use_qk_norm,
     )
     layer_specs = []
-    append_deepstack = False
     for layer_number in range(config.num_hidden_layers):
+        append_deepstack = False
         real_layer_number = layer_number + config.num_empty_layers_add_in_head
         if layer_number in config.deepstack_visual_indexes:
             append_deepstack = True
@@ -117,21 +124,17 @@ def get_qwen3_vl_vision_spec(
     transformer_layers_spec: list[LayerSpec],
     head_empty_layers_spec: list[LayerSpec] | None = None,
     tail_empty_layer_spec: list[LayerSpec] | None = None,
-    rotary_percent: float = 1.0,
-    rotary_base: int = 10000,
-    rope_scaling: bool = False,
+    rotary_base: int = 10000.0,
 ):
     backend = LocalSpecProvider()
     embedding_extra_kwargs = {"config": config}
     rotary_emb_extra_kwargs = {
-        "head_dim": config.head_dim // 2,
-        "rotary_base": rotary_base,
-        "rope_scaling": rope_scaling,
-        "rotary_percent": rotary_percent,
+        "dim": config.head_dim // 2,
+        "theta": rotary_base,
     }
     embedding_spec = VisionEmbeddingSpec(
         rope_embedding=LayerSpec(
-            layer=RotaryEmbedding,
+            layer=VisionRotaryEmbedding,
             extra_kwargs=rotary_emb_extra_kwargs,
         )
     )

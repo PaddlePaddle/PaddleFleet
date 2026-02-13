@@ -85,9 +85,21 @@ class Qwen3VLVisionProvider(TransformerConfig):
             model_init_device_context = partial(paddle.device, device="meta")
 
         with model_init_device_context():
-            res_model = qwen3_vl_vision_builder(
+            fleet_model = qwen3_vl_vision_builder(
                 self,
                 seg_method="layer:TransformerLayer|EmptyLayer",
                 num_stages=pp_size,
             )
-        return res_model
+            model = Qwen3VLVisionModel.__new__(Qwen3VLVisionModel)
+
+            for attr_name in dir(fleet_model):
+                if not attr_name.startswith("__"):
+                    try:
+                        attr_value = getattr(fleet_model, attr_name)
+                        setattr(model, attr_name, attr_value)
+                    except:
+                        pass
+        return model
+
+
+__all__ = ["Qwen3VLVisionProvider"]
