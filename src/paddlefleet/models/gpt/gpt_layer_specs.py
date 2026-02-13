@@ -290,6 +290,7 @@ def get_gpt_mtp_layers_spec_for_backend(
         if config.num_nextn_predict_layers
         else 0
     )
+    mtp_num_layers = 1
     mtp_layer_specs = []
     for i in range(mtp_num_layers):
         mtp_layer_specs.append(mtp_layer_spec_func(layer_number=i))
