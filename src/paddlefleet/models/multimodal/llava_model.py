@@ -399,12 +399,16 @@ class LLaVAModel(FleetLayer):
             modules.append(self.language_model)
         if freeze_vision_model and self.vision_model is not None:
             modules.append(self.vision_model)
-        if freeze_vision_projection and self.vision_projection is not None:
+        if (
+            freeze_vision_projection
+            and hasattr(self, "vision_projection")
+            and self.vision_projection is not None
+        ):
             modules.append(self.vision_projection)
 
         for module in modules:
             for param in module.parameters():
-                param.requires_grad = False
+                param.stop_gradient = True
 
     def _preprocess_data(
         self,
