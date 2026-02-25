@@ -973,6 +973,16 @@ jobs:
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
           '
 
+      - name: Qwen vl moe
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
+          '
+
 
       - name: Terminate and delete the container
         if: ${{ always() }}
