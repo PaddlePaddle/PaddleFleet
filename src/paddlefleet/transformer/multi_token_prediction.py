@@ -472,21 +472,23 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         hidden_states_concat = dict_args["hidden_states"]
-        tensor_list = paddle.split(
-            hidden_states_concat, self.config.num_nextn_predict_layers + 1
-        )
-        dict_args["hidden_states"] = tensor_list[0]
-        dict_args["decoder_input"] = tensor_list[self.layer_number + 1]
-
-        if self.config.recompute_granularity == "full" and self.training:
-            hidden_states = self._checkpointed_forward(
-                self._proj_and_transformer_layer, **dict_args
+        # print("mtp layer num: ", self.layer_number)
+        for i in range(self.config.num_nextn_predict_layers):
+            tensor_list = paddle.split(
+                hidden_states_concat, self.config.num_nextn_predict_layers + 1
             )
-        else:
-            hidden_states = self._proj_and_transformer_layer(**dict_args)
+            dict_args["hidden_states"] = tensor_list[0]
+            dict_args["decoder_input"] = tensor_list[i + 1]
 
-        tensor_list[self.layer_number + 1] = hidden_states
-        hidden_states_concat = paddle.concat(tensor_list)
+            if self.config.recompute_granularity == "full" and self.training:
+                hidden_states = self._checkpointed_forward(
+                    self._proj_and_transformer_layer, **dict_args
+                )
+            else:
+                hidden_states = self._proj_and_transformer_layer(**dict_args)
+
+            tensor_list[i + 1] = hidden_states
+            hidden_states_concat = paddle.concat(tensor_list)
         dict_args["hidden_states"] = hidden_states_concat
         dict_args.pop("decoder_input")
         return dict_args

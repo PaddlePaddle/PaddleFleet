@@ -14,10 +14,15 @@
 
 
 import paddle
-from paddle import Tensor
+import paddle.distributed as dist
+from paddle import Tensor, nn
+from paddle.distributed import fleet
 from paddle.distributed.fleet.utils import recompute
 
-from paddlefleet.context_parallel_utils import ContextParallelGatherOp
+from paddlefleet.context_parallel_utils import (
+    ContextParallelGatherOp,
+    ContextParallelScatterOp,
+)
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
@@ -98,20 +103,106 @@ class LanguageLoss(FleetLayer):
             lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
             seq_length = lm_labels.shape[1]
 
-            lm_loss = self._forward(logits[0], lm_labels)
-
             mtp_loss = []
             mtp_logits = logits[1:]
-            for depth in range(self.config.num_nextn_predict_layers):
-                logits_cur_depth = mtp_logits[depth]
-                labels_cur_depth = labels_ori[
-                    :, (depth + 1) : (depth + 1 + seq_length)
-                ]
-                loss_cur_depth = self._forward(
-                    logits_cur_depth,
-                    labels_cur_depth,
-                )
-                mtp_loss.append(loss_cur_depth)
+
+            # hardcoding
+            mtp_distillation = True
+            if not mtp_distillation:
+                lm_loss = self._forward(logits[0], lm_labels)
+                for depth in range(self.config.num_nextn_predict_layers):
+                    logits_cur_depth = mtp_logits[depth]
+                    labels_cur_depth = labels_ori[
+                        :, (depth + 1) : (depth + 1 + seq_length)
+                    ]
+                    loss_cur_depth = self._forward(
+                        logits_cur_depth,
+                        labels_cur_depth,
+                    )
+                    mtp_loss.append(loss_cur_depth)
+            else:
+                lm_loss = 0.0
+
+                print("prediction_scores_cur_depth: ", logits[0])
+                print("prediction_scores_cur_depth: ", logits[0].shape)
+                target_p_self_op_dist = nn.Softmax(axis=2)(logits[0])
+                print("target_p_self_op_dist: ", target_p_self_op_dist)
+                if get_context_parallel_world_size() > 1:
+                    target_p_self_op_dist = ContextParallelGatherOp.apply(
+                        target_p_self_op_dist, axis=1
+                    )
+
+                def padding(tensor, left=False, pad_len=1):
+                    zeropadding = paddle.zeros_like(tensor[:, -pad_len:, :])
+                    if left:
+                        tensor = paddle.concat((zeropadding, tensor), axis=1)
+                    else:
+                        tensor = paddle.concat((tensor, zeropadding), axis=1)
+                    return tensor
+
+                if (
+                    self.config.num_nextn_predict_layers > 0
+                    and mtp_logits is not None
+                ):
+                    for depth in range(len(mtp_logits)):
+                        prediction_scores_cur_depth = mtp_logits[depth]
+                        labels_cur_depth = labels_ori[
+                            :, (depth + 1) : (depth + 1 + seq_length)
+                        ]
+                        lossmask = (
+                            labels_cur_depth != self.ignored_index
+                        ).cast(paddle.float32)
+                        print(
+                            "mtp_prediction_scores_cur_depth: ",
+                            prediction_scores_cur_depth,
+                        )
+                        print(
+                            "mtp_prediction_scores_cur_depth: ",
+                            prediction_scores_cur_depth.shape,
+                        )
+                        print("mtp_lossmask: ", lossmask.shape)
+                        out_logp = nn.LogSoftmax(axis=2)(
+                            prediction_scores_cur_depth
+                        )
+                        print("out_logp: ", out_logp)
+
+                        target_p = target_p_self_op_dist[
+                            :, (depth + 1) :, :
+                        ].clone()
+                        target_p = padding(
+                            target_p, left=False, pad_len=depth + 1
+                        )
+                        print("target_p: ", target_p)
+                        if get_context_parallel_world_size() > 1:
+                            target_p = ContextParallelScatterOp.apply(
+                                target_p, axis=1
+                            )
+                        plogp = target_p * out_logp
+                        print("plogp: ", plogp)
+
+                        lossmask = lossmask[..., None]
+                        xishu = lossmask.sum() + 1e-5
+                        print("xishu: ", xishu)
+                        if get_context_parallel_world_size() > 1:
+                            lossmask = ContextParallelScatterOp.apply(
+                                lossmask, axis=1
+                            )
+
+                        ploss = -paddle.sum(paddle.sum(lossmask * plogp, 2))
+                        print("ploss: ", ploss)
+
+                        if get_context_parallel_world_size() > 1:
+                            dist.all_reduce(
+                                ploss,
+                                group=fleet.get_hybrid_communicate_group().get_context_parallel_group(),
+                            )
+
+                        ploss = ploss / xishu
+                        mtp_loss.append(ploss)
+
+                        # loss_matrix_cur_depth = loss_matrix_cur_depth.cast(paddle.float32) * lossmask_cur_depth
+
+            print(f"[Ting LOG] mtp loss: {mtp_loss}")
 
             # Store detached MTP loss tensors into class-level tracker.
             # Use .detach() instead of .item() to avoid GPU synchronization on every
@@ -122,6 +213,7 @@ class LanguageLoss(FleetLayer):
                 )
 
             def add_loss(main_loss, loss):
+                print(f"[Ting LOG] main_loss: {main_loss}, add_loss: {loss}")
                 if self.config.add_mtp_loss:
                     return main_loss + loss - loss.detach()
                 else:
