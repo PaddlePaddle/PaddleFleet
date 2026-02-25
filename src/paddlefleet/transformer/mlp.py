@@ -92,6 +92,7 @@ class MLP(FleetLayer):
         is_expert: bool = False,
         input_size: int | None = None,
         intermediate_size: int | None = None,
+        hidden_size: int | None = None,
         tp_group=None,
     ):
         super().__init__(config=config)
@@ -122,6 +123,9 @@ class MLP(FleetLayer):
                 )
 
             intermediate_size = self.config.intermediate_size
+        self.hidden_size = (
+            hidden_size if hidden_size is not None else self.config.hidden_size
+        )
 
         # If this is a gated linear unit we double the output width
         # see https://arxiv.org/pdf/2002.05202.pdf
@@ -145,7 +149,7 @@ class MLP(FleetLayer):
         self.down_proj = build_layer(
             sublayers_spec.down_proj,
             self.config.intermediate_size,
-            self.config.hidden_size,
+            self.hidden_size,
             config=self.config,
             init_method=self.config.output_layer_init_method,
             bias=self.config.use_bias,

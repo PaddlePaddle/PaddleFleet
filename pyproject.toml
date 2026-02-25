@@ -96,6 +96,8 @@ ci = [
 default-groups = ["build", "test"]
 link-mode = "copy"
 index-strategy = "unsafe-best-match"
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/paddlefleet/_extensions/*.cu" }, { file = "third_party/" }]
+
 
 [tool.uv.sources]
 paddlepaddle-gpu = {index = "paddlepaddle-gpu"}
@@ -104,7 +106,7 @@ paddlepaddle-xpu = {index = "paddlepaddle-xpu"}
 
 [[tool.uv.index]]
 name = "paddlepaddle-gpu"
-url = "https://www.paddlepaddle.org.cn/packages/stable/cu129/"
+url = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/"
 
 [[tool.uv.index]]
 name = "paddlepaddle-xpu"
