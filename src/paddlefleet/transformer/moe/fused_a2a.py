@@ -14,31 +14,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-try:
-    from paddle.distributed.communication import deep_ep
-
-    HAVE_DEEP_EP = True
-except ImportError:
-    HAVE_DEEP_EP = False
-
-import importlib
 
 import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
 
+from paddlefleet.ops import is_deep_ep_available
+
 from .moe_utils import manual_backward
 
+if is_deep_ep_available():
+    from paddlefleet.ops import deep_ep
+
+    HAVE_DEEP_EP = True
+else:
+    HAVE_DEEP_EP = False
+
 _buffer = None
-
-
-def set_pfcc_deep_ep_backend():
-    global deep_ep, HAVE_DEEP_EP, _buffer
-    pfcc_deep_ep = importlib.import_module("paddlefleet.ops.deep_ep")
-    deep_ep = pfcc_deep_ep
-    _buffer = None
-    HAVE_DEEP_EP = deep_ep is not None
 
 
 def barrier_ep(ep_group):
