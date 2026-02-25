@@ -63,10 +63,10 @@ class KimiK25VisionProvider(TransformerConfig):
     rotary_percent: float = 1.0
     transform_rules = {
         "dtype": "params_dtype",
-        "hidden_size": "vt_hidden_size",
-        "intermediate_size": "vt_intermediate_size",
-        "num_attention_heads": "vt_num_attention_heads",
-        "num_hidden_layers": "vt_num_hidden_layers",
+        "vt_hidden_size": "hidden_size",
+        "vt_intermediate_size": "intermediate_size",
+        "vt_num_attention_heads": "num_attention_heads",
+        "vt_num_hidden_layers": "num_hidden_layers",
     }
 
     def provide(self) -> "KimiK25VisionModel":

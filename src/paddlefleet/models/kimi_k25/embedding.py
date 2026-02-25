@@ -190,6 +190,7 @@ class MoonVision3dPatchEmbed(FleetLayer):
             self.out_dim,
             kernel_size=self.patch_size,
             stride=self.patch_size,
+            dtype=config.params_dtype,
         )
 
         if config.pos_emb_type == "divided_fixed":
@@ -235,7 +236,7 @@ class MoonVision3dPatchEmbed(FleetLayer):
             "grid_thws": grid_thws,
             "hidden_states": hidden_states,
             "attention_mask": dict_args.get("attention_mask", None),
-            "startend_row_indices": dict_args.get(
+            "attn_mask_startend_row_indices": dict_args.get(
                 "attn_mask_startend_row_indices", None
             ),
             "rotary_pos_emb": rotary_pos_emb,

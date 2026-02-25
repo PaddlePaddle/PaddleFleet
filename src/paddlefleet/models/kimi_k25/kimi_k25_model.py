@@ -104,6 +104,7 @@ class KimiK25VisionTransformerLayer(TransformerLayer):
         # runners in the cuda graph manager
         dict_args.pop("dynamic_inference_decode_only", None)
         dict_args.pop("position_ids", None)
+
         if self.full_recompute:
             hidden_states = dict_args["hidden_states"]
             attention_mask = dict_args.get("attention_mask", None)
@@ -162,7 +163,9 @@ class KimiK25VisionTransformerLayer(TransformerLayer):
                 packed_seq_params=packed_seq_params,
             )
         else:
+            grid_thws = dict_args.pop("grid_thws", None)
             outputs = self._forward_impl(**dict_args)
+            dict_args["grid_thws"] = grid_thws
 
         if len(outputs) == 3:
             output, context = outputs[0], outputs[1]
