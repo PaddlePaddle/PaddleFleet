@@ -230,7 +230,7 @@ jobs:
       - name: Checkout code
         run: |
           pwd
-          export ../../../proxy
+          source ../../../proxy
           git clone https://github.com/PaddleFleet.git .
           git log -1
 
