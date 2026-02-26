@@ -180,6 +180,7 @@ class TestGPTModel(unittest.TestCase):
 
         repo_name = os.environ.get("repo_flag")
         if judge_machine_type() == "H":
+            pass  # TODO(Pan Zhaowu): Waiting for PR77876 pulled and refresh H machine test
             if version == 13:
                 assert loss.item() == 5.239149570465088, (
                     f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
