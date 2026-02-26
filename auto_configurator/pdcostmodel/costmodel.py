@@ -164,7 +164,9 @@ class PDCostModel:
                  hardware_config: HardwareConfig = None,
                  training_config: TrainingConfig = None,
                  auto_calibrate: bool = False,
-                 calibrate_on_predict: bool = False):
+                 calibrate_on_predict: bool = False,
+                 use_cached_profile: bool = True,
+                 node_count: int = 1):
         """
         初始化 CostModel
         
@@ -174,21 +176,83 @@ class PDCostModel:
             training_config: 训练配置 (默认 bf16, recompute=full)
             auto_calibrate: 是否在初始化时自动校准硬件
             calibrate_on_predict: 是否在每次预测前重新校准
+            use_cached_profile: 是否使用本地缓存的校准配置 (默认 True)
+            node_count: 节点数量 (默认 1)
         """
         self.model_config = model_config
         self.training_config = training_config or TrainingConfig()
         self._calibrated = False
         self._calibrate_on_predict = calibrate_on_predict
         self._calibration_result = None
+        self._node_count = node_count
         
-        # 硬件配置
-        if auto_calibrate:
+        # 硬件配置优先级:
+        # 1. 用户显式传入 hardware_config
+        # 2. use_cached_profile=True 时尝试加载本地缓存
+        # 3. auto_calibrate=True 时执行校准
+        # 4. 使用默认配置
+        if hardware_config is not None:
+            # 用户显式传入配置
+            self.hardware_config = hardware_config
+            self._calibrated = True
+        elif use_cached_profile:
+            # 尝试加载本地缓存的校准配置
+            self.hardware_config = self._load_or_calibrate(verbose=False)
+        elif auto_calibrate:
             self.hardware_config = self.calibrate(verbose=True)
         else:
-            self.hardware_config = hardware_config or HardwareConfig()
+            self.hardware_config = HardwareConfig()
         
         # 初始化子模型
         self._init_sub_models()
+    
+    def _load_or_calibrate(self, force_calibrate: bool = False, verbose: bool = True) -> HardwareConfig:
+        """
+        加载本地校准配置，如果不存在则执行校准
+        
+        Args:
+            force_calibrate: 是否强制重新校准
+            verbose: 是否打印信息
+        
+        Returns:
+            HardwareConfig: 硬件配置
+        """
+        from .profile_manager import ProfileManager, auto_calibrate_or_load
+        from .calibration import HardwareCalibrator
+        
+        manager = ProfileManager()
+        calibrator = HardwareCalibrator()
+        
+        # 检测当前硬件
+        gpu_name, memory_gb, gpu_count = calibrator.detect_gpu_info()
+        
+        if not force_calibrate and manager.has_profile(gpu_name, gpu_count, self._node_count):
+            # 加载已保存的配置
+            profile_data = manager.load_profile(gpu_name, gpu_count, self._node_count)
+            if profile_data:
+                self._calibrated = True
+                if verbose:
+                    print(f"✅ 已加载校准配置: {gpu_name} × {gpu_count}")
+                return manager.create_hardware_config(profile_data)
+        
+        # 需要执行校准
+        if verbose:
+            print(f"🔧 未找到校准配置，开始校准 {gpu_name} × {gpu_count}...")
+        
+        result = calibrator.calibrate(verbose=verbose)
+        self._calibration_result = result
+        
+        # 保存校准结果
+        filepath = manager.save_calibration(result, self._node_count)
+        if verbose:
+            print(f"💾 校准结果已保存: {filepath}")
+        
+        self._calibrated = True
+        
+        return calibrator.create_hardware_config(
+            num_nodes=self._node_count,
+            gpus_per_node=gpu_count // self._node_count if self._node_count > 0 else gpu_count
+        )
     
     def _init_sub_models(self):
         """初始化子模型"""
@@ -303,8 +367,8 @@ class PDCostModel:
             }
             recompute_gran = recompute_gran_map.get(recompute_granularity.lower(), RecomputeGranularity.FULL)
         
-        # tensorwise offload 配置
-        use_tensorwise = tensorwise_offload_optimizer if tensorwise_offload_optimizer is not None else False
+        # tensorwise offload 配置 (默认启用 offload 以节省显存)
+        use_tensorwise = tensorwise_offload_optimizer if tensorwise_offload_optimizer is not None else True
         offload_ratio = tensorwise_offload_ratio if tensorwise_offload_ratio is not None else 0.95
         
         result = PredictionResult()

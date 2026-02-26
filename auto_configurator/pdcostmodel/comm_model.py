@@ -90,7 +90,10 @@ class CommModel:
         
         # 传输时间
         data_gb = self._bytes_to_gb(comm_volume)
-        transfer_ms = data_gb / (bandwidth * efficiency) * 1000.0
+        effective_bw = bandwidth * efficiency
+        if effective_bw <= 0:
+            effective_bw = 0.1  # 防止除零
+        transfer_ms = data_gb / effective_bw * 1000.0
         
         total_time_ms = latency_ms + transfer_ms
         
@@ -123,7 +126,10 @@ class CommModel:
         latency_ms = num_steps * latency_us / 1000.0
         
         data_gb = self._bytes_to_gb(comm_volume)
-        transfer_ms = data_gb / (bandwidth * efficiency) * 1000.0
+        effective_bw = bandwidth * efficiency
+        if effective_bw <= 0:
+            effective_bw = 0.1  # 防止除零
+        transfer_ms = data_gb / effective_bw * 1000.0
         
         total_time_ms = latency_ms + transfer_ms
         
@@ -158,7 +164,10 @@ class CommModel:
         latency_ms = num_steps * latency_us / 1000.0
         
         data_gb = self._bytes_to_gb(comm_volume)
-        transfer_ms = data_gb / (bandwidth * efficiency) * 1000.0
+        effective_bw = bandwidth * efficiency
+        if effective_bw <= 0:
+            effective_bw = 0.1  # 防止除零
+        transfer_ms = data_gb / effective_bw * 1000.0
         
         total_time_ms = latency_ms + transfer_ms
         
@@ -199,7 +208,10 @@ class CommModel:
         
         # 传输时间 (全双工网络，所有发送并行)
         data_gb = self._bytes_to_gb(comm_volume)
-        transfer_ms = data_gb / (bandwidth * efficiency) * 1000.0
+        effective_bw = bandwidth * efficiency
+        if effective_bw <= 0:
+            effective_bw = 0.1  # 防止除零，使用最小带宽
+        transfer_ms = data_gb / effective_bw * 1000.0
         
         # 负载不均衡因子 (MoE routing 不均衡)
         imbalance_factor = 1.15
@@ -227,7 +239,10 @@ class CommModel:
         latency_ms = latency_us / 1000.0
         
         data_gb = self._bytes_to_gb(data_size_bytes)
-        transfer_ms = data_gb / (bandwidth * efficiency) * 1000.0
+        effective_bw = bandwidth * efficiency
+        if effective_bw <= 0:
+            effective_bw = 0.1  # 防止除零
+        transfer_ms = data_gb / effective_bw * 1000.0
         
         total_time_ms = latency_ms + transfer_ms
         

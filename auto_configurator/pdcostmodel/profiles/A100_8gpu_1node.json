@@ -1,0 +1,29 @@
+{
+  "gpu_name": "A100",
+  "gpu_memory_gb": 80.0,
+  "gpu_count": 8,
+  "fp32_tflops": 0.0,
+  "fp16_tflops": 0.0,
+  "bf16_tflops": 312.0,
+  "memory_bandwidth_gbps": 0.0,
+  "intra_node_bandwidth_gbps": 0.0,
+  "calibrated": true,
+  "bf16_curve": {
+    "dtype": "bfloat16",
+    "peak_tflops": 312.0,
+    "fit_a": 0.0,
+    "fit_b": 0.0,
+    "fit_max": 1.0,
+    "points": [
+      {
+        "size": 1024,
+        "tflops": 156.0,
+        "efficiency": 0.5,
+        "time_ms": 50.0
+      }
+    ]
+  },
+  "node_count": 1,
+  "calibrated_at": "2026-02-26T18:22:40.471159",
+  "pdcost_version": "1.0.0"
+}

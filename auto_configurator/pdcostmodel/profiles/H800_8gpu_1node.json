@@ -1,0 +1,152 @@
+{
+  "gpu_name": "NVIDIA H800",
+  "gpu_memory_gb": 79.65,
+  "gpu_count": 8,
+  "fp32_tflops": 43.44,
+  "fp16_tflops": 620.94,
+  "bf16_tflops": 657.66,
+  "memory_bandwidth_gbps": 2346.46,
+  "intra_node_bandwidth_gbps": 0.0,
+  "calibrated": true,
+  "bf16_curve": {
+    "dtype": "bfloat16",
+    "peak_tflops": 657.66,
+    "fit_a": 0.221357,
+    "fit_b": -1.120165,
+    "fit_max": 1.0,
+    "points": [
+      {
+        "size": 64,
+        "tflops": 0.03,
+        "efficiency": 0.0,
+        "time_ms": 0.017
+      },
+      {
+        "size": 128,
+        "tflops": 0.24,
+        "efficiency": 0.0004,
+        "time_ms": 0.018
+      },
+      {
+        "size": 256,
+        "tflops": 1.91,
+        "efficiency": 0.0029,
+        "time_ms": 0.018
+      },
+      {
+        "size": 512,
+        "tflops": 14.68,
+        "efficiency": 0.0223,
+        "time_ms": 0.018
+      },
+      {
+        "size": 1024,
+        "tflops": 93.97,
+        "efficiency": 0.1429,
+        "time_ms": 0.023
+      },
+      {
+        "size": 2048,
+        "tflops": 441.0,
+        "efficiency": 0.6706,
+        "time_ms": 0.039
+      },
+      {
+        "size": 4096,
+        "tflops": 656.56,
+        "efficiency": 0.9983,
+        "time_ms": 0.209
+      },
+      {
+        "size": 8192,
+        "tflops": 658.01,
+        "efficiency": 1.0005,
+        "time_ms": 1.671
+      },
+      {
+        "size": 12288,
+        "tflops": 620.8,
+        "efficiency": 0.944,
+        "time_ms": 5.978
+      },
+      {
+        "size": 16384,
+        "tflops": 598.35,
+        "efficiency": 0.9098,
+        "time_ms": 14.701
+      }
+    ]
+  },
+  "fp16_curve": {
+    "dtype": "float16",
+    "peak_tflops": 620.94,
+    "fit_a": 0.219809,
+    "fit_b": -1.11386,
+    "fit_max": 1.0,
+    "points": [
+      {
+        "size": 64,
+        "tflops": 0.03,
+        "efficiency": 0.0,
+        "time_ms": 0.019
+      },
+      {
+        "size": 128,
+        "tflops": 0.22,
+        "efficiency": 0.0003,
+        "time_ms": 0.019
+      },
+      {
+        "size": 256,
+        "tflops": 1.81,
+        "efficiency": 0.0029,
+        "time_ms": 0.019
+      },
+      {
+        "size": 512,
+        "tflops": 13.5,
+        "efficiency": 0.0217,
+        "time_ms": 0.02
+      },
+      {
+        "size": 1024,
+        "tflops": 99.95,
+        "efficiency": 0.161,
+        "time_ms": 0.021
+      },
+      {
+        "size": 2048,
+        "tflops": 385.06,
+        "efficiency": 0.6201,
+        "time_ms": 0.045
+      },
+      {
+        "size": 4096,
+        "tflops": 625.0,
+        "efficiency": 1.0065,
+        "time_ms": 0.22
+      },
+      {
+        "size": 8192,
+        "tflops": 602.15,
+        "efficiency": 0.9697,
+        "time_ms": 1.826
+      },
+      {
+        "size": 12288,
+        "tflops": 582.96,
+        "efficiency": 0.9388,
+        "time_ms": 6.366
+      },
+      {
+        "size": 16384,
+        "tflops": 572.7,
+        "efficiency": 0.9223,
+        "time_ms": 15.359
+      }
+    ]
+  },
+  "node_count": 1,
+  "calibrated_at": "2026-02-26T17:49:58.156914",
+  "pdcost_version": "1.0.0"
+}

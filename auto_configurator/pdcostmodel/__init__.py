@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pdcost - PaddleFormers 分布式训练代价模型
+pdcostmodel - PaddleFormers 分布式训练代价模型
 
 用于预测不同并行配置下的:
 - Step 时间 (训练迭代耗时)
@@ -16,7 +16,7 @@ pdcost - PaddleFormers 分布式训练代价模型
 - Context Parallel (CP)
 
 使用方式:
-    from pdcost import PDCostModel, ModelConfig, ParallelConfig
+    from pdcostmodel import PDCostModel, ModelConfig, ParallelConfig
     
     # 创建模型配置 (以 Qwen3-30B-A3B 为例)
     model_config = ModelConfig.from_name("qwen3-30b-a3b")
@@ -30,6 +30,17 @@ pdcost - PaddleFormers 分布式训练代价模型
     
     print(f"Step Time: {result.step_time_ms:.2f} ms")
     print(f"Memory: {result.memory_gb:.2f} GB")
+
+快速搜索最优配置:
+    from pdcostmodel import grid_search
+    
+    # 一行代码搜索最优配置
+    results = grid_search("qwen3-30b-a3b", total_gpus=8)
+    
+    # 获取最优配置
+    best = results.best
+    print(f"最优配置: {best.config_str}")
+    print(f"吞吐量: {best.tokens_per_second_per_gpu:.0f} tok/s/GPU")
 """
 
 from .config import (
@@ -54,6 +65,20 @@ from .calibration import (
     CalibrationResult,
     quick_calibrate,
     create_calibrated_hardware_config,
+)
+from .profile_manager import (
+    ProfileManager,
+    auto_calibrate_or_load,
+    precise_calibrate,
+    list_saved_profiles,
+    get_profile_path,
+    PROFILES_DIR,
+)
+from .gridsearch import (
+    GridSearcher,
+    GridSearchResult,
+    SearchResult,
+    grid_search,
 )
 
 __version__ = "0.1.0"
@@ -80,4 +105,16 @@ __all__ = [
     "CalibrationResult",
     "quick_calibrate",
     "create_calibrated_hardware_config",
+    # 校准配置管理
+    "ProfileManager",
+    "auto_calibrate_or_load",
+    "precise_calibrate",
+    "list_saved_profiles",
+    "get_profile_path",
+    "PROFILES_DIR",
+    # Grid Search
+    "GridSearcher",
+    "GridSearchResult",
+    "SearchResult",
+    "grid_search",
 ]

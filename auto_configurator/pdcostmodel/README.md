@@ -1,8 +1,8 @@
-# pdcost - PaddleFormers 分布式训练代价模型
+# PDCostModel - PaddleFormers 分布式训练代价模型
 
-`pdcost` 是一个用于预测 PaddleFormers 分布式训练性能的工具，可以在实际运行前估算不同并行配置下的：
+`pdcostmodel` 是一个用于预测 PaddleFormers 分布式训练性能的工具，可以在实际运行前估算不同并行配置下的：
 
-- **Step 时间** (训练迭代耗时，已校准 seq_len 阈值效应)
+- **Step 时间** (训练迭代耗时)
 - **显存占用** (支持双指标: allocated + reserved)
 - **硬件利用率** (MFU)
 - **训练吞吐量** (tokens/s/GPU)
@@ -10,9 +10,8 @@
 ## ✨ 特性亮点
 
 - 🎯 **高精度预测**: Step time 误差 ~5%，显存误差 ~10%
-- 📊 **双指标显存**: 同时预测 `allocated` (实际分配) 和 `reserved` (框架预留)
-- 🔧 **seq_len 校准**: 内置阈值效应模型，准确处理不同序列长度
-- 🔍 **配置搜索**: 自动搜索最优并行配置，支持 OOM 过滤
+- ?? **一键搜索**: `grid_search()` 一行代码找到最优并行配置
+- 📊 **自动报告**: 格式化输出搜索结果，支持 JSON/YAML 导出
 - ⚡ **MoE 专用**: 针对 Qwen3 MoE 等稀疏模型优化
 - 🔬 **硬件校准**: 通过实测 GEMM benchmark 校准 GPU 算力
 
@@ -21,39 +20,383 @@
 ## 📁 模块结构
 
 ```
-pdcost/
+pdcostmodel/
 ├── __init__.py          # 主入口，导出所有公共 API
+├── gridsearch.py        # 🔥 Grid Search 配置搜索模块
+│   ├── grid_search      # 快速搜索函数
+│   ├── GridSearcher     # 搜索器类
+│   ├── GridSearchResult # 搜索结果
+│   └── SearchResult     # 单个配置结果
 ├── config.py            # 配置类定义
-│   ├── ModelConfig      # 模型架构配置
-│   ├── ParallelConfig   # 并行策略配置
-│   ├── TrainingConfig   # 训练配置
-│   ├── HardwareConfig   # 硬件配置
-│   ├── GPUSpec          # GPU 规格
-│   └── NetworkSpec      # 网络规格
+├── costmodel.py         # 代价模型主类
 ├── memory_model.py      # 显存预测模型
-│   ├── MemoryModel      # 显存估算主类
-│   ├── MemoryBreakdown  # 显存分解结果
-│   ├── ShardingConfig   # Sharding 配置
-│   └── RecomputeConfig  # 重计算配置
 ├── compute_model.py     # 计算时间预测模型
-│   ├── ComputeModel     # 计算时间估算
-│   └── LayerProfile     # 层计算 Profile
 ├── comm_model.py        # 通信时间预测模型
-│   ├── CommModel        # 通信时间估算
-│   └── CommResult       # 通信预测结果
 ├── calibration.py       # 硬件校准模块
-│   ├── HardwareCalibrator   # 硬件校准器
-│   ├── CalibrationResult    # 校准结果
-│   ├── PerformanceCurve     # 性能曲线
-│   ├── quick_calibrate      # 快速校准函数
-│   └── create_calibrated_hardware_config  # 创建校准后配置
-├── costmodel.py         # 主 CostModel 类
-│   ├── PDCostModel      # 代价模型主类
-│   └── PredictionResult # 预测结果
-├── search_configs.py    # 配置搜索脚本
-└── examples/            # 使用示例
-    ├── basic_usage.py
-    └── paddleformers_optimization.py
+├── profile_manager.py   # 校准配置管理
+└── test/                # 单元测试
+```
+
+---
+
+## 🚀 快速开始
+
+### 🔥 一行代码搜索最优配置 (推荐)
+
+```python
+from pdcostmodel import grid_search
+
+# 一行代码搜索最优并行配置
+results = grid_search("qwen3-30b-a3b", total_gpus=8)
+
+# 获取最优配置
+best = results.best
+print(f"最优配置: {best.config_str}")
+print(f"吞吐量: {best.tokens_per_second_per_gpu:.0f} tok/s/GPU")
+print(f"显存: {best.memory_gb:.2f} GB")
+```
+
+输出示例:
+```
+🔍 检测到硬件: NVIDIA H800 × 8 (79.6 GB)
+✅ 找到已保存的校准配置，正在加载...
+🔍 搜索配置空间...
+   生成了 38 个候选配置
+   评估完成: 38 个配置, 18 个满足显存约束
+
+==============================================================================================================
+🚀 PDCost 配置搜索报告 - qwen3-30b-a3b
+==============================================================================================================
+排名   配置                                  step时延(ms)     显存(GB)     约束     MFU      tok/s/GPU   
+--------------------------------------------------------------------------------------------------------------
+1    TP1-PP1-DP8-EP8-Sharding(stage1)    26447.15       64.02      ✅      17.8%    4,956       
+2    TP1-PP1-DP8-EP8-Sharding(stage2)    26447.15       65.88      ✅      17.8%    4,956       
+3    TP1-PP2-DP4-EP4-Sharding(stage1)    21664.45       61.59      ✅      10.9%    3,025       
+...
+```
+
+---
+
+## 🔍 Grid Search API 完整指南
+
+### 1. `grid_search()` - 便捷搜索函数
+
+最简单的使用方式，适合快速探索。
+
+```python
+from pdcostmodel import grid_search
+
+results = grid_search(
+    model="qwen3-30b-a3b",           # 模型名称或 ModelConfig 对象
+    total_gpus=8,                     # 总 GPU 数
+    micro_batch_size=1,               # 每设备批次大小
+    seq_len=8192,                     # 序列长度
+    gradient_accumulation_steps=16,   # 梯度累积步数
+    tp_candidates=[1, 2, 4, 8],       # TP 候选值 (可选)
+    pp_candidates=[1, 2, 4],          # PP 候选值 (可选)
+    ep_candidates=[1, 2, 4, 8],       # EP 候选值 (可选)
+    sharding_candidates=["stage1", "stage2"],  # Sharding 候选值 (可选)
+    sort_by="throughput",             # 排序方式: "throughput" 或 "step_time"
+    top_k=10,                         # 显示前 k 个配置
+    print_report=True,                # 是否打印报告
+    verbose=True,                     # 是否打印详细信息
+)
+```
+
+#### 参数说明
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `model` | str / ModelConfig | 必填 | 模型名称 (如 "qwen3-30b-a3b") 或自定义 ModelConfig |
+| `total_gpus` | int | 8 | 总 GPU 数量 |
+| `micro_batch_size` | int | 1 | 每设备批次大小 |
+| `seq_len` | int | 8192 | 序列长度 |
+| `gradient_accumulation_steps` | int | 16 | 梯度累积步数 |
+| `tp_candidates` | List[int] | [1,2,4,8] | Tensor Parallel 候选值 |
+| `pp_candidates` | List[int] | [1,2,4] | Pipeline Parallel 候选值 |
+| `ep_candidates` | List[int] | 自动 | Expert Parallel 候选值 (MoE 模型自动设置) |
+| `sharding_candidates` | List[str] | ["stage1","stage2"] | ZeRO Sharding 候选值 |
+| `sort_by` | str | "throughput" | 排序方式: "throughput" 或 "step_time" |
+| `top_k` | int | 10 | 显示前 k 个配置 |
+| `print_report` | bool | True | 是否打印格式化报告 |
+| `verbose` | bool | True | 是否打印详细信息 |
+
+#### 返回值: `GridSearchResult`
+
+```python
+results.model_name          # 模型名称
+results.total_gpus          # 总 GPU 数
+results.total_configs       # 总配置数
+results.valid_configs       # 有效配置数 (满足显存约束)
+results.results             # List[SearchResult] - 排序后的配置列表
+results.best                # SearchResult - 最优配置
+results.search_space        # 搜索空间配置
+results.training_params     # 训练参数
+results.hardware_info       # 硬件信息
+```
+
+---
+
+### 2. `GridSearcher` - 搜索器类
+
+适合需要更细粒度控制的场景，如多次搜索、生成 YAML 配置。
+
+```python
+from pdcostmodel import GridSearcher
+
+# 创建搜索器
+searcher = GridSearcher(
+    model_name="qwen3-30b-a3b",       # 模型名称
+    model_config=None,                 # 或提供自定义 ModelConfig
+    hardware_config=None,              # 硬件配置 (默认自动校准)
+    total_gpus=8,                      # 总 GPU 数
+    node_count=1,                      # 节点数
+    tp_candidates=[1, 2, 4, 8],        # TP 候选值
+    pp_candidates=[1, 2, 4],           # PP 候选值
+    ep_candidates=[1, 2, 4, 8],        # EP 候选值
+    sharding_candidates=["stage1", "stage2"],
+    auto_calibrate=True,               # 是否自动校准硬件
+    require_precise=True,              # 是否要求精确校准
+    verbose=True,
+)
+
+# 执行搜索
+results = searcher.search(
+    micro_batch_size=1,
+    seq_len=8192,
+    gradient_accumulation_steps=16,
+    recompute_granularity="full",
+    sort_by="throughput",
+    top_k=10,
+    print_report=True,
+)
+```
+
+#### GridSearcher 方法
+
+| 方法 | 说明 |
+|------|------|
+| `search(...)` | 执行配置搜索，返回 `GridSearchResult` |
+| `generate_search_space()` | 生成合法的配置搜索空间，返回 `List[Dict]` |
+| `generate_yaml_config(result, output_path)` | 生成训练配置 YAML 文件 |
+
+---
+
+### 3. `SearchResult` - 单个配置结果
+
+每个配置的预测结果。
+
+```python
+result = results.best  # 或 results.results[0]
+
+# 配置信息
+result.rank                          # 排名
+result.config                        # 配置字典 {"tp":1, "pp":1, "dp":8, "ep":8, "sharding":"stage1"}
+result.config_str                    # 配置字符串 "TP1-PP1-DP8-EP8-Sharding(stage1)"
+
+# 性能预测
+result.step_time_ms                  # Step 时延 (ms)
+result.memory_gb                     # 显存占用 (GB)
+result.fits_memory                   # 是否满足显存约束
+result.mfu                           # Model FLOPs Utilization
+result.tokens_per_second             # 总吞吐量 (tok/s)
+result.tokens_per_second_per_gpu     # 每卡吞吐量 (tok/s/GPU)
+
+# 训练参数
+result.micro_batch_size              # 每设备批次大小
+result.seq_len                       # 序列长度
+result.gradient_accumulation_steps   # 梯度累积步数
+result.global_batch_size             # 全局批次大小
+```
+
+---
+
+### 4. `GridSearchResult` - 完整搜索结果
+
+```python
+# 保存到 JSON
+results.save_json("search_results.json")
+
+# 转为字典
+result_dict = results.to_dict()
+
+# 打印报告
+results.print_report(top_k=10)
+```
+
+#### 导出 JSON 格式
+
+```json
+{
+  "model_name": "qwen3-30b-a3b",
+  "total_gpus": 8,
+  "total_configs": 38,
+  "valid_configs": 18,
+  "best": {
+    "rank": 1,
+    "config": {"tp": 1, "pp": 1, "dp": 8, "ep": 8, "sharding": "stage1"},
+    "config_str": "TP1-PP1-DP8-EP8-Sharding(stage1)",
+    "step_time_ms": 26447.15,
+    "memory_gb": 64.02,
+    "fits_memory": true,
+    "mfu": 0.178,
+    "tokens_per_second_per_gpu": 4956
+  },
+  "results": [...],
+  "search_space": {...},
+  "training_params": {...},
+  "hardware_info": {...}
+}
+```
+
+---
+
+### 5. 生成训练配置 YAML
+
+```python
+from pdcostmodel import GridSearcher
+
+searcher = GridSearcher(model_name="qwen3-30b-a3b", total_gpus=8)
+
+# 方式 1: 自动搜索并生成最优配置
+yaml_content = searcher.generate_yaml_config(output_path="best_config.yaml")
+
+# 方式 2: 为指定配置生成 YAML
+results = searcher.search()
+yaml_content = searcher.generate_yaml_config(
+    result=results.results[1],  # 使用第 2 名配置
+    output_path="second_best.yaml"
+)
+```
+
+#### 生成的 YAML 示例
+
+```yaml
+## qwen3-30b-a3b 自动生成配置 ##
+## PDCost 预测吞吐量: 4956 tok/s/GPU ##
+
+# 数据配置
+train_dataset_type: erniekit
+eval_dataset_type: erniekit
+max_seq_len: 8192
+
+# 模型配置
+model_name_or_path: qwen3-30b-a3b
+_attn_implementation: flashmask
+
+# 训练配置
+do_train: true
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+# global_batch_size: 128
+
+# 并行配置
+tensor_model_parallel_size: 1
+sequence_parallel: false
+pipeline_model_parallel_size: 1
+use_expert_parallel: true
+expert_model_parallel_size: 8
+
+# 重计算配置
+recompute_granularity: full
+recompute_method: uniform
+recompute_num_layers: 1
+
+# Sharding 配置
+sharding: stage1
+split_param: true
+
+# 优化器配置
+optim: adamw
+bf16: true
+tensorwise_offload_optimizer: true
+```
+
+---
+
+## 📋 完整使用示例
+
+### 示例 1: 快速搜索
+
+```python
+from pdcostmodel import grid_search
+
+# 搜索 Qwen3-30B-A3B 的最优 8 卡配置
+results = grid_search("qwen3-30b-a3b", total_gpus=8)
+
+# 输出最优配置
+print(f"最优配置: {results.best.config_str}")
+print(f"吞吐量: {results.best.tokens_per_second_per_gpu:.0f} tok/s/GPU")
+```
+
+### 示例 2: 自定义搜索空间
+
+```python
+from pdcostmodel import grid_search
+
+# 限制搜索空间
+results = grid_search(
+    "qwen3-30b-a3b",
+    total_gpus=32,
+    seq_len=4096,
+    micro_batch_size=2,
+    tp_candidates=[2, 4, 8],  # 只考虑 TP >= 2
+    pp_candidates=[1, 2, 4, 8],
+    top_k=5,
+)
+```
+
+### 示例 3: 使用自定义模型配置
+
+```python
+from pdcostmodel import grid_search, ModelConfig
+
+# 创建自定义 Dense 模型配置 (类似 LLaMA 8B)
+custom_model = ModelConfig(
+    num_hidden_layers=32,
+    hidden_size=4096,
+    intermediate_size=14336,
+    num_attention_heads=32,
+    num_key_value_heads=8,
+    num_experts=1,  # Dense 模型
+    vocab_size=128256,
+)
+
+# 搜索
+results = grid_search(custom_model, total_gpus=8, seq_len=4096)
+```
+
+### 示例 4: 比较不同序列长度
+
+```python
+from pdcostmodel import GridSearcher
+
+searcher = GridSearcher(model_name="qwen3-30b-a3b", total_gpus=8, verbose=False)
+
+print(f"{'序列长度':<12} {'最优配置':<35} {'吞吐量':<15} {'显存':<10}")
+print("-" * 75)
+
+for seq_len in [2048, 4096, 8192]:
+    results = searcher.search(seq_len=seq_len, print_report=False)
+    if results.best:
+        print(f"{seq_len:<12} {results.best.config_str:<35} "
+              f"{results.best.tokens_per_second_per_gpu:<15,.0f} "
+              f"{results.best.memory_gb:<10.2f}")
+```
+
+### 示例 5: 导出完整结果
+
+```python
+from pdcostmodel import GridSearcher
+
+searcher = GridSearcher(model_name="qwen3-30b-a3b", total_gpus=8)
+results = searcher.search()
+
+# 保存搜索结果
+results.save_json("search_results.json")
+
+# 生成最优配置 YAML
+searcher.generate_yaml_config(output_path="best_config.yaml")
 ```
 
 ---
@@ -64,433 +407,30 @@ pdcost/
 |---------|------|------|
 | Tensor Parallel (TP) | `tp` | 张量并行，切分 Attention 和 MLP 权重 |
 | Pipeline Parallel (PP) | `pp` | 流水线并行，切分 Transformer 层 |
-| Data Parallel (DP) | `dp` | 数据并行，复制模型 |
+| Data Parallel (DP) | `dp` | 数据并行，复制模型 (自动计算) |
 | Expert Parallel (EP) | `ep` | 专家并行，切分 MoE 专家 |
-| Sharding (ZeRO) | `sharding` | 优化器状态/梯度/参数分片 (stage1/2/3) |
-| Sequence Parallel (SP) | `sp` | 序列并行，配合 TP 使用 |
-| Context Parallel (CP) | `cp` | 上下文并行，切分序列长度 |
-
----
-
-## 🚀 快速开始
-
-### 最简用法
-
-```python
-from pdcost import ModelConfig, PDCostModel, ParallelConfig
-from pdcost.config import HardwareConfig, GPUSpec
-
-# 1. 加载模型配置
-model = ModelConfig.from_json('Qwen3-30B-A3B-Base/config.json')
-
-# 2. 定义硬件配置
-hardware = HardwareConfig(
-    gpu=GPUSpec(name='H800', memory_gb=79.6, bf16_tflops=788.0),
-    num_nodes=1, gpus_per_node=8
-)
-
-# 3. 创建代价模型 (TrainingConfig 可选，有默认值)
-costmodel = PDCostModel(model, hardware)
-
-# 4. 预测 (训练参数直接传入 predict_calibrated)
-parallel = ParallelConfig(tp=1, pp=1, dp=8, ep=8, sharding='stage1')
-result = costmodel.predict_calibrated(
-    parallel,
-    seq_len=8192,                        # 序列长度
-    micro_batch_size=1,                  # 每卡 batch size
-    gradient_accumulation_steps=16,      # 梯度累积
-    recompute_granularity='full',        # 重计算策略
-    tensorwise_offload_optimizer=True    # 优化器 offload
-)
-
-# 5. 读取结果
-print(f"吞吐量: {result.tokens_per_second_per_gpu:.0f} tok/s/GPU")
-print(f"Step 时间: {result.step_time_ms/1000:.2f} s")
-print(f"Allocated: {result.memory_breakdown.allocated_memory_gb:.2f} GB")
-print(f"Reserved: {result.memory_breakdown.reserved_memory_gb:.2f} GB")
-print(f"可运行: {'✅' if result.fits_memory else '❌ OOM'}")
-```
-
-### 使用预设模型
-
-```python
-from pdcost import PDCostModel, ModelConfig, ParallelConfig
-from pdcost.config import HardwareConfig, GPUSpec
-
-# 使用预设模型 (支持 qwen3-30b-a3b, llama3-70b, deepseek-v3 等)
-model = ModelConfig.from_name("qwen3-30b-a3b")
-hardware = HardwareConfig(
-    gpu=GPUSpec(name='H800', memory_gb=79.6, bf16_tflops=788.0),
-    num_nodes=1, gpus_per_node=8
-)
-costmodel = PDCostModel(model, hardware)
-
-parallel = ParallelConfig(tp=1, pp=1, dp=8, ep=8, sharding="stage1")
-result = costmodel.predict_calibrated(
-    parallel, seq_len=8192, micro_batch_size=1,
-    gradient_accumulation_steps=16,
-    recompute_granularity='full',
-    tensorwise_offload_optimizer=True
-)
-print(f"吞吐量: {result.tokens_per_second_per_gpu:.0f} tok/s/GPU")
-```
-
-> 💡 **提示**: 
-> - `TrainingConfig` 是可选的，训练参数可直接传给 `predict_calibrated()`
-> - 推荐使用 `predict_calibrated()` 而非 `predict()`，前者包含 seq_len 阈值效应校准
-> - MoE 模型建议使用 `recompute_granularity='full'`
-
----
-
-## 🔧 硬件校准
-
-pdcost 支持通过 GEMM benchmark 测试实际 GPU 算力和显存带宽，自动校准硬件参数，提高预测精度。
-
-### 快速校准
-
-一步完成校准并创建可直接使用的 `HardwareConfig`：
-
-```python
-from pdcost.calibration import create_calibrated_hardware_config
-
-# 运行 benchmark + 创建 HardwareConfig
-hardware = create_calibrated_hardware_config(
-    num_nodes=1,
-    gpus_per_node=8,
-    device_id=0,
-    verbose=True
-)
-
-```
-
-### 详细校准（含性能曲线）
-
-如果需要更精细的控制或获取多尺寸性能曲线：
-
-```python
-from pdcost.calibration import HardwareCalibrator
-
-calibrator = HardwareCalibrator(
-    device_id=0,       # 测试 GPU ID
-    warmup_iters=5,    # 预热次数
-    test_iters=20      # 测试次数
-)
-
-# 完整校准（含多尺寸性能曲线）
-result = calibrator.calibrate(
-    test_compute=True,      # 测试算力
-    test_memory=True,       # 测试显存带宽
-    gemm_size=8192,         # GEMM 峰值测试矩阵大小
-    multi_size_test=True,   # 多尺寸测试生成性能曲线
-    test_sizes=[64, 128, 256, 512, 1024, 2048, 4096, 8192],
-    verbose=True
-)
-
-# 创建校准后的 HardwareConfig
-hardware = calibrator.create_hardware_config(num_nodes=1, gpus_per_node=8)
-```
-
-### 仅查看校准数据
-
-如果只想查看校准结果而不创建配置：
-
-```python
-from pdcost.calibration import quick_calibrate
-
-result = quick_calibrate(device_id=0, verbose=True)
-print(result)
-# CalibrationResult:
-#   GPU: NVIDIA H800 × 8
-#   Memory: 79.6 GB
-#   FP32: 51.6 TFLOPS
-#   FP16: 763.0 TFLOPS
-#   BF16: 788.0 TFLOPS
-#   Memory BW: 2781.8 GB/s
-```
-
-### 校准内容
-
-| 测试项 | 说明 |
-|--------|------|
-| GPU 检测 | 自动检测 GPU 名称、显存、数量 |
-| 算力测试 | FP32/FP16/BF16 大矩阵 GEMM |
-| 带宽测试 | 显存读写带宽 |
-| 性能曲线 | 多尺寸 GEMM 拟合效率曲线（详细校准） |
-| 网络估算 | 根据 GPU 型号估算 NVLink/IB 带宽 |
-
----
-
-## 📋 配置类详解
-
-### ModelConfig - 模型架构配置
-
-```python
-ModelConfig(
-    num_hidden_layers=48,       # Transformer 层数
-    hidden_size=2048,           # 隐藏维度
-    intermediate_size=6144,     # FFN 中间维度
-    num_attention_heads=32,     # 注意力头数
-    num_key_value_heads=4,      # KV 头数 (GQA)
-    head_dim=64,                # 每个头的维度
-    num_experts=128,            # MoE 专家数
-    num_experts_per_tok=8,      # Top-K
-    moe_intermediate_size=768,  # 专家 FFN 维度
-    vocab_size=151936,          # 词表大小
-)
-
-# 从 config.json 加载
-model = ModelConfig.from_json('Qwen3-30B-A3B-Base/config.json')
-
-# 使用预设模型
-model = ModelConfig.from_name("qwen3-30b-a3b")
-```
-
-### ParallelConfig - 并行配置
-
-```python
-ParallelConfig(
-    tp=1,                # 张量并行度
-    pp=1,                # 流水线并行度
-    dp=8,                # 数据并行度
-    ep=8,                # 专家并行度
-    sharding="stage1",   # ZeRO 阶段: none/stage1/stage2/stage3
-    sp=False,            # 序列并行
-    cp=1,                # 上下文并行度
-)
-```
-
-### TrainingConfig - 训练配置
-
-```python
-TrainingConfig(
-    micro_batch_size=1,              # 每卡 batch size
-    sequence_length=8192,            # 序列长度
-    gradient_accumulation_steps=64,  # 梯度累积
-    dtype="bfloat16",                # 数据类型: float32/float16/bfloat16
-    recompute_granularity="full",    # 重计算: none/selective/full
-    amp_master_grad=True,            # 混合精度 master grad
-)
-```
-
-### HardwareConfig - 硬件配置
-
-```python
-HardwareConfig(
-    gpu=GPUSpec(
-        name="H800",
-        memory_gb=79.6,
-        bf16_tflops=788.0,
-        fp16_tflops=788.0,
-        fp32_tflops=51.0,
-        memory_bandwidth_gbps=2800.0
-    ),
-    network=NetworkSpec(
-        intra_node_bandwidth_gbps=900.0,  # NVLink
-        inter_node_bandwidth_gbps=200.0,  # IB
-    ),
-    num_nodes=1,
-    gpus_per_node=8,
-)
-
-# 使用预设 GPU
-from pdcost.config import GPUSpec
-gpu = GPUSpec.from_name("H100-80GB-HBM3")  # 支持 H100, A100, A800, V100 等
-```
-
----
-
-## 📈 预测函数参数
-
-### predict_calibrated() - 校准预测（推荐）
-
-```python
-result = costmodel.predict_calibrated(
-    parallel,                           # ParallelConfig: 并行配置
-    seq_len=8192,                       # 序列长度
-    micro_batch_size=1,                 # 每卡 batch size
-    gradient_accumulation_steps=64,     # 梯度累积步数
-    recompute_granularity="full",       # 重计算粒度: "none", "selective", "full"
-    tensorwise_offload_optimizer=True,  # 是否启用 tensorwise 优化器 offload
-    tensorwise_offload_ratio=0.95,      # offload 比例 (默认 95%)
-)
-```
-
-### 关键参数说明
-
-| 参数 | 说明 | 影响 |
-|------|------|------|
-| `seq_len` | 序列长度 | 影响激活显存和计算时间 |
-| `micro_batch_size` | 每卡 batch size | 影响显存和吞吐量 |
-| `gradient_accumulation_steps` | 梯度累积 | 影响全局 batch 和 step 时间 |
-| `recompute_granularity` | 重计算策略 | `none` 不重计算；`full` 全部重计算，激活显存最低 |
-| `tensorwise_offload_optimizer` | Tensorwise 优化器 offload | 优化器状态动态 offload 到 CPU（需要 dp > 1） |
-
-### 重计算策略对 MoE 模型的影响
-
-| granularity | 激活显存因子 | 说明 |
-|-------------|-------------|------|
-| `none` | 1.0 | 不重计算，显存最高 |
-| `selective` | 1.0 (MoE) / 0.6 (Dense) | **对 MoE 几乎无效**，只重计算 attention |
-| `full` | 0.15 | 全部重计算，显存最低 |
-
-
----
-
-## 📊 预测结果 (PredictionResult)
-
-```python
-result = costmodel.predict_calibrated(parallel, ...)
-
-# 时延指标
-result.step_time_ms          # 总 step 时间 (ms)
-result.compute_time_ms       # 计算时间 (ms)
-result.total_comm_time_ms    # 通信时间 (ms)
-result.bubble_time_ms        # 流水线气泡 (ms)
-
-# 显存指标
-result.memory_gb             # 总显存 (GB)
-result.memory_breakdown      # 详细显存分解
-result.fits_memory           # 是否满足显存约束
-
-# 效率指标
-result.mfu                   # Model FLOPs Utilization
-result.compute_efficiency    # 计算效率
-
-# 吞吐量
-result.tokens_per_second     # 总吞吐量 (tok/s)
-result.tokens_per_second_per_gpu  # 每卡吞吐量 (tok/s/GPU)
-```
-
----
-
-## 💾 显存分解 (MemoryBreakdown)
-
-```python
-breakdown = result.memory_breakdown
-
-# 主要组成
-breakdown.parameter_memory_gb       # 参数显存
-breakdown.gradient_memory_gb        # 梯度显存
-breakdown.optimizer_memory_gb       # 优化器状态显存
-breakdown.activation_memory_gb      # 激活值显存
-breakdown.communication_buffer_gb   # 通信缓冲区
-breakdown.temporary_buffer_gb       # 临时缓冲区 (含 logits FP32 转换)
-breakdown.framework_overhead_gb     # 框架基础开销
-
-# 双指标显存 (PaddleFormers 特有)
-breakdown.allocated_memory_gb       # 实际分配显存
-breakdown.reserved_memory_gb        # 预留显存 (含激活缓冲池)
-breakdown.activation_buffer_pool_gb # 框架激活缓冲池
-```
-
-### 双指标显存说明
-
-PaddleFormers 框架有两个显存指标：
-- **allocated**: 实际分配的显存，包括参数、梯度、优化器、激活等
-- **reserved**: 框架预留的显存池，包括 allocated + 激活缓冲池
-
-```python
-# 示例
-result = costmodel.predict_calibrated(parallel, seq_len=4096, ...)
-mb = result.memory_breakdown
-
-print(f"Allocated: {mb.allocated_memory_gb:.2f} GB")  # ~52.91 GB
-print(f"Reserved: {mb.reserved_memory_gb:.2f} GB")   # ~58.71 GB
-```
-
----
-
-## 🔍 配置搜索
-
-### 使用 search_configs.py 搜索最优配置
-
-```python
-from pdcost.search_configs import search_all_configs
-
-# 搜索所有可运行配置
-search_all_configs(
-    model_config_path='Qwen3-30B-A3B-Base/config.json',
-    total_gpus=8,
-    gpu_memory_gb=79.6,
-    output_file='all_runnable_configs.json'
-)
-```
-
-### 手动搜索示例
-
-```python
-from pdcost import ModelConfig, PDCostModel, ParallelConfig
-from pdcost.config import TrainingConfig, HardwareConfig, GPUSpec
-
-model = ModelConfig.from_json('Qwen3-30B-A3B-Base/config.json')
-hardware = HardwareConfig(
-    gpu=GPUSpec(name='H800', memory_gb=79.6, bf16_tflops=788.0),
-    num_nodes=1, gpus_per_node=8
-)
-training = TrainingConfig(micro_batch_size=1, sequence_length=8192, dtype='bfloat16')
-costmodel = PDCostModel(model, hardware, training)
-
-# 搜索空间
-configs = []
-for tp in [1, 2, 4, 8]:
-    for pp in [1, 2, 4, 8]:
-        if 8 % (tp * pp) != 0:
-            continue
-        dp = 8 // (tp * pp)
-        for ep in [1, 2, 4, 8]:
-            for seq_len in [4096, 8192]:
-                parallel = ParallelConfig(tp=tp, pp=pp, dp=dp, ep=ep, sharding='stage1')
-                result = costmodel.predict_calibrated(
-                    parallel, seq_len=seq_len, micro_batch_size=1,
-                    gradient_accumulation_steps=64,
-                    recompute_granularity='full',
-                    tensorwise_offload_optimizer=True
-                )
-                if result.fits_memory:
-                    configs.append({
-                        'tp': tp, 'pp': pp, 'dp': dp, 'ep': ep,
-                        'seq': seq_len,
-                        'tok_s': result.tokens_per_second_per_gpu,
-                        'mem': result.memory_breakdown.reserved_memory_gb
-                    })
-
-# 按吞吐量排序
-configs.sort(key=lambda x: x['tok_s'], reverse=True)
-for c in configs[:5]:
-    print(f"tp={c['tp']}, pp={c['pp']}, dp={c['dp']}, ep={c['ep']}, "
-          f"seq={c['seq']}: {c['tok_s']:.0f} tok/s/GPU, {c['mem']:.1f} GB")
-```
+| Sharding (ZeRO) | `sharding` | 优化器状态/梯度分片 (stage1/stage2) |
 
 ### 搜索空间约束
 
-配置搜索会自动过滤无效配置：
-- `tp * pp * dp == total_gpus` (GPU 数量约束)
-- `ep <= num_experts` 且 `ep` 整除专家数
-- 显存不超过 GPU 容量 (OOM 过滤)
-- `tensorwise_offload` 需要 `dp > 1` (Sharding 约束)
+Grid Search 自动应用以下约束过滤无效配置：
 
----
-
-## 📖 YAML 配置参数映射
-
-从 PaddleFormers YAML 配置到 pdcost 参数的映射：
-
-| YAML 参数 | pdcost 参数 | 说明 |
-|-----------|-------------|------|
-| `per_device_train_batch_size` | `micro_batch_size` | 每卡 batch size |
-| `max_seq_len` | `seq_len` | 序列长度 |
-| `gradient_accumulation_steps` | `gradient_accumulation_steps` | 梯度累积 |
-| `tensor_model_parallel_size` | `tp` | 张量并行度 |
-| `pipeline_model_parallel_size` | `pp` | 流水线并行度 |
-| `expert_model_parallel_size` | `ep` | 专家并行度 |
-| `sharding: stage1/stage2` | `sharding='stage1'/'stage2'` | Sharding 阶段 |
-| `recompute_granularity` | `recompute_granularity` | 重计算粒度 |
-| `tensorwise_offload_optimizer` | `tensorwise_offload_optimizer` | 优化器 offload |
-| `bf16: true` | `dtype='bfloat16'` | 数据类型 |
+- `TP × PP × DP = total_gpus` — GPU 数量必须完全分配
+- `PP 整除层数` — 流水线并行要求每个 stage 层数相同
+- `EP ≤ DP` — 专家并行是数据并行的子分组
+- `EP ≤ 专家数` — EP 不能超过模型的专家数量
+- `显存 ≤ GPU 容量` — OOM 配置自动过滤
 
 ---
 
 ## 📊 支持的预设模型
+
+```python
+from pdcostmodel import ModelConfig
+
+# 使用预设模型
+model = ModelConfig.from_name("qwen3-30b-a3b")
+```
 
 | 模型名称 | 类型 | 参数量 | 说明 |
 |---------|------|--------|------|
@@ -502,98 +442,114 @@ for c in configs[:5]:
 
 ---
 
+## 🔧 硬件校准
+
+Grid Search 默认自动执行硬件校准。也可以手动控制：
+
+```python
+from pdcostmodel import GridSearcher
+
+# 禁用自动校准
+searcher = GridSearcher(
+    model_name="qwen3-30b-a3b",
+    total_gpus=8,
+    auto_calibrate=False,  # 使用默认硬件参数
+)
+
+# 或手动校准
+from pdcostmodel import auto_calibrate_or_load
+
+hardware_config, is_from_cache = auto_calibrate_or_load(
+    node_count=1,
+    force_calibrate=False,   # 强制重新校准
+    precise=True,            # 精确校准模式
+    require_precise=True,    # 要求精确校准
+    verbose=True,
+)
+
+searcher = GridSearcher(
+    model_name="qwen3-30b-a3b",
+    total_gpus=8,
+    hardware_config=hardware_config,
+    auto_calibrate=False,
+)
+```
+
+---
+
 ## 🎯 预测精度参考
 
-在 Qwen3-30B-A3B + H800 8卡环境下的预测精度：
+在 Qwen3-30B-A3B + H800 8卡环境下：
 
 | 指标 | 预测误差 |
 |------|----------|
 | Step Time | ~5% |
 | 吞吐量 (tok/s/GPU) | ~5% |
-| Allocated 显存 | ~10% |
-| Reserved 显存 | ~8% |
+| 显存 (allocated) | ~10% |
 
 ---
 
 ## 💡 使用建议
 
 1. **MoE 模型**: 
-   - 优先使用 EP 并行，通常 `ep = min(num_experts, total_gpus)`
-   - **必须使用 `full` 重计算**，`selective` 对 MoE 几乎无效
+   - 优先使用 EP 并行
+   - **必须使用 `full` 重计算** (默认已启用)
 
 2. **显存不足**: 
-   - 增加 Sharding 阶段 (`stage1` → `stage2` → `stage3`)
-   - 开启 `tensorwise_offload_optimizer=True`（需要 dp > 1）
-   - 使用 `full` 重计算
+   - 增加 Sharding 阶段 (`stage1` → `stage2`)
+   - 默认已启用 `tensorwise_offload_optimizer`
 
-3. **大序列长度**: 
-   - 考虑使用 Context Parallel (CP) 或 Sequence Parallel (SP)
-   - 注意 `seq_len > 4096` 会显著增加激活缓冲池
+3. **大规模搜索**: 
+   - 先用小范围候选值探索趋势
+   - 再针对有希望的区域细化搜索
 
 4. **多节点训练**: 
    - PP 适合跨节点
    - TP 建议节点内使用
 
-5. **硬件校准**:
-   - 建议首次使用时执行 `quick_calibrate()` 获取准确的硬件参数
+---
+
+## 📖 API 快速参考
+
+```python
+from pdcostmodel import (
+    # Grid Search (推荐)
+    grid_search,           # 快速搜索函数
+    GridSearcher,          # 搜索器类
+    GridSearchResult,      # 搜索结果
+    SearchResult,          # 单个配置结果
+    
+    # 配置类
+    ModelConfig,           # 模型架构配置
+    ParallelConfig,        # 并行配置
+    HardwareConfig,        # 硬件配置
+    
+    # 代价模型
+    PDCostModel,           # 代价模型主类
+    PredictionResult,      # 预测结果
+    
+    # 硬件校准
+    auto_calibrate_or_load,# 自动校准或加载
+)
+```
 
 ---
 
 ## 📝 运行示例
 
 ```bash
-cd /root/paddlejob/workspace/env_run/zhangdongqi/costmodel
+cd /root/paddlejob/workspace/env_run/zhangdongqi/PaddleFleet/auto_configurator
 
-# 运行基础示例
-python pdcost/examples/basic_usage.py
-
-# 运行 PaddleFormers 优化示例
-python pdcost/examples/paddleformers_optimization.py
-
-# 搜索最优配置
-python pdcost/search_configs.py
+# 运行 Grid Search 示例
+python example_pdcost_gridsearch.py
 ```
 
 ---
 
 ## ⚠️ 注意事项
 
-1. 预测结果为理论估算值，实际性能受多种因素影响
-2. 建议在少量配置上进行实际 benchmark 验证
-3. 通信时间预测假设理想的网络条件
-4. **MoE 模型必须使用 `full` 重计算**，`selective` 对 MoE 基本无效
-5. `tensorwise_offload` 只在 `dp > 1` 时有效
-
----
-
-## 📖 API 快速参考
-
-### 主要类
-
-```python
-from pdcost import (
-    # 配置类
-    ModelConfig,           # 模型架构配置
-    TrainingConfig,        # 训练配置
-    ParallelConfig,        # 并行配置
-    HardwareConfig,        # 硬件配置
-    GPUSpec,               # GPU 规格
-    NetworkSpec,           # 网络规格
-    
-    # 子模型
-    MemoryModel,           # 显存预测
-    MemoryBreakdown,       # 显存分解
-    ComputeModel,          # 计算预测
-    CommModel,             # 通信预测
-    
-    # 主模型
-    PDCostModel,           # 代价模型主类
-    PredictionResult,      # 预测结果
-    
-    # 校准
-    HardwareCalibrator,    # 硬件校准器
-    CalibrationResult,     # 校准结果
-    quick_calibrate,       # 快速校准
-    create_calibrated_hardware_config,  # 创建校准配置
-)
-```
+1. 预测结果为理论估算值，建议用实际 benchmark 验证关键配置
+2. 首次运行会自动执行硬件校准 (约 1-2 分钟)
+3. **MoE 模型必须使用 `full` 重计算**
+4. `tensorwise_offload` 只在 `dp > 1` 时有效
+5. 通信时间预测假设理想网络条件

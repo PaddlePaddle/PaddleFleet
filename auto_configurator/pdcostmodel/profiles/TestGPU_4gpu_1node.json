@@ -1,0 +1,41 @@
+{
+  "gpu_name": "TestGPU",
+  "gpu_memory_gb": 40.0,
+  "gpu_count": 4,
+  "fp32_tflops": 30.0,
+  "fp16_tflops": 0.0,
+  "bf16_tflops": 400.0,
+  "memory_bandwidth_gbps": 2000.0,
+  "intra_node_bandwidth_gbps": 0.0,
+  "calibrated": true,
+  "bf16_curve": {
+    "dtype": "bfloat16",
+    "peak_tflops": 1000.0,
+    "fit_a": 0.04,
+    "fit_b": 0.2,
+    "fit_max": 1.0,
+    "points": [
+      {
+        "size": 512,
+        "tflops": 250.0,
+        "efficiency": 0.25,
+        "time_ms": 25.0
+      },
+      {
+        "size": 1024,
+        "tflops": 500.0,
+        "efficiency": 0.5,
+        "time_ms": 50.0
+      },
+      {
+        "size": 2048,
+        "tflops": 700.0,
+        "efficiency": 0.7,
+        "time_ms": 70.0
+      }
+    ]
+  },
+  "node_count": 1,
+  "calibrated_at": "2026-02-26T18:22:40.469991",
+  "pdcost_version": "1.0.0"
+}
