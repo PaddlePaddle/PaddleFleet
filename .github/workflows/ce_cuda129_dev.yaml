@@ -231,7 +231,7 @@ jobs:
         run: |
           pwd
           source ../../../proxy
-          git clone https://github.com/PaddleFleet.git .
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git log -1
 
       - name: Determine the runner
