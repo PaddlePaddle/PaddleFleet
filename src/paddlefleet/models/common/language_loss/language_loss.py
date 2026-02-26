@@ -15,9 +15,12 @@
 
 import paddle
 import paddle.distributed as dist
-from paddle import Tensor, nn
+from paddle import Tensor
+from paddle.autograd import PyLayer
 from paddle.distributed import fleet
+from paddle.distributed.fleet.layers.mpu import mp_ops
 from paddle.distributed.fleet.utils import recompute
+from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
 from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
@@ -31,6 +34,59 @@ from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+class DistributedSoftmaxOp(PyLayer):
+    @staticmethod
+    def forward(ctx, x, axis=-1, mp_group=None):
+        ctx.axis = axis
+        ctx.mp_group = mp_group
+
+        if mp_group is None:
+            hcg = fleet.get_hybrid_communicate_group()
+            ctx.mp_group = hcg.get_model_parallel_group()
+
+        local_max = paddle.max(x, axis=axis, keepdim=True)
+
+        all_max = AllGatherOp.apply(local_max, axis=0, group=ctx.mp_group)
+
+        global_max = paddle.max(all_max, axis=0, keepdim=True)
+
+        x_stable = x - global_max
+
+        exp_x = paddle.exp(x_stable.cast("float32"))
+
+        local_sum_exp = paddle.sum(exp_x, axis=axis, keepdim=True)
+
+        sum_exp = mp_ops._mp_allreduce(
+            local_sum_exp,
+            group=mp_group,
+            use_calc_stream=True,
+            use_model_parallel=True,
+        )
+
+        softmax_output = exp_x / sum_exp
+
+        ctx.save_for_backward(softmax_output, sum_exp)
+
+        return softmax_output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        softmax_output, global_sum_exp = ctx.saved_tensor()
+        axis = ctx.axis
+        mp_group = ctx.mp_group
+
+        grad_softmax = grad_output * softmax_output
+
+        local_sum_grad = paddle.sum(grad_softmax, axis=axis, keepdim=True)
+
+        all_sum_grad = AllGatherOp.apply(local_sum_grad, axis=0, group=mp_group)
+        global_sum_grad = paddle.sum(all_sum_grad, axis=0, keepdim=True)
+
+        grad_input = softmax_output * (grad_output - global_sum_grad)
+
+        return grad_input
 
 
 class LanguageLoss(FleetLayer):
@@ -107,7 +163,8 @@ class LanguageLoss(FleetLayer):
             mtp_logits = logits[1:]
 
             # hardcoding
-            mtp_distillation = True
+            # mtp_distillation = True
+            mtp_distillation = False
             if not mtp_distillation:
                 lm_loss = self._forward(logits[0], lm_labels)
                 for depth in range(self.config.num_nextn_predict_layers):
@@ -122,10 +179,9 @@ class LanguageLoss(FleetLayer):
                     mtp_loss.append(loss_cur_depth)
             else:
                 lm_loss = 0.0
-
-                print("prediction_scores_cur_depth: ", logits[0])
-                print("prediction_scores_cur_depth: ", logits[0].shape)
-                target_p_self_op_dist = nn.Softmax(axis=2)(logits[0])
+                target_p_self_op_dist = DistributedSoftmaxOp.apply(
+                    logits[0], axis=2
+                )
                 print("target_p_self_op_dist: ", target_p_self_op_dist)
                 if get_context_parallel_world_size() > 1:
                     target_p_self_op_dist = ContextParallelGatherOp.apply(
@@ -161,8 +217,10 @@ class LanguageLoss(FleetLayer):
                             prediction_scores_cur_depth.shape,
                         )
                         print("mtp_lossmask: ", lossmask.shape)
-                        out_logp = nn.LogSoftmax(axis=2)(
-                            prediction_scores_cur_depth
+                        out_logp = paddle.log(
+                            DistributedSoftmaxOp.apply(
+                                prediction_scores_cur_depth, axis=2
+                            )
                         )
                         print("out_logp: ", out_logp)
 
