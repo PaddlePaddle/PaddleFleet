@@ -336,58 +336,13 @@ jobs:
           python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
-      - name: Proprocess for integration test
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/preprocess.sh
-          preprocess_exit_code=$?
-          if [[ "$preprocess_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mPreprocess failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mPreprocess succeeded.\033[0m"
-          fi
-          '
-
-      - name: Integration test (GLM4.5 single-card)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
-          glm45_single_card_exit_code=$?
-          if [[ "$glm45_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
-          fi
-          '
-
-      - name: Integration test (Qwen3-30B-A3B single-card)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
-          qwen3_single_card_exit_code=$?
-          if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
-          fi
-          '
-
-      - name: Qwen3-vl-8k-single-card
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
-          '
+      - name: Run single card test
+        uses: ./.github/actions/cases/single_card.yml
+        with:
+          docker_name: ${{ env.container_name }}
+          multi_python_version: ''
+          case_base_name: 'CUDA126_release'
+          formers_install_status: ${{ steps.formers_install.conclusion }}
 
       - name: Terminate and delete the container
         if: ${{ always() }}
