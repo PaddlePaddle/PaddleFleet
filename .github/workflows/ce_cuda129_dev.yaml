@@ -320,7 +320,6 @@ jobs:
         run: |
           pwd
           source ../../../proxy
-          rm -rf * .[^.]*
           git clone https://github.com/PaddlePaddle/PaddleFleet.git temp
           cd temp
           git status
