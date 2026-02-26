@@ -227,30 +227,6 @@ jobs:
       CACHE_DIR: /home/.cache
       TASK: paddlefleet-CE-CUDA129-DEV-integration-test-single-card-release
     steps:
-      - name: Checkout code
-        run: |
-          pwd
-          source ../../../proxy
-          rm -rf * .[^.]*
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git temp
-          cd temp
-          git status
-          git config --global --add safe.directory temp
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          cd ..
-          mv temp/* . 2>/dev/null || true
-          mv temp/.[^.]* . 2>/dev/null || true
-          rmdir temp
-          # 验证最终目录结构
-          echo "=== 最终目录 ==="
-          ls -la
-          echo "=== action.yml 位置 ==="
-          ls -la .github/actions/cases/single-card/action.yml
-          git log -1
-
       - name: Determine the runner
         run: |
           gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
@@ -338,6 +314,30 @@ jobs:
           echo "paddleformers Commit"
           python -c "import paddleformers; print(paddleformers.version.commit)"
           '
+
+      - name: Checkout code
+        run: |
+          pwd
+          source ../../../proxy
+          rm -rf * .[^.]*
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git temp
+          cd temp
+          git status
+          git config --global --add safe.directory temp
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
+          git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
+          cd ..
+          mv temp/* . 2>/dev/null || true
+          mv temp/.[^.]* . 2>/dev/null || true
+          rmdir temp
+          # 验证最终目录结构
+          echo "=== 最终目录 ==="
+          ls -la
+          echo "=== action.yml 位置 ==="
+          ls -la .github/actions/cases/single-card/action.yml
+          git log -1
 
       - name: Run single card integration test
         uses: ./.github/actions/cases/single-card
