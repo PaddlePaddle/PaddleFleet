@@ -230,6 +230,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+        env:
+          ACTIONS_RUNTIME_TOKEN: '' # 跳过 node 检查
+          ACTIONS_CACHE_URL: ''
       - name: Determine the runner
         run: |
           gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
