@@ -227,9 +227,12 @@ jobs:
       CACHE_DIR: /home/.cache
       TASK: paddlefleet-CE-CUDA129-DEV-integration-test-single-card-release
     steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
+      - name: Checkout code
+        run: |
+          pwd
+          export ../../../proxy
+          git clone https://github.com/PaddleFleet.git .
+          git log -1
 
       - name: Determine the runner
         run: |
