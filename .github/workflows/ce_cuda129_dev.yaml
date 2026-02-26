@@ -233,6 +233,14 @@ jobs:
           source ../../../proxy
           rm -rf * .[^.]*
           git clone https://github.com/PaddlePaddle/PaddleFleet.git temp
+          cd temp
+          git status
+          git config --global --add safe.directory temp
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
+          git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
+          cd ..
           mv temp/* . 2>/dev/null || true
           mv temp/.[^.]* . 2>/dev/null || true
           rmdir temp
