@@ -24,9 +24,18 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Preprocess for integration test
-      if: ${{ inputs.formers_install_status == 'success' }}
+    - name: Single Card Tests
       run: |
+        echo "========================================"
+        echo "Starting single card test suite"
+        echo "========================================"
+      shell: bash
+
+    - name: Preprocess for integration test
+      if: always() && inputs.formers_install_status == 'success'
+      run: |
+        echo "::group::Preprocess logs"
+        echo ">>> Running preprocess <<<"
         docker exec -t ${{ inputs.docker_name }} /bin/bash -c '
         source /root/proxy
         if [[ -n "${{ inputs.multi_python_version }}" ]]; then
@@ -35,11 +44,20 @@ runs:
         fi
         bash -x PaddleFormers/tests/integration_test/preprocess.sh
         '
+        if [ $? -eq 0 ]; then
+          echo ">>> Preprocess completed <<<"
+        else
+          echo ">>> Preprocess failed <<<"
+          exit 1
+        fi
+        echo "::endgroup::"
       shell: bash
 
     - name: Integration test (GLM4.5 single-card)
-      if: ${{ inputs.formers_install_status == 'success' }}
+      if: always() && inputs.formers_install_status == 'success'
       run: |
+        echo "::group::GLM4.5 test logs"
+        echo ">>> Running GLM4.5 single-card test <<<"
         docker exec -t ${{ inputs.docker_name }} /bin/bash -c '
         source /root/proxy
         if [[ -n "${{ inputs.multi_python_version }}" ]]; then
@@ -55,11 +73,22 @@ runs:
           bash -x PaddleFleet/ci/ce_check_precision.sh $CASE_NAME $BASE_NAME
         fi
         '
+        if [ $? -eq 0 ]; then
+          echo ">>> GLM4.5 test completed <<<"
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo ">>> GLM4.5 test failed <<<"
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        echo "::endgroup::"
       shell: bash
 
     - name: Integration test (Qwen3-30B-A3B single-card)
-      if: ${{ inputs.formers_install_status == 'success' }}
+      if: always() && inputs.formers_install_status == 'success'
       run: |
+        echo "::group::Qwen3 test logs"
+        echo ">>> Running Qwen3 single-card test <<<"
         docker exec -t ${{ inputs.docker_name }} /bin/bash -c '
         source /root/proxy
         if [[ -n "${{ inputs.multi_python_version }}" ]]; then
@@ -75,11 +104,22 @@ runs:
           bash -x PaddleFleet/ci/ce_check_precision.sh $CASE_NAME $BASE_NAME
         fi
         '
+        if [ $? -eq 0 ]; then
+          echo ">>> Qwen3 test completed <<<"
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo ">>> Qwen3 test failed <<<"
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        echo "::endgroup::"
       shell: bash
 
     - name: Qwen3-vl-8k-single-card
-      if: ${{ inputs.formers_install_status == 'success' }}
+      if: always() && inputs.formers_install_status == 'success'
       run: |
+        echo "::group::Qwen3-vl test logs"
+        echo ">>> Running Qwen3-vl-8k single-card test <<<"
         docker exec -t ${{ inputs.docker_name }} /bin/bash -c '
         source /root/proxy
         if [[ -n "${{ inputs.multi_python_version }}" ]]; then
@@ -95,4 +135,79 @@ runs:
           bash -x PaddleFleet/ci/ce_check_precision.sh $CASE_NAME $BASE_NAME
         fi
         '
+        if [ $? -eq 0 ]; then
+          echo ">>> Qwen3-vl test completed <<<"
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo ">>> Qwen3-vl test failed <<<"
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        echo "::endgroup::"
+      shell: bash
+    - name: 📊 Test Summary
+      if: always()
+      run: |
+        echo "============================================"
+        echo "          SINGLE CARD TEST SUMMARY"
+        echo "============================================"
+
+        # 获取各步骤状态
+        GLM45_STATUS="${{ steps.glm45.outputs.status }}"
+        QWEN3_STATUS="${{ steps.qwen3.outputs.status }}"
+        QWEN3VL_STATUS="${{ steps.qwen3vl.outputs.status }}"
+
+        # 如果没有执行（条件不满足），标记为 skipped
+        [ -z "$GLM45_STATUS" ] && GLM45_STATUS="skipped"
+        [ -z "$QWEN3_STATUS" ] && QWEN3_STATUS="skipped"
+        [ -z "$QWEN3VL_STATUS" ] && QWEN3VL_STATUS="skipped"
+
+        # 打印表格
+        printf "| %-25s | %-10s |\n" "Test Phase" "Status"
+        printf "|---------------------------|------------|\n"
+        printf "| %-25s | %-10s |\n" "GLM4.5 single-card" "${GLM45_STATUS}"
+        printf "| %-25s | %-10s |\n" "Qwen3 single-card" "${QWEN3_STATUS}"
+        printf "| %-25s | %-10s |\n" "Qwen3-vl-8k single-card" "${QWEN3VL_STATUS}"
+
+        echo "============================================"
+
+        # 计算通过/失败统计
+        TOTAL=0
+        PASSED=0
+        FAILED=0
+        SKIPPED=0
+
+        for status in "$GLM45_STATUS" "$QWEN3_STATUS" "$QWEN3VL_STATUS"; do
+          if [ "$status" != "skipped" ]; then
+            TOTAL=$((TOTAL + 1))
+            if [ "$status" = "success" ]; then
+              PASSED=$((PASSED + 1))
+            else
+              FAILED=$((FAILED + 1))
+            fi
+          else
+            SKIPPED=$((SKIPPED + 1))
+          fi
+        done
+
+        echo ""
+        echo "📊 Statistics:"
+        echo "   Total executed: $TOTAL"
+        echo "   ✅ Passed: $PASSED"
+        echo "   ❌ Failed: $FAILED"
+        echo "   ⏭️  Skipped: $SKIPPED"
+        echo ""
+
+        # 最终结果
+        if [ $FAILED -gt 0 ]; then
+          echo "❌ TEST SUITE FAILED: $FAILED test(s) failed"
+          echo "============================================"
+          exit 1
+        elif [ $TOTAL -eq 0 ]; then
+          echo "⚠️  TEST SUITE SKIPPED: No tests were executed"
+          echo "============================================"
+        else
+          echo "✅ TEST SUITE PASSED: All $PASSED test(s) passed"
+          echo "============================================"
+        fi
       shell: bash
