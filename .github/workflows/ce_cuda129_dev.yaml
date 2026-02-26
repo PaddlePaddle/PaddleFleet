@@ -231,7 +231,17 @@ jobs:
         run: |
           pwd
           source ../../../proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
+          rm -rf * .[^.]*
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git temp
+          mv temp/* . 2>/dev/null || true
+          mv temp/.[^.]* . 2>/dev/null || true
+          rm -rf temp
+          rmdir temp
+          # 验证最终目录结构
+          echo "=== 最终目录 ==="
+          ls -la
+          echo "=== action.yml 位置 ==="
+          ls -la .github/actions/cases/single-card/action.yml
           git log -1
 
       - name: Determine the runner
