@@ -227,6 +227,9 @@ jobs:
       CACHE_DIR: /home/.cache
       TASK: paddlefleet-CE-CUDA129-DEV-integration-test-single-card-release
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Determine the runner
         run: |
           gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
@@ -316,7 +319,7 @@ jobs:
           '
 
       - name: Run single card integration test
-        uses: ./.github/actions/single_card
+        uses: ./.github/actions/cases/single-card
         with:
           docker_name: ${{ env.container_name }}
           multi_python_version: ''
