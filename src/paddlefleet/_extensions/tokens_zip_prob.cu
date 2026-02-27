@@ -73,7 +73,8 @@ std::vector<paddle::Tensor> tokens_zip_prob_impl(
            "num_expert must be <= INT_MAX for tokens_zip_prob.");
   PD_CHECK(topk <= static_cast<int64_t>(std::numeric_limits<int>::max()),
            "topk must be <= INT_MAX for tokens_zip_prob.");
-  PD_CHECK(unzipped_probs.size() == static_cast<size_t>(num_expert),
+  PD_CHECK(unzipped_probs.size() == static_cast<size_t>(num_expert) &&
+               num_expert > 0,
            "unzipped_probs.size() must equal num_expert.");
   int num_expert_int = static_cast<int>(num_expert);
   int topk_int = static_cast<int>(topk);
