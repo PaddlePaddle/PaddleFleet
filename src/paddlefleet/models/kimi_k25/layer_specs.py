@@ -17,6 +17,9 @@ from ...fusions.fused_bias_dropout import get_bias_dropout_add
 from ...spec_utils import LayerSpec
 from ...transformer.attention import SelfAttention, SelfAttentionSublayersSpec
 from ...transformer.identity_op import IdentityOp
+from ...transformer.paddle_norm import (
+    WrappedPaddleNormPipe,
+)
 from ...transformer.transformer_config import TransformerConfig
 from ...transformer.transformer_layer import TransformerLayerSublayersSpec
 from ..backends import LocalSpecProvider
@@ -121,9 +124,7 @@ def get_kimi_k25_vision_spec(
             extra_kwargs=rotary_emb_extra_kwargs,
         )
     )
-    merger_norm = backend.layer_norm(
-        rms_norm=(config.normalization == "RMSNorm"), for_qk=False
-    )
+
     sdtpool_merger_spec = LayerSpec(
         layer=KimiK25VisionSd2TpoolMerger, extra_kwargs={"config": config}
     )
@@ -150,6 +151,13 @@ def get_kimi_k25_vision_spec(
             head_empty_layers=head_empty_layers_spec,
             transformer_layers=transformer_layers_spec,
             tail_empty_layers=tail_empty_layer_spec,
+            final_layernorm=LayerSpec(
+                layer=WrappedPaddleNormPipe,
+                extra_kwargs={
+                    "config": config,
+                    "hidden_size": config.hidden_size,
+                },
+            ),
             sdtpool_merger=sdtpool_merger_spec,
             merger=merger_spec,
         ),

@@ -40,6 +40,7 @@ class KimiK25VisionSublayersSpec:
     head_empty_layers: list[LayerSpec] = None
     transformer_layers: list[LayerSpec] = None
     tail_empty_layers: list[LayerSpec] = None
+    final_layernorm: LayerSpec = None
     sdtpool_merger: LayerSpec = None
     merger: LayerSpec = None
 
@@ -56,6 +57,12 @@ class KimiK25VisionModel(TransformerEncoder):
             layers, LayerDesc(spec.embedding), f"{name_prefix}.patch_embed"
         )
         self.get_encoder_layer_desc_list(layers, spec, name_prefix)
+
+        self.add_sequential_layer(
+            layers,
+            LayerDesc(spec.final_layernorm),
+            f"{name_prefix}.final_layernorm",
+        )
         # no parameter
         self.add_sequential_layer(
             layers,
