@@ -62,6 +62,10 @@ class GridSearchConfig:
     gbs: int
     min_model_parallel: int
     max_model_parallel: int
+    # ===== 新增字段 =====
+    sharding: list[str]           
+    gas: list[int]                
+    seq_len: list[int]
 
 
 @dataclass
@@ -102,6 +106,10 @@ class GeneratedConfig:
     recompute_num_layers: int | None
     recompute_modules: list | None
     log_dir: str
+    # ===== 新增字段 =====
+    sharding: str                        
+    gradient_accumulation_steps: int     
+    sequence_length: int
 
 
 # ============================================================================
@@ -137,6 +145,10 @@ class GPTGridSearch:
     gbs: int = 1024
     min_model_parallel: int = 1
     max_model_parallel: int = 8
+    # 新增搜索参数
+    sharding: list[str] = None
+    gas: list[int] = None
+    seq_len_list: list[int] = None
 
     def init_params(self):
         """Initialize search space based on model size and hardware."""
@@ -148,6 +160,10 @@ class GPTGridSearch:
         self.cp = [1]
         self.ep = [1]
         self.mbs = [1, 2, 4, 8]
+        # 新增默认值
+        self.sharding = ['stage1', 'stage2']
+        self.gas = [8, 16, 32, 64]
+        self.seq_len_list = [2048, 4096, 8192]
 
         if self.gpu_memory_gb == 80:
             self._init_80gb_params(model_size)
@@ -409,6 +425,10 @@ def get_grid_search_params(
     min_model_parallel_size: int | str,
     max_model_parallel_size: int | str,
     global_batch_size: int,
+    # ===== 新增参数 =====
+    sharding_stages: list[str] | str = "auto",
+    gradient_accumulation_steps: list[int] | str = "auto",
+    sequence_lengths: list[int] | str = "auto",
 ) -> GridSearchConfig:
     """Get grid search parameters for the given configuration.
 
@@ -481,6 +501,13 @@ def get_grid_search_params(
         params.min_model_parallel = min_model_parallel_size
     if max_model_parallel_size != "auto":
         params.max_model_parallel = max_model_parallel_size
+    # ===== 新增覆盖逻辑 =====
+    if sharding_stages != "auto":
+        params.sharding = sharding_stages
+    if gradient_accumulation_steps != "auto":
+        params.gas = gradient_accumulation_steps
+    if sequence_lengths != "auto":
+        params.seq_len_list = sequence_lengths
 
     return GridSearchConfig(
         tp=params.tp,
@@ -491,6 +518,10 @@ def get_grid_search_params(
         gbs=params.gbs,
         min_model_parallel=params.min_model_parallel,
         max_model_parallel=params.max_model_parallel,
+        # ===== 新增返回字段 =====
+        sharding=params.sharding,
+        gas=params.gas,
+        seq_len=params.seq_len_list,
     )
 
 
@@ -611,42 +642,53 @@ def generate_grid_search_configs(
             )
         )
 
-        # Generate config for each activation checkpoint setting
-        if act_layers[0] is not None:
-            for act in act_layers:
-                for num_mbs in num_mbs_act:
-                    for act_pipe in act_per_pipe:
-                        config = _create_config(
-                            runner_config,
-                            tp,
-                            pp,
-                            cp,
-                            ep,
-                            virtual_pipelines,
-                            mbs,
-                            act,
-                            num_mbs,
-                            act_pipe,
-                            grid_params,
-                        )
-                        if config:
-                            configs[config.name] = config
-        else:
-            config = _create_config(
-                runner_config,
-                tp,
-                pp,
-                cp,
-                ep,
-                virtual_pipelines,
-                grid_params.mbs[0] if grid_params.mbs else 1,
-                None,
-                None,
-                None,
-                grid_params,
-            )
-            if config:
-                configs[config.name] = config
+        # Iterate over new search dimensions
+        for sharding in grid_params.sharding:
+            for gas in grid_params.gas:
+                for seq_len in grid_params.seq_len:
+                    for mbs in grid_params.mbs:
+                        # Generate config for each activation checkpoint setting
+                        if act_layers[0] is not None:
+                            for act in act_layers:
+                                for num_mbs in num_mbs_act:
+                                    for act_pipe in act_per_pipe:
+                                        config = _create_config(
+                                            runner_config,
+                                            tp,
+                                            pp,
+                                            cp,
+                                            ep,
+                                            virtual_pipelines,
+                                            mbs,
+                                            act,
+                                            num_mbs,
+                                            act_pipe,
+                                            grid_params,
+                                            sharding,
+                                            gas,
+                                            seq_len,
+                                        )
+                                        if config:
+                                            configs[config.name] = config
+                        else:
+                            config = _create_config(
+                                runner_config,
+                                tp,
+                                pp,
+                                cp,
+                                ep,
+                                virtual_pipelines,
+                                mbs,
+                                None,
+                                None,
+                                None,
+                                grid_params,
+                                sharding,
+                                gas,
+                                seq_len,
+                            )
+                            if config:
+                                configs[config.name] = config
 
     logger.info(f"Total candidate configurations: {len(configs)}")
     return configs
@@ -684,6 +726,9 @@ def _create_config(
     num_mbs_act: int | None,
     act_per_pipe: int | None,
     grid_params: GridSearchConfig,
+    sharding: str = 'stage1',
+    gas: int = 16,
+    seq_len: int = 2048,
 ) -> GeneratedConfig | None:
     """Create a GeneratedConfig from parameters.
 
@@ -715,7 +760,8 @@ def _create_config(
     name = (
         f"{runner_config.model_type}_{runner_config.model_size_in_b}b_"
         f"{training_config.get_num_nodes()}nodes_"
-        f"tp_{tp}_pp_{pp}_cp_{cp}_ep_{ep}_mbs_{mbs}"
+        f"tp_{tp}_pp_{pp}_cp_{cp}_ep_{ep}_mbs_{mbs}_"
+        f"{sharding}_gas_{gas}_seq_{seq_len}"
     )
     if virtual_pipelines:
         name += f"_vp_{virtual_pipelines}"
@@ -738,4 +784,8 @@ def _create_config(
         recompute_num_layers=act,
         recompute_modules=None,
         log_dir=log_dir,
+        # 新增字段
+        sharding=sharding,
+        gradient_accumulation_steps=gas,
+        sequence_length=seq_len,
     )
