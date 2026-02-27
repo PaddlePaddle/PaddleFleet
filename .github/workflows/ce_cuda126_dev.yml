@@ -285,6 +285,9 @@ jobs:
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
+          cd ..
+          mv PaddleFleet/* . 2>/dev/null || true
+          mv PaddleFleet/.[^.]* . 2>/dev/null || true
           '
 
       - name: Install PaddleFormers
