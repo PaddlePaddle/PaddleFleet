@@ -469,7 +469,6 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         hidden_states_concat = dict_args["hidden_states"]
-        # print("mtp layer num: ", self.layer_number)
         for i in range(self.config.num_nextn_predict_layers):
             tensor_list = paddle.split(
                 hidden_states_concat, self.config.num_nextn_predict_layers + 1

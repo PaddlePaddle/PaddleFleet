@@ -15,7 +15,7 @@
 
 import paddle
 import paddle.distributed as dist
-from paddle import Tensor
+from paddle import Tensor, nn
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.distributed.fleet.layers.mpu import mp_ops
@@ -40,15 +40,15 @@ class DistributedSoftmaxOp(PyLayer):
     @staticmethod
     def forward(ctx, x, axis=-1, mp_group=None):
         ctx.axis = axis
-        ctx.mp_group = mp_group
-
         if mp_group is None:
             hcg = fleet.get_hybrid_communicate_group()
-            ctx.mp_group = hcg.get_model_parallel_group()
+            mp_group = hcg.get_model_parallel_group()
+
+        ctx.mp_group = mp_group
 
         local_max = paddle.max(x, axis=axis, keepdim=True)
 
-        all_max = AllGatherOp.apply(local_max, axis=0, group=ctx.mp_group)
+        all_max = AllGatherOp.apply(local_max)
 
         global_max = paddle.max(all_max, axis=0, keepdim=True)
 
@@ -81,7 +81,7 @@ class DistributedSoftmaxOp(PyLayer):
 
         local_sum_grad = paddle.sum(grad_softmax, axis=axis, keepdim=True)
 
-        all_sum_grad = AllGatherOp.apply(local_sum_grad, axis=0, group=mp_group)
+        all_sum_grad = AllGatherOp.apply(local_sum_grad)
         global_sum_grad = paddle.sum(all_sum_grad, axis=0, keepdim=True)
 
         grad_input = softmax_output * (grad_output - global_sum_grad)
@@ -158,10 +158,7 @@ class LanguageLoss(FleetLayer):
             mtp_loss = []
             mtp_logits = logits[1:]
 
-            # hardcoding
-            # mtp_distillation = True
-            mtp_distillation = False
-            if not mtp_distillation:
+            if not self.config.mtp_distillation_loss:
                 lm_loss = self._forward(logits[0], lm_labels)
                 for depth in range(self.config.num_nextn_predict_layers):
                     logits_cur_depth = mtp_logits[depth]
@@ -175,10 +172,12 @@ class LanguageLoss(FleetLayer):
                     mtp_loss.append(loss_cur_depth)
             else:
                 lm_loss = 0.0
-                target_p_self_op_dist = DistributedSoftmaxOp.apply(
-                    logits[0], axis=2
-                )
-                print("target_p_self_op_dist: ", target_p_self_op_dist)
+                if get_tensor_model_parallel_world_size() > 1:
+                    target_p_self_op_dist = DistributedSoftmaxOp.apply(
+                        logits[0], axis=2
+                    )
+                else:
+                    target_p_self_op_dist = nn.Softmax(axis=2)(logits[0])
                 if get_context_parallel_world_size() > 1:
                     target_p_self_op_dist = ContextParallelGatherOp.apply(
                         target_p_self_op_dist, axis=1
@@ -204,21 +203,16 @@ class LanguageLoss(FleetLayer):
                         lossmask = (
                             labels_cur_depth != self.ignored_index
                         ).cast(paddle.float32)
-                        print(
-                            "mtp_prediction_scores_cur_depth: ",
-                            prediction_scores_cur_depth,
-                        )
-                        print(
-                            "mtp_prediction_scores_cur_depth: ",
-                            prediction_scores_cur_depth.shape,
-                        )
-                        print("mtp_lossmask: ", lossmask.shape)
-                        out_logp = paddle.log(
-                            DistributedSoftmaxOp.apply(
-                                prediction_scores_cur_depth, axis=2
+                        if get_tensor_model_parallel_world_size() > 1:
+                            out_logp = paddle.log(
+                                DistributedSoftmaxOp.apply(
+                                    prediction_scores_cur_depth, axis=2
+                                )
                             )
-                        )
-                        print("out_logp: ", out_logp)
+                        else:
+                            out_logp = nn.LogSoftmax(axis=2)(
+                                prediction_scores_cur_depth
+                            )
 
                         target_p = target_p_self_op_dist[
                             :, (depth + 1) :, :
@@ -226,24 +220,25 @@ class LanguageLoss(FleetLayer):
                         target_p = padding(
                             target_p, left=False, pad_len=depth + 1
                         )
-                        print("target_p: ", target_p)
                         if get_context_parallel_world_size() > 1:
                             target_p = ContextParallelScatterOp.apply(
                                 target_p, axis=1
                             )
                         plogp = target_p * out_logp
-                        print("plogp: ", plogp)
 
                         lossmask = lossmask[..., None]
                         xishu = lossmask.sum() + 1e-5
-                        print("xishu: ", xishu)
                         if get_context_parallel_world_size() > 1:
                             lossmask = ContextParallelScatterOp.apply(
                                 lossmask, axis=1
                             )
 
                         ploss = -paddle.sum(paddle.sum(lossmask * plogp, 2))
-                        print("ploss: ", ploss)
+                        if get_tensor_model_parallel_world_size() > 1:
+                            dist.all_reduce(
+                                ploss,
+                                group=fleet.get_hybrid_communicate_group().get_model_parallel_group(),
+                            )
 
                         if get_context_parallel_world_size() > 1:
                             dist.all_reduce(
@@ -259,7 +254,6 @@ class LanguageLoss(FleetLayer):
             print(f"[Ting LOG] mtp loss: {mtp_loss}")
 
             def add_loss(main_loss, loss):
-                print(f"[Ting LOG] main_loss: {main_loss}, add_loss: {loss}")
                 if self.config.add_mtp_loss:
                     return main_loss + loss - loss.detach()
                 else:

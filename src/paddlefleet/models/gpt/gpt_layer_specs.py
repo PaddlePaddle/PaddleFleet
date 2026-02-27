@@ -285,12 +285,12 @@ def get_gpt_mtp_layers_spec_for_backend(
         transformer_layer_spec=transformer_layer_spec,
         backend=backend,
     )
-    mtp_num_layers = (
-        config.num_nextn_predict_layers
-        if config.num_nextn_predict_layers
-        else 0
-    )
-    mtp_num_layers = 1
+
+    mtp_num_layers = max(0, config.mtp_num_layers)
+    print("mtp_num_layers: ", config.mtp_num_layers)
+    print("num_nextn_predict_layers: ", config.num_nextn_predict_layers)
+    print("mtp_distillation_loss: ", config.mtp_distillation_loss)
+
     mtp_layer_specs = []
     for i in range(mtp_num_layers):
         mtp_layer_specs.append(mtp_layer_spec_func(layer_number=i))
