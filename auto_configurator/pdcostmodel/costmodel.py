@@ -12,9 +12,12 @@ PDCostModel - PaddleFormers 分布式训练代价模型主模块
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from .config import (
     ModelConfig, ParallelConfig, TrainingConfig, HardwareConfig,
@@ -127,7 +130,7 @@ class PDCostModel:
         
         parallel = ParallelConfig(tp=8, pp=1, dp=1, ep=8)
         result = costmodel.predict(parallel, micro_batch_size=1, seq_len=8192)
-        print(result)
+        logger.debug(result)
         
     带硬件校准:
         costmodel = PDCostModel(model_config, auto_calibrate=True)
@@ -217,42 +220,19 @@ class PDCostModel:
         Returns:
             HardwareConfig: 硬件配置
         """
-        from .profile_manager import ProfileManager, auto_calibrate_or_load
-        from .calibration import HardwareCalibrator
+        from .utils.calibration import HardwareCalibrator
         
-        manager = ProfileManager()
         calibrator = HardwareCalibrator()
-        
-        # 检测当前硬件
-        gpu_name, memory_gb, gpu_count = calibrator.detect_gpu_info()
-        
-        if not force_calibrate and manager.has_profile(gpu_name, gpu_count, self._node_count):
-            # 加载已保存的配置
-            profile_data = manager.load_profile(gpu_name, gpu_count, self._node_count)
-            if profile_data:
-                self._calibrated = True
-                if verbose:
-                    print(f"✅ 已加载校准配置: {gpu_name} × {gpu_count}")
-                return manager.create_hardware_config(profile_data)
-        
-        # 需要执行校准
-        if verbose:
-            print(f"🔧 未找到校准配置，开始校准 {gpu_name} × {gpu_count}...")
-        
-        result = calibrator.calibrate(verbose=verbose)
-        self._calibration_result = result
-        
-        # 保存校准结果
-        filepath = manager.save_calibration(result, self._node_count)
-        if verbose:
-            print(f"💾 校准结果已保存: {filepath}")
+        config = calibrator.auto_calibrate(
+            node_count=self._node_count,
+            force=force_calibrate,
+            verbose=verbose
+        )
         
         self._calibrated = True
+        self._calibration_result = calibrator.result
         
-        return calibrator.create_hardware_config(
-            num_nodes=self._node_count,
-            gpus_per_node=gpu_count // self._node_count if self._node_count > 0 else gpu_count
-        )
+        return config
     
     def _init_sub_models(self):
         """初始化子模型"""
@@ -814,7 +794,7 @@ class PDCostModel:
                     "prediction": prediction.to_dict(),
                 })
             except Exception as e:
-                print(f"Warning: Failed to predict config {cfg}: {e}")
+                logger.warning(f"Failed to predict config {cfg}: {e}")
                 continue
         
         # 排序: 先按是否满足显存，再按时延
@@ -828,36 +808,15 @@ class PDCostModel:
         self._print_ranking_report(results[:top_k])
         
         return results[:top_k]
-    
     def _print_ranking_report(self, results: List[Dict]):
-        """打印排序报告"""
+        """记录排序报告到日志"""
         if not results:
             return
         
-        print("\n" + "=" * 120)
-        print("🚀 PDCostModel - 并行配置排序报告")
-        print("=" * 120)
-        print(f"{'排名':<4} {'配置':<30} {'时延(ms)':<12} {'显存(GB)':<10} "
-              f"{'约束':<6} {'MFU':<8} {'tok/s':<12} {'tok/s/GPU':<12}")
-        print("-" * 120)
-        
-        for r in results:
-            fits = "✅" if r["fits_memory"] else "❌"
-            print(f"{r['rank']:<4} {r['config_str']:<30} "
-                  f"{r['step_time_ms']:<12.2f} {r['memory_gb']:<10.2f} "
-                  f"{fits:<6} {r['mfu']:<8.1%} "
-                  f"{r['tokens_per_second']:<12,.0f} "
-                  f"{r['tokens_per_second_per_gpu']:<12,.0f}")
-        
-        print("-" * 120)
-        
-        if results:
-            best = results[0]
-            print(f"\n📊 最优配置: {best['config_str']}")
-            print(f"   • 预计时延: {best['step_time_ms']:.2f} ms")
-            print(f"   • 显存占用: {best['memory_gb']:.2f} GB")
-            print(f"   • MFU: {best['mfu']:.1%}")
-            print(f"   • 吞吐量: {best['tokens_per_second']:,.0f} tok/s")
+        best = results[0]
+        logger.info(f"最优配置: {best['config_str']}, 时延={best['step_time_ms']:.2f}ms, "
+                   f"显存={best['memory_gb']:.2f}GB, MFU={best['mfu']:.1%}, "
+                   f"吞吐量={best['tokens_per_second']:,.0f} tok/s")
     
     def generate_search_space(self, total_gpus: int,
                               max_tp: int = 8,
@@ -975,12 +934,9 @@ class PDCostModel:
                             "tp": tp, "pp": pp, "dp": dp, "ep": ep, "sharding": sharding
                         })
         
-        print(f"\n🔍 搜索配置空间...")
-        print(f"   并行配置数: {len(parallel_configs)}")
-        print(f"   seq_lens: {seq_lens}")
-        print(f"   micro_batch_sizes: {micro_batch_sizes}")
-        print(f"   gas_values: {gas_values}")
-        print(f"   总组合数: {len(parallel_configs) * len(seq_lens) * len(micro_batch_sizes) * len(gas_values)}")
+        logger.info(f"搜索空间: 并行配置={len(parallel_configs)}, seq_lens={seq_lens}, "
+                   f"mbs={micro_batch_sizes}, gas={gas_values}, "
+                   f"总组合={len(parallel_configs) * len(seq_lens) * len(micro_batch_sizes) * len(gas_values)}")
         
         # 遍历所有组合
         for pcfg in parallel_configs:
@@ -1040,35 +996,16 @@ class PDCostModel:
         return valid_results[:top_k]
     
     def _print_throughput_report(self, results: List[Dict], total_gpus: int):
-        """打印吞吐量排序报告"""
+        """记录吞吐量排序报告到日志"""
         if not results:
-            print("\n❌ 没有找到满足显存约束的配置！")
+            logger.warning("没有找到满足显存约束的配置")
             return
         
-        print("\n" + "=" * 140)
-        print(f"🚀 PDCostModel - {total_gpus}卡最优吞吐量配置 Top {len(results)}")
-        print("=" * 140)
-        print(f"{'排名':<4} {'并行配置':<28} {'seq_len':<8} {'mbs':<4} {'gas':<4} "
-              f"{'step(s)':<9} {'显存(GB)':<10} {'tok/s/GPU':<12} {'global_bs':<10}")
-        print("-" * 140)
-        
-        for r in results:
-            print(f"{r['rank']:<4} {r['parallel_str']:<28} {r['seq_len']:<8} "
-                  f"{r['micro_batch_size']:<4} {r['gradient_accumulation_steps']:<4} "
-                  f"{r['step_time_s']:<9.2f} {r['memory_gb']:<10.1f} "
-                  f"{r['tokens_per_second_per_gpu']:<12,.0f} {r['global_batch_size']:<10}")
-        
-        print("-" * 140)
-        
-        if results:
-            best = results[0]
-            print(f"\n🏆 最优配置:")
-            print(f"   并行: {best['parallel_str']}")
-            print(f"   seq_len={best['seq_len']}, mbs={best['micro_batch_size']}, gas={best['gradient_accumulation_steps']}")
-            print(f"   预计时延: {best['step_time_s']:.2f} s")
-            print(f"   显存占用: {best['memory_gb']:.1f} GB")
-            print(f"   吞吐量: {best['tokens_per_second_per_gpu']:,.0f} tok/s/GPU")
-            print(f"   Global Batch Size: {best['global_batch_size']}")
+        best = results[0]
+        logger.info(f"最优配置: {best['parallel_str']}, seq_len={best['seq_len']}, "
+                   f"mbs={best['micro_batch_size']}, gas={best['gradient_accumulation_steps']}, "
+                   f"时延={best['step_time_s']:.2f}s, 显存={best['memory_gb']:.1f}GB, "
+                   f"吞吐量={best['tokens_per_second_per_gpu']:,.0f} tok/s/GPU")
     
     def generate_yaml_config(self, config: Dict, output_path: str = None) -> str:
         """
@@ -1104,7 +1041,7 @@ dataloader_num_workers: 8
 prefetch_factor: 4
 
 ### model
-model_name_or_path: /root/paddlejob/workspace/env_run/zhangdongqi/Qwen3-30B-A3B-Base
+model_name_or_path: {config.get('model_path', './Qwen3-30B-A3B-Base')}
 _attn_implementation: flashmask
 use_qk_norm: true
 
@@ -1182,7 +1119,7 @@ continue_training: false
         if output_path:
             with open(output_path, 'w') as f:
                 f.write(yaml_content)
-            print(f"\n✅ 配置已保存到: {output_path}")
+            logger.info(f"配置已保存到: {output_path}")
         
         return yaml_content
 

@@ -676,15 +676,21 @@ class MemoryModel:
         # 临时缓冲区
         # 主要包含 logits FP32 转换（计算 loss 时 logits 从 BF16 转为 FP32）
         # logits_fp32 = mbs × seq × vocab × 4 bytes
-        # 注意：PaddleFormers 使用 chunked cross-entropy loss 优化
-        # 实际不需要同时保存完整 logits，只需要约 30% 的理论值
-        CHUNKED_LOSS_FACTOR = 0.3
+        # 
+        # 重要修正 (2026-02-27):
+        # 实测发现 cross_entropy_with_softmax 需要分配完整 logits 空间
+        # OOM 错误: "Cannot allocate 18.546875GB" = 8 * 4096 * 151936 * 4 / 1024^3
+        # 说明框架实际未启用 chunked cross-entropy，需要完整 logits
+        # 
+        # 此外 softmax 输出也需要同等大小的空间
+        # 总计: logits (FP32) + softmax_output (FP32) ≈ 2x
+        LOGITS_FACTOR = 2.0  # logits + softmax output
         logits_fp32_gb = (
             mbs * 
             seq_len * 
             self.model.vocab_size * 
             4  # float32 = 4 bytes
-        ) / (1024 ** 3) * CHUNKED_LOSS_FACTOR
+        ) / (1024 ** 3) * LOGITS_FACTOR
         
         # 其他临时缓冲（约为激活的 5%）
         other_temp_buffer = breakdown.activation_memory_gb * 0.05

@@ -8,7 +8,6 @@
 3. AllToAll - MoE EP
 4. P2P Send/Recv - PP 流水线
 
-参考 Galvatron 的通信建模方法
 """
 
 import math
