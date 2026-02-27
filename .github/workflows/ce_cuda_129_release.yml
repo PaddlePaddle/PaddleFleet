@@ -128,7 +128,6 @@ jobs:
           fi
           '
 
-
       - name: Terminate and delete the container
         if: ${{ always() }}
         run: |

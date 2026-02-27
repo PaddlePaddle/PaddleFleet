@@ -1,0 +1,289 @@
+name: 'multi card tests'
+description: '多卡测试用例'
+
+inputs:
+  docker_name:
+    description: 'Docker容器名称'
+    required: true
+    type: string
+  multi_python_version:
+    description: '多Python版本'
+    required: false
+    default: ''
+    type: string
+  case_base_name:
+    description: '测试用例基础名称'
+    required: true
+    type: string
+  formers_install_status:
+    description: 'PaddleFormers安装状态'
+    required: true
+    default: 'success'
+    type: string
+
+runs:
+  using: "composite"
+  steps:
+    - name: Multi Card Tests
+      run: |
+        echo "========================================"
+        echo "Starting multi card test suite"
+        echo "========================================"
+      shell: bash
+
+    - name: Integration test (GLM4.5 single-card)
+      id: glm45
+      if: always() && inputs.formers_install_status == 'success'
+      run: |
+        echo "::group::GLM4.5 test logs"
+        echo ">>> Running GLM4.5 single-card test <<<"
+        docker exec -t ${{ inputs.docker_name }} /bin/bash -c '
+        source /root/proxy
+        if [[ -n "${{ inputs.multi_python_version }}" ]]; then
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ inputs.multi_python_version }}
+        fi
+        export BASE_NAME=${{ inputs.case_base_name }}
+        export CASE_NAME=glm45_single_card.txt
+        bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
+        exit_code=$?
+        if [ $exit_code -ne 0 ]; then
+          echo "GLM4.5 single-card test failed, checking precision..."
+          bash -x PaddleFleet/ci/ce_check_precision.sh $CASE_NAME $BASE_NAME
+        fi
+        '
+        if [ $? -eq 0 ]; then
+          echo ">>> GLM4.5 test completed <<<"
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo ">>> GLM4.5 test failed <<<"
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        echo "::endgroup::"
+      shell: bash
+
+    - name: GLM4.5 pre-train
+      id: glm45_pt
+      if: always() && inputs.formers_install_status == 'success'
+      run: |
+        echo "::group::GLM4.5 PT logs"
+        echo ">>> Running GLM4.5 pre-train test <<<"
+        docker exec -t ${{ inputs.docker_name }} /bin/bash -c '
+        source /root/proxy
+        bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
+        glm45_exit_code=$?
+        if [[ "$glm45_exit_code" != "0" ]]; then
+          echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+          exit 1
+        else
+          echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+        fi
+        '
+      shell: bash
+
+    - name: GLM4.5 sft
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
+        glm45_exit_code=$?
+        if [[ "$glm45_exit_code" != "0" ]]; then
+          echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+          exit 1
+        else
+          echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+        fi
+        '
+
+    - name: GLM4.5 lora
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
+        glm45_exit_code=$?
+        if [[ "$glm45_exit_code" != "0" ]]; then
+          echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+          exit 1
+        else
+          echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+        fi
+        '
+
+    - name: GLM4.5 dpo
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
+        glm45_exit_code=$?
+        if [[ "$glm45_exit_code" != "0" ]]; then
+          echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
+          exit 1
+        else
+          echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
+        fi
+        '
+    - name: GLM4.5 dpo_lora
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+        '
+
+    - name: Integration test (GLM4.5 multi-card FP8)
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+        glm45_exit_code=$?
+        if [[ "$glm45_exit_code" != "0" ]]; then
+          echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+          exit 1
+        else
+          echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
+        fi
+        '
+
+
+    - name: GLM4.5 pre-train (Grouped GEMM)
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
+        glm45_exit_code=$?
+        if [[ "$glm45_exit_code" != "0" ]]; then
+          echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
+          exit 1
+        else
+          echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
+        fi
+        '
+
+    - name: Qwen pre-train
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+        '
+
+    - name: Qwen sft
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+        '
+
+    - name: Qwen lora
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+        '
+
+    - name: Qwen vl sft
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+        '
+
+    - name: Qwen vl lora
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+        '
+
+    - name: Qwen vl moe
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+        '
+
+    - name: Qwen3-vl-8k-fsdp
+      if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      run: |
+        docker exec -t ${{ env.container_name }} /bin/bash -ce '
+        source /root/proxy
+        timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+        '
+
+    - name: 📊 Test Summary
+      if: always()
+      run: |
+        echo "============================================"
+        echo "          SINGLE CARD TEST SUMMARY"
+        echo "============================================"
+
+        # 获取各步骤状态
+        GLM45_STATUS="${{ steps.glm45.outputs.status }}"
+        QWEN3_STATUS="${{ steps.qwen3.outputs.status }}"
+        QWEN3VL_STATUS="${{ steps.qwen3vl.outputs.status }}"
+
+        # 如果没有执行（条件不满足），标记为 skipped
+        [ -z "$GLM45_STATUS" ] && GLM45_STATUS="skipped"
+        [ -z "$QWEN3_STATUS" ] && QWEN3_STATUS="skipped"
+        [ -z "$QWEN3VL_STATUS" ] && QWEN3VL_STATUS="skipped"
+
+        # 打印表格
+        printf "| %-25s | %-10s |\n" "Test Phase" "Status"
+        printf "|---------------------------|------------|\n"
+        printf "| %-25s | %-10s |\n" "GLM4.5 single-card" "${GLM45_STATUS}"
+        printf "| %-25s | %-10s |\n" "Qwen3 single-card" "${QWEN3_STATUS}"
+        printf "| %-25s | %-10s |\n" "Qwen3-vl-8k single-card" "${QWEN3VL_STATUS}"
+
+        echo "============================================"
+
+        # 计算通过/失败统计
+        TOTAL=0
+        PASSED=0
+        FAILED=0
+        SKIPPED=0
+
+        for status in "$GLM45_STATUS" "$QWEN3_STATUS" "$QWEN3VL_STATUS"; do
+          if [ "$status" != "skipped" ]; then
+            TOTAL=$((TOTAL + 1))
+            if [ "$status" = "success" ]; then
+              PASSED=$((PASSED + 1))
+            else
+              FAILED=$((FAILED + 1))
+            fi
+          else
+            SKIPPED=$((SKIPPED + 1))
+          fi
+        done
+
+        echo ""
+        echo "📊 Statistics:"
+        echo "   Total executed: $TOTAL"
+        echo "   ✅ Passed: $PASSED"
+        echo "   ❌ Failed: $FAILED"
+        echo "   ⏭️  Skipped: $SKIPPED"
+        echo ""
+
+        # 最终结果
+        if [ $FAILED -gt 0 ]; then
+          echo "❌ TEST SUITE FAILED: $FAILED test(s) failed"
+          echo "============================================"
+          exit 1
+        elif [ $TOTAL -eq 0 ]; then
+          echo "⚠️  TEST SUITE SKIPPED: No tests were executed"
+          echo "============================================"
+        else
+          echo "✅ TEST SUITE PASSED: All $PASSED test(s) passed"
+          echo "============================================"
+        fi
+      shell: bash
