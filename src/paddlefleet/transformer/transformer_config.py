@@ -380,6 +380,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
 
+    moe_shared_expert_gate: bool = False
+    """Enable gate for shared expert."""
+
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
