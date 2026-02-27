@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 from enum import Enum
 
-from .config import (
+from ..config import (
     ModelConfig, ParallelConfig, TrainingConfig,
     ShardingStage, RecomputeGranularity
 )

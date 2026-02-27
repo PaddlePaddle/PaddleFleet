@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 from enum import Enum
 
-from .config import ModelConfig, ParallelConfig, TrainingConfig, HardwareConfig
+from ..config import ModelConfig, ParallelConfig, TrainingConfig, HardwareConfig
 
 
 class LayerType(Enum):

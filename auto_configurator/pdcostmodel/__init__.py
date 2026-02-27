@@ -11,7 +11,7 @@ pdcostmodel - 分布式训练代价模型
 
 from .config import ModelConfig, ParallelConfig
 from .costmodel import PDCostModel
-from .utils.calibration import get_hardware_config
+from .calibration import get_hardware_config
 
 __version__ = "0.1.0"
 __all__ = [

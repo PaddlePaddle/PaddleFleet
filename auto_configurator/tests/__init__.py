@@ -13,5 +13,7 @@
 # limitations under the License.
 
 """
-pdcost 单元测试模块
+Test suite for AutoConfigurator.
 """
+
+__version__ = "0.1.0"

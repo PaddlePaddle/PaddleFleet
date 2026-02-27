@@ -23,9 +23,9 @@ from .config import (
     ModelConfig, ParallelConfig, TrainingConfig, HardwareConfig,
     GPUSpec, NetworkSpec, ShardingStage, RecomputeGranularity
 )
-from .memory_model import MemoryModel, MemoryBreakdown, ShardingConfig, RecomputeConfig
-from .compute_model import ComputeModel
-from .comm_model import CommModel
+from .submodels.memory_model import MemoryModel, MemoryBreakdown, ShardingConfig, RecomputeConfig
+from .submodels.compute_model import ComputeModel
+from .submodels.comm_model import CommModel
 
 
 @dataclass
@@ -220,7 +220,7 @@ class PDCostModel:
         Returns:
             HardwareConfig: 硬件配置
         """
-        from .utils.calibration import HardwareCalibrator
+        from .calibration import HardwareCalibrator
         
         calibrator = HardwareCalibrator()
         config = calibrator.auto_calibrate(

@@ -1,0 +1,73 @@
+HARDWARE_SPECS = {
+    "H800_8gpu_1node": {
+        "gpu_name": "NVIDIA H800",
+        "gpu_memory_gb": 79.65,
+        "gpu_count": 8,
+        "fp32_tflops": 40.0,
+        "fp16_tflops": 603.01,
+        "bf16_tflops": 618.4,
+        "memory_bandwidth_gbps": 2325.44,
+        "intra_node_bandwidth_gbps": 0.0,
+        "calibrated": True,
+        "bf16_curve": {
+            "dtype": "bfloat16",
+            "peak_tflops": 618.4,
+            "fit_a": 0.246503,
+            "fit_b": -1.260603,
+            "fit_max": 1.0,
+            "points": [
+                {
+                    "size": 64,
+                    "tflops": 0.03,
+                    "efficiency": 0.0,
+                    "time_ms": 0.018,
+                },
+                {
+                    "size": 128,
+                    "tflops": 0.23,
+                    "efficiency": 0.0004,
+                    "time_ms": 0.019,
+                },
+                {
+                    "size": 256,
+                    "tflops": 1.78,
+                    "efficiency": 0.0029,
+                    "time_ms": 0.019,
+                },
+                {
+                    "size": 512,
+                    "tflops": 13.71,
+                    "efficiency": 0.0222,
+                    "time_ms": 0.02,
+                },
+                {
+                    "size": 1024,
+                    "tflops": 101.08,
+                    "efficiency": 0.1634,
+                    "time_ms": 0.021,
+                },
+                {
+                    "size": 2048,
+                    "tflops": 418.3,
+                    "efficiency": 0.6764,
+                    "time_ms": 0.041,
+                },
+                {
+                    "size": 4096,
+                    "tflops": 635.41,
+                    "efficiency": 1.0275,
+                    "time_ms": 0.216,
+                },
+                {
+                    "size": 8192,
+                    "tflops": 623.27,
+                    "efficiency": 1.0079,
+                    "time_ms": 1.764,
+                },
+            ],
+        },
+        "node_count": 1,
+        "calibrated_at": "2026-02-27T22:21:45.822852",
+        "pdcost_version": "1.0.0",
+    },
+}

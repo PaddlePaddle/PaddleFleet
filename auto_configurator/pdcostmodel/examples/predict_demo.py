@@ -13,10 +13,11 @@ if __name__ == "__main__":
     # 1. 加载模型和硬件 (从 JSON 加载，与实际训练一致)
     model = ModelConfig.from_json("../Qwen3-30B-A3B-Base/config.json")
     hardware = get_hardware_config(verbose=False)
+    print(hardware)
     costmodel = PDCostModel(model, hardware)
     
     # 2. 定义并行配置 (从 benchmark_best.log 提取: TP=1, PP=1, DP=1, EP=8, Sharding=8)
-    parallel = ParallelConfig(tp=1, pp=1, dp=1, ep=8, sharding='stage1', sharding_degree=8)
+    parallel = ParallelConfig(tp=1, pp=1, dp=8, ep=8, sharding='stage1', sharding_degree=8)
     
     # 3. 预测性能 (benchmark_best.log 配置: mbs=2, seq_len=8192, gas=64)
     result = costmodel.predict_calibrated(

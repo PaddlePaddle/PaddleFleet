@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from pdcostmodel import ModelConfig, PDCostModel, ParallelConfig
 from pdcostmodel.config import TrainingConfig
-from pdcostmodel.utils.calibration import get_hardware_config
+from pdcostmodel.calibration import get_hardware_config
 
 # 日志目录
 LOG_DIR = Path(__file__).parent / "logs"

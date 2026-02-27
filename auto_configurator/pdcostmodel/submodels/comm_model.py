@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 from enum import Enum
 
-from .config import HardwareConfig, ParallelConfig, ModelConfig, TrainingConfig
+from ..config import HardwareConfig, ParallelConfig, ModelConfig, TrainingConfig
 
 
 class CommType(Enum):
