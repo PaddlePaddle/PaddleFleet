@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-pip install protobuf==6.33.5
+# pip install protobuf==6.33.5
 disable_file="$work_dir/tests/multi_card_tests/disable_multi-card_uts.txt"
 test_dir="$work_dir/tests/multi_card_tests"
 yaml_config="$work_dir/tests/test_configs.yaml"
