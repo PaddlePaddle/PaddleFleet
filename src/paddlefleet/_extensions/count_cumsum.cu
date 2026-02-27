@@ -248,6 +248,11 @@ std::vector<paddle::Tensor> CountCumsumCuda(const paddle::Tensor& x,
   }
 
   if (N == 0) {
+    // For N == 0, semantics require all-zero outputs instead of uninitialized memory.
+    count_output.zero_();
+    if (do_cumsum) {
+      cumsum_output.zero_();
+    }
     return {count_output, cumsum_output};
   }
 
