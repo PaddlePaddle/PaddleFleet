@@ -285,6 +285,9 @@ jobs:
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
+          cd ..
+          mv PaddleFleet/* . 2>/dev/null || true
+          mv PaddleFleet/.[^.]* . 2>/dev/null || true
           '
 
       - name: Install PaddleFormers
@@ -316,28 +319,28 @@ jobs:
           python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
-      - name: Checkout code
-        run: |
-          pwd
-          source ../../../proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git temp
-          cd temp
-          git status
-          git config --global --add safe.directory temp
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
-          cd ..
-          mv temp/* . 2>/dev/null || true
-          mv temp/.[^.]* . 2>/dev/null || true
-          rmdir temp
-          # 验证最终目录结构
-          echo "=== 最终目录 ==="
-          ls -la
-          echo "=== action.yml 位置 ==="
-          ls -la .github/actions/cases/single-card/action.yml
-          git log -1
+      # - name: Checkout code
+      #   run: |
+      #     pwd
+      #     source ../../../proxy
+      #     git clone https://github.com/PaddlePaddle/PaddleFleet.git temp
+      #     cd temp
+      #     git status
+      #     git config --global --add safe.directory temp
+      #     git config user.name "PaddleCI"
+      #     git config user.email "paddle_ci@example.com"
+      #     git config pull.rebase false
+      #     git pull --no-edit origin pull/${PR_ID}/head
+      #     cd ..
+      #     mv temp/* . 2>/dev/null || true
+      #     mv temp/.[^.]* . 2>/dev/null || true
+      #     rmdir temp
+      #     # 验证最终目录结构
+      #     echo "=== 最终目录 ==="
+      #     ls -la
+      #     echo "=== action.yml 位置 ==="
+      #     ls -la .github/actions/cases/single-card/action.yml
+      #     git log -1
 
       - name: Run single card integration test
         uses: ./.github/actions/cases/single-card

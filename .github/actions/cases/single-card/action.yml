@@ -54,6 +54,7 @@ runs:
       shell: bash
 
     - name: Integration test (GLM4.5 single-card)
+      id: glm45
       if: always() && inputs.formers_install_status == 'success'
       run: |
         echo "::group::GLM4.5 test logs"
@@ -85,6 +86,7 @@ runs:
       shell: bash
 
     - name: Integration test (Qwen3-30B-A3B single-card)
+      id: qwen3
       if: always() && inputs.formers_install_status == 'success'
       run: |
         echo "::group::Qwen3 test logs"
@@ -116,6 +118,7 @@ runs:
       shell: bash
 
     - name: Qwen3-vl-8k-single-card
+      id: qwen3vl
       if: always() && inputs.formers_install_status == 'success'
       run: |
         echo "::group::Qwen3-vl test logs"
