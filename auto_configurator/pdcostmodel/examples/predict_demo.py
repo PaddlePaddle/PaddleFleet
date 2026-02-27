@@ -11,7 +11,7 @@ from pdcostmodel import ModelConfig, ParallelConfig, PDCostModel, get_hardware_c
 
 if __name__ == "__main__":
     # 1. 加载模型和硬件 (从 JSON 加载，与实际训练一致)
-    model = ModelConfig.from_json("../../Qwen3-30B-A3B-Base/config.json")
+    model = ModelConfig.from_json("../Qwen3-30B-A3B-Base/config.json")
     hardware = get_hardware_config(verbose=False)
     costmodel = PDCostModel(model, hardware)
     

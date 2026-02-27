@@ -45,9 +45,6 @@ def search(model_name: str = "qwen3-30b-a3b", total_gpus: int = 8):
         gbs=grid_search.gbs,
         min_model_parallel=grid_search.min_model_parallel,
         max_model_parallel=grid_search.max_model_parallel,
-        sharding=grid_search.sharding,
-        gas=grid_search.gas,
-        seq_len=grid_search.seq_len_list,
     )
     
  
@@ -65,42 +62,39 @@ def search(model_name: str = "qwen3-30b-a3b", total_gpus: int = 8):
                 # EP 必须 <= DP
                 if ep > dp:
                     continue
-                
-                for sharding in search_space.sharding:
-                    for mbs in search_space.mbs:
-                        for gas in search_space.gas:
-                            for seq_len in search_space.seq_len:
-                                try:
-                                    # 构建并行配置
-                                    parallel = ParallelConfig(
-                                        tp=tp, pp=pp, dp=dp, ep=ep, sharding=sharding
-                                    )
-                                    
-                                    # 使用 PDCostModel 预测性能
-                                    result = costmodel.predict_calibrated(
-                                        parallel,
-                                        micro_batch_size=mbs,
-                                        seq_len=seq_len,
-                                        gradient_accumulation_steps=gas,
-                                        tensorwise_offload_optimizer=True,
-                                        tensorwise_offload_ratio=0.95,
-                                    )
-                                    
-                                    # 过滤显存不足的配置
-                                    if not result.fits_memory:
-                                        continue
-                                    
-                                    results.append({
-                                        'tp': tp, 'pp': pp, 'dp': dp, 'ep': ep,
-                                        'sharding': sharding, 'mbs': mbs, 'gas': gas,
-                                        'seq_len': seq_len,
-                                        'tps': result.tokens_per_second_per_gpu,
-                                        'step_time_s': result.step_time_ms / 1000,
-                                        'memory_gb': result.memory_gb,
-                                        'mfu': result.mfu,
-                                    })
-                                except Exception:
-                                    continue
+
+                for mbs in search_space.mbs:
+                    try:
+                        # 构建并行配置
+                        parallel = ParallelConfig(
+                            tp=tp, pp=pp, dp=dp, ep=ep
+                        )
+                        
+                        # 使用 PDCostModel 预测性能
+                        result = costmodel.predict_calibrated(
+                            parallel,
+                            micro_batch_size=mbs,
+                            seq_len=4096,
+                            gradient_accumulation_steps=64,
+                            tensorwise_offload_optimizer=True,
+                            tensorwise_offload_ratio=0.95,
+                        )
+                        
+                        # 过滤显存不足的配置
+                        if not result.fits_memory:
+                            continue
+                        
+                        results.append({
+                            'tp': tp, 'pp': pp, 'dp': dp, 'ep': ep,
+                            'mbs': mbs,
+                            'max_seq_len': 4096,
+                            'tps': result.tokens_per_second_per_gpu,
+                            'step_time_s': result.step_time_ms / 1000,
+                            'memory_gb': result.memory_gb,
+                            'mfu': result.mfu,
+                        })
+                    except Exception:
+                        continue
     
     # 5. 按吞吐量排序
     results.sort(key=lambda x: -x['tps'])
@@ -111,8 +105,8 @@ def search(model_name: str = "qwen3-30b-a3b", total_gpus: int = 8):
 if __name__ == "__main__":
     result = search("qwen3-30b-a3b")
     if result:
-        print(f"\n最佳配置: tp={result['tp']}, pp={result['pp']}, dp={result['dp']}, ep={result['ep']}, sharding={result['sharding']}")
-        print(f"seq_len={result['seq_len']}, mbs={result['mbs']}, gas={result['gas']}")
+        print(f"\n最佳配置: tp={result['tp']}, pp={result['pp']}, dp={result['dp']}, ep={result['ep']}")
+        print(f"max_seq_len={result['max_seq_len']}, mbs={result['mbs']}")
         print(f"吞吐量: {result['tps']:.0f} tok/s/GPU")
         print(f"步长时间: {result['step_time_s']:.2f} s/step")
         print(f"显存占用: {result['memory_gb']:.2f} GB")
