@@ -18,15 +18,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
+from paddle.incubate.nn.functional.fused_rms_norm_ext import fused_rms_norm_ext
 from paddle.nn.functional import layer_norm
-
-try:
-    from paddle.incubate.nn.functional.fused_rms_norm_ext import (
-        fused_rms_norm_ext,
-    )
-except ImportError:
-    logging.warn("Fail to import fused_rms_norm_ext!")
-    fused_rms_norm_ext = None
 
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
@@ -75,9 +68,6 @@ class RMSNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
-        assert fused_rms_norm_ext is not None, (
-            "Enable fuse rms norm but paddle version is incorrect."
-        )
         return fused_rms_norm_ext(
             hidden_states, self.weight, self.variance_epsilon
         )[0].astype(self.weight.dtype)
