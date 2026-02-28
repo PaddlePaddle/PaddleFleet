@@ -121,6 +121,13 @@ class LayerNorm(paddle.nn.Layer):
         mark_as_sequence_parallel_parameter(self.weight)
 
 
+class FusedRMSNorm(RMSNorm):
+    def forward(self, hidden_states: Tensor):
+        return fused_rms_norm_ext(
+            hidden_states, self.weight, self.variance_epsilon
+        )[0].astype(self.weight.dtype)
+
+
 class WrappedPaddleNorm:
     def __new__(
         cls,
