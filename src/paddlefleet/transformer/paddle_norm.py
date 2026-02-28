@@ -18,15 +18,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
+from paddle.incubate.nn.functional.fused_rms_norm_ext import fused_rms_norm_ext
 from paddle.nn.functional import layer_norm
-
-try:
-    from paddle.incubate.nn.functional.fused_rms_norm_ext import (
-        fused_rms_norm_ext,
-    )
-except ImportError:
-    logging.warn("Fail to import fused_rms_norm_ext!")
-    fused_rms_norm_ext = None
 
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
@@ -75,36 +68,9 @@ class RMSNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
-        if self.config.fuse_rms_norm:
-            assert fused_rms_norm_ext is not None, (
-                "Enable fuse rms norm but paddle version is incorrect."
-            )
-            return fused_rms_norm_ext(
-                hidden_states, self.weight, self.variance_epsilon
-            )[0].astype(self.weight.dtype)
-
-        if paddle.in_dynamic_mode():
-            with paddle.amp.auto_cast(False):
-                variance = (
-                    hidden_states.astype("float32")
-                    .pow(2)
-                    .mean(-1, keepdim=True)
-                )
-                hidden_states = (
-                    paddle.rsqrt(variance + self.variance_epsilon)
-                    * hidden_states
-                )
-        else:
-            variance = (
-                hidden_states.astype("float32").pow(2).mean(-1, keepdim=True)
-            )
-            hidden_states = (
-                paddle.rsqrt(variance + self.variance_epsilon) * hidden_states
-            )
-
-        if self.weight.dtype in [paddle.float16, paddle.bfloat16]:
-            hidden_states = paddle.cast(hidden_states, self.weight.dtype)
-        return hidden_states * self.weight
+        return fused_rms_norm_ext(
+            hidden_states, self.weight, self.variance_epsilon
+        )[0].astype(self.weight.dtype)
 
     def enable_sequence_parallel(self):
         mark_as_sequence_parallel_parameter(self.weight)
@@ -157,9 +123,6 @@ class LayerNorm(paddle.nn.Layer):
 
 class FusedRMSNorm(RMSNorm):
     def forward(self, hidden_states: Tensor):
-        assert fused_rms_norm_ext is not None, (
-            "Enable fuse rms norm but paddle version is incorrect."
-        )
         return fused_rms_norm_ext(
             hidden_states, self.weight, self.variance_epsilon
         )[0].astype(self.weight.dtype)
@@ -190,29 +153,6 @@ class WrappedPaddleNorm:
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="WrappedPaddleNorm")
-
-
-class WrappedFusedNorm:
-    def __new__(
-        cls,
-        config: TransformerConfig,
-        hidden_size: int,
-        eps: float = 1e-5,
-        input_is_parallel: bool = False,
-    ):
-        if config.normalization == "RMSNorm":
-            norm_cls = FusedRMSNorm
-        elif config.normalization == "LayerNorm":
-            norm_cls = LayerNorm
-        else:
-            raise Exception("Only supports RMSNorm now.")
-
-        return norm_cls(
-            config=config,
-            normalized_shape=hidden_size,
-            norm_eps=eps,
-            input_is_parallel=config.sequence_parallel,
-        )
 
 
 class WrappedPaddleNormPipe(paddle.nn.Layer):
