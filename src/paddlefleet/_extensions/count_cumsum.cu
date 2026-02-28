@@ -247,16 +247,6 @@ std::vector<paddle::Tensor> CountCumsumCuda(const paddle::Tensor& x,
     cumsum_output = paddle::empty({0}, paddle::DataType::INT32, place);
   }
 
-  if (N == 0) {
-    // For N == 0, semantics require all-zero outputs instead of uninitialized
-    // memory.
-    count_output.zero_();
-    if (do_cumsum) {
-      cumsum_output.zero_();
-    }
-    return {count_output, cumsum_output};
-  }
-
   if (x.dtype() == paddle::DataType::INT32) {
     count_cumsum_cuda_impl<int>(
         x, count_output, cumsum_output, do_cumsum, N, E, stream);
