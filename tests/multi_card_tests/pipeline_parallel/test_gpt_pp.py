@@ -216,6 +216,10 @@ class TestPP(unittest.TestCase):
                 "_layers.9.1.self_attn.qkv_proj.weight": "da92c4047a99953688efcb8fce415bde",
                 "_layers.shared_layers.embed.embedding.embed_tokens.weight": "161fb3e084d8dfb71046a13310dd7857",
             }
+
+            for name, param in overlap_gpt_model.named_parameters():
+                print(f'"{name}": "{param.grad._md5sum()}"')
+
             for name, p in overlap_gpt_model.named_parameters():
                 assert p.grad._md5sum() == baseline[name]
 

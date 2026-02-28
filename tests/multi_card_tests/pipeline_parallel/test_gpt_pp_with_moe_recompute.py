@@ -248,6 +248,9 @@ class TestPP(unittest.TestCase):
             }
 
             for name, param in overlap_gpt_model.named_parameters():
+                print(f'"{name}": "{param.grad._md5sum()}"')
+
+            for name, param in overlap_gpt_model.named_parameters():
                 assert param.grad._md5sum() == baseline[name]
 
 
