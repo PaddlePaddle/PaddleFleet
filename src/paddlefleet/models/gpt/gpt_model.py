@@ -225,6 +225,13 @@ class GPTModel(PipelineLayer):
             )
             i += 1
 
+        # Place layer_norm after transformer_layers and before MTP. This aligns with Megatron-LM
+        # where hidden_states go through decoder.final_layernorm before being used by MTP and LM
+        # Head. In PaddleFleet, normed_main is passed through MTP layers to LM Head.
+        self.add_sequential_layer(
+            layers, LayerDesc(spec.layer_norm), name_prefix
+        )
+
         if spec.mtp is not None:
             for mtp_spec in spec.mtp:
                 self.add_sequential_layer(
@@ -236,10 +243,6 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
-
-        self.add_sequential_layer(
-            layers, LayerDesc(spec.layer_norm), name_prefix
-        )
 
         if tie_word_embeddings:
             self.add_sequential_layer(

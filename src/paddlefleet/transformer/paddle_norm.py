@@ -156,6 +156,18 @@ class WrappedPaddleNorm:
 
 
 class WrappedPaddleNormPipe(paddle.nn.Layer):
+    """Pipeline-compatible normalization layer.
+
+    This layer is placed after transformer_layers and before MTP in the pipeline,
+    aligning with Megatron-LM where hidden_states go through decoder.final_layernorm
+    before being used by both MTP and LM Head.
+
+    When MTP is enabled, the input is a concatenated tensor [main_hidden, mtp_emb_0, ...].
+    Only main_hidden (tensor_list[0]) is normalized; the remaining MTP embeddings are
+    passed through unchanged. The normalized main_hidden is then passed through MTP
+    layers (which transparently forward it) to LM Head.
+    """
+
     def __init__(
         self,
         config: TransformerConfig,
@@ -184,11 +196,8 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
         ):
-            rst_list = []
-            for i in range(self.config.num_nextn_predict_layers):
-                rst_list.append(self.norm(tensor_list[i + 1]))
             hidden_states_concat = paddle.concat(
-                [rst["hidden_states"], *rst_list]
+                [rst["hidden_states"], *tensor_list[1:]]
             )
             rst["hidden_states"] = hidden_states_concat
         return rst
