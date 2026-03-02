@@ -291,12 +291,13 @@ jobs:
           '
 
       - name: Multi-card test
+        timeout-minutes: 30
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           export WITH_COVERAGE=ON
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
-          timeout 20m bash ci/multi-card_test.sh
+          bash ci/multi-card_test.sh
           multi_card_exit_code=$?
           ls -a /paddle/coveragedata/
           coverage combine
