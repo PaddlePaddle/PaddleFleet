@@ -27,7 +27,6 @@ env:
   PADDLE_ROOT: /paddle
   ci_scripts: /paddle/ci
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
-  CI_name: test
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image_cu126: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda126-dev"
   docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
@@ -115,7 +114,6 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
-            -e CI_name \
             -e use_release \
             -e repo_flag="paddlefleet" \
             -e PIP_CACHE_DIR \
@@ -257,7 +255,6 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
-            -e CI_name \
             -e PIP_CACHE_DIR \
             -e repo_flag="paddlefleet" \
             -e use_release \
@@ -390,6 +387,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
+          echo "BASE_NAME=${CUDA_VERSION}-${PYTHON_VERSION}" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           GPU_DEVICES: ${{ env.GPU_DEVICES }}
@@ -397,6 +395,7 @@ jobs:
           CUDA_VERSION: ${{ env.CUDA_VERSION }}
           PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
           PADDLE_URL: ${{ env.PADDLE_URL }}
+          BASE_NAME: ${{ env.BASE_NAME }}
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
@@ -415,12 +414,12 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
-            -e CI_name \
             -e use_release \
             -e PIP_CACHE_DIR \
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
+            -e BASE_NAME \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -522,7 +521,7 @@ jobs:
       - name: Integration test (GLM4.5 single-card)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -531,8 +530,8 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
-            exit 1
+            export case_name="glm45_single_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
           fi
@@ -541,7 +540,7 @@ jobs:
       - name: Integration test (Qwen3-30B-A3B single-card)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -550,8 +549,8 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
-            exit 1
+            export case_name="qwen3_single_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
@@ -560,7 +559,7 @@ jobs:
       - name: Qwen3-vl-8k-single-card
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -569,8 +568,8 @@ jobs:
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: Qwen3-vl-8k-single-card.\033[0m"
-            exit 1
+            export case_name="qwen3vl_sft_single_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-single-card.\033[0m"
           fi
@@ -631,12 +630,14 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
+          echo "BASE_NAME=${CUDA_VERSION}-${PYTHON_VERSION}" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
           CUDA_VERSION: ${{ env.CUDA_VERSION }}
           PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
           PADDLE_URL: ${{ env.PADDLE_URL }}
+          BASE_NAME: ${{ env.BASE_NAME }}
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
@@ -655,11 +656,11 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e use_release \
-            -e CI_name \
             -e PIP_CACHE_DIR \
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
+            -e BASE_NAME \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -739,7 +740,7 @@ jobs:
       - name: GLM4.5 pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -748,8 +749,8 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
+            export case_name="glm45_pt"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -758,7 +759,7 @@ jobs:
       - name: GLM4.5 sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -767,8 +768,8 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
+            export case_name="glm45_sft"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -777,7 +778,7 @@ jobs:
       - name: GLM4.5 lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -786,8 +787,8 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
+            export case_name="glm45_lora"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -796,7 +797,7 @@ jobs:
       - name: GLM4.5 dpo
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -805,8 +806,8 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
-            exit 1
+            export case_name="glm45_dpo"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
           fi
@@ -815,20 +816,27 @@ jobs:
       - name: GLM4.5 dpo_lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+          exit_code=$?
+          if [[ "$exit_code" != "0" ]]; then
+            export case_name="glm45_dpo_lora"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo_lora.\033[0m"
+          fi
           '
 
 
       - name: GLM4.5 pre-train (Grouped GEMM)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -837,8 +845,8 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
-            exit 1
+            export case_name="glm45_pt_grouped_gemm"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
           fi
@@ -847,85 +855,134 @@ jobs:
       - name: Qwen pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+          exit_code=$?
+          if [[ "$exit_code" != "0" ]]; then
+            export case_name="qwen_pt"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen pre-train.\033[0m"
+          fi
           '
 
       - name: Qwen sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+          exit_code=$?
+          if [[ "$exit_code" != "0" ]]; then
+            export case_name="qwen_sft"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen sft.\033[0m"
+          fi
           '
 
       - name: Qwen lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+          exit_code=$?
+          if [[ "$exit_code" != "0" ]]; then
+            export case_name="qwen_lora"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen lora.\033[0m"
+          fi
           '
 
       - name: Qwen vl sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+          exit_code=$?
+          if [[ "$exit_code" != "0" ]]; then
+            export case_name="qwen3vl_sft_h20_tp8_multi_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen vl sft.\033[0m"
+          fi
           '
 
       - name: Qwen vl lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+          exit_code=$?
+          if [[ "$exit_code" != "0" ]]; then
+            export case_name="qwen3vl_lora_h20_multi_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen vl lora.\033[0m"
+          fi
           '
 
       - name: Qwen vl moe
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+          exit_code=$?
+          if [[ "$exit_code" != "0" ]]; then
+            export case_name="qwen3vl_sft_h20_moe_multi_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen vl moe.\033[0m"
+          fi
           '
 
       - name: Qwen3-vl-8k-fsdp
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+          exit_code=$?
+          if [[ "$exit_code" != "0" ]]; then
+            export case_name="qwen3vl_sft_h20_fsdp_multi_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-fsdp.\033[0m"
+          fi
           '
 
       - name: Terminate and delete the container
@@ -983,12 +1040,14 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
+          echo "BASE_NAME=${CUDA_VERSION}-${PYTHON_VERSION}" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
           CUDA_VERSION: ${{ env.CUDA_VERSION }}
           PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
           PADDLE_URL: ${{ env.PADDLE_URL }}
+          BASE_NAME: ${{ env.BASE_NAME }}
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
@@ -1007,11 +1066,11 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e use_release \
-            -e CI_name \
             -e PIP_CACHE_DIR \
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
+            -e BASE_NAME \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -1092,134 +1151,210 @@ jobs:
 
       - name: GLM4.5 pre-train
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="glm45_pt_multi_card_a100"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 pre-train.\033[0m"
+          fi
           '
 
       - name: GLM4.5 sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="glm45_sft_multi_card_a100"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 sft.\033[0m"
+          fi
           '
 
       - name: GLM4.5 lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="glm45_lora_multi_card_a100"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 lora.\033[0m"
+          fi
           '
 
       - name: GLM4.5 dpo
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
-          glm45_exit_code=$?
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="glm45_dpo_multi_card_a100"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
+          fi
           '
 
       - name: GLM4.5 dpo_lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="glm45_dpo_lora_multi_card_a100"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo_lora.\033[0m"
+          fi
           '
 
       - name: Qwen pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="qwen_pt_multi_card_a100"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen pre-train.\033[0m"
+          fi
           '
 
       - name: Qwen sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="qwen_sft_multi_card_a100"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen sft.\033[0m"
+          fi
           '
 
       - name: Qwen lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="qwen_lora_multi_card_a100"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen lora.\033[0m"
+          fi
           '
 
       - name: Qwen vl sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="qwen3vl_sft_a100_tp8_multi_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen vl sft.\033[0m"
+          fi
           '
 
       - name: Qwen vl lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="qwen3vl_lora_a100_multi_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen vl lora.\033[0m"
+          fi
           '
 
       - name: Qwen vl moe
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
+          exit_code=$?
+          if [ ${exit_code} -ne 0 ]; then
+            export case_name="qwen3vl_sft_a100_moe_multi_card"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: Qwen vl moe.\033[0m"
+          fi
           '
 
       - name: Terminate and delete the container
