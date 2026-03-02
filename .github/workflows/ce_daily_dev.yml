@@ -153,6 +153,10 @@ jobs:
           else
             paddle_url=${PADDLE_URL}
           fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
+          fi
           echo "Install uv"
           export WITH_COVERAGE=ON
           pip install --upgrade pip
@@ -315,6 +319,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           else
             paddle_url=${PADDLE_URL}
+          fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
@@ -500,6 +508,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           else
             paddle_url=${PADDLE_URL}
+          fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -740,6 +752,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           else
             paddle_url=${PADDLE_URL}
+          fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -1154,6 +1170,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           else
             paddle_url=${PADDLE_URL}
+          fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers

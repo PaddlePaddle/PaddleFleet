@@ -155,6 +155,10 @@ jobs:
           else
             paddle_url=${PADDLE_URL}
           fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
+          fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
           pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -321,6 +325,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           else
             paddle_url=${PADDLE_URL}
+          fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
@@ -511,6 +519,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           else
             paddle_url=${PADDLE_URL}
+          fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -757,6 +769,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           else
             paddle_url=${PADDLE_URL}
+          fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -1174,6 +1190,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           else
             paddle_url=${PADDLE_URL}
+          fi
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
