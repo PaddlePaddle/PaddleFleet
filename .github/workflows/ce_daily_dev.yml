@@ -135,6 +135,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
+          find . -maxdepth 1 -name "--*" -delete
           rm -rf * .[^.]*
           source /root/proxy
           mkdir -p /home/.cache/pip
@@ -305,6 +306,7 @@ jobs:
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          find . -maxdepth 1 -name "--*" -delete
           rm -rf * .[^.]*
           source /root/proxy
           pip install --upgrade pip
@@ -470,6 +472,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           nvidia-smi
+          find . -maxdepth 1 -name "--*" -delete
           rm -rf * .[^.]*
           source /root/proxy
           mkdir -p /home/.cache/pip
@@ -715,6 +718,7 @@ jobs:
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          find . -maxdepth 1 -name "--*" -delete
           rm -rf * .[^.]*
           source /root/proxy
           mkdir -p /home/.cache/pip
@@ -1130,6 +1134,7 @@ jobs:
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          find . -maxdepth 1 -name "--*" -delete
           rm -rf * .[^.]*
           source /root/proxy
           mkdir -p /home/.cache/pip
