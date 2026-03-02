@@ -157,7 +157,7 @@ jobs:
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           echo "Install uv"
           export WITH_COVERAGE=ON
           pip install --upgrade pip
@@ -168,7 +168,6 @@ jobs:
           git config pull.rebase false
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
@@ -303,7 +302,7 @@ jobs:
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
@@ -312,8 +311,6 @@ jobs:
           git submodule update --init --recursive
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
@@ -402,7 +399,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-          echo "BASE_NAME=${CUDA_VERSION}-${PYTHON_VERSION}" >> $GITHUB_ENV
+          echo "BASE_NAME=${CUDA_VERSION}-${PYTHON_VERSION}-H20" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           GPU_DEVICES: ${{ env.GPU_DEVICES }}
@@ -467,7 +464,7 @@ jobs:
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -475,8 +472,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          git checkout ${fleet_branch}
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -494,12 +490,13 @@ jobs:
           else
             paddle_url=${PADDLE_URL}
           fi
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${formers_branch}
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
@@ -651,7 +648,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-          echo "BASE_NAME=${CUDA_VERSION}-${PYTHON_VERSION}" >> $GITHUB_ENV
+          echo "BASE_NAME=${CUDA_VERSION}-${PYTHON_VERSION}-H20" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -682,6 +679,9 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
+            -e paddlefleet_url \
+            -e fleet_branch \
+            -e formers_branch \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -708,14 +708,17 @@ jobs:
             conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
             conda activate python${PYTHON_VERSION}
           fi
+          fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
+          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/$CUDA_VERSION/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -733,13 +736,14 @@ jobs:
           else
             paddle_url=${PADDLE_URL}
           fi
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFormers
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${formers_branch}
           git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           if [ "${use_release}" == "true" ]; then
@@ -1061,7 +1065,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-          echo "BASE_NAME=${CUDA_VERSION}-${PYTHON_VERSION}" >> $GITHUB_ENV
+          echo "BASE_NAME=${CUDA_VERSION}-${PYTHON_VERSION}-A100" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -1123,7 +1127,7 @@ jobs:
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -1132,9 +1136,6 @@ jobs:
           git config pull.rebase false
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
-          pip uninstall paddlefleet -y
-          pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -1152,14 +1153,14 @@ jobs:
           else
             paddle_url=${PADDLE_URL}
           fi
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
+          git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git log -1
           git checkout ${formers_branch}
+          git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
