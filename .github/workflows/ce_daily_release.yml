@@ -166,6 +166,7 @@ jobs:
           export WITH_COVERAGE=ON
           pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
+          cd PaddleFleet
           git config --global --add safe.directory /paddle/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
@@ -181,7 +182,7 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          bash PaddleFleet/ci/single_card_test.sh
+          bash ci/single_card_test.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
@@ -203,6 +204,7 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          cd PaddleFleet
           bash ci/single_card_sonic.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
@@ -336,6 +338,7 @@ jobs:
           rm -rf ./*
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           git config --global --add safe.directory /paddle/PaddleFleet
+          cd PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
