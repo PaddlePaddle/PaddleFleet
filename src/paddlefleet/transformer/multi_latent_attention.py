@@ -56,16 +56,14 @@ class MLASelfAttentionSublayersSpec:
     """Submodules for the MLA self-attention layer."""
 
     # TODO(nschank): Move layernorms back to the bottom once all other layers have defaults removed.
-    # q_norm: LayerNorm
-    # k v_norm: LayerNorm
-    q_norm: LayerSpec | type = None
-    kv_norm: LayerSpec | type = None
+    q_a_layernorm: LayerSpec | type = None
+    kv_a_layernorm: LayerSpec | type = None
 
     q_proj: LayerSpec | type = None
-    q_down_proj: LayerSpec | type = None
-    q_up_proj: LayerSpec | type = None
-    kv_down_proj: LayerSpec | type = None
-    kv_up_proj: LayerSpec | type = None
+    q_a_proj: LayerSpec | type = None
+    q_b_proj: LayerSpec | type = None
+    kv_a_proj_with_mqa: LayerSpec | type = None
+    kv_b_proj: LayerSpec | type = None
     core_attention: LayerSpec | type = None
     o_proj: LayerSpec | type = None
 
@@ -372,8 +370,8 @@ class MLASelfAttention(MultiLatentAttention):
             )
 
         else:
-            self.q_down_proj = build_layer(
-                sublayers_spec.q_down_proj,
+            self.q_a_proj = build_layer(
+                sublayers_spec.q_a_proj,
                 self.config.hidden_size,
                 self.config.q_lora_rank,
                 config=self.config,
@@ -381,13 +379,13 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 is_expert=False,
-                tp_comm_buffer_name="q_down_proj",
+                tp_comm_buffer_name="q_a_proj",
                 skip_weight_param_allocation=False,
                 tp_group=pg_collection.tp,
             )
 
-            self.q_up_proj = build_layer(
-                sublayers_spec.q_up_proj,
+            self.q_b_proj = build_layer(
+                sublayers_spec.q_b_proj,
                 self.config.q_lora_rank,
                 self.config.num_attention_heads * self.q_head_dim,
                 config=self.config,
@@ -396,12 +394,12 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 is_expert=False,
-                tp_comm_buffer_name="q_up_proj",
+                tp_comm_buffer_name="q_b_proj",
                 tp_group=pg_collection.tp,
             )
 
-        self.kv_down_proj = build_layer(
-            sublayers_spec.kv_down_proj,
+        self.kv_a_proj_with_mqa = build_layer(
+            sublayers_spec.kv_a_proj_with_mqa,
             self.config.hidden_size,
             self.config.kv_lora_rank + self.config.qk_rope_head_dim,
             config=self.config,
@@ -409,13 +407,13 @@ class MLASelfAttention(MultiLatentAttention):
             bias=False,
             skip_bias_add=False,
             is_expert=False,
-            tp_comm_buffer_name="kv_down_proj",
+            tp_comm_buffer_name="kv_a_proj_with_mqa",
             skip_weight_param_allocation=False,
             tp_group=pg_collection.tp,
         )
 
-        self.kv_up_proj = build_layer(
-            sublayers_spec.kv_up_proj,
+        self.kv_b_proj = build_layer(
+            sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
             self.config.num_attention_heads
             * (self.config.qk_nope_head_dim + self.config.v_head_dim),
@@ -425,33 +423,20 @@ class MLASelfAttention(MultiLatentAttention):
             bias=False,
             skip_bias_add=False,
             is_expert=False,
-            tp_comm_buffer_name="kv_up_proj",
+            tp_comm_buffer_name="kv_b_proj",
             tp_group=pg_collection.tp,
         )
 
-        # if self.config.q_lora_rank is not None:
-        #     self.q_norm = sublayers_spec.q_norm(
-        #         hidden_size=self.config.q_lora_rank,
-        #         config=self.config,
-        #         eps=self.config.rms_norm_eps,
-        #     )
-
-        # self.kv_norm = sublayers_spec.kv_norm(
-        #     hidden_size=self.config.kv_lora_rank,
-        #     config=self.config,
-        #     eps=self.config.rms_norm_eps,
-        # )
-
         if self.config.q_lora_rank is not None:
-            self.q_norm = build_layer(
-                sublayers_spec.q_norm,
+            self.q_a_layernorm = build_layer(
+                sublayers_spec.q_a_layernorm,
                 hidden_size=self.config.q_lora_rank,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
             )
 
-        self.kv_norm = build_layer(
-            sublayers_spec.kv_norm,
+        self.kv_a_layernorm = build_layer(
+            sublayers_spec.kv_a_layernorm,
             hidden_size=self.config.kv_lora_rank,
             config=self.config,
             eps=self.config.rms_norm_eps,
@@ -545,11 +530,11 @@ class MLASelfAttention(MultiLatentAttention):
         # QKV down projection and layernorm
         # =========================================
         if self.config.q_lora_rank is not None:
-            # if q_down_proj is ColumnParallelLinear:
+            # if q_a_proj is ColumnParallelLinear:
             #     q_compressed: [s, b, q_lora_rank / TP]
-            # elif q_down_proj is Linear:
+            # elif q_a_proj is Linear:
             #     q_compressed: [s / TP, b, q_lora_rank]
-            q_compressed, _ = self.q_down_proj(hidden_states)
+            q_compressed, _ = self.q_a_proj(hidden_states)
 
             # When output is sharded (ColumnParallelLinear), two things are needed to be
             # identical to a normal Linear.
@@ -567,11 +552,11 @@ class MLASelfAttention(MultiLatentAttention):
         else:
             q_compressed = hidden_states
 
-        # if kv_down_proj is ColumnParallelLinear:
+        # if kv_a_proj_with_mqa is ColumnParallelLinear:
         #     kv_combined: [s, b, (kv_lora_rank + qk_rope_head_dim) / TP]
-        # elif kv_down_proj is Linear:
+        # elif kv_a_proj_with_mqa is Linear:
         #     kv_combined: [s / TP, b, (kv_lora_rank + qk_rope_head_dim)]
-        kv_combined, _ = self.kv_down_proj(hidden_states)
+        kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
         if (
             kv_combined.size(-1)
             != self.config.kv_lora_rank + self.config.qk_rope_head_dim
@@ -596,10 +581,13 @@ class MLASelfAttention(MultiLatentAttention):
                 [self.config.kv_lora_rank, self.config.qk_rope_head_dim],
                 axis=-1,
             )
-            if get_pg_size(self.tp_group) > 1 and self.config.sequence_parallel:
+            if (
+                get_pg_size(self.pg_collection.tp) > 1
+                and self.config.sequence_parallel
+            ):
                 # k_pos_emb: [s, b, qk_rope_head_dim]
                 k_pos_emb = gather_from_sequence_parallel_region(
-                    k_pos_emb, group=self.tp_group
+                    k_pos_emb, group=self.pg_collection.tp
                 )
 
         if packed_seq_params is not None:
@@ -616,9 +604,9 @@ class MLASelfAttention(MultiLatentAttention):
 
         if self.config.q_lora_rank is not None:
             # q_compressed: [num_tokens, q_lora_rank]
-            q_compressed = self.q_norm(q_compressed)
+            q_compressed = self.q_a_layernorm(q_compressed)
 
-        kv_compressed = self.kv_norm(kv_compressed)
+        kv_compressed = self.kv_a_layernorm(kv_compressed)
 
         # =========================================
         # QKV up projection and RoPE apply
@@ -636,7 +624,7 @@ class MLASelfAttention(MultiLatentAttention):
             if self.config.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_up_proj(q_compressed)
+                q, _ = self.q_b_proj(q_compressed)
             else:
                 # q_compressed: [num_tokens, hidden_size]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
@@ -650,7 +638,7 @@ class MLASelfAttention(MultiLatentAttention):
             )
 
             # kv: [num_tokens, n * (qk_nope_head_dim + v_head_dim)]
-            kv, _ = self.kv_up_proj(kv_compressed)
+            kv, _ = self.kv_b_proj(kv_compressed)
 
             # kv: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
             kv = kv.view(
@@ -788,16 +776,16 @@ class MLASelfAttention(MultiLatentAttention):
 
     def _backward_kv_proj(self):
         """Computes weight gradients of KV projection layers"""
-        self.kv_up_proj.backward_dw()
-        self.kv_down_proj.backward_dw()
+        self.kv_b_proj.backward_dw()
+        self.kv_a_proj_with_mqa.backward_dw()
 
     def _backward_q_proj(self):
         """Computes weight gradients of Q projection layers"""
         if self.config.q_lora_rank is None:
             self.q_proj.backward_dw()
         else:
-            self.q_down_proj.backward_dw()
-            self.q_up_proj.backward_dw()
+            self.q_a_proj.backward_dw()
+            self.q_b_proj.backward_dw()
 
     def _backward_output_proj(self):
         """Computes weight gradients of output projection layer"""
