@@ -46,7 +46,7 @@ parse_yaml_patterns() {
 }
 
 get_num_gpus_for_test() {
-    local filepath=$1    # "tests/multi_card_tests/xxx/yy.py"
+    local filepath=$1     # "tests/multi_card_tests/xxx/yy.py"
     local pattern num
 
     while IFS='|' read -r pattern num; do
