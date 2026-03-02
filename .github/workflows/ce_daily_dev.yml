@@ -160,8 +160,8 @@ jobs:
           echo "Install uv"
           export WITH_COVERAGE=ON
           pip install --upgrade pip
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
-          git config --global --add safe.directory /paddle
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git
+          git config --global --add safe.directory /paddle/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
@@ -177,7 +177,7 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          bash ci/single_card_test.sh
+          bash PaddleFleet/ci/single_card_test.sh
           single_card_exit_code=$?
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
@@ -324,8 +324,8 @@ jobs:
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
-          git config --global --add safe.directory /paddle
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git
+          git config --global --add safe.directory /paddle/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
@@ -354,8 +354,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          export PYTHONPATH=/paddle:$PYTHONPATH
-          bash ci/multi-card_test.sh
+          export PYTHONPATH=/paddle/PaddleFleet:$PYTHONPATH
+          bash PaddleFleet/ci/multi-card_test.sh
           multi_card_exit_code=$?
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed.\033[0m"
