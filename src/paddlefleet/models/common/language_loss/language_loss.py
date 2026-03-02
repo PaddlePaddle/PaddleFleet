@@ -29,6 +29,9 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class LanguageLoss(FleetLayer):
+    # Class-level tracker for MTP loss, read by trainer for logging.
+    mtp_loss_tracker: dict[str, float] = {}
+
     def __init__(
         self,
         config: TransformerConfig,
@@ -108,6 +111,14 @@ class LanguageLoss(FleetLayer):
                     labels_cur_depth,
                 )
                 mtp_loss.append(loss_cur_depth)
+
+            # Store detached MTP loss tensors into class-level tracker.
+            # Use .detach() instead of .item() to avoid GPU synchronization on every
+            # micro-batch. The trainer will call .item() only at logging steps.
+            for i, loss_val in enumerate(mtp_loss):
+                LanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
+                    loss_val.detach()
+                )
 
             def add_loss(main_loss, loss):
                 if self.config.add_mtp_loss:

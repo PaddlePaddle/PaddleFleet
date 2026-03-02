@@ -322,6 +322,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             hidden_size=self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
+
         self.offload_context = nullcontext()
 
     def _concat_embeddings(
