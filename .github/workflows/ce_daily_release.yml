@@ -1,4 +1,4 @@
-name: CE Daily Dev
+name: CE Daily Release
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
-        description: '是否使用预编译的develop paddle 版本'
+        description: '是否使用预编译的release paddle版本'
         type: choice
         options:
           - 'true'
@@ -31,10 +31,13 @@ env:
   docker_image_cu126: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda126-dev"
   docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
   docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev"
-  paddle_url_cu126: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
-  paddle_url_cu129: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
-  paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
+  paddle_url_cu126: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
+  paddle_url_cu129: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
+  paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
+  paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/"
   use_release: ${{ inputs.use_release || 'true' }}
+  fleet_branch: "release/0.2"
+  formers_branch: "release/1.1"
 defaults:
   run:
     shell: bash
@@ -64,7 +67,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-DEV-single-card-test
+      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-Release-single-card-test
     steps:
       - name: Determine the runner
         run: |
@@ -121,6 +124,8 @@ jobs:
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
+            -e paddlefleet_url \
+            -e fleet_branch \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
@@ -150,6 +155,9 @@ jobs:
           else
             paddle_url=${PADDLE_URL}
           fi
+          fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
+          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           echo "Install uv"
           export WITH_COVERAGE=ON
           pip install --upgrade pip
@@ -158,6 +166,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
@@ -209,7 +218,7 @@ jobs:
             python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
-      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-multi-card_test-dev
+      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-multi-card_test-release
     steps:
       - name: setup cuda and python
         run: |
@@ -262,6 +271,8 @@ jobs:
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
+            -e paddlefleet_url \
+            -e fleet_branch \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -290,12 +301,16 @@ jobs:
           else
             paddle_url=${PADDLE_URL}
           fi
+          fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
+          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git submodule update --init --recursive
+          git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -362,7 +377,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-DEV-integration-test-single-card-release
+      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-Release-integration-test-single-card-release
     steps:
       - name: Determine the runner
         run: |
@@ -420,6 +435,9 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
+            -e paddlefleet_url \
+            -e fleet_branch \
+            -e formers_branch \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -447,6 +465,9 @@ jobs:
             conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
             conda activate python${PYTHON_VERSION}
           fi
+          fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
+          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -607,7 +628,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-DEV-integration-test-multi-card-release
+      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-Release-integration-test-multi-card-release
     steps:
       - name: setup cuda and python
         run: |
@@ -1017,7 +1038,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-DEV-integration-test-A100
+      TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-Release-integration-test-A100
     steps:
       - name: setup cuda and python
         run: |
@@ -1071,6 +1092,9 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
+            -e fleet_branch \
+            -e formers_branch \
+            -e paddlefleet_url \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -1097,17 +1121,20 @@ jobs:
             conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
             conda activate python${PYTHON_VERSION}
           fi
+          fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
+          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -1132,6 +1159,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
+          git checkout ${formers_branch}
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
