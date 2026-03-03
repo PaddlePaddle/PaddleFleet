@@ -227,10 +227,7 @@ class MoonVision3dPatchEmbed(FleetLayer):
         # apply positional embedding
         hidden_states = self.pos_emb(hidden_states, grid_thws)
 
-        rotary_pos_emb = self.rotary_pos_emb(grid_thws)
-        rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cos_sin(
-            grid_thws
-        )
+        rope_freqs_cis = self.rotary_pos_emb.get_freqs_cis(grid_thws)
 
         preproc_output = {
             "grid_thws": grid_thws,
@@ -239,8 +236,6 @@ class MoonVision3dPatchEmbed(FleetLayer):
             "attn_mask_startend_row_indices": dict_args.get(
                 "attn_mask_startend_row_indices", None
             ),
-            "rotary_pos_emb": rotary_pos_emb,
-            "rotary_pos_cos": rotary_pos_cos,
-            "rotary_pos_sin": rotary_pos_sin,
+            "rope_freqs_cis": rope_freqs_cis,
         }
         return preproc_output

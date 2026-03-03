@@ -120,37 +120,9 @@ class KimiK25VisionTransformerLayer(TransformerLayer):
             )
             context = dict_args.get("context", None)
             context_mask = dict_args.get("context_mask", None)
-            rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
-            rotary_pos_cos = dict_args.get("rotary_pos_cos", None)
-            rotary_pos_sin = dict_args.get("rotary_pos_sin", None)
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
-
-            assert (rotary_pos_sin is None) == (rotary_pos_cos is None)
-
-            if rotary_pos_cos is not None and rotary_pos_sin is not None:
-                rotary_pos_cos = rotary_pos_cos.clone()
-                rotary_pos_sin = rotary_pos_sin.clone()
-                if self.config.apply_rope_fusion:
-                    rotary_pos_cos = rotary_pos_cos[0, ...]
-                    rotary_pos_sin = rotary_pos_sin[0, ...]
-                    if rotary_pos_cos.ndim == 2:
-                        rotary_pos_cos = rotary_pos_cos.reshape(
-                            [
-                                1,
-                                rotary_pos_cos.shape[0],
-                                1,
-                                rotary_pos_cos.shape[1],
-                            ]
-                        )
-                        rotary_pos_sin = rotary_pos_sin.reshape(
-                            [
-                                1,
-                                rotary_pos_sin.shape[0],
-                                1,
-                                rotary_pos_sin.shape[1],
-                            ]
-                        )
+            rope_freqs_cis = dict_args.get("rope_freqs_cis", None)
 
             outputs = recompute(
                 self._forward_impl,
@@ -161,11 +133,9 @@ class KimiK25VisionTransformerLayer(TransformerLayer):
                 else None,
                 context=context,
                 context_mask=context_mask,
-                rotary_pos_emb=rotary_pos_emb.clone()
-                if rotary_pos_emb is not None
+                rope_freqs_cis=rope_freqs_cis.clone()
+                if rope_freqs_cis is not None
                 else None,  # Clone is necessary!
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
             )
@@ -178,8 +148,6 @@ class KimiK25VisionTransformerLayer(TransformerLayer):
             output, context = outputs[0], outputs[1]
         else:
             output, context = outputs, None
-
-        deepstack_feature = outputs[-1]
 
         rst = OrderedDict()
         rst = {"hidden_states": output}
@@ -197,9 +165,7 @@ class KimiK25VisionTransformerLayer(TransformerLayer):
         attn_mask_startend_row_indices: paddle.Tensor = None,
         context: paddle.Tensor = None,
         context_mask: paddle.Tensor = None,
-        rotary_pos_emb: paddle.Tensor = None,
-        rotary_pos_cos: paddle.Tensor = None,
-        rotary_pos_sin: paddle.Tensor = None,
+        rope_freqs_cis: paddle.Tensor = None,
         attention_bias: paddle.Tensor = None,
         packed_seq_params: PackedSeqParams = None,
     ):
@@ -213,9 +179,7 @@ class KimiK25VisionTransformerLayer(TransformerLayer):
             attn_mask_startend_row_indices=attn_mask_startend_row_indices,
             context=context,
             context_mask=context_mask,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
+            rope_freqs_cis=rope_freqs_cis,
             attention_bias=attention_bias,
             in_recompute=self.full_recompute,
         )

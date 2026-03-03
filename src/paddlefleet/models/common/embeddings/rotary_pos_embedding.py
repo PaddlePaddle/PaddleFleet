@@ -409,12 +409,13 @@ class Rope2DPosEmbRepeated(nn.Layer):
         freqs_cis = freqs_cis.reshape(self.max_height, self.max_width, -1)
         return freqs_cis
 
-    def forward(self, grid_thws: paddle.Tensor) -> paddle.Tensor:
+    def get_freqs_cis(self, grid_thws: paddle.Tensor) -> paddle.Tensor:
         """
         Args:
             grid_thws (paddle.Tensor): grid time, height and width
-         Returns:
-            Tensor: Embeddings after applying RoPE. shape (sum(t * height * width), dim//2)
+
+        Returns:
+            freqs_cis: tensor of shape (sum(t * height * width), dim//2)
         """
         if not hasattr(self, "freqs_cis"):
             self.register_buffer(
@@ -437,6 +438,16 @@ class Rope2DPosEmbRepeated(nn.Layer):
             ],
             dim=0,
         )
+        return freqs_cis
+
+    def forward(self, grid_thws: paddle.Tensor) -> paddle.Tensor:
+        """
+        Args:
+            grid_thws (paddle.Tensor): grid time, height and width
+         Returns:
+            Tensor: Embeddings after applying RoPE. shape (sum(t * height * width), dim//2)
+        """
+        freqs_cis = self.get_freqs_cis(grid_thws)
         rotary_pos_emb = paddle.angle(freqs_cis)
         self.rotary_pos_cos = paddle.real(freqs_cis)
         self.rotary_pos_sin = paddle.imag(freqs_cis)
@@ -445,7 +456,7 @@ class Rope2DPosEmbRepeated(nn.Layer):
     def get_cos_sin(self, grid_thws: int, offset: int = 0) -> (Tensor, Tensor):
         """Cosine and sine values for RoPE are precomputed for all positions up to the maximum
         sequence length"""
-        if self.rotary_pos_sin is None or self.rotary_pos_sin is None:
+        if self.rotary_pos_cos is None or self.rotary_pos_sin is None:
             self.forward(grid_thws)
 
         return self.rotary_pos_cos, self.rotary_pos_sin
