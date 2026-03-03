@@ -191,7 +191,10 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
                 hidden_states_concat, self.config.num_nextn_predict_layers + 1
             )
             dict_args["hidden_states"] = tensor_list[0]
-        rst = {"hidden_states": self.norm(dict_args["hidden_states"])}
+        rst = {
+            **dict_args,
+            "hidden_states": self.norm(dict_args["hidden_states"]),
+        }
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
