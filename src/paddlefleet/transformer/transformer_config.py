@@ -476,6 +476,62 @@ class TransformerConfig(ModelParallelConfig):
     using_sonic_moe: bool = False
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
 
+    ####################
+    # MLA
+    ####################
+    """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.
+
+    The initialization function has an argument for each parameter, including those in
+    ModelParallelConfig. Included YaRN RoPE parameters that is fused in MLA.
+    """
+
+    q_lora_rank: int = 512
+    """Rank of Query tensor's low rank representation."""
+
+    kv_lora_rank: int = 512
+    """Rank of Key and Value tensors' low rank representation."""
+
+    qk_nope_head_dim: int = 64
+    """Dimension of the head in the QK projection. q_head_dim = qk_nope_head_dim + qk_rope_head_dim. Original qk_head_dim"""
+
+    qk_rope_head_dim: int = 64
+    """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
+
+    v_head_dim: int = 128
+    """Dimension of the head in the V projection."""
+
+    rope_type: str = "yarn"
+    """Type of RoPE to use. Default to yarn, options are rope and yarn."""
+
+    rotary_base: float = 10000
+    """Rotary base for the rotary embeddings, used by rope and yarn."""
+
+    rotary_percent: float = 1.0
+    """Rotary percent for the rotary embeddings, used by rope."""
+
+    rotary_scaling_factor: float = 40
+    """Rotary scaling factor for the rotary embeddings, used by yarn."""
+
+    original_max_position_embeddings: int = 4096
+    """Original maximum position embeddings for the original model, used by yarn."""
+
+    beta_fast: float = 32
+    """Beta fast for YaRN RoPE, used by yarn."""
+
+    beta_slow: float = 1
+    """Beta slow for YaRN RoPE, used by yarn."""
+
+    mscale: float = 1.0
+    """Mscale for YaRN RoPE in Multi-Latent Attention, used by yarn."""
+
+    mscale_all_dim: float = 0.0
+    """Mscale all dimensions for YaRN RoPE in Multi-Latent Attention, used by yarn."""
+
+    cache_mla_latents: bool = False
+    """Cache the low dimensional tensors for MLA rather than full KV cache.
+       This is only for the dynamic inference backend and requires that
+       Flash MLA is installed."""
+
     @classmethod
     def from_config(cls, config_dict):
         # note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
@@ -569,10 +625,10 @@ class TransformerConfig(ModelParallelConfig):
         if self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
 
-        if self.first_k_dense_replace and self.moe_layer_freq:
-            raise ValueError(
-                "Cannot specify both first_k_dense_replace and moe_layer_freq."
-            )
+        # if self.first_k_dense_replace and self.moe_layer_freq:
+        #     raise ValueError(
+        #         "Cannot specify both first_k_dense_replace and moe_layer_freq."
+        #     )
         if self.first_k_dense_replace is None and self.moe_layer_freq is None:
             self.moe_layer_freq = 1
         if self.first_k_dense_replace:
@@ -635,3 +691,17 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
+
+        if (
+            self.multi_latent_attention
+            and self.apply_rope_fusion
+            and self.rope_type != "yarn"
+        ):
+            raise ValueError(
+                "apply_rope_fusion for MLA only works with YARN RoPE."
+            )
+
+        if self.cache_mla_latents:
+            assert self.apply_rope_fusion is False, (
+                "Rope Fusion is not compatible with caching latents"
+            )
