@@ -485,9 +485,6 @@ class TransformerConfig(ModelParallelConfig):
     ModelParallelConfig. Included YaRN RoPE parameters that is fused in MLA.
     """
 
-    multi_latent_attention: bool = True
-    """Whether to use Multi-Latent Attention."""
-
     q_lora_rank: int = 512
     """Rank of Query tensor's low rank representation."""
 
@@ -502,9 +499,6 @@ class TransformerConfig(ModelParallelConfig):
 
     v_head_dim: int = 128
     """Dimension of the head in the V projection."""
-
-    normalization: str = "RMSNorm"
-    """Default normalization layer for MLA models is RMSNorm."""
 
     rope_type: str = "yarn"
     """Type of RoPE to use. Default to yarn, options are rope and yarn."""
@@ -631,10 +625,10 @@ class TransformerConfig(ModelParallelConfig):
         if self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
 
-        if self.first_k_dense_replace and self.moe_layer_freq:
-            raise ValueError(
-                "Cannot specify both first_k_dense_replace and moe_layer_freq."
-            )
+        # if self.first_k_dense_replace and self.moe_layer_freq:
+        #     raise ValueError(
+        #         "Cannot specify both first_k_dense_replace and moe_layer_freq."
+        #     )
         if self.first_k_dense_replace is None and self.moe_layer_freq is None:
             self.moe_layer_freq = 1
         if self.first_k_dense_replace:
