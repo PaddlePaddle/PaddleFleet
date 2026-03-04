@@ -21,11 +21,14 @@ IS_NVIDIA = False
 IS_XPU = False
 IS_ILUVATAR_GPU = False
 IS_METAX_GPU = False
+_initialized = False
 
 
 def init_backend_type():
-    global IS_NVIDIA, IS_XPU, IS_ILUVATAR_GPU, IS_METAX_GPU
-
+    global IS_NVIDIA, IS_XPU, IS_ILUVATAR_GPU, IS_METAX_GPU, _initialized
+    if _initialized:
+        return
+    _initialized = True
     typelist = {"on", "yes", "1", "true"}
     IS_NVIDIA = os.environ.get("IS_NVIDIA", "0").lower() in typelist
     IS_XPU = os.environ.get("IS_XPU", "0").lower() in typelist
@@ -72,3 +75,6 @@ def init_backend_type():
         logging.getLogger(
             "Please verify your environment and ensure that device information retrieval commands are functional. NVIDIA(nvidia-smi), XPU(xpu-smi), MetaX-GPU(mx-smi), and Iluvatar-GPU(ixsmi) are supported! You may also configure environment variables manually: IS_NVIDIA/IS_XPU/IS_ILUVATAR_GPU/IS_METAX_GPU"
         )
+
+
+init_backend_type()

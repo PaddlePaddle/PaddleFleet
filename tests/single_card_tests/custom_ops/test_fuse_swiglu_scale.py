@@ -20,7 +20,7 @@ import paddle.nn.functional as F
 from paddle import base
 from paddle.base import core
 
-from paddlefleet.ops import fused_swiglu_scale
+from paddlefleet.fusions.fused_swiglu_scale import fused_swiglu_scale_forward
 
 
 class TestFusedSwiGLUScale(unittest.TestCase):
@@ -91,7 +91,7 @@ class TestFusedSwiGLUScale(unittest.TestCase):
 
         # Custom Op implementation
         # Note: The C++ op might return a list [Tensor], handle it if necessary
-        ret = fused_swiglu_scale(x_custom, scale_custom)
+        ret = fused_swiglu_scale_forward(x_custom, scale_custom)
         out_custom = ret[0] if isinstance(ret, (list, tuple)) else ret
 
         # 5. Backward Pass
