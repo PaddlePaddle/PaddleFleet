@@ -188,6 +188,9 @@ class TestGPTModel(unittest.TestCase):
                     f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
                 )
             else:  # 12.X
+                assert cuda_minor == 6, (
+                    f"cuda minor version not equal ({cuda_minor} != 6), please check your environment"
+                )
                 if cuda_minor == 6:
                     assert loss.item() == 5.239708423614502, (
                         f"loss not equal ({loss.item()} != 5.239708423614502), please check your modify"
