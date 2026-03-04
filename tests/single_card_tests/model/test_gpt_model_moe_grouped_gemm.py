@@ -188,9 +188,6 @@ class TestGPTModel(unittest.TestCase):
                     f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
                 )
             else:  # 12.X
-                assert cuda_minor == 6, (
-                    f"cuda minor version not equal ({cuda_minor} != 6), please check your environment"
-                )
                 if cuda_minor == 6:
                     assert loss.item() == 5.239708423614502, (
                         f"loss not equal ({loss.item()} != 5.239708423614502), please check your modify"
@@ -198,12 +195,13 @@ class TestGPTModel(unittest.TestCase):
                     assert embed_tokens_grad_norm == 2.796875, (
                         f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
                     )
-                assert loss.item() == 5.239149570465088, (
-                    f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
-                )
-                assert embed_tokens_grad_norm == 2.796875, (
-                    f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
-                )
+                else:  # 12.9
+                    assert loss.item() == 5.239149570465088, (
+                        f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
+                    )
+                    assert embed_tokens_grad_norm == 2.796875, (
+                        f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
+                    )
         elif judge_machine_type() == "V":
             pass  # TODO: add V machine test
 
