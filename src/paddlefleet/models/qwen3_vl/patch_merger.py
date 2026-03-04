@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from paddle import nn
 
 from ...spec_utils import LayerSpec, build_layer
-from ...tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from ...transformer.identity_op import IdentityOp
 
 
@@ -47,32 +46,12 @@ class Qwen3VLVisionPathMerger(nn.Module):
         )
         self.use_postshuffle_norm = use_postshuffle_norm
 
-        self.linear_fc1 = build_layer(
-            ColumnParallelLinear,
-            config=config,
-            input_size=self.hidden_size,
-            output_size=self.hidden_size,
-            init_method=config.init_method,
-            bias=config.use_bias,
-            skip_bias_add=False,
-            gather_output=False,
-            is_expert=False,
-        )
+        self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
         self.act_fn = nn.GELU()
-        self.linear_fc2 = build_layer(
-            RowParallelLinear,
-            config=config,
-            input_size=self.hidden_size,
-            output_size=dim,
-            init_method=config.output_layer_init_method,
-            input_is_parallel=True,
-            bias=config.use_bias,
-            skip_bias_add=False,
-            is_expert=False,
-        )
+        self.linear_fc2 = nn.Linear(self.hidden_size, dim)
 
     def forward(self, dict_args):
-        x = dict_args["hidden_states"]
+        x = dict_args.pop("hidden_states")
         if self.use_postshuffle_norm:
             x = self.norm(x.reshape([-1, self.hidden_size]))
             x = x.reshape([-1, self.hidden_size])
@@ -80,8 +59,7 @@ class Qwen3VLVisionPathMerger(nn.Module):
             x = self.norm(x)
             x = x.reshape([-1, self.hidden_size])
 
-        x, _ = self.linear_fc1(x)
-        x, _ = self.linear_fc2(self.act_fn(x))
+        x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
         rst = {"hidden_states": x}
         rst = {**dict_args, **rst}
         return rst

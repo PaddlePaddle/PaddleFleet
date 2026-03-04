@@ -93,11 +93,19 @@ def get_gpt_layer_local_spec(
     backend = LocalSpecProvider()
     # Adjust for RMS norm.
     if normalization == "RMSNorm":
-        layer_norm = backend.layer_norm(rms_norm=True, for_qk=False)
-        qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
+        layer_norm = backend.layer_norm(
+            rms_norm=True, for_qk=False, eps=config.rms_norm_eps
+        )
+        qk_norm = backend.layer_norm(
+            rms_norm=True, for_qk=True, eps=config.rms_norm_eps
+        )
     else:
-        layer_norm = backend.layer_norm(rms_norm=False, for_qk=False)
-        qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
+        layer_norm = backend.layer_norm(
+            rms_norm=False, for_qk=False, eps=config.rms_norm_eps
+        )
+        qk_norm = backend.layer_norm(
+            rms_norm=False, for_qk=True, eps=config.rms_norm_eps
+        )
 
     mlp = get_mlp_layer_spec_for_backend(
         backend=backend,

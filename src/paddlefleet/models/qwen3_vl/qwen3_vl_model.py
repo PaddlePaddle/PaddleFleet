@@ -118,6 +118,7 @@ class Qwen3VLVisionTransformerLayer(TransformerLayer):
         # runners in the cuda graph manager
         dict_args.pop("dynamic_inference_decode_only", None)
         dict_args.pop("position_ids", None)
+        deepstack_features_list = dict_args.pop("deepstack_features_list", None)
         if self.full_recompute:
             hidden_states = dict_args["hidden_states"]
             attention_mask = dict_args.get("attention_mask", None)
@@ -189,10 +190,11 @@ class Qwen3VLVisionTransformerLayer(TransformerLayer):
         rst = {"hidden_states": hidden_states}
         if context is not None:
             rst["context"] = context
-        if "deepstack_feature_lists" not in dict_args:
-            dict_args["deepstack_feature_lists"] = []
+        if deepstack_features_list is None:
+            deepstack_features_list = []
         if deepstack_feature is not None:
-            dict_args["deepstack_feature_lists"].append(deepstack_feature)
+            deepstack_features_list.append(deepstack_feature)
+        rst["deepstack_features_list"] = deepstack_features_list
         rst = {**dict_args, **rst}
         return rst
 
@@ -468,7 +470,6 @@ class Qwen3VLModelDist(FleetLayer):
     def __init__(
         self,
         config: TransformerConfig,
-        tokenizer=None,
         pre_process: bool = True,
         post_process: bool = True,
         add_encoder: bool = True,
@@ -728,7 +729,7 @@ class Qwen3VLModelDist(FleetLayer):
         vision_output = self.vision_model(dict_args)
         image_embeds, deepstack_image_embeds = (
             vision_output["hidden_states"],
-            vision_output["deepstack_feature_lists"],
+            vision_output["deepstack_features_list"],
         )
         split_sizes = (
             image_grid_thw.prod(-1)

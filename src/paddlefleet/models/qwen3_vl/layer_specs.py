@@ -42,8 +42,12 @@ def get_qwen3_vl_vision_layer_local_spec(
     append_deepstack: bool = False,
 ) -> LayerSpec:
     backend = LocalSpecProvider()
-    layer_norm = backend.layer_norm(rms_norm=False, for_qk=False, fused=False)
-    qk_norm = backend.layer_norm(rms_norm=False, for_qk=True, fused=False)
+    layer_norm = backend.layer_norm(
+        rms_norm=False, for_qk=False, fused=False, eps=config.rms_norm_eps
+    )
+    qk_norm = backend.layer_norm(
+        rms_norm=False, for_qk=True, fused=False, eps=config.rms_norm_eps
+    )
     mlp = get_mlp_layer_spec_for_backend(
         backend=backend,
     )
@@ -55,6 +59,7 @@ def get_qwen3_vl_vision_layer_local_spec(
                 rms_norm=(config.normalization == "RMSNorm"),
                 for_qk=False,
                 fused=False,
+                eps=1e-6,
             )
         ),
         extra_kwargs={"config": config, "use_postshuffle_norm": True},
@@ -139,7 +144,10 @@ def get_qwen3_vl_vision_spec(
         )
     )
     merger_norm = backend.layer_norm(
-        rms_norm=(config.normalization == "RMSNorm"), for_qk=False
+        rms_norm=(config.normalization == "RMSNorm"),
+        for_qk=False,
+        fused=False,
+        eps=1e-6,
     )
     merger_spec = LayerSpec(
         layer=Qwen3VLVisionPathMerger,
