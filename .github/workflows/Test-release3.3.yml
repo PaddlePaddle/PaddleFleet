@@ -787,6 +787,22 @@ jobs:
           fi
           '
 
+      - name: GLM4.5 pre-train (EP4)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi-ep4
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-ep4/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          ls -a /workspace/PaddleFleet/coveragedata-multi-ep4
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-ep4/coverage.xml
+          coverage report -m
+          '
+
       - name: Qwen pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
@@ -835,6 +851,66 @@ jobs:
           coverage report -m
           '
 
+      - name: Qwen vl sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-vl-sft
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-vl-sft/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-vl-sft/coverage.xml
+          coverage report -m
+          '
+
+      - name: Qwen vl lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-vl-lora
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-vl-lora/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-vl-lora/coverage.xml
+          coverage report -m
+          '
+
+      - name: Qwen vl moe
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-vl-moe
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-vl-moe/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-vl-moe/coverage.xml
+          coverage report -m
+          '
+
+      - name: Qwen3-vl-8k-fsdp
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          mkdir /workspace/PaddleFleet/coveragedata-qwen-vl-fsdp
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-vl-fsdp/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+          coverage --version
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-vl-fsdp/coverage.xml
+          coverage report -m
+          '
+
       - name: H20 Coverage Upload to BOS
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
@@ -848,11 +924,16 @@ jobs:
           cp /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml coverage-multi-lora.xml
           cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
           cp /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml coverage-multi-grouped-gemm.xml
+          cp /workspace/PaddleFleet/coveragedata-multi-ep4/coverage.xml coverage-multi-ep4.xml
           cp /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml coverage-multi-dpo.xml
           cp /workspace/PaddleFleet/coveragedata-dpo-lora/coverage.xml coverage-dpo-lora.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml coverage-qwen-multi-pt.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
           cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-vl-sft/coverage.xml coverage-qwen-vl-sft.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-vl-lora/coverage.xml coverage-qwen-vl-lora.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-vl-moe/coverage.xml coverage-qwen-vl-moe.xml
+          cp /workspace/PaddleFleet/coveragedata-qwen-vl-fsdp/coverage.xml coverage-qwen-vl-fsdp.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
           python ${push_file} coverage-multi-pt.xml ${target_path_multi}
           python ${push_file} coverage-multi-sft.xml ${target_path_multi}
@@ -861,9 +942,14 @@ jobs:
           python ${push_file} coverage-dpo-lora.xml ${target_path_multi}
           python ${push_file} coverage-multi-fp8.xml ${target_path_multi}
           python ${push_file} coverage-multi-grouped-gemm.xml ${target_path_multi}
+          python ${push_file} coverage-multi-ep4.xml ${target_path_multi}
           python ${push_file} coverage-qwen-multi-pt.xml ${target_path_multi}
           python ${push_file} coverage-qwen-multi-sft.xml ${target_path_multi}
           python ${push_file} coverage-qwen-multi-lora.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-vl-sft.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-vl-lora.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-vl-moe.xml ${target_path_multi}
+          python ${push_file} coverage-qwen-vl-fsdp.xml ${target_path_multi}
           '
 
       - name: Terminate and delete the container
@@ -1226,6 +1312,7 @@ jobs:
           h20_dpo_lora_coverage.xml:h20-multi/coverage-dpo-lora.xml
           h20_multi_fp8_coverage.xml:h20-multi/coverage-multi-fp8.xml
           h20_multi_grouped_gemm_coverage.xml:h20-multi/coverage-multi-grouped-gemm.xml
+          h20_multi_ep4_coverage.xml:h20-multi/coverage-multi-ep4.xml
           h20_single_coverage.xml:h20-single/coverage-single.xml
           h20_qwen_coverage.xml:h20-single/coverage-qwen.xml
           h20_qwen3vl_sft_single_coverage.xml:h20-single/coverage-qwen3vl.xml
@@ -1243,6 +1330,10 @@ jobs:
           h20_qwen_multi_pt_coverage.xml:h20-multi/coverage-qwen-multi-pt.xml
           h20_qwen_multi_sft_coverage.xml:h20-multi/coverage-qwen-multi-sft.xml
           h20_qwen_multi_lora_coverage.xml:h20-multi/coverage-qwen-multi-lora.xml
+          h20_qwen3vl_sft_coverage.xml:h20-multi/coverage-qwen-vl-sft.xml
+          h20_qwen3vl_lora_coverage.xml:h20-multi/coverage-qwen-vl-lora.xml
+          h20_qwen3vl_moe_coverage.xml:h20-multi/coverage-qwen-vl-moe.xml
+          h20_qwen3vl_fsdp_coverage.xml:h20-multi/coverage-qwen-vl-fsdp.xml
           "
           base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
 
@@ -1281,6 +1372,7 @@ jobs:
             "h20_dpo_lora_coverage.xml"
             "h20_multi_fp8_coverage.xml"
             "h20_multi_grouped_gemm_coverage.xml"
+            "h20_multi_ep4_coverage.xml"
             "h20_qwen_multi_pt_coverage.xml"
             "h20_qwen_multi_sft_coverage.xml"
             "h20_qwen_multi_lora_coverage.xml"
@@ -1298,6 +1390,10 @@ jobs:
             "a100_qwen3vl_moe_coverage.xml"
             "a100_qwen3vl_lora_coverage.xml"
             "a100_qwen3vl_sft_coverage.xml"
+            "h20_qwen3vl_sft_coverage.xml"
+            "h20_qwen3vl_lora_coverage.xml"
+            "h20_qwen3vl_moe_coverage.xml"
+            "h20_qwen3vl_fsdp_coverage.xml"
           )
 
           for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
@@ -1326,6 +1422,7 @@ jobs:
             ./h20_qwen_multi_lora_coverage.xml,
             ./h20_multi_fp8_coverage.xml,
             ./h20_multi_grouped_gemm_coverage.xml,
+            ./h20_multi_ep4_coverage.xml,
             ./h20_single_coverage.xml,
             ./h20_qwen_coverage.xml,
             ./a100_pt_coverage.xml,
@@ -1341,6 +1438,10 @@ jobs:
             ./a100_qwen3vl_lora_coverage.xml,
             ./a100_qwen3vl_moe_coverage.xml,
             ./h20_qwen3vl_sft_single_coverage.xml
+            ./h20_qwen3vl_sft_coverage.xml,
+            ./h20_qwen3vl_lora_coverage.xml,
+            ./h20_qwen3vl_moe_coverage.xml,
+            ./h20_qwen3vl_fsdp_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true

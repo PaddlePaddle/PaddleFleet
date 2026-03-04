@@ -556,6 +556,14 @@ jobs:
           fi
           '
 
+      - name: GLM4.5 pre-train (EP4)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          '
+
       - name: Qwen pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
@@ -774,7 +782,6 @@ jobs:
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
           '
 
-
       - name: Qwen vl sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
@@ -791,7 +798,6 @@ jobs:
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
           '
 
-
       - name: Qwen vl moe
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
@@ -799,8 +805,6 @@ jobs:
           source /root/proxy
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
           '
-
-
 
       - name: Terminate and delete the container
         if: ${{ always() }}

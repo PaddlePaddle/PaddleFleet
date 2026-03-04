@@ -54,31 +54,35 @@ cuda_capability = (
     if paddle.is_compiled_with_cuda()
     else None
 )
+if paddle.is_compiled_with_cuda():
+    _python_version = sys.version_info
+    _python_version_str = ".".join(map(str, _python_version[:3]))
+    _cuda_version = get_cuda_version()
+    _cuda_version_str = ".".join(map(str, _cuda_version))
+    _capability_str = (
+        f"{cuda_capability[0]}.{cuda_capability[1]}"
+        if cuda_capability
+        else "unavailable"
+    )
 
-_python_version = sys.version_info
-_python_version_str = ".".join(map(str, _python_version[:3]))
-_cuda_version = get_cuda_version()
-_cuda_version_str = ".".join(map(str, _cuda_version))
-_capability_str = (
-    f"{cuda_capability[0]}.{cuda_capability[1]}"
-    if cuda_capability
-    else "unavailable"
-)
+    DEEP_GEMM_HINT = (
+        "For developers: guard imports with `is_deep_gemm_available()` and only call `paddlefleet.ops.deep_gemm` when flag branch enabled.\n"
+        "For users: set `use_deep_gemm=False` if you want to skip it, or use a GPU with compute capability >= 9.0 to enable."
+    )
 
-DEEP_GEMM_HINT = (
-    "For developers: guard imports with `is_deep_gemm_available()` and only call `paddlefleet.ops.deep_gemm` when flag branch enabled.\n"
-    "For users: set `use_deep_gemm=False` if you want to skip it, or use a GPU with compute capability >= 9.0 to enable."
-)
+    DEEP_EP_HINT = (
+        "For developers: guard imports with `is_deep_ep_available()` and only call `paddlefleet.ops.deep_ep` when flag branch enabled.\n"
+        "For users: avoid `moe_token_dispatcher_type='deepep'` or use a GPU with compute capability >= 9.0 to enable."
+    )
 
-DEEP_EP_HINT = (
-    "For developers: guard imports with `is_deep_ep_available()` and only call `paddlefleet.ops.deep_ep` when flag branch enabled.\n"
-    "For users: avoid `moe_token_dispatcher_type='deepep'` or use a GPU with compute capability >= 9.0 to enable."
-)
-
-SONIC_MOE_HINT = (
-    "For developers: guard imports with `is_sonicmoe_available()` and only call `paddlefleet.ops.sonicmoe` when flag branch enabled.\n"
-    "For users: set `using_sonic_moe=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 9.0 to enable."
-)
+    SONIC_MOE_HINT = (
+        "For developers: guard imports with `is_sonicmoe_available()` and only call `paddlefleet.ops.sonicmoe` when flag branch enabled.\n"
+        "For users: set `using_sonic_moe=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 9.0 to enable."
+    )
+else:
+    DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
+    DEEP_EP_HINT = "deep_ep is not supported on XPU backend."
+    SONIC_MOE_HINT = "sonicmoe is not supported on XPU backend."
 
 
 def _build_notice(
@@ -193,53 +197,55 @@ import_custom_ops(
 
 blocked_import_messages: dict[str, str] = {}
 
-if is_deep_gemm_available():
-    paddle.compat.enable_torch_proxy(scope={"deep_gemm", "triton"}, silent=True)
-    _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
-else:
-    warning, error = _hopper_requirement(
-        "paddlefleet.ops.deep_gemm", hint=DEEP_GEMM_HINT
-    )
-    logger.warning(warning)
-    blocked_import_messages["paddlefleet.ops.deep_gemm"] = error
+if paddle.is_compiled_with_cuda():
+    if is_deep_gemm_available():
+        paddle.compat.enable_torch_proxy(
+            scope={"deep_gemm", "triton"}, silent=True
+        )
+        _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
+    else:
+        warning, error = _hopper_requirement(
+            "paddlefleet.ops.deep_gemm", hint=DEEP_GEMM_HINT
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet.ops.deep_gemm"] = error
 
-if is_deep_ep_available():
-    paddle.compat.enable_torch_proxy(scope={"deep_ep"}, silent=True)
-    # Loading libnvshmem_host.so.* first when use editable install
-    _try_load_nvshmem(ops_dir)
-    _safe_load_ecosystem_lib("deep_ep", ops_dir, globals())
-else:
-    warning, error = _hopper_requirement(
-        "paddlefleet.ops.deep_ep", hint=DEEP_EP_HINT
-    )
-    logger.warning(warning)
-    blocked_import_messages["paddlefleet.ops.deep_ep"] = error
+    if is_deep_ep_available():
+        paddle.compat.enable_torch_proxy(scope={"deep_ep"}, silent=True)
+        # Loading libnvshmem_host.so.* first when use editable install
+        _try_load_nvshmem(ops_dir)
+        _safe_load_ecosystem_lib("deep_ep", ops_dir, globals())
+    else:
+        warning, error = _hopper_requirement(
+            "paddlefleet.ops.deep_ep", hint=DEEP_EP_HINT
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet.ops.deep_ep"] = error
 
-if is_sonic_moe_available():
-    paddle.compat.enable_torch_proxy(
-        scope={"sonicmoe", "quack", "triton"}, silent=True
-    )
-    _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
-else:
-    warning, error = _sonic_moe_requirement(
-        "paddlefleet.ops.sonicmoe", hint=SONIC_MOE_HINT
-    )
-    logger.warning(warning)
-    blocked_import_messages["paddlefleet.ops.sonicmoe"] = error
+    if is_sonic_moe_available():
+        paddle.compat.enable_torch_proxy(
+            scope={"sonicmoe", "quack", "triton"}, silent=True
+        )
+        _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
+    else:
+        warning, error = _sonic_moe_requirement(
+            "paddlefleet.ops.sonicmoe", hint=SONIC_MOE_HINT
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet.ops.sonicmoe"] = error
 
+    if blocked_import_messages:
+        sys.meta_path.insert(
+            0, HardwareIncompatibleBlocker(blocked_import_messages)
+        )
 
-if blocked_import_messages:
-    sys.meta_path.insert(
-        0, HardwareIncompatibleBlocker(blocked_import_messages)
-    )
-
-try:
-    paddle.compat.enable_torch_proxy(scope={"triton"}, silent=True)
-    from .._extensions.flashmask import (
-        rr_attn_estimate_triton_func,  # noqa: F401
-    )
-finally:
-    paddle.compat.disable_torch_proxy()
+    try:
+        paddle.compat.enable_torch_proxy(scope={"triton"}, silent=True)
+        from .._extensions.flashmask import (
+            rr_attn_estimate_triton_func,  # noqa: F401
+        )
+    finally:
+        paddle.compat.disable_torch_proxy()
 
 
 def __getattr__(name):

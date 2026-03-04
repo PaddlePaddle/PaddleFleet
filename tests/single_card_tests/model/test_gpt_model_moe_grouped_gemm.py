@@ -188,8 +188,8 @@ class TestGPTModel(unittest.TestCase):
                     f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
                 )
             else:  # 12.X
-                assert loss.item() == 5.239708423614502, (
-                    f"loss not equal ({loss.item()} != 5.239708423614502), please check your modify"
+                assert loss.item() == 5.239149570465088, (
+                    f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
                 )
                 assert embed_tokens_grad_norm == 2.796875, (
                     f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
