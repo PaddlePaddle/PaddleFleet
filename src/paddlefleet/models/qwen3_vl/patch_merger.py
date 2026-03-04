@@ -11,24 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass
 
 from paddle import nn
-
-from ...spec_utils import LayerSpec, build_layer
-from ...transformer.identity_op import IdentityOp
-
-
-@dataclass
-class Qwen3VLVisionPatchMergerSpec:
-    norm: LayerSpec = IdentityOp
 
 
 class Qwen3VLVisionPathMerger(nn.Module):
     def __init__(
         self,
         config,
-        sublayers_spec: Qwen3VLVisionPatchMergerSpec,
         dim: int | None = None,
         context_dim: int | None = None,
         use_postshuffle_norm: bool = False,
@@ -41,9 +31,7 @@ class Qwen3VLVisionPathMerger(nn.Module):
 
         self.hidden_size = context_dim * (config.spatial_merge_size**2)
         norm_dim = self.hidden_size if use_postshuffle_norm else context_dim
-        self.norm = build_layer(
-            sublayers_spec.norm, config=config, hidden_size=norm_dim
-        )
+        self.norm = nn.LayerNorm(norm_dim, epsilon=1e-6)
         self.use_postshuffle_norm = use_postshuffle_norm
 
         self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)

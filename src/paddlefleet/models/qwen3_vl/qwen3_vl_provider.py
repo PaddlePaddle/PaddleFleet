@@ -18,11 +18,20 @@ from functools import partial
 
 import paddle
 from paddle.nn import functional as F
+from paddleformers.transformers.gpt_provider import GPTModelProvider
+
+from paddlefleet import parallel_state
 
 from ...spec_utils import LayerSpec
 from ...transformer import TransformerConfig
+from .embedding import Qwen3VLTextEmbedding
 from .qwen3_vl_builders import qwen3_vl_vision_builder
-from .qwen3_vl_model import Qwen3VLVisionModel, Qwen3VLVisionTransformerLayer
+from .qwen3_vl_model import (
+    Qwen3VLModelDist,
+    Qwen3VLTextTransformerLayer,
+    Qwen3VLVisionModel,
+    Qwen3VLVisionTransformerLayer,
+)
 
 
 @dataclass
@@ -102,4 +111,171 @@ class Qwen3VLVisionProvider(TransformerConfig):
         return model
 
 
-__all__ = ["Qwen3VLVisionProvider"]
+@dataclass
+class Qwen3VLTextProvider(GPTModelProvider):
+    """
+    Base config for Qwen3 Models.
+    """
+
+    normalization: str = "RMSNorm"
+    activation_func: Callable = F.silu
+    gated_linear_unit: bool = True
+    use_bias: bool = False
+    add_qkv_bias: bool = True
+    seq_length: int = 4096
+    init_method_std: int = 0.02
+    hidden_dropout_prob: float = 0.0
+    attention_dropout: float = 0.0
+    vocab_size: int = 151936
+    share_embeddings_and_output_weights: bool | None = False
+    rms_norm_eps: float = 1e-6
+    rotary_base: float = 1000000.0
+    position_embedding_type: str = "rope"
+    use_qk_norm: bool = True
+    specific_embedding: type = Qwen3VLTextEmbedding
+    specific_transformer_layer: type = Qwen3VLTextTransformerLayer
+    max_sequence_length: int = 262144
+    multimodal_embedding: bool = False
+    _save_to_hf: bool = False
+    use_fused_linear_cross_entropy: bool = True
+    high_precision_rope: bool = True
+    moe_grouped_gemm: bool = True
+
+    n_shared_experts: int = 0
+    transform_rules = {
+        "dtype": "params_dtype",
+        "num_heads": "num_attention_heads",
+        "depth": "num_hidden_layers",
+        "initializer_range": "init_method_std",
+        "num_experts": "n_routed_experts",
+    }
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.mrope_section = self.rope_scaling.get(
+            "mrope_section", [24, 20, 20]
+        )
+
+
+@dataclass
+class Qwen3VLProvider(TransformerConfig):
+    text_config: Qwen3VLTextProvider | None = None
+    vision_config: Qwen3VLVisionProvider | None = None
+
+    drop_vision_class_token: bool = False
+    vision_feature_layer: int = -2
+
+    encoder_pipeline_model_parallel_size: int = 0
+    encoder_tensor_model_parallel_size: int = 1
+
+    seq_length: int = 1024
+
+    language_model_from_pretrained: str | None = None
+    vision_model_from_pretrained: str | None = None
+
+    def provide(
+        self, tokenizer=None, vp_stage: int | None = None
+    ) -> "Qwen3VLModelDist":
+        self.text_config.scatter_embedding_sequence_parallel = False
+        self.text_config.tensor_model_parallel_size = (
+            self.tensor_model_parallel_size
+        )
+        self.text_config.sequence_parallel = self.sequence_parallel
+        self.text_config.context_parallel_size = self.context_parallel_size
+        self.vision_config.tensor_model_parallel_size = (
+            self.tensor_model_parallel_size
+        )
+        # self.vision_projection_config.tensor_model_parallel_size = self.tensor_model_parallel_size
+        self.text_config.pipeline_model_parallel_size = (
+            self.pipeline_model_parallel_size
+        )
+
+        if self.encoder_pipeline_model_parallel_size > 0:
+            assert self.encoder_pipeline_model_parallel_size == 1, (
+                "ViT can only live on 1 pipeline stage."
+            )
+            self.vision_config.pipeline_model_parallel_size = (
+                self.encoder_pipeline_model_parallel_size
+            )
+            # self.vision_projection_config.pipeline_model_parallel_size = self.encoder_pipeline_model_parallel_size
+            self.text_config.encoder_pipeline_model_parallel_size = (
+                self.encoder_pipeline_model_parallel_size
+            )
+            if self.encoder_tensor_model_parallel_size > 0:
+                self.vision_config.tensor_model_parallel_size = (
+                    self.encoder_tensor_model_parallel_size
+                )
+                # self.vision_projection_config.tensor_model_parallel_size = self.encoder_tensor_model_parallel_size
+
+        config_attrs = [
+            "cross_entropy_loss_fusion",
+            "gradient_accumulation_fusion",
+            "bias_activation_fusion",
+            "bias_dropout_fusion",
+            "masked_softmax_fusion",
+            "attention_softmax_in_fp32",
+            "apply_rope_fusion",
+            "overlap_p2p_comm",
+            "batch_p2p_comm",
+        ]
+
+        for config in [
+            self.text_config,
+            self.vision_config,
+            # self.vision_projection_config,
+        ]:
+            for attr in config_attrs:
+                setattr(config, attr, getattr(self, attr))
+
+        self.text_config.tp_comm_overlap = self.tp_comm_overlap
+        self.vision_config.tp_comm_overlap = False
+        # self.vision_projection_config.tp_comm_overlap = False
+
+        vp_stage = vp_stage or 0
+
+        model = Qwen3VLModelDist(
+            config=self,
+            tokenizer=tokenizer,
+            pre_process=parallel_state.is_pipeline_first_stage(
+                ignore_virtual=False, vp_stage=vp_stage
+            )
+            or parallel_state.get_pipeline_model_parallel_rank()
+            == self.encoder_pipeline_model_parallel_size,
+            post_process=parallel_state.is_pipeline_last_stage(
+                ignore_virtual=False, vp_stage=vp_stage
+            ),
+            add_encoder=parallel_state.is_pipeline_first_stage(
+                ignore_virtual=False, vp_stage=vp_stage
+            ),
+            add_decoder=parallel_state.is_pipeline_last_stage(
+                ignore_virtual=False, vp_stage=vp_stage
+            )
+            or parallel_state.get_pipeline_model_parallel_rank()
+            >= self.encoder_pipeline_model_parallel_size,
+            drop_vision_class_token=self.drop_vision_class_token,
+            vp_stage=vp_stage,
+        )
+
+        return model
+
+    @classmethod
+    def from_config(cls, config):
+        res = super().from_config(config)
+        res.vision_config = Qwen3VLVisionProvider.from_config(
+            config.vision_config
+        )
+        res.text_config = Qwen3VLTextProvider.from_config(config.text_config)
+        res.vision_config.normalization = "LayerNorm"
+        res.vision_config.gated_linear_unit = False
+        res.text_config.multimodal_embedding = True
+        res.text_config.position_embedding_type = "mrope"
+        res.text_config.image_token_id = config.image_token_id
+        res.text_config.video_token_id = config.video_token_id
+        return res
+
+
+__all__ = [
+    "Qwen3VLVisionProvider",
+    "Qwen3VLTextProvider",
+    "Qwen3VLProvider",
+]
