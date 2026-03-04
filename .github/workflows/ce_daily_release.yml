@@ -529,6 +529,9 @@ jobs:
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
+          if [ ${CUDA_VERSION} == "cu130" ]; then
+            pip install blinker==1.9.0 --ignore-installed
+          fi
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
@@ -778,6 +781,9 @@ jobs:
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
+          fi
+          if [ ${CUDA_VERSION} == "cu130" ]; then
+            pip install blinker==1.9.0 --ignore-installed
           fi
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -1199,6 +1205,9 @@ jobs:
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
+          fi
+          if [ ${CUDA_VERSION} == "cu130" ]; then
+            pip install blinker==1.9.0 --ignore-installed
           fi
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers

@@ -58,7 +58,7 @@ def judge_machine_type():
 
 result = judge_machine_type()
 print("你的机器类型是：", result)
-version, _ = get_cuda_version()
+version, cuda_minor = get_cuda_version()
 print("CUDA version:", version)
 
 
@@ -180,7 +180,6 @@ class TestGPTModel(unittest.TestCase):
 
         repo_name = os.environ.get("repo_flag")
         if judge_machine_type() == "H":
-            return  # TODO(Pan Zhaowu): Waiting for PR77876 pulled and refresh H machine test
             if version == 13:
                 assert loss.item() == 5.239149570465088, (
                     f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
@@ -189,8 +188,15 @@ class TestGPTModel(unittest.TestCase):
                     f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
                 )
             else:  # 12.X
+                if cuda_minor == 6:
+                    assert loss.item() == 5.239708423614502, (
+                        f"loss not equal ({loss.item()} != 5.239708423614502), please check your modify"
+                    )
+                    assert embed_tokens_grad_norm == 2.796875, (
+                        f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
+                    )
                 assert loss.item() == 5.239149570465088, (
-                    f"loss not equal ({loss.item()} != 5.239708423614502), please check your modify"
+                    f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
                 )
                 assert embed_tokens_grad_norm == 2.796875, (
                     f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
