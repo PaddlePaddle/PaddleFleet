@@ -206,45 +206,37 @@ class TestPP(unittest.TestCase):
             forward_backward_overlap_scheduler=True,
         )
 
-        # Print MD5 for CI debugging - need to update expected values after enable_partial_send_recv=False
-        print(f"[DEBUG] loss md5sum: {overlap_loss._md5sum()}")
+        assert overlap_loss._md5sum() == "bc7d1057df35d56003ba91c1801a9acb"
 
         if paddle.distributed.get_rank() == 0:
+            baseline = {
+                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "4d1da78d31fda37efff3ce130f49774b",
+                "_layers.9.0.input_layernorm.weight": "61cf0cdd4ccdffa29bc5addde85f7a00",
+                "_layers.9.0.self_attn.o_proj.weight": "e8b7ccefe45bdc4e98c34a4027d573ca",
+                "_layers.9.0.self_attn.qkv_proj.weight": "c8749b42237bddc3f972b4c2a4bafcf6",
+                "_layers.9.0.self_attn.q_norm.weight": "b9af1a3cff0a03e649b4d275ce8ac13c",
+                "_layers.9.0.self_attn.k_norm.weight": "576bc73bc3de6d350f641efe31e8c67a",
+                "_layers.9.0.post_attention_layernorm.weight": "a2988b16d7c5ba9093c680873dfbfb01",
+                "_layers.9.0.mlp.gate.weight": "3f20707f0d45e4b94dd288f81350287c",
+                "_layers.9.0.mlp.grouped_gemm_experts.weight1": "39449d13822de77685452d09e48f17e3",
+                "_layers.9.0.mlp.grouped_gemm_experts.weight2": "d2eaeace5c65309cf1e88cfe5dd08fd6",
+                "_layers.9.0.mlp.shared_experts.up_gate_proj.weight": "d14317ce681d3a801e4e7fd14ba16ac9",
+                "_layers.9.0.mlp.shared_experts.down_proj.weight": "758ecd35c5e94e143c33221f6ed8d95e",
+                "_layers.9.1.input_layernorm.weight": "7c3bf7bcc86076aa22f3022bd108b7cd",
+                "_layers.9.1.self_attn.o_proj.weight": "623d83b63c05a984791916a46040dfdf",
+                "_layers.9.1.self_attn.qkv_proj.weight": "c0ad3fc0770931e81a9600ffb288dc4f",
+                "_layers.9.1.self_attn.q_norm.weight": "532f2601a39dde43d7e846c0788dc1f6",
+                "_layers.9.1.self_attn.k_norm.weight": "618b318fcaf96dc314f4f73fcfdfd5b7",
+                "_layers.9.1.post_attention_layernorm.weight": "91b5642254475cf7de3b2e12cab58d5e",
+                "_layers.9.1.mlp.gate.weight": "7df6522a1da204d40ea895be8d72a114",
+                "_layers.9.1.mlp.grouped_gemm_experts.weight1": "f7fdd1638f8095442d7b2be6f907a258",
+                "_layers.9.1.mlp.grouped_gemm_experts.weight2": "42c0f502fe3a9139a41e76ebefa7701a",
+                "_layers.9.1.mlp.shared_experts.up_gate_proj.weight": "9a3c7de300f34a15924746d1a0a4b29f",
+                "_layers.9.1.mlp.shared_experts.down_proj.weight": "80542d9d52256dadb1f02b0e6cb1d25a",
+            }
+
             for name, param in overlap_gpt_model.named_parameters():
-                print(f"[DEBUG] {name}: {param.grad._md5sum()}")
-
-        # TODO: Uncomment assertions after getting correct MD5 values from CI
-        # assert overlap_loss._md5sum() == "6961acbcfafaca51949b9a6eba287d37"
-
-        # if paddle.distributed.get_rank() == 0:
-        #     baseline = {
-        #         "_layers.shared_layers.embed.embedding.embed_tokens.weight": "9ca08aca1b0d0c9baa4c7dcb5a3b09cc",
-        #         "_layers.9.0.input_layernorm.weight": "89d6b6cd451ac90c449356bb49dfedbc",
-        #         "_layers.9.0.self_attn.o_proj.weight": "7b1dc9804f644806c67b18c894187564",
-        #         "_layers.9.0.self_attn.qkv_proj.weight": "f7d4fa68c188284d99554b4d7610a399",
-        #         "_layers.9.0.self_attn.q_norm.weight": "29503b412d6025b5a158428c8b967a2b",
-        #         "_layers.9.0.self_attn.k_norm.weight": "aae6fad3db7782a4d986a23c77632a4e",
-        #         "_layers.9.0.post_attention_layernorm.weight": "b082d508c73df6960eb188dfeec9d60d",
-        #         "_layers.9.0.mlp.gate.weight": "476406d990c412cd29ad67ab70c86ade",
-        #         "_layers.9.0.mlp.grouped_gemm_experts.weight1": "b2186b44f3b2511122579c36c4bd663b",
-        #         "_layers.9.0.mlp.grouped_gemm_experts.weight2": "20d7d3225c9f52c52b52a982006e8481",
-        #         "_layers.9.0.mlp.shared_experts.up_gate_proj.weight": "0e2842ab12ab2e1a503fd7337a922222",
-        #         "_layers.9.0.mlp.shared_experts.down_proj.weight": "1f09eb3ded670fe733eff65786270514",
-        #         "_layers.9.1.input_layernorm.weight": "1497a2b44f6f6806d66a6ab9b8ec6cde",
-        #         "_layers.9.1.self_attn.o_proj.weight": "c365438f1e7839c60f106e5c9ecac09c",
-        #         "_layers.9.1.self_attn.qkv_proj.weight": "7e4ab11d95765fedfe476de90bc66657",
-        #         "_layers.9.1.self_attn.q_norm.weight": "1519c0ce2dce5ba491319368c91836f8",
-        #         "_layers.9.1.self_attn.k_norm.weight": "1cac550f934da31f8f4d8d728870eb47",
-        #         "_layers.9.1.post_attention_layernorm.weight": "32aad93fa62bf97ad006bce2069fc29d",
-        #         "_layers.9.1.mlp.gate.weight": "df3af6f5943b7f3888994ed1c52a0d8b",
-        #         "_layers.9.1.mlp.grouped_gemm_experts.weight1": "ca83c67d1cba6c4b80cecd46ccb70d2b",
-        #         "_layers.9.1.mlp.grouped_gemm_experts.weight2": "048e09c1fa7038638ed0163e926a233f",
-        #         "_layers.9.1.mlp.shared_experts.up_gate_proj.weight": "0a706afa7618c07b2b83aeba38bdd286",
-        #         "_layers.9.1.mlp.shared_experts.down_proj.weight": "3b60fd25f6872b06cdef9dd13df5c4d1",
-        #     }
-        #
-        #     for name, param in overlap_gpt_model.named_parameters():
-        #         assert param.grad._md5sum() == baseline[name]
+                assert param.grad._md5sum() == baseline[name]
 
 
 if __name__ == "__main__":
