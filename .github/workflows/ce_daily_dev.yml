@@ -16,6 +16,15 @@ on:
           - 'false'
         default: 'true'
         required: false
+      parallel_jobs:
+        description: 'Number of parallel jobs'
+        required: true
+        default: '2'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '4'
 
 permissions: read-all
 
@@ -38,18 +47,33 @@ env:
   paddle_url_cu129: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
   use_release: ${{ inputs.use_release || 'true' }}
+  MAX_PARALLEL: ${{ github.event.inputs.parallel_jobs || '2' }}
+
+
+
 defaults:
   run:
     shell: bash
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      parallel: ${{ steps.set.outputs.parallel }}
+    steps:
+      - id: set
+        run: |
+          # 这里可以使用 env
+          echo "parallel=${{ env.MAX_PARALLEL }}" >> $GITHUB_OUTPUT
+
   single_card_test:
+    needs: setup
     name: Unit test (single card)
     runs-on:
       group: Fleet-H-single-card
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: "${{ needs.setup.outputs.parallel }}"
       matrix:
         include:
           - cuda: "12.6"
@@ -221,12 +245,13 @@ jobs:
           docker rm -f ${{ env.container_name }}
 
   multi-card_test:
+    needs: setup
     name: Unit test (multi-card)
     runs-on:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: "${{ needs.setup.outputs.parallel }}"
       matrix:
         include:
           - cuda: "12.6"
@@ -380,12 +405,13 @@ jobs:
 
 
   integration-test-H20-single-card:
+    needs: setup
     name: Integration test (H20, single card)
     runs-on:
       group: Fleet-H-single-card
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: "${{ needs.setup.outputs.parallel }}"
       matrix:
         include:
           - cuda: "12.6"
@@ -632,12 +658,13 @@ jobs:
           docker rm -f ${{ env.container_name }}
 
   integration-test-H20-multi-card:
+    needs: setup
     name: Integration test (H20, multi-card)
     runs-on:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: "${{ needs.setup.outputs.parallel }}"
       matrix:
         include:
           - cuda: "12.6"
@@ -1051,12 +1078,13 @@ jobs:
 
 
   integration-test-a100:
+    needs: setup
     name: Integration test (A100)
     runs-on:
       group: Distribute
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: "${{ needs.setup.outputs.parallel }}"
       matrix:
         include:
           - cuda: "12.6"
