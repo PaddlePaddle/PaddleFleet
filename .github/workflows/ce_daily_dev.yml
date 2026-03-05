@@ -16,15 +16,6 @@ on:
           - 'false'
         default: 'true'
         required: false
-      parallel_jobs:
-        description: 'Number of parallel jobs'
-        required: true
-        default: '2'
-        type: choice
-        options:
-          - '1'
-          - '2'
-          - '4'
 
 permissions: read-all
 
@@ -56,24 +47,13 @@ defaults:
     shell: bash
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      parallel: ${{ steps.set.outputs.parallel }}
-    steps:
-      - id: set
-        run: |
-          # 这里可以使用 env
-          echo "parallel=${{ env.MAX_PARALLEL }}" >> $GITHUB_OUTPUT
-
   single_card_test:
-    needs: setup
     name: Unit test (single card)
     runs-on:
       group: Fleet-H-single-card
     strategy:
       fail-fast: false
-      max-parallel: "${{ needs.setup.outputs.parallel }}"
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"
@@ -245,13 +225,12 @@ jobs:
           docker rm -f ${{ env.container_name }}
 
   multi-card_test:
-    needs: setup
     name: Unit test (multi-card)
     runs-on:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: "${{ needs.setup.outputs.parallel }}"
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"
@@ -405,13 +384,12 @@ jobs:
 
 
   integration-test-H20-single-card:
-    needs: setup
     name: Integration test (H20, single card)
     runs-on:
       group: Fleet-H-single-card
     strategy:
       fail-fast: false
-      max-parallel: "${{ needs.setup.outputs.parallel }}"
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"
@@ -658,13 +636,12 @@ jobs:
           docker rm -f ${{ env.container_name }}
 
   integration-test-H20-multi-card:
-    needs: setup
     name: Integration test (H20, multi-card)
     runs-on:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: "${{ needs.setup.outputs.parallel }}"
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"
@@ -1078,13 +1055,12 @@ jobs:
 
 
   integration-test-a100:
-    needs: setup
     name: Integration test (A100)
     runs-on:
       group: Distribute
     strategy:
       fail-fast: false
-      max-parallel: "${{ needs.setup.outputs.parallel }}"
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"

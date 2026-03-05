@@ -13,15 +13,6 @@ on:
           - 'false'
         default: 'true'
         required: false
-      parallel_jobs:
-        description: 'Number of parallel jobs'
-        required: true
-        default: '2'
-        type: choice
-        options:
-          - '1'
-          - '2'
-          - '4'
 
 permissions: read-all
 
@@ -58,7 +49,7 @@ jobs:
       group: Fleet-H-single-card
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"
@@ -238,7 +229,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"
@@ -400,7 +391,7 @@ jobs:
       group: Fleet-H-single-card
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"
@@ -658,7 +649,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"
@@ -1082,7 +1073,7 @@ jobs:
       group: Distribute
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - cuda: "12.6"
