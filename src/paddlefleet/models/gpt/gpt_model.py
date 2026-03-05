@@ -225,13 +225,13 @@ class GPTModel(PipelineLayer):
             )
             i += 1
 
+        # Always place layer_norm after transformer_layers and before tail_empty_layers/MTP,
+        # so that the model structure is consistent regardless of whether MTP is enabled.
+        self.add_sequential_layer(
+            layers, LayerDesc(spec.layer_norm), name_prefix
+        )
+
         if spec.mtp:
-            # When MTP is enabled (non-empty list), place layer_norm before MTP. This aligns
-            # with Megatron-LM where hidden_states go through decoder.final_layernorm before
-            # being used by both MTP and LM Head.
-            self.add_sequential_layer(
-                layers, LayerDesc(spec.layer_norm), name_prefix
-            )
             for mtp_spec in spec.mtp:
                 self.add_sequential_layer(
                     layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"
@@ -242,14 +242,6 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
-
-        if not spec.mtp:
-            # When MTP is disabled (None or empty list), place layer_norm after
-            # tail_empty_layers (original position), preserving the PP layer assignment
-            # to avoid P2P communication mismatches.
-            self.add_sequential_layer(
-                layers, LayerDesc(spec.layer_norm), name_prefix
-            )
 
         if tie_word_embeddings:
             self.add_sequential_layer(
