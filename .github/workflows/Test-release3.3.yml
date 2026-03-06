@@ -1351,7 +1351,7 @@ jobs:
           echo "=== DIFF FILE ==="
           cat diff.txt
           echo "================="
-          python -m pip install diff-cover covreage==7.6.1
+          python -m pip install diff-cover coverage==7.6.1
           echo "=== 覆盖率文件 ==="
           ls *.xml
           echo "================="
