@@ -697,8 +697,3 @@ class TransformerConfig(ModelParallelConfig):
             raise ValueError(
                 "apply_rope_fusion for MLA only works with YARN RoPE."
             )
-
-        if self.cache_mla_latents:
-            assert self.apply_rope_fusion is False, (
-                "Rope Fusion is not compatible with caching latents"
-            )
