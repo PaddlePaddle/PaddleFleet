@@ -1,5 +1,16 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import math
 from dataclasses import dataclass
@@ -19,10 +30,6 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding as YarnRotaryEmbedding,
     _yarn_get_mscale,
 )
-
-# from paddlefleet.pipeline_parallel.fine_grained_activation_offload import (
-#     FineGrainedActivationOffloadingInterface as off_interface,
-# )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
@@ -31,15 +38,9 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.transformer.attention import Attention
-
-# from paddlefleet.transformer.custom_layers.transformer_engine import (
-#     split_te_layernorm_column_parallel_linear,
-# )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
-
-# from paddlefleet.typed_paddle import apply_module
-from paddlefleet.utils import deprecate_inference_params, get_pg_size
+from paddlefleet.utils import get_pg_size
 
 try:
     from paddlefleet.fusions.fused_mla_yarn_rope_apply import (
@@ -53,9 +54,8 @@ except:
 
 @dataclass
 class MLASelfAttentionSublayersSpec:
-    """Submodules for the MLA self-attention layer."""
+    """Sublayers for MLA self-attention layer."""
 
-    # TODO(nschank): Move layernorms back to the bottom once all other layers have defaults removed.
     q_a_layernorm: LayerSpec | type = None
     kv_a_layernorm: LayerSpec | type = None
 
@@ -69,11 +69,7 @@ class MLASelfAttentionSublayersSpec:
 
 
 class MultiLatentAttention(Attention):
-    """Multi-Latent Attention layer abstract class.
-
-    This layer only contains common modules required for the "self attn" and
-    "cross attn" specializations.
-    """
+    """Multi-Latent Attention layer abstract class."""
 
     def __init__(
         self,
@@ -103,21 +99,10 @@ class MultiLatentAttention(Attention):
             self.config.qk_nope_head_dim + self.config.qk_rope_head_dim
         )
 
-        # Overwrite the base class kv shape to support MLA inference
-        self.key_hidden_size = self.q_head_dim
-        self.val_hidden_size = self.config.v_head_dim
-
-        self.recompute_up_proj = (
-            self.config.recompute_granularity == "selective"
-            and "mla_up_proj" in self.config.recompute_modules
-        )
-        self.qkv_up_checkpoint = None
-
         mscale = _yarn_get_mscale(
             self.config.rotary_scaling_factor, self.config.mscale_all_dim
         )
         self.softmax_scale = mscale * mscale / math.sqrt(self.q_head_dim)
-        self.cache_mla_latents = self.config.cache_mla_latents
 
         if self.config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
@@ -178,18 +163,13 @@ class MultiLatentAttention(Attention):
         attention_mask,
         attn_mask_startend_row_indices: Tensor | None = None,
         key_value_states=None,
-        inference_context=None,
         rotary_pos_emb=None,
         rotary_pos_cos=None,
         rotary_pos_sin=None,
-        rotary_pos_cos_sin=None,
         attention_bias=None,
         packed_seq_params=None,
         in_recompute: bool = False,
         position_ids=None,
-        sequence_len_offset=None,
-        *,
-        inference_params=None,
     ):
         """Forward pass for multi-latent attention"""
         assert rotary_pos_emb is None, (
@@ -201,54 +181,23 @@ class MultiLatentAttention(Attention):
         assert rotary_pos_cos is None and rotary_pos_sin is None, (
             "MLA does not support Flash Decoding"
         )
-        assert not rotary_pos_cos_sin, (
-            "Flash-infer rope has not been tested with MLA."
-        )
-        assert not (self.training and self.cache_mla_latents), (
-            "cache_mla_latents conflicts with training."
-        )
-
-        # hidden_states: [sq, b, h]
-
-        inference_context = deprecate_inference_params(
-            inference_context, inference_params
-        )
 
         # =====================
         # Query, Key, and Value
         # =====================
-        # Get the query, key and value tensors based on the type of attention -
-        # self or cross attn.
-        # query: [96, 1, 16, 128], key:[96, 1, 16, 128], value:[96, 1, 16, 128]
+        # Get the query, key and value tensors based on the type of attention
 
-        query, key, value, q_compressed, kv_compressed = (
-            self.get_query_key_value_tensors(
-                hidden_states,
-                key_value_states,
-                position_ids,
-                packed_seq_params,
-                inference_context=inference_context,
-            )
+        query, key, value = self.get_query_key_value_tensors(
+            hidden_states,
+            key_value_states,
+            position_ids,
+            packed_seq_params,
         )
-        # if self.offload_qkv_linear:
-        #     query = off_interface.group_commit(
-        #         query, name="qkv_linear", forced_released_tensors=[hidden_states]
-        #     )
 
-        # ===================================================
-        # Adjust key, value for inference
-        # ===================================================
-        # rotary_pos_emb = None
-        # query, key, value, _, attn_mask_type, block_table = self._adjust_key_value_for_inference(
-        #     inference_context, query, key, value, rotary_pos_emb=None
-        # )
-
-        # TODO: Currently, TE can only accept contiguous tensors for MLA
         attn_mask_type = self.attn_mask_type
         query = query.contiguous()
         key = key.contiguous()
 
-        # Value is none during decode for absorption
         if value is not None:
             value = value.contiguous()
 
@@ -293,27 +242,6 @@ class MultiLatentAttention(Attention):
                 use_rr_flash_attention=self.use_rr_flash_attention
                 and in_recompute,
             )
-
-        # We are doing absorption with cache mla latents and decode mode.
-        # if self.cache_mla_latents and inference_context.is_decode_only():
-        #     # core_attn_out = self.self.up_v_layer(core_attn_out)
-        #     core_attn_out = paddle.einsum("sbhc,hdc->sbhd", core_attn_out, self.up_v_weight)
-        #     core_attn_out = core_attn_out.contiguous()
-
-        #     # Flatten back: [seq, batch, num_heads * v_head_dim]
-        #     core_attn_out = core_attn_out.view(core_attn_out.size(0), core_attn_out.size(1), -1)
-
-        # if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
-        #     # reshape to same output shape as unpacked case
-        #     # (t, np, hn) -> (t, b=1, h=np*hn)
-        #     # t is the pack size = sum (sq_i)
-        #     # note that batch is a dummy dimension in the packed case
-        #     core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
-
-        # if self.recompute_up_proj:
-        #     assert self.qkv_up_checkpoint is not None
-        #     self.qkv_up_checkpoint.discard_output_and_register_recompute(core_attn_out)
-        #     self.qkv_up_checkpoint = None
 
         # =================
         # Output. [sq, b, h]
@@ -448,9 +376,6 @@ class MLASelfAttention(MultiLatentAttention):
         key_value_states=None,
         position_ids=None,
         packed_seq_params=None,
-        inference_context=None,
-        *,
-        inference_params=None,
     ):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`.
@@ -459,15 +384,6 @@ class MLASelfAttention(MultiLatentAttention):
         # Attention heads [s, b, n*h]
         assert hidden_states.ndim == 3, (
             f"hidden_states should be 3D, [s, b, n*h], got {hidden_states.ndim}D"
-        )
-        if packed_seq_params is not None:
-            assert packed_seq_params.local_cp_size is None, (
-                "hybrid_context_parallel is not supported with MLA yet and is planned for future. \
-            Please disable hybrid_context_parallel."
-            )
-
-        inference_context = deprecate_inference_params(
-            inference_context, inference_params
         )
 
         # =========================================
@@ -499,9 +415,6 @@ class MLASelfAttention(MultiLatentAttention):
                     )
                 )
                 rotary_pos_emb = None
-                assert inference_context is None, (
-                    "Inference with MLA RoPE fusion is not supported"
-                )
                 assert (
                     fused_apply_mla_rope_for_q is not None
                     and fused_apply_mla_rope_for_kv is not None
@@ -532,15 +445,11 @@ class MLASelfAttention(MultiLatentAttention):
         if self.config.q_lora_rank is not None:
             # if q_a_proj is ColumnParallelLinear:
             #     q_compressed: [s, b, q_lora_rank / TP]
-            # elif q_a_proj is Linear:
-            #     q_compressed: [s / TP, b, q_lora_rank]
             q_compressed, _ = self.q_a_proj(hidden_states)
 
-            # When output is sharded (ColumnParallelLinear), two things are needed to be
-            # identical to a normal Linear.
-            #   1. Manually gather output to restore output dim q_lora_rank;
-            #   2. Scatter sequence back to s / TP if sequence-parallel since it was
-            #      gathered by ColumnParallelLinear.
+            # When output is sharded (ColumnParallelLinear):
+            # Gather output to restore output dim q_lora_rank;
+            # Scatter sequence back to s / TP if sequence-parallel
             if q_compressed.size(-1) != self.config.q_lora_rank:
                 q_compressed = gather_from_tensor_model_parallel_region(
                     q_compressed
@@ -554,8 +463,6 @@ class MLASelfAttention(MultiLatentAttention):
 
         # if kv_a_proj_with_mqa is ColumnParallelLinear:
         #     kv_combined: [s, b, (kv_lora_rank + qk_rope_head_dim) / TP]
-        # elif kv_a_proj_with_mqa is Linear:
-        #     kv_combined: [s / TP, b, (kv_lora_rank + qk_rope_head_dim)]
         kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
         if (
             kv_combined.size(-1)
@@ -591,9 +498,7 @@ class MLASelfAttention(MultiLatentAttention):
                 )
 
         if packed_seq_params is not None:
-            # If sequence packing, TE expect [t, h, d] shaped qkv input.
-            # In Megatron-Core, the qkv shape is [t, 1, h, d].
-            # So we need to reshape qkv from [t, 1, h, d] to [t, h, d].
+            # If sequence packing, reshape qkv from [t, 1, h, d] to [t, h, d].
             q_compressed = q_compressed.squeeze(1)
             kv_compressed = kv_compressed.squeeze(1)
             k_pos_emb = k_pos_emb.squeeze(1)
@@ -650,7 +555,6 @@ class MLASelfAttention(MultiLatentAttention):
             # [num_tokens, qk_rope_head_dim] -> [num_tokens, 1, qk_rope_head_dim]
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
-            # todo add assert about fusions and caching
             if self.config.apply_rope_fusion:
                 cp_rank = self.pg_collection.cp.rank()
                 cp_size = self.pg_collection.cp.size()
@@ -679,24 +583,16 @@ class MLASelfAttention(MultiLatentAttention):
             else:
                 q_len = q.size()[0]
                 # rotary_pos_emb: [seq_len, 1, 64]
+                # squeeze [1, seq_len, 1, 64] -> [seq_len, 1, 64]
                 rotary_pos_emb = rotary_pos_emb.squeeze(0)
-                if inference_context is not None:
-                    # add offset to the sequence start for inference
-                    sequence_start = inference_context.sequence_len_offset
-                    sequence_end = sequence_start + q_len
-                    rotary_pos_emb = rotary_pos_emb[sequence_start:sequence_end]
-                elif (
+                if (
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
                 ):
-                    # Shorten rotary_pos_emb to the sequence length when inference_params
-                    # is not provided. This makes sure we can run forward directly with
-                    # any sequence length. During training, the sequence length is always
+                    # During training, the sequence length is always
                     # the full rotary_pos_emb length, except for sequence packing + CP.
-                    # When sequence packing and context parallel are both enabled, the
-                    # position embedding will not split rotary_pos_emb, so it may exceed
-                    # the sequence length on this CP rank, but we need the full rotary_pos_emb
-                    # to cover the full sequence, so we do not shorten it here.
+                    # We need the full rotary_pos_emb to cover the full sequence,
+                    # so we do not shorten it here.
                     rotary_pos_emb = rotary_pos_emb[0:q_len]
 
                 # q_no_pe: [num_tokens, n, qk_nope_head_dim]
@@ -741,10 +637,10 @@ class MLASelfAttention(MultiLatentAttention):
                     cp_group=self.pg_collection.cp,
                 )
 
-                # query: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
+                # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
                 query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
 
-                # key: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
+                # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
                 if k_pos_emb.ndim == 4:
                     k_pos_emb = k_pos_emb.expand(
                         -1, -1, self.num_attention_heads_per_partition, -1
@@ -766,7 +662,7 @@ class MLASelfAttention(MultiLatentAttention):
             q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb
         )
 
-        return query, key, value, q_compressed, kv_compressed
+        return query, key, value
 
     def backward_dw(self) -> NoReturn:
         """Execute weight gradient computation"""

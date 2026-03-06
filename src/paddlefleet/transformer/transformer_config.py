@@ -527,10 +527,7 @@ class TransformerConfig(ModelParallelConfig):
     mscale_all_dim: float = 0.0
     """Mscale all dimensions for YaRN RoPE in Multi-Latent Attention, used by yarn."""
 
-    cache_mla_latents: bool = False
-    """Cache the low dimensional tensors for MLA rather than full KV cache.
-       This is only for the dynamic inference backend and requires that
-       Flash MLA is installed."""
+    # cache_mla_latents: bool = False
 
     @classmethod
     def from_config(cls, config_dict):
