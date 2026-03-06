@@ -173,15 +173,10 @@ class MLP(FleetLayer):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
-        print("hidden_states:", hidden_states.shape)
-        print("self.up_gate_proj: ", self.up_gate_proj.weight.shape)
         intermediate_parallel, bias_parallel = self.up_gate_proj(hidden_states)
-        print("intermediate_parallel: ", intermediate_parallel.shape)
         nvtx_range_pop(suffix="up_gate_proj")
 
         nvtx_range_push(suffix="activation")
-        print("self.config.gated_linear_unit ", self.config.gated_linear_unit)
-        print("bias_activation_fusion ", self.config.bias_activation_fusion)
         if self.config.bias_activation_fusion:
             if per_token_scale is not None:
                 if self.hidden_act == F.silu and self.config.gated_linear_unit:
@@ -192,7 +187,6 @@ class MLP(FleetLayer):
                         per_token_scale.unsqueeze(-1),
                         self.config.activation_func_fp8_input_store,
                     )
-                    print("after swiglu: ", intermediate_parallel.shape)
                 elif (
                     self.hidden_act == quick_gelu
                     and self.config.gated_linear_unit
@@ -236,7 +230,6 @@ class MLP(FleetLayer):
                     intermediate_parallel = bias_swiglu_impl(
                         intermediate_parallel, bias_parallel
                     )
-                    print("222 ", intermediate_parallel.shape)
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")
         else:
@@ -269,8 +262,6 @@ class MLP(FleetLayer):
 
         # [s, b, h]
         nvtx_range_push(suffix="down_proj")
-        print("intermediate_parallel:", intermediate_parallel.shape)
-        print("self.down_proj:", self.down_proj.weight.shape)
         output, output_bias = self.down_proj(intermediate_parallel)
         nvtx_range_pop(suffix="down_proj")
 
