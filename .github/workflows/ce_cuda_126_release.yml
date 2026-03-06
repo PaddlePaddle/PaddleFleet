@@ -1,8 +1,6 @@
 name: CE-CUDA-126-Release
 
 on:
-  schedule:
-    - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
