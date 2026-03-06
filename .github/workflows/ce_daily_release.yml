@@ -518,6 +518,7 @@ jobs:
         id: formers_install
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -622,6 +623,7 @@ jobs:
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
+          set -x
           source /root/proxy
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
