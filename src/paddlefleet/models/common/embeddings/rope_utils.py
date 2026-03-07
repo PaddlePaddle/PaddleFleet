@@ -263,6 +263,11 @@ def _apply_rotary_pos_emb_thd(
 
     seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
 
+    # Optimization: convert cu_seqlens to a Python list once here, so the
+    # per-sequence loop below can index it with zero GPU->CPU syncs instead
+    # of calling .item() on every iteration (one D2H sync per sub-sequence).
+    cu_seqlens_list = cu_seqlens.tolist()
+
     # Handle two different frequency tensor formats:
     # 1. If freqs.size(0) == cu_seqlens[-1]: freqs contains all positions across all sequences
     #    -> Use offset-based mapping for exact positional correspondence
@@ -275,7 +280,8 @@ def _apply_rotary_pos_emb_thd(
         freq_slices = []
         for i, x in enumerate(sequence_splits):
             # cu_seqlens[i] is the starting offset of this sequence in the original batch
-            seq_start_offset = cu_seqlens[i].item()
+            # Use pre-fetched Python list to avoid per-iteration GPU->CPU sync
+            seq_start_offset = cu_seqlens_list[i]
             freq_slices.append(
                 _get_thd_freqs_on_this_cp_rank(
                     cp_rank, cp_size, x, freqs, seq_start_offset

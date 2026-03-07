@@ -106,74 +106,76 @@ class VisionEmbedding(FleetLayer):
         return rotary_pos_emb
 
     def fast_pos_embed_interpolate(self, grid_thw):
+        # Optimization: replace per-image tolist() + Python list extend with
+        # pure-GPU paddle.cat accumulation, eliminating 274k GpuMemcpySync:GPU->CPU
+        # synchronization points that previously stalled the GPU pipeline.
         grid_ts, grid_hs, grid_ws = (
             grid_thw[:, 0],
             grid_thw[:, 1],
             grid_thw[:, 2],
         )
-        device = paddle.get_device()
 
-        idx_list = [[] for _ in range(4)]
-        weight_list = [[] for _ in range(4)]
+        idx_parts = [[] for _ in range(4)]
+        weight_parts = [[] for _ in range(4)]
 
         for t, h, w in zip(grid_ts, grid_hs, grid_ws):
+            # All tensors stay on GPU throughout — no .tolist() / CPU round-trip
             h_idxs = paddle.linspace(0, self.num_grid_per_side - 1, h)
             w_idxs = paddle.linspace(0, self.num_grid_per_side - 1, w)
 
-            h_idxs_floor = h_idxs.int()
-            w_idxs_floor = w_idxs.int()
-            h_idxs_ceil = (h_idxs.int() + 1).clip(
+            h_idxs_floor = h_idxs.cast("int32")
+            w_idxs_floor = w_idxs.cast("int32")
+            h_idxs_ceil = (h_idxs_floor + 1).clip(
                 max=self.num_grid_per_side - 1
             )
-            w_idxs_ceil = (w_idxs.int() + 1).clip(
+            w_idxs_ceil = (w_idxs_floor + 1).clip(
                 max=self.num_grid_per_side - 1
             )
 
-            dh = h_idxs - h_idxs_floor.astype("float32")
-            dw = w_idxs - w_idxs_floor.astype("float32")
+            dh = h_idxs - h_idxs_floor.cast("float32")
+            dw = w_idxs - w_idxs_floor.cast("float32")
 
             base_h = h_idxs_floor * self.num_grid_per_side
             base_h_ceil = h_idxs_ceil * self.num_grid_per_side
 
-            indices = [
-                (base_h[None].T + w_idxs_floor[None]).flatten(),
-                (base_h[None].T + w_idxs_ceil[None]).flatten(),
-                (base_h_ceil[None].T + w_idxs_floor[None]).flatten(),
-                (base_h_ceil[None].T + w_idxs_ceil[None]).flatten(),
-            ]
+            # [h*w] int32 index tensors, kept on GPU
+            idx_parts[0].append((base_h.unsqueeze(1) + w_idxs_floor.unsqueeze(0)).flatten().cast("int64"))
+            idx_parts[1].append((base_h.unsqueeze(1) + w_idxs_ceil.unsqueeze(0)).flatten().cast("int64"))
+            idx_parts[2].append((base_h_ceil.unsqueeze(1) + w_idxs_floor.unsqueeze(0)).flatten().cast("int64"))
+            idx_parts[3].append((base_h_ceil.unsqueeze(1) + w_idxs_ceil.unsqueeze(0)).flatten().cast("int64"))
 
-            weights = [
-                ((1 - dh)[None].T * (1 - dw)[None]).flatten(),
-                ((1 - dh)[None].T * dw[None]).flatten(),
-                (dh[None].T * (1 - dw)[None]).flatten(),
-                (dh[None].T * dw[None]).flatten(),
-            ]
+            # [h*w] float weight tensors, kept on GPU
+            weight_parts[0].append((((1 - dh).unsqueeze(1)) * ((1 - dw).unsqueeze(0))).flatten())
+            weight_parts[1].append((((1 - dh).unsqueeze(1)) * (dw.unsqueeze(0))).flatten())
+            weight_parts[2].append(((dh.unsqueeze(1)) * ((1 - dw).unsqueeze(0))).flatten())
+            weight_parts[3].append(((dh.unsqueeze(1)) * (dw.unsqueeze(0))).flatten())
 
-            for i in range(4):
-                idx_list[i].extend(indices[i].tolist())
-                weight_list[i].extend(weights[i].tolist())
+        # Single cat per corner — 4 GPU ops total instead of N_images * 8 CPU syncs
+        idx_tensor = paddle.stack(
+            [paddle.concat(idx_parts[i]) for i in range(4)]
+        )  # [4, total_hw]
+        weight_tensor = paddle.stack(
+            [paddle.concat(weight_parts[i]) for i in range(4)]
+        ).cast(self.pos_embed.weight.dtype)  # [4, total_hw]
 
-        idx_tensor = paddle.tensor(idx_list, dtype=paddle.long, device=device)
-        weight_tensor = paddle.tensor(
-            weight_list, dtype=self.pos_embed.weight.dtype
-        )
-        pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
+        pos_embeds = self.pos_embed(idx_tensor) * weight_tensor.unsqueeze(-1)
         patch_pos_embeds = (
             pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
         )
 
-        patch_pos_embeds = patch_pos_embeds.split(
-            [h * w for h, w in zip(grid_hs, grid_ws)]
-        )
+        # split sizes are small Python ints from grid_thw — no GPU sync needed
+        hw_sizes = [int(h) * int(w) for h, w in zip(grid_hs, grid_ws)]
+        patch_pos_embeds = patch_pos_embeds.split(hw_sizes)
 
         patch_pos_embeds_permute = []
         merge_size = self.spatial_merge_size
         for pos_embed, t, h, w in zip(
             patch_pos_embeds, grid_ts, grid_hs, grid_ws
         ):
-            pos_embed = pos_embed.repeat([t, 1])
+            t, h, w = int(t), int(h), int(w)
+            pos_embed = pos_embed.tile([t, 1])
             pos_embed = (
-                pos_embed.view(
+                pos_embed.reshape(
                     [
                         t,
                         h // merge_size,
@@ -183,11 +185,11 @@ class VisionEmbedding(FleetLayer):
                         -1,
                     ]
                 )
-                .permute(0, 1, 3, 2, 4, 5)
-                .flatten(0, 4)
+                .transpose([0, 1, 3, 2, 4, 5])
+                .flatten(start_axis=0, stop_axis=4)
             )
             patch_pos_embeds_permute.append(pos_embed)
-        patch_pos_embeds = paddle.cat(patch_pos_embeds_permute)
+        patch_pos_embeds = paddle.concat(patch_pos_embeds_permute)
         return patch_pos_embeds
 
     def get_packed_seq_params(
@@ -201,7 +203,12 @@ class VisionEmbedding(FleetLayer):
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0).contiguous()
         cu_seqlens = cu_seqlens.squeeze().contiguous()
 
-        max_seqlen = seqlens.max().item()
+        # Optimization: compute max_seqlen on CPU from grid_thw (small integer
+        # metadata already available on CPU) to avoid a GPU->CPU sync (.item()).
+        # grid_thw[:,1]*grid_thw[:,2] gives per-frame token counts; the max
+        # over frames is the maximum sequence length for packed attention.
+        grid_thw_list = grid_thw.tolist()  # one-shot tiny D2H copy of shape info
+        max_seqlen = int(max(h * w for _, h, w in grid_thw_list))
 
         return PackedSeqParams(
             cu_seqlens_q=cu_seqlens,

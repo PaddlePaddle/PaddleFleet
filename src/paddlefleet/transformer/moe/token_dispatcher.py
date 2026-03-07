@@ -538,11 +538,10 @@ class AllToAllTokenDispatcher(nn.Layer):
         # )
         # num_global_tokens_per_local_expert = global_tokens_per_expert.reshape(self.expert_model_parallel_size, self.num_local_experts)
 
-        if num_global_tokens_per_local_expert.sum().item() == 0:
-            self.is_empty_tokens = True
-        else:
-            self.is_empty_tokens = False
-
+        # Optimization: defer the is_empty_tokens check until after the
+        # cpu().tolist() call that is already required for output_splits, so we
+        # reuse data that must be on CPU anyway instead of issuing an extra
+        # GPU->CPU sync (sum().item()) before that point.
         self.tokens_per_expert = num_global_tokens_per_local_expert.sum(axis=0)
 
         num_global_tokens_per_rank = num_global_tokens_per_local_expert.sum(
@@ -556,12 +555,14 @@ class AllToAllTokenDispatcher(nn.Layer):
         )
 
         self.output_splits = num_global_tokens_per_rank.cpu().tolist()
+        # Reuse already-fetched Python list — zero extra D2H sync
+        self.is_empty_tokens = sum(self.output_splits) == 0
         num_local_tokens_per_expert = self.routing_map.sum(dim=0)
         self.input_split_sizes = num_local_tokens_per_expert.reshape(
             self.expert_model_parallel_size, self.num_local_experts
         ).sum(axis=1)
         self.output_shape_tokens = [
-            num_global_tokens_per_rank.sum().cpu().item(),
+            sum(self.output_splits),  # reuse Python list sum — no extra D2H sync
             d_model,
         ]
 
