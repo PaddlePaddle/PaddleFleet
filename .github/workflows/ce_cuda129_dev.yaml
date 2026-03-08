@@ -101,13 +101,13 @@ jobs:
           git config pull.rebase false
           git pull --no-edit origin pull/563/head
           git submodule update --init --recursive
-          sed -i "s#packages/nightly/cu129#packages/nightly/cu126#g" pyproject.toml
           mkdir -p /root/.cache/pip
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          uv lock --upgrade
-          uv sync -v
+          export IS_NVIDIA=True
+          uv build --wheel -v
+          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -187,17 +187,16 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git submodule update --init --recursive
           pip install colorlog>=6.10.1
           git pull --no-edit origin pull/563/head
           git submodule update --init --recursive
-          sed -i "s#packages/nightly/cu129#packages/nightly/cu126#g" pyproject.toml
           mkdir -p /root/.cache/pip
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          uv lock --upgrade
-          uv sync -v
+          export IS_NVIDIA=True
+          uv build --wheel -v
+          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install nvidia-cutlass-dsl==4.2.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
@@ -297,13 +296,13 @@ jobs:
           git config pull.rebase false
           git pull --no-edit origin pull/563/head
           git submodule update --init --recursive
-          sed -i "s#packages/nightly/cu129#packages/nightly/cu126#g" pyproject.toml
           mkdir -p /root/.cache/pip
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          uv lock --upgrade
-          uv sync -v
+          export IS_NVIDIA=True
+          uv build --wheel -v
+          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
           # python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -458,8 +457,9 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          uv lock --upgrade
-          uv sync -v
+          export IS_NVIDIA=True
+          uv build --wheel -v
+          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -725,8 +725,9 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           pip install uv
-          uv lock --upgrade
-          uv sync -v
+          export IS_NVIDIA=True
+          uv build --wheel -v
+          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install colorlog>=6.10.1
