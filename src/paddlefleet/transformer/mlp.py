@@ -122,7 +122,10 @@ class MLP(FleetLayer):
                     "MLP requires `config.intermediate_size` is not None, but it got None."
                 )
 
-            intermediate_size = self.config.intermediate_size
+            self.intermediate_size = self.config.intermediate_size
+        else:
+            self.intermediate_size = intermediate_size
+
         self.hidden_size = (
             hidden_size if hidden_size is not None else self.config.hidden_size
         )
@@ -130,11 +133,11 @@ class MLP(FleetLayer):
         # If this is a gated linear unit we double the output width
         # see https://arxiv.org/pdf/2002.05202.pdf
         if self.config.gated_linear_unit:
-            intermediate_size *= 2
+            self.intermediate_size *= 2
         self.up_gate_proj = build_layer(
             sublayers_spec.up_gate_proj,
             self.input_size,
-            intermediate_size,
+            self.intermediate_size,
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,

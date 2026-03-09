@@ -215,7 +215,8 @@ class GPTModel(PipelineLayer):
 
     def get_layer_desc_list(self, spec, tie_word_embeddings):
         layers = []
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+        model_type = getattr(self.config, "model_type", "")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
             name_prefix = "model.language_model"
         else:
             name_prefix = "model"
@@ -533,7 +534,8 @@ class GPTModel(PipelineLayer):
         """
         state_dict = super().state_dict(*args, **kwargs)
 
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+        model_type = getattr(self.config, "model_type", "")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
             name_prefix = "model.language_model."
         else:
             name_prefix = ""
@@ -600,7 +602,8 @@ class GPTModel(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+        model_type = getattr(self.config, "model_type", "")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
             name_prefix = "model.language_model."
         else:
             name_prefix = ""

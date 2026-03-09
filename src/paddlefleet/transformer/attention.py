@@ -509,7 +509,7 @@ class SelfAttention(Attention):
         if sublayers_spec.q_norm is not None:
             self.q_norm = build_layer(
                 sublayers_spec.q_norm,
-                hidden_size=self.hidden_size_per_attention_head,
+                normalized_shape=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
                 input_is_parallel=norm_input_parallel,
@@ -520,7 +520,7 @@ class SelfAttention(Attention):
         if sublayers_spec.k_norm is not None:
             self.k_norm = build_layer(
                 sublayers_spec.k_norm,
-                hidden_size=self.hidden_size_per_attention_head,
+                normalized_shape=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
                 input_is_parallel=norm_input_parallel,

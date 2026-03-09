@@ -12,31 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from .layer_specs import (
+    get_qwen3_5_language_spec,
+    get_qwen3_5_vision_spec,
+)
+from .qwen3_5_model import (
+    Qwen3_5Model,
+    Qwen3_5VisionModel,
+    Qwen3_5VisionSublayersSpec,
+)
+from .qwen3_5_provider import (
+    Qwen3_5VisionProvider,
+    Qwen3_5VLProvider,
+)
 
-from paddlefleet.transformer.transformer_config import TransformerConfig
-
-
-@dataclass
-class GPTConfig(TransformerConfig):
-    """Configuration object for gpt."""
-
-    vocab_size: int = 1024
-
-    position_embedding_type: str = "rope"
-
-    rotary_percent: float = 1.0
-
-    rotary_base: int = 10000
-
-    rope_scaling: float = 1.0
-
-    max_sequence_length: int = 64
-
-    tie_word_embeddings: bool = False
-
-    moe_grouped_gemm: bool = False
-
-    parallel_output: bool = True
-
-    layer_types: list = None
+__all__ = [
+    "get_qwen3_5_language_spec",
+    "get_qwen3_5_vision_spec",
+    "Qwen3_5Model",
+    "Qwen3_5VisionModel",
+    "Qwen3_5VisionSublayersSpec",
+    "Qwen3_5VisionProvider",
+    "Qwen3_5VLProvider",
+]

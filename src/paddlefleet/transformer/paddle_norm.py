@@ -157,7 +157,6 @@ class WrappedPaddleNorm:
                 config.sequence_parallel
                 or config.tensor_model_parallel_size > 1
             )
-
         return norm_cls(
             config=config,
             normalized_shape=hidden_size,
