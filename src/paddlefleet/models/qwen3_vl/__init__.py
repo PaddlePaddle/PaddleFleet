@@ -18,11 +18,6 @@ from .qwen3_vl_model import (
     Qwen3VLVisionModel,
     Qwen3VLVisionTransformerLayer,
 )
-from .qwen3_vl_provider import (
-    Qwen3VLProvider,
-    Qwen3VLTextProvider,
-    Qwen3VLVisionProvider,
-)
 
 __all__ = [
     "Qwen3VLTextEmbedding",
@@ -30,7 +25,4 @@ __all__ = [
     "Qwen3VLTextTransformerLayer",
     "Qwen3VLVisionModel",
     "Qwen3VLVisionTransformerLayer",
-    "Qwen3VLVisionProvider",
-    "Qwen3VLProvider",
-    "Qwen3VLTextProvider",
 ]
