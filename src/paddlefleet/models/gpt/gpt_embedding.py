@@ -188,21 +188,23 @@ class GPTEmbedding(FleetLayer):
                     #   2. use paddle.scatter (dense backward = gather) to place
                     #      image_embeds values at the True positions
                     #   3. blend with original decoder_input via mask arithmetic
+                    #
+                    # Optimization: reuse decoder_input's flattened buffer as the
+                    # scatter base (scaled by (1-mask)) to avoid a separate
+                    # paddle.zeros([n_total]) allocation (~192 MB bf16 tensor).
                     image_mask_f = image_mask.astype(decoder_input.dtype)  # [B,S,H] float
-                    bsh = decoder_input.shape  # [B, S, H]
-                    n_total = bsh[0] * bsh[1] * bsh[2]
                     flat_indices = paddle.nonzero(
                         image_mask.reshape([-1])
                     ).squeeze(-1)  # [N_img*H] int64 — dense nonzero, no scatter bwd
+                    # Scale the base tensor by (1 - mask) in-place before scatter
+                    # so that visual positions are zero — no extra zeros allocation.
+                    base_flat = (decoder_input * (1.0 - image_mask_f)).reshape([-1])
                     image_src_flat = paddle.scatter(
-                        paddle.zeros([n_total], dtype=decoder_input.dtype),
+                        base_flat,
                         flat_indices,
                         image_embeds.astype(decoder_input.dtype).reshape([-1]),
                     )  # scatter bwd is a simple gather — no sparse atomics
-                    decoder_input = (
-                        decoder_input * (1.0 - image_mask_f)
-                        + image_src_flat.reshape(bsh)
-                    )
+                    decoder_input = image_src_flat.reshape(decoder_input.shape)
                     visual_pos_masks = image_mask[..., 0]
                     deepstack_visual_embeds = deepstack_image_embeds
 
@@ -213,20 +215,16 @@ class GPTEmbedding(FleetLayer):
                         video_features=video_embeds,
                     )
                     video_mask_f = video_mask.astype(decoder_input.dtype)
-                    bsh = decoder_input.shape
-                    n_total = bsh[0] * bsh[1] * bsh[2]
                     flat_indices = paddle.nonzero(
                         video_mask.reshape([-1])
                     ).squeeze(-1)
+                    base_flat = (decoder_input * (1.0 - video_mask_f)).reshape([-1])
                     video_src_flat = paddle.scatter(
-                        paddle.zeros([n_total], dtype=decoder_input.dtype),
+                        base_flat,
                         flat_indices,
                         video_embeds.astype(decoder_input.dtype).reshape([-1]),
                     )
-                    decoder_input = (
-                        decoder_input * (1.0 - video_mask_f)
-                        + video_src_flat.reshape(bsh)
-                    )
+                    decoder_input = video_src_flat.reshape(decoder_input.shape)
                     visual_pos_masks = video_mask[..., 0]
                     deepstack_visual_embeds = deepstack_video_embeds
 

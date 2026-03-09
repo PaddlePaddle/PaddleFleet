@@ -420,6 +420,23 @@ class CPDotProductAttention(FleetLayer):
         self.attention_type = attention_type  # unused for now
         self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
 
+        # Cache append_indices to avoid repeated np.arange + HtoD transfer
+        # every forward call.  Key: seq_len; Value: GPU tensor [1, 1, seq_len, 1]
+        self._append_indices_cache: dict = {}
+
+    def _get_append_indices(self, seq_len: int, dtype) -> "Tensor":
+        """Return a cached [1, 1, seq_len, 1] arange tensor on GPU."""
+        if seq_len not in self._append_indices_cache:
+            t = paddle.arange(seq_len, dtype=dtype).reshape([1, 1, seq_len, 1])
+            t.stop_gradient = True
+            self._append_indices_cache[seq_len] = t
+        cached = self._append_indices_cache[seq_len]
+        # Cast to requested dtype if different (e.g., first call with int64 then int32)
+        if cached.dtype != dtype:
+            cached = cached.cast(dtype)
+            self._append_indices_cache[seq_len] = cached
+        return cached
+
     def forward(
         self,
         query: Tensor,
@@ -429,7 +446,7 @@ class CPDotProductAttention(FleetLayer):
         attn_mask_startend_row_indices: Tensor = None,
         attn_mask_type: AttnMaskType = None,
         attention_bias: Tensor = None,
-        packed_seq_params: PackedSeqParams | None = None,
+        packed_seq_params: "PackedSeqParams | None" = None,
         use_rr_flash_attention: bool = False,
     ):
         """Forward."""
@@ -455,11 +472,10 @@ class CPDotProductAttention(FleetLayer):
 
         if attn_mask_startend_row_indices.shape[-1] == 1:
             b, k_heads, k_seqlen, _ = attn_mask_startend_row_indices.shape
-            append_indices = paddle.to_tensor(
-                np.arange(seq_len),
-                dtype=attn_mask_startend_row_indices.dtype,
-            ).cuda()
-            append_indices = append_indices.reshape(1, 1, seq_len, 1)
+            # Use cached arange tensor to avoid np.arange + HtoD per forward call
+            append_indices = self._get_append_indices(
+                seq_len, attn_mask_startend_row_indices.dtype
+            )
             append_indices_expand = append_indices.expand(
                 b, k_heads, k_seqlen, 1
             )
@@ -469,11 +485,10 @@ class CPDotProductAttention(FleetLayer):
             )
         elif attn_mask_startend_row_indices.shape[-1] == 2:
             b, k_heads, k_seqlen, _ = attn_mask_startend_row_indices.shape
-            append_indices = paddle.to_tensor(
-                np.arange(seq_len),
-                dtype=attn_mask_startend_row_indices.dtype,
+            # Use cached arange tensor to avoid np.arange + HtoD per forward call
+            append_indices = self._get_append_indices(
+                seq_len, attn_mask_startend_row_indices.dtype
             )
-            append_indices = append_indices.reshape(1, 1, seq_len, 1)
             append_indices_expand0 = append_indices.expand(
                 b, k_heads, k_seqlen, 1
             )

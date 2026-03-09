@@ -98,6 +98,10 @@ class RotaryEmbedding(nn.Layer):
 
         self._cast_to_low_precision = False
 
+        # Cache: avoid recomputing arange+outer every forward when seq_len unchanged.
+        # Key: (max_seq_len, offset); Value: emb tensor [1, seq_len, 1, dim]
+        self._freqs_cache: dict = {}
+
     def _apply_scaling(
         self,
         freqs,
@@ -159,11 +163,18 @@ class RotaryEmbedding(nn.Layer):
         self, max_seq_len: int, offset: int = 0
     ) -> (Tensor, Tensor):
         """Cosine and sine values for RoPE are precomputed for all positions up to the maximum
-        sequence length"""
-        freqs = self.get_freqs_non_repeated(max_seq_len, offset)
-        cos = paddle.cos(freqs)
-        sin = paddle.sin(freqs)
-        return cos, sin
+        sequence length. Results are cached to avoid recomputation across training steps."""
+        cache_key = (max_seq_len, offset)
+        if not hasattr(self, "_cos_sin_cache"):
+            self._cos_sin_cache: dict = {}
+        if cache_key not in self._cos_sin_cache:
+            freqs = self.get_freqs_non_repeated(max_seq_len, offset)
+            cos = paddle.cos(freqs)
+            sin = paddle.sin(freqs)
+            cos.stop_gradient = True
+            sin.stop_gradient = True
+            self._cos_sin_cache[cache_key] = (cos, sin)
+        return self._cos_sin_cache[cache_key]
 
     def forward(
         self,
@@ -182,6 +193,14 @@ class RotaryEmbedding(nn.Layer):
         Returns:
             Tensor: Embeddings after applying RoPE.
         """
+        # When position_ids are provided (variable positions, e.g. packed sequences),
+        # we cannot cache by (max_seq_len, offset) alone — fall through to recompute.
+        # Otherwise cache the emb tensor to avoid repeated arange+outer per step.
+        if position_ids is None:
+            cache_key = (max_seq_len, offset)
+            if cache_key in self._freqs_cache:
+                return self._freqs_cache[cache_key]
+
         freqs = self.get_freqs_non_repeated(
             max_seq_len, offset, position_ids=position_ids
         )
@@ -195,6 +214,12 @@ class RotaryEmbedding(nn.Layer):
             ).reshape((freqs.shape[0], -1))
         # emb [1, seq_len, 1, dim]
         emb = emb[None, :, None, :]
+
+        if position_ids is None:
+            # Mark as non-trainable so the cache entry won't participate in grad
+            emb.stop_gradient = True
+            self._freqs_cache[cache_key] = emb
+
         return emb
 
     def get_rotary_seq_len(
