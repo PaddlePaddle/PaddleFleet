@@ -146,6 +146,8 @@ class MLP(FleetLayer):
 
         self.hidden_act = self.config.hidden_act
 
+        if self.config.gated_linear_unit:
+            intermediate_size //= 2
         self.down_proj = build_layer(
             sublayers_spec.down_proj,
             self.config.intermediate_size,
