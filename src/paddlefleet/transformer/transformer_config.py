@@ -230,9 +230,6 @@ class TransformerConfig(ModelParallelConfig):
     masked_softmax_fusion: bool = False
     """If True, uses softmax fusion."""
 
-    fuse_rms_norm: bool = False
-    """Fused rms norm or not"""
-
     normalization: str = "RMSNorm"
     """Norm type"""
 
@@ -382,6 +379,9 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
+
+    moe_shared_expert_gate: bool = False
+    """Enable gate for shared expert."""
 
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
@@ -622,16 +622,29 @@ class TransformerConfig(ModelParallelConfig):
         if self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
 
-        # if self.first_k_dense_replace and self.moe_layer_freq:
-        #     raise ValueError(
-        #         "Cannot specify both first_k_dense_replace and moe_layer_freq."
-        #     )
+        if (
+            self.first_k_dense_replace
+            and self.moe_layer_freq is not None
+            and not isinstance(self.moe_layer_freq, int)
+        ):
+            raise ValueError(
+                "Cannot specify both first_k_dense_replace and moe_layer_freq."
+            )
         if self.first_k_dense_replace is None and self.moe_layer_freq is None:
             self.moe_layer_freq = 1
         if self.first_k_dense_replace:
-            self.moe_layer_freq = [0] * self.first_k_dense_replace + [1] * (
-                self.num_hidden_layers - self.first_k_dense_replace
-            )
+            if self.moe_layer_freq:
+                moe_layer_pattern = [
+                    1 if (i % self.moe_layer_freq == 0) else 0
+                    for i in range(self.num_hidden_layers)
+                ]
+            else:
+                moe_layer_pattern = [1] * (
+                    self.num_hidden_layers - self.first_k_dense_replace
+                )
+            self.moe_layer_freq = [
+                0
+            ] * self.first_k_dense_replace + moe_layer_pattern
         if self.recompute_granularity == "":
             self.recompute_granularity = None
 

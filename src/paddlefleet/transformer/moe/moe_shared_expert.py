@@ -15,6 +15,9 @@
 
 from copy import deepcopy
 
+import paddle
+import paddle.nn.functional as F
+
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -47,3 +50,20 @@ class StandardMLPSharedExpert(MLP):
                 intermediate_size=moe_intermediate_size,
                 # tp_group=pg_collection.expt_tp,
             )
+        self.use_shared_expert_gate = config.moe_shared_expert_gate
+        if self.use_shared_expert_gate:
+            self.gate_weight = paddle.create_parameter(
+                shape=[config.hidden_size, 1],
+                dtype=config.params_dtype,
+                default_initializer=paddle.nn.initializer.Uniform(),
+            )
+        else:
+            self.gate_weight = None
+
+    def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
+        output, output_bias = super().forward(hidden_states)
+        if self.use_shared_expert_gate:
+            logits = F.linear(hidden_states, self.gate_weight)
+            gate_score = F.sigmoid(logits)
+            output = output * gate_score
+        return output, output_bias

@@ -1,8 +1,6 @@
 name: CE-CUDA-CUDA-130-Dev
 
 on:
-  schedule:
-    - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
@@ -560,6 +558,14 @@ jobs:
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
           fi
+          '
+
+      - name: GLM4.5 pre-train (EP4)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
           '
 
       - name: Qwen pre-train

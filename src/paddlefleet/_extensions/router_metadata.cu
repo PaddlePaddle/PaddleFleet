@@ -15,6 +15,7 @@
 #include <cuda_runtime.h>
 #include <paddle/extension.h>
 #include <cub/cub.cuh>
+#include <limits>
 
 __global__ void simple_arange_kernel(int* output, int64_t N) {
   for (int64_t idx =
@@ -103,15 +104,15 @@ std::vector<paddle::Tensor> RouterMetadataCuda(
     const paddle::Tensor& topk_router_indices,
     const paddle::Tensor& expert_frequency_offset,
     int K) {
-  // TODO(large-tensor): downstream functors may still use int; guard until
-  // upgraded.
   int64_t num_tokens = topk_router_indices.shape()[0];
-
-  // TODO(large-tensor): downstream functors may still use int; guard until
-  // upgraded.
   int64_t num_experts = expert_frequency_offset.shape()[0];
+  PADDLE_ENFORCE_LE(
+      num_tokens * K,
+      static_cast<int64_t>(std::numeric_limits<int>::max()),
+      common::errors::InvalidArgument(
+          "num_tokens * K must be <= INT_MAX for router_metadata kernels."));
 
-  const int total_elements = num_tokens * K;
+  const int total_elements = static_cast<int>(num_tokens * K);
   auto place = topk_router_indices.place();
   cudaStream_t stream = topk_router_indices.stream();
 
@@ -125,7 +126,7 @@ std::vector<paddle::Tensor> RouterMetadataCuda(
   auto num_activated_per_token_offset =
       paddle::empty({num_tokens + 1}, paddle::DataType::INT32, place);
   int threads = 256;
-  int blocks = (num_tokens + threads - 1) / threads;
+  int blocks = static_cast<int>((num_tokens + threads - 1) / threads);
 
   if (num_tokens > 0) {
     CountValidExpertsKernel<T>
