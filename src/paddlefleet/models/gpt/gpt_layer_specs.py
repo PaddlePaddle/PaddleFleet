@@ -30,6 +30,9 @@ from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
     MultimodalRotaryEmbedding,
     RotaryEmbedding,
 )
+from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
+    YarnRotaryEmbedding,
+)
 from paddlefleet.models.gpt import GPTModel
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding, GPTEmbeddingSpec
 from paddlefleet.models.gpt.gpt_model import GPTSublayersSpec
@@ -45,6 +48,10 @@ from paddlefleet.transformer.attention import (
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
+from paddlefleet.transformer.multi_latent_attention import (
+    MLASelfAttention,
+    MLASelfAttentionSublayersSpec,
+)
 from paddlefleet.transformer.multi_token_prediction import (
     get_mtp_layer_spec_for_backend,
 )
@@ -115,46 +122,81 @@ def get_gpt_layer_local_spec(
             )
             transformer_cls = TransformerLayerWithOverlap
 
-    return LayerSpec(
-        layer=transformer_cls,
-        sublayers_spec=TransformerLayerSublayersSpec(
-            input_layernorm=layer_norm,
-            self_attn=LayerSpec(
-                layer=SelfAttention,
-                extra_kwargs={"attn_mask_type": AttnMaskType.causal},
-                sublayers_spec=SelfAttentionSublayersSpec(
-                    qkv_proj=backend.column_parallel_linear(),
-                    core_attention=backend.core_attention(),
-                    o_proj=backend.row_parallel_linear(),
-                    q_norm=(
-                        L2Norm
-                        if qk_l2_norm
-                        else (qk_norm if use_qk_norm else IdentityOp)
-                    ),
-                    k_norm=(
-                        L2Norm
-                        if qk_l2_norm
-                        else (qk_norm if use_qk_norm else IdentityOp)
+    if multi_latent_attention:
+        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
+        return LayerSpec(
+            layer=transformer_cls,
+            sublayers_spec=TransformerLayerSublayersSpec(
+                input_layernorm=layer_norm,
+                self_attn=LayerSpec(
+                    layer=MLASelfAttention,
+                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
+                    sublayers_spec=MLASelfAttentionSublayersSpec(
+                        q_proj=backend.column_parallel_linear(),
+                        q_a_proj=backend.column_parallel_linear(),
+                        q_b_proj=backend.column_parallel_linear(),
+                        kv_a_proj_with_mqa=backend.column_parallel_linear(),
+                        kv_b_proj=backend.column_parallel_linear(),
+                        core_attention=backend.core_attention(),
+                        o_proj=backend.row_parallel_linear(),
+                        q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+                        kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
                     ),
                 ),
+                self_attn_bda=get_bias_dropout_add,
+                post_attention_layernorm=layer_norm,
+                mlp=mlp,
+                mlp_bda=get_bias_dropout_add,
             ),
-            self_attn_bda=get_bias_dropout_add,
-            post_attention_layernorm=layer_norm,
-            mlp=mlp,
-            mlp_bda=get_bias_dropout_add,
-            sharded_state_dict_keys_map={
-                "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
-                "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
+            extra_kwargs={
+                "config": config,
+                "layer_number": layer_number,
+                "hidden_dropout_prob": config.hidden_dropout_prob
+                if config is not None
+                else None,
             },
-        ),
-        extra_kwargs={
-            "config": config,
-            "layer_number": layer_number,
-            "hidden_dropout_prob": config.hidden_dropout_prob
-            if config is not None
-            else None,
-        },
-    )
+        )
+    else:
+        return LayerSpec(
+            layer=transformer_cls,
+            sublayers_spec=TransformerLayerSublayersSpec(
+                input_layernorm=layer_norm,
+                self_attn=LayerSpec(
+                    layer=SelfAttention,
+                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
+                    sublayers_spec=SelfAttentionSublayersSpec(
+                        qkv_proj=backend.column_parallel_linear(),
+                        core_attention=backend.core_attention(),
+                        o_proj=backend.row_parallel_linear(),
+                        q_norm=(
+                            L2Norm
+                            if qk_l2_norm
+                            else (qk_norm if use_qk_norm else IdentityOp)
+                        ),
+                        k_norm=(
+                            L2Norm
+                            if qk_l2_norm
+                            else (qk_norm if use_qk_norm else IdentityOp)
+                        ),
+                    ),
+                ),
+                self_attn_bda=get_bias_dropout_add,
+                post_attention_layernorm=layer_norm,
+                mlp=mlp,
+                mlp_bda=get_bias_dropout_add,
+                sharded_state_dict_keys_map={
+                    "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
+                    "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
+                },
+            ),
+            extra_kwargs={
+                "config": config,
+                "layer_number": layer_number,
+                "hidden_dropout_prob": config.hidden_dropout_prob
+                if config is not None
+                else None,
+            },
+        )
 
 
 def get_mlp_layer_spec_for_backend(
@@ -329,6 +371,17 @@ def get_gpt_spec(
     rope_embedding_spec = None
     if position_embedding_type == "rope" and not config.multi_latent_attention:
         rope_embedding_spec = LayerSpec(layer=RotaryEmbedding)
+        rope_embedding_extra_kwargs = {
+            "rotary_percent": rotary_percent,
+            "rotary_base": rotary_base,
+            "rope_scaling": rope_scaling,
+        }
+        embedding_extra_kwargs = {
+            **embedding_extra_kwargs,
+            **rope_embedding_extra_kwargs,
+        }
+    elif position_embedding_type == "yarn":
+        rope_embedding_spec = LayerSpec(layer=YarnRotaryEmbedding)
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
