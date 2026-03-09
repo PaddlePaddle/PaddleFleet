@@ -156,7 +156,7 @@ class MLP(FleetLayer):
 
         self.down_proj = build_layer(
             sublayers_spec.down_proj,
-            intermediate_size,
+            self.config.intermediate_size,
             self.hidden_size,
             config=self.config,
             init_method=self.config.output_layer_init_method,
