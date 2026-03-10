@@ -13,9 +13,7 @@
 # limitations under the License.
 
 from .kimi_k25_model import KimiK25VisionModel
-from .kimi_k25_provider import KimiK25VisionProvider
 
 __all__ = [
-    "KimiK25VisionProvider",
     "KimiK25VisionModel",
 ]
