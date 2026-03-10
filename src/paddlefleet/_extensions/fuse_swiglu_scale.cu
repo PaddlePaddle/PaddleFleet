@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <cuda_bf16.h>
+#include <limits>
 #include <vector>
 #include "paddle/extension.h"
 
@@ -162,6 +163,16 @@ std::vector<paddle::Tensor> FusedSwiGLUScaleForward(
   auto hidden_size = hidden2 / 2;
   auto out = paddle::empty({rows, hidden_size}, x.dtype(), x.place());
 
+  if (rows == 0 || hidden_size == 0) {
+    return {out};
+  }
+
+  PADDLE_ENFORCE_LE(
+      rows * hidden2,
+      static_cast<int64_t>(std::numeric_limits<int>::max()),
+      common::errors::InvalidArgument(
+          "rows * hidden2 must be <= INT_MAX for fused_swiglu_scale."));
+
   int grid_size = rows;
   int block_size = 256;
   auto stream = x.stream();
@@ -206,6 +217,16 @@ std::vector<paddle::Tensor> FusedSwiGLUScaleBackward(
   auto hidden_size = hidden2 / 2;
   auto d_x = paddle::empty_like(x);
   auto d_scale = paddle::empty_like(scale);
+
+  if (rows == 0 || hidden_size == 0) {
+    return {d_x, d_scale};
+  }
+
+  PADDLE_ENFORCE_LE(
+      rows * hidden2,
+      static_cast<int64_t>(std::numeric_limits<int>::max()),
+      common::errors::InvalidArgument(
+          "rows * hidden2 must be <= INT_MAX for fused_swiglu_scale."));
 
   int grid_size = rows;
   int block_size = 256;

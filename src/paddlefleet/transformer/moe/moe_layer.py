@@ -43,9 +43,6 @@ from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
 from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
-# To avoid repeated imports and backend switching
-_PFCC_DEEP_EP_BACKEND_SET = False
-
 logger = logging.getLogger(__name__)
 
 if paddlefleet.ops.is_sonic_moe_available():
@@ -139,7 +136,6 @@ class MoELayer(nn.Layer):
                     "paddlefleet.ops.sonicmoe"
                 ]
             )
-        self.moe_use_pfcc_deepep = config.moe_use_pfcc_deepep
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
         self.moe_ep_barrier = config.moe_ep_barrier
@@ -198,12 +194,9 @@ class MoELayer(nn.Layer):
                 self.moe_use_fusion_node = config.moe_use_fusion_node
             else:
                 if self.moe_grouped_gemm:
-                    logger.warning(
-                        "moe_grouped_gemm is not supported when moe_token_dispatcher_type != 'deepep'."
+                    raise ValueError(
+                        "moe_grouped_gemm is only supported when moe_token_dispatcher_type is 'deepep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
                     )
-                self.moe_grouped_gemm = (
-                    False  # TODO: Support EP>1 alltoall moe_grouped_gemm
-                )
                 self.fp8_dispatch = False
 
         if self.fp8:
@@ -251,20 +244,6 @@ class MoELayer(nn.Layer):
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
-                global _PFCC_DEEP_EP_BACKEND_SET
-                if self.moe_use_pfcc_deepep and not _PFCC_DEEP_EP_BACKEND_SET:
-                    from .fused_a2a import (
-                        set_pfcc_deep_ep_backend as set_pfcc_deep_ep_backend_a2a,
-                    )
-
-                    set_pfcc_deep_ep_backend_a2a()
-                    from paddlefleet.transformer.transformer_layer import (
-                        set_pfcc_deep_ep_backend as set_pfcc_deep_ep_backend_layer,
-                    )
-
-                    set_pfcc_deep_ep_backend_layer()
-                    _PFCC_DEEP_EP_BACKEND_SET = True
-
                 self.token_dispatcher = MoEFlexTokenDispatcher(
                     self.num_experts_per_device,
                     self.num_experts_per_tok,
@@ -649,9 +628,10 @@ class MoELayer(nn.Layer):
     def aux_loss_compute(self, args):
         hidden_states, aux_loss, residuals = args
         if self.training and self.router_aux_loss_coef:
-            aux_loss = aux_loss * self.router_aux_loss_coef
+            aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
-
+        else:
+            output = hidden_states
         output = output.reshape(residuals.shape)
         if self.shared_experts is not None:
             shared_output = self.shared_experts(residuals)[0]
@@ -722,7 +702,7 @@ class MoELayer(nn.Layer):
                 )
 
         if self.training and self.router_aux_loss_coef:
-            aux_loss = aux_loss * self.router_aux_loss_coef
+            aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(output, aux_loss)
 
         output = output.reshape(orig_shape)

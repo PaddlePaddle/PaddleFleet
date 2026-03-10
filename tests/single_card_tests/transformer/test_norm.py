@@ -27,7 +27,6 @@ class TestFleetLayer(unittest.TestCase):
             hidden_size=12,
             num_attention_heads=4,
             normalization="RMSNorm",
-            fuse_rms_norm=True,
         )
         self.norm = WrappedPaddleNorm(
             config=self.transformer_config,

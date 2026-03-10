@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <limits>
+
 #include "paddle/phi/kernels/funcs/fast_divmod.h"
 #include "paddle/phi/kernels/funcs/segmented_array.h"
 #include "paddle/phi/kernels/fusion/gpu/quant_utils.h"
@@ -458,7 +460,13 @@ std::vector<paddle::Tensor> fuse_stack_transpose_fp8_quant_fleet_custom(
   }
 
   // Launch kernel
-  dim3 grid((M / 128) * (K / 128), 1, N);
+  int64_t grid_x = (M / 128) * (K / 128);
+  PADDLE_ENFORCE_LE(
+      grid_x,
+      static_cast<int64_t>(std::numeric_limits<int>::max()),
+      common::errors::InvalidArgument(
+          "grid.x exceeds INT_MAX in fuse_stack_transpose_fp8_quant."));
+  dim3 grid(static_cast<uint32_t>(grid_x), 1, N);
   dim3 block(32, 16);
 
   FastDivMod K_div_128(K / 128);

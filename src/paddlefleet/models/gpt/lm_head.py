@@ -31,6 +31,7 @@ class GPTLMHead(ColumnParallelLinear):
         self.skip_weight_param_allocation = kwargs[
             "skip_weight_param_allocation"
         ]
+        self._dtype = self.config.params_dtype
 
         kwargs["skip_weight_param_allocation"] = True
         super().__init__(**kwargs)
@@ -71,6 +72,7 @@ class GPTLMHead(ColumnParallelLinear):
                     is_bias=False,
                     default_initializer=paddle.nn.initializer.Constant(0.0),
                 )
+
                 if self.config.perform_initialization:
                     _initialize_affine_weight_gpu(
                         self.weight,

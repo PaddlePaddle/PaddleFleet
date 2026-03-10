@@ -15,12 +15,15 @@
 
 # pylint: disable=missing-function-docstring, missing-class-docstring
 
+import logging
+
 import paddle
 import paddle.nn.functional as F
 
 from paddlefleet.jit import jit_fuser
-from paddlefleet.ops import fused_swiglu_bwd
 from paddlefleet.utils import nvtx_decorator
+
+logger = logging.getLogger(__name__)
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
@@ -76,7 +79,14 @@ def swiglu_back(g, y):
         paddle.Tensor: Gradient with respect to the input tensor, computed using the
             chain rule and the derivative of the SiLU activation function.
     """
-    return fused_swiglu_bwd(g, y)
+    if paddle.is_compiled_with_cuda():
+        from paddlefleet.ops import fused_swiglu_bwd
+
+        return fused_swiglu_bwd(g, y)
+    else:
+        raise NotImplementedError(
+            "fused_swiglu_bwd is not implemented for non-CUDA backends."
+        )
 
 
 @jit_fuser

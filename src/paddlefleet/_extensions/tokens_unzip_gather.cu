@@ -81,14 +81,16 @@ std::vector<paddle::Tensor> tokens_unzip_gather(
   int64_t zipped_rows = x_shape[0];
   int hidden_size = x_shape[1];
 
-  std::vector<int64_t> x_scale_shape;
-  int quanted_hidden_size = 0;
   bool has_scale = (x_scale.get_ptr() != nullptr);
+  int quanted_hidden_size = 0;
   if (has_scale) {
-    x_scale_shape = x_scale.get().shape();
+    auto x_scale_shape = x_scale.get().shape();
     PD_CHECK(x_scale_shape.size() == 2);
     PD_CHECK(x_scale_shape[0] == x_shape[0]);
     quanted_hidden_size = x_scale_shape[1];
+  } else {
+    PD_CHECK(hidden_size % 128 == 0);
+    quanted_hidden_size = hidden_size / 128;
   }
 
   auto x_unzipped =
@@ -98,12 +100,9 @@ std::vector<paddle::Tensor> tokens_unzip_gather(
     x_scale_unzipped = paddle::zeros(
         {padded_num_tokens, quanted_hidden_size}, x_scale.get().dtype(), place);
   } else {
-    PD_CHECK(hidden_size % 128 == 0);
-    quanted_hidden_size = hidden_size / 128;
     x_scale_unzipped = paddle::empty(
         {0, quanted_hidden_size}, paddle::DataType::FLOAT32, place);
   }
-
   auto index_unzipped = paddle::empty(
       {tokens_per_expert[expert_id]}, paddle::DataType::INT64, place);
 
@@ -145,7 +144,10 @@ std::vector<paddle::Tensor> tokens_unzip_gather(
     }                                                                     \
   } while (0)
 
-  if (grid > 0) {
+  // Skip kernel when expert has no tokens: unzipped_rows=0 causes the kernel to
+  // always hit `unzipped_row_idx >= unzipped_rows` and continue, so avoid the
+  // wasteful launch.
+  if (grid > 0 && tokens_per_expert[expert_id] > 0) {
     if (has_scale) {
       LAUNCH_TOKENS_UNZIP_GATHER_KERNEL(phi::float8_e4m3fn);
     } else {
