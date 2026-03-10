@@ -66,7 +66,7 @@ class RMSNorm(paddle.nn.Layer):
         )
         self.weight = paddle.create_parameter(
             shape=[self.normalized_shape],
-            dtype=paddle.get_default_dtype(),
+            dtype=config.params_dtype,
             default_initializer=paddle.nn.initializer.Constant(1.0),
         )
         self.config = config
@@ -128,13 +128,13 @@ class LayerNorm(paddle.nn.Layer):
         )
         self.weight = paddle.create_parameter(
             shape=[self.normalized_shape],
-            dtype=paddle.get_default_dtype(),
+            dtype=config.params_dtype,
             default_initializer=paddle.nn.initializer.Constant(1.0),
         )
         param_shape = [np.prod(self.normalized_shape)]
         self.bias = self.create_parameter(
             shape=param_shape,
-            dtype=paddle.get_default_dtype(),
+            dtype=config.params_dtype,
             default_initializer=paddle.nn.initializer.Constant(0.0),
             is_bias=True,
         )
