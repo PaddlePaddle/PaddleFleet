@@ -22,6 +22,10 @@ from paddlefleet.transformer.attention import (
 )
 from paddlefleet.transformer.dot_product_attention import DotProductAttention
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.multi_latent_attention import (
+    MLASelfAttention,
+    MLASelfAttentionSublayersSpec,
+)
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import (
     init_method_normal,
@@ -113,6 +117,80 @@ class TestSelfAttention(unittest.TestCase):
 
         output, bias = self.self_attn(
             hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb
+        )
+
+        # Check if output and bias have the correct shape
+        assert output.shape[0] == micro_batch_size
+        assert output.shape[1] == sequence_length
+        assert output.shape[2] == config.hidden_size
+        assert bias.shape[0] == config.hidden_size
+
+
+class TestMLASelfAttention(unittest.TestCase):
+    def setUp(self):
+        self.config = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=128,
+            num_attention_heads=1,
+        )
+
+        self.config.num_key_value_heads = self.config.num_attention_heads
+        self.config.head_dim = (
+            self.config.hidden_size // self.config.num_attention_heads
+        )
+        self.config.softmax_scale = None
+        self.config.use_bias = True
+        self.config.no_rope_freq = None
+        self.config.recompute_granularity = None
+        self.config.fused_single_qkv_rope = False
+        self.config.rotary_interleaved = False
+        self.config.multi_latent_attention = True
+        self.config.init_method = init_method_normal(0.02)
+        self.config.output_layer_init_method = scaled_init_method_normal(
+            0.02, 1, 2.0
+        )
+        self.config.rms_norm_eps = 1e-5
+        self.config.context_parallel_size = 1
+        self.config.apply_query_key_layer_scaling = False
+        self.config.sliding_window = None
+        self.config.window_attn_skip_freq = None
+        self.config.fp16 = False
+        self.config.bf16 = False
+        self.config.masked_softmax_fusion = False
+        self.config.attention_softmax_in_fp32 = True
+        self.config.attention_dropout = 0.1
+        self.config.softmax_type = "vanilla"
+
+        self.self_attn = MLASelfAttention(
+            self.config,
+            MLASelfAttentionSublayersSpec(
+                q_proj=BiasedLinear,
+                q_a_proj=BiasedLinear,
+                q_b_proj=BiasedLinear,
+                kv_a_proj_with_mqa=BiasedLinear,
+                kv_b_proj=BiasedLinear,
+                core_attention=DotProductAttention,
+                o_proj=BiasedLinear,
+                q_a_layernorm=RMSNorm,
+                kv_a_layernorm=RMSNorm,
+            ),
+            attn_mask_type=AttnMaskType.causal,
+            layer_number=1,
+        )
+
+    def test_self_attention(self):
+        config = self.self_attn.config
+        sequence_length = 127
+        micro_batch_size = 2
+        hidden_size = self.self_attn.config.hidden_size
+
+        hidden_states = paddle.randn(
+            (micro_batch_size, sequence_length, hidden_size),
+        )
+
+        output, bias = self.self_attn(
+            hidden_states,
+            attention_mask=None,
         )
 
         # Check if output and bias have the correct shape
