@@ -64,6 +64,7 @@ class RMSNorm(paddle.nn.Layer):
         self.variance_epsilon = (
             config.rms_norm_eps if norm_eps is None else norm_eps
         )
+
         self.weight = paddle.create_parameter(
             shape=[self.normalized_shape],
             dtype=config.params_dtype,

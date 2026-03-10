@@ -260,6 +260,7 @@ class DotProductAttention(FleetLayer):
             )
 
             # Handle MLA case where query/key head_dim != value head_dim
+
             # flashmask_attention requires head_dim_q == head_dim_v for backward pass
             q_head_dim = query.shape[-1]
             v_head_dim = value.shape[-1]
@@ -276,7 +277,7 @@ class DotProductAttention(FleetLayer):
                 value_padded = paddle.concat([value, value_padding], axis=-1)
             else:
                 value_padded = value
-                
+
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
