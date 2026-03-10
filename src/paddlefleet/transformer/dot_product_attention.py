@@ -258,10 +258,29 @@ class DotProductAttention(FleetLayer):
                 if use_rr_flash_attention
                 else flashmask_attention
             )
+
+            # Handle MLA case where query/key head_dim != value head_dim
+            # flashmask_attention requires head_dim_q == head_dim_v for backward pass
+            q_head_dim = query.shape[-1]
+            v_head_dim = value.shape[-1]
+            need_value_padding = q_head_dim != v_head_dim
+
+            if need_value_padding:
+                # Pad value to match query head_dim
+                # value: [b, s, h, v_head_dim] -> [b, s, h, q_head_dim]
+                bsz, seq_len, num_heads, _ = value.shape
+                value_padding = paddle.zeros(
+                    [bsz, seq_len, num_heads, q_head_dim - v_head_dim],
+                    dtype=value.dtype,
+                )
+                value_padded = paddle.concat([value, value_padding], axis=-1)
+            else:
+                value_padded = value
+
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
-                value.astype(value.dtype),
+                value_padded.astype(value.dtype),
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=(attn_mask_type == AttnMaskType.causal),

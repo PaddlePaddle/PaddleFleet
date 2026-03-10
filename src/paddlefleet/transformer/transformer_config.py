@@ -230,9 +230,6 @@ class TransformerConfig(ModelParallelConfig):
     masked_softmax_fusion: bool = False
     """If True, uses softmax fusion."""
 
-    fuse_rms_norm: bool = False
-    """Fused rms norm or not"""
-
     normalization: str = "RMSNorm"
     """Norm type"""
 
@@ -310,11 +307,8 @@ class TransformerConfig(ModelParallelConfig):
     """Options are greedy, group_limited_greedy, no_auxtc"""
 
     moe_token_dispatcher_type: str = "deepep"
-    """The type of token dispatcher to use. The default is 'allgather'.
+    """The type of token dispatcher to use. The default is 'deepep'.
     Options are 'allgather','alltoall' and 'deepep'."""
-
-    moe_use_pfcc_deepep: bool = False
-    """Whether to use PFCC DeepEP for the MoE layer. If False, Paddle DeepEP is used. This argument takes effect only when moe_token_dispatcher_type is set to 'deepep'."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -385,6 +379,9 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
+
+    moe_shared_expert_gate: bool = False
+    """Enable gate for shared expert."""
 
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
@@ -479,6 +476,59 @@ class TransformerConfig(ModelParallelConfig):
     using_sonic_moe: bool = False
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
 
+    ####################
+    # MLA
+    ####################
+    """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.
+
+    The initialization function has an argument for each parameter, including those in
+    ModelParallelConfig. Included YaRN RoPE parameters that is fused in MLA.
+    """
+
+    q_lora_rank: int = 512
+    """Rank of Query tensor's low rank representation."""
+
+    kv_lora_rank: int = 512
+    """Rank of Key and Value tensors' low rank representation."""
+
+    qk_nope_head_dim: int = 64
+    """Dimension of the head in the QK projection. q_head_dim = qk_nope_head_dim + qk_rope_head_dim. Original qk_head_dim"""
+
+    qk_rope_head_dim: int = 64
+    """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
+
+    v_head_dim: int = 128
+    """Dimension of the head in the V projection."""
+
+    rope_type: str = "yarn"
+    """Type of RoPE to use. Default to yarn, options are rope and yarn."""
+
+    rotary_base: float = 10000
+    """Rotary base for the rotary embeddings, used by rope and yarn."""
+
+    rotary_percent: float = 1.0
+    """Rotary percent for the rotary embeddings, used by rope."""
+
+    rotary_scaling_factor: float = 40
+    """Rotary scaling factor for the rotary embeddings, used by yarn."""
+
+    original_max_position_embeddings: int = 4096
+    """Original maximum position embeddings for the original model, used by yarn."""
+
+    beta_fast: float = 32
+    """Beta fast for YaRN RoPE, used by yarn."""
+
+    beta_slow: float = 1
+    """Beta slow for YaRN RoPE, used by yarn."""
+
+    mscale: float = 1.0
+    """Mscale for YaRN RoPE in Multi-Latent Attention, used by yarn."""
+
+    mscale_all_dim: float = 0.0
+    """Mscale all dimensions for YaRN RoPE in Multi-Latent Attention, used by yarn."""
+
+    # cache_mla_latents: bool = False
+
     @classmethod
     def from_config(cls, config_dict):
         # note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
@@ -572,16 +622,29 @@ class TransformerConfig(ModelParallelConfig):
         if self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
 
-        if self.first_k_dense_replace and self.moe_layer_freq:
+        if (
+            self.first_k_dense_replace
+            and self.moe_layer_freq is not None
+            and not isinstance(self.moe_layer_freq, int)
+        ):
             raise ValueError(
                 "Cannot specify both first_k_dense_replace and moe_layer_freq."
             )
         if self.first_k_dense_replace is None and self.moe_layer_freq is None:
             self.moe_layer_freq = 1
         if self.first_k_dense_replace:
-            self.moe_layer_freq = [0] * self.first_k_dense_replace + [1] * (
-                self.num_hidden_layers - self.first_k_dense_replace
-            )
+            if self.moe_layer_freq:
+                moe_layer_pattern = [
+                    1 if (i % self.moe_layer_freq == 0) else 0
+                    for i in range(self.num_hidden_layers)
+                ]
+            else:
+                moe_layer_pattern = [1] * (
+                    self.num_hidden_layers - self.first_k_dense_replace
+                )
+            self.moe_layer_freq = [
+                0
+            ] * self.first_k_dense_replace + moe_layer_pattern
         if self.recompute_granularity == "":
             self.recompute_granularity = None
 
@@ -638,3 +701,12 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
+
+        if (
+            self.multi_latent_attention
+            and self.apply_rope_fusion
+            and self.rope_type != "yarn"
+        ):
+            raise ValueError(
+                "apply_rope_fusion for MLA only works with YARN RoPE."
+            )

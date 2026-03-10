@@ -119,9 +119,9 @@ struct alignas(16) VectorType<uint8_t, 16> {
 template <typename T>
 __device__ __forceinline__ void unrolled_memcpy(const T* src,
                                                 T* dst,
-                                                const int num_elements) {
+                                                const int64_t num_elements) {
 #pragma unroll
-  for (int idx = threadIdx.x; idx < num_elements; idx += blockDim.x) {
+  for (int64_t idx = threadIdx.x; idx < num_elements; idx += blockDim.x) {
     dst[idx] = src[idx];
   }
 }
@@ -130,34 +130,33 @@ __device__ __forceinline__ void unrolled_memcpy(const T* src,
 template <typename T>
 __device__ __forceinline__ void vectorized_memcpy(const T* src,
                                                   T* dst,
-                                                  const int num_elements) {
+                                                  const int64_t num_elements) {
   constexpr int vector_size_in_bytes = 16;
-  const int elements_per_vector = vector_size_in_bytes / sizeof(T);
+  const int64_t elements_per_vector = vector_size_in_bytes / sizeof(T);
 
-  int num_vectors = num_elements / elements_per_vector;
-  int remaining_elements = num_elements % elements_per_vector;
+  int64_t num_vectors = num_elements / elements_per_vector;
+  int64_t remaining_elements = num_elements % elements_per_vector;
 
   using VecType = VectorType<T, elements_per_vector>;
   const VecType* src_vec = reinterpret_cast<const VecType*>(src);
   VecType* dst_vec = reinterpret_cast<VecType*>(dst);
 
 #pragma unroll
-  for (int idx = threadIdx.x; idx < num_vectors; idx += blockDim.x) {
+  for (int64_t idx = threadIdx.x; idx < num_vectors; idx += blockDim.x) {
     dst_vec[idx] = src_vec[idx];
   }
 
   if (remaining_elements > 0) {
-    int offset = num_vectors * elements_per_vector;
-    for (int i = threadIdx.x; i < remaining_elements; i += blockDim.x) {
+    int64_t offset = num_vectors * elements_per_vector;
+    for (int64_t i = threadIdx.x; i < remaining_elements; i += blockDim.x) {
       dst[offset + i] = src[offset + i];
     }
   }
 }
 
 template <typename T>
-__device__ __forceinline__ void try_vectorized_memcpy(const T* src,
-                                                      T* dst,
-                                                      const int num_elements) {
+__device__ __forceinline__ void try_vectorized_memcpy(
+    const T* src, T* dst, const int64_t num_elements) {
   bool is_aligned_128bit =
       ((uintptr_t)src & 0xF) == 0 && ((uintptr_t)dst & 0xF) == 0;
   if (is_aligned_128bit) {

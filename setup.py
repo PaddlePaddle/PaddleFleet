@@ -185,9 +185,17 @@ def setup_install_no_extension():
     )
 
 
-dependencies = (
-    common_dependencies + get_special_build_deps() + get_special_setup_deps()
-)
+try:
+    dependencies = (
+        common_dependencies
+        + get_special_build_deps()
+        + get_special_setup_deps()
+    )
+except Exception as e:
+    raise Exception(
+        f"Failed to resolve special dependencies: {e}, using common dependencies only"
+    )
+
 if backends.IS_NVIDIA:
     setup_ops_extension()
 elif backends.IS_XPU:

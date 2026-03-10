@@ -1,9 +1,16 @@
 name: CE-CUDA-129-PYTHON-RELEASE
 
 on:
-  schedule:
-    - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
+    inputs:
+      use_release:
+        description: '是否使用预编译的Release版本'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+        required: false
 
 permissions: read-all
 
@@ -22,10 +29,10 @@ env:
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
   paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
-  paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.1.0/latest/cu129/"
-  fleet_branch: "release/0.1.0"
-  formers_branch: "release/v1.0"
-
+  paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/cu129/"
+  fleet_branch: "release/0.2"
+  formers_branch: "release/1.1"
+  use_release: ${{ inputs.use_release || 'true' }}
 
 defaults:
   run:
@@ -72,7 +79,9 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e paddle_url \
+            -e use_release \
             -e paddlefleet_url \
+            -e repo_flag="paddlefleet" \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
@@ -120,8 +129,11 @@ jobs:
           url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -138,7 +150,7 @@ jobs:
           '
 
       - name: Single card sonic moe test
-        if: matrix.python == '3.12'
+        if: matrix.python == '3.12' && always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
@@ -197,6 +209,8 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
+            -e use_release \
+            -e repo_flag="paddlefleet" \
             -e paddle_url \
             -e paddlefleet_url \
             -e fleet_branch \
@@ -246,8 +260,11 @@ jobs:
           url_info=paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          pip install ${fleet_url_info}  --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           chmod +x /usr/local/bin/yq
@@ -324,6 +341,7 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
+            -e use_release \
             -e paddle_url \
             -e formers_branch \
             -e paddlefleet_url \
@@ -373,8 +391,11 @@ jobs:
           url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --force-reinstall --no-cache-dir
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -462,6 +483,16 @@ jobs:
           fi
           '
 
+      - name: Qwen3-vl-8k-single-card
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
+          '
+
       - name: Terminate and delete the container
         if: ${{ always() }}
         run: |
@@ -505,6 +536,7 @@ jobs:
             -e CI_name \
             -e paddle_url \
             -e paddlefleet_url \
+            -e use_release \
             -e fleet_branch \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
@@ -551,8 +583,11 @@ jobs:
           url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --force-reinstall --no-cache-dir
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -658,6 +693,16 @@ jobs:
           fi
           '
 
+      - name: GLM4.5 dpo_lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+          '
+
       - name: Integration test (GLM4.5 multi-card FP8)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
@@ -693,6 +738,16 @@ jobs:
           fi
           '
 
+      - name: GLM4.5 pre-train (EP4)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          '
+
       - name: Qwen pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
@@ -721,6 +776,46 @@ jobs:
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
           bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+          '
+
+      - name: Qwen vl sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+          '
+
+      - name: Qwen vl lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+          '
+
+      - name: Qwen vl moe
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+          '
+
+      - name: Qwen3-vl-8k-fsdp
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
           '
 
       - name: Terminate and delete the container
@@ -767,6 +862,7 @@ jobs:
             -e paddlefleet_url \
             -e formers_branch \
             -e no_proxy \
+            -e use_release \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
@@ -811,13 +907,17 @@ jobs:
           url_info="paddlepaddle_gpu-0.0.0-cp${version}-cp${version}-linux_x86_64.whl"
           fleet_url_info=paddlefleet-0.0.0-cp${version}-cp${version}-linux_x86_64.whl
           wget "$paddlefleet_url$fleet_url_info" -O ${fleet_url_info}
-          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ --force-reinstall --no-cache-dir
+          pip install ${fleet_url_info} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          if [ "$use_release" == "true" ]; then
+            echo "Use release paddle package"
+            pip install "$paddle_url$url_info" --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+          fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
 
       - name: Install PaddleFormers
+        id: formers_install
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -854,14 +954,109 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_a100.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
+          '
+
+      - name: GLM4.5 sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
+          '
+
+      - name: GLM4.5 lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
+          '
+
+      - name: GLM4.5 dpo
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
           glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-          fi
+          '
+
+      - name: GLM4.5 dpo_lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
+          '
+
+      - name: Qwen pre-train
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
+          '
+
+      - name: Qwen sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
+          '
+
+      - name: Qwen lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
+          '
+
+      - name: Qwen vl sft
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
+          '
+
+      - name: Qwen vl lora
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
+          '
+
+
+      - name: Qwen vl moe
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
           '
 
 

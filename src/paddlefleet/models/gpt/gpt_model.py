@@ -224,22 +224,24 @@ class GPTModel(PipelineLayer):
                 f"{name_prefix}.layers.{i}",
             )
             i += 1
-        for tail_empty_layer in spec.tail_empty_layers:
-            self.add_sequential_layer(
-                layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
-            )
-            i += 1
 
-        if spec.mtp is not None:
+        # Always place layer_norm after transformer_layers and before tail_empty_layers/MTP,
+        # so that the model structure is consistent regardless of whether MTP is enabled.
+        self.add_sequential_layer(
+            layers, LayerDesc(spec.layer_norm), name_prefix
+        )
+
+        if spec.mtp:
             for mtp_spec in spec.mtp:
                 self.add_sequential_layer(
                     layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"
                 )
                 i += 1
-
-        self.add_sequential_layer(
-            layers, LayerDesc(spec.layer_norm), name_prefix
-        )
+        for tail_empty_layer in spec.tail_empty_layers:
+            self.add_sequential_layer(
+                layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
+            )
+            i += 1
 
         if tie_word_embeddings:
             self.add_sequential_layer(

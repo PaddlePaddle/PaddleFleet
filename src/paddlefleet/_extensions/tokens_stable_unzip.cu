@@ -265,8 +265,14 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
   if (XScale) {
     PD_CHECK(XScale->dtype() == paddle::DataType::FLOAT32);
   }
-  const int rows = X.shape()[0];
-  const int cols = X.shape()[1];
+  // TODO(large-tensor): downstream functors may still use int; guard until
+  // upgraded.
+  int64_t rows = X.shape()[0];
+
+  // TODO(large-tensor): downstream functors may still use int; guard until
+  // upgraded.
+  int64_t cols = X.shape()[1];
+
   const int quanted_cols = (XScale) ? XScale->shape()[1] : 0;
   /*
   const int max_tokens_per_expert =
@@ -294,7 +300,9 @@ std::vector<paddle::Tensor> tokens_unzip_stable(
         }
 
         const int output_rows = tokens_cumulated;
-        const int topk_calculated = expert_routemap_topk.shape()[1];
+        // TODO(large-tensor): downstream functors may still use int; guard
+        // until upgraded.
+        int64_t topk_calculated = expert_routemap_topk.shape()[1];
 
         if (XScale && fill_x) {
           XScale_unzipped = paddle::empty(
