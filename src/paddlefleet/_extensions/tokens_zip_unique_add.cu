@@ -31,8 +31,9 @@ __global__ void tokens_zip_unique_add_kernel(
     auto* zipped_ptr = zipped_ptrs[zipped_row / subbatch_rows] +
                        (zipped_row % subbatch_rows) * hidden_size;
     const auto* unzipped_ptr = unzipped + unzipped_row * hidden_size;
-    for (int i = threadIdx.x * VecSize; i < hidden_size;
-         i += blockDim.x * VecSize) {
+    for (int64_t i = static_cast<int64_t>(threadIdx.x) * VecSize;
+         i < hidden_size;
+         i += static_cast<int64_t>(blockDim.x) * VecSize) {
       phi::AlignedVector<ZipT, VecSize> zipped_tmp;
       phi::AlignedVector<UnzipT, VecSize> unzipped_tmp;
       phi::Load(zipped_ptr + i, &zipped_tmp);

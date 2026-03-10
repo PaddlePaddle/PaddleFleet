@@ -27,16 +27,16 @@ namespace cg = cooperative_groups;
 
 using BlockScan = cub::BlockScan<uint32_t, BLOCK_SIZE>;
 
-template <typename T>
-inline __device__ void load_128_bits(const T* src, T* dst, uint32_t idx) {
-  uint32_t num_elements = 16 / sizeof(T);
+template <typename T, typename IdxT>
+inline __device__ void load_128_bits(const T* src, T* dst, IdxT idx) {
+  constexpr int num_elements = 16 / sizeof(T);
   float4 vec = *reinterpret_cast<const float4*>(src + idx * num_elements);
   *reinterpret_cast<float4*>(dst) = vec;
 }
 
-template <typename T>
-inline __device__ void store_128_bits(const T* src, T* dst, uint32_t idx) {
-  uint32_t num_elements = 16 / sizeof(T);
+template <typename T, typename IdxT>
+inline __device__ void store_128_bits(const T* src, T* dst, IdxT idx) {
+  constexpr int num_elements = 16 / sizeof(T);
   float4 vec = *reinterpret_cast<const float4*>(src);
   *reinterpret_cast<float4*>(dst + idx * num_elements) = vec;
 }
@@ -45,12 +45,13 @@ template <typename scalar_t>
 inline __device__ void _update_local_count(const scalar_t* x,
                                            int32_t* shared_memory,
                                            const int64_t& N,
-                                           const uint32_t& global_thread_id,
-                                           const uint32_t& grid_size) {
+                                           const uint32_t global_thread_id,
+                                           const uint32_t grid_size) {
   constexpr uint32_t N_per_thread = 16 / sizeof(scalar_t);
-  const uint32_t N_vec = N / N_per_thread;
+  const int64_t N_vec = N / N_per_thread;
+  const int64_t vec_covered = N_vec * N_per_thread;
 
-  for (uint32_t i = global_thread_id; i < N_vec; i += grid_size) {
+  for (int64_t i = global_thread_id; i < N_vec; i += grid_size) {
     scalar_t x_vec[N_per_thread];
     load_128_bits<scalar_t>(x, x_vec, i);
 
@@ -59,7 +60,7 @@ inline __device__ void _update_local_count(const scalar_t* x,
     }
   }
 
-  const uint32_t i = (N_vec * N_per_thread) + global_thread_id;
+  const int64_t i = vec_covered + global_thread_id;
   if (i < N) {
     atomicAdd(&shared_memory[x[i]], 1);
   }
@@ -111,6 +112,8 @@ __global__ void count_cumsum_cuda_kernel(const scalar_t* x,
                                          int32_t* cumsum_output,
                                          const int64_t N,
                                          const uint32_t E) {
+  // NOTE: gridDim = num_SMs is small (<256), grid_size and global_thread_id
+  // never exceed int range.
   const uint32_t global_thread_id = blockIdx.x * blockDim.x + threadIdx.x;
   const uint32_t grid_size = gridDim.x * blockDim.x;
 

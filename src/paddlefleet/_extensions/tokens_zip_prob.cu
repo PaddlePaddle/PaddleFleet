@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <limits>
+
 #include "paddle/common/array.h"
 #include "paddle/phi/kernels/funcs/aligned_vector.h"
 #include "utils.h"  // NOLINT
@@ -65,18 +67,26 @@ std::vector<paddle::Tensor> tokens_zip_prob_impl(
   PD_CHECK(zipped_expertwise_rowmap_shape[0] == dispatched_indices_shape[0]);
 
   int64_t zipped_rows = zipped_expertwise_rowmap_shape[0];
-  int num_expert = zipped_expertwise_rowmap_shape[1];
-  int topk = dispatched_indices_shape[1];
-  PD_CHECK(unzipped_probs.size() == num_expert);
+  int64_t num_expert = zipped_expertwise_rowmap_shape[1];
+  int64_t topk = dispatched_indices_shape[1];
+  PD_CHECK(num_expert <= static_cast<int64_t>(std::numeric_limits<int>::max()),
+           "num_expert must be <= INT_MAX for tokens_zip_prob.");
+  PD_CHECK(topk <= static_cast<int64_t>(std::numeric_limits<int>::max()),
+           "topk must be <= INT_MAX for tokens_zip_prob.");
+  PD_CHECK(unzipped_probs.size() == static_cast<size_t>(num_expert) &&
+               num_expert > 0,
+           "unzipped_probs.size() must equal num_expert.");
+  int num_expert_int = static_cast<int>(num_expert);
+  int topk_int = static_cast<int>(topk);
 
   auto zipped_probs =
       paddle::empty({zipped_rows, topk}, dtype, unzipped_probs[0].place());
 
   PD_SWITCH_NUM_EXPERTS(
-      num_expert, ([&] {
+      static_cast<int>(num_expert), ([&] {
         phi::Array<UnzippedProbInfo<T>, MAX_NUM_EXPERTS_C> unzipped_probs_info;
         int64_t offset = 0;
-        for (int i = 0; i < num_expert; ++i) {
+        for (int i = 0; i < num_expert_int; ++i) {
           auto shape = unzipped_probs[i].shape();
           PD_CHECK(shape.size() == 1);
           unzipped_probs_info[i].data = unzipped_probs[i].data<T>();
@@ -85,7 +95,8 @@ std::vector<paddle::Tensor> tokens_zip_prob_impl(
         }
 
         int thread = 1024;
-        int grid = LimitGridDim((zipped_rows * topk + thread - 1) / thread);
+        int64_t total_items = zipped_rows * topk;
+        int grid = LimitGridDim((total_items + thread - 1) / thread);
 
         if (grid > 0) {
           tokens_zip_prob_kernel<T, MAX_NUM_EXPERTS_C>
@@ -95,8 +106,8 @@ std::vector<paddle::Tensor> tokens_zip_prob_impl(
                   dispatched_indices.data<int>(),
                   zipped_probs.data<T>(),
                   zipped_rows,
-                  topk,
-                  num_expert);
+                  topk_int,
+                  num_expert_int);
         }
       }));
   return {zipped_probs};
@@ -167,13 +178,20 @@ std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch_impl(
   PD_CHECK(zipped_expertwise_rowmap_shape[0] == dispatched_indices_shape[0]);
 
   int64_t zipped_rows = zipped_expertwise_rowmap_shape[0];
-  int num_expert = zipped_expertwise_rowmap_shape[1];
-  int topk = dispatched_indices_shape[1];
+  int64_t num_expert = zipped_expertwise_rowmap_shape[1];
+  int64_t topk = dispatched_indices_shape[1];
+  PD_CHECK(num_expert <= static_cast<int64_t>(std::numeric_limits<int>::max()),
+           "num_expert must be <= INT_MAX for tokens_zip_prob_seq_subbatch.");
+  PD_CHECK(topk <= static_cast<int64_t>(std::numeric_limits<int>::max()),
+           "topk must be <= INT_MAX for tokens_zip_prob_seq_subbatch.");
+  int num_expert_int = static_cast<int>(num_expert);
+  int topk_int = static_cast<int>(topk);
 
   auto zipped_probs =
       paddle::empty({zipped_rows, topk}, dtype, unzipped_probs[0].place());
   int thread = 1024;
-  int grid = LimitGridDim((zipped_rows * topk + thread - 1) / thread);
+  int64_t total_items = zipped_rows * topk;
+  int grid = LimitGridDim((total_items + thread - 1) / thread);
 
 #define LAUNCH_TOKENS_ZIP_PROB_SEQ_SUBBATCH_FIX_CASE(__T, __num_split)       \
   if (unzipped_probs.size() <= __num_split) {                                \
@@ -209,8 +227,8 @@ std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch_impl(
               dispatched_indices.data<int>(),                                \
               zipped_probs.data<__T>(),                                      \
               zipped_rows,                                                   \
-              topk,                                                          \
-              num_expert,                                                    \
+              topk_int,                                                      \
+              num_expert_int,                                                \
               subbatch_rows);                                                \
     }                                                                        \
   } while (0)
