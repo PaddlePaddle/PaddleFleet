@@ -39,7 +39,6 @@ from paddlefleet.models.common.embeddings.rope_utils import (
 )
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
-    gather_from_tensor_model_parallel_region,
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.multi_latent_attention import (
@@ -479,16 +478,14 @@ class MLASelfAttentionWithDSA(MLASelfAttention):
     """MLA Self-attention with DeepSeek Sparse Attention (DSA) Indexer.
 
     Extends the upstream MLASelfAttention by:
-    1. Reusing parent's get_query_key_value_tensors() for Q/K/V computation.
-    2. Overriding forward() to compute Indexer inputs separately, run the DSA
-       Indexer, build a sparse mask, and use unfused bmm attention.
+    1. Reusing parent's get_query_key_value_tensors() for Q/K/V + q_compressed.
+    2. Overriding forward() to run the DSA Indexer, build a sparse mask,
+       and use unfused bmm attention.
 
-    The Indexer needs q_latent (normed q_compressed with full q_lora_rank) and
-    hidden_states in [b, s, h] format. Since the parent's get_query_key_value_tensors
-    doesn't expose these intermediates, we re-compute q_a_proj + norm for the
-    Indexer path. This is cheap because:
-    - q_a_proj is a small down-projection (hidden -> q_lora_rank)
-    - Indexer inputs are detached, so no extra backward cost
+    The Indexer needs q_compressed (normed, from MLA down-projection) and
+    hidden_states in [b, s, h] format. The parent's get_query_key_value_tensors
+    now returns (query, key, value, q_compressed, kv_compressed) — aligned with
+    Megatron-LM — so we directly reuse q_compressed for the Indexer path.
     """
 
     def __init__(
@@ -520,65 +517,6 @@ class MLASelfAttentionWithDSA(MLASelfAttention):
             config, "indexer_use_sparse_loss", False
         )
 
-    def _compute_indexer_inputs(self, hidden_states):
-        """Compute Indexer's q_latent by re-running q_a_proj + norm.
-
-        This is a lightweight re-computation of the q down-projection path.
-        The result is detached, so no gradient flows back through this path.
-
-        Unlike the parent's get_query_key_value_tensors (which scatters back to
-        [s/tp, b, ...] for SP), the Indexer needs full-sequence tensors [s, b, ...].
-        So we follow the parent's q_a_proj path but skip the scatter step.
-
-        Args:
-            hidden_states: [s/tp, b, h] (SP) or [s, b, h] (non-SP)
-
-        Returns:
-            indexer_hidden: [b, s, h] — detached hidden_states (full seq) for Indexer
-            indexer_q_latent: [b, s, q_lora_rank] — detached normed q_compressed (full seq)
-        """
-        # Re-compute q_a_proj on original hidden_states (let it handle SP internally)
-        with paddle.no_grad():
-            if self.config.q_lora_rank is not None:
-                # q_a_proj (ColumnParallelLinear) handles SP all-gather internally:
-                #   SP: [s/tp, b, h] -> [s, b, q_lora_rank/tp]
-                #   non-SP: [s, b, h] -> [s, b, q_lora_rank/tp]
-                q_compressed, _ = self.q_a_proj(hidden_states)
-                # Gather feature dim to full q_lora_rank if sharded
-                if q_compressed.shape[-1] != self.config.q_lora_rank:
-                    q_compressed = gather_from_tensor_model_parallel_region(
-                        q_compressed
-                    )
-                    # Parent would scatter_to_sequence_parallel_region here,
-                    # but Indexer needs full sequence — skip scatter.
-                q_latent = self.q_a_layernorm(q_compressed)
-                # q_latent: [s, b, q_lora_rank] (full seq, full feature)
-            else:
-                q_latent = hidden_states
-                # Need full seq for the else branch too
-                if self.config.sequence_parallel:
-                    q_latent = gather_from_sequence_parallel_region(
-                        q_latent,
-                        tensor_parallel_output_grad=True,
-                        group=self.pg_collection.tp,
-                    )
-
-        # Gather hidden_states separately for indexer_hidden
-        if self.config.sequence_parallel:
-            indexer_hidden = gather_from_sequence_parallel_region(
-                hidden_states,
-                tensor_parallel_output_grad=True,
-                group=self.pg_collection.tp,
-            ).detach()
-        else:
-            indexer_hidden = hidden_states.detach()
-
-        # Convert [s, b, ...] -> [b, s, ...]
-        indexer_hidden = indexer_hidden.transpose([1, 0, 2])
-        indexer_q_latent = q_latent.detach().transpose([1, 0, 2])
-
-        return indexer_hidden, indexer_q_latent
-
     def forward(
         self,
         hidden_states,
@@ -596,8 +534,8 @@ class MLASelfAttentionWithDSA(MLASelfAttention):
         """Forward: MLA projections + DSA Indexer + sparse attention.
 
         Overrides the parent forward to:
-        1. Reuse parent's get_query_key_value_tensors for Q/K/V
-        2. Compute Indexer inputs separately (lightweight re-computation)
+        1. Reuse parent's get_query_key_value_tensors for Q/K/V + q_compressed
+        2. Prepare Indexer inputs from returned q_compressed (no re-computation)
         3. Run DSA Indexer to get top-k indices
         4. Build sparse mask and use unfused bmm attention
         5. Compute DSA Indexer KL loss if enabled
@@ -609,22 +547,41 @@ class MLASelfAttentionWithDSA(MLASelfAttention):
         assert rotary_pos_cos is None and rotary_pos_sin is None
 
         # =====================
-        # Query, Key, and Value (reuse parent's MLA implementation)
+        # Query, Key, Value + compressed intermediates (aligned with Megatron)
         # =====================
-        query, key, value = self.get_query_key_value_tensors(
-            hidden_states,
-            key_value_states,
-            position_ids,
-            packed_seq_params,
+        query, key, value, q_compressed, kv_compressed = (
+            self.get_query_key_value_tensors(
+                hidden_states,
+                key_value_states,
+                position_ids,
+                packed_seq_params,
+            )
         )
 
         # =====================
-        # DSA Indexer
+        # DSA Indexer inputs (reuse q_compressed from parent, no re-computation)
         # =====================
-        # Compute Indexer inputs: re-runs q_a_proj + norm (cheap, detached)
-        indexer_hidden, indexer_q_latent = self._compute_indexer_inputs(
-            hidden_states
-        )
+        # q_compressed: [s/tp, b, q_lora_rank] (SP) or [s, b, q_lora_rank] (non-SP)
+        # Indexer needs full-sequence [b, s, ...] tensors, all detached.
+        with paddle.no_grad():
+            if self.config.sequence_parallel:
+                indexer_q_latent = gather_from_sequence_parallel_region(
+                    q_compressed,
+                    tensor_parallel_output_grad=True,
+                    group=self.pg_collection.tp,
+                ).detach()
+                indexer_hidden = gather_from_sequence_parallel_region(
+                    hidden_states,
+                    tensor_parallel_output_grad=True,
+                    group=self.pg_collection.tp,
+                ).detach()
+            else:
+                indexer_q_latent = q_compressed.detach()
+                indexer_hidden = hidden_states.detach()
+
+            # Convert [s, b, ...] -> [b, s, ...]
+            indexer_q_latent = indexer_q_latent.transpose([1, 0, 2])
+            indexer_hidden = indexer_hidden.transpose([1, 0, 2])
 
         # Get RoPE freqs for Indexer (non-interleaved, computed from rotary_pos_emb)
         # Re-compute from self.rotary_pos_emb since parent doesn't expose it

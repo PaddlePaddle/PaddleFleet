@@ -187,7 +187,7 @@ class MultiLatentAttention(Attention):
         # =====================
         # Get the query, key and value tensors based on the type of attention
 
-        query, key, value = self.get_query_key_value_tensors(
+        query, key, value, _, _ = self.get_query_key_value_tensors(
             hidden_states,
             key_value_states,
             position_ids,
@@ -662,7 +662,7 @@ class MLASelfAttention(MultiLatentAttention):
             q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb
         )
 
-        return query, key, value
+        return query, key, value, q_compressed, kv_compressed
 
     def backward_dw(self) -> NoReturn:
         """Execute weight gradient computation"""
