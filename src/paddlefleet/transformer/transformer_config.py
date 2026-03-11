@@ -529,6 +529,26 @@ class TransformerConfig(ModelParallelConfig):
 
     # cache_mla_latents: bool = False
 
+    ####################
+    # DSA (DeepSeek Sparse Attention)
+    ####################
+
+    index_n_heads: int | None = None
+    """Number of DSA Indexer heads. None disables DSA; non-None activates
+    DeepSeek V3.2 sparse attention path."""
+
+    index_head_dim: int = 128
+    """Per-head dimension for Indexer Q/K vectors."""
+
+    index_topk: int = 2048
+    """Number of token positions selected by Indexer per query token."""
+
+    indexer_loss_coeff: float | None = None
+    """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
+
+    indexer_use_sparse_loss: bool = False
+    """Whether to restrict DSA KL loss to top-k positions only."""
+
     @classmethod
     def from_config(cls, config_dict):
         # note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
