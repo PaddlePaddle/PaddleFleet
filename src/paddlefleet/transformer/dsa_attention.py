@@ -52,6 +52,69 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
+def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
+    """Fast Walsh-Hadamard Transform using the butterfly algorithm.
+
+    Pure Paddle implementation, equivalent to:
+        F.linear(x, hadamard_matrix(dim)) * scale
+
+    Uses O(N log N) butterfly operations instead of O(N^2) matrix multiply.
+    The Hadamard matrix is symmetric and orthogonal, so backward is the same
+    transform applied to grad_output (handled automatically by Paddle autograd).
+
+    Reference:
+        - fast-hadamard-transform (Tri Dao): csrc/fast_hadamard_transform_cuda.cu
+        - PaddleFormers/paddleformers/quantization/hadamard_utils.py (matmul_hadU)
+
+    Args:
+        x: Input tensor of shape (..., dim). dim must be a power of 2.
+        scale: Scaling factor applied to the output.
+
+    Returns:
+        Hadamard-transformed tensor of the same shape.
+    """
+    original_shape = x.shape
+    dim = original_shape[-1]
+    assert dim > 0 and (dim & (dim - 1)) == 0, (
+        f"hadamard_transform requires dim to be a power of 2, got {dim}"
+    )
+
+    # Flatten batch dims: (..., dim) -> (batch, dim)
+    x = x.reshape([-1, dim])
+
+    # Butterfly: iteratively halve and compute sum/diff pairs.
+    # Uses paddle.stack (not in-place index assignment) to keep autograd intact.
+    h = 1
+    while h < dim:
+        x = x.reshape([-1, dim // (2 * h), 2, h])
+        a = x[:, :, 0, :]
+        b = x[:, :, 1, :]
+        x = paddle.stack([a + b, a - b], axis=2)
+        x = x.reshape([-1, dim])
+        h *= 2
+
+    return x.reshape(original_shape) * scale
+
+
+def rotate_activation(x: Tensor) -> Tensor:
+    """Apply Hadamard rotation activation.
+
+    Reference:
+        https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/inference/model.py#L424-L428
+
+    Args:
+        x: Input tensor (must be bfloat16).
+
+    Returns:
+        Rotated tensor.
+    """
+    assert x.dtype == paddle.bfloat16, (
+        f"rotate_activation only support bf16 input, but got {x.dtype}"
+    )
+    hidden_size = x.shape[-1]
+    return hadamard_transform(x, scale=hidden_size**-0.5)
+
+
 # ---------------------------------------------------------------------------
 # Unfused DSA attention (explicit bmm, supports asymmetric Q/K vs V dims)
 # ---------------------------------------------------------------------------
@@ -220,6 +283,10 @@ class Indexer(paddle.nn.Layer):
         if freqs is not None:
             k = self._apply_rope(k.unsqueeze(2), freqs, mscale).squeeze(2)
 
+        # Rotate activation (Hadamard transform)
+        q = rotate_activation(q)
+        k = rotate_activation(k)
+
         weights = (
             self.weights_proj(hidden_states.cast("float32"))
             * (self.n_heads**-0.5)
@@ -385,6 +452,7 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
 
     @staticmethod
     def forward(ctx, output: Tensor, indexer_loss: Tensor) -> Tensor:
+        print(f"===========> indexer_loss: {indexer_loss}")
         ctx.save_for_backward(indexer_loss)
         return output
 
