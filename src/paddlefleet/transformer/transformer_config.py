@@ -635,8 +635,10 @@ class TransformerConfig(ModelParallelConfig):
         if self.first_k_dense_replace:
             if self.moe_layer_freq:
                 moe_layer_pattern = [
-                    1 if (i % self.moe_layer_freq == 0) else 0
-                    for i in range(self.num_hidden_layers)
+                    1 if ((i + 1) % self.moe_layer_freq == 0) else 0
+                    for i in range(
+                        self.num_hidden_layers - self.first_k_dense_replace
+                    )
                 ]
             else:
                 moe_layer_pattern = [1] * (

@@ -57,9 +57,12 @@ class RMSNorm(paddle.nn.Layer):
         self.variance_epsilon = (
             config.rms_norm_eps if norm_eps is None else norm_eps
         )
+
         self.weight = paddle.create_parameter(
             shape=[self.normalized_shape],
-            dtype=paddle.get_default_dtype(),
+            dtype=config.params_dtype
+            if config.params_dtype is not None
+            else paddle.get_default_dtype(),
             default_initializer=paddle.nn.initializer.Constant(1.0),
         )
         self.config = config
@@ -94,13 +97,17 @@ class LayerNorm(paddle.nn.Layer):
         )
         self.weight = paddle.create_parameter(
             shape=[self.normalized_shape],
-            dtype=paddle.get_default_dtype(),
+            dtype=config.params_dtype
+            if config.params_dtype is not None
+            else paddle.get_default_dtype(),
             default_initializer=paddle.nn.initializer.Constant(1.0),
         )
         param_shape = [np.prod(self.normalized_shape)]
         self.bias = self.create_parameter(
             shape=param_shape,
-            dtype=paddle.get_default_dtype(),
+            dtype=config.params_dtype
+            if config.params_dtype is not None
+            else paddle.get_default_dtype(),
             default_initializer=paddle.nn.initializer.Constant(0.0),
             is_bias=True,
         )
