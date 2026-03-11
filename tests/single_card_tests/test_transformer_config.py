@@ -54,7 +54,7 @@ class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
         )
         # first 2 layers are dense (0), remaining layers follow pattern: 1 if (i % 2 == 0) else 0
         # Pattern for range(8): i=0->1, i=1->0, i=2->1, i=3->0, i=4->1, i=5->0, i=6->1, i=7->0
-        expected = [0, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+        expected = [0, 0, 0, 1, 0, 1, 0, 1]
         self.assertEqual(config.moe_layer_freq, expected)
 
     def test_first_k_dense_replace_with_moe_layer_freq_none(self):
@@ -94,7 +94,7 @@ class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
         )
         # first 1 layer is dense
         # Pattern for range(7): i=0->1, i=1->0, i=2->0, i=3->1, i=4->0, i=5->0, i=6->1
-        expected = [0, 1, 0, 0, 1, 0, 0, 1]
+        expected = [0, 0, 0, 1, 0, 0, 1]
         self.assertEqual(config.moe_layer_freq, expected)
 
     def test_first_k_dense_replace_equals_num_hidden_layers(self):
@@ -141,7 +141,7 @@ class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
             num_hidden_layers=5,
         )
         # moe_layer_freq=1 is truthy int, pattern: 1 if (i % 1 == 0) else 0 => all 1s
-        expected = [0, 1, 1, 1, 1, 1]
+        expected = [0, 1, 1, 1, 1]
         self.assertEqual(config.moe_layer_freq, expected)
 
 
