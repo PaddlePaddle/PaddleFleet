@@ -33,6 +33,8 @@ from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import get_pg_size, nvtx_range_pop, nvtx_range_push
 
+from .paddle_norm import get_norm_extra_args
+
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -53,8 +55,8 @@ def _l2norm(x):
     Equivalent to fla.modules.l2norm.l2norm for paddle tensors.
     """
     x_float = x.astype(paddle.float32)
-    norm = paddle.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + 1e-6)
-    return (x_float * norm).astype(x.dtype)
+    inv_norm = paddle.rsqrt(x_float.pow(2).sum(-1, keepdim=True) + 1e-6)
+    return (x_float * inv_norm).astype(x.dtype)
 
 
 @dataclass
@@ -164,7 +166,6 @@ class GatedDeltaNet(FleetLayer):
         self.conv_dim_local_tp = self.conv_dim // self.tp_size
 
         # weight shape: [conv_dim, 1, d_conv], bias shape: [conv_dim]
-        # Paddle Conv1D with data_format='NCL' matches torch.nn.Conv1d
         self.conv1d = nn.Conv1D(
             in_channels=self.conv_dim_local_tp,
             out_channels=self.conv_dim_local_tp,
@@ -204,12 +205,17 @@ class GatedDeltaNet(FleetLayer):
         # processes its local value heads, so the gradient is a partial sum.
         # Mark the parameter so that register_sequence_parallel_allreduce_hooks
         # will all-reduce its gradient across the TP group.
+        input_is_parallel = True if self.tp_size > 1 else False
+        extra_args = get_norm_extra_args(
+            sublayers_spec.out_norm,
+            self.config,
+            self.value_head_dim,
+            self.config.rms_norm_eps,
+            input_is_parallel,
+        )
         self.out_norm = build_layer(
             sublayers_spec.out_norm,
-            config=self.config,
-            normalized_shape=self.value_head_dim,
-            norm_eps=self.config.rms_norm_eps,
-            input_is_parallel=True,
+            **extra_args,
         )
 
         self.out_proj = build_layer(
@@ -219,7 +225,7 @@ class GatedDeltaNet(FleetLayer):
             config=self.config,
             init_method=self.config.output_layer_init_method,
             bias=bias,
-            input_is_parallel=True,
+            input_is_parallel=True if self.tp_size > 1 else False,
             skip_bias_add=True,
             is_expert=False,
             tp_group=self.pg_collection.tp,
@@ -375,16 +381,17 @@ class GatedDeltaNet(FleetLayer):
                 use_qk_l2norm_in_kernel=False,
             )
         else:
-            core_attn_out, last_recurrent_state = chunk_gated_delta_rule(
-                query,
-                key,
-                value,
-                g=g,
-                beta=beta,
-                initial_state=None,
-                output_final_state=False,
-                use_qk_l2norm_in_kernel=False,
-            )
+            raise NotImplementedError("FLA not supported yet.")
+            # core_attn_out, last_recurrent_state = chunk_gated_delta_rule(
+            #     query,
+            #     key,
+            #     value,
+            #     g=g,
+            #     beta=beta,
+            #     initial_state=None,
+            #     output_final_state=False,
+            #     use_qk_l2norm_in_kernel=False,
+            # )
         nvtx_range_pop(suffix="gated_delta_rule")
 
         # Gated norm
@@ -493,18 +500,18 @@ class GatedDeltaNet(FleetLayer):
 
         return sharded_sd
 
-    def backward_dw(self):
-        """Execute weight gradient computation for all linear layers."""
-        self._backward_in_proj()
-        self._backward_out_proj()
+    # def backward_dw(self):
+    #     """Execute weight gradient computation for all linear layers."""
+    #     self._backward_in_proj()
+    #     self._backward_out_proj()
 
-    def _backward_in_proj(self):
-        """Computes weight gradients of input projection layer."""
-        self.in_proj.backward_dw()
+    # def _backward_in_proj(self):
+    #     """Computes weight gradients of input projection layer."""
+    #     self.in_proj.backward_dw()
 
-    def _backward_out_proj(self):
-        """Computes weight gradients of output projection layer."""
-        self.out_proj.backward_dw()
+    # def _backward_out_proj(self):
+    #     """Computes weight gradients of output projection layer."""
+    #     self.out_proj.backward_dw()
 
 
 def paddle_chunk_gated_delta_rule(
@@ -521,7 +528,7 @@ def paddle_chunk_gated_delta_rule(
     """
     Paddle-native implementation of chunked gated delta rule for deterministic mode.
 
-    This is a direct port of torch_chunk_gated_delta_rule from Megatron-LM.
+    This is a direct port from Megatron-LM.
 
     Reference: https://github.com/huggingface/transformers/blob/144c8ce2809a2e21914017652700e1ecb450501e/
         src/transformers/models/qwen3_next/modeling_qwen3_next.py#L470-L547

@@ -28,6 +28,7 @@ from paddlefleet.transformer.gated_delta_net import (
     _l2norm,
     paddle_chunk_gated_delta_rule,
 )
+from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 # ---- Local stand-in layers (no fleet / TP required) ----
@@ -223,7 +224,7 @@ class TestL2Norm(unittest.TestCase):
         """After L2 norm, mean of squared values along last dim should be ~1."""
         x = paddle.randn([4, 8, 32])
         y = _l2norm(x)
-        mean_sq = y.astype(paddle.float32).pow(2).mean(-1)
+        mean_sq = y.astype(paddle.float32).pow(2).sum(-1)
         assert paddle.allclose(
             mean_sq, paddle.ones_like(mean_sq), atol=1e-4, rtol=1e-4
         ).item()
@@ -276,6 +277,36 @@ class TestGatedDeltaNet(unittest.TestCase):
         self.assertTrue(hasattr(self.gdn, "A_log"))
         self.assertTrue(hasattr(self.gdn, "out_norm"))
         self.assertTrue(hasattr(self.gdn, "out_proj"))
+
+        sublayers_spec = GatedDeltaNetSublayersSpec(
+            in_proj=NoBiasLinear,
+            out_norm=WrappedPaddleNorm,
+            out_proj=NoBiasLinear,
+        )
+
+        gdn = GatedDeltaNet(
+            config=self.config,
+            sublayers_spec=sublayers_spec,
+            layer_number=1,
+            bias=False,
+            conv_bias=False,
+            conv_init=1.0,
+            use_qk_l2norm=True,
+            A_init_range=(1, 16),
+            pg_collection=_FakePGCollection(),
+            conv_kernel_dim=CONV_KERNEL_DIM,
+            key_head_dim=KEY_HEAD_DIM,
+            value_head_dim=VALUE_HEAD_DIM,
+            num_key_heads=NUM_KEY_HEADS,
+            num_value_heads=NUM_VALUE_HEADS,
+        )
+
+    def test_sharded_state_dict(self):
+        """Check sharded_state_dict() completeness."""
+        sharded_sd = self.gdn.sharded_state_dict()
+        self.assertEqual(
+            len(sharded_sd), 6
+        )  # 13 from GatedDeltaNetSublayersSpec
 
     def test_parameter_shapes(self):
         """Verify key parameter shapes."""
