@@ -107,7 +107,7 @@ jobs:
           pip install uv
           export IS_NVIDIA=True
           uv build --wheel -v
-          pip install dist/paddlefleet-0.3.0.dev20260309-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install dist/paddlefleet-0.3.0.dev20260312-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
           # python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -192,7 +192,7 @@ jobs:
           pip install uv
           export IS_NVIDIA=True
           uv build --wheel -v
-          pip install dist/paddlefleet-0.3.0.dev20260309-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install dist/paddlefleet-0.3.0.dev20260312-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install nvidia-cutlass-dsl==4.2.1
           # python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -294,7 +294,7 @@ jobs:
           pip install uv
           export IS_NVIDIA=True
           uv build --wheel -v
-          pip install dist/paddlefleet-0.3.0.dev20260309-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install dist/paddlefleet-0.3.0.dev20260312-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
           # python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -448,7 +448,7 @@ jobs:
           pip install uv
           export IS_NVIDIA=True
           uv build --wheel -v
-          pip install dist/paddlefleet-0.3.0.dev20260309-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install dist/paddlefleet-0.3.0.dev20260312-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
           # python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -713,7 +713,7 @@ jobs:
           pip install uv
           export IS_NVIDIA=True
           uv build --wheel -v
-          pip install dist/paddlefleet-0.3.0.dev20260309-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install dist/paddlefleet-0.3.0.dev20260312-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
           # python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
