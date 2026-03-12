@@ -43,8 +43,10 @@ class BiasedLinear(paddle.nn.Layer):
 
 
 class RMSNorm(paddle.nn.Layer):
-    def __init__(self, hidden_size, eps, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__()
+        hidden_size = kwargs.get("normalized_shape", kwargs.get("hidden_size"))
+        eps = kwargs.get("norm_eps", kwargs.get("eps"))
         self.weight = paddle.nn.Parameter(paddle.zeros([hidden_size]))
         self.eps = eps
 
@@ -235,6 +237,168 @@ class TestMLASelfAttention(unittest.TestCase):
         assert output.shape[1] == sequence_length
         assert output.shape[2] == config.hidden_size
         assert bias.shape[0] == config.hidden_size
+
+
+class TestGatedSelfAttention(unittest.TestCase):
+    """Test SelfAttention with gated_attention=True (forward and backward)."""
+
+    def _make_config(self, gqa=False):
+        config = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=128,
+            num_attention_heads=4,
+        )
+        config.num_key_value_heads = 2 if gqa else config.num_attention_heads
+        config.head_dim = config.hidden_size // config.num_attention_heads
+        config.softmax_scale = None
+        config.use_bias = True
+        config.no_rope_freq = None
+        config.recompute_granularity = None
+        config.fused_single_qkv_rope = False
+        config.rotary_interleaved = False
+        config.multi_latent_attention = False
+        config.init_method = init_method_normal(0.02)
+        config.output_layer_init_method = scaled_init_method_normal(
+            0.02, 1, 2.0
+        )
+        config.rms_norm_eps = 1e-5
+        config.context_parallel_size = 1
+        config.apply_query_key_layer_scaling = False
+        config.sliding_window = None
+        config.window_attn_skip_freq = None
+        config.fp16 = False
+        config.bf16 = False
+        config.masked_softmax_fusion = False
+        config.attention_softmax_in_fp32 = True
+        config.attention_dropout = 0.0
+        config.softmax_type = "vanilla"
+        config.gated_attention = True
+        return config
+
+    def _build_attn(self, config):
+        return SelfAttention(
+            config,
+            SelfAttentionSublayersSpec(
+                qkv_proj=BiasedLinear,
+                core_attention=DotProductAttention,
+                o_proj=BiasedLinear,
+                q_norm=RMSNorm,
+                k_norm=RMSNorm,
+            ),
+            attn_mask_type=AttnMaskType.causal,
+            layer_number=1,
+        )
+
+    def test_gated_attention_forward_shape(self):
+        """Gated attention output should have the same shape as standard attention."""
+        config = self._make_config()
+        attn = self._build_attn(config)
+
+        seq_len, batch_size = 64, 2
+        hidden_states = paddle.randn((batch_size, seq_len, config.hidden_size))
+        rotary_pos_emb = paddle.randn((1, seq_len, 1, config.head_dim))
+
+        output, bias = attn(
+            hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb
+        )
+
+        self.assertEqual(
+            output.shape, [batch_size, seq_len, config.hidden_size]
+        )
+        self.assertEqual(bias.shape[0], config.hidden_size)
+        self.assertTrue(
+            paddle.all(paddle.isfinite(output)).item(),
+            "Output contains NaN or Inf",
+        )
+
+    def test_gated_attention_backward(self):
+        """Gated attention should produce valid gradients for all parameters."""
+        config = self._make_config()
+        attn = self._build_attn(config)
+
+        seq_len, batch_size = 32, 2
+        hidden_states = paddle.randn((batch_size, seq_len, config.hidden_size))
+        hidden_states.stop_gradient = False
+        rotary_pos_emb = paddle.randn((1, seq_len, 1, config.head_dim))
+
+        output, bias = attn(
+            hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb
+        )
+        loss = output.sum()
+        loss.backward()
+
+        # Check input gradient exists and is finite
+        self.assertIsNotNone(hidden_states.grad)
+        self.assertTrue(
+            paddle.all(paddle.isfinite(hidden_states.grad)).item(),
+            "Input gradient contains NaN or Inf",
+        )
+
+        # Check all parameter gradients exist and are finite
+        for name, param in attn.named_parameters():
+            self.assertIsNotNone(
+                param.grad, f"Parameter {name} has no gradient"
+            )
+            self.assertTrue(
+                paddle.all(paddle.isfinite(param.grad)).item(),
+                f"Parameter {name} gradient contains NaN or Inf",
+            )
+
+    def test_gated_attention_gqa(self):
+        """Gated attention should work with grouped query attention (GQA)."""
+        config = self._make_config(gqa=True)
+        attn = self._build_attn(config)
+
+        seq_len, batch_size = 32, 2
+        hidden_states = paddle.randn((batch_size, seq_len, config.hidden_size))
+        hidden_states.stop_gradient = False
+        rotary_pos_emb = paddle.randn((1, seq_len, 1, config.head_dim))
+
+        output, bias = attn(
+            hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb
+        )
+        loss = output.sum()
+        loss.backward()
+
+        self.assertEqual(
+            output.shape, [batch_size, seq_len, config.hidden_size]
+        )
+        self.assertIsNotNone(hidden_states.grad)
+        self.assertTrue(
+            paddle.all(paddle.isfinite(output)).item(),
+            "GQA gated attention output contains NaN or Inf",
+        )
+
+    def test_gate_has_effect(self):
+        """Verify that the gate actually modulates the output (not a no-op)."""
+        config_gated = self._make_config()
+        config_ungated = self._make_config()
+        config_ungated.gated_attention = False
+
+        paddle.manual_seed(42)
+        attn_gated = self._build_attn(config_gated)
+        paddle.manual_seed(42)
+        attn_ungated = self._build_attn(config_ungated)
+
+        seq_len, batch_size = 32, 2
+        paddle.manual_seed(123)
+        hidden_states = paddle.randn(
+            (batch_size, seq_len, config_gated.hidden_size)
+        )
+        rotary_pos_emb = paddle.randn((1, seq_len, 1, config_gated.head_dim))
+
+        out_gated, _ = attn_gated(
+            hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb
+        )
+        out_ungated, _ = attn_ungated(
+            hidden_states, attention_mask=None, rotary_pos_emb=rotary_pos_emb
+        )
+
+        # Outputs should differ because gated has extra gate projection
+        self.assertFalse(
+            paddle.allclose(out_gated, out_ungated, atol=1e-6).item(),
+            "Gated and ungated outputs should differ",
+        )
 
 
 if __name__ == "__main__":
