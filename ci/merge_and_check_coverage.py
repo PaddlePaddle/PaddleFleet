@@ -214,7 +214,7 @@ def print_full_coverage_report(
     print(f"{'=' * 80}")
 
     # Group by directory
-    dir_coverage = defaultdict({"total": 0, "covered": 0, "rate": 0})
+    dir_coverage = defaultdict(lambda: {"total": 0, "covered": 0, "rate": 0})
 
     for filename, cov in filename_coverage.items():
         dir_name = (
