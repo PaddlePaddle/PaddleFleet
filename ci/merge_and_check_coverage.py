@@ -340,9 +340,6 @@ def main():
 
     merged_root, coverage_rate, filename_coverage = result
 
-    # Save merged coverage
-    save_merged_coverage(merged_root, args.output)
-
     # Calculate total lines for report
     total_lines = sum(cov["total"] for cov in filename_coverage.values())
     covered_lines = sum(cov["covered"] for cov in filename_coverage.values())
