@@ -114,7 +114,7 @@ class MultiLatentAttention(Attention):
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.config.qk_rope_head_dim,
-                rotary_base=self.config.rotary_base,
+                rotary_base=self.config.rope_theta,
                 scaling_factor=self.config.rotary_scaling_factor,
                 original_max_position_embeddings=self.config.original_max_position_embeddings,
                 beta_fast=self.config.beta_fast,
@@ -581,10 +581,9 @@ class MLASelfAttention(MultiLatentAttention):
                     cp_size,
                 )
             else:
-                q_len = q.size()[0]
-                # rotary_pos_emb: [seq_len, 1, 64]
-                # squeeze [1, seq_len, 1, 64] -> [seq_len, 1, 64]
-                rotary_pos_emb = rotary_pos_emb.squeeze(0)
+                q_len = q.size()[1]
+                # rotary_pos_emb: squeeze [1, seq_len, 1, headdim]
+
                 if (
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
