@@ -794,24 +794,24 @@ jobs:
           python -c "import paddleformers; print(paddleformers.version.commit)"
           '
 
-      # - name: GLM4.5 pre-train
-      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-      #   run: |
-      #     docker exec -t ${{ env.container_name }} /bin/bash -c '
-      #     source /root/proxy
-      #     if [ "${PYTHON_VERSION}" != "3.10" ]; then
-      #       source "$HOME/miniconda/etc/profile.d/conda.sh"
-      #       conda activate python${PYTHON_VERSION}
-      #     fi
-      #     bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
-      #     glm45_exit_code=$?
-      #     if [[ "$glm45_exit_code" != "0" ]]; then
-      #       export case_name="glm45_pt"
-      #       bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
-      #     else
-      #       echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-      #     fi
-      #     '
+      - name: GLM4.5 pre-train
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          source /root/proxy
+          if [ "${PYTHON_VERSION}" != "3.10" ]; then
+            source "$HOME/miniconda/etc/profile.d/conda.sh"
+            conda activate python${PYTHON_VERSION}
+          fi
+          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_pt"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+          fi
+          '
 
       # - name: GLM4.5 sft
       #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
