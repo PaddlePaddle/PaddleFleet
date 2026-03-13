@@ -677,11 +677,13 @@ class TransformerLayer(nn.Layer):
 
         return hidden_states
 
-    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True, full_master_weights={}):
         if isinstance(self.mlp, MoELayer):
             logger.info(f"fp8 quant weight for mlp {type(self.mlp)}")
             self.mlp.fp8_quant_weight(
-                batch_mode=batch_mode, quant_transpose=quant_transpose
+                batch_mode=batch_mode, 
+                quant_transpose=quant_transpose, 
+                full_master_weights=full_master_weights
             )
 
     def use_fp8(self):

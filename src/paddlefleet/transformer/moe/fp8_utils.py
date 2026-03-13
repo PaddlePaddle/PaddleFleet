@@ -86,7 +86,7 @@ def _get_fp8_weight_and_scale(weight, transpose=False):
 
     return fp8_weight, fp8_scale
 
-
+FIRST_TIME = True
 def fused_stack_quant(expert_weight_list, transpose=False):
     if transpose is False and hasattr(
         expert_weight_list[0], "fp8_weight_stacked"
@@ -113,6 +113,7 @@ def fused_stack_quant(expert_weight_list, transpose=False):
             expert_weight_list[0], transpose=True
         )
     else:
+        print("fused_stack_quant expert_weight_list")
         w, scale = paddle.incubate.nn.functional.fused_stack_transpose_quant(
             expert_weight_list, transpose=transpose
         )

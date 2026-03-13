@@ -625,7 +625,7 @@ class GPTModel(PipelineLayer):
 
         return renamed_sharded_state_dict
 
-    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True, full_master_weights={}):
         if self._num_virtual_pipeline_stages > 1:
             for idx, chunk in enumerate(self._model_chunks):
                 for idx, layer in enumerate(chunk):
@@ -633,12 +633,15 @@ class GPTModel(PipelineLayer):
                         layer.fp8_quant_weight(
                             batch_mode=batch_mode,
                             quant_transpose=quant_transpose,
+                            full_master_weights=full_master_weights
                         )
         else:
             for idx, layer in enumerate(self.run_function):
                 if isinstance(layer, TransformerLayer):
                     layer.fp8_quant_weight(
-                        batch_mode=batch_mode, quant_transpose=quant_transpose
+                        batch_mode=batch_mode,
+                        quant_transpose=quant_transpose,
+                        full_master_weights=full_master_weights
                     )
 
     def use_fp8(self):

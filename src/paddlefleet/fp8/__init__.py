@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .adamw_fp8 import AdamWForFp8
 from .linear import FP8Linear
+from .sharding_optimizer_fp8 import DygraphShardingOptimizerV2ForFp8
 
-__all__ = ["FP8Linear"]
+__all__ = ["FP8Linear", "AdamWForFp8", "DygraphShardingOptimizerV2ForFp8"]

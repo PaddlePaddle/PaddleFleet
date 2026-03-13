@@ -880,12 +880,37 @@ class MoELayer(nn.Layer):
             )
             return final_hidden_states.cast(hidden_states.dtype)
 
-    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True, full_master_weights={}):
         if not (self.moe_use_fusion_node and self.fp8):
             return
+        def calc_diff(x: paddle.Tensor, y: paddle.Tensor):
+            x, y = x.double().numpy(), y.double().numpy()
+            denominator = (x * x + y * y).sum()
+            if denominator == 0:  # Which means that all elements in x and y are 0
+                print("denominator is 0, return 0.0")
+                return 0.0
+            sim = 2 * (x * y).sum() / denominator
+            return 1 - sim
+        @paddle.no_grad()
+        def stack_transpose_quant(master_weights_list):
+            obj = paddle.stack(master_weights_list)
+            # print("weight stack: ", obj.shape, obj.dtype)
+            obj = obj.transpose([0, 2, 1]).contiguous()
+            
+            assert obj.dtype == paddle.float32
+            assert obj.dim() == 3
+            b, m, n = obj.shape
+            assert m % 128 == 0 and n % 128 == 0, (f"shape: {obj.shape}")
+            obj_view = obj.view(-1, 128, n // 128, 128).astype(paddle.float32)
+            x_amax = obj_view.abs().float().amax(dim=(1, 3), keepdim=True)
+            x_amax[x_amax==0] = 1
+            sf = x_amax / 448.0
+            sf = sf.astype(paddle.float32)
+            x_scaled = (obj_view * (float(1.0) / sf)).to(paddle.float8_e4m3fn)
+            return x_scaled.reshape([b*m,n]).contiguous(), sf.reshape([b*m//128,n//128]).contiguous()
 
         def quantize_weights(
-            weight_list, weight_obj=None, quant_transpose=None
+            weight_list, weight_obj=None, quant_transpose=None, full_master_weights={}
         ):
             """Helper function to quantize a list of weights."""
             if weight_obj is None:
@@ -917,12 +942,26 @@ class MoELayer(nn.Layer):
                 weight_obj.fp8_weight_stacked = fp8_weight
                 weight_obj.fp8_scale_stacked = fp8_scale
             elif quant_transpose is True:
+                for weight in weight_list:
+                    print("==========> quantizing weight: ", weight.name, weight.dtype, full_master_weights[weight.name].dtype)
+                    print("master weight diff: ", calc_diff(weight.astype(paddle.float32), full_master_weights[weight.name].astype(paddle.float32)))
                 # Only quantize with transpose
+                master_weights_list = []
+                for weight in weight_list:
+                    master_weights_list.append(
+                        full_master_weights.pop(weight.name)
+                    )
+
+                fp8_weight_t, fp8_scale_t = stack_transpose_quant(master_weights_list)
+                print("fp8_weight_t before: ", fp8_weight_t._md5sum(), fp8_weight_t)
+                print("fp8_scale_t before: ", fp8_scale_t._md5sum(), fp8_scale_t)
                 fp8_weight_t, fp8_scale_t = (
                     paddle.incubate.nn.functional.fused_stack_transpose_quant(
                         weight_list, transpose=True
                     )
                 )
+                print("fp8_weight_t after: ", fp8_weight_t._md5sum(), fp8_weight_t)
+                print("fp8_scale_t after: ", fp8_scale_t._md5sum(), fp8_scale_t)
                 weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
                 weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
             else:
@@ -942,11 +981,11 @@ class MoELayer(nn.Layer):
             ]
             if expert_w1_list:
                 quantize_weights(
-                    expert_w1_list, expert_w1_list[0], quant_transpose
+                    expert_w1_list, expert_w1_list[0], quant_transpose, full_master_weights
                 )
             if expert_w2_list:
                 quantize_weights(
-                    expert_w2_list, expert_w2_list[0], quant_transpose
+                    expert_w2_list, expert_w2_list[0], quant_transpose, full_master_weights
                 )
 
         else:
@@ -956,10 +995,12 @@ class MoELayer(nn.Layer):
                     quantize_weights(
                         [expert.up_gate_proj.weight],
                         quant_transpose=quant_transpose,
+                        full_master_weights=full_master_weights
                     )
                     quantize_weights(
                         [expert.down_proj.weight],
                         quant_transpose=quant_transpose,
+                        full_master_weights=full_master_weights
                     )
 
     def use_fp8(self):
