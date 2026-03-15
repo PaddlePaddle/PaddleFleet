@@ -20,6 +20,8 @@ from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_layers_spec,
     get_gpt_layer_local_spec,
+    get_gpt_layer_mhc_spec,
+    get_gpt_mhc_decoder_layers_spec,
     get_gpt_mtp_layers_spec,
     get_gpt_spec,
 )
@@ -28,23 +30,36 @@ from paddlefleet.spec_utils import LayerSpec, build_layer
 
 def gpt_builder(config, **kwargs):
     print("building GPT model ...")
+
+    # Determine whether to use MHC (Manifold Constrained Hyper Connections)
+    use_mhc = getattr(config, "use_mhc", False)
+
     if config.n_routed_experts:
-        # Define the decoder block spec
-        transformer_layers_spec = get_gpt_decoder_layers_spec(
-            config,
-            normalization=config.normalization,
-        )
+        # Define the decoder block spec for MoE models
+        if use_mhc:
+            print("    Using MHC (Manifold Constrained Hyper Connections) for residual connections")
+            transformer_layers_spec = get_gpt_mhc_decoder_layers_spec(
+                config,
+                normalization=config.normalization,
+            )
+        else:
+            transformer_layers_spec = get_gpt_decoder_layers_spec(
+                config,
+                normalization=config.normalization,
+            )
     else:
-        # Define the decoder layer spec
+        # Define the decoder layer spec for dense models
         transformer_layer_spec_func = _get_transformer_layer_spec_func(config)
         transformer_layers_spec = []
-        for layer_number in range(config.num_hidden_layers):
+        num_layers = config.num_hidden_layers
+        for layer_number in range(num_layers):
             real_layer_number = (
                 layer_number + config.num_empty_layers_add_in_head
             )
             transformer_layers_spec.append(
                 transformer_layer_spec_func(layer_number=real_layer_number)
             )
+
     mtp_layers_spec = None
     if config.num_nextn_predict_layers is not None:
         if (
@@ -114,13 +129,27 @@ def _get_transformer_layer_spec_func(config):
         config: Model configuration
 
     Returns:
-        transformer_layer_spec: The transformer layer specification
+        transformer_layer_spec: The transformer layer specification function
     """
-    return partial(
-        get_gpt_layer_local_spec,
-        config=config,
-        use_qk_norm=config.use_qk_norm,
-        num_experts=config.n_routed_experts,
-        multi_latent_attention=config.multi_latent_attention,
-        normalization=config.normalization,
-    )
+    use_mhc = getattr(config, "use_mhc", False)
+
+    if use_mhc:
+        # Use MHC layer spec
+        return partial(
+            get_gpt_layer_mhc_spec,
+            config=config,
+            use_qk_norm=config.use_qk_norm,
+            num_experts=config.n_routed_experts,
+            multi_latent_attention=config.multi_latent_attention,
+            normalization=config.normalization,
+        )
+    else:
+        # Use standard layer spec
+        return partial(
+            get_gpt_layer_local_spec,
+            config=config,
+            use_qk_norm=config.use_qk_norm,
+            num_experts=config.n_routed_experts,
+            multi_latent_attention=config.multi_latent_attention,
+            normalization=config.normalization,
+        )

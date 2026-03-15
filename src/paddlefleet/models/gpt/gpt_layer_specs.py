@@ -47,6 +47,7 @@ from paddlefleet.transformer.attention import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.identity_op import IdentityOp
+from paddlefleet.transformer.hyper_connection import HyperConnectionModule
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
@@ -59,6 +60,7 @@ from paddlefleet.transformer.paddle_norm import L2Norm
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSublayersSpec,
+    TransformerLayerWithMHC,
     TransformerLayerWithOverlap,
 )
 
@@ -197,6 +199,228 @@ def get_gpt_layer_local_spec(
                 else None,
             },
         )
+
+
+def get_gpt_layer_mhc_spec(
+    config: TransformerConfig | None = None,
+    num_experts: int | None = None,
+    moe_grouped_gemm: bool | None = False,
+    use_qk_norm: bool | None = False,
+    multi_latent_attention: bool | None = False,
+    normalization: str | None = None,
+    qk_l2_norm: bool | None = False,
+    layer_number: int | None = 1,
+    **kwargs,
+) -> LayerSpec:
+    """
+    Layer spec for TransformerLayerWithMHC.
+
+    Uses HyperConnectionModule plugged via the layer spec system with flat
+    [s, b, n*C] tensor format. Expand/contract is handled at the block level.
+
+    Reference: https://arxiv.org/abs/2502.20358
+
+    Args:
+        config: TransformerConfig with MHC settings
+        num_experts: Number of experts for MoE layers
+        moe_grouped_gemm: Whether to use grouped GEMM for MoE
+        use_qk_norm: Whether to use layer norm for Q/K
+        multi_latent_attention: Whether to use multi-latent attention
+        normalization: Normalization type ("RMSNorm" or "LayerNorm")
+        qk_l2_norm: Whether to use L2 norm for Q/K
+        layer_number: Layer index
+
+    Returns:
+        LayerSpec: Layer specification for TransformerLayerWithMHC
+    """
+    backend = LocalSpecProvider()
+
+    # Adjust for RMS norm
+    if normalization == "RMSNorm":
+        layer_norm = backend.layer_norm(rms_norm=True, for_qk=False)
+        qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
+    else:
+        layer_norm = backend.layer_norm(rms_norm=False, for_qk=False)
+        qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
+
+    mlp = get_mlp_layer_spec_for_backend(
+        backend=backend,
+        num_experts=num_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+    )
+
+    # Use TransformerLayerWithMHC as the layer class
+    transformer_cls = TransformerLayerWithMHC
+
+    # MHC is not compatible with overlap scheduler
+    if paddle.distributed.is_initialized():
+        use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
+            "pp_configs"
+        ].forward_backward_overlap_scheduler
+        if use_overlap:
+            raise ValueError(
+                "Megatron-style MHC is not compatible with "
+                "forward_backward_overlap_scheduler. Please disable one of them."
+            )
+
+    hc_module = HyperConnectionModule
+
+    if multi_latent_attention:
+        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
+        return LayerSpec(
+            layer=transformer_cls,
+            sublayers_spec=TransformerLayerSublayersSpec(
+                input_layernorm=layer_norm,
+                self_attention_hyper_connection=hc_module,
+                self_attn=LayerSpec(
+                    layer=MLASelfAttention,
+                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
+                    sublayers_spec=MLASelfAttentionSublayersSpec(
+                        q_proj=backend.column_parallel_linear(),
+                        q_a_proj=backend.column_parallel_linear(),
+                        q_b_proj=backend.column_parallel_linear(),
+                        kv_a_proj_with_mqa=backend.column_parallel_linear(),
+                        kv_b_proj=backend.column_parallel_linear(),
+                        core_attention=backend.core_attention(),
+                        o_proj=backend.row_parallel_linear(),
+                        q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+                        kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+                    ),
+                ),
+                self_attn_bda=get_bias_dropout_add,
+                post_attention_layernorm=layer_norm,
+                mlp_hyper_connection=hc_module,
+                mlp=mlp,
+                mlp_bda=get_bias_dropout_add,
+            ),
+            extra_kwargs={
+                "config": config,
+                "layer_number": layer_number,
+                "hidden_dropout_prob": config.hidden_dropout_prob
+                if config is not None
+                else None,
+            },
+        )
+    else:
+        return LayerSpec(
+            layer=transformer_cls,
+            sublayers_spec=TransformerLayerSublayersSpec(
+                input_layernorm=layer_norm,
+                self_attention_hyper_connection=hc_module,
+                self_attn=LayerSpec(
+                    layer=SelfAttention,
+                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
+                    sublayers_spec=SelfAttentionSublayersSpec(
+                        qkv_proj=backend.column_parallel_linear(),
+                        core_attention=backend.core_attention(),
+                        o_proj=backend.row_parallel_linear(),
+                        q_norm=(
+                            L2Norm
+                            if qk_l2_norm
+                            else (qk_norm if use_qk_norm else IdentityOp)
+                        ),
+                        k_norm=(
+                            L2Norm
+                            if qk_l2_norm
+                            else (qk_norm if use_qk_norm else IdentityOp)
+                        ),
+                    ),
+                ),
+                self_attn_bda=get_bias_dropout_add,
+                post_attention_layernorm=layer_norm,
+                mlp_hyper_connection=hc_module,
+                mlp=mlp,
+                mlp_bda=get_bias_dropout_add,
+                sharded_state_dict_keys_map={
+                    "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
+                    "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
+                },
+            ),
+            extra_kwargs={
+                "config": config,
+                "layer_number": layer_number,
+                "hidden_dropout_prob": config.hidden_dropout_prob
+                if config is not None
+                else None,
+            },
+        )
+
+
+def get_gpt_mhc_decoder_layers_spec(
+    config: TransformerConfig,
+    normalization: str | None = None,
+    qk_l2_norm: bool | None = False,
+) -> list[LayerSpec]:
+    """
+    GPT decoder layers spec with MHC.
+
+    Uses TransformerLayerWithMHC with HyperConnectionModule.
+    Expand/contract of streams is handled at the block level.
+
+    Args:
+        config: TransformerConfig with MHC settings
+        normalization: Normalization type
+        qk_l2_norm: Whether to use L2 norm for Q/K
+
+    Returns:
+        list[LayerSpec]: List of layer specifications with MHC
+    """
+    dense_layer_spec_func = partial(
+        get_gpt_layer_mhc_spec,
+        config=config,
+        num_experts=None,
+        moe_grouped_gemm=False,
+        use_qk_norm=config.use_qk_norm,
+        multi_latent_attention=config.multi_latent_attention,
+        normalization=normalization,
+        qk_l2_norm=qk_l2_norm,
+    )
+
+    moe_layer_spec_func = partial(
+        get_gpt_layer_mhc_spec,
+        config=config,
+        num_experts=config.n_routed_experts,
+        moe_grouped_gemm=config.moe_grouped_gemm,
+        use_qk_norm=config.use_qk_norm,
+        multi_latent_attention=config.multi_latent_attention,
+        normalization=normalization,
+        qk_l2_norm=qk_l2_norm,
+    )
+
+    # Parse config.moe_layer_freq to determine the pattern of expert/dense layers
+    if isinstance(config.moe_layer_freq, int):
+        moe_layer_pattern = [
+            1 if (i % config.moe_layer_freq == 0) else 0
+            for i in range(config.num_hidden_layers)
+        ]
+    elif isinstance(config.moe_layer_freq, list):
+        moe_layer_pattern = config.moe_layer_freq
+        assert len(moe_layer_pattern) == config.num_hidden_layers, (
+            f"Invalid length of moe_layer_pattern: {len(moe_layer_pattern)}, "
+            f"expected {config.num_hidden_layers}"
+        )
+    else:
+        raise ValueError(
+            f"Invalid moe_layer_freq: {type(config.moe_layer_freq)}, {config.moe_layer_freq}"
+        )
+
+    # Create the layer specs for the model
+    layer_specs = []
+    num_layers = config.num_hidden_layers
+    for layer_number in range(num_layers):
+        real_layer_number = layer_number + config.num_empty_layers_add_in_head
+        if moe_layer_pattern[layer_number] == 1:
+            layer_specs.append(
+                moe_layer_spec_func(layer_number=real_layer_number)
+            )
+        elif moe_layer_pattern[layer_number] == 0:
+            layer_specs.append(
+                dense_layer_spec_func(layer_number=real_layer_number)
+            )
+        else:
+            raise ValueError(f"Invalid layer pattern: {moe_layer_pattern}")
+
+    return layer_specs
 
 
 def get_mlp_layer_spec_for_backend(

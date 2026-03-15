@@ -390,6 +390,28 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use barrier for expert parallelism."""
 
     ##################
+    # MHC (Manifold Constrained Hyper Connections)
+    ##################
+    use_mhc: bool = False
+    """Whether to use Manifold Constrained Hyper Connections instead of standard residual connections.
+    When enabled, MHC replaces standard residual connections for both attention and MLP layers."""
+
+    mhc_num_residual_streams: int = 1
+    """Number of residual streams for MHC. Default is 1 (equivalent to standard residual).
+    Higher values (e.g., 4, 8) enable hyper-connections with multiple parallel streams."""
+
+    mhc_sinkhorn_iters: int = 20
+    """Number of Sinkhorn-Knopp iterations for MHC optimal transport computation."""
+
+    mhc_use_triton: bool = True
+    """Whether to use Triton kernels for MHC computation. When True, uses optimized
+    Triton kernels if available. Falls back to native PaddlePaddle if Triton is unavailable."""
+
+    mhc_kernel_backend: str = "auto"
+    """Kernel backend for MHC. Options: 'auto', 'triton', 'tilelang', 'cutedsl'.
+    'auto' will select the best available backend based on hardware."""
+
+    ##################
     # Context Parallel
     ##################
     cp_comm_type: str | list[str] | None = None

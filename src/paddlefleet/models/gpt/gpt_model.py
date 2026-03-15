@@ -217,6 +217,18 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(head_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
+
+        # Insert MHC expand layer before transformer layers
+        use_mhc = getattr(self.config, "use_mhc", False)
+        if use_mhc:
+            from paddlefleet.transformer.hyper_connection import MHCExpandLayer
+            from paddlefleet.spec_utils import LayerSpec as LSpec
+            self.add_sequential_layer(
+                layers,
+                LayerDesc(LSpec(layer=MHCExpandLayer, extra_kwargs={"config": self.config})),
+                f"{name_prefix}.mhc_expand",
+            )
+
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
                 layers,
@@ -224,6 +236,16 @@ class GPTModel(PipelineLayer):
                 f"{name_prefix}.layers.{i}",
             )
             i += 1
+
+        # Insert MHC contract layer after transformer layers
+        if use_mhc:
+            from paddlefleet.transformer.hyper_connection import MHCContractLayer
+            from paddlefleet.spec_utils import LayerSpec as LSpec
+            self.add_sequential_layer(
+                layers,
+                LayerDesc(LSpec(layer=MHCContractLayer, extra_kwargs={"config": self.config})),
+                f"{name_prefix}.mhc_contract",
+            )
 
         # Always place layer_norm after transformer_layers and before tail_empty_layers/MTP,
         # so that the model structure is consistent regardless of whether MTP is enabled.
