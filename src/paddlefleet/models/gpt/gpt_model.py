@@ -14,26 +14,27 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-from paddlefleet.pipeline_parallel import (
-    LayerDesc,
-    PipelineLayer,
-    SharedLayerDesc,
-)
-from paddlefleet.pipeline_parallel.pp_utils.utils import (
-    dict_to_tuple_helper,
-)
-
-if TYPE_CHECKING:
-    from paddlefleet.spec_utils import LayerSpec
 
 from paddle.distributed import fleet
 
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
-from paddlefleet.pipeline_parallel import ScheduleChunk
+from paddlefleet.pipeline_parallel import (
+    LayerDesc,
+    PipelineLayer,
+    ScheduleChunk,
+    SharedLayerDesc,
+)
+from paddlefleet.pipeline_parallel.pp_utils.utils import (
+    dict_to_tuple_helper,
+)
+from paddlefleet.spec_utils import LayerSpec
+from paddlefleet.transformer.hyper_connection import (
+    MHCContractLayer,
+    MHCExpandLayer,
+)
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerNode,
@@ -221,11 +222,14 @@ class GPTModel(PipelineLayer):
         # Insert MHC expand layer before transformer layers
         use_mhc = getattr(self.config, "use_mhc", False)
         if use_mhc:
-            from paddlefleet.transformer.hyper_connection import MHCExpandLayer
-            from paddlefleet.spec_utils import LayerSpec as LSpec
             self.add_sequential_layer(
                 layers,
-                LayerDesc(LSpec(layer=MHCExpandLayer, extra_kwargs={"config": self.config})),
+                LayerDesc(
+                    LayerSpec(
+                        layer=MHCExpandLayer,
+                        extra_kwargs={"config": self.config},
+                    )
+                ),
                 f"{name_prefix}.mhc_expand",
             )
 
@@ -239,11 +243,14 @@ class GPTModel(PipelineLayer):
 
         # Insert MHC contract layer after transformer layers
         if use_mhc:
-            from paddlefleet.transformer.hyper_connection import MHCContractLayer
-            from paddlefleet.spec_utils import LayerSpec as LSpec
             self.add_sequential_layer(
                 layers,
-                LayerDesc(LSpec(layer=MHCContractLayer, extra_kwargs={"config": self.config})),
+                LayerDesc(
+                    LayerSpec(
+                        layer=MHCContractLayer,
+                        extra_kwargs={"config": self.config},
+                    )
+                ),
                 f"{name_prefix}.mhc_contract",
             )
 
@@ -617,8 +624,6 @@ class GPTModel(PipelineLayer):
             sharded_state_dict[self._pp_to_single_mapping[k]] = v
 
         def increment_expert_number(s, increment):
-            import re
-
             def replace(match):
                 original_number = int(match.group(0))
                 new_number = original_number + increment

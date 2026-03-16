@@ -46,8 +46,8 @@ from paddlefleet.transformer.attention import (
     SelfAttentionSublayersSpec,
 )
 from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,

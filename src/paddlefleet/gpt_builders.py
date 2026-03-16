@@ -37,7 +37,9 @@ def gpt_builder(config, **kwargs):
     if config.n_routed_experts:
         # Define the decoder block spec for MoE models
         if use_mhc:
-            print("    Using MHC (Manifold Constrained Hyper Connections) for residual connections")
+            print(
+                "    Using MHC (Manifold Constrained Hyper Connections) for residual connections"
+            )
             transformer_layers_spec = get_gpt_mhc_decoder_layers_spec(
                 config,
                 normalization=config.normalization,
