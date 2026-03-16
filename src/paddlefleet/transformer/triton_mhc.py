@@ -27,14 +27,13 @@ Key optimizations:
 """
 
 import paddle
-import paddle.nn as nn
-import paddle.nn.functional as F
 
 paddle.enable_compat(scope={"triton"})
 
 try:
     import triton
     import triton.language as tl
+
     TRITON_AVAILABLE = True
 except ImportError:
     TRITON_AVAILABLE = False
@@ -47,6 +46,7 @@ except ImportError:
 # ============================================================================
 # Compact Sinkhorn-Knopp (no diag_embed optimization)
 # ============================================================================
+
 
 @triton.jit
 def sinkhorn_4x4_compact_kernel(
@@ -95,10 +95,10 @@ def sinkhorn_4x4_compact_kernel(
     # Unrolled iterations for maximum performance
     for _ in range(iters):
         # Update u: u = 1.0 / (A @ v + eps)
-        Av0 = A00*v0 + A01*v1 + A02*v2 + A03*v3 + eps
-        Av1 = A10*v0 + A11*v1 + A12*v2 + A13*v3 + eps
-        Av2 = A20*v0 + A21*v1 + A22*v2 + A23*v3 + eps
-        Av3 = A30*v0 + A31*v1 + A32*v2 + A33*v3 + eps
+        Av0 = A00 * v0 + A01 * v1 + A02 * v2 + A03 * v3 + eps
+        Av1 = A10 * v0 + A11 * v1 + A12 * v2 + A13 * v3 + eps
+        Av2 = A20 * v0 + A21 * v1 + A22 * v2 + A23 * v3 + eps
+        Av3 = A30 * v0 + A31 * v1 + A32 * v2 + A33 * v3 + eps
 
         u0 = 1.0 / Av0
         u1 = 1.0 / Av1
@@ -106,10 +106,10 @@ def sinkhorn_4x4_compact_kernel(
         u3 = 1.0 / Av3
 
         # Update v: v = 1.0 / (A^T @ u + eps)
-        At_u0 = A00*u0 + A10*u1 + A20*u2 + A30*u3 + eps
-        At_u1 = A01*u0 + A11*u1 + A21*u2 + A31*u3 + eps
-        At_u2 = A02*u0 + A12*u1 + A22*u2 + A32*u3 + eps
-        At_u3 = A03*u0 + A13*u1 + A23*u2 + A33*u3 + eps
+        At_u0 = A00 * u0 + A10 * u1 + A20 * u2 + A30 * u3 + eps
+        At_u1 = A01 * u0 + A11 * u1 + A21 * u2 + A31 * u3 + eps
+        At_u2 = A02 * u0 + A12 * u1 + A22 * u2 + A32 * u3 + eps
+        At_u3 = A03 * u0 + A13 * u1 + A23 * u2 + A33 * u3 + eps
 
         v0 = 1.0 / At_u0
         v1 = 1.0 / At_u1
@@ -161,7 +161,7 @@ def triton_sinkhorn_knopp_compact(A, it=20, eps=1e-8):
         v = paddle.empty([batch_size, n], dtype=paddle.float32)
 
         # Get strides
-        stride_batch_A = n*n
+        stride_batch_A = n * n
         stride_n_A = n
         stride_batch_uv = u.stride(0)
         stride_n_uv = u.stride(1)
@@ -186,7 +186,7 @@ def triton_sinkhorn_knopp_compact(A, it=20, eps=1e-8):
         return u, v
     else:
         # Fallback: use original sinkhorn and extract diagonal elements
-        _, U, V = sinkhorn_knopp(A.reshape([B*L, n, n]), it=it, eps=eps)
+        _, U, V = sinkhorn_knopp(A.reshape([B * L, n, n]), it=it, eps=eps)
         # Extract diagonal from U and V: U[i,i] and V[i,i]
         # For diagonal matrix, only diagonal elements are non-zero
         u = paddle.diagonal(U, axis1=1, axis2=2)  # [batch_size, n]
@@ -243,7 +243,7 @@ def sinkhorn_knopp(A, it=20, eps=1e-8):
         # Build diagonal matrices
         U = paddle.diag_embed(u)
         V = paddle.diag_embed(v)
-        return _, U, V
+        return None, U, V
 
     # Fallback to original Python implementation
     # Initialize u and v with same dtype as A
@@ -265,31 +265,31 @@ def sinkhorn_knopp(A, it=20, eps=1e-8):
     # Build diagonal matrices
     # paddle.diag_embed converts vectors to diagonal matrices (B, n) -> (B, n, n)
     if u.dtype == paddle.bfloat16:
-        u = u.cast('float32')
-        v = v.cast('float32')
+        u = u.cast("float32")
+        v = v.cast("float32")
         U = paddle.diag_embed(u)
         V = paddle.diag_embed(v)
-        U = U.cast('bfloat16')
-        V = V.cast('bfloat16')
+        U = U.cast("bfloat16")
+        V = V.cast("bfloat16")
     else:
         U = paddle.diag_embed(u)
         V = paddle.diag_embed(v)
 
-    return _, U, V
+    return None, U, V
 
 
 @triton.jit
 def exp_matmul_residuals_fused_kernel(
     # Inputs
-    H_res_exp_ptr,      # [B*L, N, N]
-    u_ptr,              # [B*L, N] - compact vector (diagonal of U)
-    v_ptr,              # [B*L, N] - compact vector (diagonal of V)
-    H_pre_ptr,          # [B*L, N]
-    x_ptr,              # [B*L, N, D]
+    H_res_exp_ptr,  # [B*L, N, N]
+    u_ptr,  # [B*L, N] - compact vector (diagonal of U)
+    v_ptr,  # [B*L, N] - compact vector (diagonal of V)
+    H_pre_ptr,  # [B*L, N]
+    x_ptr,  # [B*L, N, D]
     # Outputs
-    H_res_out_ptr,      # [B*L, N, N] - float32
-    residuals_ptr,      # [B*L, N, D]
-    branch_input_ptr,   # [B*L, D]
+    H_res_out_ptr,  # [B*L, N, N] - float32
+    residuals_ptr,  # [B*L, N, D]
+    branch_input_ptr,  # [B*L, D]
     # Parameters
     num_tokens: tl.constexpr,  # B*L
     N: tl.constexpr,
@@ -381,10 +381,18 @@ def exp_matmul_residuals_fused_kernel(
         d_mask = d_offsets < D
 
         # Load x[token, 0..3, d_block] once, reuse for residuals + branch
-        x_0 = tl.load(x_ptr + base_x + 0 * D + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        x_1 = tl.load(x_ptr + base_x + 1 * D + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        x_2 = tl.load(x_ptr + base_x + 2 * D + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        x_3 = tl.load(x_ptr + base_x + 3 * D + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+        x_0 = tl.load(
+            x_ptr + base_x + 0 * D + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
+        x_1 = tl.load(
+            x_ptr + base_x + 1 * D + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
+        x_2 = tl.load(
+            x_ptr + base_x + 2 * D + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
+        x_3 = tl.load(
+            x_ptr + base_x + 3 * D + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
 
         # Residuals: residuals[token, n, d] = sum_k H_res[n, k] * x[k, d]
         res_0 = hr00 * x_0 + hr01 * x_1 + hr02 * x_2 + hr03 * x_3
@@ -392,36 +400,55 @@ def exp_matmul_residuals_fused_kernel(
         res_2 = hr20 * x_0 + hr21 * x_1 + hr22 * x_2 + hr23 * x_3
         res_3 = hr30 * x_0 + hr31 * x_1 + hr32 * x_2 + hr33 * x_3
 
-        tl.store(residuals_ptr + residuals_base + 0 * D + d_offsets, res_0.to(OUTPUT_DTYPE), mask=d_mask)
-        tl.store(residuals_ptr + residuals_base + 1 * D + d_offsets, res_1.to(OUTPUT_DTYPE), mask=d_mask)
-        tl.store(residuals_ptr + residuals_base + 2 * D + d_offsets, res_2.to(OUTPUT_DTYPE), mask=d_mask)
-        tl.store(residuals_ptr + residuals_base + 3 * D + d_offsets, res_3.to(OUTPUT_DTYPE), mask=d_mask)
+        tl.store(
+            residuals_ptr + residuals_base + 0 * D + d_offsets,
+            res_0.to(OUTPUT_DTYPE),
+            mask=d_mask,
+        )
+        tl.store(
+            residuals_ptr + residuals_base + 1 * D + d_offsets,
+            res_1.to(OUTPUT_DTYPE),
+            mask=d_mask,
+        )
+        tl.store(
+            residuals_ptr + residuals_base + 2 * D + d_offsets,
+            res_2.to(OUTPUT_DTYPE),
+            mask=d_mask,
+        )
+        tl.store(
+            residuals_ptr + residuals_base + 3 * D + d_offsets,
+            res_3.to(OUTPUT_DTYPE),
+            mask=d_mask,
+        )
 
         # Branch input: reuse x_0..x_3 already in registers
         branch_val = hp_0 * x_0 + hp_1 * x_1 + hp_2 * x_2 + hp_3 * x_3
-        tl.store(branch_input_ptr + branch_base + d_offsets, branch_val.to(OUTPUT_DTYPE), mask=d_mask)
+        tl.store(
+            branch_input_ptr + branch_base + d_offsets,
+            branch_val.to(OUTPUT_DTYPE),
+            mask=d_mask,
+        )
 
 
 # ============================================================================
 # Compact Backward Kernels
 # ============================================================================
 
+
 @triton.jit
 def hres_bwd_exp_matmul_compact_kernel(
     # Inputs
-    d_H_res_mat_ptr,       # [B*L, N, N]
-    H_res_exp_ptr,         # [B*L, N, N]
-    u_ptr,                 # [B*L, N] - compact vector
-    v_ptr,                 # [B*L, N] - compact vector
-    H_all_ptr,             # [B*L, N+N+N*N] - float32
-    bias_terms_ptr,        # [N+N+N*N] - float32
-    scaling_factors_ptr,   # [3] - float32
-
+    d_H_res_mat_ptr,  # [B*L, N, N]
+    H_res_exp_ptr,  # [B*L, N, N]
+    u_ptr,  # [B*L, N] - compact vector
+    v_ptr,  # [B*L, N] - compact vector
+    H_all_ptr,  # [B*L, N+N+N*N] - float32
+    bias_terms_ptr,  # [N+N+N*N] - float32
+    scaling_factors_ptr,  # [3] - float32
     # Outputs
-    d_scaling_factors_ptr, # [3] - output for scale gradients (index 2: res_scale)
-    d_H_all_ptr,           # [B*L, N+N+N*N] - write d_H_all[2N:] directly (bfloat16)
-    d_bias_terms_ptr,      # [N+N+N*N] - atomic add d_bias_res at offset 2*N
-
+    d_scaling_factors_ptr,  # [3] - output for scale gradients (index 2: res_scale)
+    d_H_all_ptr,  # [B*L, N+N+N*N] - write d_H_all[2N:] directly (bfloat16)
+    d_bias_terms_ptr,  # [N+N+N*N] - atomic add d_bias_res at offset 2*N
     # Parameters
     num_tokens: tl.constexpr,  # B*L
     N: tl.constexpr,
@@ -429,7 +456,7 @@ def hres_bwd_exp_matmul_compact_kernel(
     N3: tl.constexpr,
     stride_d_H_res_mat,
     stride_H_res_exp,
-    stride_u,               # stride for compact vectors
+    stride_u,  # stride for compact vectors
     stride_v,
     stride_H_all,
 ):
@@ -470,28 +497,39 @@ def hres_bwd_exp_matmul_compact_kernel(
         col = i % N
 
         # d_H_res_exp[row, col] = u[row] * d_H_res_mat[row, col] * v[col]
-        d_H_mat_rc = tl.load(d_H_res_mat_ptr + d_H_res_mat_base + row * N + col).to(tl.float32)
+        d_H_mat_rc = tl.load(
+            d_H_res_mat_ptr + d_H_res_mat_base + row * N + col
+        ).to(tl.float32)
         u_val = tl.load(u_ptr + pid * stride_u + row).to(tl.float32)
         v_val = tl.load(v_ptr + pid * stride_v + col).to(tl.float32)
 
         d_H_res_exp_rc = u_val * d_H_mat_rc * v_val
 
         # Load H_res_exp[r, c]
-        h_res_exp_rc = tl.load(H_res_exp_ptr + H_res_exp_base + row * N + col).to(tl.float32)
+        h_res_exp_rc = tl.load(
+            H_res_exp_ptr + H_res_exp_base + row * N + col
+        ).to(tl.float32)
 
         # d_H_res = d_H_res_exp * H_res_exp
         d_H_res_rc = d_H_res_exp_rc * h_res_exp_rc
 
         # Load H_all_raw_res[row, col] (flattened)
-        H_all_raw_res_rc = (tl.load(H_all_ptr + H_all_base + 2 * N + row * N + col).to(tl.float32) -
-                             tl.load(bias_terms_ptr + 2 * N + row * N + col).to(tl.float32)) / res_scale
+        H_all_raw_res_rc = (
+            tl.load(H_all_ptr + H_all_base + 2 * N + row * N + col).to(
+                tl.float32
+            )
+            - tl.load(bias_terms_ptr + 2 * N + row * N + col).to(tl.float32)
+        ) / res_scale
 
         # Accumulate d_res_scale
         d_res_scale_acc += d_H_res_rc * H_all_raw_res_rc
 
         # d_H_res_scaled -> write to d_H_all[2N + i] (values already in register)
         d_H_res_scaled_rc = d_H_res_rc * res_scale
-        tl.store(d_H_all_ptr + H_all_base + 2 * N + i, d_H_res_scaled_rc.to(tl.bfloat16))
+        tl.store(
+            d_H_all_ptr + H_all_base + 2 * N + i,
+            d_H_res_scaled_rc.to(tl.bfloat16),
+        )
 
         # d_bias_res: d_H_res_rc already in register
         tl.atomic_add(d_bias_terms_ptr + 2 * N + i, d_H_res_rc)
@@ -504,9 +542,16 @@ def hres_bwd_exp_matmul_compact_kernel(
 # Optimized Fused Kernels for Width Connection
 # ============================================================================
 
+
 @triton.autotune(
-    configs=[triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32, 'BLOCK_K': 128}, num_warps=4, num_stages=4)],
-    key=['num_tokens', 'ND', 'N3'],
+    configs=[
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 32, "BLOCK_K": 128},
+            num_warps=4,
+            num_stages=4,
+        )
+    ],
+    key=["num_tokens", "ND", "N3"],
 )
 @triton.jit
 def width_rmsnorm_gemm_kernel(
@@ -522,7 +567,7 @@ def width_rmsnorm_gemm_kernel(
     NN,
     stride_x_token,
     stride_cw_out,
-    stride_h_all_token,   # stride for H_all output (N3 for 4D [B,L,N3])
+    stride_h_all_token,  # stride for H_all output (N3 for 4D [B,L,N3])
     eps,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -547,8 +592,11 @@ def width_rmsnorm_gemm_kernel(
     for k_idx in range(0, ND, BLOCK_K):
         k_offsets = k_idx + rk
         mask_k = k_offsets < ND
-        x_chunk = tl.load(x_ptr + x_offset_base + k_offsets[None, :],
-                          mask=x_mask_m[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
+        x_chunk = tl.load(
+            x_ptr + x_offset_base + k_offsets[None, :],
+            mask=x_mask_m[:, None] & mask_k[None, :],
+            other=0.0,
+        ).to(tl.float32)
         _var_acc += x_chunk * x_chunk
 
     var_sum = tl.sum(_var_acc, axis=1)
@@ -560,15 +608,22 @@ def width_rmsnorm_gemm_kernel(
     for k_idx in range(0, ND, BLOCK_K):
         k_offsets = k_idx + rk
         mask_k = k_offsets < ND
-        x_chunk = tl.load(x_ptr + x_offset_base + k_offsets[None, :],
-                          mask=x_mask_m[:, None] & mask_k[None, :], other=0.0)
+        x_chunk = tl.load(
+            x_ptr + x_offset_base + k_offsets[None, :],
+            mask=x_mask_m[:, None] & mask_k[None, :],
+            other=0.0,
+        )
         # norm_weight = 1.0 (no learnable weight for RMSNorm)
         x_normed = x_chunk * rstd[:, None]
 
         # Load weights: combined_weights[k_offsets, rn] for correct GEMM
         # combined_weights shape is [ND, N3], so element [k, j] = ptr + k * N3 + j
-        w_ptr_base = combined_weights_ptr + (k_offsets[:, None] * stride_cw_out + rn[None, :])
-        w_chunk = tl.load(w_ptr_base, mask=mask_k[:, None] & (rn[None, :] < N3), other=0.0).to(tl.bfloat16)
+        w_ptr_base = combined_weights_ptr + (
+            k_offsets[:, None] * stride_cw_out + rn[None, :]
+        )
+        w_chunk = tl.load(
+            w_ptr_base, mask=mask_k[:, None] & (rn[None, :] < N3), other=0.0
+        ).to(tl.bfloat16)
         # w_chunk shape: [BLOCK_K, BLOCK_N], no transpose needed for correct GEMM
         acc += tl.dot(x_normed.to(tl.bfloat16), w_chunk)
 
@@ -582,7 +637,9 @@ def width_rmsnorm_gemm_kernel(
     bias_pre_vals = tl.load(bias_terms_ptr + rn, mask=bias_pre_mask, other=0.0)
 
     bias_post_mask = (rn >= N) & (rn < 2 * N)
-    bias_post_vals = tl.load(bias_terms_ptr + rn, mask=bias_post_mask, other=0.0)
+    bias_post_vals = tl.load(
+        bias_terms_ptr + rn, mask=bias_post_mask, other=0.0
+    )
 
     bias_res_mask = (rn >= 2 * N) & (rn < N3)
     bias_res_vals = tl.load(bias_terms_ptr + rn, mask=bias_res_mask, other=0.0)
@@ -595,21 +652,32 @@ def width_rmsnorm_gemm_kernel(
 
     # Store H_pre part (elements 0 to N-1)
     final_pre = acc * scale_pre + bias_pre_vals
-    tl.store(H_all_ptr + H_all_offset_base, final_pre.to(tl.bfloat16),
-             mask=x_mask_m[:, None] & bias_pre_mask[None, :])
+    tl.store(
+        H_all_ptr + H_all_offset_base,
+        final_pre.to(tl.bfloat16),
+        mask=x_mask_m[:, None] & bias_pre_mask[None, :],
+    )
 
     # Store H_post part (elements N to 2N-1)
     final_post = acc * scale_post + bias_post_vals
-    tl.store(H_all_ptr + H_all_offset_base, final_post.to(tl.bfloat16),
-             mask=x_mask_m[:, None] & bias_post_mask[None, :])
+    tl.store(
+        H_all_ptr + H_all_offset_base,
+        final_post.to(tl.bfloat16),
+        mask=x_mask_m[:, None] & bias_post_mask[None, :],
+    )
 
     # Store H_res part (elements 2N to N3-1)
     final_res = acc * scale_res + bias_res_vals
-    tl.store(H_all_ptr + H_all_offset_base, final_res.to(tl.bfloat16),
-             mask=x_mask_m[:, None] & bias_res_mask[None, :])
+    tl.store(
+        H_all_ptr + H_all_offset_base,
+        final_res.to(tl.bfloat16),
+        mask=x_mask_m[:, None] & bias_res_mask[None, :],
+    )
 
 
-def width_rmsnorm_gemm_forward(x, combined_weights, scaling_factors, bias_terms, norm_eps, N, D, B, L):
+def width_rmsnorm_gemm_forward(
+    x, combined_weights, scaling_factors, bias_terms, norm_eps, N, D, B, L
+):
     """
     Wrapper for fused RMSNorm + GEMM kernel.
 
@@ -640,8 +708,12 @@ def width_rmsnorm_gemm_forward(x, combined_weights, scaling_factors, bias_terms,
     # Use 2D grid with smallest BLOCK values from autotune configs to ensure coverage
     # Autotune configs use BLOCK_M in [16, 32, 64, 128] and BLOCK_N in [32, 64]
     # Using smallest values ensures grid is large enough for any autotune config
-    grid_m = triton.cdiv(num_tokens, 16)  # Use smallest BLOCK_M=16 to ensure sufficient parallelism
-    grid_n = triton.cdiv(N3, 32)          # Use smallest BLOCK_N=32 to increase N dimension coverage
+    grid_m = triton.cdiv(
+        num_tokens, 16
+    )  # Use smallest BLOCK_M=16 to ensure sufficient parallelism
+    grid_n = triton.cdiv(
+        N3, 32
+    )  # Use smallest BLOCK_N=32 to increase N dimension coverage
     grid = (grid_m, grid_n)
 
     width_rmsnorm_gemm_kernel[grid](
@@ -656,8 +728,8 @@ def width_rmsnorm_gemm_forward(x, combined_weights, scaling_factors, bias_terms,
         N3=N3,
         NN=NN,
         stride_x_token=ND,
-        stride_cw_out=N3,   # fixed: combined_weights shape is [ND, N3], row-major stride is N3
-        stride_h_all_token=N3,   # for 4D [B, L, N3] C-contiguous
+        stride_cw_out=N3,  # fixed: combined_weights shape is [ND, N3], row-major stride is N3
+        stride_h_all_token=N3,  # for 4D [B, L, N3] C-contiguous
         eps=norm_eps,
     )
 
@@ -668,18 +740,24 @@ def width_rmsnorm_gemm_forward(x, combined_weights, scaling_factors, bias_terms,
 def mhc_sigmoid_exp_kernel(
     # Pointers
     H_ptr,
-    Out_Pre_ptr, Out_Post_ptr, Out_Res_Exp_ptr,
+    Out_Pre_ptr,
+    Out_Post_ptr,
+    Out_Res_Exp_ptr,
     # Stride info (optimized for token processing)
-    stride_h_token, stride_h_dim,
-    stride_out_pre_token, stride_out_pre_dim,
-    stride_out_post_token, stride_out_post_dim,
-    stride_out_res_token, stride_out_res_dim,
+    stride_h_token,
+    stride_h_dim,
+    stride_out_pre_token,
+    stride_out_pre_dim,
+    stride_out_post_token,
+    stride_out_post_dim,
+    stride_out_res_token,
+    stride_out_res_dim,
     n_tokens,
     real_N,
     # Compile-time constants
-    BLOCK_N: tl.constexpr,      # Power of 2 covering N
-    BLOCK_RES: tl.constexpr,    # Power of 2 covering N*N
-    BLOCK_SIZE: tl.constexpr    # Number of tokens per program
+    BLOCK_N: tl.constexpr,  # Power of 2 covering N
+    BLOCK_RES: tl.constexpr,  # Power of 2 covering N*N
+    BLOCK_SIZE: tl.constexpr,  # Number of tokens per program
 ):
     # 1. Determine current token batch
     pid = tl.program_id(0)
@@ -700,27 +778,46 @@ def mhc_sigmoid_exp_kernel(
     base_h_ptr = H_ptr + (offs_token[:, None] * stride_h_token)
 
     # H_pre processing: direct sigmoid (scale and bias already applied in GEMM kernel)
-    h_pre = tl.load(base_h_ptr + offs_n[None, :] * stride_h_dim,
-                    mask=mask_token[:, None] & mask_n[None, :], other=0.0).to(tl.float32)
+    h_pre = tl.load(
+        base_h_ptr + offs_n[None, :] * stride_h_dim,
+        mask=mask_token[:, None] & mask_n[None, :],
+        other=0.0,
+    ).to(tl.float32)
     out_pre = tl.sigmoid(h_pre)
 
     # H_post processing: direct sigmoid then multiply 2.0 (scale and bias already applied in GEMM kernel)
-    h_post = tl.load(base_h_ptr + (real_N + offs_n[None, :]) * stride_h_dim,
-                     mask=mask_token[:, None] & mask_n[None, :], other=0.0).to(tl.float32)
+    h_post = tl.load(
+        base_h_ptr + (real_N + offs_n[None, :]) * stride_h_dim,
+        mask=mask_token[:, None] & mask_n[None, :],
+        other=0.0,
+    ).to(tl.float32)
     out_post = 2.0 * tl.sigmoid(h_post)
 
     # Write results
-    tl.store(Out_Pre_ptr + (offs_token[:, None] * stride_out_pre_token) + (offs_n[None, :] * stride_out_pre_dim),
-             out_pre, mask=mask_token[:, None] & mask_n[None, :])
-    tl.store(Out_Post_ptr + (offs_token[:, None] * stride_out_post_token) + (offs_n[None, :] * stride_out_post_dim),
-             out_post, mask=mask_token[:, None] & mask_n[None, :])
+    tl.store(
+        Out_Pre_ptr
+        + (offs_token[:, None] * stride_out_pre_token)
+        + (offs_n[None, :] * stride_out_pre_dim),
+        out_pre,
+        mask=mask_token[:, None] & mask_n[None, :],
+    )
+    tl.store(
+        Out_Post_ptr
+        + (offs_token[:, None] * stride_out_post_token)
+        + (offs_n[None, :] * stride_out_post_dim),
+        out_post,
+        mask=mask_token[:, None] & mask_n[None, :],
+    )
 
     # -----------------------------------------------------------
     # 4. H_res_exp: Compute max and exp in float32 precision (matching original implementation)
     # -----------------------------------------------------------
     res_start_idx = 2 * real_N
-    h_res = tl.load(base_h_ptr + (res_start_idx + offs_res[None, :]) * stride_h_dim,
-                    mask=mask_token[:, None] & mask_res[None, :], other=-float('inf')).to(tl.float32)
+    h_res = tl.load(
+        base_h_ptr + (res_start_idx + offs_res[None, :]) * stride_h_dim,
+        mask=mask_token[:, None] & mask_res[None, :],
+        other=-float("inf"),
+    ).to(tl.float32)
 
     # Find max per row in float32 (matching original implementation precision)
     max_val = tl.max(h_res, axis=1)  # Shape: (BLOCK_SIZE, )
@@ -729,8 +826,14 @@ def mhc_sigmoid_exp_kernel(
     res_exp = tl.exp(h_res - max_val[:, None])
 
     # Write final result (cast back to float16/bfloat16)
-    tl.store(Out_Res_Exp_ptr + (offs_token[:, None] * stride_out_res_token) + (offs_res[None, :] * stride_out_res_dim),
-             res_exp, mask=mask_token[:, None] & mask_res[None, :])
+    tl.store(
+        Out_Res_Exp_ptr
+        + (offs_token[:, None] * stride_out_res_token)
+        + (offs_res[None, :] * stride_out_res_dim),
+        res_exp,
+        mask=mask_token[:, None] & mask_res[None, :],
+    )
+
 
 def mhc_fuse_sigmoid_exp(H_all, H_pre, H_post, H_res_exp, N):
     """
@@ -754,27 +857,41 @@ def mhc_fuse_sigmoid_exp(H_all, H_pre, H_post, H_res_exp, N):
     BLOCK_RES = 64  # N*N max is 64
     BLOCK_SIZE = 256  # Increase block size for large L to increase parallelism
 
-    grid = (triton.cdiv(n_tokens, BLOCK_SIZE), )
+    grid = (triton.cdiv(n_tokens, BLOCK_SIZE),)
 
     mhc_sigmoid_exp_kernel[grid](
-        H_all, H_pre, H_post, H_res_exp,  # Removed bias_terms and scaling_factors parameters
-        H_all.stride(1), H_all.stride(2),
-        H_pre.stride(1), H_pre.stride(2),
-        H_post.stride(1), H_post.stride(2),
-        H_res_exp.stride(1), 1,
-        n_tokens, N,
-        BLOCK_N=BLOCK_N, BLOCK_RES=BLOCK_RES, BLOCK_SIZE=BLOCK_SIZE
+        H_all,
+        H_pre,
+        H_post,
+        H_res_exp,  # Removed bias_terms and scaling_factors parameters
+        H_all.stride(1),
+        H_all.stride(2),
+        H_pre.stride(1),
+        H_pre.stride(2),
+        H_post.stride(1),
+        H_post.stride(2),
+        H_res_exp.stride(1),
+        1,
+        n_tokens,
+        N,
+        BLOCK_N=BLOCK_N,
+        BLOCK_RES=BLOCK_RES,
+        BLOCK_SIZE=BLOCK_SIZE,
     )
 
     return H_pre, H_post, H_res_exp
+
 
 # ============================================================================
 # Optimized Depth Connection Forward Kernel
 # ============================================================================
 
+
 @triton.autotune(
-    configs=[triton.Config({'BLOCK_SIZE_D': 1024, 'num_stages': 2}, num_warps=8)],
-    key=['D'],
+    configs=[
+        triton.Config({"BLOCK_SIZE_D": 1024, "num_stages": 2}, num_warps=8)
+    ],
+    key=["D"],
 )
 @triton.jit
 def depth_connection_forward_kernel_optimized(
@@ -820,20 +937,24 @@ def depth_connection_forward_kernel_optimized(
             branch_output_ptr + branch_offset + d_offsets,
             mask=mask,
             other=0.0,
-            eviction_policy='evict_last'
+            eviction_policy="evict_last",
         )
 
-        residual_offset = batch_idx * stride_res + seq_idx * N * D + stream_idx * D
+        residual_offset = (
+            batch_idx * stride_res + seq_idx * N * D + stream_idx * D
+        )
         residual_vals = tl.load(
             residuals_ptr + residual_offset + d_offsets,
             mask=mask,
             other=0.0,
-            eviction_policy='evict_last'
+            eviction_policy="evict_last",
         )
 
         output_vals = h_post * branch_vals + residual_vals
 
-        output_offset = batch_idx * stride_res + seq_idx * N * D + stream_idx * D
+        output_offset = (
+            batch_idx * stride_res + seq_idx * N * D + stream_idx * D
+        )
         tl.store(output_ptr + output_offset + d_offsets, output_vals, mask=mask)
 
 
@@ -875,6 +996,7 @@ def depth_connection_forward_triton_optimized(H_post, branch_output, residuals):
 # Fused Kernels for Post-Sinkhorn Computation
 # ============================================================================
 
+
 @triton.jit
 def fused_exp_double_matmul_kernel(
     H_res_exp_ptr,
@@ -905,7 +1027,9 @@ def fused_exp_double_matmul_kernel(
         u_val = tl.load(U_ptr + base_offset + row * N + m).to(tl.float32)
         inner_sum = tl.zeros([], dtype=tl.float32)
         for j in range(N):
-            h_val = tl.load(H_res_exp_ptr + base_offset + m * N + j).to(tl.float32)
+            h_val = tl.load(H_res_exp_ptr + base_offset + m * N + j).to(
+                tl.float32
+            )
             v_val = tl.load(V_ptr + base_offset + j * N + col).to(tl.float32)
             inner_sum += h_val * v_val
         result += u_val * inner_sum
@@ -953,12 +1077,16 @@ def fused_residuals_branch_input_kernel(
         res_acc = tl.zeros([BLOCK_SIZE_D], dtype=tl.float32)
         for k in range(N):
             h_val = tl.load(H_res_ptr + base_h_res + k)
-            x_vals = tl.load(x_ptr + base_x + k * D + d_offsets,
-                           mask=d_mask, other=0.0)
+            x_vals = tl.load(
+                x_ptr + base_x + k * D + d_offsets, mask=d_mask, other=0.0
+            )
             res_acc += h_val * x_vals
 
-        tl.store(residuals_ptr + base_residuals + d_offsets,
-                res_acc.to(OUTPUT_DTYPE), mask=d_mask)
+        tl.store(
+            residuals_ptr + base_residuals + d_offsets,
+            res_acc.to(OUTPUT_DTYPE),
+            mask=d_mask,
+        )
 
     if n == 0:
         for d_block in range(0, D, BLOCK_SIZE_D):
@@ -968,12 +1096,16 @@ def fused_residuals_branch_input_kernel(
             branch_acc = tl.zeros([BLOCK_SIZE_D], dtype=tl.float32)
             for k in range(N):
                 h_pre_val = tl.load(H_pre_ptr + token_idx * N + k)
-                x_vals = tl.load(x_ptr + base_x + k * D + d_offsets,
-                               mask=d_mask, other=0.0)
+                x_vals = tl.load(
+                    x_ptr + base_x + k * D + d_offsets, mask=d_mask, other=0.0
+                )
                 branch_acc += h_pre_val * x_vals
 
-            tl.store(branch_input_ptr + token_idx * D + d_offsets,
-                    branch_acc.to(OUTPUT_DTYPE), mask=d_mask)
+            tl.store(
+                branch_input_ptr + token_idx * D + d_offsets,
+                branch_acc.to(OUTPUT_DTYPE),
+                mask=d_mask,
+            )
 
 
 def post_sinkhorn_fused_forward(H_res_exp, u, v, H_pre, x):
@@ -1000,16 +1132,16 @@ def post_sinkhorn_fused_forward(H_res_exp, u, v, H_pre, x):
 
     # Map Paddle dtype to Triton dtype for kernel output
     dtype_map = {
-        'float32': tl.float32,
-        'bfloat16': tl.bfloat16,
-        'float16': tl.float16,
+        "float32": tl.float32,
+        "bfloat16": tl.bfloat16,
+        "float16": tl.float16,
     }
     output_dtype = dtype_map.get(str(x_dtype), tl.float32)
 
     num_batches = B * L
 
     # Allocate outputs as 4D, no reshape needed
-    H_res_out = paddle.empty([B, L, N, N], dtype='float32')
+    H_res_out = paddle.empty([B, L, N, N], dtype="float32")
     residuals = paddle.empty([B, L, N, D], dtype=x_dtype)
     branch_input = paddle.empty([B, L, 1, D], dtype=x_dtype)
 
@@ -1020,9 +1152,17 @@ def post_sinkhorn_fused_forward(H_res_exp, u, v, H_pre, x):
     if N == 4:
         grid = (num_batches,)
         exp_matmul_residuals_fused_kernel[grid](
-            H_res_exp, u, v, H_pre, x,
-            H_res_out, residuals, branch_input,
-            num_tokens=num_batches, N=N, D=D,
+            H_res_exp,
+            u,
+            v,
+            H_pre,
+            x,
+            H_res_out,
+            residuals,
+            branch_input,
+            num_tokens=num_batches,
+            N=N,
+            D=D,
             BLOCK_SIZE_D=BLOCK_SIZE_D,
             OUTPUT_DTYPE=output_dtype,
             num_warps=8,
@@ -1035,15 +1175,25 @@ def post_sinkhorn_fused_forward(H_res_exp, u, v, H_pre, x):
 
         grid1 = (num_batches * N * N,)
         fused_exp_double_matmul_kernel[grid1](
-            H_res_exp, U, V, H_res_out,
-            num_batches=num_batches, N=N,
+            H_res_exp,
+            U,
+            V,
+            H_res_out,
+            num_batches=num_batches,
+            N=N,
             BLOCK_SIZE_N=triton.next_power_of_2(N),
         )
 
         grid2 = (num_batches * N,)
         fused_residuals_branch_input_kernel[grid2](
-            H_res_out, H_pre, x, residuals, branch_input,
-            num_tokens=num_batches, N=N, D=D,
+            H_res_out,
+            H_pre,
+            x,
+            residuals,
+            branch_input,
+            num_tokens=num_batches,
+            N=N,
+            D=D,
             BLOCK_SIZE_D=BLOCK_SIZE_D,
             OUTPUT_DTYPE=output_dtype,
         )
@@ -1054,6 +1204,7 @@ def post_sinkhorn_fused_forward(H_res_exp, u, v, H_pre, x):
 # ============================================================================
 # Backward Kernels for Width Connection - Part 1: Branch & Residuals
 # ============================================================================
+
 
 @triton.jit
 def width_branch_residuals_backward_kernel(
@@ -1122,13 +1273,19 @@ def width_branch_residuals_backward_kernel(
     # d_H_res_mat[token, n, k] += sum over d_block of (d_residuals[token, n, d] * x[token, k, d])
 
     # Load d_residuals[token, n, d_block]
-    d_residuals_base = batch_idx * stride_x_batch + seq_idx * stride_x_seq + n * stride_x_n
-    d_residuals_vals = tl.load(d_residuals_ptr + d_residuals_base + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+    d_residuals_base = (
+        batch_idx * stride_x_batch + seq_idx * stride_x_seq + n * stride_x_n
+    )
+    d_residuals_vals = tl.load(
+        d_residuals_ptr + d_residuals_base + d_offsets, mask=d_mask, other=0.0
+    ).to(tl.float32)
 
     # For each k, compute dot product and add to d_H_res_mat
     for k in range(N):
         # Load x[token, k, d_block]
-        x_vals = tl.load(x_ptr + x_base + k * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+        x_vals = tl.load(
+            x_ptr + x_base + k * stride_x_n + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
 
         # Compute partial sum
         d_H_res_val = tl.sum(d_residuals_vals * x_vals)
@@ -1147,24 +1304,39 @@ def width_branch_residuals_backward_kernel(
         h_res_val = tl.load(H_res_ptr + H_res_base).to(tl.float32)
 
         # Load d_residuals[token, k, d_block]
-        d_residuals_base = batch_idx * stride_x_batch + seq_idx * stride_x_seq + k * stride_x_n
-        d_residuals_vals = tl.load(d_residuals_ptr + d_residuals_base + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+        d_residuals_base = (
+            batch_idx * stride_x_batch + seq_idx * stride_x_seq + k * stride_x_n
+        )
+        d_residuals_vals = tl.load(
+            d_residuals_ptr + d_residuals_base + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        ).to(tl.float32)
 
         # Accumulate
         d_x_residuals_acc += h_res_val * d_residuals_vals
 
     # ============ Branch backward ============
     # d_H_pre_from_branch[token, n] += sum over d_block of (d_branch_input[token, d] * x[token, n, d])
-    d_branch_base = batch_idx * stride_d_branch_batch + seq_idx * stride_d_branch_seq
-    d_branch_vals = tl.load(d_branch_input_ptr + d_branch_base + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-    x_vals_n = tl.load(x_ptr + x_base + n * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+    d_branch_base = (
+        batch_idx * stride_d_branch_batch + seq_idx * stride_d_branch_seq
+    )
+    d_branch_vals = tl.load(
+        d_branch_input_ptr + d_branch_base + d_offsets, mask=d_mask, other=0.0
+    ).to(tl.float32)
+    x_vals_n = tl.load(
+        x_ptr + x_base + n * stride_x_n + d_offsets, mask=d_mask, other=0.0
+    ).to(tl.float32)
 
     d_H_pre_val = tl.sum(d_branch_vals * x_vals_n)
 
     # Add to existing value
     H_pre_base = batch_idx * stride_H_pre + seq_idx * N + n
     existing_val = tl.load(d_H_pre_from_branch_ptr + H_pre_base)
-    tl.store(d_H_pre_from_branch_ptr + H_pre_base, existing_val + d_H_pre_val.to(tl.float32))
+    tl.store(
+        d_H_pre_from_branch_ptr + H_pre_base,
+        existing_val + d_H_pre_val.to(tl.float32),
+    )
 
     # d_x_branch[token, n, d_block] = H_pre[token, n] * d_branch_input[token, d]
     H_pre_base = batch_idx * stride_H_pre + seq_idx * N
@@ -1172,12 +1344,22 @@ def width_branch_residuals_backward_kernel(
     d_x_from_branch_val = h_pre_val * d_branch_vals
 
     # Store d_x_branch_add_residuals[token, n, d_block] = d_x_residuals + d_x_branch
-    d_x_branch_add_residuals_base = batch_idx * stride_x_batch + seq_idx * stride_x_seq + n * stride_x_n
+    d_x_branch_add_residuals_base = (
+        batch_idx * stride_x_batch + seq_idx * stride_x_seq + n * stride_x_n
+    )
     d_x_branch_add_residuals_val = d_x_residuals_acc + d_x_from_branch_val
-    tl.store(d_x_branch_add_residuals_ptr + d_x_branch_add_residuals_base + d_offsets, d_x_branch_add_residuals_val, mask=d_mask)
+    tl.store(
+        d_x_branch_add_residuals_ptr
+        + d_x_branch_add_residuals_base
+        + d_offsets,
+        d_x_branch_add_residuals_val,
+        mask=d_mask,
+    )
 
 
-def width_branch_residuals_backward_triton(d_branch_input, d_residuals, x, H_pre, H_res):
+def width_branch_residuals_backward_triton(
+    d_branch_input, d_residuals, x, H_pre, H_res
+):
     """
     Wrapper for Branch & Residuals Backward Kernel (Kernel 1).
 
@@ -1198,9 +1380,9 @@ def width_branch_residuals_backward_triton(d_branch_input, d_residuals, x, H_pre
     B, L, N, D = x.shape
 
     # Allocate float32 outputs
-    d_H_pre_from_branch = paddle.zeros([B, L, N], dtype='float32')
-    d_H_res_mat = paddle.zeros([B, L, N, N], dtype='float32')
-    d_x_branch_add_residuals = paddle.empty([B, L, N, D], dtype='float32')
+    d_H_pre_from_branch = paddle.zeros([B, L, N], dtype="float32")
+    d_H_res_mat = paddle.zeros([B, L, N, N], dtype="float32")
+    d_x_branch_add_residuals = paddle.empty([B, L, N, D], dtype="float32")
 
     num_tokens = B * L
 
@@ -1252,9 +1434,10 @@ def width_branch_residuals_backward_triton(d_branch_input, d_residuals, x, H_pre
 # Optimized Backward Kernel for N=4, D>=4096
 # ============================================================================
 
+
 @triton.autotune(
-    configs=[triton.Config({'BLOCK_SIZE_D': 2048}, num_warps=8)],
-    key=['D'],
+    configs=[triton.Config({"BLOCK_SIZE_D": 2048}, num_warps=8)],
+    key=["D"],
 )
 @triton.jit
 def width_branch_residuals_backward_kernel_n4_optimized(
@@ -1305,11 +1488,11 @@ def width_branch_residuals_backward_kernel_n4_optimized(
     seq_idx = token_idx % L
 
     # Stride calculations
-    stride_x_batch = L * N * D      # for x, d_residuals, etc.
-    stride_x_seq = N * D            # stride for L dimension
-    stride_x_n = D                  # stride for N dimension
-    stride_d_branch_batch = L * D   # for d_branch_input [B, L, 1, D]
-    stride_d_branch_seq = D        # stride for L dimension in d_branch_input
+    stride_x_batch = L * N * D  # for x, d_residuals, etc.
+    stride_x_seq = N * D  # stride for L dimension
+    stride_x_n = D  # stride for N dimension
+    stride_d_branch_batch = L * D  # for d_branch_input [B, L, 1, D]
+    stride_d_branch_seq = D  # stride for L dimension in d_branch_input
     stride_H_res = L * N * N
     stride_H_pre = L * N
 
@@ -1350,22 +1533,52 @@ def width_branch_residuals_backward_kernel_n4_optimized(
 
         # Preload x[token, :, d_block] -> shape [4, BLOCK_SIZE_D]
         # Using explicit loop for clarity and guaranteed loading order
-        x_block_0 = tl.load(x_ptr + x_base + 0 * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        x_block_1 = tl.load(x_ptr + x_base + 1 * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        x_block_2 = tl.load(x_ptr + x_base + 2 * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        x_block_3 = tl.load(x_ptr + x_base + 3 * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+        x_block_0 = tl.load(
+            x_ptr + x_base + 0 * stride_x_n + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
+        x_block_1 = tl.load(
+            x_ptr + x_base + 1 * stride_x_n + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
+        x_block_2 = tl.load(
+            x_ptr + x_base + 2 * stride_x_n + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
+        x_block_3 = tl.load(
+            x_ptr + x_base + 3 * stride_x_n + d_offsets, mask=d_mask, other=0.0
+        ).to(tl.float32)
 
         # Preload d_residuals[token, :, d_block] -> shape [4, BLOCK_SIZE_D]
-        d_res_block_0 = tl.load(d_residuals_ptr + x_base + 0 * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        d_res_block_1 = tl.load(d_residuals_ptr + x_base + 1 * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        d_res_block_2 = tl.load(d_residuals_ptr + x_base + 2 * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
-        d_res_block_3 = tl.load(d_residuals_ptr + x_base + 3 * stride_x_n + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+        d_res_block_0 = tl.load(
+            d_residuals_ptr + x_base + 0 * stride_x_n + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        ).to(tl.float32)
+        d_res_block_1 = tl.load(
+            d_residuals_ptr + x_base + 1 * stride_x_n + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        ).to(tl.float32)
+        d_res_block_2 = tl.load(
+            d_residuals_ptr + x_base + 2 * stride_x_n + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        ).to(tl.float32)
+        d_res_block_3 = tl.load(
+            d_residuals_ptr + x_base + 3 * stride_x_n + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        ).to(tl.float32)
 
         # ===== Compute d_H_res_mat[token, n, k] = sum_d(d_residuals[n] * x[k]) =====
         # Use tl.where to select d_residuals[n] based on current n (avoids warp divergence)
-        d_res_n = tl.where(n == 0, d_res_block_0,
-                  tl.where(n == 1, d_res_block_1,
-                  tl.where(n == 2, d_res_block_2, d_res_block_3)))
+        d_res_n = tl.where(
+            n == 0,
+            d_res_block_0,
+            tl.where(
+                n == 1,
+                d_res_block_1,
+                tl.where(n == 2, d_res_block_2, d_res_block_3),
+            ),
+        )
 
         # Compute dot products with preloaded x blocks and accumulate
         # d_H_res_mat[token, n, 0]
@@ -1389,13 +1602,21 @@ def width_branch_residuals_backward_kernel_n4_optimized(
 
         # ===== Branch backward =====
         # d_H_pre_from_branch[token, n] = sum_d(d_branch_input[token, d] * x[token, n, d])
-        d_branch_base = batch_idx * stride_d_branch_batch + seq_idx * stride_d_branch_seq
-        d_branch_vals = tl.load(d_branch_input_ptr + d_branch_base + d_offsets, mask=d_mask, other=0.0).to(tl.float32)
+        d_branch_base = (
+            batch_idx * stride_d_branch_batch + seq_idx * stride_d_branch_seq
+        )
+        d_branch_vals = tl.load(
+            d_branch_input_ptr + d_branch_base + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        ).to(tl.float32)
 
         # Get preloaded x[token, n, d_block] using tl.where (avoids warp divergence)
-        x_vals_n = tl.where(n == 0, x_block_0,
-                   tl.where(n == 1, x_block_1,
-                   tl.where(n == 2, x_block_2, x_block_3)))
+        x_vals_n = tl.where(
+            n == 0,
+            x_block_0,
+            tl.where(n == 1, x_block_1, tl.where(n == 2, x_block_2, x_block_3)),
+        )
 
         # Accumulate d_H_pre_from_branch across all D blocks
         d_H_pre_from_branch_acc += tl.sum(d_branch_vals * x_vals_n)
@@ -1405,9 +1626,17 @@ def width_branch_residuals_backward_kernel_n4_optimized(
         d_x_from_branch_val = h_pre_val * d_branch_vals
 
         # Store d_x_branch_add_residuals[token, n, d_block] = d_x_residuals + d_x_branch
-        d_x_branch_add_residuals_base = batch_idx * stride_x_batch + seq_idx * stride_x_seq + n * stride_x_n
+        d_x_branch_add_residuals_base = (
+            batch_idx * stride_x_batch + seq_idx * stride_x_seq + n * stride_x_n
+        )
         d_x_branch_add_residuals_val = d_x_residuals_acc + d_x_from_branch_val
-        tl.store(d_x_branch_add_residuals_ptr + d_x_branch_add_residuals_base + d_offsets, d_x_branch_add_residuals_val, mask=d_mask)
+        tl.store(
+            d_x_branch_add_residuals_ptr
+            + d_x_branch_add_residuals_base
+            + d_offsets,
+            d_x_branch_add_residuals_val,
+            mask=d_mask,
+        )
 
     # Store accumulated d_H_res_mat and d_H_pre_from_branch after all D blocks
     # d_H_res_mat[token, n, 0]
@@ -1428,7 +1657,10 @@ def width_branch_residuals_backward_kernel_n4_optimized(
 
     # Store d_H_pre_from_branch[token, n]
     H_pre_base = batch_idx * stride_H_pre + seq_idx * N + n
-    tl.store(d_H_pre_from_branch_ptr + H_pre_base, d_H_pre_from_branch_acc.to(tl.float32))
+    tl.store(
+        d_H_pre_from_branch_ptr + H_pre_base,
+        d_H_pre_from_branch_acc.to(tl.float32),
+    )
 
 
 # ============================================================================
@@ -1437,7 +1669,10 @@ def width_branch_residuals_backward_kernel_n4_optimized(
 # This function calls Triton kernels and will be used to fix kernel bugs
 # ============================================================================
 
-def width_rmsnorm_gemm_backward_triton(d_H_all, x, combined_weights, norm_eps, N, D, d_x_branch_add_residuals):
+
+def width_rmsnorm_gemm_backward_triton(
+    d_H_all, x, combined_weights, norm_eps, N, D, d_x_branch_add_residuals
+):
     """
     Triton version of width_rmsnorm_gemm_backward.
     Fused with d_x_branch_add_residuals to reduce memory access overhead.
@@ -1511,11 +1746,11 @@ def width_rmsnorm_gemm_backward_triton(d_H_all, x, combined_weights, norm_eps, N
         N=ND,
         K=N3,
         stride_dh_m=stride_d_H_all,  # actual stride from [B, L, N3]
-        stride_dh_k=1,      # stride for K dimension in d_H_all
-        stride_cw_n=N3,    # stride for M dimension in combined_weights (K=N3)
-        stride_cw_k=1,      # stride for K dimension in combined_weights
-        stride_dn_m=ND,    # stride for M dimension in d_normed (N=ND)
-        stride_dn_k=1,      # stride for K dimension in d_normed
+        stride_dh_k=1,  # stride for K dimension in d_H_all
+        stride_cw_n=N3,  # stride for M dimension in combined_weights (K=N3)
+        stride_cw_k=1,  # stride for K dimension in combined_weights
+        stride_dn_m=ND,  # stride for M dimension in d_normed (N=ND)
+        stride_dn_k=1,  # stride for K dimension in d_normed
         BLOCK_M=BLOCK_M_FIXED,
         BLOCK_N=BLOCK_N_FIXED,
         BLOCK_K=BLOCK_K_FIXED,
@@ -1557,7 +1792,10 @@ def width_rmsnorm_gemm_backward_triton(d_H_all, x, combined_weights, norm_eps, N
     # autotune automatically selects optimal BLOCK_M/BLOCK_K/num_warps/num_stages
     # ==========================================
     def grid_dcw(META):
-        return (triton.cdiv(ND, META['BLOCK_M']), triton.cdiv(N3, META['BLOCK_N']))
+        return (
+            triton.cdiv(ND, META["BLOCK_M"]),
+            triton.cdiv(N3, META["BLOCK_N"]),
+        )
 
     gemm_d_combined_weights_kernel_fixed[grid_dcw](
         normed,
@@ -1633,14 +1871,14 @@ def rmsnorm_fused_forward_backward(
             x_ptr + token_id * ND + d_offsets,
             mask=d_mask,
             other=0.0,
-            eviction_policy="evict_last"
+            eviction_policy="evict_last",
         ).to(tl.float32)
 
         d_normed_block = tl.load(
             d_normed_ptr + token_id * ND + d_offsets,
             mask=d_mask,
             other=0.0,
-            eviction_policy="evict_last"
+            eviction_policy="evict_last",
         ).to(tl.float32)
 
         # Forward: Compute variance (element-wise accumulation, no sum)
@@ -1675,21 +1913,21 @@ def rmsnorm_fused_forward_backward(
             x_ptr + token_id * ND + d_offsets,
             mask=d_mask,
             other=0.0,
-            eviction_policy="evict_first"  # Not needed after Phase 2, can be evicted
+            eviction_policy="evict_first",  # Not needed after Phase 2, can be evicted
         ).to(tl.float32)
 
         d_normed_block = tl.load(
             d_normed_ptr + token_id * ND + d_offsets,
             mask=d_mask,
             other=0.0,
-            eviction_policy="evict_first"
+            eviction_policy="evict_first",
         ).to(tl.float32)
 
         d_x_branch = tl.load(
             d_x_branch_add_residuals_ptr + token_id * ND + d_offsets,
             mask=d_mask,
             other=0.0,
-            eviction_policy="evict_first"
+            eviction_policy="evict_first",
         ).to(tl.float32)
 
         # Forward: normed (store as bfloat16 to reduce write bandwidth)
@@ -1698,7 +1936,7 @@ def rmsnorm_fused_forward_backward(
         tl.store(
             normed_ptr + token_id * ND + d_offsets,
             normed_val.to(tl.bfloat16),
-            mask=d_mask
+            mask=d_mask,
         )
 
         # Backward: d_x (with type conversion)
@@ -1706,7 +1944,11 @@ def rmsnorm_fused_forward_backward(
         d_x_scale = d_normed_block * inv_std
         d_x_from_var = d_var * (x_block * two_over_nd)
         d_x_val = d_x_scale + d_x_from_var + d_x_branch
-        tl.store(d_x_ptr + token_id * ND + d_offsets, d_x_val.to(DX_DTYPE), mask=d_mask)
+        tl.store(
+            d_x_ptr + token_id * ND + d_offsets,
+            d_x_val.to(DX_DTYPE),
+            mask=d_mask,
+        )
 
 
 @triton.jit
@@ -1745,18 +1987,22 @@ def gemm_d_normed_kernel_fixed(
         k_mask = k_offsets < K
 
         a_block = tl.load(
-            d_H_all_ptr + rm[:, None] * stride_dh_m + k_offsets[None, :] * stride_dh_k,
+            d_H_all_ptr
+            + rm[:, None] * stride_dh_m
+            + k_offsets[None, :] * stride_dh_k,
             mask=rm_mask[:, None] & k_mask[None, :],
-            other=0.0
+            other=0.0,
         )
 
         # Load combined_weights^T[k, rn]
         # combined_weights is [ND, N3] in row-major
         # combined_weights^T[k, rn] = combined_weights[rn, k]
         b_block = tl.load(
-            combined_weights_ptr + k_offsets[:, None] * stride_cw_k + rn[None, :] * stride_cw_n,
+            combined_weights_ptr
+            + k_offsets[:, None] * stride_cw_k
+            + rn[None, :] * stride_cw_n,
             mask=k_mask[:, None] & rn_mask[None, :],
-            other=0.0
+            other=0.0,
         ).to(tl.bfloat16)
 
         # acc += d_H_all[rm, k] @ combined_weights^T[k, rn]
@@ -1766,13 +2012,19 @@ def gemm_d_normed_kernel_fixed(
     tl.store(
         d_normed_ptr + rm[:, None] * stride_dn_m + rn[None, :] * stride_dn_k,
         acc,
-        mask=c_mask
+        mask=c_mask,
     )
 
 
 @triton.autotune(
-    configs=[triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32, 'BLOCK_K': 128}, num_warps=4, num_stages=4)],
-    key=['M', 'N', 'K'],
+    configs=[
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 32, "BLOCK_K": 128},
+            num_warps=4,
+            num_stages=4,
+        )
+    ],
+    key=["M", "N", "K"],
 )
 @triton.jit
 def gemm_d_combined_weights_kernel_fixed(
@@ -1811,26 +2063,31 @@ def gemm_d_combined_weights_kernel_fixed(
         k_mask = k_offsets < K
 
         a_block = tl.load(
-            normed_ptr + k_offsets[:, None] * stride_normed_k + rm[None, :] * stride_normed_m,
+            normed_ptr
+            + k_offsets[:, None] * stride_normed_k
+            + rm[None, :] * stride_normed_m,
             mask=k_mask[:, None] & rm_mask[None, :],
-            other=0.0
+            other=0.0,
         )
 
         b_block = tl.load(
-            d_H_all_ptr + k_offsets[:, None] * stride_dh_k + rn[None, :] * stride_dh_n,
+            d_H_all_ptr
+            + k_offsets[:, None] * stride_dh_k
+            + rn[None, :] * stride_dh_n,
             mask=k_mask[:, None] & rn_mask[None, :],
-            other=0.0
+            other=0.0,
         )
 
         acc += tl.dot(tl.trans(a_block), b_block)
 
     c_mask = rm_mask[:, None] & rn_mask[None, :]
     tl.store(
-        d_combined_weights_ptr + rm[:, None] * stride_dcw_m + rn[None, :] * stride_dcw_n,
+        d_combined_weights_ptr
+        + rm[:, None] * stride_dcw_m
+        + rn[None, :] * stride_dcw_n,
         acc.to(DCW_DTYPE),
-        mask=c_mask
+        mask=c_mask,
     )
-
 
 
 # ============================================================================
@@ -1842,20 +2099,21 @@ def gemm_d_combined_weights_kernel_fixed(
 # Function: Fused double matrix multiplication + exponential gradient + scaling + d_res_scale computation
 # ----------------------------------------------------------------------------
 
+
 @triton.jit
 def hres_bwd_exp_matmul_kernel(
     # Inputs
-    d_H_res_mat_ptr,       # [B*L, N, N]
-    H_res_exp_ptr,         # [B*L, N, N]
-    U_ptr,                 # [B*L, N, N]
-    V_ptr,                 # [B*L, N, N]
-    H_all_ptr,             # [B*L, N+N+N*N] - float32
-    bias_terms_ptr,        # [N+N+N*N] - float32
-    scaling_factors_ptr,   # [3] - float32
+    d_H_res_mat_ptr,  # [B*L, N, N]
+    H_res_exp_ptr,  # [B*L, N, N]
+    U_ptr,  # [B*L, N, N]
+    V_ptr,  # [B*L, N, N]
+    H_all_ptr,  # [B*L, N+N+N*N] - float32
+    bias_terms_ptr,  # [N+N+N*N] - float32
+    scaling_factors_ptr,  # [3] - float32
     # Outputs
-    d_scaling_factors_ptr, # [3] - output for scale gradients (index 2: res_scale)
-    d_H_all_ptr,           # [B*L, N+N+N*N] - write d_H_all[2N:] directly (bfloat16)
-    d_bias_terms_ptr,      # [N+N+N*N] - atomic add d_bias_res at offset 2*N
+    d_scaling_factors_ptr,  # [3] - output for scale gradients (index 2: res_scale)
+    d_H_all_ptr,  # [B*L, N+N+N*N] - write d_H_all[2N:] directly (bfloat16)
+    d_bias_terms_ptr,  # [N+N+N*N] - atomic add d_bias_res at offset 2*N
     # Parameters
     num_tokens: tl.constexpr,  # B*L
     N: tl.constexpr,
@@ -1923,28 +2181,43 @@ def hres_bwd_exp_matmul_kernel(
                     # sum_j d_H_res_mat[k, j] * V[col, j]
                     inner_sum = tl.zeros([], dtype=tl.float32)
                     for j in range(N):
-                        d_H_mat_kj = tl.load(d_H_res_mat_ptr + d_H_res_mat_base + k * N + j).to(tl.float32)
-                        v_cj = tl.load(V_ptr + V_base + col * N + j).to(tl.float32)
+                        d_H_mat_kj = tl.load(
+                            d_H_res_mat_ptr + d_H_res_mat_base + k * N + j
+                        ).to(tl.float32)
+                        v_cj = tl.load(V_ptr + V_base + col * N + j).to(
+                            tl.float32
+                        )
                         inner_sum += d_H_mat_kj * v_cj
 
                     d_H_res_exp_rc += u_kr * inner_sum
 
                 # Load H_res_exp[r, c]
-                h_res_exp_rc = tl.load(H_res_exp_ptr + H_res_exp_base + row * N + col).to(tl.float32)
+                h_res_exp_rc = tl.load(
+                    H_res_exp_ptr + H_res_exp_base + row * N + col
+                ).to(tl.float32)
 
                 # d_H_res = d_H_res_exp * H_res_exp
                 d_H_res_rc = d_H_res_exp_rc * h_res_exp_rc
 
                 # Load H_all_raw_res[row, col] (flattened)
-                H_all_raw_res_rc = (tl.load(H_all_ptr + H_all_base + 2 * N + row * N + col).to(tl.float32) -
-                                     tl.load(bias_terms_ptr + 2 * N + row * N + col).to(tl.float32)) / res_scale
+                H_all_raw_res_rc = (
+                    tl.load(H_all_ptr + H_all_base + 2 * N + row * N + col).to(
+                        tl.float32
+                    )
+                    - tl.load(bias_terms_ptr + 2 * N + row * N + col).to(
+                        tl.float32
+                    )
+                ) / res_scale
 
                 # Accumulate d_res_scale
                 d_res_scale_acc += d_H_res_rc * H_all_raw_res_rc
 
                 # d_H_res_scaled -> write to d_H_all[2N + idx_val] (values already in register)
                 d_H_res_scaled_rc = d_H_res_rc * res_scale
-                tl.store(d_H_all_ptr + H_all_base + 2 * N + idx_val, d_H_res_scaled_rc.to(tl.bfloat16))
+                tl.store(
+                    d_H_all_ptr + H_all_base + 2 * N + idx_val,
+                    d_H_res_scaled_rc.to(tl.bfloat16),
+                )
 
                 # d_bias_res: d_H_res_rc already in register
                 tl.atomic_add(d_bias_terms_ptr + 2 * N + idx_val, d_H_res_rc)
@@ -1958,18 +2231,19 @@ def hres_bwd_exp_matmul_kernel(
 # Function: H_pre/H_post sigmoid gradient + d_pre_scale/d_post_scale computation
 # ----------------------------------------------------------------------------
 
+
 @triton.jit
 def pre_post_act_bwd_kernel(
     # Inputs
-    d_H_post_ptr,               # [B*L, N]
-    d_H_pre_from_branch_ptr,    # [B*L, N]
-    H_all_ptr,                  # [B*L, N+N+N*N] - float32
-    bias_terms_ptr,             # [N+N+N*N] - float32
-    scaling_factors_ptr,        # [3] - float32
+    d_H_post_ptr,  # [B*L, N]
+    d_H_pre_from_branch_ptr,  # [B*L, N]
+    H_all_ptr,  # [B*L, N+N+N*N] - float32
+    bias_terms_ptr,  # [N+N+N*N] - float32
+    scaling_factors_ptr,  # [3] - float32
     # Outputs
-    d_scaling_factors_ptr,      # [3] - output for scale gradients (index 0: pre_scale, index 1: post_scale)
-    d_H_all_ptr,                # [B*L, N+N+N*N] - merge d_H_pre/d_H_post directly here
-    d_bias_terms_ptr,           # [N+N+N*N] - bias gradient (atomic add for pre/post)
+    d_scaling_factors_ptr,  # [3] - output for scale gradients (index 0: pre_scale, index 1: post_scale)
+    d_H_all_ptr,  # [B*L, N+N+N*N] - merge d_H_pre/d_H_post directly here
+    d_bias_terms_ptr,  # [N+N+N*N] - bias gradient (atomic add for pre/post)
     # Parameters
     num_tokens: tl.constexpr,
     N: tl.constexpr,
@@ -2005,7 +2279,9 @@ def pre_post_act_bwd_kernel(
     for i in range(N):
         # ===== H_post backward =====
         # Load H_all[N + i]
-        H_all_post_val = tl.load(H_all_ptr + H_all_base_offset + N + i).to(tl.float32)
+        H_all_post_val = tl.load(H_all_ptr + H_all_base_offset + N + i).to(
+            tl.float32
+        )
 
         # Load bias_terms[N + i]
         bias_post_val = tl.load(bias_terms_ptr + N + i).to(tl.float32)
@@ -2033,12 +2309,17 @@ def pre_post_act_bwd_kernel(
         d_post_scale_acc += d_H_post_raw_val * H_all_raw_post_val
 
         # Merge d_H_post into d_H_all[N+i] and accumulate bias gradient (values already in register)
-        tl.store(d_H_all_ptr + H_all_base_offset + N + i, d_H_post_scaled_val.to(tl.bfloat16))
+        tl.store(
+            d_H_all_ptr + H_all_base_offset + N + i,
+            d_H_post_scaled_val.to(tl.bfloat16),
+        )
         tl.atomic_add(d_bias_terms_ptr + N + i, d_H_post_raw_val)
 
         # ===== H_pre backward =====
         # Load H_all[i]
-        H_all_pre_val = tl.load(H_all_ptr + H_all_base_offset + i).to(tl.float32)
+        H_all_pre_val = tl.load(H_all_ptr + H_all_base_offset + i).to(
+            tl.float32
+        )
 
         # Load bias_terms[i]
         bias_pre_val = tl.load(bias_terms_ptr + i).to(tl.float32)
@@ -2054,7 +2335,9 @@ def pre_post_act_bwd_kernel(
         sigmoid_derived_pre = sigmoid_pre * (1.0 - sigmoid_pre)
 
         # Load d_H_pre_from_branch[i]
-        d_H_pre_val = tl.load(d_H_pre_from_branch_ptr + pid * N + i).to(tl.float32)
+        d_H_pre_val = tl.load(d_H_pre_from_branch_ptr + pid * N + i).to(
+            tl.float32
+        )
 
         # d_H_pre_raw = d_H_pre_from_branch * sigmoid_derived
         d_H_pre_raw_val = d_H_pre_val * sigmoid_derived_pre
@@ -2066,7 +2349,10 @@ def pre_post_act_bwd_kernel(
         d_pre_scale_acc += d_H_pre_raw_val * H_all_raw_pre_val
 
         # Merge d_H_pre into d_H_all[i] and accumulate bias gradient (values already in register)
-        tl.store(d_H_all_ptr + H_all_base_offset + i, d_H_pre_scaled_val.to(tl.bfloat16))
+        tl.store(
+            d_H_all_ptr + H_all_base_offset + i,
+            d_H_pre_scaled_val.to(tl.bfloat16),
+        )
         tl.atomic_add(d_bias_terms_ptr + i, d_H_pre_raw_val)
 
     # Store scale gradients using atomic add (index 0: pre_scale, index 1: post_scale)
@@ -2075,15 +2361,15 @@ def pre_post_act_bwd_kernel(
 
 
 def width_hres_activation_backward_triton(
-    d_H_res_mat,         # [B, L, N, N] - from Kernel 1
-    d_H_post,             # [B, L, N] - upper layer gradient
+    d_H_res_mat,  # [B, L, N, N] - from Kernel 1
+    d_H_post,  # [B, L, N] - upper layer gradient
     d_H_pre_from_branch,  # [B, L, N] - from Kernel 1
-    H_all,               # [B, L, N+N+N*N]
-    H_res_exp,           # [B, L, N, N] - exponential of original H_res (before Sinkhorn)
-    u,                   # [B*L, N] - compact left scaling vector (diagonal of U)
-    v,                   # [B*L, N] - compact right scaling vector (diagonal of V)
-    scaling_factors,      # [3]
-    bias_terms,           # [N+N+N*N]
+    H_all,  # [B, L, N+N+N*N]
+    H_res_exp,  # [B, L, N, N] - exponential of original H_res (before Sinkhorn)
+    u,  # [B*L, N] - compact left scaling vector (diagonal of U)
+    v,  # [B*L, N] - compact right scaling vector (diagonal of V)
+    scaling_factors,  # [3]
+    bias_terms,  # [N+N+N*N]
     N,
     skip_sk_gradient=False,  # When True, detach SK gradients (align with width_connection_v2)
 ):
@@ -2124,25 +2410,27 @@ def width_hres_activation_backward_triton(
     # For 4D tensor [B, L, N, N], stride[1] = N*N is the token stride
     # For 4D tensor [B, L, N], stride[1] = N is the token stride
     # For 2D tensor [B*L, N], stride[0] = N is the token stride
-    stride_d_H_res_mat = d_H_res_mat.stride(1)  # [B, L, N, N] -> stride[1] = N*N
-    stride_H_res_exp = H_res_exp.stride(1)      # [B, L, N, N] -> stride[1] = N*N
-    stride_H_all = H_all.stride(1)              # [B, L, N3] -> stride[1] = N3
-    stride_u = u.stride(0)                      # [B*L, N] -> stride[0] = N
-    stride_v = v.stride(0)                      # [B*L, N] -> stride[0] = N
+    stride_d_H_res_mat = d_H_res_mat.stride(
+        1
+    )  # [B, L, N, N] -> stride[1] = N*N
+    stride_H_res_exp = H_res_exp.stride(1)  # [B, L, N, N] -> stride[1] = N*N
+    stride_H_all = H_all.stride(1)  # [B, L, N3] -> stride[1] = N3
+    stride_u = u.stride(0)  # [B*L, N] -> stride[0] = N
+    stride_v = v.stride(0)  # [B*L, N] -> stride[0] = N
 
     # Allocate outputs
     # When skip_sk_gradient=True, initialize to zeros since H_res portion won't be computed
     if skip_sk_gradient:
-        d_H_all = paddle.zeros([B, L, N3], dtype='bfloat16')
+        d_H_all = paddle.zeros([B, L, N3], dtype="bfloat16")
     else:
-        d_H_all = paddle.empty([B, L, N3], dtype='bfloat16')
+        d_H_all = paddle.empty([B, L, N3], dtype="bfloat16")
 
     # Allocate scalar outputs for scale gradients (pre-allocated [3] tensor to avoid concat)
     # Index 0: d_res_scale, Index 1: d_pre_scale, Index 2: d_post_scale
-    d_scaling_factors = paddle.zeros([3], dtype='float32')
+    d_scaling_factors = paddle.zeros([3], dtype="float32")
 
     # Allocate bias output (initialize to zero)
-    d_bias_terms = paddle.zeros([N3], dtype='float32')
+    d_bias_terms = paddle.zeros([N3], dtype="float32")
 
     # 2-Kernel pipeline: Kernel A handles res, Kernel B handles pre/post
     # Both write directly to d_H_all and d_bias_terms (no intermediate buffers)
@@ -2153,13 +2441,25 @@ def width_hres_activation_backward_triton(
         if N == 4:
             grid_a = (num_tokens,)
             hres_bwd_exp_matmul_compact_kernel[grid_a](
-                d_H_res_mat, H_res_exp, u, v,
-                H_all, bias_terms, scaling_factors,
-                d_scaling_factors, d_H_all, d_bias_terms,
-                num_tokens=num_tokens, N=N, NN=NN, N3=N3,
+                d_H_res_mat,
+                H_res_exp,
+                u,
+                v,
+                H_all,
+                bias_terms,
+                scaling_factors,
+                d_scaling_factors,
+                d_H_all,
+                d_bias_terms,
+                num_tokens=num_tokens,
+                N=N,
+                NN=NN,
+                N3=N3,
                 stride_d_H_res_mat=stride_d_H_res_mat,
                 stride_H_res_exp=stride_H_res_exp,
-                stride_u=stride_u, stride_v=stride_v, stride_H_all=stride_H_all,
+                stride_u=stride_u,
+                stride_v=stride_v,
+                stride_H_all=stride_H_all,
             )
         else:
             # For N!=4, use non-compact Kernel A with reconstructed U and V
@@ -2168,12 +2468,25 @@ def width_hres_activation_backward_triton(
 
             grid_a = (num_tokens,)
             hres_bwd_exp_matmul_kernel[grid_a](
-                d_H_res_mat, H_res_exp, U, V,
-                H_all, bias_terms, scaling_factors,
-                d_scaling_factors, d_H_all, d_bias_terms,
-                num_tokens=num_tokens, N=N, NN=NN, N3=N3,
-                stride_d_H_res_mat=stride_d_H_res_mat, stride_H_res_exp=stride_H_res_exp,
-                stride_U=NN, stride_V=NN, stride_H_all=stride_H_all,
+                d_H_res_mat,
+                H_res_exp,
+                U,
+                V,
+                H_all,
+                bias_terms,
+                scaling_factors,
+                d_scaling_factors,
+                d_H_all,
+                d_bias_terms,
+                num_tokens=num_tokens,
+                N=N,
+                NN=NN,
+                N3=N3,
+                stride_d_H_res_mat=stride_d_H_res_mat,
+                stride_H_res_exp=stride_H_res_exp,
+                stride_U=NN,
+                stride_V=NN,
+                stride_H_all=stride_H_all,
             )
         # d_scaling_factors[0] (res_scale) and d_bias_terms[2N:] are updated by kernel
     # else: d_H_all[:, :, 2N:] remains zero, d_scaling_factors[0] and d_bias_terms[2N:] remain zero
@@ -2182,10 +2495,18 @@ def width_hres_activation_backward_triton(
     # This kernel handles H_pre and H_post gradients (not affected by skip_sk_gradient)
     grid_b = (num_tokens,)
     pre_post_act_bwd_kernel[grid_b](
-        d_H_post, d_H_pre_from_branch,
-        H_all, bias_terms, scaling_factors,
-        d_scaling_factors, d_H_all, d_bias_terms,
-        num_tokens=num_tokens, N=N, N3=N3, stride_H_all=stride_H_all,
+        d_H_post,
+        d_H_pre_from_branch,
+        H_all,
+        bias_terms,
+        scaling_factors,
+        d_scaling_factors,
+        d_H_all,
+        d_bias_terms,
+        num_tokens=num_tokens,
+        N=N,
+        N3=N3,
+        stride_H_all=stride_H_all,
     )
 
     # d_scaling_factors is already [3] with index 0: res_scale, 1: pre_scale, 2: post_scale
@@ -2198,9 +2519,10 @@ def width_hres_activation_backward_triton(
 # Backward Kernel with Thread-Level Reduction
 # ============================================================================
 
+
 @triton.autotune(
-    configs=[triton.Config({'BLOCK_SIZE_D': 1024}, num_warps=8)],
-    key=['D'],
+    configs=[triton.Config({"BLOCK_SIZE_D": 1024}, num_warps=8)],
+    key=["D"],
 )
 @triton.jit
 def depth_connection_backward_fused_kernel(
@@ -2254,17 +2576,17 @@ def depth_connection_backward_fused_kernel(
         h_post_offset = batch_idx * stride_H + seq_idx * N + stream_idx
         h_post_val = tl.load(H_post_ptr + h_post_offset)
 
-        d_output_offset = batch_idx * stride_grad + seq_idx * N * D + stream_idx * D
+        d_output_offset = (
+            batch_idx * stride_grad + seq_idx * N * D + stream_idx * D
+        )
         d_output_vals = tl.load(
-            d_output_ptr + d_output_offset + d_offsets,
-            mask=d_mask,
-            other=0.0
+            d_output_ptr + d_output_offset + d_offsets, mask=d_mask, other=0.0
         )
 
         tl.store(
             d_residuals_ptr + d_output_offset + d_offsets,
             d_output_vals,
-            mask=d_mask
+            mask=d_mask,
         )
 
         d_branch_acc += h_post_val * d_output_vals
@@ -2273,7 +2595,7 @@ def depth_connection_backward_fused_kernel(
         branch_vals = tl.load(
             branch_output_ptr + branch_offset + d_offsets,
             mask=d_mask,
-            other=0.0
+            other=0.0,
         )
 
         d_h_post_val = tl.sum(branch_vals * d_output_vals)
@@ -2282,10 +2604,10 @@ def depth_connection_backward_fused_kernel(
 
     branch_offset = batch_idx * stride_branch + seq_idx * D
     tl.store(
-            d_branch_output_ptr + branch_offset + d_offsets,
-            d_branch_acc.to(D_BRANCH_DTYPE),
-            mask=d_mask
-        )
+        d_branch_output_ptr + branch_offset + d_offsets,
+        d_branch_acc.to(D_BRANCH_DTYPE),
+        mask=d_mask,
+    )
 
 
 def depth_connection_backward_triton_fused(d_output, H_post, branch_output):
@@ -2340,6 +2662,7 @@ def depth_connection_backward_triton_fused(d_output, H_post, branch_output):
 # Depth Connection Backward - Split Kernel Implementation (Scheme A)
 # Separated into two kernels to avoid concurrent write conflicts, can use empty memory
 # ============================================================================
+
 
 @triton.jit
 def depth_conn_bwd_residuals_kernel(
@@ -2397,18 +2720,18 @@ def depth_conn_bwd_residuals_kernel(
         h_post_val = tl.load(H_post_ptr + h_post_offset)
 
         # Load d_output[b, l, stream_idx, d_start:d_end]
-        d_output_offset = batch_idx * L * N * D + seq_idx * N * D + stream_idx * D
+        d_output_offset = (
+            batch_idx * L * N * D + seq_idx * N * D + stream_idx * D
+        )
         d_output_vals = tl.load(
-            d_output_ptr + d_output_offset + d_offsets,
-            mask=d_mask,
-            other=0.0
+            d_output_ptr + d_output_offset + d_offsets, mask=d_mask, other=0.0
         )
 
         # Write d_residuals = d_output (each position written only once)
         tl.store(
             d_residuals_ptr + d_output_offset + d_offsets,
             d_output_vals,
-            mask=d_mask
+            mask=d_mask,
         )
 
         # Accumulate d_branch_output = sum_n(H_post * d_output)
@@ -2419,13 +2742,13 @@ def depth_conn_bwd_residuals_kernel(
     tl.store(
         d_branch_output_ptr + branch_offset + d_offsets,
         d_branch_acc.to(D_BRANCH_DTYPE),
-        mask=d_mask
+        mask=d_mask,
     )
 
 
 @triton.autotune(
-    configs=[triton.Config({'BLOCK_SIZE_D': 1024}, num_warps=8)],
-    key=['D'],
+    configs=[triton.Config({"BLOCK_SIZE_D": 1024}, num_warps=8)],
+    key=["D"],
 )
 @triton.jit
 def depth_conn_bwd_hpost_kernel(
@@ -2477,15 +2800,15 @@ def depth_conn_bwd_hpost_kernel(
         branch_vals = tl.load(
             branch_output_ptr + branch_offset + d_offsets,
             mask=d_mask,
-            other=0.0
+            other=0.0,
         )
 
         # Load d_output[b, l, stream_idx, d_start:d_end]
-        d_output_offset = batch_idx * L * N * D + seq_idx * N * D + stream_idx * D
+        d_output_offset = (
+            batch_idx * L * N * D + seq_idx * N * D + stream_idx * D
+        )
         d_output_vals = tl.load(
-            d_output_ptr + d_output_offset + d_offsets,
-            mask=d_mask,
-            other=0.0
+            d_output_ptr + d_output_offset + d_offsets, mask=d_mask, other=0.0
         )
 
         # Accumulate contribution from current D block
@@ -2500,6 +2823,7 @@ def depth_conn_bwd_hpost_kernel(
 # Depth Connection Backward - Fused Single Kernel (Optimized)
 # Single kernel completes all computations, grid = (B * L,)
 # ============================================================================
+
 
 @triton.jit
 def depth_conn_bwd_fused_v2_kernel(
@@ -2569,33 +2893,65 @@ def depth_conn_bwd_fused_v2_kernel(
         branch_vals = tl.load(
             branch_output_ptr + branch_offset + d_offsets,
             mask=d_mask,
-            other=0.0
+            other=0.0,
         )
 
         # Accumulator for d_branch in current D block
         d_branch_acc = tl.zeros([BLOCK_SIZE_D], dtype=tl.float32)
 
         # Stream 0
-        d_output_vals = tl.load(d_output_ptr + base_offset + 0 * D + d_offsets, mask=d_mask, other=0.0)
-        tl.store(d_residuals_ptr + base_offset + 0 * D + d_offsets, d_output_vals, mask=d_mask)
+        d_output_vals = tl.load(
+            d_output_ptr + base_offset + 0 * D + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        )
+        tl.store(
+            d_residuals_ptr + base_offset + 0 * D + d_offsets,
+            d_output_vals,
+            mask=d_mask,
+        )
         d_branch_acc += h_post_0 * d_output_vals
         d_h_post_0 += tl.sum(branch_vals * d_output_vals)
 
         # Stream 1
-        d_output_vals = tl.load(d_output_ptr + base_offset + 1 * D + d_offsets, mask=d_mask, other=0.0)
-        tl.store(d_residuals_ptr + base_offset + 1 * D + d_offsets, d_output_vals, mask=d_mask)
+        d_output_vals = tl.load(
+            d_output_ptr + base_offset + 1 * D + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        )
+        tl.store(
+            d_residuals_ptr + base_offset + 1 * D + d_offsets,
+            d_output_vals,
+            mask=d_mask,
+        )
         d_branch_acc += h_post_1 * d_output_vals
         d_h_post_1 += tl.sum(branch_vals * d_output_vals)
 
         # Stream 2
-        d_output_vals = tl.load(d_output_ptr + base_offset + 2 * D + d_offsets, mask=d_mask, other=0.0)
-        tl.store(d_residuals_ptr + base_offset + 2 * D + d_offsets, d_output_vals, mask=d_mask)
+        d_output_vals = tl.load(
+            d_output_ptr + base_offset + 2 * D + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        )
+        tl.store(
+            d_residuals_ptr + base_offset + 2 * D + d_offsets,
+            d_output_vals,
+            mask=d_mask,
+        )
         d_branch_acc += h_post_2 * d_output_vals
         d_h_post_2 += tl.sum(branch_vals * d_output_vals)
 
         # Stream 3
-        d_output_vals = tl.load(d_output_ptr + base_offset + 3 * D + d_offsets, mask=d_mask, other=0.0)
-        tl.store(d_residuals_ptr + base_offset + 3 * D + d_offsets, d_output_vals, mask=d_mask)
+        d_output_vals = tl.load(
+            d_output_ptr + base_offset + 3 * D + d_offsets,
+            mask=d_mask,
+            other=0.0,
+        )
+        tl.store(
+            d_residuals_ptr + base_offset + 3 * D + d_offsets,
+            d_output_vals,
+            mask=d_mask,
+        )
         d_branch_acc += h_post_3 * d_output_vals
         d_h_post_3 += tl.sum(branch_vals * d_output_vals)
 
@@ -2603,7 +2959,7 @@ def depth_conn_bwd_fused_v2_kernel(
         tl.store(
             d_branch_output_ptr + branch_offset + d_offsets,
             d_branch_acc.to(D_BRANCH_DTYPE),
-            mask=d_mask
+            mask=d_mask,
         )
 
     # Write d_H_post[b, l, :] vector
@@ -2613,7 +2969,9 @@ def depth_conn_bwd_fused_v2_kernel(
     tl.store(d_H_post_ptr + h_post_offset + 3, d_h_post_3.to(D_H_POST_DTYPE))
 
 
-def depth_connection_backward_triton_fused_optimized(d_output, H_post, branch_output):
+def depth_connection_backward_triton_fused_optimized(
+    d_output, H_post, branch_output
+):
     """
     Optimized single kernel implementation - avoids double launch overhead.
 
@@ -2626,7 +2984,9 @@ def depth_connection_backward_triton_fused_optimized(d_output, H_post, branch_ou
     """
     B, L, N, D = d_output.shape
 
-    assert N == 4, f"depth_connection_backward_triton_fused_optimized only supports N=4, got N={N}"
+    assert N == 4, (
+        f"depth_connection_backward_triton_fused_optimized only supports N=4, got N={N}"
+    )
 
     # Paddle dtype -> Triton dtype mapping
     def get_triton_dtype(paddle_dtype):
@@ -2751,6 +3111,7 @@ def depth_connection_backward_triton_split(d_output, H_post, branch_output):
 # PyLayer Wrapper Classes
 # ============================================================================
 
+
 class DepthConnectionLayerTriton(paddle.autograd.PyLayer):
     """Triton-accelerated PyLayer for depth connection."""
 
@@ -2758,7 +3119,9 @@ class DepthConnectionLayerTriton(paddle.autograd.PyLayer):
     def forward(ctx, H_post, branch_output, residuals):
         """Forward pass using optimized Triton kernel."""
         paddle.base.core.nvprof_nvtx_push("mhc depth_connection")
-        output = depth_connection_forward_triton_optimized(H_post, branch_output, residuals)
+        output = depth_connection_forward_triton_optimized(
+            H_post, branch_output, residuals
+        )
 
         if output.dtype != branch_output.dtype:
             output = output.cast(branch_output.dtype)
@@ -2778,20 +3141,22 @@ class DepthConnectionLayerTriton(paddle.autograd.PyLayer):
 
         # Use optimized single kernel version (only supports N=4)
         if N == 4:
-            d_H_post, d_branch_output, d_residuals = depth_connection_backward_triton_fused_optimized(
-                d_output, H_post, branch_output
+            d_H_post, d_branch_output, d_residuals = (
+                depth_connection_backward_triton_fused_optimized(
+                    d_output, H_post, branch_output
+                )
             )
         else:
             # Fallback to split version
-            d_H_post, d_branch_output, d_residuals = depth_connection_backward_triton_split(
-                d_output, H_post, branch_output
+            d_H_post, d_branch_output, d_residuals = (
+                depth_connection_backward_triton_split(
+                    d_output, H_post, branch_output
+                )
             )
 
         paddle.base.core.nvprof_nvtx_pop()
 
-        return (d_H_post,
-                d_branch_output,
-                d_residuals)
+        return (d_H_post, d_branch_output, d_residuals)
 
 
 class WidthConnectionLayerTriton(paddle.autograd.PyLayer):
@@ -2801,9 +3166,18 @@ class WidthConnectionLayerTriton(paddle.autograd.PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, x, combined_weights, scaling_factors, bias_terms,
-               norm_eps, max_sinkhorn_iters, N, D,
-               skip_sk_gradient=True):
+    def forward(
+        ctx,
+        x,
+        combined_weights,
+        scaling_factors,
+        bias_terms,
+        norm_eps,
+        max_sinkhorn_iters,
+        N,
+        D,
+        skip_sk_gradient=True,
+    ):
         """
         Forward pass using optimized fused operations.
 
@@ -2824,11 +3198,20 @@ class WidthConnectionLayerTriton(paddle.autograd.PyLayer):
         # Get H_all from kernel (direct 4D I/O, no reshape needed)
         # norm_weight=1.0 (no learnable weight for RMSNorm)
         H_all = width_rmsnorm_gemm_forward(
-            x, combined_weights, scaling_factors,
-            bias_terms, norm_eps, N, D, B, L
+            x,
+            combined_weights,
+            scaling_factors,
+            bias_terms,
+            norm_eps,
+            N,
+            D,
+            B,
+            L,
         )
 
-        H_pre, H_post, H_res_exp = mhc_fuse_sigmoid_exp(H_all, H_pre, H_post, H_res_exp, N)
+        H_pre, H_post, H_res_exp = mhc_fuse_sigmoid_exp(
+            H_all, H_pre, H_post, H_res_exp, N
+        )
 
         u, v = triton_sinkhorn_knopp_compact(H_res_exp, max_sinkhorn_iters)
 
@@ -2838,8 +3221,16 @@ class WidthConnectionLayerTriton(paddle.autograd.PyLayer):
         )
 
         ctx.save_for_backward(
-            x, H_all, combined_weights, scaling_factors, bias_terms,
-            H_pre, H_res_exp, H_res, u.detach(), v.detach()
+            x,
+            H_all,
+            combined_weights,
+            scaling_factors,
+            bias_terms,
+            H_pre,
+            H_res_exp,
+            H_res,
+            u.detach(),
+            v.detach(),
         )
 
         ctx.norm_eps = norm_eps
@@ -2865,9 +3256,21 @@ class WidthConnectionLayerTriton(paddle.autograd.PyLayer):
         except Exception as e:
             print(f"ERROR getting saved_tensor: {e}")
             raise
-        paddle.base.core.nvprof_nvtx_push("mhc width_connection backward (Triton)")
-        (x, H_all, combined_weights, scaling_factors, bias_terms,
-         H_pre, H_res_exp, H_res, u, v) = saved
+        paddle.base.core.nvprof_nvtx_push(
+            "mhc width_connection backward (Triton)"
+        )
+        (
+            x,
+            H_all,
+            combined_weights,
+            scaling_factors,
+            bias_terms,
+            H_pre,
+            H_res_exp,
+            H_res,
+            u,
+            v,
+        ) = saved
 
         B, L, N, D = ctx.B, ctx.L, ctx.N, ctx.D
         NN = N * N
@@ -2876,39 +3279,54 @@ class WidthConnectionLayerTriton(paddle.autograd.PyLayer):
 
         # ===== Kernel 1: Branch & Residuals Backward =====
         # Compute: d_H_pre_from_branch, d_H_res_mat, d_x_branch_add_residuals (fused)
-        d_H_pre_from_branch, d_H_res_mat, d_x_branch_add_residuals = width_branch_residuals_backward_triton(
-            d_branch_input, d_residuals, x, H_pre, H_res
+        d_H_pre_from_branch, d_H_res_mat, d_x_branch_add_residuals = (
+            width_branch_residuals_backward_triton(
+                d_branch_input, d_residuals, x, H_pre, H_res
+            )
         )
 
         # ===== Kernel 2: H_res + Activation Backward =====
         # Compute: d_H_all, d_scaling_factors, d_bias_terms using compact vectors
-        d_H_all, d_scaling_factors, d_bias_terms = width_hres_activation_backward_triton(
-            d_H_res_mat, d_H_post, d_H_pre_from_branch,
-            H_all, H_res_exp, u, v, scaling_factors, bias_terms, N,
-            skip_sk_gradient=ctx.skip_sk_gradient
+        d_H_all, d_scaling_factors, d_bias_terms = (
+            width_hres_activation_backward_triton(
+                d_H_res_mat,
+                d_H_post,
+                d_H_pre_from_branch,
+                H_all,
+                H_res_exp,
+                u,
+                v,
+                scaling_factors,
+                bias_terms,
+                N,
+                skip_sk_gradient=ctx.skip_sk_gradient,
+            )
         )
 
         # ===== Kernel 3: Combined_weights + RMSNorm Backward =====
         # Compute: d_x (fused with d_x_branch_add_residuals), d_combined_weights
         # norm_weight=1.0 (no learnable weight for RMSNorm)
         d_x, d_combined_weights = width_rmsnorm_gemm_backward_triton(
-            d_H_all, x, combined_weights, ctx.norm_eps, N, D, d_x_branch_add_residuals
+            d_H_all,
+            x,
+            combined_weights,
+            ctx.norm_eps,
+            N,
+            D,
+            d_x_branch_add_residuals,
         )
 
         paddle.base.core.nvprof_nvtx_pop()
 
         # Return gradients for tensor inputs only (4 values)
         # d_x and d_combined_weights already have correct dtype from kernel
-        return (d_x,
-                d_combined_weights,
-                d_scaling_factors,
-                d_bias_terms)
+        return (d_x, d_combined_weights, d_scaling_factors, d_bias_terms)
 
 
 # Export symbols
 __all__ = [
-    'WidthConnectionLayerTriton',
-    'DepthConnectionLayerTriton',
-    'TRITON_AVAILABLE',
-    'sinkhorn_knopp',
+    "WidthConnectionLayerTriton",
+    "DepthConnectionLayerTriton",
+    "TRITON_AVAILABLE",
+    "sinkhorn_knopp",
 ]

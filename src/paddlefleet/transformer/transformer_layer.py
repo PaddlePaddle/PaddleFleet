@@ -33,6 +33,7 @@ from paddlefleet.recompute_utils import (
     need_recompute_in_first_n,
 )
 from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddlefleet.transformer.hyper_connection import HyperConnectionModule
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -724,6 +725,18 @@ class TransformerLayerWithMHC(TransformerLayer):
             pg_collection=pg_collection,
         )
 
+        # Check if cross-attention is enabled (not IdentityOp)
+        self._has_cross_attention = not isinstance(
+            self.cross_attention, IdentityOp
+        )
+        if self._has_cross_attention:
+            log_single_rank(
+                logger,
+                logging.WARNING,
+                f"TransformerLayerWithMHC[{layer_number}]: Cross-attention is enabled. "
+                f"Using reduce/expand around cross-attention which may affect MHC benefits.",
+            )
+
         # Build hyper connection modules from spec
         self.self_attention_hyper_connection = build_layer(
             sublayers_spec.self_attention_hyper_connection,
@@ -825,16 +838,27 @@ class TransformerLayerWithMHC(TransformerLayer):
 
         # Step 4: Depth connection with dropout
         with paddle.enable_grad():
-            hidden_states = self.self_attention_hyper_connection.depth_connection(
-                layer_output_with_bias=attention_output_with_bias,
-                residuals=mhc_residuals,
-                h_post=self_attn_h_post,
-                dropout_prob=self.hidden_dropout_prob,
-                training=self.training,
-                fused=self.config.bias_dropout_fusion,
+            hidden_states = (
+                self.self_attention_hyper_connection.depth_connection(
+                    layer_output_with_bias=attention_output_with_bias,
+                    residuals=mhc_residuals,
+                    h_post=self_attn_h_post,
+                    dropout_prob=self.hidden_dropout_prob,
+                    training=self.training,
+                    fused=self.config.bias_dropout_fusion,
+                )
             )
 
         # Cross-attention (no hyper connection support)
+        # Handle dimension mismatch: hidden_states is [s, b, n*C] but cross-attention
+        # expects [s, b, C]. Reduce before cross-attention, expand after.
+        n = self.config.mhc_num_residual_streams
+        if self._has_cross_attention:
+            # Reduce: [s, b, n*C] -> [s, b, C]
+            hidden_states = HyperConnectionModule.reduce_stream(
+                hidden_states, n
+            )
+
         residual = hidden_states
         pre_cross_attn_layernorm_output = self.pre_cross_attn_layernorm(
             hidden_states
@@ -857,6 +881,12 @@ class TransformerLayerWithMHC(TransformerLayer):
             hidden_states = self.cross_attn_bda(
                 self.training, self.config.bias_dropout_fusion
             )(attention_output_with_bias, residual, self.hidden_dropout_prob)
+
+        if self._has_cross_attention:
+            # Expand: [s, b, C] -> [s, b, n*C]
+            hidden_states = HyperConnectionModule.expand_stream(
+                hidden_states, n
+            )
 
         if is_first_fwd:
             hidden_states.stop_gradient = False

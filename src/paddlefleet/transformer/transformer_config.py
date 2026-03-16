@@ -407,10 +407,6 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use Triton kernels for MHC computation. When True, uses optimized
     Triton kernels if available. Falls back to native PaddlePaddle if Triton is unavailable."""
 
-    mhc_kernel_backend: str = "auto"
-    """Kernel backend for MHC. Options: 'auto', 'triton', 'tilelang', 'cutedsl'.
-    'auto' will select the best available backend based on hardware."""
-
     ##################
     # Context Parallel
     ##################

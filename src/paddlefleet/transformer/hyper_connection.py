@@ -24,20 +24,17 @@ hidden states, unlike the existing mhc.py which uses [B, L, N, D] (4D).
 
 from __future__ import annotations
 
-import math
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import paddle
-import paddle.nn as nn
 import paddle.nn.functional as F
-from paddle import Tensor
+from paddle import Tensor, nn
 
 from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
 
 from .triton_mhc import (
-    WidthConnectionLayerTriton,
-    DepthConnectionLayerTriton,
     TRITON_AVAILABLE,
+    WidthConnectionLayerTriton,
     sinkhorn_knopp,
 )
 
@@ -64,7 +61,9 @@ class HyperConnectionModule(nn.Layer):
         layer_number: Current layer index for initialization
     """
 
-    def __init__(self, config: TransformerConfig, layer_number: int = 1, **kwargs):
+    def __init__(
+        self, config: TransformerConfig, layer_number: int = 1, **kwargs
+    ):
         super().__init__()
         self.config = config
         self.layer_number = layer_number
@@ -83,14 +82,14 @@ class HyperConnectionModule(nn.Layer):
                 self.n * self.hidden_size,
                 total_output_dim,
             ],
-            dtype='float32',
+            dtype="float32",
             default_initializer=nn.initializer.XavierNormal(),
         )
 
         # Combined scaling parameters: [pre_scale, post_scale, res_scale]
         self.scaling_factors = self.create_parameter(
             shape=[3],
-            dtype='float32',
+            dtype="float32",
             default_initializer=nn.initializer.Constant(0.01),
         )
 
@@ -99,7 +98,7 @@ class HyperConnectionModule(nn.Layer):
         total_bias_dim = sum(bias_dims)
         self.bias_terms = self.create_parameter(
             shape=[total_bias_dim],
-            dtype='float32',
+            dtype="float32",
             default_initializer=nn.initializer.Constant(0.0),
         )
 
@@ -107,7 +106,7 @@ class HyperConnectionModule(nn.Layer):
 
     def width_connection(
         self, x: Tensor, skip_sk_gradient: bool = True
-    ) -> Tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """
         Width connection for mHC - generates branch input and residual connections.
 
@@ -132,7 +131,9 @@ class HyperConnectionModule(nn.Layer):
         else:
             return self._width_connection_native(x)
 
-    def _width_connection_native(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    def _width_connection_native(
+        self, x: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """
         Native PaddlePaddle implementation of width connection.
 
@@ -164,8 +165,10 @@ class HyperConnectionModule(nn.Layer):
         res_scale = self.scaling_factors[2]
 
         H_pre = H_all[:, :, :n] * pre_scale + self.bias_terms[:n]
-        H_post = H_all[:, :, n:2*n] * post_scale + self.bias_terms[n:2*n]
-        H_res = H_all[:, :, 2*n:] * res_scale + self.bias_terms[2*n:]
+        H_post = (
+            H_all[:, :, n : 2 * n] * post_scale + self.bias_terms[n : 2 * n]
+        )
+        H_res = H_all[:, :, 2 * n :] * res_scale + self.bias_terms[2 * n :]
 
         # Apply activation functions
         H_pre = F.sigmoid(H_pre)
@@ -178,12 +181,14 @@ class HyperConnectionModule(nn.Layer):
             # Subtract max for numerical stability
             H_res_max = H_res.max(axis=(-2, -1), keepdim=True)
             H_res_exp = paddle.exp(H_res - H_res_max)
-            _, U, V = sinkhorn_knopp(H_res_exp.reshape([s * b, n, n]), self.sinkhorn_iterations)
+            _, U, V = sinkhorn_knopp(
+                H_res_exp.reshape([s * b, n, n]), self.sinkhorn_iterations
+            )
 
         # Compute doubly stochastic matrix: U @ H_res_exp @ V
         res = paddle.matmul(
             paddle.matmul(U.detach(), H_res_exp.reshape([s * b, n, n])),
-            V.detach()
+            V.detach(),
         )
         H_res_mat = res.reshape([s, b, n, n])
 
@@ -194,14 +199,19 @@ class HyperConnectionModule(nn.Layer):
         # Compute branch_input: H_pre @ x (aggregation)
         branch_input = paddle.matmul(H_pre.unsqueeze(dim=-2), x_4d).squeeze(-2)
 
+        # Cast outputs back to input dtype to prevent dtype drift in AMP/bfloat16 scenarios
         if branch_input.dtype != x_dtype:
             branch_input = branch_input.cast(x_dtype)
+        if residuals.dtype != x_dtype:
+            residuals = residuals.cast(x_dtype)
+        if H_post.dtype != x_dtype:
+            H_post = H_post.cast(x_dtype)
 
         return branch_input, residuals, H_post
 
     def _width_connection_triton(
         self, x: Tensor, skip_sk_gradient: bool = True
-    ) -> Tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """
         Triton kernel implementation of width connection for maximum performance.
 
@@ -224,16 +234,18 @@ class HyperConnectionModule(nn.Layer):
         x_4d = x.reshape([s, b, n, C])
 
         # Call Triton kernel
-        branch_input_4d, residuals_4d, h_post = WidthConnectionLayerTriton.apply(
-            x_4d,
-            self.combined_weights,
-            self.scaling_factors,
-            self.bias_terms,
-            self.norm_eps,
-            self.sinkhorn_iterations,
-            n,
-            C,
-            skip_sk_gradient,
+        branch_input_4d, residuals_4d, h_post = (
+            WidthConnectionLayerTriton.apply(
+                x_4d,
+                self.combined_weights,
+                self.scaling_factors,
+                self.bias_terms,
+                self.norm_eps,
+                self.sinkhorn_iterations,
+                n,
+                C,
+                skip_sk_gradient,
+            )
         )
 
         # Reshape outputs back to [s, b, n*C] format
@@ -258,13 +270,15 @@ class HyperConnectionModule(nn.Layer):
             normalized: [s, b, n*C] - normalized tensor
         """
         nC = x.shape[-1]
-        r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)
-        r = 1.0 / (r + self.norm_eps)
-        return x * r
+        # Compute variance = mean(x^2)
+        variance = paddle.mean(x * x, axis=-1, keepdim=True)
+        # RMSNorm: x / sqrt(variance + eps) = x * rsqrt(variance + eps)
+        rstd = paddle.rsqrt(variance + self.norm_eps)
+        return x * rstd
 
     def depth_connection(
         self,
-        layer_output_with_bias: Tuple[Tensor, Optional[Tensor]],
+        layer_output_with_bias: tuple[Tensor, Tensor | None],
         residuals: Tensor,
         h_post: Tensor,
         dropout_prob: float = 0.0,
@@ -281,7 +295,7 @@ class HyperConnectionModule(nn.Layer):
         4. Combine with residuals: output = expanded + residuals
 
         Args:
-            layer_output_with_bias: Tuple of (output, bias) where:
+            layer_output_with_bias: Tuple of (output, bias) or single Tensor where:
                 - output: [s, b, C] - output from branch layer (attention/MLP)
                 - bias: [C] or None - optional bias tensor to add
             residuals: [s, b, n*C] - residual from width_connection (already H_res mixed)
@@ -293,7 +307,11 @@ class HyperConnectionModule(nn.Layer):
         Returns:
             output: [s, b, n*C] - final n-stream output
         """
-        branch_output, bias = layer_output_with_bias
+        # Handle both tuple and single tensor input
+        if isinstance(layer_output_with_bias, tuple):
+            branch_output, bias = layer_output_with_bias
+        else:
+            branch_output, bias = layer_output_with_bias, None
 
         # Triton path
         if self.use_triton and TRITON_AVAILABLE:
@@ -303,7 +321,13 @@ class HyperConnectionModule(nn.Layer):
 
         # Native path
         return self._depth_connection_native(
-            branch_output, residuals, h_post, bias, dropout_prob, training, fused
+            branch_output,
+            residuals,
+            h_post,
+            bias,
+            dropout_prob,
+            training,
+            fused,
         )
 
     def _depth_connection_native(
@@ -311,7 +335,7 @@ class HyperConnectionModule(nn.Layer):
         branch_output: Tensor,
         residuals: Tensor,
         h_post: Tensor,
-        bias: Optional[Tensor],
+        bias: Tensor | None,
         dropout_prob: float,
         training: bool,
         fused: bool,
@@ -319,17 +343,26 @@ class HyperConnectionModule(nn.Layer):
         """Native PaddlePaddle implementation of depth connection with dropout."""
         s, b, C = branch_output.shape
         n = self.n
+        x_dtype = branch_output.dtype
+
+        # Ensure h_post matches branch_output dtype to prevent dtype drift
+        if h_post.dtype != x_dtype:
+            h_post = h_post.cast(x_dtype)
 
         # Pre-compute h_post_4d: [s, b, n, 1]
         h_post_4d = h_post.unsqueeze(-1)
 
         # Expand branch output: [s, b, n, 1] * [s, b, 1, C] -> [s, b, n, C] -> [s, b, n*C]
-        expanded = (h_post_4d * branch_output.unsqueeze(2)).reshape([s, b, n * C])
+        expanded = (h_post_4d * branch_output.unsqueeze(2)).reshape(
+            [s, b, n * C]
+        )
 
         # Expand bias if present: [s, b, n, 1] * [1, 1, 1, C] -> [s, b, n, C] -> [s, b, n*C]
         bias_expanded = None
         if bias is not None:
-            bias_expanded = (h_post_4d * bias.reshape([1, 1, 1, C])).reshape([s, b, n * C])
+            bias_expanded = (h_post_4d * bias.reshape([1, 1, 1, C])).reshape(
+                [s, b, n * C]
+            )
 
         # Apply bias-dropout-add
         bda_func = get_bias_dropout_add(training, fused)
@@ -342,7 +375,7 @@ class HyperConnectionModule(nn.Layer):
         branch_output: Tensor,
         residuals: Tensor,
         h_post: Tensor,
-        bias: Optional[Tensor],
+        bias: Tensor | None,
         dropout_prob: float,
         training: bool,
     ) -> Tensor:
@@ -351,24 +384,29 @@ class HyperConnectionModule(nn.Layer):
         n = self.n
         x_dtype = branch_output.dtype
 
-        # Reshape inputs for Triton kernel
-        branch_output_4d = branch_output.unsqueeze(2)  # [s, b, 1, C]
-        residuals_4d = residuals.reshape([s, b, n, C])  # [s, b, n, C]
+        # Ensure h_post matches branch_output dtype to prevent dtype drift
+        if h_post.dtype != x_dtype:
+            h_post = h_post.cast(x_dtype)
 
-        # Apply Triton depth connection: output = H_post * branch_output + residuals
-        output_4d = DepthConnectionLayerTriton.apply(h_post, branch_output_4d, residuals_4d)
+        # Pre-compute h_post_4d: [s, b, n, 1]
+        h_post_4d = h_post.unsqueeze(-1)
 
-        # Handle bias: expand and add
+        # Expand branch output: [s, b, n, 1] * [s, b, 1, C] -> [s, b, n, C] -> [s, b, n*C]
+        expanded = (h_post_4d * branch_output.unsqueeze(2)).reshape(
+            [s, b, n * C]
+        )
+
+        # Expand bias if present: [s, b, n, 1] * [1, 1, 1, C] -> [s, b, n, C] -> [s, b, n*C]
+        bias_expanded = None
         if bias is not None:
-            bias_expanded = h_post.unsqueeze(-1) * bias.reshape([1, 1, 1, C])
-            output_4d = output_4d + bias_expanded
+            bias_expanded = (h_post_4d * bias.reshape([1, 1, 1, C])).reshape(
+                [s, b, n * C]
+            )
 
-        # Apply dropout
-        if dropout_prob > 0.0 and training:
-            output_4d = F.dropout(output_4d, p=dropout_prob, training=training)
-
-        # Reshape back to [s, b, n*C]
-        output = output_4d.reshape([s, b, n * C])
+        # Apply bias-dropout-add with correct semantics:
+        # dropout(expanded + bias) + residuals (not dropout(expanded + bias + residuals))
+        bda_func = get_bias_dropout_add(training, fused=False)
+        output = bda_func((expanded, bias_expanded), residuals, dropout_prob)
 
         if output.dtype != x_dtype:
             output = output.cast(x_dtype)
@@ -431,7 +469,9 @@ class MHCExpandLayer(nn.Layer):
 
     def forward(self, dict_args):
         hidden_states = dict_args["hidden_states"]
-        dict_args["hidden_states"] = HyperConnectionModule.expand_stream(hidden_states, self.n)
+        dict_args["hidden_states"] = HyperConnectionModule.expand_stream(
+            hidden_states, self.n
+        )
         return dict_args
 
 
@@ -448,5 +488,7 @@ class MHCContractLayer(nn.Layer):
 
     def forward(self, dict_args):
         hidden_states = dict_args["hidden_states"]
-        dict_args["hidden_states"] = HyperConnectionModule.reduce_stream(hidden_states, self.n)
+        dict_args["hidden_states"] = HyperConnectionModule.reduce_stream(
+            hidden_states, self.n
+        )
         return dict_args
