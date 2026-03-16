@@ -180,6 +180,29 @@ jobs:
           fi
           '
 
+      - name: Single card sonic moe test
+        if: matrix.python == '3.12' && matrix.cuda == '12.9' && always()
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          pwd
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          echo "Paddle Commit"
+          python -c "import paddle; print(paddle.version.commit)"
+          echo "PaddleFleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          cd PaddleFleet
+          bash ci/single_card_sonic.sh
+          single_card_exit_code=$?
+          if [[ "$single_card_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mSingle card test succeeded.\033[0m"
+          fi
+          '
+
       - name: Terminate and delete the container
         if: ${{ always() }}
         run: |
@@ -545,7 +568,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_single_card"
@@ -813,6 +836,40 @@ jobs:
             bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
+          fi
+          '
+
+      - name: Integration test (GLM4.5 multi-card FP8)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_pt_fp8"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
+          fi
+          '
+
+      - name: GLM4.5 pre-train (EP4)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_pt_ep4"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 EP4.\033[0m"
           fi
           '
 
@@ -1101,7 +1158,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh a100
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_pt_multi_card_a100"
@@ -1118,7 +1175,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_sft.sh a100
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_sft_multi_card_a100"
@@ -1135,7 +1192,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_lora.sh a100
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_lora_multi_card_a100"
@@ -1152,7 +1209,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh a100
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_multi_card_a100"
@@ -1169,7 +1226,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh a100
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_lora_multi_card_a100"
@@ -1186,7 +1243,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen.sh pt a100
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_pt_multi_card_a100"
@@ -1203,7 +1260,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen.sh sft a100
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_sft_multi_card_a100"
@@ -1220,7 +1277,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen.sh lora a100
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_lora_multi_card_a100"
