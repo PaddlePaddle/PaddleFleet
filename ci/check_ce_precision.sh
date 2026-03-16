@@ -21,6 +21,9 @@ if [ $exit_code -ne 0 ]; then
     echo "Failed to download ground truth file ${case_gt_file} for precision check."
     exit $exit_code
 fi
+if [[ ! -f "${case_name}.txt" && "$case_name" == *glm* ]]; then
+    cp glm45_fleet/${case_name}.txt ./
+fi
 python  PaddleFormers/tests/integration_test/check_loss.py --log_file ${case_name}.txt --gt_file ${case_gt_file}
 exit_code=$?
 if [ $exit_code -ne 0 ]; then
