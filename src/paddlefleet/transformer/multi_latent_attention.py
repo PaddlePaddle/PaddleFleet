@@ -23,6 +23,7 @@ from paddle import Tensor
 _ERNIECORE_ALIGNMENT = (
     os.environ.get("gpt_model_use_experimental_version", "0") == "1"
 )
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.models.common.embeddings import (
@@ -36,7 +37,6 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_mscale,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
     gather_from_tensor_model_parallel_region,
@@ -211,7 +211,7 @@ class MultiLatentAttention(Attention):
                 "'rope' and 'yarn'"
             )
 
-        self.core_attention = build_layer(
+        self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
             config=self.config,
             layer_number=self.layer_number,
@@ -225,7 +225,7 @@ class MultiLatentAttention(Attention):
         )
 
         # Output.
-        self.o_proj = build_layer(
+        self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
             self.query_projection_size,
             self.config.hidden_size,
@@ -380,7 +380,7 @@ class MLASelfAttention(MultiLatentAttention):
 
         if self.config.q_lora_rank is None:
             # Not projecting query
-            self.q_proj = build_layer(
+            self.q_proj = build_spec_layer(
                 sublayers_spec.q_proj,
                 self.config.hidden_size,
                 self.config.num_attention_heads * self.q_head_dim,
@@ -394,7 +394,7 @@ class MLASelfAttention(MultiLatentAttention):
             )
 
         else:
-            self.q_a_proj = build_layer(
+            self.q_a_proj = build_spec_layer(
                 sublayers_spec.q_a_proj,
                 self.config.hidden_size,
                 self.config.q_lora_rank,
@@ -408,7 +408,7 @@ class MLASelfAttention(MultiLatentAttention):
                 tp_group=pg_collection.tp,
             )
 
-            self.q_b_proj = build_layer(
+            self.q_b_proj = build_spec_layer(
                 sublayers_spec.q_b_proj,
                 self.config.q_lora_rank,
                 self.config.num_attention_heads * self.q_head_dim,
@@ -422,7 +422,7 @@ class MLASelfAttention(MultiLatentAttention):
                 tp_group=pg_collection.tp,
             )
 
-        self.kv_a_proj_with_mqa = build_layer(
+        self.kv_a_proj_with_mqa = build_spec_layer(
             sublayers_spec.kv_a_proj_with_mqa,
             self.config.hidden_size,
             self.config.kv_lora_rank + self.config.qk_rope_head_dim,
@@ -436,7 +436,7 @@ class MLASelfAttention(MultiLatentAttention):
             tp_group=pg_collection.tp,
         )
 
-        self.kv_b_proj = build_layer(
+        self.kv_b_proj = build_spec_layer(
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
             self.config.num_attention_heads
@@ -452,14 +452,14 @@ class MLASelfAttention(MultiLatentAttention):
         )
 
         if self.config.q_lora_rank is not None:
-            self.q_a_layernorm = build_layer(
+            self.q_a_layernorm = build_spec_layer(
                 sublayers_spec.q_a_layernorm,
                 hidden_size=self.config.q_lora_rank,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
             )
 
-        self.kv_a_layernorm = build_layer(
+        self.kv_a_layernorm = build_spec_layer(
             sublayers_spec.kv_a_layernorm,
             hidden_size=self.config.kv_lora_rank,
             config=self.config,
