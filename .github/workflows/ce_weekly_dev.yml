@@ -168,7 +168,7 @@ jobs:
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
@@ -317,7 +317,7 @@ jobs:
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
@@ -463,7 +463,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -491,7 +491,7 @@ jobs:
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
@@ -696,7 +696,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -723,7 +723,7 @@ jobs:
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
@@ -969,7 +969,7 @@ jobs:
   integration-test-a100:
     name: Integration test (A100)
     runs-on:
-      group: Fleet-A100
+      group: Distribute
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -1082,7 +1082,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
