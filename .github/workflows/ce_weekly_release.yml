@@ -348,7 +348,7 @@ jobs:
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           export PYTHONPATH=/paddle/PaddleFleet:$PYTHONPATH
-          bash PaddleFleet/ci/multi-card_test.sh
+          bash ci/multi-card_test.sh
           multi_card_exit_code=$?
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed.\033[0m"
