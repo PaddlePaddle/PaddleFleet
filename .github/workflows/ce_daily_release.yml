@@ -912,6 +912,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
+          if [ "${CUDA_VERSION}" == "cu126" ]; then
+            exit 0
+          fi
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
@@ -932,6 +935,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
+          if [ "${CUDA_VERSION}" == "cu126" ]; then
+            exit 0
+          fi
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}

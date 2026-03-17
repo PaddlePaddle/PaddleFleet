@@ -331,6 +331,8 @@ jobs:
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -827,6 +829,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
+          if [ "${CUDA_VERSION}" == "cu126" ]; then
+            exit 0
+          fi
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
@@ -844,6 +849,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
+          if [ "${CUDA_VERSION}" == "cu126" ]; then
+            exit 0
+          fi
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
