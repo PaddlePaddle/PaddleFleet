@@ -911,8 +911,10 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${PYTHON_VERSION}
+          if [ "${PYTHON_VERSION}" != "3.10" ]; then
+            source "$HOME/miniconda/etc/profile.d/conda.sh"
+            conda activate python${PYTHON_VERSION}
+          fi
           bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -928,8 +930,10 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${PYTHON_VERSION}
+          if [ "${PYTHON_VERSION}" != "3.10" ]; then
+            source "$HOME/miniconda/etc/profile.d/conda.sh"
+            conda activate python${PYTHON_VERSION}
+          fi
           bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
