@@ -1,9 +1,6 @@
 name: CE Weekly Release
 
 on:
-  pull_request:
-    branches:
-      - develop
   schedule:
     - cron: '0 20 * * 0' # Weekly on Sunday at 20:00 for release
   workflow_dispatch:
@@ -60,166 +57,166 @@ jobs:
   #         - cuda: "12.6"
   #           python: "3.11"
   #         - cuda: "12.6"
-    #         python: "3.12"
-    #       - cuda: "12.6"
-    #         python: "3.13"
-    #       - cuda: "13.0"
-    #         python: "3.11"
-    #       - cuda: "13.0"
-    #         python: "3.12"
-    #       - cuda: "13.0"
-    #         python: "3.13"
-    # env:
-    #   PIP_CACHE_DIR: /home/.cache/pip
-    #   CACHE_DIR: /home/.cache
-    #   TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-Weekly-single-card-test
-    # steps:
-    #   - name: Determine the runner
-    #     run: |
-    #       gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
-    #       cuda=${{ matrix.cuda }}
-    #       python_version=${{ matrix.python }}
-    #       echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
-    #       if [ "${cuda}" == "12.9" ]; then
-    #         docker_image=${docker_image_cu129}
-    #         cuda_version="cu129"
-    #         paddle_url=${paddle_url_cu129_release}
-    #       elif [ "${cuda}" == "13.0" ]; then
-    #         docker_image=${docker_image_cu130}
-    #         cuda_version="cu130"
-    #         paddle_url=${paddle_url_cu130_release}
-    #       else
-    #         docker_image=${docker_image_cu126}
-    #         cuda_version="cu126"
-    #         paddle_url=${paddle_url_cu126_release}
-    #       fi
-    #       echo "DOCKER_IMAGE=${docker_image}" >> $GITHUB_ENV
-    #       echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
-    #       echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
-    #       echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-    #   - name: Check docker image and run container
-    #     env:
-    #       GPU_DEVICES: ${{ env.GPU_DEVICES }}
-    #       DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
-    #       CUDA_VERSION: ${{ env.CUDA_VERSION }}
-    #       PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
-    #       PADDLE_URL: ${{ env.PADDLE_URL }}
+  #         python: "3.12"
+  #       - cuda: "12.6"
+  #         python: "3.13"
+  #       - cuda: "13.0"
+  #         python: "3.11"
+  #       - cuda: "13.0"
+  #         python: "3.12"
+  #       - cuda: "13.0"
+  #         python: "3.13"
+  # env:
+  #   PIP_CACHE_DIR: /home/.cache/pip
+  #   CACHE_DIR: /home/.cache
+  #   TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-Weekly-single-card-test
+  # steps:
+  #   - name: Determine the runner
+  #     run: |
+  #       gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+  #       cuda=${{ matrix.cuda }}
+  #       python_version=${{ matrix.python }}
+  #       echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
+  #       if [ "${cuda}" == "12.9" ]; then
+  #         docker_image=${docker_image_cu129}
+  #         cuda_version="cu129"
+  #         paddle_url=${paddle_url_cu129_release}
+  #       elif [ "${cuda}" == "13.0" ]; then
+  #         docker_image=${docker_image_cu130}
+  #         cuda_version="cu130"
+  #         paddle_url=${paddle_url_cu130_release}
+  #       else
+  #         docker_image=${docker_image_cu126}
+  #         cuda_version="cu126"
+  #         paddle_url=${paddle_url_cu126_release}
+  #       fi
+  #       echo "DOCKER_IMAGE=${docker_image}" >> $GITHUB_ENV
+  #       echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
+  #       echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
+  #       echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
+  #   - name: Check docker image and run container
+  #     env:
+  #       GPU_DEVICES: ${{ env.GPU_DEVICES }}
+  #       DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
+  #       CUDA_VERSION: ${{ env.CUDA_VERSION }}
+  #       PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
+  #       PADDLE_URL: ${{ env.PADDLE_URL }}
 
-    #     run: |
-    #       container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
-    #       echo "container_name=${container_name}" >> ${{ github.env }}
-    #       docker pull ${DOCKER_IMAGE}
-    #       docker run -d -t --name ${container_name} --gpus "\"device=${GPU_DEVICES}\"" --shm-size=32G \
-    #         -v "/dev/shm:/dev/shm"  \
-    #         -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-    #         -v ${{ github.workspace }}/../../..:/root \
-    #         -v /ssd1/paddle-1/action_cache:/home/.cache \
-    #         -v ${{ github.workspace }}:/paddle \
-    #         -e BRANCH \
-    #         -e PR_ID \
-      #       -e COMMIT_ID \
-      #       -e PADDLE_ROOT \
-      #       -e ci_scripts \
-      #       -e CACHE_DIR \
-      #       -e no_proxy \
-      #       -e use_release \
-      #       -e repo_flag="paddlefleet" \
-      #       -e PIP_CACHE_DIR \
-      #       -e work_dir \
-      #       -e CUDA_VERSION \
-      #       -e PYTHON_VERSION \
-      #       -e PADDLE_URL \
-      #       -e paddlefleet_url \
-      #       -e fleet_branch \
-      #       -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-      #       -e GITHUB_REPO_NAME="${{ github.repository }}" \
-      #       -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
-      #       -e GITHUB_RUN_ID="${{ github.run_id }}" \
-      #       -w /paddle --network host ${DOCKER_IMAGE}
+  #     run: |
+  #       container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
+  #       echo "container_name=${container_name}" >> ${{ github.env }}
+  #       docker pull ${DOCKER_IMAGE}
+  #       docker run -d -t --name ${container_name} --gpus "\"device=${GPU_DEVICES}\"" --shm-size=32G \
+  #         -v "/dev/shm:/dev/shm"  \
+  #         -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
+  #         -v ${{ github.workspace }}/../../..:/root \
+  #         -v /ssd1/paddle-1/action_cache:/home/.cache \
+  #         -v ${{ github.workspace }}:/paddle \
+  #         -e BRANCH \
+  #         -e PR_ID \
+  #       -e COMMIT_ID \
+  #       -e PADDLE_ROOT \
+  #       -e ci_scripts \
+  #       -e CACHE_DIR \
+  #       -e no_proxy \
+  #       -e use_release \
+  #       -e repo_flag="paddlefleet" \
+  #       -e PIP_CACHE_DIR \
+  #       -e work_dir \
+  #       -e CUDA_VERSION \
+  #       -e PYTHON_VERSION \
+  #       -e PADDLE_URL \
+  #       -e paddlefleet_url \
+  #       -e fleet_branch \
+  #       -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
+  #       -e GITHUB_REPO_NAME="${{ github.repository }}" \
+  #       -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+  #       -e GITHUB_RUN_ID="${{ github.run_id }}" \
+  #       -w /paddle --network host ${DOCKER_IMAGE}
 
 
-      # - name: Single card test
-      #   run: |
-      #     docker exec -t ${{ env.container_name }} /bin/bash -xce '
-      #     pwd
-      #     find . -maxdepth 1 -name "--*" -delete
-      #     rm -rf * .[^.]*
-      #     source /root/proxy
-      #     mkdir -p /home/.cache/pip
-      #     pip cache dir
-      #     wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-      #     bash miniconda.sh -b -p $HOME/miniconda -u
-      #     source "$HOME/miniconda/etc/profile.d/conda.sh"
-      #     conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-      #     conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-      #     conda init bash
-      #     conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-      #     conda activate python${PYTHON_VERSION}
-      #     paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-      #     paddle_url="${PADDLE_URL}${paddle_whl}"
-      #     echo "Install uv"
-      #     export WITH_COVERAGE=ON
-      #     pip install --upgrade pip
-      #     git clone https://github.com/PaddlePaddle/PaddleFleet.git
-      #     git config --global --add safe.directory /paddle/PaddleFleet
-      #     cd PaddleFleet
-      #     git config user.name "PaddleCI"
-      #     git config user.email "paddle_ci@example.com"
-      #     git config pull.rebase false
-      #     git checkout ${fleet_branch}
-      #     pip install colorlog>=6.10.1
-      #     fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-      #     wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-      #     pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-      #     if [ "${use_release}" == "true" ]; then
-      #       echo "Using release paddle package"
-      #       pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
-      #     fi
-      #     pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
-      #     echo "Paddle Commit"
-      #     python -c "import paddle; print(paddle.version.commit)"
-      #     echo "PaddleFleet Commit"
-      #     python -c "import paddlefleet; print(paddlefleet.version.commit)"
-      #     export PYTHONPATH=/paddle/PaddleFleet:$PYTHONPATH
-      #     bash ci/single_card_test.sh
-      #     single_card_exit_code=$?
-      #     if [[ "$single_card_exit_code" != "0" ]]; then
-      #       echo -e "::error:: \033[31mSingle card test failed.\033[0m"
-      #       exit 1
-      #     else
-      #       echo -e "\033[32mSingle card test succeeded.\033[0m"
-      #     fi
-      #     '
+  # - name: Single card test
+  #   run: |
+  #     docker exec -t ${{ env.container_name }} /bin/bash -xce '
+  #     pwd
+  #     find . -maxdepth 1 -name "--*" -delete
+  #     rm -rf * .[^.]*
+  #     source /root/proxy
+  #     mkdir -p /home/.cache/pip
+  #     pip cache dir
+  #     wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+  #     bash miniconda.sh -b -p $HOME/miniconda -u
+  #     source "$HOME/miniconda/etc/profile.d/conda.sh"
+  #     conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+  #     conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+  #     conda init bash
+  #     conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+  #     conda activate python${PYTHON_VERSION}
+  #     paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+  #     paddle_url="${PADDLE_URL}${paddle_whl}"
+  #     echo "Install uv"
+  #     export WITH_COVERAGE=ON
+  #     pip install --upgrade pip
+  #     git clone https://github.com/PaddlePaddle/PaddleFleet.git
+  #     git config --global --add safe.directory /paddle/PaddleFleet
+  #     cd PaddleFleet
+  #     git config user.name "PaddleCI"
+  #     git config user.email "paddle_ci@example.com"
+  #     git config pull.rebase false
+  #     git checkout ${fleet_branch}
+  #     pip install colorlog>=6.10.1
+  #     fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+  #     wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
+  #     pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+  #     if [ "${use_release}" == "true" ]; then
+  #       echo "Using release paddle package"
+  #       pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+  #     fi
+  #     pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+  #     echo "Paddle Commit"
+  #     python -c "import paddle; print(paddle.version.commit)"
+  #     echo "PaddleFleet Commit"
+  #     python -c "import paddlefleet; print(paddlefleet.version.commit)"
+  #     export PYTHONPATH=/paddle/PaddleFleet:$PYTHONPATH
+  #     bash ci/single_card_test.sh
+  #     single_card_exit_code=$?
+  #     if [[ "$single_card_exit_code" != "0" ]]; then
+  #       echo -e "::error:: \033[31mSingle card test failed.\033[0m"
+  #       exit 1
+  #     else
+  #       echo -e "\033[32mSingle card test succeeded.\033[0m"
+  #     fi
+  #     '
 
-      # - name: Single card sonic moe test
-      #   if: matrix.python == '3.12' && matrix.cuda == '12.9' && always()
-      #   run: |
-      #     docker exec -t ${{ env.container_name }} /bin/bash -xce '
-      #     pwd
-      #     source /root/proxy
-      #     source "$HOME/miniconda/etc/profile.d/conda.sh"
-      #     conda activate python${{ matrix.python }}
-      #     echo "Paddle Commit"
-      #     python -c "import paddle; print(paddle.version.commit)"
-      #     echo "PaddleFleet Commit"
-      #     python -c "import paddlefleet; print(paddlefleet.version.commit)"
-      #     cd PaddleFleet
-      #     bash ci/single_card_sonic.sh
-      #     single_card_exit_code=$?
-      #     if [[ "$single_card_exit_code" != "0" ]]; then
-      #       echo -e "::error:: \033[31mSingle card test failed.\033[0m"
-      #       exit 1
-      #     else
-      #       echo -e "\033[32mSingle card test succeeded.\033[0m"
-      #     fi
-      #     '
+  # - name: Single card sonic moe test
+  #   if: matrix.python == '3.12' && matrix.cuda == '12.9' && always()
+  #   run: |
+  #     docker exec -t ${{ env.container_name }} /bin/bash -xce '
+  #     pwd
+  #     source /root/proxy
+  #     source "$HOME/miniconda/etc/profile.d/conda.sh"
+  #     conda activate python${{ matrix.python }}
+  #     echo "Paddle Commit"
+  #     python -c "import paddle; print(paddle.version.commit)"
+  #     echo "PaddleFleet Commit"
+  #     python -c "import paddlefleet; print(paddlefleet.version.commit)"
+  #     cd PaddleFleet
+  #     bash ci/single_card_sonic.sh
+  #     single_card_exit_code=$?
+  #     if [[ "$single_card_exit_code" != "0" ]]; then
+  #       echo -e "::error:: \033[31mSingle card test failed.\033[0m"
+  #       exit 1
+  #     else
+  #       echo -e "\033[32mSingle card test succeeded.\033[0m"
+  #     fi
+  #     '
 
-      # - name: Terminate and delete the container
-      #   if: ${{ always() }}
-      #   run: |
-      #     set +e
-      #     docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
-      #     docker rm -f ${{ env.container_name }}
+  # - name: Terminate and delete the container
+  #   if: ${{ always() }}
+  #   run: |
+  #     set +e
+  #     docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+  #     docker rm -f ${{ env.container_name }}
 
   multi-card_test:
     name: Unit test (multi-card)
@@ -425,38 +422,38 @@ jobs:
   #     - name: Check docker image and run container
   #       env:
   #         GPU_DEVICES: ${{ env.GPU_DEVICES }}
-          # DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
-          # CUDA_VERSION: ${{ env.CUDA_VERSION }}
-        #   PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
-        #   PADDLE_URL: ${{ env.PADDLE_URL }}
-        #   BASE_NAME: ${{ env.BASE_NAME }}
-        # run: |
-        #   container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
-        #   echo "container_name=${container_name}" >> ${{ github.env }}
-        #   docker pull ${DOCKER_IMAGE}
-        #   set -x
-        #   docker run -d -t --name ${container_name} --gpus "\"device=${GPU_DEVICES}\"" --shm-size=32G \
-        #     -v "/dev/shm:/dev/shm"  \
-            # -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
-            # -v ${{ github.workspace }}/../../..:/root \
-            # -v /ssd1/paddle-1/action_cache:/home/.cache \
-            # -v ${{ github.workspace }}:/workspace \
-            # -e BRANCH \
-            # -e PR_ID \
-            # -e COMMIT_ID \
-            # -e PADDLE_ROOT \
-            # -e ci_scripts \
-            # -e CACHE_DIR \
-            # -e no_proxy \
-            # -e use_release \
-            # -e paddlefleet_url \
-            # -e fleet_branch \
-            # -e formers_branch \
-            # -e PIP_CACHE_DIR \
-            # -e CUDA_VERSION \
-            # -e PYTHON_VERSION \
-            # -e PADDLE_URL \
-            # -e BASE_NAME \
+  # DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
+  # CUDA_VERSION: ${{ env.CUDA_VERSION }}
+  #   PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
+  #   PADDLE_URL: ${{ env.PADDLE_URL }}
+  #   BASE_NAME: ${{ env.BASE_NAME }}
+  # run: |
+  #   container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
+  #   echo "container_name=${container_name}" >> ${{ github.env }}
+  #   docker pull ${DOCKER_IMAGE}
+  #   set -x
+  #   docker run -d -t --name ${container_name} --gpus "\"device=${GPU_DEVICES}\"" --shm-size=32G \
+  #     -v "/dev/shm:/dev/shm"  \
+  # -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
+  # -v ${{ github.workspace }}/../../..:/root \
+  # -v /ssd1/paddle-1/action_cache:/home/.cache \
+  # -v ${{ github.workspace }}:/workspace \
+  # -e BRANCH \
+  # -e PR_ID \
+  # -e COMMIT_ID \
+  # -e PADDLE_ROOT \
+  # -e ci_scripts \
+  # -e CACHE_DIR \
+  # -e no_proxy \
+  # -e use_release \
+  # -e paddlefleet_url \
+  # -e fleet_branch \
+  # -e formers_branch \
+  # -e PIP_CACHE_DIR \
+  # -e CUDA_VERSION \
+  # -e PYTHON_VERSION \
+  # -e PADDLE_URL \
+  # -e BASE_NAME \
   #           -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
   #           -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
   #           -e GITHUB_REPO_NAME="${{ github.repository }}" \
