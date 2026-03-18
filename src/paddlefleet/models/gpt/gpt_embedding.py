@@ -66,7 +66,7 @@ class GPTEmbedding(FleetLayer):
             config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and self.sequence_parallel
-            and not config.mtp_weight_only
+            and not config.mtp_load_weight_only
         ):
             self.embedding.embed_tokens.reduce_scatter_embeddings = False
             self.embedding.scatter_to_sequence_parallel = False
@@ -125,7 +125,7 @@ class GPTEmbedding(FleetLayer):
             if (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
-                and not self.config.mtp_weight_only
+                and not self.config.mtp_load_weight_only
             ):
                 assert not self.multimodal_embedding, (
                     "MTP not support mm for now."
@@ -266,7 +266,7 @@ class GPTEmbedding(FleetLayer):
             assert (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
-                and not self.config.mtp_weight_only
+                and not self.config.mtp_load_weight_only
             )
             assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
             hidden_states_concat = paddle.concat(mtp_emb_res)

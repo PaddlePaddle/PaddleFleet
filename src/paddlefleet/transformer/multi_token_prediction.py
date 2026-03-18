@@ -170,7 +170,7 @@ def get_mtp_layer_spec_for_backend(
     layer_norm_impl: type = backend.layer_norm()
     mtp_layer_spec = LayerSpec(
         layer=WeightOnlyMTPLayer
-        if config.mtp_weight_only
+        if config.mtp_load_weight_only
         else MultiTokenPredictionLayer,
         sublayers_spec=MultiTokenPredictionLayerSublayersSpec(
             enorm=layer_norm_impl,

@@ -84,7 +84,7 @@ class TestWeightOnlyMTP(unittest.TestCase):
             tie_word_embeddings=True,
             use_qk_norm=True,
             num_nextn_predict_layers=1,
-            mtp_weight_only=True,
+            mtp_load_weight_only=True,
         )
 
         cls.gpt_model = gpt_builder(cls.config, num_stages=1)
@@ -97,14 +97,14 @@ class TestWeightOnlyMTP(unittest.TestCase):
                 found_weight_only_mtp = True
                 break
         assert found_weight_only_mtp, (
-            "GPTModel with mtp_weight_only=True should contain a WeightOnlyMTPLayer"
+            "GPTModel with mtp_load_weight_only=True should contain a WeightOnlyMTPLayer"
         )
 
     def test_weight_only_mtp_params_marked(self):
         """Test that all params in WeightOnlyMTPLayer have is_weight_only_mtp=True and stop_gradient=True."""
         weight_only_params = self.gpt_model._get_weight_only_params()
         assert len(weight_only_params) > 0, (
-            "Model with mtp_weight_only=True should have weight-only params"
+            "Model with mtp_load_weight_only=True should have weight-only params"
         )
 
         for param in weight_only_params:
