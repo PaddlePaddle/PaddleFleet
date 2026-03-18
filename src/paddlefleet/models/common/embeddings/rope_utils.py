@@ -158,11 +158,6 @@ def _apply_rotary_pos_emb_bshd(
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-    if multi_latent_attention:
-        x1 = t[..., 0::2]
-        x2 = t[..., 1::2]
-        t = paddle.cat((x1, x2), axis=-1)
-
     if high_precision_rope:
         return _apply_rotary_pos_emb_bshd_fp32(
             t,
@@ -283,7 +278,7 @@ def _apply_rotary_pos_emb_thd(
             )
 
         freqs_packed = paddle.cat(freq_slices, axis=1)
-        # [seq,bs,num_heads,head_dim]
+        # [b,seq,num_heads,head_dim]
         return _apply_rotary_pos_emb_bshd(
             t,
             freqs_packed,
