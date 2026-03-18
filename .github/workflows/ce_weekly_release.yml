@@ -115,25 +115,25 @@ jobs:
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
             -e PR_ID \
-          -e COMMIT_ID \
-          -e PADDLE_ROOT \
-          -e ci_scripts \
-          -e CACHE_DIR \
-          -e no_proxy \
-          -e use_release \
-          -e repo_flag="paddlefleet" \
-          -e PIP_CACHE_DIR \
-          -e work_dir \
-          -e CUDA_VERSION \
-          -e PYTHON_VERSION \
-          -e PADDLE_URL \
-          -e paddlefleet_url \
-          -e fleet_branch \
-          -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
-          -e GITHUB_REPO_NAME="${{ github.repository }}" \
-          -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
-          -e GITHUB_RUN_ID="${{ github.run_id }}" \
-          -w /paddle --network host ${DOCKER_IMAGE}
+            -e COMMIT_ID \
+            -e PADDLE_ROOT \
+            -e ci_scripts \
+            -e CACHE_DIR \
+            -e no_proxy \
+            -e use_release \
+            -e repo_flag="paddlefleet" \
+            -e PIP_CACHE_DIR \
+            -e work_dir \
+            -e CUDA_VERSION \
+            -e PYTHON_VERSION \
+            -e PADDLE_URL \
+            -e paddlefleet_url \
+            -e fleet_branch \
+            -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
+            -e GITHUB_REPO_NAME="${{ github.repository }}" \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            -w /paddle --network host ${DOCKER_IMAGE}
 
       - name: Single card test
         run: |
