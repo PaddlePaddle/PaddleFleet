@@ -168,6 +168,7 @@ def check_submodule_updated():
             and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
             and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
             and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "flash-attention" / ".git").exists()
         ):
             logger.error(
                 "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
@@ -284,6 +285,14 @@ def get_libs():
             artifacts=[
                 Artifact("quack", "quack"),
             ],
+        ),
+        EcosystemLibrary(
+            name="flash-attention",
+            source_rel_path="third_party/flash-attention/flashmask",
+            artifacts=[
+                Artifact("flash_mask", "flash_mask"),
+            ],
+            extra_env={"FLASHMASK_BUILD": "fa4"},
         ),
     ]
     return LIBRARIES

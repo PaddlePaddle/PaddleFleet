@@ -13,6 +13,8 @@ prune third_party/quack/quack_kernels.egg-info
 prune third_party/quack/build
 prune third_party/sonic-moe/build
 prune third_party/sonic-moe/sonicmoe.egg-info
+prune third_party/flash-attention/flashmask/build
+prune third_party/flash-attention/flashmask/flash_mask.egg-info
 global-exclude *.pyc
 global-exclude *.pyo
 global-exclude __pycache__
