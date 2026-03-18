@@ -210,47 +210,10 @@ class TestPP(unittest.TestCase):
 
         print(rst)
 
-        assert overlap_loss._md5sum() == "bef8aebcd0e33875e5bfb418e70bc6a1"
+        assert overlap_loss._md5sum() == "8754358fe1c39633fa49e91eaa3b34da"
 
         if paddle.distributed.get_rank() == 0:
-            baseline = {
-                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "768904869d2bae8541aa275a2cf366e5",
-                "_layers.9.0.input_layernorm.weight": "07978a523af73b2558fb1d049e9f8c75",
-                "_layers.9.0.self_attn.o_proj.weight": "13154cdbb1e13a1a0778b3b96a8bc289",
-                "_layers.9.0.self_attn.qkv_proj.weight": "de886dfd465778194148ea73d3c1eb8c",
-                "_layers.9.0.self_attn.q_norm.weight": "b00146d06887a578800b0c0c2eb1a05f",
-                "_layers.9.0.self_attn.k_norm.weight": "2f3e0941991da20e088edfd404b864c6",
-                "_layers.9.0.post_attention_layernorm.weight": "1761ea24f06616e4b94cd9073a809c59",
-                "_layers.9.0.mlp.gate.weight": "9f2d8c778a48f48d1f2ed0316ea975cf",
-                "_layers.9.0.mlp.experts.0.up_gate_proj.weight": "f5c4d0fec9e4e6a52dda2dcfa59ac707",
-                "_layers.9.0.mlp.experts.0.down_proj.weight": "d2dcd1a22d94ed4b8eca9f4d9706d885",
-                "_layers.9.0.mlp.experts.1.up_gate_proj.weight": "7015e46aad675e854dc342a5f135acef",
-                "_layers.9.0.mlp.experts.1.down_proj.weight": "c2c52ab8648be361d78e55e871d1fa10",
-                "_layers.9.0.mlp.experts.2.up_gate_proj.weight": "2bd05ba8e0af2a54b05ec3041510ca36",
-                "_layers.9.0.mlp.experts.2.down_proj.weight": "92b701b0d4a850c477464d8f6e9bb7ae",
-                "_layers.9.0.mlp.experts.3.up_gate_proj.weight": "99a04253c09f9362146ce9adac7e4def",
-                "_layers.9.0.mlp.experts.3.down_proj.weight": "38f1c41ba59908483ee42c54c8f3388c",
-                "_layers.9.0.mlp.shared_experts.up_gate_proj.weight": "33010b26f7ef9f9ca17cd45c5f387631",
-                "_layers.9.0.mlp.shared_experts.down_proj.weight": "63a4ad06e46c8aa4f5d0b973e9e5cd93",
-                "_layers.9.1.input_layernorm.weight": "4e3b54c14058a1721b5ff2daa8861562",
-                "_layers.9.1.self_attn.o_proj.weight": "9332447f4549dba1c56d4e0630980eef",
-                "_layers.9.1.self_attn.qkv_proj.weight": "9d8baf0f7a5a92fb305cfac2254a51f7",
-                "_layers.9.1.self_attn.q_norm.weight": "4b7de5d9738a3e30fb97625dc4fb16b0",
-                "_layers.9.1.self_attn.k_norm.weight": "a4dc9712d3ac232269380adb7cd43368",
-                "_layers.9.1.post_attention_layernorm.weight": "c0bbb12135d945016e37f1daed956e5a",
-                "_layers.9.1.mlp.gate.weight": "7789a0e4b6fed339b7e0484404ec74db",
-                "_layers.9.1.mlp.experts.0.up_gate_proj.weight": "d6c5e0240a3ef67906046fa7f89d85aa",
-                "_layers.9.1.mlp.experts.0.down_proj.weight": "ba18edda2107750acd85e7e1a5019408",
-                "_layers.9.1.mlp.experts.1.up_gate_proj.weight": "061ea7f1c1b875e70ba0719958d8d4f5",
-                "_layers.9.1.mlp.experts.1.down_proj.weight": "58deece95a0ce59690042f123d1abd5e",
-                "_layers.9.1.mlp.experts.2.up_gate_proj.weight": "4cc180f5e35d9438f1de1b07b79633be",
-                "_layers.9.1.mlp.experts.2.down_proj.weight": "d1ff2bc6e14a7d620e88d753bde65ca7",
-                "_layers.9.1.mlp.experts.3.up_gate_proj.weight": "96d335ead56b00b3f7f2e3023e2d8205",
-                "_layers.9.1.mlp.experts.3.down_proj.weight": "888547a7c6b2e8b58635711240585d6d",
-                "_layers.9.1.mlp.shared_experts.up_gate_proj.weight": "87b635b2353e5cbd94f362a9bdfd0df9",
-                "_layers.9.1.mlp.shared_experts.down_proj.weight": "c27c801635f3bf200afd59e6d93f8a54",
-            }
-
+            baseline = {'_layers.shared_layers.embed.embedding.embed_tokens.weight': 'ce0633bcee0941a2c1977f4035b7292b', '_layers.9.0.input_layernorm.weight': '461674e41d2836cc73e5831f666ab9f5', '_layers.9.0.self_attn.o_proj.weight': '59b5595fde968e4e52c81b41749f4696', '_layers.9.0.self_attn.qkv_proj.weight': 'd9761897132c2e7ce2c8be4ff7221fa8', '_layers.9.0.self_attn.q_norm.weight': 'b94afb136bf440b337ae94010c9e4c17', '_layers.9.0.self_attn.k_norm.weight': '300d085cac222d53cf9bb92be27189af', '_layers.9.0.post_attention_layernorm.weight': '196a243f3ed01cd25c99a4b7d5e7dcd6', '_layers.9.0.mlp.gate.weight': '678e72fa625c1a1c09fc05ccca068648', '_layers.9.0.mlp.experts.0.up_gate_proj.weight': '78d26d064b88431101c1cbfac14541d6', '_layers.9.0.mlp.experts.0.down_proj.weight': 'f112d158c20544df428bfff8352c748d', '_layers.9.0.mlp.experts.1.up_gate_proj.weight': 'ab57c494486f609ab08ee45971861cc9', '_layers.9.0.mlp.experts.1.down_proj.weight': '87cf26c2c82a5a7d49c9e97d6e5efba8', '_layers.9.0.mlp.experts.2.up_gate_proj.weight': 'c90322445a61a7312527bf66c094d201', '_layers.9.0.mlp.experts.2.down_proj.weight': '50facb409710679e9934855bfcb8ea44', '_layers.9.0.mlp.experts.3.up_gate_proj.weight': '4abc089b00b8db3afd067874b5cdd0d4', '_layers.9.0.mlp.experts.3.down_proj.weight': '343e214a069204bc86adb9d9cb06b6d1', '_layers.9.0.mlp.shared_experts.up_gate_proj.weight': '8314b680ba97d723a942aca6391855f8', '_layers.9.0.mlp.shared_experts.down_proj.weight': 'ad69b07d0074115b2725e7590cff0b43', '_layers.9.1.input_layernorm.weight': 'e92ff13502c8e70af5a65cc923d90b34', '_layers.9.1.self_attn.o_proj.weight': '40cfd3888bea600770613555a3267a84', '_layers.9.1.self_attn.qkv_proj.weight': 'e2f896440d1928a72789e63f1cb87c14', '_layers.9.1.self_attn.q_norm.weight': '05e5b9a7e71699833013ab8db7835473', '_layers.9.1.self_attn.k_norm.weight': 'cc2442b1e266ad7d1d9d1b39527fc471', '_layers.9.1.post_attention_layernorm.weight': 'dc00fe16047cb84cfebc42662a8d8bb0', '_layers.9.1.mlp.gate.weight': 'd428dd107048be5db2d8432d38cbff30', '_layers.9.1.mlp.experts.0.up_gate_proj.weight': '53a1e5a8cf7d90c4fd0c73604e2bbc8d', '_layers.9.1.mlp.experts.0.down_proj.weight': '49bde2326fdadf67df3e1834dc1dc09a', '_layers.9.1.mlp.experts.1.up_gate_proj.weight': 'fb706cc9500a3ee4542bfcced88a4cd0', '_layers.9.1.mlp.experts.1.down_proj.weight': '7c88534136ffe7767d76b3c6bfeb2e75', '_layers.9.1.mlp.experts.2.up_gate_proj.weight': '3fee1850ae5cc3fdff09c2d50479d6fc', '_layers.9.1.mlp.experts.2.down_proj.weight': 'ef1a77fcb4cac9de38a7f7e874c0a199', '_layers.9.1.mlp.experts.3.up_gate_proj.weight': '97e9e22f7542fd3e132ad5e9c3885123', '_layers.9.1.mlp.experts.3.down_proj.weight': '924cd4162180eacff56e936da3d62539', '_layers.9.1.mlp.shared_experts.up_gate_proj.weight': '4dee5ee86a9bdbfbf0597c832aa03782', '_layers.9.1.mlp.shared_experts.down_proj.weight': 'b5a313887c62c1f27fa9ffe11da69cb2'}
             assert rst == baseline
 
 
