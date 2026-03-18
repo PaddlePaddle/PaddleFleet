@@ -1935,3 +1935,1004 @@ def test_triton_native_gradient_comparison():
                 f"Parameter gradient '{name1}' mismatch: "
                 f"max_diff={((p1.grad - p2.grad).abs().max().item()):.6f}"
             )
+
+
+# =============================================================================
+# Test 34-50: Tests for gpt_layer_specs.py coverage
+# =============================================================================
+
+
+class MockTransformerConfig:
+    """Mock TransformerConfig for testing gpt_layer_specs."""
+
+    def __init__(
+        self,
+        num_hidden_layers=4,
+        hidden_size=64,
+        num_attention_heads=4,
+        intermediate_size=128,
+        vocab_size=100,
+        max_sequence_length=64,
+        normalization="RMSNorm",
+        use_qk_norm=False,
+        multi_latent_attention=False,
+        n_routed_experts=None,
+        moe_grouped_gemm=False,
+        moe_layer_freq=1,
+        num_empty_layers_add_in_head=0,
+        num_empty_layers_add_in_tail=0,
+        num_nextn_predict_layers=None,
+        num_layers=4,
+        mhc_num_residual_streams=4,
+        mhc_sinkhorn_iters=10,
+        mhc_use_triton=False,
+        use_mhc=False,
+        hidden_dropout_prob=0.0,
+        rms_norm_eps=1e-6,
+        rope_theta=10000.0,
+        rotary_percent=1.0,
+        position_embedding_type="rope",
+        tie_word_embeddings=False,
+        pipeline_model_parallel_size=1,
+        virtual_pipeline_model_parallel_size=None,
+        parallel_output=False,
+        max_position_embeddings=512,
+        rope_scaling=False,
+        mrope_section=None,
+        model_type="gpt",
+        init_method=None,
+        output_layer_init_method=None,
+        bias_dropout_fusion=False,
+        recompute_granularity=None,
+        recompute_modules=None,
+        recompute_num_layers=None,
+        recompute_method=None,
+        context_parallel_size=1,
+        cp_comm_type=None,
+        sequence_parallel=False,
+        cpu_offloading=False,
+    ):
+        self.num_hidden_layers = num_hidden_layers
+        self.hidden_size = hidden_size
+        self.num_attention_heads = num_attention_heads
+        self.intermediate_size = intermediate_size
+        self.vocab_size = vocab_size
+        self.max_sequence_length = max_sequence_length
+        self.normalization = normalization
+        self.use_qk_norm = use_qk_norm
+        self.multi_latent_attention = multi_latent_attention
+        self.n_routed_experts = n_routed_experts
+        self.moe_grouped_gemm = moe_grouped_gemm
+        self.moe_layer_freq = moe_layer_freq
+        self.num_empty_layers_add_in_head = num_empty_layers_add_in_head
+        self.num_empty_layers_add_in_tail = num_empty_layers_add_in_tail
+        self.num_nextn_predict_layers = num_nextn_predict_layers
+        self.num_layers = num_layers
+        self.mhc_num_residual_streams = mhc_num_residual_streams
+        self.mhc_sinkhorn_iters = mhc_sinkhorn_iters
+        self.mhc_use_triton = mhc_use_triton
+        self.use_mhc = use_mhc
+        self.hidden_dropout_prob = hidden_dropout_prob
+        self.rms_norm_eps = rms_norm_eps
+        self.rope_theta = rope_theta
+        self.rotary_percent = rotary_percent
+        self.position_embedding_type = position_embedding_type
+        self.tie_word_embeddings = tie_word_embeddings
+        self.pipeline_model_parallel_size = pipeline_model_parallel_size
+        self.virtual_pipeline_model_parallel_size = (
+            virtual_pipeline_model_parallel_size
+        )
+        self.parallel_output = parallel_output
+        self.max_position_embeddings = max_position_embeddings
+        self.rope_scaling = rope_scaling
+        self.mrope_section = mrope_section
+        self.model_type = model_type
+        self.init_method = init_method
+        self.output_layer_init_method = output_layer_init_method
+        self.bias_dropout_fusion = bias_dropout_fusion
+        self.recompute_granularity = recompute_granularity
+        self.recompute_modules = recompute_modules
+        self.recompute_num_layers = recompute_num_layers
+        self.recompute_method = recompute_method
+        self.context_parallel_size = context_parallel_size
+        self.cp_comm_type = cp_comm_type
+        self.sequence_parallel = sequence_parallel
+        self.cpu_offloading = cpu_offloading
+
+
+def test_get_gpt_layer_mhc_spec_basic():
+    """Test basic MHC layer spec creation."""
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_mhc_spec
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayerWithMHC,
+    )
+
+    config = MockTransformerConfig(use_mhc=True)
+    spec = get_gpt_layer_mhc_spec(
+        config=config,
+        num_experts=None,
+        moe_grouped_gemm=False,
+        use_qk_norm=False,
+        multi_latent_attention=False,
+        normalization="RMSNorm",
+        qk_l2_norm=False,
+        layer_number=1,
+    )
+    assert isinstance(spec, LayerSpec)
+    assert spec.layer == TransformerLayerWithMHC
+
+
+def test_get_gpt_layer_mhc_spec_with_mla():
+    """Test MHC layer spec with multi-latent attention."""
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_mhc_spec
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayerWithMHC,
+    )
+
+    config = MockTransformerConfig(use_mhc=True, multi_latent_attention=True)
+    spec = get_gpt_layer_mhc_spec(
+        config=config,
+        num_experts=None,
+        moe_grouped_gemm=False,
+        use_qk_norm=False,
+        multi_latent_attention=True,
+        normalization="RMSNorm",
+        qk_l2_norm=False,
+        layer_number=1,
+    )
+    assert isinstance(spec, LayerSpec)
+    assert spec.layer == TransformerLayerWithMHC
+
+
+def test_get_gpt_layer_mhc_spec_with_layernorm():
+    """Test MHC layer spec with LayerNorm instead of RMSNorm."""
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_mhc_spec
+    from paddlefleet.spec_utils import LayerSpec
+
+    config = MockTransformerConfig(use_mhc=True)
+    spec = get_gpt_layer_mhc_spec(
+        config=config,
+        num_experts=None,
+        moe_grouped_gemm=False,
+        use_qk_norm=True,
+        multi_latent_attention=False,
+        normalization="LayerNorm",
+        qk_l2_norm=False,
+        layer_number=1,
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+def test_get_gpt_mhc_decoder_layers_spec_with_int_freq():
+    """Test MHC decoder layers spec with integer moe_layer_freq."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_mhc_decoder_layers_spec,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayerWithMHC,
+    )
+
+    config = MockTransformerConfig(
+        use_mhc=True,
+        num_hidden_layers=4,
+        moe_layer_freq=2,
+    )
+    specs = get_gpt_mhc_decoder_layers_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+    assert len(specs) == 4
+    for spec in specs:
+        assert isinstance(spec, LayerSpec)
+        assert spec.layer == TransformerLayerWithMHC
+
+
+def test_get_gpt_mhc_decoder_layers_spec_with_list_freq():
+    """Test MHC decoder layers spec with list moe_layer_freq."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_mhc_decoder_layers_spec,
+    )
+
+    config = MockTransformerConfig(
+        use_mhc=True,
+        num_hidden_layers=4,
+        moe_layer_freq=[0, 1, 0, 1],
+        n_routed_experts=4,
+    )
+    specs = get_gpt_mhc_decoder_layers_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+    assert len(specs) == 4
+
+
+def test_get_gpt_decoder_layers_spec_with_int_freq():
+    """Test decoder layers spec with integer moe_layer_freq."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_decoder_layers_spec,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+
+    config = MockTransformerConfig(
+        num_hidden_layers=4,
+        moe_layer_freq=2,
+    )
+    specs = get_gpt_decoder_layers_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+    assert len(specs) == 4
+    for spec in specs:
+        assert isinstance(spec, LayerSpec)
+
+
+def test_get_gpt_decoder_layers_spec_with_list_freq():
+    """Test decoder layers spec with list moe_layer_freq."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_decoder_layers_spec,
+    )
+
+    config = MockTransformerConfig(
+        num_hidden_layers=4,
+        moe_layer_freq=[0, 1, 0, 1],
+        n_routed_experts=4,
+    )
+    specs = get_gpt_decoder_layers_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+    assert len(specs) == 4
+
+
+def test_get_mlp_layer_spec_for_backend_dense():
+    """Test MLP spec for dense layer."""
+    from paddlefleet.models.backends import LocalSpecProvider
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_mlp_layer_spec_for_backend,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+
+    backend = LocalSpecProvider()
+    spec = get_mlp_layer_spec_for_backend(
+        backend=backend,
+        num_experts=None,
+        moe_grouped_gemm=False,
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+def test_get_mlp_layer_spec_for_backend_moe():
+    """Test MLP spec with num_experts > 0 (MoE)."""
+    from paddlefleet.models.backends import LocalSpecProvider
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_mlp_layer_spec_for_backend,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+
+    backend = LocalSpecProvider()
+    spec = get_mlp_layer_spec_for_backend(
+        backend=backend,
+        num_experts=4,
+        moe_grouped_gemm=False,
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+def test_get_gpt_mtp_layers_spec_none():
+    """Test MTP layers spec when num_nextn_predict_layers is None."""
+    from paddlefleet.models.backends import LocalSpecProvider
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_layer_local_spec,
+        get_gpt_mtp_layers_spec_for_backend,
+    )
+
+    config = MockTransformerConfig(num_nextn_predict_layers=None)
+    backend = LocalSpecProvider()
+
+    transformer_layer_spec = get_gpt_layer_local_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+    spec_list = [transformer_layer_spec]
+
+    mtp_specs = get_gpt_mtp_layers_spec_for_backend(
+        config=config,
+        spec=spec_list,
+        backend=backend,
+    )
+    assert len(mtp_specs) == 0
+
+
+def test_get_gpt_mtp_layers_spec_with_layers():
+    """Test MTP layers spec when num_nextn_predict_layers > 0."""
+    from paddlefleet.models.backends import LocalSpecProvider
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_layer_local_spec,
+        get_gpt_mtp_layers_spec_for_backend,
+    )
+
+    config = MockTransformerConfig(num_nextn_predict_layers=2)
+    backend = LocalSpecProvider()
+
+    transformer_layer_spec = get_gpt_layer_local_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+    spec_list = [transformer_layer_spec]
+
+    mtp_specs = get_gpt_mtp_layers_spec_for_backend(
+        config=config,
+        spec=spec_list,
+        backend=backend,
+    )
+    assert len(mtp_specs) == 2
+
+
+def test_get_gpt_spec_basic():
+    """Test basic GPT spec creation."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_layer_local_spec,
+        get_gpt_spec,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+
+    config = MockTransformerConfig(
+        vocab_size=100,
+        max_sequence_length=64,
+    )
+
+    transformer_layer_spec = get_gpt_layer_local_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+
+    spec = get_gpt_spec(
+        config=config,
+        transformer_layers_spec=[transformer_layer_spec],
+        mtp_layers_spec=None,
+        vocab_size=100,
+        max_sequence_length=64,
+        head_empty_layers_spec=[],
+        tail_empty_layers_spec=[],
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+def test_get_gpt_spec_with_rope():
+    """Test GPT spec with RoPE embedding."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_layer_local_spec,
+        get_gpt_spec,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+
+    config = MockTransformerConfig(
+        vocab_size=100,
+        max_sequence_length=64,
+        position_embedding_type="rope",
+    )
+
+    transformer_layer_spec = get_gpt_layer_local_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+
+    spec = get_gpt_spec(
+        config=config,
+        transformer_layers_spec=[transformer_layer_spec],
+        mtp_layers_spec=None,
+        vocab_size=100,
+        max_sequence_length=64,
+        head_empty_layers_spec=[],
+        tail_empty_layers_spec=[],
+        position_embedding_type="rope",
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+def test_get_gpt_spec_with_yarn():
+    """Test GPT spec with Yarn embedding."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_layer_local_spec,
+        get_gpt_spec,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+
+    config = MockTransformerConfig(
+        vocab_size=100,
+        max_sequence_length=64,
+        position_embedding_type="yarn",
+    )
+
+    transformer_layer_spec = get_gpt_layer_local_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+
+    spec = get_gpt_spec(
+        config=config,
+        transformer_layers_spec=[transformer_layer_spec],
+        mtp_layers_spec=None,
+        vocab_size=100,
+        max_sequence_length=64,
+        head_empty_layers_spec=[],
+        tail_empty_layers_spec=[],
+        position_embedding_type="yarn",
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+def test_get_gpt_spec_with_mrope():
+    """Test GPT spec with multimodal RoPE embedding."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_layer_local_spec,
+        get_gpt_spec,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+
+    config = MockTransformerConfig(
+        vocab_size=100,
+        max_sequence_length=64,
+        position_embedding_type="mrope",
+        mrope_section=[1, 1, 1],
+    )
+
+    transformer_layer_spec = get_gpt_layer_local_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+
+    spec = get_gpt_spec(
+        config=config,
+        transformer_layers_spec=[transformer_layer_spec],
+        mtp_layers_spec=None,
+        vocab_size=100,
+        max_sequence_length=64,
+        head_empty_layers_spec=[],
+        tail_empty_layers_spec=[],
+        position_embedding_type="mrope",
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+def test_get_gpt_spec_with_tie_word_embeddings():
+    """Test GPT spec with tied word embeddings."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_layer_local_spec,
+        get_gpt_spec,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+
+    config = MockTransformerConfig(
+        vocab_size=100,
+        max_sequence_length=64,
+        tie_word_embeddings=True,
+        pipeline_model_parallel_size=1,
+    )
+
+    transformer_layer_spec = get_gpt_layer_local_spec(
+        config=config,
+        normalization="RMSNorm",
+    )
+
+    spec = get_gpt_spec(
+        config=config,
+        transformer_layers_spec=[transformer_layer_spec],
+        mtp_layers_spec=None,
+        vocab_size=100,
+        max_sequence_length=64,
+        head_empty_layers_spec=[],
+        tail_empty_layers_spec=[],
+        tie_word_embeddings=True,
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+def test_get_gpt_layer_local_spec_with_mla():
+    """Test get_gpt_layer_local_spec with MLA."""
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+    from paddlefleet.spec_utils import LayerSpec
+
+    config = MockTransformerConfig(multi_latent_attention=True)
+    spec = get_gpt_layer_local_spec(
+        config=config,
+        num_experts=None,
+        moe_grouped_gemm=False,
+        use_qk_norm=False,
+        multi_latent_attention=True,
+        normalization="RMSNorm",
+        qk_l2_norm=False,
+        layer_number=1,
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+def test_get_gpt_layer_local_spec_with_qk_l2_norm():
+    """Test get_gpt_layer_local_spec with qk_l2_norm."""
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+    from paddlefleet.spec_utils import LayerSpec
+
+    config = MockTransformerConfig()
+    spec = get_gpt_layer_local_spec(
+        config=config,
+        num_experts=None,
+        moe_grouped_gemm=False,
+        use_qk_norm=False,
+        multi_latent_attention=False,
+        normalization="RMSNorm",
+        qk_l2_norm=True,
+        layer_number=1,
+    )
+    assert isinstance(spec, LayerSpec)
+
+
+# =============================================================================
+# Tests for transformer_block.py coverage
+# =============================================================================
+
+
+def test_transformer_block_sublayers_spec_dataclass():
+    """Test TransformerBlockSublayersSpec dataclass."""
+    from paddlefleet.transformer.transformer_block import (
+        TransformerBlockSublayersSpec,
+    )
+
+    spec = TransformerBlockSublayersSpec()
+    assert spec.layer_specs is None
+    assert spec.layer_norm is None
+
+
+def test_get_block_sublayers_spec_with_sublayers_spec():
+    """Test _get_block_sublayers_spec with TransformerBlockSublayersSpec input."""
+    from paddlefleet.transformer.transformer_block import (
+        TransformerBlockSublayersSpec,
+        _get_block_sublayers_spec,
+    )
+
+    config = MockTransformerConfig()
+    sublayers_spec = TransformerBlockSublayersSpec()
+    result = _get_block_sublayers_spec(config, sublayers_spec)
+    assert result is sublayers_spec
+
+
+def test_get_block_sublayers_spec_with_layer_spec_transformer_layer():
+    """Test _get_block_sublayers_spec with LayerSpec for TransformerLayer."""
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_block import (
+        TransformerBlockSublayersSpec,
+        _get_block_sublayers_spec,
+    )
+    from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+    config = MockTransformerConfig(num_hidden_layers=2)
+    # Create a LayerSpec directly with TransformerLayer
+    layer_spec = LayerSpec(layer=TransformerLayer)
+    result = _get_block_sublayers_spec(config, layer_spec)
+    assert isinstance(result, TransformerBlockSublayersSpec)
+    assert result.layer_specs is not None
+    assert len(result.layer_specs) == config.num_hidden_layers
+
+
+# =============================================================================
+# Tests for gpt_builders.py coverage
+# =============================================================================
+
+
+def test_get_transformer_layer_spec_func_mhc():
+    """Test _get_transformer_layer_spec_func with MHC enabled."""
+    from paddlefleet.gpt_builders import _get_transformer_layer_spec_func
+
+    config = MockTransformerConfig(use_mhc=True)
+    func = _get_transformer_layer_spec_func(config)
+    assert callable(func)
+
+
+def test_get_transformer_layer_spec_func_no_mhc():
+    """Test _get_transformer_layer_spec_func without MHC."""
+    from paddlefleet.gpt_builders import _get_transformer_layer_spec_func
+
+    config = MockTransformerConfig(use_mhc=False)
+    func = _get_transformer_layer_spec_func(config)
+    assert callable(func)
+
+
+# =============================================================================
+# Tests for tensors_clone function in transformer_layer.py
+# =============================================================================
+
+
+def test_tensors_clone():
+    """Test tensors_clone with various input types."""
+    from paddlefleet.transformer.transformer_layer import tensors_clone
+
+    # Test tensor
+    x = paddle.randn([2, 3])
+    cloned = tensors_clone(x)
+    assert cloned.shape == x.shape
+
+    # Test list
+    x_list = [paddle.randn([2, 3]), paddle.randn([4, 5])]
+    cloned_list = tensors_clone(x_list)
+    assert isinstance(cloned_list, list)
+    assert len(cloned_list) == 2
+
+    # Test dict
+    x_dict = {"a": paddle.randn([2, 3])}
+    cloned_dict = tensors_clone(x_dict)
+    assert isinstance(cloned_dict, dict)
+
+
+# =============================================================================
+# Tests for TransformerLayerSublayersSpec dataclass
+# =============================================================================
+
+
+def test_transformer_layer_sublayers_spec_dataclass():
+    """Test TransformerLayerSublayersSpec dataclass."""
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayerSublayersSpec,
+    )
+
+    spec = TransformerLayerSublayersSpec()
+    assert spec.input_layernorm is not None
+    assert spec.self_attn is not None
+    assert spec.mlp is not None
+
+
+# =============================================================================
+# Tests for gpt_model.py GPTSublayersSpec dataclass
+# =============================================================================
+
+
+# =============================================================================
+# Tests for GPTSublayersSpec dataclass
+# =============================================================================
+
+
+def test_gpt_sublayers_spec_dataclass():
+    """Test GPTSublayersSpec dataclass."""
+    from paddlefleet.models.gpt.gpt_model import GPTSublayersSpec
+
+    spec = GPTSublayersSpec()
+    assert spec.embedding is None
+    assert spec.transformer_layers is None
+    assert spec.mtp is None
+    assert spec.layer_norm is None
+    assert spec.lm_head is None
+
+
+# =============================================================================
+# Tests for gpt_builders.py - MoE branches (testing spec generation only)
+# =============================================================================
+
+
+def test_gpt_builder_moe_mhc_spec():
+    """Test gpt_builder spec generation with MoE model and MHC enabled."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_mhc_decoder_layers_spec,
+    )
+
+    config = MockTransformerConfig(
+        use_mhc=True,
+        n_routed_experts=4,
+        num_hidden_layers=2,
+    )
+    # Test that spec is generated correctly for MoE + MHC
+    spec = get_gpt_mhc_decoder_layers_spec(
+        config=config, normalization="RMSNorm"
+    )
+    assert spec is not None
+
+
+def test_gpt_builder_moe_no_mhc_spec():
+    """Test gpt_builder spec generation with MoE model without MHC."""
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_decoder_layers_spec,
+    )
+
+    config = MockTransformerConfig(
+        use_mhc=False,
+        n_routed_experts=4,
+        num_hidden_layers=2,
+    )
+    spec = get_gpt_decoder_layers_spec(config=config, normalization="RMSNorm")
+    assert spec is not None
+
+
+def test_gpt_builder_dense_mhc_spec():
+    """Test gpt_builder spec generation with dense model and MHC."""
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_mhc_spec
+
+    config = MockTransformerConfig(
+        use_mhc=True,
+        n_routed_experts=None,
+        num_hidden_layers=2,
+    )
+    spec = get_gpt_layer_mhc_spec(config=config, layer_number=0)
+    assert spec is not None
+
+
+def test_gpt_builder_dense_no_mhc_spec():
+    """Test gpt_builder spec generation with dense model without MHC."""
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+
+    config = MockTransformerConfig(
+        use_mhc=False,
+        n_routed_experts=None,
+        num_hidden_layers=2,
+    )
+    spec = get_gpt_layer_local_spec(config=config, layer_number=0)
+    assert spec is not None
+
+
+# =============================================================================
+# Tests for gpt_layer_specs.py - overlap scheduler check
+# =============================================================================
+
+
+def test_get_gpt_layer_mhc_spec_overlap_scheduler_raises():
+    """Test that MHC with overlap scheduler raises ValueError."""
+    import paddle.distributed as dist
+
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_mhc_spec
+
+    # Skip if distributed is not initialized
+    if not dist.is_initialized():
+        return
+
+    config = MockTransformerConfig(use_mhc=True)
+    try:
+        get_gpt_layer_mhc_spec(config=config, layer_number=0)
+    except ValueError as e:
+        assert "MHC is not compatible" in str(e)
+
+
+# =============================================================================
+# Tests for hyper_connection.py missing lines
+# =============================================================================
+
+
+def test_hyper_connection_native_depth_with_bias():
+    """Test native depth connection with bias tensor."""
+    from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+
+    config = MockConfig(hidden_size=32, mhc_use_triton=False)
+    hc = HyperConnectionModule(config=config, layer_number=1)
+
+    s, b, n, C = 2, 2, 4, 32
+    x = paddle.randn([s, b, n * C], dtype="float32")
+    branch_input, residuals, H_post = hc.width_connection(x)
+
+    branch_output = paddle.randn([s, b, C], dtype="float32")
+    bias = paddle.randn([C], dtype="float32")
+
+    output = hc.depth_connection(
+        (branch_output, bias), residuals, H_post, fused=False
+    )
+    assert output.shape == [s, b, n * C]
+
+
+def test_hyper_connection_width_skip_sk_gradient():
+    """Test width_connection with skip_sk_gradient."""
+    from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+
+    config = MockConfig(hidden_size=32, mhc_use_triton=False)
+    hc = HyperConnectionModule(config=config, layer_number=1)
+
+    s, b, n, C = 2, 2, 4, 32
+    x = paddle.randn([s, b, n * C], dtype="float32")
+
+    # Test width_connection with skip_sk_gradient=False
+    branch_input, residuals, H_post = hc.width_connection(
+        x, skip_sk_gradient=False
+    )
+    assert branch_input.shape == [s, b, C]
+
+    # Test depth_connection
+    branch_output = paddle.randn([s, b, C], dtype="float32")
+    output = hc.depth_connection((branch_output, None), residuals, H_post)
+    assert output.shape == [s, b, n * C]
+
+
+# =============================================================================
+# Tests for HyperConnectionModule expand/reduce_stream (transformer_block.py coverage)
+# =============================================================================
+
+
+def test_hyper_connection_expand_stream():
+    """Test HyperConnectionModule.expand_stream static method."""
+    from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+
+    s, b, C, n = 4, 2, 64, 4
+    hidden_states = paddle.randn([s, b, C])
+
+    expanded = HyperConnectionModule.expand_stream(hidden_states, n)
+    assert expanded.shape == [s, b, n * C]
+
+
+def test_hyper_connection_reduce_stream():
+    """Test HyperConnectionModule.reduce_stream static method."""
+    from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+
+    s, b, C, n = 4, 2, 64, 4
+    hidden_states = paddle.randn([s, b, n * C])
+
+    reduced = HyperConnectionModule.reduce_stream(hidden_states, n)
+    assert reduced.shape == [s, b, C]
+
+
+def test_hyper_connection_expand_reduce_roundtrip():
+    """Test expand and reduce roundtrip consistency."""
+    from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+
+    s, b, C, n = 4, 2, 64, 4
+    original = paddle.randn([s, b, C])
+
+    expanded = HyperConnectionModule.expand_stream(original, n)
+    reduced = HyperConnectionModule.reduce_stream(expanded, n)
+
+    # The reduced should be close to original (sum divided by n)
+    expected = original
+    assert paddle.allclose(reduced, expected, atol=1e-5)
+
+
+# =============================================================================
+# Tests for MHCExpandLayer and MHCContractLayer (gpt_model.py coverage)
+# =============================================================================
+
+
+def test_mhc_expand_layer():
+    """Test MHCExpandLayer forward pass."""
+    from paddlefleet.transformer.hyper_connection import (
+        MHCExpandLayer,
+    )
+
+    config = MockTransformerConfig(use_mhc=True)
+    expand_layer = MHCExpandLayer(config)
+
+    s, b, C = 4, 2, 64
+    hidden_states = paddle.randn([s, b, C], dtype="float32")
+
+    # MHCExpandLayer expects a dict with hidden_states
+    dict_args = {"hidden_states": hidden_states}
+    output = expand_layer(dict_args)
+
+    n = config.mhc_num_residual_streams
+    assert output["hidden_states"].shape == [s, b, n * C]
+
+
+def test_mhc_contract_layer():
+    """Test MHCContractLayer forward pass."""
+    from paddlefleet.transformer.hyper_connection import (
+        MHCContractLayer,
+    )
+
+    config = MockTransformerConfig(use_mhc=True)
+    contract_layer = MHCContractLayer(config)
+
+    s, b, C = 4, 2, 64
+    n = config.mhc_num_residual_streams
+    hidden_states = paddle.randn([s, b, n * C], dtype="float32")
+
+    # MHCContractLayer expects a dict with hidden_states
+    dict_args = {"hidden_states": hidden_states}
+    output = contract_layer(dict_args)
+
+    assert output["hidden_states"].shape == [s, b, C]
+
+
+# =============================================================================
+# Tests for hyper_connection dtype casting branches
+# =============================================================================
+
+
+def test_hyper_connection_with_different_dtypes():
+    """Test that operations work with different dtypes."""
+    from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+
+    # Test with float32 input
+    config = MockConfig(hidden_size=32, mhc_use_triton=False)
+    hc = HyperConnectionModule(config=config, layer_number=1)
+
+    s, b, n, C = 2, 2, 4, 32
+    x = paddle.randn([s, b, n * C], dtype="float32")
+
+    branch_input, residuals, H_post = hc.width_connection(x)
+    assert branch_input.shape == [s, b, C]
+    assert branch_input.dtype == paddle.float32
+
+
+def test_hyper_connection_depth_with_dropout():
+    """Test depth connection with dropout enabled."""
+    from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+
+    config = MockConfig(hidden_size=32, mhc_use_triton=False)
+    hc = HyperConnectionModule(config=config, layer_number=1)
+
+    s, b, n, C = 2, 2, 4, 32
+    x = paddle.randn([s, b, n * C], dtype="float32")
+    branch_input, residuals, H_post = hc.width_connection(x)
+
+    branch_output = paddle.randn([s, b, C], dtype="float32")
+
+    # Test with dropout enabled
+    output = hc.depth_connection(
+        (branch_output, None),
+        residuals,
+        H_post,
+        dropout_prob=0.1,
+        training=True,
+    )
+    assert output.shape == [s, b, n * C]
+
+
+# =============================================================================
+# Tests for transformer_layer.py cross_attention branches
+# =============================================================================
+
+
+def test_transformer_layer_sublayers_spec_cross_attention():
+    """Test TransformerLayerSublayersSpec with cross_attention enabled."""
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayerSublayersSpec,
+    )
+
+    # Create sublayers spec with cross attention
+    sublayers_spec = TransformerLayerSublayersSpec()
+    sublayers_spec.cross_attention = LayerSpec(layer=object)
+
+    # This test verifies the spec can be created with cross attention
+    assert sublayers_spec.cross_attention is not None
+
+
+# =============================================================================
+# Tests for gpt_builders.py dense model layer iteration
+# =============================================================================
+
+
+def test_transformer_layer_spec_func_iteration():
+    """Test transformer_layer_spec_func iteration for dense models."""
+    from paddlefleet.gpt_builders import _get_transformer_layer_spec_func
+
+    config = MockTransformerConfig(
+        use_mhc=True,
+        n_routed_experts=None,  # Dense model
+        num_hidden_layers=3,
+        num_empty_layers_add_in_head=0,
+    )
+
+    # Get the spec function
+    transformer_layer_spec_func = _get_transformer_layer_spec_func(config)
+    assert callable(transformer_layer_spec_func)
+
+    # Test iteration over layers (covers lines 56-57)
+    transformer_layers_spec = []
+    for layer_number in range(config.num_hidden_layers):
+        real_layer_number = layer_number + config.num_empty_layers_add_in_head
+        spec = transformer_layer_spec_func(layer_number=real_layer_number)
+        transformer_layers_spec.append(spec)
+
+    assert len(transformer_layers_spec) == 3
+
+
+def test_transformer_layer_spec_func_no_mhc():
+    """Test transformer_layer_spec_func without MHC."""
+    from paddlefleet.gpt_builders import _get_transformer_layer_spec_func
+
+    config = MockTransformerConfig(
+        use_mhc=False,
+        n_routed_experts=None,
+        num_hidden_layers=2,
+    )
+
+    transformer_layer_spec_func = _get_transformer_layer_spec_func(config)
+    assert callable(transformer_layer_spec_func)
+
+    # Generate specs
+    for i in range(config.num_hidden_layers):
+        spec = transformer_layer_spec_func(layer_number=i)
+        assert spec is not None

@@ -396,7 +396,7 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use Manifold Constrained Hyper Connections instead of standard residual connections.
     When enabled, MHC replaces standard residual connections for both attention and MLP layers."""
 
-    mhc_num_residual_streams: int = 1
+    mhc_num_residual_streams: int = 4
     """Number of residual streams for MHC. Default is 1 (equivalent to standard residual).
     Higher values (e.g., 4, 8) enable hyper-connections with multiple parallel streams."""
 
