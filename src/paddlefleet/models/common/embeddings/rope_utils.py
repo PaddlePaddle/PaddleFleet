@@ -117,7 +117,6 @@ def _apply_rotary_pos_emb_bshd_fp32(
     with paddle.amp.auto_cast(False):
         orig_t_dtype = t.dtype
         t = t.astype(dtype="float32")
-        t_pass = t_pass.astype(dtype="float32")
         rotate_t = _rotate_half(t, rotary_interleaved)
         cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
         sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
@@ -131,7 +130,14 @@ def _apply_rotary_pos_emb_bshd_fp32(
             rotate_t.reshape_(t.shape)
 
         t = (t * cos_) + (rotate_t * sin_)
-        return paddle.cat((t, t_pass), axis=-1).astype(orig_t_dtype)
+        skip_t_pass = t_pass.shape[-1] == 0
+        if not skip_t_pass:
+            t_pass = t_pass.astype(dtype="float32")
+            res = paddle.cat((t, t_pass), axis=-1).astype(orig_t_dtype)
+        else:
+            res = t.astype(orig_t_dtype)
+
+        return res
 
 
 def _apply_rotary_pos_emb_bshd(
