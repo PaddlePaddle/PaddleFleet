@@ -263,7 +263,7 @@ if paddle.is_compiled_with_cuda():
             "paddlefleet.ops.flash_mask", hint=FLASH_MASK_HINT
         )
         logger.warning(warning)
-        blocked_import_messages["paddlefleet.ops.flash_mask"] = error   
+        blocked_import_messages["paddlefleet.ops.flash_mask"] = error
 
     if blocked_import_messages:
         sys.meta_path.insert(
