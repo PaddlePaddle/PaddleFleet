@@ -269,7 +269,7 @@ def get_libs():
             ],
             extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
             if (cuda_major == 12 and cuda_minor < 8)
-            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0"},
+            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0;10.3"},
         ),
         EcosystemLibrary(
             name="sonic-moe",
