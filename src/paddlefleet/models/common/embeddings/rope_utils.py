@@ -263,6 +263,11 @@ def _apply_rotary_pos_emb_thd(
 
     seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
 
+    # Optimization: convert cu_seqlens to a Python list once here, so the
+    # per-sequence loop below can index it with zero GPU->CPU syncs instead
+    # of calling .item() on every iteration (one D2H sync per sub-sequence).
+    cu_seqlens_list = cu_seqlens.tolist()
+
     # Handle two different frequency tensor formats:
     # 1. If freqs.size(0) == cu_seqlens[-1]: freqs contains all positions across all sequences
     #    -> Use offset-based mapping for exact positional correspondence
@@ -275,7 +280,8 @@ def _apply_rotary_pos_emb_thd(
         freq_slices = []
         for i, x in enumerate(sequence_splits):
             # cu_seqlens[i] is the starting offset of this sequence in the original batch
-            seq_start_offset = cu_seqlens[i].item()
+            # Use pre-fetched Python list to avoid per-iteration GPU->CPU sync
+            seq_start_offset = cu_seqlens_list[i]
             freq_slices.append(
                 _get_thd_freqs_on_this_cp_rank(
                     cp_rank, cp_size, x, freqs, seq_start_offset
@@ -340,11 +346,10 @@ def apply_rotary_pos_emb(
         cp_group (Group): Context parallel group
     """
     if config.apply_rope_fusion:
-        # Paddle fused_rope not support cu_seqlens or cp_group
-        if cu_seqlens:
-            raise NotImplementedError(
-                "cu_seqlens not be supported when using fused_rope"
-            )
+        if cu_seqlens is not None and sin is None and cos is None:
+            # fused_rope cannot compute per-segment positions from cu_seqlens
+            # alone; fall through to the unfused path below.
+            pass
         else:
             assert isinstance(t, tuple), (
                 "The input for fused_rope should be a tuple of tensors"
@@ -360,6 +365,31 @@ def apply_rotary_pos_emb(
             )
 
     # use unfused implementation
+    if cu_seqlens is not None and cos is not None and sin is not None:
+        # Fast path: precomputed cos/sin with packed sequences (e.g. VIT 2D RoPE).
+        # Skip the expensive thd loop and directly apply cos/sin.
+        rot_dim = cos.shape[-1]
+        t_rot, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+        # cos/sin: [seq_len, dim] -> broadcast to [1, seq_len, 1, dim] for bshd
+        if cos.ndim == 2:
+            cos = cos.unsqueeze(0).unsqueeze(2)
+            sin = sin.unsqueeze(0).unsqueeze(2)
+        with paddle.amp.auto_cast(False):
+            orig_dtype = t_rot.dtype
+            t_rot = t_rot.astype("float32")
+            cos = cos.astype("float32")
+            sin = sin.astype("float32")
+            t_rot = (t_rot * cos) + (
+                _rotate_half(
+                    t_rot, rotary_interleaved=config.rotary_interleaved
+                )
+                * sin
+            )
+            t_rot = t_rot.astype(orig_dtype)
+        if t_pass.shape[-1] > 0:
+            return paddle.cat((t_rot, t_pass), axis=-1)
+        return t_rot
+
     if cu_seqlens is None:
         return _apply_rotary_pos_emb_bshd(
             t,
