@@ -630,6 +630,13 @@ class MLASelfAttention(MultiLatentAttention):
                     axis=-1,
                 )
 
+                # When sequence_parallel is enabled and not packed,
+                # q/k are seq-first [s, b, n, d] but rotary_pos_emb is
+                # batch-first [1, s, 1, d]. Transpose to [s, 1, 1, d]
+                # so broadcasting aligns correctly in _apply_rotary_pos_emb_bshd.
+                if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
+                    rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
+
                 # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
                 q_pos_emb = apply_rotary_pos_emb(
                     q_pos_emb,

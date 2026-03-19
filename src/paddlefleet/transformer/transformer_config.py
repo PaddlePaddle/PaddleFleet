@@ -503,9 +503,6 @@ class TransformerConfig(ModelParallelConfig):
     rope_type: str = "yarn"
     """Type of RoPE to use. Default to yarn, options are rope and yarn."""
 
-    rotary_base: float = 10000
-    """Rotary base for the rotary embeddings, used by rope and yarn."""
-
     rotary_percent: float = 1.0
     """Rotary percent for the rotary embeddings, used by rope."""
 
