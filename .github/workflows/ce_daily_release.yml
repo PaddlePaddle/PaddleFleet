@@ -2,7 +2,7 @@ name: CE Daily Release
 
 on:
   schedule:
-    - cron: '0 19 * * *'
+    - cron: '0 20 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
@@ -229,7 +229,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 1
       matrix:
         include:
           - cuda: "12.6"
@@ -649,7 +649,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 1
       matrix:
         include:
           - cuda: "12.6"

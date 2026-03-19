@@ -2,7 +2,7 @@ name: CE Weekly Dev
 
 on:
   schedule:
-    - cron: '0 19 * * 0' # Weekly on Sunday at 19:00 for dev
+    - cron: '0 2 * * 0' # Weekly on Sunday at 19:00 for dev
   workflow_dispatch:
     inputs:
       use_release:
@@ -216,7 +216,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 1
       matrix:
         include:
           - cuda: "12.6"
@@ -593,7 +593,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 1
       matrix:
         include:
           - cuda: "12.6"
