@@ -386,12 +386,6 @@ class MLASelfAttention(MultiLatentAttention):
             f"hidden_states should be 3D, [b, s, n*h], got {hidden_states.ndim}D"
         )
 
-        if packed_seq_params is not None:
-            assert packed_seq_params.local_cp_size is None, (
-                "hybrid_context_parallel is not supported with MLA yet and is planned for future. "
-                "Please disable hybrid_context_parallel."
-            )
-
         # =========================================
         # Prepare RoPE and seqlen related params
         # =========================================
@@ -505,13 +499,13 @@ class MLASelfAttention(MultiLatentAttention):
                     k_pos_emb, group=self.pg_collection.tp
                 )
 
-        if packed_seq_params is not None:
-            # PaddleFleet batch-first: [b=1, t, h] -> squeeze dim0 (batch) -> [t, h]
-            # (SP seq-first: [t, b=1, h] -> squeeze dim1 (batch) -> [t, h])
-            batch_dim = 1 if self.config.sequence_parallel else 0
-            q_compressed = q_compressed.squeeze(batch_dim)
-            kv_compressed = kv_compressed.squeeze(batch_dim)
-            k_pos_emb = k_pos_emb.squeeze(batch_dim)
+        # if packed_seq_params is not None:
+        #     # PaddleFleet batch-first: [b=1, t, h] -> squeeze dim0 (batch) -> [t, h]
+        #     # (SP seq-first: [t, b=1, h] -> squeeze dim1 (batch) -> [t, h])
+        #     batch_dim = 1 if self.config.sequence_parallel else 0
+        #     q_compressed = q_compressed.squeeze(batch_dim)
+        #     kv_compressed = kv_compressed.squeeze(batch_dim)
+        #     k_pos_emb = k_pos_emb.squeeze(batch_dim)
 
         # =========================================
         # Apply norm
