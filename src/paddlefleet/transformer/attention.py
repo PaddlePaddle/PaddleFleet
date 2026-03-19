@@ -495,7 +495,7 @@ class SelfAttention(Attention):
                 * self.hidden_size_per_attention_head
             ),
         )
-        mixed_qkv = mixed_qkv.view(*new_tensor_shape)
+        mixed_qkv = mixed_qkv.reshape(*new_tensor_shape)
 
         split_arg_list = [
             (

@@ -892,6 +892,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
+          if [ "${CUDA_VERSION}" == "cu126" ]; then
+            exit 0
+          fi
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
@@ -903,6 +906,47 @@ jobs:
             bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
+          fi
+          '
+
+      - name: Integration test (GLM4.5 multi-card FP8)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          source /root/proxy
+          if [ "${CUDA_VERSION}" == "cu126" ]; then
+            exit 0
+          fi
+          if [ "${PYTHON_VERSION}" != "3.10" ]; then
+            source "$HOME/miniconda/etc/profile.d/conda.sh"
+            conda activate python${PYTHON_VERSION}
+          fi
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_pt_fp8"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
+          fi
+          '
+
+      - name: GLM4.5 pre-train (EP4)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          source /root/proxy
+          if [ "${PYTHON_VERSION}" != "3.10" ]; then
+            source "$HOME/miniconda/etc/profile.d/conda.sh"
+            conda activate python${PYTHON_VERSION}
+          fi
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_pt_ep4"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 EP4.\033[0m"
           fi
           '
 

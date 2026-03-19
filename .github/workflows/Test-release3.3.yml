@@ -1359,6 +1359,60 @@ jobs:
           diff-cover *.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
 
+      - name: Check full coverage
+        if: always()
+        run: |
+          echo "=== 全量覆盖率检查 ==="
+          python -m pip install coverage==7.6.1
+
+          # 定义所有覆盖率文件
+          COVERAGE_FILES=(
+            "multi_coverage.xml"
+            "single_coverage.xml"
+            "h20_multi_pt_coverage.xml"
+            "h20_multi_sft_coverage.xml"
+            "h20_multi_lora_coverage.xml"
+            "h20_multi_dpo_coverage.xml"
+            "h20_dpo_lora_coverage.xml"
+            "h20_multi_fp8_coverage.xml"
+            "h20_multi_grouped_gemm_coverage.xml"
+            "h20_multi_ep4_coverage.xml"
+            "h20_qwen_multi_pt_coverage.xml"
+            "h20_qwen_multi_sft_coverage.xml"
+            "h20_qwen_multi_lora_coverage.xml"
+            "h20_single_coverage.xml"
+            "h20_qwen_coverage.xml"
+            "a100_pt_coverage.xml"
+            "a100_sft_coverage.xml"
+            "a100_lora_coverage.xml"
+            "a100_dpo_coverage.xml"
+            "a100_dpo_lora_coverage.xml"
+            "a100_coverage-qwen-multi-pt.xml"
+            "a100_coverage-qwen-multi-sft.xml"
+            "a100_coverage-qwen-multi-lora.xml"
+            "h20_qwen3vl_sft_single_coverage.xml"
+            "a100_qwen3vl_moe_coverage.xml"
+            "a100_qwen3vl_lora_coverage.xml"
+            "a100_qwen3vl_sft_coverage.xml"
+            "h20_qwen3vl_sft_coverage.xml"
+            "h20_qwen3vl_lora_coverage.xml"
+            "h20_qwen3vl_moe_coverage.xml"
+            "h20_qwen3vl_fsdp_coverage.xml"
+          )
+
+          # 检查哪些文件存在
+          EXISTING_FILES=()
+          for FILE in "${COVERAGE_FILES[@]}"; do
+            if [ -f "$FILE" ]; then
+              EXISTING_FILES+=("$FILE")
+            fi
+          done
+
+          echo "找到 ${#EXISTING_FILES[@]} 个覆盖率文件"
+
+          # 使用脚本合并 XML 覆盖率文件并输出全量覆盖率报告
+          python ci/merge_and_check_coverage.py "${EXISTING_FILES[@]}" --report-only
+
       - name: filter coverage files and remove backup files
         if: always()
         run: |
