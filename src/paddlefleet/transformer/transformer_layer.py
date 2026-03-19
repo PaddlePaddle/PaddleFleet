@@ -531,6 +531,7 @@ class TransformerLayer(nn.Layer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
+        rope_freqs_cis: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
@@ -551,6 +552,7 @@ class TransformerLayer(nn.Layer):
             rotary_pos_emb (Tensor | None): Rotary positional embeddings.
             rotary_pos_cos (Tensor | None): Rotary embedding cosine.
             rotary_pos_sin (Tensor | None): Rotary embedding sine.
+            rope_freqs_cis (Tensor | None): Rotary embedding frequency.
             attention_bias (Tensor | None): Bias tensor for Q * K.T.
             packed_seq_params (object, optional): Parameters for packed sequence processing.
 
@@ -572,20 +574,30 @@ class TransformerLayer(nn.Layer):
         else:
             input_layernorm_output = self.input_layernorm(hidden_states)
 
-        # Self attention.
-        attention_output_with_bias = self.self_attn(
-            input_layernorm_output,
-            attention_mask=attention_mask,
-            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            position_ids=position_ids,
-            attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            in_recompute=in_recompute,
-        )
-
+        if rope_freqs_cis is not None:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rope_freqs_cis=rope_freqs_cis,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+            )
+        else:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+            )
         with paddle.enable_grad():
             hidden_states = self.self_attn_bda(
                 self.training, self.config.bias_dropout_fusion

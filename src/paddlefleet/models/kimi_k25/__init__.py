@@ -1,4 +1,4 @@
-# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,17 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .language_model_embedding import (
-    LanguageModelEmbedding as LanguageModelEmbedding,
-)
-from .rope_utils import (
-    apply_rotary_pos_emb as apply_rotary_pos_emb,
-)
-from .rotary_pos_embedding import (
-    MultimodalRotaryEmbedding as MultimodalRotaryEmbedding,
-    Rope2DPosEmbRepeated as Rope2DPosEmbRepeated,
-    RotaryEmbedding as RotaryEmbedding,
-)
-from .yarn_rotary_pos_embedding import (
-    YarnRotaryEmbedding as YarnRotaryEmbedding,
-)
+from .kimi_k25_model import KimiK25VisionModel
+
+__all__ = [
+    "KimiK25VisionModel",
+]

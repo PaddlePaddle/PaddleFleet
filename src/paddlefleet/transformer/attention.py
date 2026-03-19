@@ -230,6 +230,7 @@ class Attention(FleetLayer, ABC):
         rotary_pos_emb: Tensor | tuple[Tensor, Tensor] | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
+        rope_freqs_cis: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
@@ -291,7 +292,27 @@ class Attention(FleetLayer, ABC):
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
-        if rotary_pos_emb is not None:
+        if rope_freqs_cis is not None:
+            rope_freqs_cis = rope_freqs_cis.unsqueeze(-2)  # ..., 1, head_dim/2
+            # ..., num_heads, head_dim/2
+            query_ = paddle.view_as_complex(
+                query.float().view(*query.shape[:-1], -1, 2)
+            )
+            key_ = paddle.view_as_complex(
+                key.float().view(*key.shape[:-1], -1, 2)
+            )
+            query = (
+                paddle.view_as_real(query_ * rope_freqs_cis)
+                .flatten(-2)
+                .to(hidden_states.dtype)
+            )  # ..., num_heads, head_dim
+            key = (
+                paddle.view_as_real(key_ * rope_freqs_cis)
+                .flatten(-2)
+                .to(hidden_states.dtype)
+            )  # ..., num_heads, head_dim
+
+        elif rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
 
             if packed_seq_params is not None:
