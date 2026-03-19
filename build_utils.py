@@ -223,7 +223,7 @@ def get_special_build_deps():
         major = sys.version_info.major
         minor = sys.version_info.minor
         deps = [
-            "paddlepaddle-gpu==3.3.0.post20260302+4d13c2a11f8",
+            "paddlepaddle-gpu==3.3.0.post20260317+38eee703e79",
         ]
         if cuda_major == 12:
             deps.append(
@@ -269,7 +269,7 @@ def get_libs():
             ],
             extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
             if (cuda_major == 12 and cuda_minor < 8)
-            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0"},
+            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0;10.3"},
         ),
         EcosystemLibrary(
             name="sonic-moe",
