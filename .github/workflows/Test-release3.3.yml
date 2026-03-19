@@ -433,8 +433,9 @@ jobs:
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
-          git fetch origin pull/3930/head
-          git checkout FETCH_HEAD
+          if [ ${BRANCH} != "develop" ]; then
+            git checkout ${formers_branch}
+          fi
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
@@ -623,8 +624,9 @@ jobs:
           python -m pip install --upgrade pip
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
-          git fetch origin pull/3930/head
-          git checkout FETCH_HEAD
+          if [ ${BRANCH} != "develop" ]; then
+            git checkout ${formers_branch}
+          fi
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFormers
           git log -1
@@ -952,8 +954,9 @@ jobs:
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
-          git fetch origin pull/3930/head
-          git checkout FETCH_HEAD
+          if [ ${BRANCH} != "develop" ]; then
+            git checkout ${formers_branch}
+          fi
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
