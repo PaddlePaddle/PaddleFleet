@@ -216,7 +216,6 @@ class DotProductAttention(FleetLayer):
                         None,
                         self.config.attention_dropout,
                         is_causal=False,
-                        scale=self.softmax_scale,
                     )
                 )
             # [b,s,h_n,h_dim]
@@ -232,7 +231,6 @@ class DotProductAttention(FleetLayer):
             # is_causal is True in default
             # training is True in default
             # Default values above maybe changed in the future
-            attention_mask = attention_mask.to(dtype=query.dtype)
             attn_output = paddle.nn.functional.scaled_dot_product_attention(
                 query,
                 key,
@@ -241,7 +239,6 @@ class DotProductAttention(FleetLayer):
                 self.config.attention_dropout,
                 is_causal=True,
                 training=True,
-                scale=self.softmax_scale,
             )
 
             attn_output = paddle.reshape(
