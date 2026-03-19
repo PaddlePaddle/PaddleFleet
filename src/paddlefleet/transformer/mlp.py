@@ -144,7 +144,16 @@ class MLP(FleetLayer):
             tp_group=tp_group,
         )
 
-        self.hidden_act = self.config.hidden_act
+        # Ensure hidden_act is a callable function, not a bound method
+        hidden_act_value = self.config.hidden_act
+        if hasattr(hidden_act_value, "__self__") and hasattr(
+            hidden_act_value, "__func__"
+        ):
+            # If it's a bound method, use the unbound function
+            self.hidden_act = hidden_act_value.__func__
+        else:
+            self.hidden_act = hidden_act_value
+
         if self.config.gated_linear_unit:
             intermediate_size //= 2
 
