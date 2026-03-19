@@ -192,6 +192,7 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             hidden_states_concat = dict_args["hidden_states"]
             tensor_list = paddle.split(
@@ -205,6 +206,7 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             hidden_states_concat = paddle.concat(
                 [rst["hidden_states"], *tensor_list[1:]]

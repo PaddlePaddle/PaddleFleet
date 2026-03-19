@@ -369,6 +369,7 @@ class TransformerLayer(nn.Layer):
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
+            and not self.config.mtp_load_weight_only
         ):
             # process hidden_states
             hidden_states_concat = dict_args["hidden_states"]
@@ -461,6 +462,7 @@ class TransformerLayer(nn.Layer):
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
+            and not self.config.mtp_load_weight_only
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
@@ -808,6 +810,7 @@ class TransformerLayerNode(ScheduleNode):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             mtp_tmp_dict = {}
             for i in range(self.config.num_nextn_predict_layers):
@@ -895,6 +898,7 @@ class TransformerLayerNode(ScheduleNode):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             # maybe error, fix this by concat and split
             assert len(output_grad) == self.config.num_nextn_predict_layers + 1
@@ -987,6 +991,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             # maybe error, fix this by concat and split
             assert len(output_grad) == self.config.num_nextn_predict_layers + 1

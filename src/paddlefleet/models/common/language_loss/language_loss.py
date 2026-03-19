@@ -91,6 +91,7 @@ class LanguageLoss(FleetLayer):
             assert (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
+                and not self.config.mtp_load_weight_only
             )
             assert len(logits) == self.config.num_nextn_predict_layers + 1
             labels_ori = labels
