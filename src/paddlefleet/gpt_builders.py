@@ -20,8 +20,6 @@ from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_layers_spec,
     get_gpt_layer_local_spec,
-    get_gpt_layer_mhc_spec,
-    get_gpt_mhc_decoder_layers_spec,
     get_gpt_mtp_layers_spec,
     get_gpt_spec,
 )
@@ -40,15 +38,11 @@ def gpt_builder(config, **kwargs):
             print(
                 "    Using MHC (Manifold Constrained Hyper Connections) for residual connections"
             )
-            transformer_layers_spec = get_gpt_mhc_decoder_layers_spec(
-                config,
-                normalization=config.normalization,
-            )
-        else:
-            transformer_layers_spec = get_gpt_decoder_layers_spec(
-                config,
-                normalization=config.normalization,
-            )
+        transformer_layers_spec = get_gpt_decoder_layers_spec(
+            config,
+            normalization=config.normalization,
+            use_mhc=use_mhc,
+        )
     else:
         # Define the decoder layer spec for dense models
         transformer_layer_spec_func = _get_transformer_layer_spec_func(config)
@@ -135,23 +129,12 @@ def _get_transformer_layer_spec_func(config):
     """
     use_mhc = getattr(config, "use_mhc", False)
 
-    if use_mhc:
-        # Use MHC layer spec
-        return partial(
-            get_gpt_layer_mhc_spec,
-            config=config,
-            use_qk_norm=config.use_qk_norm,
-            num_experts=config.n_routed_experts,
-            multi_latent_attention=config.multi_latent_attention,
-            normalization=config.normalization,
-        )
-    else:
-        # Use standard layer spec
-        return partial(
-            get_gpt_layer_local_spec,
-            config=config,
-            use_qk_norm=config.use_qk_norm,
-            num_experts=config.n_routed_experts,
-            multi_latent_attention=config.multi_latent_attention,
-            normalization=config.normalization,
-        )
+    return partial(
+        get_gpt_layer_local_spec,
+        config=config,
+        use_qk_norm=config.use_qk_norm,
+        num_experts=config.n_routed_experts,
+        multi_latent_attention=config.multi_latent_attention,
+        normalization=config.normalization,
+        use_mhc=use_mhc,
+    )

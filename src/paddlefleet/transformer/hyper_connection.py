@@ -70,7 +70,15 @@ class HyperConnectionModule(nn.Layer):
         self.n = config.mhc_num_residual_streams
         self.hidden_size = config.hidden_size
         self.sinkhorn_iterations = config.mhc_sinkhorn_iters
-        self.use_triton = config.mhc_use_triton
+        # Environment variable override: MHC_USE_TRITON=0 forces native, =1 forces triton
+        import os
+
+        env_triton = os.environ.get("MHC_USE_TRITON", None)
+        if env_triton is not None:
+            self.use_triton = env_triton.lower() not in ("0", "false", "off")
+        else:
+            self.use_triton = config.mhc_use_triton
+        self._logged_backend = False
 
         # Parameter merging optimization: combined weight matrix
         # Total output dim: pre(N) + post(N) + res(N*N)
@@ -127,8 +135,18 @@ class HyperConnectionModule(nn.Layer):
             h_post: [s, b, n] - expansion weights for depth connection
         """
         if self.use_triton and TRITON_AVAILABLE:
+            if not self._logged_backend:
+                print(
+                    f"[MHC] layer={self.layer_number} using TRITON backend (use_triton={self.use_triton}, TRITON_AVAILABLE={TRITON_AVAILABLE})"
+                )
+                self._logged_backend = True
             return self._width_connection_triton(x, skip_sk_gradient)
         else:
+            if not self._logged_backend:
+                print(
+                    f"[MHC] layer={self.layer_number} using NATIVE backend (use_triton={self.use_triton}, TRITON_AVAILABLE={TRITON_AVAILABLE})"
+                )
+                self._logged_backend = True
             return self._width_connection_native(x)
 
     def _width_connection_native(

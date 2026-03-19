@@ -84,16 +84,21 @@ def get_gpt_layer_local_spec(
     normalization: str | None = None,
     qk_l2_norm: bool | None = False,
     layer_number: int | None = 1,
+    use_mhc: bool = False,
+    **kwargs,
 ) -> LayerSpec:
     """Use this spec for an implementation using only layers in Fleet-Core.
 
+    When use_mhc=True, uses TransformerLayerWithMHC with HyperConnectionModule
+    plugged via the layer spec system. Expand/contract of streams is handled
+    at the block level. Reference: https://arxiv.org/abs/2502.20358
 
     Args:
         num_experts (int, optional): Number of experts. Defaults to None.
         moe_grouped_gemm (bool, optional): To use Grouped GEMM. Defaults to False.
         use_qk_norm (bool, optional): To use layernorm for queries/keys. Defaults to False.
-        fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
         qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
+        use_mhc (bool, optional): To use Manifold-Constrained Hyper-Connections. Defaults to False.
 
     Returns:
         LayerSpec: Layer specification with Fleet-Core layers
@@ -113,157 +118,32 @@ def get_gpt_layer_local_spec(
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
     )
-    transformer_cls = getattr(config, "specific_layer", TransformerLayer)
-    if paddle.distributed.is_initialized():
-        use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
-            "pp_configs"
-        ].forward_backward_overlap_scheduler
-        if use_overlap:
-            assert transformer_cls.__name__ == TransformerLayer.__name__, (
-                "Only base TransformerLayer can be overlapped."
-            )
-            transformer_cls = TransformerLayerWithOverlap
 
-    if multi_latent_attention:
-        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-        return LayerSpec(
-            layer=transformer_cls,
-            sublayers_spec=TransformerLayerSublayersSpec(
-                input_layernorm=layer_norm,
-                self_attn=LayerSpec(
-                    layer=MLASelfAttention,
-                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
-                    sublayers_spec=MLASelfAttentionSublayersSpec(
-                        q_proj=backend.column_parallel_linear(),
-                        q_a_proj=backend.column_parallel_linear(),
-                        q_b_proj=backend.column_parallel_linear(),
-                        kv_a_proj_with_mqa=backend.column_parallel_linear(),
-                        kv_b_proj=backend.column_parallel_linear(),
-                        core_attention=backend.core_attention(),
-                        o_proj=backend.row_parallel_linear(),
-                        q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                        kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                    ),
-                ),
-                self_attn_bda=get_bias_dropout_add,
-                post_attention_layernorm=layer_norm,
-                mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
-            ),
-            extra_kwargs={
-                "config": config,
-                "layer_number": layer_number,
-                "hidden_dropout_prob": config.hidden_dropout_prob
-                if config is not None
-                else None,
-            },
-        )
+    if use_mhc:
+        transformer_cls = TransformerLayerWithMHC
+        # MHC is not compatible with overlap scheduler
+        if paddle.distributed.is_initialized():
+            use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
+                "pp_configs"
+            ].forward_backward_overlap_scheduler
+            if use_overlap:
+                raise ValueError(
+                    "Megatron-style MHC is not compatible with "
+                    "forward_backward_overlap_scheduler. Please disable one of them."
+                )
+        hc_module = HyperConnectionModule
     else:
-        return LayerSpec(
-            layer=transformer_cls,
-            sublayers_spec=TransformerLayerSublayersSpec(
-                input_layernorm=layer_norm,
-                self_attn=LayerSpec(
-                    layer=SelfAttention,
-                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
-                    sublayers_spec=SelfAttentionSublayersSpec(
-                        qkv_proj=backend.column_parallel_linear(),
-                        core_attention=backend.core_attention(),
-                        o_proj=backend.row_parallel_linear(),
-                        q_norm=(
-                            L2Norm
-                            if qk_l2_norm
-                            else (qk_norm if use_qk_norm else IdentityOp)
-                        ),
-                        k_norm=(
-                            L2Norm
-                            if qk_l2_norm
-                            else (qk_norm if use_qk_norm else IdentityOp)
-                        ),
-                    ),
-                ),
-                self_attn_bda=get_bias_dropout_add,
-                post_attention_layernorm=layer_norm,
-                mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
-                sharded_state_dict_keys_map={
-                    "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
-                    "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
-                },
-            ),
-            extra_kwargs={
-                "config": config,
-                "layer_number": layer_number,
-                "hidden_dropout_prob": config.hidden_dropout_prob
-                if config is not None
-                else None,
-            },
-        )
-
-
-def get_gpt_layer_mhc_spec(
-    config: TransformerConfig | None = None,
-    num_experts: int | None = None,
-    moe_grouped_gemm: bool | None = False,
-    use_qk_norm: bool | None = False,
-    multi_latent_attention: bool | None = False,
-    normalization: str | None = None,
-    qk_l2_norm: bool | None = False,
-    layer_number: int | None = 1,
-    **kwargs,
-) -> LayerSpec:
-    """
-    Layer spec for TransformerLayerWithMHC.
-
-    Uses HyperConnectionModule plugged via the layer spec system with flat
-    [s, b, n*C] tensor format. Expand/contract is handled at the block level.
-
-    Reference: https://arxiv.org/abs/2502.20358
-
-    Args:
-        config: TransformerConfig with MHC settings
-        num_experts: Number of experts for MoE layers
-        moe_grouped_gemm: Whether to use grouped GEMM for MoE
-        use_qk_norm: Whether to use layer norm for Q/K
-        multi_latent_attention: Whether to use multi-latent attention
-        normalization: Normalization type ("RMSNorm" or "LayerNorm")
-        qk_l2_norm: Whether to use L2 norm for Q/K
-        layer_number: Layer index
-
-    Returns:
-        LayerSpec: Layer specification for TransformerLayerWithMHC
-    """
-    backend = LocalSpecProvider()
-
-    # Adjust for RMS norm
-    if normalization == "RMSNorm":
-        layer_norm = backend.layer_norm(rms_norm=True, for_qk=False)
-        qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
-    else:
-        layer_norm = backend.layer_norm(rms_norm=False, for_qk=False)
-        qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
-
-    mlp = get_mlp_layer_spec_for_backend(
-        backend=backend,
-        num_experts=num_experts,
-        moe_grouped_gemm=moe_grouped_gemm,
-    )
-
-    # Use TransformerLayerWithMHC as the layer class
-    transformer_cls = TransformerLayerWithMHC
-
-    # MHC is not compatible with overlap scheduler
-    if paddle.distributed.is_initialized():
-        use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
-            "pp_configs"
-        ].forward_backward_overlap_scheduler
-        if use_overlap:
-            raise ValueError(
-                "Megatron-style MHC is not compatible with "
-                "forward_backward_overlap_scheduler. Please disable one of them."
-            )
-
-    hc_module = HyperConnectionModule
+        transformer_cls = getattr(config, "specific_layer", TransformerLayer)
+        if paddle.distributed.is_initialized():
+            use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
+                "pp_configs"
+            ].forward_backward_overlap_scheduler
+            if use_overlap:
+                assert transformer_cls.__name__ == TransformerLayer.__name__, (
+                    "Only base TransformerLayer can be overlapped."
+                )
+                transformer_cls = TransformerLayerWithOverlap
+        hc_module = IdentityOp
 
     if multi_latent_attention:
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
@@ -346,81 +226,8 @@ def get_gpt_layer_mhc_spec(
         )
 
 
-def get_gpt_mhc_decoder_layers_spec(
-    config: TransformerConfig,
-    normalization: str | None = None,
-    qk_l2_norm: bool | None = False,
-) -> list[LayerSpec]:
-    """
-    GPT decoder layers spec with MHC.
-
-    Uses TransformerLayerWithMHC with HyperConnectionModule.
-    Expand/contract of streams is handled at the block level.
-
-    Args:
-        config: TransformerConfig with MHC settings
-        normalization: Normalization type
-        qk_l2_norm: Whether to use L2 norm for Q/K
-
-    Returns:
-        list[LayerSpec]: List of layer specifications with MHC
-    """
-    dense_layer_spec_func = partial(
-        get_gpt_layer_mhc_spec,
-        config=config,
-        num_experts=None,
-        moe_grouped_gemm=False,
-        use_qk_norm=config.use_qk_norm,
-        multi_latent_attention=config.multi_latent_attention,
-        normalization=normalization,
-        qk_l2_norm=qk_l2_norm,
-    )
-
-    moe_layer_spec_func = partial(
-        get_gpt_layer_mhc_spec,
-        config=config,
-        num_experts=config.n_routed_experts,
-        moe_grouped_gemm=config.moe_grouped_gemm,
-        use_qk_norm=config.use_qk_norm,
-        multi_latent_attention=config.multi_latent_attention,
-        normalization=normalization,
-        qk_l2_norm=qk_l2_norm,
-    )
-
-    # Parse config.moe_layer_freq to determine the pattern of expert/dense layers
-    if isinstance(config.moe_layer_freq, int):
-        moe_layer_pattern = [
-            1 if (i % config.moe_layer_freq == 0) else 0
-            for i in range(config.num_hidden_layers)
-        ]
-    elif isinstance(config.moe_layer_freq, list):
-        moe_layer_pattern = config.moe_layer_freq
-        assert len(moe_layer_pattern) == config.num_hidden_layers, (
-            f"Invalid length of moe_layer_pattern: {len(moe_layer_pattern)}, "
-            f"expected {config.num_hidden_layers}"
-        )
-    else:
-        raise ValueError(
-            f"Invalid moe_layer_freq: {type(config.moe_layer_freq)}, {config.moe_layer_freq}"
-        )
-
-    # Create the layer specs for the model
-    layer_specs = []
-    num_layers = config.num_hidden_layers
-    for layer_number in range(num_layers):
-        real_layer_number = layer_number + config.num_empty_layers_add_in_head
-        if moe_layer_pattern[layer_number] == 1:
-            layer_specs.append(
-                moe_layer_spec_func(layer_number=real_layer_number)
-            )
-        elif moe_layer_pattern[layer_number] == 0:
-            layer_specs.append(
-                dense_layer_spec_func(layer_number=real_layer_number)
-            )
-        else:
-            raise ValueError(f"Invalid layer pattern: {moe_layer_pattern}")
-
-    return layer_specs
+# Backward-compatible alias
+get_gpt_layer_mhc_spec = partial(get_gpt_layer_local_spec, use_mhc=True)
 
 
 def get_mlp_layer_spec_for_backend(
@@ -461,8 +268,21 @@ def get_gpt_decoder_layers_spec(
     config: TransformerConfig,
     normalization: str | None = None,
     qk_l2_norm: bool | None = False,
+    use_mhc: bool = False,
 ) -> list[LayerSpec]:
-    """GPT block spec."""
+    """GPT block spec.
+
+    When use_mhc=True, uses TransformerLayerWithMHC with HyperConnectionModule.
+
+    Args:
+        config: TransformerConfig
+        normalization: Normalization type
+        qk_l2_norm: Whether to use L2 norm for Q/K
+        use_mhc: Whether to use Manifold-Constrained Hyper-Connections
+
+    Returns:
+        list[LayerSpec]: List of layer specifications
+    """
     dense_layer_spec_func = partial(
         get_gpt_layer_local_spec,
         config=config,
@@ -472,6 +292,7 @@ def get_gpt_decoder_layers_spec(
         multi_latent_attention=config.multi_latent_attention,
         normalization=normalization,
         qk_l2_norm=qk_l2_norm,
+        use_mhc=use_mhc,
     )
 
     moe_layer_spec_func = partial(
@@ -483,6 +304,7 @@ def get_gpt_decoder_layers_spec(
         multi_latent_attention=config.multi_latent_attention,
         normalization=normalization,
         qk_l2_norm=qk_l2_norm,
+        use_mhc=use_mhc,
     )
 
     # Parse config.moe_layer_freq to determine the pattern of expert/dense layers.
@@ -522,6 +344,12 @@ def get_gpt_decoder_layers_spec(
             raise ValueError(f"Invalid layer pattern: {moe_layer_pattern}")
 
     return layer_specs
+
+
+# Backward-compatible alias
+get_gpt_mhc_decoder_layers_spec = partial(
+    get_gpt_decoder_layers_spec, use_mhc=True
+)
 
 
 def get_gpt_mtp_layers_spec(
