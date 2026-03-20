@@ -276,12 +276,24 @@ def _apply_rotary_pos_emb_thd(
     #    -> Use traditional mapping without offsets (map first :seqlen part)
     if freqs.dim() >= 1 and freqs.size(1) == cu_seqlens[-1]:
         # CASE 1: Exact mapping with offsets
+        # When cp_size==1, every per-segment slice concatenates back to the original freqs.
+        # Skip the split+cat and call bshd directly with the original freqs.
+        if cp_size == 1:
+            return _apply_rotary_pos_emb_bshd(
+                t,
+                freqs,
+                rotary_interleaved=rotary_interleaved,
+                multi_latent_attention=multi_latent_attention,
+                mscale=mscale,
+                high_precision_rope=high_precision_rope,
+            )
         # Build packed freqs in one pass, then apply once to the whole packed tensor
+        cu_seqlens_list = cu_seqlens.tolist()
         sequence_splits = paddle.split(t, seqlens, axis=1 if t.ndim == 4 else 0)
         freq_slices = []
         for i, x in enumerate(sequence_splits):
             # cu_seqlens[i] is the starting offset of this sequence in the original batch
-            seq_start_offset = cu_seqlens[i].item()
+            seq_start_offset = cu_seqlens_list[i]
             freq_slices.append(
                 _get_thd_freqs_on_this_cp_rank(
                     cp_rank, cp_size, x, freqs, seq_start_offset
