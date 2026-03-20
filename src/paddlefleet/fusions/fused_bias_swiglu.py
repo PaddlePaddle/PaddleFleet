@@ -256,7 +256,7 @@ def bias_swiglu_impl(
     """
     ori_shape = input.shape
     assert len(ori_shape) in [2, 3]
-    input = input.view(-1, ori_shape[-1])
+    input = input.reshape(-1, ori_shape[-1])
     if bias is not None:
         output = BiasSwiGLUFunction.apply(
             input, bias, fp8_input_store, cpu_offload_input
@@ -267,7 +267,7 @@ def bias_swiglu_impl(
     return (
         output
         if len(ori_shape) == 2
-        else output.view(ori_shape[0], ori_shape[1], -1)
+        else output.reshape(ori_shape[0], ori_shape[1], -1)
     )
 
 
