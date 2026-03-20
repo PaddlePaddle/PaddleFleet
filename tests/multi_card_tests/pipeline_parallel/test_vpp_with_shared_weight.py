@@ -83,6 +83,7 @@ class TestDistVppTraining(unittest.TestCase):
         }
         strategy.hybrid_configs["pp_configs"].sync_moment = True
         strategy.hybrid_configs["pp_configs"].sync_param = True
+        strategy.hybrid_configs["pp_configs"].delay_scale_loss = True
         self.strategy = strategy
 
         fleet.init(is_collective=True, strategy=strategy)

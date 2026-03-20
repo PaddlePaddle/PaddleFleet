@@ -193,6 +193,7 @@ class TestDistEmbeddingTraining(unittest.TestCase):
             "micro_batch_size": micro_batch_size,
         }
         strategy.hybrid_configs["pp_configs"].clear_every_step_cache = True
+        strategy.hybrid_configs["pp_configs"].delay_scale_loss = True
         self.strategy = strategy
 
         fleet.init(is_collective=True, strategy=strategy)

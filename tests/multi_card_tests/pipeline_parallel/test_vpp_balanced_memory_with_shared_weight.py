@@ -76,7 +76,10 @@ class TestDistVppTraining(unittest.TestCase):
             "dp_degree": self.data_parallel_size,
             "mp_degree": self.model_parallel_size,
             "pp_degree": self.pipeline_parallel_size,
-            "pp_configs": {"best_unbalanced_scheduler": True},
+            "pp_configs": {
+                "best_unbalanced_scheduler": True,
+                "delay_scale_loss": True,
+            },
         }
         strategy.pipeline_configs = {
             "accumulate_steps": batch_size // micro_batch_size,
