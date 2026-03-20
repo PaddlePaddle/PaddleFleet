@@ -169,7 +169,9 @@ def get_mtp_layer_spec_for_backend(
     column_parallel_linear_impl: type = backend.column_parallel_linear()
     layer_norm_impl: type = backend.layer_norm()
     mtp_layer_spec = LayerSpec(
-        layer=MultiTokenPredictionLayer,
+        layer=WeightOnlyMTPLayer
+        if config.mtp_load_weight_only
+        else MultiTokenPredictionLayer,
         sublayers_spec=MultiTokenPredictionLayerSublayersSpec(
             enorm=layer_norm_impl,
             hnorm=layer_norm_impl,
@@ -491,3 +493,19 @@ class MultiTokenPredictionLayer(FleetLayer):
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="MultiTokenPredictionLayer")
+
+
+class WeightOnlyMTPLayer(MultiTokenPredictionLayer):
+    """MTP layer that only holds weights without participating in forward computation."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for _, param in self.state_dict().items():
+            param.is_weight_only_mtp = True
+            param.stop_gradient = True
+
+    def forward(self, dict_args: dict):
+        return dict_args
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="WeightOnlyMTPLayer")
