@@ -232,7 +232,8 @@ class DotProductAttention(FleetLayer):
             # is_causal is True in default
             # training is True in default
             # Default values above maybe changed in the future
-            attention_mask = attention_mask.to(dtype=query.dtype)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(dtype=query.dtype)
             attn_output = paddle.nn.functional.scaled_dot_product_attention(
                 query,
                 key,
