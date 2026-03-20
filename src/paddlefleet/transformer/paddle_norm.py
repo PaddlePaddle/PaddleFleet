@@ -210,8 +210,6 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
                 [rst["hidden_states"], *tensor_list[1:]]
             )
             rst["hidden_states"] = hidden_states_concat
-
-        rst = {**dict_args, **rst}
         return rst
 
     def build_schedule_node(self):
