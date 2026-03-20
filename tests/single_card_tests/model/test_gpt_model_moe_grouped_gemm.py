@@ -181,7 +181,7 @@ class TestGPTModel(unittest.TestCase):
         repo_name = os.environ.get("repo_flag")
         if judge_machine_type() == "H":
             if version == 13:
-                assert loss.item() == 5.4003071784973145, (
+                assert loss.item() == 5.239149570465088, (
                     f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
                 )
                 assert embed_tokens_grad_norm == 2.796875, (
@@ -196,8 +196,8 @@ class TestGPTModel(unittest.TestCase):
                         f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
                     )
                 else:  # 12.9
-                    assert loss.item() == 5.239149570465088, (
-                        f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
+                    assert loss.item() == 5.4003071784973145, (
+                        f"loss not equal ({loss.item()} != 5.4003071784973145), please check your modify"
                     )
                     assert embed_tokens_grad_norm == 2.796875, (
                         f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"

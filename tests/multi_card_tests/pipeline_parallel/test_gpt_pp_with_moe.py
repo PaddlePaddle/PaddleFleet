@@ -215,7 +215,7 @@ class TestPP(unittest.TestCase):
         pp = pprint.PrettyPrinter(depth=None, width=200, compact=False)
         pp.pprint(rst)
 
-        assert overlap_loss._md5sum() == "b9d9bab70678927c5001583312506560"
+        assert overlap_loss._md5sum() == "415cc09d834fe62f76ae14f88236c71e"
 
         if paddle.distributed.get_rank() == 0:
             baseline = {

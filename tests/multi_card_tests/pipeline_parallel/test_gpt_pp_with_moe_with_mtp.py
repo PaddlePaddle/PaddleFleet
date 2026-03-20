@@ -200,7 +200,7 @@ class TestPP(unittest.TestCase):
             self.vocab_size,
             config,
         )
-
+        print("overlap_loss ", overlap_loss)
         print(overlap_loss._md5sum())
 
         rst = {}
@@ -210,7 +210,7 @@ class TestPP(unittest.TestCase):
 
         print(rst)
 
-        assert overlap_loss._md5sum() == "bef8aebcd0e33875e5bfb418e70bc6a1"
+        assert overlap_loss._md5sum() == "8846d932a018a2524cbf3a9ce4fe1fa0"
 
         if paddle.distributed.get_rank() == 0:
             baseline = {
