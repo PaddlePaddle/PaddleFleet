@@ -166,6 +166,7 @@ jobs:
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+          pip install protobuf==7.34.0 --extra-index-url=https://pypi.tuna.tsinghua.edu.cn/simple
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -327,6 +328,7 @@ jobs:
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+          pip install protobuf==7.34.0 --extra-index-url=https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "Paddle Commit"
@@ -498,6 +500,7 @@ jobs:
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
           pip install librosa==0.11.0
+          pip install protobuf==7.34.0 --extra-index-url=https://pypi.tuna.tsinghua.edu.cn/simple
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -722,6 +725,7 @@ jobs:
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
           pip install librosa==0.11.0
+          pip install protobuf==7.34.0 --extra-index-url=https://pypi.tuna.tsinghua.edu.cn/simple
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -1135,6 +1139,7 @@ jobs:
           pip install bce-python-sdk==0.8.74
           pip install coverage==7.6.1
           pip install librosa==0.11.0
+          pip install protobuf==7.34.0 --extra-index-url=https://pypi.tuna.tsinghua.edu.cn/simple
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
