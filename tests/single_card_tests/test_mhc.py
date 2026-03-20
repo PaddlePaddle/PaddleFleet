@@ -802,6 +802,160 @@ def test_gpt_layer_mhc_spec_overlap_raises():
         assert spec is not None
 
 
+def test_gpt_layer_spec_overlap_scheduler_compatibility():
+    """Test overlap scheduler compatibility check for both MHC and non-MHC paths."""
+    import paddle.distributed as dist
+
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+    from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+    from paddlefleet.transformer.identity_op import IdentityOp
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayer,
+        TransformerLayerWithMHC,
+    )
+
+    # Test 1: Without distributed, MHC path should return correct classes
+    if not dist.is_initialized():
+        cfg_mhc = MockTransformerConfig(use_mhc=True)
+        spec_mhc = get_gpt_layer_local_spec(
+            config=cfg_mhc,
+            normalization="RMSNorm",
+            layer_number=1,
+            use_mhc=True,
+        )
+        assert spec_mhc.layer == TransformerLayerWithMHC
+        # Check sublayers_spec has HyperConnectionModule for hyper_connection slots
+        assert (
+            spec_mhc.sublayers_spec.self_attention_hyper_connection
+            == HyperConnectionModule
+        )
+        assert (
+            spec_mhc.sublayers_spec.mlp_hyper_connection
+            == HyperConnectionModule
+        )
+
+    # Test 2: Without distributed, non-MHC path should return correct classes
+    if not dist.is_initialized():
+        cfg_no_mhc = MockTransformerConfig(use_mhc=False)
+        spec_no_mhc = get_gpt_layer_local_spec(
+            config=cfg_no_mhc,
+            normalization="RMSNorm",
+            layer_number=1,
+            use_mhc=False,
+        )
+        assert spec_no_mhc.layer == TransformerLayer
+        # Check sublayers_spec has IdentityOp for hyper_connection slots
+        assert (
+            spec_no_mhc.sublayers_spec.self_attention_hyper_connection
+            == IdentityOp
+        )
+        assert spec_no_mhc.sublayers_spec.mlp_hyper_connection == IdentityOp
+
+
+def test_gpt_layer_spec_overlap_with_mock_distributed():
+    """Test overlap scheduler check with mocked distributed environment."""
+    from unittest.mock import MagicMock, patch
+
+    from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayer,
+        TransformerLayerWithMHC,
+        TransformerLayerWithOverlap,
+    )
+
+    # Mock fleet config with overlap scheduler enabled
+    mock_pp_configs = MagicMock()
+    mock_pp_configs.forward_backward_overlap_scheduler = True
+    mock_hybrid_configs = {"pp_configs": mock_pp_configs}
+    mock_strategy = MagicMock()
+    mock_strategy.hybrid_configs = mock_hybrid_configs
+    mock_fleet = MagicMock()
+    mock_fleet._user_defined_strategy = mock_strategy
+
+    # Test 1: MHC + overlap should raise ValueError
+    with (
+        patch("paddle.distributed.is_initialized", return_value=True),
+        patch("paddle.distributed.fleet.fleet", mock_fleet),
+    ):
+        cfg_mhc = MockTransformerConfig(use_mhc=True)
+        with pytest.raises(ValueError, match="MHC is not compatible"):
+            get_gpt_layer_local_spec(
+                config=cfg_mhc,
+                normalization="RMSNorm",
+                layer_number=1,
+                use_mhc=True,
+            )
+
+    # Test 2: Non-MHC + overlap with base TransformerLayer should use Overlap
+    with (
+        patch("paddle.distributed.is_initialized", return_value=True),
+        patch("paddle.distributed.fleet.fleet", mock_fleet),
+    ):
+        cfg_no_mhc = MockTransformerConfig(use_mhc=False)
+        spec = get_gpt_layer_local_spec(
+            config=cfg_no_mhc,
+            normalization="RMSNorm",
+            layer_number=1,
+            use_mhc=False,
+        )
+        assert spec.layer == TransformerLayerWithOverlap
+
+    # Test 3: Non-MHC + overlap with custom layer should raise AssertionError
+    with (
+        patch("paddle.distributed.is_initialized", return_value=True),
+        patch("paddle.distributed.fleet.fleet", mock_fleet),
+    ):
+
+        class CustomTransformerLayer:
+            pass
+
+        cfg_custom = MockTransformerConfig(use_mhc=False)
+        cfg_custom.specific_layer = CustomTransformerLayer
+        with pytest.raises(AssertionError, match="Only base TransformerLayer"):
+            get_gpt_layer_local_spec(
+                config=cfg_custom,
+                normalization="RMSNorm",
+                layer_number=1,
+                use_mhc=False,
+            )
+
+    # Test 4: Without overlap, MHC should work with distributed
+    mock_pp_configs_no_overlap = MagicMock()
+    mock_pp_configs_no_overlap.forward_backward_overlap_scheduler = False
+    mock_hybrid_configs_no_overlap = {"pp_configs": mock_pp_configs_no_overlap}
+    mock_strategy_no_overlap = MagicMock()
+    mock_strategy_no_overlap.hybrid_configs = mock_hybrid_configs_no_overlap
+    mock_fleet_no_overlap = MagicMock()
+    mock_fleet_no_overlap._user_defined_strategy = mock_strategy_no_overlap
+
+    with (
+        patch("paddle.distributed.is_initialized", return_value=True),
+        patch("paddle.distributed.fleet.fleet", mock_fleet_no_overlap),
+    ):
+        cfg_mhc = MockTransformerConfig(use_mhc=True)
+        spec = get_gpt_layer_local_spec(
+            config=cfg_mhc,
+            normalization="RMSNorm",
+            layer_number=1,
+            use_mhc=True,
+        )
+        assert spec.layer == TransformerLayerWithMHC
+
+    # Test 5: Without overlap, non-MHC should keep original layer
+    with (
+        patch("paddle.distributed.is_initialized", return_value=True),
+        patch("paddle.distributed.fleet.fleet", mock_fleet_no_overlap),
+    ):
+        cfg_no_mhc = MockTransformerConfig(use_mhc=False)
+        spec = get_gpt_layer_local_spec(
+            config=cfg_no_mhc,
+            normalization="RMSNorm",
+            layer_number=1,
+            use_mhc=False,
+        )
+        assert spec.layer == TransformerLayer
+
+
 # =============================================================================
 # 5. MHC Integration tests
 # =============================================================================
@@ -1026,3 +1180,309 @@ def test_transformer_layer_mhc_with_recompute_variants(recompute_modules):
     hidden = paddle.randn([4, 2, N * C])
     result = layer(_base_dict_args(hidden, C=N * C))
     assert "hidden_states" in result
+
+
+# =============================================================================
+# 8. TransformerBlock MHC tests (lines 29, 253-255, 275-276)
+# =============================================================================
+
+
+def test_transformer_block_mhc_expand_contract():
+    """TransformerBlock with use_mhc=True: expand on pre_process, contract on post_process.
+
+    Tests lines 253-255 (expand) and 275-276 (contract) in transformer_block.py.
+    """
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_block import (
+        TransformerBlockSublayersSpec,
+    )
+
+    # Create config with MHC enabled
+    config = MockTransformerConfig(
+        hidden_size=64,
+        num_attention_heads=4,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        use_mhc=True,
+        mhc_num_residual_streams=4,
+        mhc_sinkhorn_iters=10,
+    )
+
+    # Create dummy layer specs that accept **kw and return (hidden_states, context)
+    class DummyTransformerLayer(paddle.nn.Layer):
+        def __init__(self, config=None, **kwargs):
+            super().__init__()
+
+        def forward(self, **kw):
+            hs = kw.get("hidden_states")
+            return hs, None
+
+    layer_specs = [
+        LayerSpec(DummyTransformerLayer)
+        for _ in range(config.num_hidden_layers)
+    ]
+    sublayers_spec = TransformerBlockSublayersSpec(
+        layer_specs=layer_specs,
+        layer_norm=None,
+    )
+
+    block = _make_transformer_block(
+        config=config,
+        sublayers_spec=sublayers_spec,
+        pre_process=True,
+        post_process=True,
+        post_layer_norm=False,
+    )
+    block.eval()
+
+    # Input: [s, b, C] - will be expanded to [s, b, n*C] in pre_process
+    s, b, C, n = 4, 1, 64, 4
+    hidden = paddle.randn([s, b, C])
+
+    # Forward pass - tests lines 253-257 (expand) and 275-278 (contract)
+    output = block(hidden_states=hidden, attention_mask=None)
+
+    # Output should be [s, b, C] after contraction
+    assert output.shape == [s, b, C], (
+        f"Expected {[s, b, C]}, got {output.shape}"
+    )
+
+
+def test_transformer_block_mhc_no_pre_post_process():
+    """TransformerBlock with use_mhc but pre_process=False and post_process=False.
+
+    Tests the code paths where MHC expand/contract are skipped.
+    """
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_block import (
+        TransformerBlockSublayersSpec,
+    )
+
+    config = MockTransformerConfig(
+        hidden_size=64,
+        num_attention_heads=4,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        use_mhc=True,
+        mhc_num_residual_streams=4,
+    )
+
+    class DummyTransformerLayer(paddle.nn.Layer):
+        def __init__(self, config=None, **kwargs):
+            super().__init__()
+
+        def forward(self, **kw):
+            hs = kw.get("hidden_states")
+            return hs, None
+
+    layer_specs = [
+        LayerSpec(DummyTransformerLayer)
+        for _ in range(config.num_hidden_layers)
+    ]
+    sublayers_spec = TransformerBlockSublayersSpec(
+        layer_specs=layer_specs,
+        layer_norm=None,
+    )
+
+    block = _make_transformer_block(
+        config=config,
+        sublayers_spec=sublayers_spec,
+        pre_process=False,
+        post_process=False,
+        post_layer_norm=False,
+    )
+    block.eval()
+
+    # When pre_process=False, block uses input_tensor instead
+    s, b, C, n = 4, 1, 64, 4
+    # Input already expanded since pre_process=False
+    hidden = paddle.randn([s, b, n * C])
+    block.set_input_tensor(hidden)
+
+    output = block(hidden_states=paddle.zeros([1]), attention_mask=None)
+
+    # Output should remain [s, b, n*C] since post_process=False (no contraction)
+    assert output.shape == [s, b, n * C], (
+        f"Expected {[s, b, n * C]}, got {output.shape}"
+    )
+
+
+def test_transformer_block_mhc_with_norm():
+    """TransformerBlock with norm layer (covers lines 178, 282).
+
+    Tests norm layer building and application.
+    """
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_block import (
+        TransformerBlockSublayersSpec,
+    )
+
+    config = MockTransformerConfig(
+        hidden_size=64,
+        num_attention_heads=4,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        use_mhc=True,
+        mhc_num_residual_streams=4,
+    )
+
+    class DummyTransformerLayer(paddle.nn.Layer):
+        def __init__(self, config=None, **kwargs):
+            super().__init__()
+
+        def forward(self, **kw):
+            hs = kw.get("hidden_states")
+            return hs, None
+
+    class DummyNorm(paddle.nn.Layer):
+        def __init__(self, config=None, hidden_size=None, eps=None, **kwargs):
+            super().__init__()
+
+        def forward(self, x):
+            return x * 1.0  # Identity-like but different object
+
+    layer_specs = [
+        LayerSpec(DummyTransformerLayer)
+        for _ in range(config.num_hidden_layers)
+    ]
+    sublayers_spec = TransformerBlockSublayersSpec(
+        layer_specs=layer_specs,
+        layer_norm=DummyNorm,  # Use DummyNorm class, not LayerSpec
+    )
+
+    # Build block with real build_layer for norm
+    block = _make_transformer_block(
+        config=config,
+        sublayers_spec=sublayers_spec,
+        pre_process=True,
+        post_process=True,
+        post_layer_norm=True,
+    )
+    block.eval()
+
+    # Verify norm was built
+    assert block.norm is not None
+
+    s, b, C = 4, 1, 64
+    hidden = paddle.randn([s, b, C])
+    output = block(hidden_states=hidden, attention_mask=None)
+    assert output.shape == [s, b, C]
+
+
+def test_transformer_block_get_layer():
+    """Test _get_layer method (covers line 188)."""
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_block import (
+        TransformerBlockSublayersSpec,
+    )
+
+    config = MockTransformerConfig(
+        hidden_size=64,
+        num_hidden_layers=2,
+        use_mhc=True,
+        mhc_num_residual_streams=4,
+    )
+
+    class DummyTransformerLayer(paddle.nn.Layer):
+        def __init__(self, config=None, **kwargs):
+            super().__init__()
+
+        def forward(self, **kw):
+            return kw.get("hidden_states"), None
+
+    layer_specs = [
+        LayerSpec(DummyTransformerLayer)
+        for _ in range(config.num_hidden_layers)
+    ]
+    sublayers_spec = TransformerBlockSublayersSpec(
+        layer_specs=layer_specs,
+        layer_norm=None,
+    )
+
+    block = _make_transformer_block(
+        config=config,
+        sublayers_spec=sublayers_spec,
+    )
+
+    # Test _get_layer method
+    layer0 = block._get_layer(0)
+    layer1 = block._get_layer(1)
+    assert layer0 is not None
+    assert layer1 is not None
+    assert layer0 is not layer1
+
+
+def test_transformer_block_wrapped_tensor():
+    """Test WrappedTensor handling (covers line 242)."""
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_block import (
+        TransformerBlockSublayersSpec,
+    )
+    from paddlefleet.utils import WrappedTensor
+
+    config = MockTransformerConfig(
+        hidden_size=64,
+        num_hidden_layers=2,
+        use_mhc=True,
+        mhc_num_residual_streams=4,
+    )
+
+    class DummyTransformerLayer(paddle.nn.Layer):
+        def __init__(self, config=None, **kwargs):
+            super().__init__()
+
+        def forward(self, **kw):
+            return kw.get("hidden_states"), None
+
+    layer_specs = [
+        LayerSpec(DummyTransformerLayer)
+        for _ in range(config.num_hidden_layers)
+    ]
+    sublayers_spec = TransformerBlockSublayersSpec(
+        layer_specs=layer_specs,
+        layer_norm=None,
+    )
+
+    block = _make_transformer_block(
+        config=config,
+        sublayers_spec=sublayers_spec,
+        pre_process=True,
+        post_process=True,
+    )
+    block.eval()
+
+    s, b, C = 4, 1, 64
+    hidden = paddle.randn([s, b, C])
+    # Wrap the tensor
+    wrapped_hidden = WrappedTensor(hidden)
+
+    # Forward with WrappedTensor - should unwrap automatically
+    output = block(hidden_states=wrapped_hidden, attention_mask=None)
+    assert output.shape == [s, b, C]
+
+
+def test_transformer_block_from_layer_spec():
+    """Test TransformerBlock with LayerSpec(TransformerLayer) (covers lines 100-104)."""
+    from paddlefleet.spec_utils import LayerSpec
+    from paddlefleet.transformer.transformer_block import (
+        _get_block_sublayers_spec,
+    )
+    from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+    config = MockTransformerConfig(
+        hidden_size=64,
+        num_hidden_layers=2,
+        use_mhc=True,
+        mhc_num_residual_streams=4,
+    )
+
+    # Create a LayerSpec with TransformerLayer
+    layer_spec = LayerSpec(TransformerLayer)
+
+    # This should trigger lines 100-104 in _get_block_sublayers_spec
+    result = _get_block_sublayers_spec(config, layer_spec)
+
+    # Verify the result
+    assert result.layer_specs is not None
+    assert len(result.layer_specs) == config.num_hidden_layers
+    assert result.layer_norm is not None

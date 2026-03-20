@@ -35,11 +35,91 @@ from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
 from .triton_mhc import (
     TRITON_AVAILABLE,
     WidthConnectionLayerTriton,
-    sinkhorn_knopp,
 )
 
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+class SinkhornKnopp(paddle.autograd.PyLayer):
+    """
+    Differentiable Sinkhorn-Knopp algorithm for doubly stochastic projection.
+
+    Projects a positive matrix onto the Birkhoff polytope (doubly stochastic matrices)
+    via iterative row and column normalization.
+
+    Reference: Eq. (9) in mHC paper - M^{(t)} = T_c(T_r(M^{(t-1)}))
+    """
+
+    eps = 1e-6
+
+    @staticmethod
+    def _sinkhorn_knopp(M: Tensor, num_iterations: int) -> Tensor:
+        """
+        Apply Sinkhorn-Knopp normalization iterations.
+
+        Args:
+            M: [s, b, n, n] - positive matrix to normalize
+            num_iterations: Number of Sinkhorn iterations
+
+        Returns:
+            M: [s, b, n, n] - doubly stochastic matrix
+        """
+        for _ in range(num_iterations):
+            # T_r: Row normalization
+            M = M / M.sum(axis=-1, keepdim=True).clip(min=SinkhornKnopp.eps)
+            # T_c: Column normalization
+            M = M / M.sum(axis=-2, keepdim=True).clip(min=SinkhornKnopp.eps)
+        return M
+
+    @staticmethod
+    def forward(ctx, H_res_logits: Tensor, num_iterations: int) -> Tensor:
+        """
+        Project to doubly stochastic matrix via iterative row/col normalization.
+
+        Args:
+            H_res_logits: [s, b, n, n] - raw logits for residual mixing matrix
+            num_iterations: Number of Sinkhorn iterations (paper uses 20)
+
+        Returns:
+            H_res: [s, b, n, n] - doubly stochastic matrix
+        """
+        # Stabilized exp: subtract row-wise max to prevent overflow
+        M_init = paddle.exp(
+            H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+        )
+
+        M = SinkhornKnopp._sinkhorn_knopp(M_init, num_iterations)
+
+        # Save initial M for backward recomputation
+        ctx.save_for_backward(M_init)
+        ctx.num_iterations = num_iterations
+        return M
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor) -> Tensor:
+        """
+        Backward through Sinkhorn-Knopp iterations using recomputation.
+        """
+        (M_init,) = ctx.saved_tensor()
+        num_iterations = ctx.num_iterations
+
+        with paddle.enable_grad():
+            M_input = M_init.detach()
+            M_input.stop_gradient = False
+
+            M_current = SinkhornKnopp._sinkhorn_knopp(M_input, num_iterations)
+
+            (grad_M_init,) = paddle.grad(
+                outputs=[M_current],
+                inputs=[M_input],
+                grad_outputs=[grad_output],
+                create_graph=False,
+                retain_graph=False,
+            )
+
+        grad_input = grad_M_init * M_init
+        return grad_input
 
 
 class HyperConnectionModule(nn.Layer):
@@ -195,20 +275,7 @@ class HyperConnectionModule(nn.Layer):
         # Reshape H_res to [s, b, n, n]
         H_res = H_res.reshape([s, b, n, n])
 
-        with paddle.no_grad():
-            # Subtract max for numerical stability
-            H_res_max = H_res.max(axis=(-2, -1), keepdim=True)
-            H_res_exp = paddle.exp(H_res - H_res_max)
-            _, U, V = sinkhorn_knopp(
-                H_res_exp.reshape([s * b, n, n]), self.sinkhorn_iterations
-            )
-
-        # Compute doubly stochastic matrix: U @ H_res_exp @ V
-        res = paddle.matmul(
-            paddle.matmul(U.detach(), H_res_exp.reshape([s * b, n, n])),
-            V.detach(),
-        )
-        H_res_mat = res.reshape([s, b, n, n])
+        H_res_mat = SinkhornKnopp.apply(H_res, self.sinkhorn_iterations)
 
         # Compute residuals: H_res_mat @ x
         residuals = paddle.matmul(H_res_mat, x_4d)

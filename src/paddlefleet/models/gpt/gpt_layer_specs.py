@@ -121,29 +121,26 @@ def get_gpt_layer_local_spec(
 
     if use_mhc:
         transformer_cls = TransformerLayerWithMHC
-        # MHC is not compatible with overlap scheduler
-        if paddle.distributed.is_initialized():
-            use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
-                "pp_configs"
-            ].forward_backward_overlap_scheduler
-            if use_overlap:
+        hc_module = HyperConnectionModule
+    else:
+        transformer_cls = getattr(config, "specific_layer", TransformerLayer)
+        hc_module = IdentityOp
+
+    # Check overlap scheduler compatibility
+    if paddle.distributed.is_initialized():
+        use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
+            "pp_configs"
+        ].forward_backward_overlap_scheduler
+        if use_overlap:
+            if use_mhc:
                 raise ValueError(
                     "Megatron-style MHC is not compatible with "
                     "forward_backward_overlap_scheduler. Please disable one of them."
                 )
-        hc_module = HyperConnectionModule
-    else:
-        transformer_cls = getattr(config, "specific_layer", TransformerLayer)
-        if paddle.distributed.is_initialized():
-            use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
-                "pp_configs"
-            ].forward_backward_overlap_scheduler
-            if use_overlap:
-                assert transformer_cls.__name__ == TransformerLayer.__name__, (
-                    "Only base TransformerLayer can be overlapped."
-                )
-                transformer_cls = TransformerLayerWithOverlap
-        hc_module = IdentityOp
+            assert transformer_cls.__name__ == TransformerLayer.__name__, (
+                "Only base TransformerLayer can be overlapped."
+            )
+            transformer_cls = TransformerLayerWithOverlap
 
     if multi_latent_attention:
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
