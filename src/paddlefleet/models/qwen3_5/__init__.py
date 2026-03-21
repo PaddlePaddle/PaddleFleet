@@ -17,6 +17,7 @@ from .layer_specs import (
     get_qwen3_5_vision_spec,
 )
 from .qwen3_5_model import (
+    FleetQwen3_5ForConditionalGeneration,
     Qwen3_5Model,
     Qwen3_5VisionModel,
     Qwen3_5VisionSublayersSpec,
@@ -34,4 +35,5 @@ __all__ = [
     "Qwen3_5VisionSublayersSpec",
     "Qwen3_5VisionProvider",
     "Qwen3_5VLProvider",
+    "FleetQwen3_5ForConditionalGeneration",
 ]

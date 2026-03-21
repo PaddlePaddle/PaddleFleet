@@ -99,16 +99,15 @@ def get_attention_spec(
         LayerSpec for the attention sublayer inside a TransformerLayer.
     """
     backend = LocalSpecProvider()
+    if config.normalization == "RMSNorm":
+        qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
+    else:
+        qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
+
+    use_qk_norm = getattr(config, "use_qk_norm", False)
+    qk_l2_norm = getattr(config, "qk_l2_norm", False)
 
     if attention_layer_type == "self_attention":
-        if config.normalization == "RMSNorm":
-            qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
-        else:
-            qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
-
-        use_qk_norm = getattr(config, "use_qk_norm", False)
-        qk_l2_norm = getattr(config, "qk_l2_norm", False)
-
         return LayerSpec(
             layer=SelfAttention,
             extra_kwargs={"attn_mask_type": attn_mask_type},
@@ -147,6 +146,23 @@ def get_attention_spec(
                 out_proj=backend.row_parallel_linear(),
             ),
             extra_kwargs=gdn_extra_kwargs,
+        )
+    elif attention_layer_type == "multi_latent_attention":
+        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
+        return LayerSpec(
+            layer=MLASelfAttention,
+            extra_kwargs={"attn_mask_type": attn_mask_type},
+            sublayers_spec=MLASelfAttentionSublayersSpec(
+                q_proj=backend.column_parallel_linear(),
+                q_a_proj=backend.column_parallel_linear(),
+                q_b_proj=backend.column_parallel_linear(),
+                kv_a_proj_with_mqa=backend.column_parallel_linear(),
+                kv_b_proj=backend.column_parallel_linear(),
+                core_attention=backend.core_attention(),
+                o_proj=backend.row_parallel_linear(),
+                q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+                kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+            ),
         )
     else:
         raise ValueError(
@@ -218,42 +234,11 @@ def get_gpt_layer_local_spec(
             transformer_cls = TransformerLayerWithOverlap
 
     if multi_latent_attention:
-        # TODO: creating MLA layer spec in get_attention_spec func like that in 'else'
-        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-        return LayerSpec(
-            layer=transformer_cls,
-            sublayers_spec=TransformerLayerSublayersSpec(
-                input_layernorm=layer_norm,
-                self_attn=LayerSpec(
-                    layer=MLASelfAttention,
-                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
-                    sublayers_spec=MLASelfAttentionSublayersSpec(
-                        q_proj=backend.column_parallel_linear(),
-                        q_a_proj=backend.linear(),
-                        q_b_proj=backend.column_parallel_linear(),
-                        kv_a_proj_with_mqa=backend.linear(),
-                        kv_b_proj=backend.column_parallel_linear(),
-                        core_attention=backend.core_attention(),
-                        o_proj=backend.row_parallel_linear(),
-                        q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                        kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                    ),
-                ),
-                self_attn_bda=get_bias_dropout_add,
-                post_attention_layernorm=layer_norm,
-                mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
-                block_attn_res=block_attn_res,
-            ),
-            extra_kwargs={
-                "config": config,
-                "layer_number": layer_number,
-                "hidden_dropout_prob": config.hidden_dropout_prob
-                if config is not None
-                else None,
-            }
+        self_attn_spec = get_attention_spec(
+            config=config,
+            attention_layer_type="multi_latent_attention",
+            attn_mask_type=AttnMaskType.causal,
         )
-
     else:
         self_attn_spec = get_attention_spec(
             config=config,
@@ -261,22 +246,28 @@ def get_gpt_layer_local_spec(
             attn_mask_type=attn_mask_type,
         )
 
-        return LayerSpec(
-            layer=transformer_cls,
-            sublayers_spec=TransformerLayerSublayersSpec(
-                input_layernorm=layer_norm,
-                self_attn=self_attn_spec,
-                self_attn_bda=get_bias_dropout_add,
-                post_attention_layernorm=layer_norm,
-                mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
-                block_attn_res=block_attn_res,
-                sharded_state_dict_keys_map={
-                    "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
-                    "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
-                },
-            )
-        )
+    return LayerSpec(
+        layer=transformer_cls,
+        sublayers_spec=TransformerLayerSublayersSpec(
+            input_layernorm=layer_norm,
+            self_attn=self_attn_spec,
+            self_attn_bda=get_bias_dropout_add,
+            post_attention_layernorm=layer_norm,
+            mlp=mlp,
+            mlp_bda=get_bias_dropout_add,
+            sharded_state_dict_keys_map={
+                "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
+                "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
+            },
+        ),
+        extra_kwargs={
+            "config": config,
+            "layer_number": layer_number,
+            "hidden_dropout_prob": config.hidden_dropout_prob
+            if config is not None
+            else None,
+        },
+    )
 
 
 def get_mlp_layer_spec_for_backend(

@@ -223,6 +223,16 @@ class VisionEmbedding(FleetLayer):
         pixel_values = dict_args["pixel_values"]
         grid_thw = dict_args["grid_thw"]
 
+        pixel_values = pixel_values.reshape(
+            [
+                -1,
+                self.in_channels,
+                self.temporal_patch_size,
+                self.patch_size,
+                self.patch_size,
+            ]
+        )
+
         hidden_states = (
             self.patch_embed(pixel_values)
             .flatten(2)
@@ -248,6 +258,7 @@ class VisionEmbedding(FleetLayer):
             "rotary_pos_emb": rotary_pos_emb,
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
+            "packed_seq_params": packed_seq_params,
         }
 
         return preproc_output

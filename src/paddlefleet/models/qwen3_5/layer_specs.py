@@ -19,6 +19,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.paddle_norm import (
+    WrappedPaddleNorm,
+    WrappedPaddleNormPipe,
+)
 
 from ...spec_utils import LayerSpec
 from ..backends import LocalSpecProvider
@@ -36,6 +40,8 @@ from ..qwen3_vl.patch_merger import (
     Qwen3VLVisionPathMerger,
 )
 from .qwen3_5_model import (
+    Qwen3_5RMSNorm,
+    Qwen3_5RMSNormPipe,
     Qwen3_5VisionModel,
     Qwen3_5VisionSublayersSpec,
 )
@@ -159,17 +165,44 @@ def get_qwen3_5_language_spec(config: GPTConfig) -> LayerSpec:
         attn_type = LAYER_TYPE_MAP.get(lt)
         if attn_type is None:
             raise ValueError(f"Unknown layer type: {lt!r} at index {i}")
-        transformer_layers_spec.append(
-            get_gpt_layer_local_spec(
-                config=config,
-                normalization=config.normalization,
-                layer_number=i + head_offset,
-                attention_layer_type=attn_type,
-            )
+        spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=i + head_offset,
+            attention_layer_type=attn_type,
+            num_experts=config.n_routed_experts,
+            moe_grouped_gemm=config.moe_grouped_gemm,
         )
 
+        # Post-process: replace standard RMSNorm with 1-centered
+        # Qwen3_5RMSNorm for decoder layer norms and QK norms.
+        # GatedDeltaNet out_norm is left unchanged (already equivalent).
+        sub = spec.sublayers_spec
+        if sub.input_layernorm is WrappedPaddleNorm:
+            sub.input_layernorm = Qwen3_5RMSNorm
+        if sub.post_attention_layernorm is WrappedPaddleNorm:
+            sub.post_attention_layernorm = Qwen3_5RMSNorm
+
+        # Replace q_norm / k_norm in self-attention (only for
+        # full_attention layers where they are WrappedPaddleNorm)
+        attn_spec = sub.self_attn
+        if hasattr(attn_spec, "sublayers_spec"):
+            attn_sub = attn_spec.sublayers_spec
+            if (
+                hasattr(attn_sub, "q_norm")
+                and attn_sub.q_norm is WrappedPaddleNorm
+            ):
+                attn_sub.q_norm = Qwen3_5RMSNorm
+            if (
+                hasattr(attn_sub, "k_norm")
+                and attn_sub.k_norm is WrappedPaddleNorm
+            ):
+                attn_sub.k_norm = Qwen3_5RMSNorm
+
+        transformer_layers_spec.append(spec)
+
     # -- Step 2: assemble full language model spec via get_gpt_spec -----------
-    return get_gpt_spec(
+    full_spec = get_gpt_spec(
         config=config,
         transformer_layers_spec=transformer_layers_spec,
         mtp_layers_spec=None,
@@ -184,3 +217,10 @@ def get_qwen3_5_language_spec(config: GPTConfig) -> LayerSpec:
         parallel_output=config.parallel_output,
         tie_word_embeddings=config.tie_word_embeddings,
     )
+
+    # Post-process: replace final layer norm with 1-centered variant
+    final_norm_spec = full_spec.sublayers_spec.layer_norm
+    if final_norm_spec.layer is WrappedPaddleNormPipe:
+        final_norm_spec.layer = Qwen3_5RMSNormPipe
+
+    return full_spec

@@ -35,17 +35,156 @@ from paddle import Tensor
 
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
-from paddlefleet.pipeline_parallel import NoPipelineParallel
+from paddlefleet.pipeline_parallel import NoPipelineParallel, ScheduleNode
+from paddlefleet.tensor_parallel.mappings import (
+    scatter_to_sequence_parallel_region,
+)
+from paddlefleet.utils import get_tensor_model_parallel_group_if_none
 
 from ...pipeline_parallel import LayerDesc
 from ...transformer.layer import FleetLayer
 from ...transformer.transformer_encoder import TransformerEncoder
+
+try:
+    from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+        mark_as_sequence_parallel_parameter,
+    )
+except ImportError:
+
+    def mark_as_sequence_parallel_parameter(parameter):
+        return parameter
+
 
 if TYPE_CHECKING:
     from ...spec_utils import LayerSpec
     from ...transformer.transformer_config import TransformerConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ======================================================================
+# 1-centered RMSNorm (matching HuggingFace Qwen3_5RMSNorm)
+# ======================================================================
+
+
+class Qwen3_5RMSNorm(paddle.nn.Layer):
+    """RMSNorm with 1-centered parameterization.
+
+    Weight is initialized to 0 and the forward computes::
+
+        output = rms_norm(x) * (1.0 + weight)
+
+    This matches the HuggingFace ``Qwen3_5RMSNorm`` so that weight
+    decay regularizes deviations from identity scale rather than
+    pushing the scale toward zero.
+
+    The constructor accepts both calling conventions used internally:
+    - ``(config, hidden_size, eps, input_is_parallel)``
+      used by ``TransformerLayer.build_layer``
+    - ``(config, normalized_shape=..., norm_eps=...)``
+      used by the ``SelfAttention._build_norm`` else-branch
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        hidden_size: int | None = None,
+        eps: float | None = None,
+        input_is_parallel: bool = False,
+        normalized_shape: int | None = None,
+        norm_eps: float | None = None,
+        **kwargs,
+    ):
+        super().__init__()
+        # Resolve hidden_size from either calling convention
+        dim = hidden_size if hidden_size is not None else normalized_shape
+        if dim is None:
+            dim = config.hidden_size
+        self.normalized_shape = dim
+
+        # Resolve eps from either calling convention
+        self.variance_epsilon = (
+            eps
+            if eps is not None
+            else (norm_eps if norm_eps is not None else config.rms_norm_eps)
+        )
+
+        # Weight initialized to 0 (1-centered parameterization)
+        self.weight = paddle.create_parameter(
+            shape=[self.normalized_shape],
+            dtype=paddle.get_default_dtype(),
+            default_initializer=paddle.nn.initializer.Constant(0.0),
+        )
+        self.config = config
+
+        if input_is_parallel:
+            self.enable_sequence_parallel()
+
+    def forward(self, hidden_states: Tensor) -> Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.astype("float32")
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * paddle.rsqrt(
+            variance + self.variance_epsilon
+        )
+        return (hidden_states * (1.0 + self.weight.astype("float32"))).astype(
+            input_dtype
+        )
+
+    def enable_sequence_parallel(self):
+        mark_as_sequence_parallel_parameter(self.weight)
+
+
+class Qwen3_5RMSNormPipe(paddle.nn.Layer):
+    """Pipeline-compatible wrapper for ``Qwen3_5RMSNorm``.
+
+    Follows the same pattern as ``WrappedPaddleNormPipe``:
+    handles dict I/O and MTP tensor splitting.
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        hidden_size: int,
+        eps: float = 1e-5,
+        input_is_parallel: bool | None = None,
+    ):
+        super().__init__()
+        self.config = config
+        self.norm = Qwen3_5RMSNorm(
+            config,
+            hidden_size,
+            eps,
+            input_is_parallel=input_is_parallel or False,
+        )
+
+    def forward(self, dict_args: dict):
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            hidden_states_concat = dict_args["hidden_states"]
+            tensor_list = paddle.split(
+                hidden_states_concat,
+                self.config.num_nextn_predict_layers + 1,
+            )
+            dict_args["hidden_states"] = tensor_list[0]
+        rst = {
+            **dict_args,
+            "hidden_states": self.norm(dict_args["hidden_states"]),
+        }
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            hidden_states_concat = paddle.concat(
+                [rst["hidden_states"], *tensor_list[1:]]
+            )
+            rst["hidden_states"] = hidden_states_concat
+        return rst
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="Qwen3_5RMSNormPipe")
 
 
 # ======================================================================
@@ -135,24 +274,23 @@ class Qwen3_5Model(FleetLayer):
         self.language_embedding = self.get_language_embedding_func(
             self.language_model
         )
-        self.language_gpt_embedding = self.get_gpt_embedding(
-            self.language_model
-        )
         self.language_backbone = self.get_language_backbone(self.language_model)
         self.language_lm_head = self.get_lm_head(self.language_model)
+
+        self.tp_group = get_tensor_model_parallel_group_if_none(None)
+
+        # Disable reduce-scatter on embed_tokens so that its forward()
+        # returns full [B, S, H] via all-reduce instead of sequence-parallel
+        # scattered output.  We need the full tensor to merge vision features
+        # before manually scattering to the SP region later in forward().
+        if self.language_embedding is not None:
+            embed_tokens = self.language_embedding.embedding.embed_tokens
+            embed_tokens.reduce_scatter_embeddings = False
 
     # ------------------------------------------------------------------
     # Input embeddings helpers
     # ------------------------------------------------------------------
     def get_language_embedding_func(self, language_model):
-        language_layers = self.language_model._layers.run_function
-        for layer in language_layers:
-            if isinstance(layer, GPTEmbedding):
-                language_embedding = layer.embedding
-                break
-        return language_embedding
-
-    def get_gpt_embedding(self, language_model):
         language_layers = self.language_model._layers.run_function
         for layer in language_layers:
             if isinstance(layer, GPTEmbedding):
@@ -500,13 +638,16 @@ class Qwen3_5Model(FleetLayer):
 
         # 1. Embed text tokens (word embeddings only, no position encoding)
         # Matches HF: inputs_embeds = self.get_input_embeddings()(input_ids)
+        # VocabParallelEmbedding handles TP partitioning, masking, and
+        # all-reduce internally.  reduce_scatter_embeddings is disabled in
+        # __init__ so we get full [B, S, H] for vision feature merging.
         if (
             inputs_embeds is None
             and input_ids is not None
             and self.language_model is not None
         ):
-            inputs_embeds = self.language_embedding(
-                input_ids=input_ids, position_ids=None
+            inputs_embeds = self.language_embedding.embedding.embed_tokens(
+                input_ids
             )
 
         # 2. Encode and merge image features
@@ -551,11 +692,17 @@ class Qwen3_5Model(FleetLayer):
                 mm_token_type_ids=mm_token_type_ids,
             )
 
+        if self.config.sequence_parallel:
+            inputs_embeds = inputs_embeds.transpose([1, 0, 2]).contiguous()
+            inputs_embeds = scatter_to_sequence_parallel_region(
+                inputs_embeds, group=self.tp_group
+            )
+
         dict_args["position_ids"] = position_ids
         dict_args["input_ids"] = None
 
         # 5. Apply rotary position encoding (RoPE)
-        lm_dict_args = self.language_gpt_embedding(
+        lm_dict_args = self.language_embedding(
             dict_args, decoder_input=inputs_embeds
         )
 
@@ -568,3 +715,70 @@ class Qwen3_5Model(FleetLayer):
             return logits
 
         return lm_dict_args
+
+
+class FleetQwen3_5ForConditionalGeneration(FleetLayer):
+    def __init__(self, config, model, criterion):
+        super().__init__(config)
+        self.model = model
+        self.criterion = criterion
+
+    def forward(self, dict_args=None, **kwargs):
+        if dict_args is None:
+            dict_args = kwargs
+        labels = dict_args.get("labels", None)
+        logits = self.model(dict_args)
+        loss = self.criterion(logits, labels)
+        return loss
+
+    def sharded_state_dict(self, structured_name_prefix: str = ""):
+        """Build sharded state dict with proper name mapping for checkpoint loading.
+
+        The Qwen3.5 model wraps language_model and visual in NoPipelineParallel,
+        which adds `_layers.` prefix to parameter keys. This method bypasses
+        NoPipelineParallel and directly calls sharded_state_dict on the underlying
+        models (GPTModel for language, Qwen3_5VisionModel for vision).
+
+        Both models handle pipeline layer name mapping internally via
+        _pp_to_single_mapping, which converts numeric layer indices to semantic
+        names with proper prefixes:
+        - Language model: `0.embedding` -> `model.language_model.embedding`
+        - Vision model: `0.patch_embed` -> `model.vision_model.patch_embed`
+
+        The resulting keys will match the AOA config target format:
+        - Language: `model.language_model.embedding.embed_tokens.weight`
+        - Vision: `model.vision_model.patch_embed.proj.weight`
+        """
+        sharded_state_dict = {}
+
+        # Get sharded state dict from language model (GPTModel wrapped in NoPipelineParallel)
+        if self.model.language_model is not None:
+            # Access the underlying PipelineLayer (GPTModel) directly
+            # GPTModel.sharded_state_dict handles the model.language_model. prefix internally
+            language_model = self.model.language_model._layers
+            if hasattr(language_model, "sharded_state_dict"):
+                lm_sharded = language_model.sharded_state_dict(
+                    structured_name_prefix=""
+                )
+                sharded_state_dict.update(lm_sharded)
+
+        # Get sharded state dict from vision model (Qwen3_5VisionModel wrapped in NoPipelineParallel)
+        if self.model.visual is not None:
+            # Access the underlying Qwen3_5VisionModel (TransformerEncoder) directly
+            # TransformerEncoder.sharded_state_dict handles the model.vision_model. prefix
+            # via _pp_to_single_mapping (since modal="vision_model")
+            vision_model = self.model.visual._layers
+            if hasattr(vision_model, "sharded_state_dict"):
+                vm_sharded = vision_model.sharded_state_dict(
+                    structured_name_prefix=""
+                )
+                sharded_state_dict.update(vm_sharded)
+
+        # Get criterion parameters if any
+        if self.criterion is not None:
+            criterion_sharded = self.criterion.sharded_state_dict(
+                structured_name_prefix=f"{structured_name_prefix}criterion."
+            )
+            sharded_state_dict.update(criterion_sharded)
+
+        return sharded_state_dict
