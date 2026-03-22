@@ -422,6 +422,17 @@ def test_hc_depth_variants():
     out4 = hc2.depth_connection((b2, None), r2, h2)
     assert out4.shape == [s, b, n * C]
 
+    # Test dtype mismatch coverage (lines 289, 291, 293, 341, 343, 487, 497)
+    # branch_output shape is [s, b, C], not [s, b, n, C]
+    hc3 = _make_hc()
+    # Create branch_output with different dtype to trigger cast operations
+    branch_output = paddle.randn([s, b, C], dtype="float16")
+    bias = paddle.randn([C], dtype="float16")
+    out5 = hc3.depth_connection(
+        (branch_output, bias), residuals, h_post, dropout_prob=0.1, training=True, fused=False
+    )
+    assert out5.shape == [s, b, n * C]
+
 
 def test_hc_different_configs():
     """Different N values, sinkhorn iters, layer numbers."""
@@ -439,6 +450,37 @@ def test_hc_different_configs():
         x = paddle.randn([2, 2, 4 * 64])
         branch, _, _ = hc.width_connection(x)
         assert not paddle.isnan(branch).any()
+
+
+def test_hc_triton_env_variable_coverage():
+    """Test MHC_USE_TRITON environment variable (covers line 158).
+
+    Covers hyper_connection.py line 158:
+    - env_triton.lower() not in ("0", "false", "off")
+    """
+    import os
+
+    # Save original value
+    original_env = os.environ.get("MHC_USE_TRITON")
+
+    # Test with "true" value (covers line 158: not in ("0", "false", "off"))
+    os.environ["MHC_USE_TRITON"] = "true"
+    from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+    cfg = MockConfig()
+    hc_true = HyperConnectionModule(config=cfg, layer_number=1)
+    # Should use Triton backend since env var is "true"
+    assert hc_true.use_triton == True  # env var "true" enables triton
+
+    # Test with "false" value (covers line 158: not in ("0", "false", "off"))
+    os.environ["MHC_USE_TRITON"] = "false"
+    hc_false = HyperConnectionModule(config=cfg, layer_number=1)
+    assert hc_false.use_triton == False
+
+    # Restore original value
+    if original_env is not None:
+        os.environ["MHC_USE_TRITON"] = original_env
+    elif "MHC_USE_TRITON" in os.environ:
+        del os.environ["MHC_USE_TRITON"]
 
 
 def test_hc_numerical_stability_and_determinism():
@@ -1561,12 +1603,6 @@ def test_gpt_model_mhc_and_mtp_coverage():
 def test_hyper_connection_transformer_layer_coverage():
     """Test TransformerLayerWithMHC for coverage improvement.
 
-    Covers transformer_layer.py lines:
-    - Line 747: mlp_hyper_connection build_layer (via _make_mhc_layer)
-    - Line 833: position_ids passed to self_attn
-    - Line 891: is_first_fwd in _forward_attention
-    - Line 906: else branch in _forward_mlp layernorm
-    - Line 934: residuals=mhc_residuals in depth_connection
     """
     N, C = 4, 64
 
@@ -1583,6 +1619,13 @@ def test_hyper_connection_transformer_layer_coverage():
     result = layer(dict_args)
     assert "hidden_states" in result
     mocks["hc"].depth_connection.assert_called()
+
+    # Test with attention_bias parameter (covers line 805)
+    attention_bias = paddle.randn([s, 1, s, s])
+    dict_args = _base_dict_args(paddle.randn([s, b, N * C]), C=N * C)
+    dict_args["attention_bias"] = attention_bias
+    result = layer(dict_args)
+    assert "hidden_states" in result
 
     # Test with is_first_fwd=True (covers line 891)
     layer.is_first_fwd = True
