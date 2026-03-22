@@ -162,7 +162,7 @@ class LanguageLoss(FleetLayer):
             mtp_logits = logits[1:]
 
             if not self.config.mtp_distillation_loss:
-                lm_loss = self._forward(logits[0], lm_labels)
+                lm_loss = 0.0
                 for depth in range(self.config.num_nextn_predict_layers):
                     logits_cur_depth = mtp_logits[depth]
                     labels_cur_depth = labels_ori[
@@ -173,6 +173,7 @@ class LanguageLoss(FleetLayer):
                         labels_cur_depth,
                     )
                     mtp_loss.append(loss_cur_depth)
+                    paddle.device.cuda.empty_cache()
             else:
                 lm_loss = 0.0
                 if get_tensor_model_parallel_world_size() > 1:
@@ -236,7 +237,7 @@ class LanguageLoss(FleetLayer):
                                 lossmask, axis=1
                             )
 
-                        ploss = -paddle.sum(paddle.sum(lossmask * plogp, 2))
+                        ploss = -paddle.sum(lossmask * plogp)
                         if get_tensor_model_parallel_world_size() > 1:
                             dist.all_reduce(
                                 ploss,
@@ -252,8 +253,8 @@ class LanguageLoss(FleetLayer):
                         ploss = ploss / xishu
                         mtp_loss.append(ploss)
 
-                        # loss_matrix_cur_depth = loss_matrix_cur_depth.cast(paddle.float32) * lossmask_cur_depth
 
+            print(f"[Ting LOG] main loss: {lm_loss}")
             print(f"[Ting LOG] mtp loss: {mtp_loss}")
 
             # Store detached MTP loss tensors into class-level tracker.
