@@ -429,7 +429,12 @@ def test_hc_depth_variants():
     branch_output = paddle.randn([s, b, C], dtype="float16")
     bias = paddle.randn([C], dtype="float16")
     out5 = hc3.depth_connection(
-        (branch_output, bias), residuals, h_post, dropout_prob=0.1, training=True, fused=False
+        (branch_output, bias),
+        residuals,
+        h_post,
+        dropout_prob=0.1,
+        training=True,
+        fused=False,
     )
     assert out5.shape == [s, b, n * C]
 
@@ -466,15 +471,16 @@ def test_hc_triton_env_variable_coverage():
     # Test with "true" value (covers line 158: not in ("0", "false", "off"))
     os.environ["MHC_USE_TRITON"] = "true"
     from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+
     cfg = MockConfig()
     hc_true = HyperConnectionModule(config=cfg, layer_number=1)
     # Should use Triton backend since env var is "true"
-    assert hc_true.use_triton == True  # env var "true" enables triton
+    assert hc_true.use_triton  # env var "true" enables triton
 
     # Test with "false" value (covers line 158: not in ("0", "false", "off"))
     os.environ["MHC_USE_TRITON"] = "false"
     hc_false = HyperConnectionModule(config=cfg, layer_number=1)
-    assert hc_false.use_triton == False
+    assert not hc_false.use_triton  # env var "false" disables triton
 
     # Restore original value
     if original_env is not None:
@@ -1601,9 +1607,7 @@ def test_gpt_model_mhc_and_mtp_coverage():
 
 
 def test_hyper_connection_transformer_layer_coverage():
-    """Test TransformerLayerWithMHC for coverage improvement.
-
-    """
+    """Test TransformerLayerWithMHC for coverage improvement."""
     N, C = 4, 64
 
     # Use existing _make_mhc_layer helper (covers line 747)
