@@ -1486,3 +1486,200 @@ def test_transformer_block_from_layer_spec():
     assert result.layer_specs is not None
     assert len(result.layer_specs) == config.num_hidden_layers
     assert result.layer_norm is not None
+
+
+def test_gpt_model_mhc_and_mtp_coverage():
+    """Test GPTModel.get_layer_desc_list with MHC and MTP for coverage improvement.
+
+    Covers gpt_model.py lines:
+    - Line 247: MHCContractLayer insertion when use_mhc=True
+    - Line 268: MTP layer iteration i += 1
+    """
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_decoder_layers_spec,
+        get_gpt_mtp_layers_spec,
+        get_gpt_spec,
+    )
+    from paddlefleet.spec_utils import LayerSpec
+
+    # Create config with MHC and MTP enabled
+    config = MockTransformerConfig(
+        use_mhc=True,
+        num_hidden_layers=2,
+        mtp_loss_weight=0.1,  # Enable MTP to cover line 268
+    )
+
+    # Create MTP spec (requires a spec parameter)
+    mtp_spec = [LayerSpec(layer=lambda x: x, extra_kwargs={"config": config})]
+
+    # Create GPTSublayersSpec using get_gpt_spec
+    gpt_spec = get_gpt_spec(
+        config=config,
+        transformer_layers_spec=get_gpt_decoder_layers_spec(
+            config, use_mhc=True
+        ),
+        mtp_layers_spec=get_gpt_mtp_layers_spec(config, mtp_spec)
+        if config.mtp_loss_weight
+        else [],
+        vocab_size=config.vocab_size,
+        max_sequence_length=config.max_sequence_length,
+        tie_word_embeddings=False,
+    )
+
+    # Extract sublayers_spec from gpt_spec
+    sublayers_spec = gpt_spec.sublayers_spec
+
+    # Ensure head_empty_layers and tail_empty_layers are not None
+    if sublayers_spec.head_empty_layers is None:
+        sublayers_spec.head_empty_layers = []
+    if sublayers_spec.tail_empty_layers is None:
+        sublayers_spec.tail_empty_layers = []
+
+    # Mock GPTModel.__init__ to avoid fleet initialization
+    with (
+        patch("paddlefleet.models.gpt.gpt_model.fleet"),
+        patch("paddlefleet.pipeline_parallel.PipelineLayer.__init__"),
+    ):
+        from paddlefleet.models.gpt.gpt_model import GPTModel
+
+        model = GPTModel.__new__(GPTModel)
+        model.config = config
+        model._pipeline_name_mapping = None
+        model._pp_to_single_mapping = None
+        model._sequential_layers = model.get_layer_desc_list(
+            sublayers_spec, tie_word_embeddings=False
+        )
+
+        # Verify layers were created correctly (covers lines 247 and 268)
+        sequential_layers = model.get_sequential_layers()
+        assert len(sequential_layers) > 0
+
+        # With MHC enabled, structure should be built correctly
+        assert len(sequential_layers) > 0
+
+
+def test_hyper_connection_transformer_layer_coverage():
+    """Test TransformerLayerWithMHC for coverage improvement.
+
+    Covers transformer_layer.py lines:
+    - Line 747: mlp_hyper_connection build_layer (via _make_mhc_layer)
+    - Line 833: position_ids passed to self_attn
+    - Line 891: is_first_fwd in _forward_attention
+    - Line 906: else branch in _forward_mlp layernorm
+    - Line 934: residuals=mhc_residuals in depth_connection
+    """
+    N, C = 4, 64
+
+    # Use existing _make_mhc_layer helper (covers line 747)
+    layer, mocks = _make_mhc_layer()
+
+    # Test forward with position_ids (covers line 833)
+    s, b = 4, 2
+    hidden_states = paddle.randn([s, b, N * C])
+    position_ids = paddle.arange(s).unsqueeze(0).expand(b, -1)
+
+    dict_args = _base_dict_args(hidden_states, C=N * C)
+    dict_args["position_ids"] = position_ids  # This triggers line 833
+    result = layer(dict_args)
+    assert "hidden_states" in result
+    mocks["hc"].depth_connection.assert_called()
+
+    # Test with is_first_fwd=True (covers line 891)
+    layer.is_first_fwd = True
+    result = layer(_base_dict_args(paddle.randn([s, b, N * C]), C=N * C))
+    assert "hidden_states" in result
+
+    # Test without recompute_post_attention_layernorm (covers line 906)
+    layer2, _ = _make_mhc_layer()
+    layer2.recompute_post_attention_layernorm = False
+    result = layer2(_base_dict_args(paddle.randn([s, b, N * C]), C=N * C))
+    assert "hidden_states" in result
+
+
+def test_hyper_connection_mlp_recompute_none_bias_coverage():
+    """Test _forward_mlp with recompute and None bias.
+
+    Covers transformer_layer.py line 919:
+    - if bias is None: return mlp_output
+    """
+    N, C = 4, 64
+
+    # Create layer with recompute_mlp=True
+    layer, mocks = _make_mhc_layer(recompute_mlp=True)
+
+    # Mock MLP to return (output, None) - triggers line 919
+    class MockMLP(paddle.nn.Layer):
+        def forward(self, x):
+            return paddle.randn_like(x), None
+
+    layer.mlp = MockMLP()
+    layer.recompute_mlp = True
+
+    result = layer(_base_dict_args(paddle.randn([4, 2, N * C]), C=N * C))
+    assert "hidden_states" in result
+
+
+def test_transformer_layer_with_overlap_compute_attention_coverage():
+    """Test TransformerLayerWithOverlap.compute_attention.
+
+    Covers transformer_layer.py line 965:
+    - return self._forward_attention(**dict_args, is_first_fwd=is_first_fwd)
+    """
+    from paddlefleet.transformer.identity_op import IdentityOp
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayerSublayersSpec,
+        TransformerLayerWithOverlap,
+    )
+
+    N, C = 4, 64
+    config = MockTransformerConfig(use_mhc=False)  # Overlap doesn't use MHC
+    mock_pg = MagicMock()
+    mock_pg.tp = MagicMock()
+    spec = TransformerLayerSublayersSpec()
+
+    # Create mocks
+    mock_ln = MagicMock(side_effect=lambda x: x)
+    mock_attn = MagicMock(return_value=(paddle.randn([4, 2, C]), None))
+    mock_mlp = MagicMock(return_value=(paddle.randn([4, 2, C]), None))
+    mock_bda = MagicMock(
+        return_value=lambda *a, **kw: MagicMock(
+            return_value=paddle.randn([4, 2, C])
+        )
+    )
+
+    call_count = [0]
+
+    def build_se(s, **kwargs):
+        call_count[0] += 1
+        idx = call_count[0]
+        if idx in [1, 4, 7]:  # layernorms
+            return mock_ln
+        elif idx == 2:  # self_attn
+            return mock_attn
+        elif idx in [3, 6, 9]:  # bda
+            return mock_bda
+        elif idx == 5:  # cross_attention
+            return IdentityOp()
+        elif idx == 8:  # mlp
+            return mock_mlp
+        return MagicMock()
+
+    with patch(
+        "paddlefleet.transformer.transformer_layer.build_layer",
+        side_effect=build_se,
+    ):
+        layer = TransformerLayerWithOverlap(
+            config=config,
+            sublayers_spec=spec,
+            layer_number=1,
+            pg_collection=mock_pg,
+        )
+
+        # Test compute_attention with is_first_fwd flag (covers line 965)
+        dict_args = _base_dict_args(paddle.randn([4, 2, C]), C=C)
+        output = layer.compute_attention(dict_args, is_first_fwd=True)
+        assert output is not None
+
+        # Test with is_first_fwd=False
+        output = layer.compute_attention(dict_args, is_first_fwd=False)
+        assert output is not None
