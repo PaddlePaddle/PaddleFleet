@@ -490,7 +490,6 @@ class MultiTokenPredictionLayer(FleetLayer):
             hidden_states_concat = paddle.concat(tensor_list)
         dict_args["hidden_states"] = hidden_states_concat
         dict_args.pop("decoder_input")
-        # print(dict_args["hidden_states"]); exit()
         return dict_args
 
     def build_schedule_node(self):

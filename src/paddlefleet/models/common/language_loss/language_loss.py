@@ -176,7 +176,7 @@ class LanguageLoss(FleetLayer):
                     mtp_loss.append(loss_cur_depth)
                     paddle.device.cuda.empty_cache()
             else:
-                lm_loss = 0.0
+                lm_loss = self._forward(logits[0], lm_labels)
                 if get_tensor_model_parallel_world_size() > 1:
                     target_p_self_op_dist = DistributedSoftmaxOp.apply(
                         logits[0], axis=2
@@ -253,10 +253,6 @@ class LanguageLoss(FleetLayer):
 
                         ploss = ploss / xishu
                         mtp_loss.append(ploss)
-
-
-            print(f"[Ting LOG] main loss: {lm_loss}")
-            print(f"[Ting LOG] mtp loss: {mtp_loss}")
 
             # Store detached MTP loss tensors into class-level tracker.
             # Use .detach() instead of .item() to avoid GPU synchronization on every
