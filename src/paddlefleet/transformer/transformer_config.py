@@ -530,6 +530,9 @@ class TransformerConfig(ModelParallelConfig):
     mscale_all_dim: float = 0.0
     """Mscale all dimensions for YaRN RoPE in Multi-Latent Attention, used by yarn."""
 
+    loss_subbatch_sequence_length: int = -1
+    """Sequence length of subbatch for loss computation."""
+
     # cache_mla_latents: bool = False
 
     @classmethod
