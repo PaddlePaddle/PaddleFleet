@@ -328,7 +328,14 @@ def get_gpt_mtp_layers_spec_for_backend(
         backend=backend,
     )
 
-    mtp_num_layers = max(0, config.mtp_num_layers)
+    if config.mtp_num_layers > 0:
+        mtp_num_layers = config.mtp_num_layers
+    else:
+        mtp_num_layers = (
+            config.num_nextn_predict_layers
+            if config.num_nextn_predict_layers
+            else 0
+        )
 
     mtp_layer_specs = []
     for i in range(mtp_num_layers):
