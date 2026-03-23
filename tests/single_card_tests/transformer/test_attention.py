@@ -161,6 +161,7 @@ class TestMLASelfAttention(unittest.TestCase):
         self.config.attention_dropout = 0.1
         self.config.softmax_type = "vanilla"
 
+    def test_self_attention(self):
         self.self_attn = MLASelfAttention(
             self.config,
             MLASelfAttentionSublayersSpec(
@@ -177,8 +178,44 @@ class TestMLASelfAttention(unittest.TestCase):
             attn_mask_type=AttnMaskType.causal,
             layer_number=1,
         )
+        config = self.self_attn.config
+        sequence_length = 127
+        micro_batch_size = 2
+        hidden_size = self.self_attn.config.hidden_size
 
-    def test_self_attention(self):
+        hidden_states = paddle.randn(
+            (micro_batch_size, sequence_length, hidden_size),
+        )
+
+        output, bias = self.self_attn(
+            hidden_states,
+            attention_mask=None,
+        )
+
+        # Check if output and bias have the correct shape
+        assert output.shape[0] == micro_batch_size
+        assert output.shape[1] == sequence_length
+        assert output.shape[2] == config.hidden_size
+        assert bias.shape[0] == config.hidden_size
+
+    def test_self_attention_sp(self):
+        self.config.sequence_parallel = True
+        self.self_attn = MLASelfAttention(
+            self.config,
+            MLASelfAttentionSublayersSpec(
+                q_proj=BiasedLinear,
+                q_a_proj=BiasedLinear,
+                q_b_proj=BiasedLinear,
+                kv_a_proj_with_mqa=BiasedLinear,
+                kv_b_proj=BiasedLinear,
+                core_attention=DotProductAttention,
+                o_proj=BiasedLinear,
+                q_a_layernorm=RMSNorm,
+                kv_a_layernorm=RMSNorm,
+            ),
+            attn_mask_type=AttnMaskType.causal,
+            layer_number=1,
+        )
         config = self.self_attn.config
         sequence_length = 127
         micro_batch_size = 2

@@ -1066,7 +1066,12 @@ class ColumnParallelLinear(paddle.nn.Layer):
             )
         else:
             output = output_parallel
-        output_bias = self.bias if self.skip_bias_add else None
+        output_bias = (
+            self.bias.clone()
+            if (self.skip_bias_add and self.bias is not None)
+            else None
+        )
+
         return output, output_bias
 
     def sharded_state_dict(
@@ -1320,7 +1325,7 @@ class RowParallelLinear(paddle.nn.Layer):
             output_bias = None
         else:
             output = output_
-            output_bias = self.bias
+            output_bias = self.bias.clone() if self.bias is not None else None
         return output, output_bias
 
     def sharded_state_dict(

@@ -50,6 +50,9 @@ class TransformerConfig(ModelParallelConfig):
     add_mtp_loss: bool = True
     """Add mtp loss to final loss to enable mtp backward and weight update."""
 
+    mtp_load_weight_only: bool = False
+    """When True, use WeightOnlyMTPLayer (holds weights but skips MTP computation and embedding processing)."""
+
     num_empty_layers_add_in_head: int = 0
     """Number of EmptyLayer before the Decoder Layer.
     num_empty_layers_add_in_head=2 Example:
