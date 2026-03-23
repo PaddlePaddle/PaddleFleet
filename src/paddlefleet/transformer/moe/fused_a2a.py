@@ -25,7 +25,10 @@ from paddlefleet.ops import is_deep_ep_available
 from .moe_utils import manual_backward
 
 if is_deep_ep_available():
-    from paddlefleet.ops import deep_ep
+    if paddle.is_compiled_with_cuda():
+        from paddlefleet.ops import deep_ep
+    else:
+        from paddle.distributed.communication import deep_ep
 
     HAVE_DEEP_EP = True
 else:
