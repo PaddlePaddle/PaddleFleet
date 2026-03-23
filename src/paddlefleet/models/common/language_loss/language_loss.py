@@ -163,7 +163,11 @@ class LanguageLoss(FleetLayer):
             mtp_logits = logits[1:]
 
             if not self.config.mtp_distillation_loss:
-                lm_loss = 0.0
+                if self.config.train_mtp_only:
+                    lm_loss = 0.0
+                else:
+                    lm_loss = self._forward(logits[0], lm_labels)
+
                 for depth in range(self.config.num_nextn_predict_layers):
                     logits_cur_depth = mtp_logits[depth]
                     labels_cur_depth = labels_ori[
