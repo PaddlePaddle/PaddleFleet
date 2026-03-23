@@ -166,7 +166,7 @@ class MoELayer(nn.Layer):
         sublayers: MoESublayers | None = None,
         pg_collection: ProcessGroupCollection | None = None,
     ):
-        if config.enable_auto_parallel:
+        if getattr(config, "enable_auto_parallel", False):
             super().__init__()
             self.config = config
             self.mesh = dist.fleet.auto.get_mesh()
@@ -513,7 +513,7 @@ class MoELayer(nn.Layer):
         self,
         hidden_states: paddle.Tensor,
     ):
-        if self.config.enable_auto_parallel:
+        if getattr(self.config, "enable_auto_parallel", False):
             return self.forward_auto(hidden_states)
         else:
             return self.forward_impl(hidden_states)
