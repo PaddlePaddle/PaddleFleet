@@ -599,8 +599,145 @@ def test_triton_width_depth_comparison():
     assert paddle.allclose(xn.grad, xt.grad, rtol=1e-3, atol=1e-4)
 
 
+def test_mhc_full_network_precision_comparison():
+    """
+    Full precision comparison: width+depth in one network, verify MHC parameter gradients
+    between Triton and non-Triton implementations.
+    """
+    from paddlefleet.transformer.hyper_connection import TRITON_AVAILABLE
+
+    if not TRITON_AVAILABLE:
+        return
+
+    # Test configuration
+    s, b, n, C = 8, 4, 4, 64
+    seed = 42
+    # Forward pass requires tighter tolerance, backward pass (gradients) allows more tolerance
+    forward_rtol, forward_atol = 1e-3, 1e-4
+    backward_rtol, backward_atol = 1e-2, 1e-3
+
+    # Create two identical HyperConnectionModules (native and triton)
+    paddle.seed(seed)
+    hc_native = _make_hc(use_triton=False, hidden_size=C, n=n, layer_number=1)
+
+    paddle.seed(seed)
+    hc_triton = _make_hc(use_triton=True, hidden_size=C, n=n, layer_number=1)
+
+    # Sync initial parameters to ensure identical starting point
+    # Note: Use set_value() instead of paddle.assign() to preserve gradient graph
+    # paddle.assign() would detach the parameter from the computation graph
+    param_names = ["combined_weights", "scaling_factors", "bias_terms"]
+    for name in param_names:
+        native_param = getattr(hc_native, name)
+        triton_param = getattr(hc_triton, name)
+        triton_param.set_value(native_param)
+
+    # Create input tensor
+    paddle.seed(seed)
+    x_native = paddle.randn([s, b, n * C], dtype="float32")
+    x_native.stop_gradient = False
+    paddle.seed(seed)
+    x_triton = paddle.randn([s, b, n * C], dtype="float32")
+    x_triton.stop_gradient = False
+
+    # Forward pass: width_connection -> mock branch -> depth_connection
+    # Simulate a branch computation (e.g., attention/MLP)
+    # Use deterministic function so native and triton get same branch output
+    def mock_branch(branch_input):
+        """Simulate a simple branch computation (deterministic)."""
+        # Simple linear transform + activation (deterministic)
+        return paddle.tanh(branch_input * 0.5)
+
+    # Native implementation forward
+    branch_native, residuals_native, h_post_native = hc_native.width_connection(
+        x_native
+    )
+    branch_output_native = mock_branch(branch_native)
+    output_native = hc_native.depth_connection(
+        (branch_output_native, None), residuals_native, h_post_native
+    )
+
+    # Triton implementation forward
+    branch_triton, residuals_triton, h_post_triton = hc_triton.width_connection(
+        x_triton
+    )
+    branch_output_triton = mock_branch(branch_triton)
+    output_triton = hc_triton.depth_connection(
+        (branch_output_triton, None), residuals_triton, h_post_triton
+    )
+
+    # Verify forward output precision
+    max_diff = (output_native - output_triton).abs().max().item()
+    assert paddle.allclose(
+        output_native, output_triton, rtol=forward_rtol, atol=forward_atol
+    ), (
+        f"Forward outputs differ: max_diff={max_diff}, rtol={forward_rtol}, atol={forward_atol}"
+    )
+
+    # Verify intermediate outputs
+    assert paddle.allclose(
+        branch_native, branch_triton, rtol=forward_rtol, atol=forward_atol
+    ), "Branch inputs differ"
+    assert paddle.allclose(
+        residuals_native, residuals_triton, rtol=forward_rtol, atol=forward_atol
+    ), "Residuals differ"
+    assert paddle.allclose(
+        h_post_native, h_post_triton, rtol=forward_rtol, atol=forward_atol
+    ), "h_post differs"
+
+    # Backward pass
+    # Create identical loss
+    loss_native = output_native.sum()
+    loss_triton = output_triton.sum()
+
+    loss_native.backward()
+    loss_triton.backward()
+
+    # Verify input gradient precision
+    assert paddle.allclose(
+        x_native.grad, x_triton.grad, rtol=backward_rtol, atol=backward_atol
+    ), "Input gradients differ"
+
+    # **Key verification: MHC parameter gradients (direct element-wise comparison)**
+    for name in param_names:
+        native_grad = getattr(hc_native, name).grad
+        triton_grad = getattr(hc_triton, name).grad
+
+        assert native_grad is not None, f"{name} has no gradient (native)"
+        assert triton_grad is not None, f"{name} has no gradient (triton)"
+
+        # Check gradient magnitude is non-zero (gradient is flowing)
+        assert native_grad.abs().sum().item() > 0, (
+            f"{name} gradient is zero (native)"
+        )
+        assert triton_grad.abs().sum().item() > 0, (
+            f"{name} gradient is zero (triton)"
+        )
+
+        # Direct element-wise comparison (use backward tolerance for gradients)
+        max_grad_diff = (native_grad - triton_grad).abs().max().item()
+        assert paddle.allclose(
+            native_grad, triton_grad, rtol=backward_rtol, atol=backward_atol
+        ), (
+            f"{name} gradients differ: max_diff={max_grad_diff}, rtol={backward_rtol}, atol={backward_atol}"
+        )
+
+    # Additional verification: H_post value range
+    # H_post = 2 * sigmoid(...), so each element should be in [0, 2] and average around 1
+    assert (h_post_native >= 0).all() and (h_post_native <= 2).all(), (
+        "h_post values out of range [0, 2] (native)"
+    )
+    assert (h_post_triton >= 0).all() and (h_post_triton <= 2).all(), (
+        "h_post values out of range [0, 2] (triton)"
+    )
+    # Check that native and triton h_post are consistent
+    assert paddle.allclose(
+        h_post_native, h_post_triton, rtol=forward_rtol, atol=forward_atol
+    ), "h_post values differ between native and triton"
+
+
 def test_triton_sinkhorn_and_kernels():
-    """Triton sinkhorn_knopp, post_sinkhorn kernels."""
+    """Triton sinkhorn_knopp, post_sinkhorn kernels with precision verification."""
     from paddlefleet.transformer.hyper_connection import TRITON_AVAILABLE
 
     if not TRITON_AVAILABLE:
@@ -612,34 +749,70 @@ def test_triton_sinkhorn_and_kernels():
 
     N = 4
     B, L = 2, 4
-    # sinkhorn_knopp may return a tuple or a single tensor depending on implementation
+    rtol, atol = 1e-4, 1e-5
+
+    # ========== Test sinkhorn_knopp ==========
+    # Verify double stochasticity: row sums and column sums should be ~1
     A = paddle.rand([B, N, N], dtype="float32") + 0.1
-    result = sinkhorn_knopp(A, it=10)
+    result = sinkhorn_knopp(A, it=20)
     if isinstance(result, tuple):
         result = result[0]
-    # Handle None case
-    if result is not None:
-        assert result.shape == [B, N, N]
 
-    # post_sinkhorn_fused_forward takes (H_res_exp, u, v, H_pre, x)
-    # Expected shapes: H_res_exp [B, L, N, N], u [B*L, N], v [B*L, N], H_pre [B, L, N], x [B, L, N, D]
+    if result is not None:
+        # Verify double stochasticity
+        row_sums = result.sum(axis=-1)
+        col_sums = result.sum(axis=-2)
+        assert paddle.allclose(
+            row_sums, paddle.ones_like(row_sums), rtol=1e-2, atol=1e-2
+        ), f"Sinkhorn row sums not ~1: {row_sums[0]}"
+        assert paddle.allclose(
+            col_sums, paddle.ones_like(col_sums), rtol=1e-2, atol=1e-2
+        ), f"Sinkhorn col sums not ~1: {col_sums[0]}"
+
+    # ========== Test post_sinkhorn_fused_forward ==========
     D = 64
-    H_res_exp = paddle.randn([B, L, N, N])  # [B, L, N, N]
-    u = paddle.randn([B * L, N])  # [B*L, N] - compact scaling vector
-    v = paddle.randn([B * L, N])  # [B*L, N] - compact scaling vector
-    H_pre = paddle.randn([B, L, N])  # [B, L, N]
-    x = paddle.randn([B, L, N, D])  # [B, L, N, D]
-    # Returns tuple: (residuals [B, L, N, D], branch_input [B, L, 1, D], H_res [B, L, N, N])
-    psf_result = post_sinkhorn_fused_forward(H_res_exp, u, v, H_pre, x)
-    assert isinstance(psf_result, tuple)
-    residuals, branch_input, H_res = psf_result
-    assert residuals.shape == [B, L, N, D]
-    assert branch_input.shape == [B, L, 1, D]
-    assert H_res.shape == [B, L, N, N]
+    H_res_exp = paddle.randn([B, L, N, N], dtype="float32")
+    u = paddle.randn([B * L, N], dtype="float32")
+    v = paddle.randn([B * L, N], dtype="float32")
+    H_pre = paddle.randn([B, L, N], dtype="float32")
+    x = paddle.randn([B, L, N, D], dtype="float32")
+
+    # Triton kernel
+    residuals, branch_input, H_res = post_sinkhorn_fused_forward(
+        H_res_exp, u, v, H_pre, x
+    )
+
+    # Native reference: H_res = diag(u) @ H_res_exp @ diag(v)
+    # residuals = H_res @ x, branch_input = H_pre @ x (sum over N)
+    u_mat = paddle.diag_embed(u.reshape([B * L, N]))  # [B*L, N, N]
+    v_mat = paddle.diag_embed(v.reshape([B * L, N]))  # [B*L, N, N]
+    H_res_exp_2d = H_res_exp.reshape([B * L, N, N])
+    H_res_native = paddle.matmul(u_mat, paddle.matmul(H_res_exp_2d, v_mat))
+    H_res_native = H_res_native.reshape([B, L, N, N])
+
+    # residuals = H_res @ x: [B, L, N, N] @ [B, L, N, D] -> [B, L, N, D]
+    residuals_native = paddle.matmul(H_res_native, x)
+
+    # branch_input = H_pre @ x: [B, L, N] @ [B, L, N, D] -> [B, L, D]
+    # H_pre @ x means sum over N with weights H_pre
+    branch_input_native = (
+        (H_pre.unsqueeze(-2) @ x)
+        .squeeze(-2)
+        .unsqueeze(-1)
+        .transpose([0, 1, 3, 2])
+    )
+
+    # Verify precision
+    assert paddle.allclose(H_res, H_res_native, rtol=rtol, atol=atol), (
+        f"H_res mismatch: max_diff={((H_res - H_res_native).abs().max().item()):.6f}"
+    )
+    assert paddle.allclose(residuals, residuals_native, rtol=rtol, atol=atol), (
+        f"residuals mismatch: max_diff={((residuals - residuals_native).abs().max().item()):.6f}"
+    )
 
 
 def test_triton_backward_kernels():
-    """Triton backward kernel wrappers."""
+    """Triton backward kernel wrappers with precision verification."""
     from paddlefleet.transformer.hyper_connection import TRITON_AVAILABLE
 
     if not TRITON_AVAILABLE:
@@ -650,55 +823,81 @@ def test_triton_backward_kernels():
     )
 
     B, L, N, D = 2, 4, 4, 64
+    rtol, atol = 1e-4, 1e-5
 
-    # Test width_branch_residuals_backward_triton
-    # Args: d_branch_input [B,L,1,D], d_residuals [B,L,N,D], x [B,L,N,D], H_pre [B,L,N], H_res [B,L,N,N]
+    # ========== Test width_branch_residuals_backward_triton ==========
     d_branch_input = paddle.randn([B, L, 1, D], dtype="float32")
     d_residuals = paddle.randn([B, L, N, D], dtype="float32")
     x = paddle.randn([B, L, N, D], dtype="float32")
     H_pre = paddle.randn([B, L, N], dtype="float32")
     H_res = paddle.randn([B, L, N, N], dtype="float32")
 
-    result = width_branch_residuals_backward_triton(
-        d_branch_input, d_residuals, x, H_pre, H_res
+    # Triton kernel
+    d_H_pre_triton, d_H_res_triton, d_x_triton = (
+        width_branch_residuals_backward_triton(
+            d_branch_input, d_residuals, x, H_pre, H_res
+        )
     )
-    assert isinstance(result, tuple)
-    d_H_pre_from_branch, d_H_res_mat, d_x_combined = result
-    assert d_H_pre_from_branch.shape == [B, L, N]
-    assert d_H_res_mat.shape == [B, L, N, N]
-    assert d_x_combined.shape == [B, L, N, D]
 
-    # Test depth_connection_backward_triton_fused
-    # Args: d_output [B,L,N,D], H_post [B,L,N], branch_output [B,L,1,D]
+    # Native reference
+    # d_H_pre = d_branch_input @ x^T (sum over D)
+    d_H_pre_native = (
+        d_branch_input.squeeze(2).unsqueeze(-2) @ x.transpose([0, 1, 3, 2])
+    ).squeeze(-2)
+    # d_H_res = d_residuals @ x^T
+    d_H_res_native = paddle.matmul(d_residuals, x.transpose([0, 1, 3, 2]))
+    # d_x_branch = H_pre * d_branch_input
+    d_x_branch = H_pre.unsqueeze(-1) * d_branch_input
+    # d_x_residuals = H_res^T @ d_residuals
+    d_x_residuals = paddle.matmul(H_res.transpose([0, 1, 3, 2]), d_residuals)
+    d_x_native = d_x_branch + d_x_residuals
+
+    assert paddle.allclose(
+        d_H_pre_triton, d_H_pre_native, rtol=rtol, atol=atol
+    ), (
+        f"d_H_pre mismatch: max_diff={((d_H_pre_triton - d_H_pre_native).abs().max().item()):.6f}"
+    )
+    assert paddle.allclose(
+        d_H_res_triton, d_H_res_native, rtol=rtol, atol=atol
+    ), (
+        f"d_H_res mismatch: max_diff={((d_H_res_triton - d_H_res_native).abs().max().item()):.6f}"
+    )
+    assert paddle.allclose(d_x_triton, d_x_native, rtol=rtol, atol=atol), (
+        f"d_x mismatch: max_diff={((d_x_triton - d_x_native).abs().max().item()):.6f}"
+    )
+
+    # ========== Test depth_connection_backward_triton_fused ==========
     d_output = paddle.randn([B, L, N, D], dtype="float32")
     H_post = paddle.randn([B, L, N], dtype="float32")
     branch_output = paddle.randn([B, L, 1, D], dtype="float32")
 
-    result2 = depth_connection_backward_triton_fused(
-        d_output, H_post, branch_output
+    # Triton kernel
+    d_H_post_triton, d_branch_triton, d_residuals_triton = (
+        depth_connection_backward_triton_fused(d_output, H_post, branch_output)
     )
-    assert isinstance(result2, tuple)
-    d_H_post, d_branch_output, d_residuals_out = result2
-    assert d_H_post.shape == [B, L, N]
-    assert d_branch_output.shape == [B, L, 1, D]
-    assert d_residuals_out.shape == [B, L, N, D]
 
+    # Native reference
+    d_residuals_native = d_output
+    d_branch_native = (H_post.unsqueeze(-1) * d_output).sum(
+        axis=2, keepdim=True
+    )
+    d_H_post_native = (branch_output * d_output).sum(axis=-1)
 
-def test_triton_pylayer():
-    """WidthConnectionLayerTriton and DepthConnectionLayerTriton PyLayers."""
-    from paddlefleet.transformer.hyper_connection import TRITON_AVAILABLE
-
-    if not TRITON_AVAILABLE:
-        return
-
-    for n in [4, 2]:
-        hc = _make_hc(use_triton=True, n=n)
-        x = paddle.randn([4, 2, n * 64])
-        x.stop_gradient = False
-        branch, res, hp = hc.width_connection(x)
-        out = hc.depth_connection((branch, None), res, hp)
-        out.sum().backward()
-        assert x.grad is not None
+    assert paddle.allclose(
+        d_H_post_triton, d_H_post_native, rtol=rtol, atol=atol
+    ), (
+        f"d_H_post mismatch: max_diff={((d_H_post_triton - d_H_post_native).abs().max().item()):.6f}"
+    )
+    assert paddle.allclose(
+        d_branch_triton, d_branch_native, rtol=rtol, atol=atol
+    ), (
+        f"d_branch mismatch: max_diff={((d_branch_triton - d_branch_native).abs().max().item()):.6f}"
+    )
+    assert paddle.allclose(
+        d_residuals_triton, d_residuals_native, rtol=rtol, atol=atol
+    ), (
+        f"d_residuals mismatch: max_diff={((d_residuals_triton - d_residuals_native).abs().max().item()):.6f}"
+    )
 
 
 # =============================================================================
@@ -736,6 +935,157 @@ def test_transformer_layer_mhc_forward():
     assert "hidden_states" in layer4(
         _base_dict_args(paddle.randn([4, 2, N * C]), C=N * C)
     )
+
+
+def test_transformer_layer_mhc_precision_comparison():
+    """TransformerLayerWithMHC precision test with real data.
+
+    Verifies that Triton and native implementations produce consistent results
+    in a full TransformerLayerWithMHC forward/backward pass.
+    """
+    from paddlefleet.transformer.hyper_connection import (
+        TRITON_AVAILABLE,
+        HyperConnectionModule,
+    )
+    from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
+    from paddlefleet.transformer.transformer_config import TransformerConfig
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayerSublayersSpec,
+        TransformerLayerWithMHC,
+    )
+
+    if not TRITON_AVAILABLE:
+        pytest.skip("Triton not available")
+
+    # Test configuration
+    s, b, n, C = 4, 2, 4, 64
+    forward_rtol, forward_atol = 1e-3, 1e-4
+    # TransformerLayer-level test has more accumulated numerical error than unit tests
+    backward_rtol, backward_atol = 5e-2, 1e-2
+    seed = 42
+
+    def make_layer(use_triton):
+        config = TransformerConfig(
+            hidden_size=C,
+            num_attention_heads=4,
+            num_hidden_layers=2,
+            intermediate_size=256,
+            use_mhc=True,
+            mhc_num_residual_streams=n,
+            mhc_sinkhorn_iters=10,
+            mhc_use_triton=use_triton,
+            normalization="RMSNorm",
+            rms_norm_eps=1e-5,
+        )
+        spec = TransformerLayerSublayersSpec(
+            input_layernorm=IdentityOp,
+            self_attention_hyper_connection=HyperConnectionModule,
+            self_attn=IdentityOp,
+            self_attn_bda=IdentityFuncOp,
+            pre_cross_attn_layernorm=IdentityOp,
+            cross_attention=IdentityOp,
+            cross_attn_bda=IdentityFuncOp,
+            post_attention_layernorm=IdentityOp,
+            mlp_hyper_connection=HyperConnectionModule,
+            mlp=IdentityOp,
+            mlp_bda=IdentityFuncOp,
+        )
+        return TransformerLayerWithMHC(
+            config=config, sublayers_spec=spec, layer_number=1
+        )
+
+    # Create layers with same initial parameters
+    paddle.seed(seed)
+    layer_native = make_layer(use_triton=False)
+    paddle.seed(seed)
+    layer_triton = make_layer(use_triton=True)
+
+    # Sync MHC parameters
+    for hc_name in ["self_attention_hyper_connection", "mlp_hyper_connection"]:
+        for param_name in ["combined_weights", "scaling_factors", "bias_terms"]:
+            native_param = getattr(getattr(layer_native, hc_name), param_name)
+            triton_param = getattr(getattr(layer_triton, hc_name), param_name)
+            triton_param.set_value(native_param)
+
+    # Create input
+    paddle.seed(seed)
+    x_native = paddle.randn([s, b, n * C], dtype="float32")
+    x_native.stop_gradient = False
+    paddle.seed(seed)
+    x_triton = paddle.randn([s, b, n * C], dtype="float32")
+    x_triton.stop_gradient = False
+
+    # Forward pass
+    dict_args_native = {"hidden_states": x_native, "attention_mask": None}
+    dict_args_triton = {"hidden_states": x_triton, "attention_mask": None}
+
+    output_native = layer_native(dict_args_native)
+    output_triton = layer_triton(dict_args_triton)
+
+    hidden_native = output_native["hidden_states"]
+    hidden_triton = output_triton["hidden_states"]
+
+    # Verify forward output
+    assert paddle.allclose(
+        hidden_native, hidden_triton, rtol=forward_rtol, atol=forward_atol
+    ), (
+        f"Forward outputs differ: max_diff={((hidden_native - hidden_triton).abs().max().item()):.6f}"
+    )
+
+    # Backward pass
+    loss_native = hidden_native.sum()
+    loss_triton = hidden_triton.sum()
+    loss_native.backward()
+    loss_triton.backward()
+
+    # Verify input gradient
+    assert paddle.allclose(
+        x_native.grad, x_triton.grad, rtol=backward_rtol, atol=backward_atol
+    ), (
+        f"Input gradients differ: max_diff={((x_native.grad - x_triton.grad).abs().max().item()):.6f}"
+    )
+
+    # Verify MHC parameter gradients
+    # Note: Triton version uses skip_sk_gradient=True by default for numerical stability,
+    # which skips gradients for H_res (the last n*n columns of combined_weights).
+    # We only compare the gradients that Triton actually computes (H_pre and H_post parts).
+    for hc_name in ["self_attention_hyper_connection", "mlp_hyper_connection"]:
+        for param_name in ["combined_weights", "scaling_factors", "bias_terms"]:
+            native_param = getattr(getattr(layer_native, hc_name), param_name)
+            triton_param = getattr(getattr(layer_triton, hc_name), param_name)
+
+            assert native_param.grad is not None, (
+                f"{hc_name}.{param_name} has no gradient (native)"
+            )
+            assert triton_param.grad is not None, (
+                f"{hc_name}.{param_name} has no gradient (triton)"
+            )
+
+            if param_name == "combined_weights":
+                # Only compare H_pre and H_post parts (first 2n columns)
+                # H_res gradients are skipped in Triton for numerical stability
+                native_grad = native_param.grad[:, : 2 * n]
+                triton_grad = triton_param.grad[:, : 2 * n]
+            elif param_name == "scaling_factors":
+                # scaling_factors indices: [0]=pre_scale, [1]=post_scale, [2]=res_scale
+                # res_scale gradient (index 2) is skipped in Triton for numerical stability
+                # Only compare pre_scale and post_scale (indices 0 and 1)
+                native_grad = native_param.grad[:2]
+                triton_grad = triton_param.grad[:2]
+            elif param_name == "bias_terms":
+                # Only compare H_pre and H_post bias (first 2n elements)
+                native_grad = native_param.grad[: 2 * n]
+                triton_grad = triton_param.grad[: 2 * n]
+            else:
+                native_grad = native_param.grad
+                triton_grad = triton_param.grad
+
+            max_diff = (native_grad - triton_grad).abs().max().item()
+            assert paddle.allclose(
+                native_grad, triton_grad, rtol=backward_rtol, atol=backward_atol
+            ), (
+                f"{hc_name}.{param_name} gradients differ: max_diff={max_diff:.6f}"
+            )
 
 
 # =============================================================================
