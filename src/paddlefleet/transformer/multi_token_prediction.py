@@ -502,7 +502,6 @@ class WeightOnlyMTPLayer(MultiTokenPredictionLayer):
         super().__init__(*args, **kwargs)
         for _, param in self.state_dict().items():
             param.is_weight_only_mtp = True
-            param.stop_gradient = True
 
     def forward(self, dict_args: dict):
         return dict_args
