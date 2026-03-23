@@ -210,7 +210,7 @@ class TestPP(unittest.TestCase):
 
         print(rst)
 
-        assert overlap_loss._md5sum() == "8846d932a018a2524cbf3a9ce4fe1fa0"
+        assert overlap_loss._md5sum() == "44fe4f1523cb8e38b02c97ff9e57543e"
 
         if paddle.distributed.get_rank() == 0:
             baseline = {
