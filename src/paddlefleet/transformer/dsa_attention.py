@@ -751,7 +751,6 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
 
     @staticmethod
     def forward(ctx, output: Tensor, indexer_loss: Tensor) -> Tensor:
-        print(f"[DSA DEBUG] indexer_loss = {indexer_loss.item():.6f}")
         ctx.save_for_backward(indexer_loss)
         return output
 
@@ -978,7 +977,11 @@ class MLASelfAttentionWithDSA(MLASelfAttention):
             )
         )
 
+        #   Non-SP: batch-first [b, s, ...]
+        #   SP:     seq-first   [s/tp, b, ...]
         if self.config.sequence_parallel:
+            # SP: q_compressed [s/tp, b, q_lora_rank] -> gather -> [s, b, q_lora_rank]
+            #     -> transpose -> [b, s, q_lora_rank]
             indexer_q_latent = gather_from_sequence_parallel_region(
                 q_compressed,
                 tensor_parallel_output_grad=True,
@@ -989,13 +992,20 @@ class MLASelfAttentionWithDSA(MLASelfAttention):
                 tensor_parallel_output_grad=True,
                 group=self.pg_collection.tp,
             ).detach()
+            indexer_q_latent = indexer_q_latent.transpose([1, 0, 2])
+            indexer_hidden = indexer_hidden.transpose([1, 0, 2])
         else:
+            # Non-SP: already batch-first [b, s, ...], no transpose needed
             indexer_q_latent = q_compressed.detach()
             indexer_hidden = hidden_states.detach()
 
-        indexer_q_latent = indexer_q_latent.transpose([1, 0, 2])
-        if self.config.sequence_parallel:
-            indexer_hidden = indexer_hidden.transpose([1, 0, 2])
+        # Convert query/key/value to sequence-first [s, b, n, h] for DSA
+        if not self.config.sequence_parallel:
+            # Non-SP: [b, s, n, h] -> [s, b, n, h]
+            query = query.transpose([1, 0, 2, 3])
+            key = key.transpose([1, 0, 2, 3])
+            value = value.transpose([1, 0, 2, 3])
+        # SP: already seq-first [s/tp, b, n, h], no transpose needed
 
         # indexer_hidden: [b, s, h]
         # indexer_q_latent: [b, s, q_lora_rank]
@@ -1048,11 +1058,11 @@ class MLASelfAttentionWithDSA(MLASelfAttention):
             # when config.rotary_interleaved=True, but Indexer uses non-interleaved
             # RoPE which expects half-half freqs [θ₁,θ₂,...,θ₁,θ₂,...].
             # Convert format here to match Indexer's rotary_interleaved=False.
-            if self.config.rotary_interleaved and indexer_freqs is not None:
-                indexer_freqs = paddle.concat(
-                    [indexer_freqs[..., 0::2], indexer_freqs[..., 1::2]],
-                    axis=-1,
-                )
+            # if self.config.rotary_interleaved and indexer_freqs is not None:
+            #     indexer_freqs = paddle.concat(
+            #         [indexer_freqs[..., 0::2], indexer_freqs[..., 1::2]],
+            #         axis=-1,
+            #     )
 
         indexer_seq_len = indexer_hidden.shape[1]  # [b, s, h] — always full seq
         indexer_causal_mask = paddle.triu(
