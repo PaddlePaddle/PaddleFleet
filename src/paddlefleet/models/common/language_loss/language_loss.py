@@ -13,6 +13,9 @@
 # limitations under the License.
 
 
+import functools
+
+import numpy as np
 import paddle
 from paddle import Tensor
 from paddle.distributed.fleet.utils import recompute
@@ -26,6 +29,74 @@ from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+def subbatch(
+    f, arg_idx, axis, bs, out_idx, use_recompute=False, same_arg_idx={}
+):
+    """
+    Converts a function to one that applies to subbatch of an input dimension.
+    This is useful for processing large tensors in smaller chunks to reduce memory usage.
+
+    Args:
+        f (Callable): Original function to be converted to subbatch processing.
+        arg_idx ([int]): Indices of the inputs to be subbatched.
+        axis ([int]): Indices of the dimensions to be subbatched for each input.
+        bs (int): Subbatch size (number of elements to process at once).
+        out_idx (int): Index of the output dimension that needs stacking.
+        use_recompute (bool, optional): Whether to use recomputation for memory savings. Defaults to False.
+        same_arg_idx (dict, optional): Mapping of argument indices that share the same tensor.
+                                     e.g. {1: 0} means args[1] == args[0], avoiding duplicate slicing.
+
+    Returns:
+        Callable: Converted function that processes inputs in subbatches.
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        assert len(arg_idx) == len(axis), (
+            "Number of batching args and number of batching dims should match."
+        )
+
+        inps = [args[i] for i in arg_idx]
+        axis_width = [inp.shape[d] for inp, d in zip(inps, axis)]
+        assert len(set(axis_width)) == 1, "Batch sizes should be kept equal."
+
+        inp_axis = dict(zip(inps, axis))
+
+        axis_width = axis_width[0]
+        if axis_width < bs:
+            return f(*args, **kwargs)
+
+        outs = []
+        for slice_at in np.arange(0, axis_width, bs):
+            _args = []
+            for i, inp in enumerate(args):
+                if i in same_arg_idx:
+                    assert i > same_arg_idx[i], (
+                        f"expect i > same_arg_idx[i], but got i: {i} and same_arg_idx[i]: {same_arg_idx[i]}"
+                    )
+                    _args.append(_args[same_arg_idx[i]])
+                elif i in arg_idx:
+                    inp = inp.slice(
+                        [inp_axis[inp]],
+                        [slice_at],
+                        [min(inp.shape[inp_axis[inp]], slice_at + bs)],
+                    )
+                    _args.append(inp)
+                else:
+                    _args.append(inp)
+            if use_recompute:
+                out = paddle.distributed.fleet.utils.recompute(
+                    f, *_args, **kwargs
+                )
+            else:
+                out = f(*_args, **kwargs)
+            outs.append(out)
+
+        return paddle.cat(outs, out_idx)
+
+    return wrapper
 
 
 class LanguageLoss(FleetLayer):
@@ -59,8 +130,29 @@ class LanguageLoss(FleetLayer):
                 reduction="none",
             )
 
+        self.loss_subbatch_sequence_length = (
+            config.loss_subbatch_sequence_length
+        )
+        self.use_subbatch = self.loss_subbatch_sequence_length > 0
+
     def forward_impl(self, logits: Tensor, labels: Tensor) -> Tensor:
-        loss = self.loss_func(logits.cast("float32"), labels)
+        seq_len = logits.shape[1]
+
+        if self.use_subbatch and seq_len > self.loss_subbatch_sequence_length:
+
+            def _cast_loss_func(logits, labels):
+                return self.loss_func(logits.cast("float32"), labels)
+
+            sb_loss_func = subbatch(
+                _cast_loss_func,
+                arg_idx=[0, 1],
+                axis=[1, 1],
+                bs=self.loss_subbatch_sequence_length,
+                out_idx=1,
+            )
+            loss = sb_loss_func(logits, labels)
+        else:
+            loss = self.loss_func(logits.cast("float32"), labels)
 
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(loss, axis=1)
