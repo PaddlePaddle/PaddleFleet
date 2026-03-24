@@ -109,14 +109,13 @@ class MultiLatentAttention(Attention):
                 self.config.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_percent=self.config.rotary_percent,
-                rotary_base=self.config.rotary_base,
+                rotary_base=self.config.rope_theta,
                 cp_group=self.pg_collection.cp,
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.config.qk_rope_head_dim,
-                rotary_interleaved=self.config.rotary_interleaved,
-                rotary_base=self.config.rotary_base,
+                rotary_base=self.config.rope_theta,
                 scaling_factor=self.config.rotary_scaling_factor,
                 original_max_position_embeddings=self.config.original_max_position_embeddings,
                 beta_fast=self.config.beta_fast,
@@ -246,7 +245,7 @@ class MultiLatentAttention(Attention):
             )
 
         # =================
-        # Output. [sq, b, h]
+        # Output. [b, sq, h]
         # =================
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
@@ -258,7 +257,7 @@ class MultiLatentAttention(Attention):
 class MLASelfAttention(MultiLatentAttention):
     """MLA Self-attention layer class
 
-    Self-attention layer takes input with size [s, b, h]
+    Self-attention layer takes input with size [b, s, h]
     and returns output of the same size.
     """
 
@@ -382,10 +381,10 @@ class MLASelfAttention(MultiLatentAttention):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`.
         """
-        # s = sequence length, b = batch size, h = hidden size, n = num attention heads
-        # Attention heads [s, b, n*h]
+        # b = batch size, s = sequence length, h = hidden size, n = num attention heads
+        # Attention heads [b, s, n*h]
         assert hidden_states.ndim == 3, (
-            f"hidden_states should be 3D, [s, b, n*h], got {hidden_states.ndim}D"
+            f"hidden_states should be 3D, [b, s, n*h], got {hidden_states.ndim}D"
         )
 
         # =========================================
@@ -395,7 +394,7 @@ class MLASelfAttention(MultiLatentAttention):
             hidden_states, self.config, packed_seq_params
         )
 
-        # rotary_pos_emb:[s, b, 1, 64]
+        # rotary_pos_emb:[1, s, 1, 64]
         mscale = 1.0
         rotary_pos_cos = None
         rotary_pos_sin = None
@@ -425,6 +424,8 @@ class MLASelfAttention(MultiLatentAttention):
                 rotary_pos_emb, mscale = self.rotary_pos_emb(
                     rotary_seq_len, packed_seq=packed_seq
                 )
+                # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
+                # mscale = 1.0
 
         if (
             packed_seq_params is not None
@@ -446,7 +447,7 @@ class MLASelfAttention(MultiLatentAttention):
         # =========================================
         if self.config.q_lora_rank is not None:
             # if q_a_proj is ColumnParallelLinear:
-            #     q_compressed: [s, b, q_lora_rank / TP]
+            #     q_compressed: [b, s, q_lora_rank / TP]
             q_compressed, _ = self.q_a_proj(hidden_states)
 
             # When output is sharded (ColumnParallelLinear):
@@ -464,27 +465,27 @@ class MLASelfAttention(MultiLatentAttention):
             q_compressed = hidden_states
 
         # if kv_a_proj_with_mqa is ColumnParallelLinear:
-        #     kv_combined: [s, b, (kv_lora_rank + qk_rope_head_dim) / TP]
+        #     kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim) / TP]
         kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
         if (
             kv_combined.size(-1)
             != self.config.kv_lora_rank + self.config.qk_rope_head_dim
         ):
-            # kv_combined: [s, b, (kv_lora_rank + qk_rope_head_dim)]
+            # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
             kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
-            # kv_compressed:[s, b, kv_lora_rank], k_pos_emb: [s, b, qk_rope_head_dim]
+            # kv_compressed:[b, s, kv_lora_rank], k_pos_emb: [b, s, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
                 [self.config.kv_lora_rank, self.config.qk_rope_head_dim],
                 axis=-1,
             )
             if self.config.sequence_parallel:
-                # kv_compressed:[s / TP, b, kv_lora_rank]
+                # kv_compressed:[b, s / TP, kv_lora_rank]
                 kv_compressed = scatter_to_sequence_parallel_region(
                     kv_compressed
                 )
         else:
-            # kv_compressed:[s / TP, b, kv_lora_rank], k_pos_emb: [s / TP, b, qk_rope_head_dim]
+            # kv_compressed:[b, s / TP, kv_lora_rank], k_pos_emb: [b, s / TP, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
                 [self.config.kv_lora_rank, self.config.qk_rope_head_dim],
@@ -494,16 +495,18 @@ class MLASelfAttention(MultiLatentAttention):
                 get_pg_size(self.pg_collection.tp) > 1
                 and self.config.sequence_parallel
             ):
-                # k_pos_emb: [s, b, qk_rope_head_dim]
+                # k_pos_emb: [b, s, qk_rope_head_dim]
                 k_pos_emb = gather_from_sequence_parallel_region(
                     k_pos_emb, group=self.pg_collection.tp
                 )
 
-        if packed_seq_params is not None:
-            # If sequence packing, reshape qkv from [t, 1, h, d] to [t, h, d].
-            q_compressed = q_compressed.squeeze(1)
-            kv_compressed = kv_compressed.squeeze(1)
-            k_pos_emb = k_pos_emb.squeeze(1)
+        # if packed_seq_params is not None:
+        #     # PaddleFleet batch-first: [b=1, t, h] -> squeeze dim0 (batch) -> [t, h]
+        #     # (SP seq-first: [t, b=1, h] -> squeeze dim1 (batch) -> [t, h])
+        #     batch_dim = 1 if self.config.sequence_parallel else 0
+        #     q_compressed = q_compressed.squeeze(batch_dim)
+        #     kv_compressed = kv_compressed.squeeze(batch_dim)
+        #     k_pos_emb = k_pos_emb.squeeze(batch_dim)
 
         # =========================================
         # Apply norm
@@ -525,8 +528,8 @@ class MLASelfAttention(MultiLatentAttention):
             """
             Apply the up projection and RoPE to the query and key.
             When sequence packing enabled, the input tensors adopt a packed shape of [t, ...];
-            otherwise, they maintain the unpacked shape [s, b, ...]. In subsequent code comments,
-            we uniformly use [num_tokens, ...] to denote [s, b, ...] or [t, ...] for two cases.
+            otherwise, they maintain the unpacked shape [b, s, ...]. In subsequent code comments,
+            we uniformly use [num_tokens, ...] to denote [b, s, ...] or [t, ...] for two cases.
             """
             if self.config.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
@@ -583,10 +586,16 @@ class MLASelfAttention(MultiLatentAttention):
                     cp_size,
                 )
             else:
-                q_len = q.size()[0]
-                # rotary_pos_emb: [seq_len, 1, 64]
-                # squeeze [1, seq_len, 1, 64] -> [seq_len, 1, 64]
-                rotary_pos_emb = rotary_pos_emb.squeeze(0)
+                # Determine seq length:
+                #   packed 3D [t, n, d]      -> dim 0
+                #   SP     4D [s, b, n, d]   -> dim 0
+                #   normal 4D [b, s, n, d]   -> dim 1
+                if q.ndim == 3 or self.config.sequence_parallel:
+                    q_len = q.size(0)
+                else:
+                    q_len = q.size(1)
+                # rotary_pos_emb: squeeze [1, seq_len, 1, headdim]
+
                 if (
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
@@ -595,7 +604,7 @@ class MLASelfAttention(MultiLatentAttention):
                     # the full rotary_pos_emb length, except for sequence packing + CP.
                     # We need the full rotary_pos_emb to cover the full sequence,
                     # so we do not shorten it here.
-                    rotary_pos_emb = rotary_pos_emb[0:q_len]
+                    rotary_pos_emb = rotary_pos_emb[:, 0:q_len]
 
                 # q_no_pe: [num_tokens, n, qk_nope_head_dim]
                 # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
@@ -615,6 +624,13 @@ class MLASelfAttention(MultiLatentAttention):
                     [self.config.qk_nope_head_dim, self.config.v_head_dim],
                     axis=-1,
                 )
+
+                # When sequence_parallel is enabled and not packed,
+                # q/k are seq-first [s, b, n, d] but rotary_pos_emb is
+                # batch-first [1, s, 1, d]. Transpose to [s, 1, 1, d]
+                # so broadcasting aligns correctly in _apply_rotary_pos_emb_bshd.
+                if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
+                    rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
                 # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
                 q_pos_emb = apply_rotary_pos_emb(

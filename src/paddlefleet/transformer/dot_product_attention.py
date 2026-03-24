@@ -285,7 +285,14 @@ class DotProductAttention(FleetLayer):
                 dropout=self.config.attention_dropout,
                 causal=(attn_mask_type == AttnMaskType.causal),
             )
+
+            if need_value_padding:
+                # Truncate output back to original v_head_dim
+                # attn_output: [b, s, h, q_head_dim] -> [b, s, h, v_head_dim]
+                attn_output = attn_output[..., :v_head_dim]
+
             attn_output = attn_output.reshape([0, 0, -1])
+
             return attn_output
 
         # ===================================

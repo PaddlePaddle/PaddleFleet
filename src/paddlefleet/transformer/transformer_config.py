@@ -44,11 +44,23 @@ class TransformerConfig(ModelParallelConfig):
     num_nextn_predict_layers: int = 0
     """Number of Multi-Token Prediction (MTP) Layers."""
 
+    train_mtp_only: bool = False
+    """Whether to train MTP only."""
+
+    mtp_distillation_loss: bool = False
+    """Whether to use distillation MTP loss."""
+
+    mtp_num_layers: int = 0
+    """MTP Layer number."""
+
     mtp_loss_scaling_factor: float = 0.3
     """Weighting factor of Multi-Token Prediction (MTP) loss."""
 
     add_mtp_loss: bool = True
     """Add mtp loss to final loss to enable mtp backward and weight update."""
+
+    mtp_load_weight_only: bool = False
+    """When True, use WeightOnlyMTPLayer (holds weights but skips MTP computation and embedding processing)."""
 
     num_empty_layers_add_in_head: int = 0
     """Number of EmptyLayer before the Decoder Layer.
@@ -527,6 +539,9 @@ class TransformerConfig(ModelParallelConfig):
     mscale_all_dim: float = 0.0
     """Mscale all dimensions for YaRN RoPE in Multi-Latent Attention, used by yarn."""
 
+    loss_subbatch_sequence_length: int = -1
+    """Sequence length of subbatch for loss computation."""
+
     # cache_mla_latents: bool = False
 
     ####################
@@ -655,7 +670,7 @@ class TransformerConfig(ModelParallelConfig):
         if self.first_k_dense_replace:
             if self.moe_layer_freq:
                 moe_layer_pattern = [
-                    1 if (i % self.moe_layer_freq == 0) else 0
+                    1 if ((i + 1) % self.moe_layer_freq == 0) else 0
                     for i in range(
                         self.num_hidden_layers - self.first_k_dense_replace
                     )

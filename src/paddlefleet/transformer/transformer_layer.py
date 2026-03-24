@@ -369,6 +369,7 @@ class TransformerLayer(nn.Layer):
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
+            and not self.config.mtp_load_weight_only
         ):
             # process hidden_states
             hidden_states_concat = dict_args["hidden_states"]
@@ -461,6 +462,7 @@ class TransformerLayer(nn.Layer):
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
+            and not self.config.mtp_load_weight_only
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
@@ -531,6 +533,7 @@ class TransformerLayer(nn.Layer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
+        rope_freqs_cis: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
@@ -551,6 +554,7 @@ class TransformerLayer(nn.Layer):
             rotary_pos_emb (Tensor | None): Rotary positional embeddings.
             rotary_pos_cos (Tensor | None): Rotary embedding cosine.
             rotary_pos_sin (Tensor | None): Rotary embedding sine.
+            rope_freqs_cis (Tensor | None): Rotary embedding frequency.
             attention_bias (Tensor | None): Bias tensor for Q * K.T.
             packed_seq_params (object, optional): Parameters for packed sequence processing.
 
@@ -572,20 +576,30 @@ class TransformerLayer(nn.Layer):
         else:
             input_layernorm_output = self.input_layernorm(hidden_states)
 
-        # Self attention.
-        attention_output_with_bias = self.self_attn(
-            input_layernorm_output,
-            attention_mask=attention_mask,
-            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            position_ids=position_ids,
-            attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            in_recompute=in_recompute,
-        )
-
+        if rope_freqs_cis is not None:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rope_freqs_cis=rope_freqs_cis,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+            )
+        else:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+            )
         with paddle.enable_grad():
             hidden_states = self.self_attn_bda(
                 self.training, self.config.bias_dropout_fusion
@@ -808,6 +822,7 @@ class TransformerLayerNode(ScheduleNode):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             mtp_tmp_dict = {}
             for i in range(self.config.num_nextn_predict_layers):
@@ -895,6 +910,7 @@ class TransformerLayerNode(ScheduleNode):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             # maybe error, fix this by concat and split
             assert len(output_grad) == self.config.num_nextn_predict_layers + 1
@@ -987,6 +1003,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             # maybe error, fix this by concat and split
             assert len(output_grad) == self.config.num_nextn_predict_layers + 1
