@@ -261,18 +261,13 @@ def _apply_rotary_pos_emb_thd(
     cp_size = get_pg_size(cp_group)
     cp_rank = get_pg_rank(cp_group)
 
-    seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
-
-    # Handle two different frequency tensor formats:
-    # 1. If freqs.size(0) == cu_seqlens[-1]: freqs contains all positions across all sequences
-    #    -> Use offset-based mapping for exact positional correspondence
-    # 2. Otherwise: freqs contains only max sequence length positions
-    #    -> Use traditional mapping without offsets (map first :seqlen part)
-    if freqs.dim() >= 1 and freqs.size(1) == cu_seqlens[-1]:
-        # CASE 1: Exact mapping with offsets
-        # When cp_size==1, every per-segment slice concatenates back to the original freqs.
-        # Skip the split+cat and call bshd directly with the original freqs.
-        if cp_size == 1:
+    # Fast path for cp_size==1 with exact mapping (CASE 1):
+    # freqs covers the full packed sequence, use it directly without splitting.
+    # Use t.shape instead of cu_seqlens[-1] for comparison — both are Python ints,
+    # avoiding D2H synchronizations from .tolist() and tensor element access.
+    if cp_size == 1:
+        seq_dim = 1 if t.ndim == 4 else 0
+        if freqs.size(1) == t.shape[seq_dim]:
             return _apply_rotary_pos_emb_bshd(
                 t,
                 freqs,
@@ -281,6 +276,16 @@ def _apply_rotary_pos_emb_thd(
                 mscale=mscale,
                 high_precision_rope=high_precision_rope,
             )
+
+    seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
+
+    # Handle two different frequency tensor formats:
+    # 1. If freqs.size(1) == cu_seqlens[-1]: freqs contains all positions across all sequences
+    #    -> Use offset-based mapping for exact positional correspondence
+    # 2. Otherwise: freqs contains only max sequence length positions
+    #    -> Use traditional mapping without offsets (map first :seqlen part)
+    if freqs.dim() >= 1 and freqs.size(1) == cu_seqlens[-1]:
+        # CASE 1: Exact mapping with offsets
         # Build packed freqs in one pass, then apply once to the whole packed tensor
         cu_seqlens_list = cu_seqlens.tolist()
         sequence_splits = paddle.split(t, seqlens, axis=1 if t.ndim == 4 else 0)
