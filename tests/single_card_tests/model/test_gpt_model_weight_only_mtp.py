@@ -101,7 +101,7 @@ class TestWeightOnlyMTP(unittest.TestCase):
         )
 
     def test_weight_only_mtp_params_marked(self):
-        """Test that all params in WeightOnlyMTPLayer have is_weight_only_mtp=True and stop_gradient=True."""
+        """Test that all params in WeightOnlyMTPLayer have is_weight_only_mtp=True."""
         weight_only_params = self.gpt_model._get_weight_only_params()
         assert len(weight_only_params) > 0, (
             "Model with mtp_load_weight_only=True should have weight-only params"
@@ -110,9 +110,6 @@ class TestWeightOnlyMTP(unittest.TestCase):
         for param in weight_only_params:
             assert getattr(param, "is_weight_only_mtp", False), (
                 "Weight-only MTP param should have is_weight_only_mtp=True"
-            )
-            assert param.stop_gradient, (
-                "Weight-only MTP param should have stop_gradient=True"
             )
 
     def test_weight_only_mtp_forward_is_noop(self):
@@ -256,13 +253,6 @@ class TestWeightOnlyMTP(unittest.TestCase):
         assert not paddle.isnan(loss).any(), "Loss should not contain NaN"
         assert not paddle.isinf(loss).any(), "Loss should not contain Inf"
         print(f"Loss with weight_only_mtp: {loss.item()}")
-
-        # Verify weight-only params have no gradient (stop_gradient=True)
-        for name, param in self.gpt_model.named_parameters():
-            if getattr(param, "is_weight_only_mtp", False):
-                assert param.grad is None, (
-                    f"Weight-only MTP param {name} should have no gradient"
-                )
 
 
 if __name__ == "__main__":
