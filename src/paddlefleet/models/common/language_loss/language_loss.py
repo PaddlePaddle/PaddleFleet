@@ -17,10 +17,18 @@ import functools
 
 import numpy as np
 import paddle
-from paddle import Tensor
+import paddle.distributed as dist
+from paddle import Tensor, nn
+from paddle.autograd import PyLayer
+from paddle.distributed import fleet
+from paddle.distributed.fleet.layers.mpu import mp_ops
 from paddle.distributed.fleet.utils import recompute
+from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
-from paddlefleet.context_parallel_utils import ContextParallelGatherOp
+from paddlefleet.context_parallel_utils import (
+    ContextParallelGatherOp,
+    ContextParallelScatterOp,
+)
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
@@ -29,6 +37,59 @@ from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+class DistributedSoftmaxOp(PyLayer):
+    @staticmethod
+    def forward(ctx, x, axis=-1, mp_group=None):
+        ctx.axis = axis
+        if mp_group is None:
+            hcg = fleet.get_hybrid_communicate_group()
+            mp_group = hcg.get_model_parallel_group()
+
+        ctx.mp_group = mp_group
+
+        local_max = paddle.max(x, axis=axis, keepdim=True)
+
+        all_max = AllGatherOp.apply(local_max)
+
+        global_max = paddle.max(all_max, axis=0, keepdim=True)
+
+        x_stable = x - global_max
+
+        exp_x = paddle.exp(x_stable.cast("float32"))
+
+        local_sum_exp = paddle.sum(exp_x, axis=axis, keepdim=True)
+
+        sum_exp = mp_ops._mp_allreduce(
+            local_sum_exp,
+            group=mp_group,
+            use_calc_stream=True,
+            use_model_parallel=True,
+        )
+
+        softmax_output = exp_x / sum_exp
+
+        ctx.save_for_backward(softmax_output, sum_exp)
+
+        return softmax_output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        softmax_output, global_sum_exp = ctx.saved_tensor()
+        axis = ctx.axis
+        mp_group = ctx.mp_group
+
+        grad_softmax = grad_output * softmax_output
+
+        local_sum_grad = paddle.sum(grad_softmax, axis=axis, keepdim=True)
+
+        all_sum_grad = AllGatherOp.apply(local_sum_grad)
+        global_sum_grad = paddle.sum(all_sum_grad, axis=0, keepdim=True)
+
+        grad_input = softmax_output * (grad_output - global_sum_grad)
+
+        return grad_input
 
 
 def subbatch(
@@ -190,20 +251,104 @@ class LanguageLoss(FleetLayer):
             lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
             seq_length = lm_labels.shape[1]
 
-            lm_loss = self._forward(logits[0], lm_labels)
-
             mtp_loss = []
             mtp_logits = logits[1:]
-            for depth in range(self.config.num_nextn_predict_layers):
-                logits_cur_depth = mtp_logits[depth]
-                labels_cur_depth = labels_ori[
-                    :, (depth + 1) : (depth + 1 + seq_length)
-                ]
-                loss_cur_depth = self._forward(
-                    logits_cur_depth,
-                    labels_cur_depth,
-                )
-                mtp_loss.append(loss_cur_depth)
+
+            if not self.config.mtp_distillation_loss:
+                if self.config.train_mtp_only:
+                    lm_loss = 0.0
+                else:
+                    lm_loss = self._forward(logits[0], lm_labels)
+
+                for depth in range(self.config.num_nextn_predict_layers):
+                    logits_cur_depth = mtp_logits[depth]
+                    labels_cur_depth = labels_ori[
+                        :, (depth + 1) : (depth + 1 + seq_length)
+                    ]
+                    loss_cur_depth = self._forward(
+                        logits_cur_depth,
+                        labels_cur_depth,
+                    )
+                    mtp_loss.append(loss_cur_depth)
+                    paddle.device.cuda.empty_cache()
+            else:
+                lm_loss = self._forward(logits[0], lm_labels)
+                if get_tensor_model_parallel_world_size() > 1:
+                    target_p_self_op_dist = DistributedSoftmaxOp.apply(
+                        logits[0], axis=2
+                    )
+                else:
+                    target_p_self_op_dist = nn.Softmax(axis=2)(logits[0])
+                if get_context_parallel_world_size() > 1:
+                    target_p_self_op_dist = ContextParallelGatherOp.apply(
+                        target_p_self_op_dist, axis=1
+                    )
+
+                def padding(tensor, left=False, pad_len=1):
+                    zeropadding = paddle.zeros_like(tensor[:, -pad_len:, :])
+                    if left:
+                        tensor = paddle.concat((zeropadding, tensor), axis=1)
+                    else:
+                        tensor = paddle.concat((tensor, zeropadding), axis=1)
+                    return tensor
+
+                if (
+                    self.config.num_nextn_predict_layers > 0
+                    and mtp_logits is not None
+                ):
+                    for depth in range(len(mtp_logits)):
+                        prediction_scores_cur_depth = mtp_logits[depth]
+                        labels_cur_depth = labels_ori[
+                            :, (depth + 1) : (depth + 1 + seq_length)
+                        ]
+                        lossmask = (
+                            labels_cur_depth != self.ignored_index
+                        ).cast(paddle.float32)
+                        if get_tensor_model_parallel_world_size() > 1:
+                            out_logp = paddle.log(
+                                DistributedSoftmaxOp.apply(
+                                    prediction_scores_cur_depth, axis=2
+                                )
+                            )
+                        else:
+                            out_logp = nn.LogSoftmax(axis=2)(
+                                prediction_scores_cur_depth
+                            )
+
+                        target_p = target_p_self_op_dist[
+                            :, (depth + 1) :, :
+                        ].clone()
+                        target_p = padding(
+                            target_p, left=False, pad_len=depth + 1
+                        )
+                        if get_context_parallel_world_size() > 1:
+                            target_p = ContextParallelScatterOp.apply(
+                                target_p, axis=1
+                            )
+                        plogp = target_p * out_logp
+
+                        lossmask = lossmask[..., None]
+                        xishu = lossmask.sum() + 1e-5
+                        if get_context_parallel_world_size() > 1:
+                            lossmask = ContextParallelScatterOp.apply(
+                                lossmask, axis=1
+                            )
+
+                        ploss = -paddle.sum(lossmask * plogp)
+                        if get_tensor_model_parallel_world_size() > 1:
+                            dist.all_reduce(
+                                ploss,
+                                group=fleet.get_hybrid_communicate_group().get_model_parallel_group(),
+                            )
+
+                        if get_context_parallel_world_size() > 1:
+                            dist.all_reduce(
+                                ploss,
+                                group=fleet.get_hybrid_communicate_group().get_context_parallel_group(),
+                            )
+
+                        ploss = ploss / xishu
+                        mtp_loss.append(ploss)
 
             # Store detached MTP loss tensors into class-level tracker.
             # Use .detach() instead of .item() to avoid GPU synchronization on every

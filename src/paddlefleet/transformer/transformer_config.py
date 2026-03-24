@@ -44,6 +44,15 @@ class TransformerConfig(ModelParallelConfig):
     num_nextn_predict_layers: int = 0
     """Number of Multi-Token Prediction (MTP) Layers."""
 
+    train_mtp_only: bool = False
+    """Whether to train MTP only."""
+
+    mtp_distillation_loss: bool = False
+    """Whether to use distillation MTP loss."""
+
+    mtp_num_layers: int = 0
+    """MTP Layer number."""
+
     mtp_loss_scaling_factor: float = 0.3
     """Weighting factor of Multi-Token Prediction (MTP) loss."""
 
