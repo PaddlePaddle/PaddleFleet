@@ -55,5 +55,23 @@ class TestYarnRotaryEmbedding(unittest.TestCase):
         assert mscale == 1.0
 
 
+class TestYarnRotaryEmbeddingInterleaved(unittest.TestCase):
+    def setUp(self):
+        self.head_dim = 8
+        self.rotary_percent = 1.0
+        self.rope = YarnRotaryEmbedding(
+            self.head_dim, self.rotary_percent, rotary_interleaved=True
+        )
+
+    def test_forward_raises_when_interleaved(self):
+        # YarnRotaryEmbedding 不支持 interleaved 模式，应抛出 AssertionError
+        with self.assertRaises(AssertionError) as ctx:
+            self.rope(64)
+        assert (
+            "Yarn RoPE does not support interleaved rotary embeddings"
+            in str(ctx.exception)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

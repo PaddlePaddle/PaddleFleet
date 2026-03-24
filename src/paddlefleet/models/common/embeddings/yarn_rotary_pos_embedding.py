@@ -117,10 +117,6 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         Returns:
             Tensor: Embeddings after applying Yarn RoPE.
         """
-        assert not self.rotary_interleaved, (
-            "Yarn RoPE does not support interleaved rotary embeddings"
-        )
-
         low, high = _yarn_find_correction_range(
             self.beta_fast,
             self.beta_slow,
