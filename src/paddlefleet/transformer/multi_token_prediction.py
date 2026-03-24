@@ -501,7 +501,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             tensor_list = paddle.split(
                 hidden_states_concat, self.config.num_nextn_predict_layers + 1
             )
-            dict_args["hidden_states"] = tensor_list[0]
+            dict_args["hidden_states"] = tensor_list[self.layer_number]
             dict_args["decoder_input"] = tensor_list[self.layer_number + 1]
 
             if self.config.recompute_granularity == "full" and self.training:
