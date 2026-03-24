@@ -32,8 +32,9 @@ except ImportError:
         return parameter
 
 
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
+
 from paddlefleet.jit import jit_fuser
-from paddlefleet.pipeline_parallel import ScheduleNode
 
 if TYPE_CHECKING:
     from paddle import Tensor

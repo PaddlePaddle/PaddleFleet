@@ -22,12 +22,15 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    ScheduleNode,
+    build_spec_layer,
+)
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet import tensor_parallel
-from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
@@ -283,14 +286,14 @@ class MultiTokenPredictionLayer(FleetLayer):
             + f"The supported attention mask types are {SUPPORTED_ATTN_MASK}."
         )
 
-        self.enorm = build_layer(
+        self.enorm = build_spec_layer(
             self.sublayers_spec.enorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
 
-        self.hnorm = build_layer(
+        self.hnorm = build_spec_layer(
             self.sublayers_spec.hnorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
@@ -302,7 +305,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         # so the input's shape is [s, b, 2*h].
         # The output will be sent to the following transformer layer,
         # so the output's shape should be [s, b, h].
-        self.eh_proj = build_layer(
+        self.eh_proj = build_spec_layer(
             self.sublayers_spec.eh_proj,
             self.config.hidden_size * 2,
             self.config.hidden_size,
@@ -313,12 +316,12 @@ class MultiTokenPredictionLayer(FleetLayer):
             skip_bias_add=False,
             is_expert=False,
         )
-        self.transformer_layer = build_layer(
+        self.transformer_layer = build_spec_layer(
             self.sublayers_spec.transformer_layer,
             config=self.config,
         )
 
-        self.norm = build_layer(
+        self.norm = build_spec_layer(
             self.sublayers_spec.layer_norm,
             config=self.config,
             hidden_size=self.config.hidden_size,

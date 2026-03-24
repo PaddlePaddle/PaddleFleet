@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Literal
 
 import paddle
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 
 from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
 from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
@@ -40,7 +41,6 @@ from paddlefleet.models.gpt.lm_head import GPTLMHead
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
-from paddlefleet.spec_utils import LayerSpec
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,

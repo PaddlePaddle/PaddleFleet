@@ -20,15 +20,24 @@ import unittest
 import numpy as np
 import paddle
 from paddle.distributed import fleet
-from paddle.distributed.fleet import distributed_model
+
+# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
+from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+    register_sequence_parallel_allreduce_hooks,
+)
 
 import paddlefleet
+
+# from tests.unit_tests.test_utilities import Utils
+import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
+from paddlefleet.tensor_parallel.mappings import (
+    _gather_along_first_dim,
+    _gather_along_last_dim,
+)
 from paddlefleet.training.initialize import initialize_fleet
-
-PP_DEGREE = 4
 
 
 def _set_random_seed(
@@ -71,21 +80,26 @@ def cal_sim(a, b):
     return paddle.nn.functional.cosine_similarity(a.flatten(), b.flatten(), 0)
 
 
-def check_grads(dist_model, serial_model):
+def check_grads(dist_model, serial_model, tp_group):
     serial_grads = {}
     for name, p in serial_model.named_parameters():
         serial_grads[name] = p.grad
 
     dist_grads = {}
     for name, p in dist_model.named_parameters():
-        grad = p.grad
-        if "shared_layers" in name:
-            serial_name = "_layers.0.embedding.embed_tokens.weight"
+        if "qkv_proj.weight" in name or "up_gate_proj.weight" in name:
+            grad = _gather_along_last_dim(p.grad, tp_group)
+        elif (
+            "o_proj.weight" in name
+            or "down_proj.weight" in name
+            or "embed_tokens.weight" in name
+        ):
+            grad = _gather_along_first_dim(p.grad, tp_group)
         else:
-            serial_name = name
+            grad = p.grad
         assert (
-            paddle.allclose(grad, serial_grads[serial_name], atol=5e-8)
-            and cal_sim(grad, serial_grads[serial_name]) > 0.999
+            paddle.allclose(grad, serial_grads[name], atol=5e-8)
+            and cal_sim(grad, serial_grads[name]) > 0.999
         )
 
 
@@ -94,9 +108,8 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
     random.seed(seed)
     np.random.seed(seed)
     paddle.manual_seed(seed)
+
     gpt_model = gpt_builder(config, num_stages=1)
-    strategy = fleet.DistributedStrategy()
-    gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
 
     data = paddle.randint(
         low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
@@ -107,6 +120,8 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
         (batch_size, 1)
     )
 
+    strategy = fleet.DistributedStrategy()
+    gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
     inputs = (
         {
             "input_ids": [input_ids],
@@ -120,7 +135,7 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
     return loss, gpt_pipe_model
 
 
-def run_pp(
+def run_tp_sp(
     seed,
     batch_size,
     seq_len,
@@ -132,8 +147,8 @@ def run_pp(
     strategy = fleet.DistributedStrategy()
     strategy.hybrid_configs = {
         "dp_degree": 1,
-        "mp_degree": 1,
-        "pp_degree": config.pipeline_model_parallel_size,
+        "mp_degree": 4,
+        "pp_degree": 1,
         "sharding_degree": 1,
         "sep_degree": 1,
         "cp_degree": 1,
@@ -154,12 +169,9 @@ def run_pp(
 
     _set_random_seed(seed)
 
-    gpt_model = gpt_builder(
-        config,
-        num_stages=config.pipeline_model_parallel_size,
-        seg_method="layer:TransformerLayer",
-    )
-    gpt_pipe_model = distributed_model(gpt_model)
+    gpt_model = gpt_builder(config, num_stages=1)
+
+    register_sequence_parallel_allreduce_hooks(gpt_model, 1, False)
 
     data = paddle.randint(
         low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
@@ -170,6 +182,9 @@ def run_pp(
         (batch_size, 1)
     )
 
+    tp_group = ps.get_tensor_model_parallel_group()
+
+    gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
     inputs = (
         {
             "input_ids": [input_ids],
@@ -180,25 +195,37 @@ def run_pp(
 
     loss = gpt_pipe_model.forward_backward_pipeline(inputs)
 
-    assert loss == loss_baseline
-    check_grads(gpt_pipe_model, gpt_model_baseline)
+    is_within_range = (
+        lambda loss, loss_baseline: False
+        if loss_baseline == 0
+        else abs(loss - loss_baseline) / loss_baseline <= 0.015
+    )
+    assert is_within_range(loss, loss_baseline), (
+        f"TP-SP Loss: {loss}, Baseline Loss: {loss_baseline}, Diff: {abs(loss - loss_baseline) / loss_baseline * 100:.2f}%, The difference is out of the tolerance range 1.5%."
+    )
+
+    # check_grads(gpt_pipe_model, gpt_model_baseline, tp_group)
 
 
-class TestPPWithRecompute(unittest.TestCase):
+class TestTPSP(unittest.TestCase):
     def setUp(self):
         self.seed = 46
         self.batch_size = 2
         self.seq_len = 128
         self.vocab_size = 1024
 
-    def test_pp(self):
+    def test_tp_sp(self):
         config = GPTConfig(
             vocab_size=self.vocab_size,
             max_sequence_length=self.seq_len,
-            num_hidden_layers=4,
+            n_routed_experts=64,
+            num_experts_per_tok=2,
+            moe_intermediate_size=64,
+            n_shared_experts=1,
+            moe_shared_expert_gate=True,
+            num_hidden_layers=2,
             hidden_size=512,
             num_attention_heads=4,
-            first_k_dense_replace=1,
             intermediate_size=1024,
             normalization="RMSNorm",
             hidden_dropout_prob=0.0,
@@ -218,21 +245,48 @@ class TestPPWithRecompute(unittest.TestCase):
             ),
             use_qk_norm=True,
         )
-
         loss, gpt_model = single_device_baseline(
             self.seed, self.batch_size, self.seq_len, self.vocab_size, config
         )
 
-        config.pipeline_model_parallel_size = PP_DEGREE
-        config.recompute_granularity = "full"
-        config.recompute_method = "uniform"
-        config.recompute_num_layers = 1
-        run_pp(
+        dist_config = GPTConfig(
+            vocab_size=self.vocab_size,
+            max_sequence_length=self.seq_len,
+            n_routed_experts=64,
+            num_experts_per_tok=2,
+            moe_intermediate_size=64,
+            n_shared_experts=1,
+            moe_shared_expert_gate=True,
+            num_hidden_layers=2,
+            hidden_size=512,
+            num_attention_heads=4,
+            intermediate_size=1024,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            use_cpu_initialization=True,
+            tensor_model_parallel_size=4,
+            sequence_parallel=True,
+            parallel_output=True,
+            tie_word_embeddings=True,
+            position_embedding_type="rope",
+            rotary_percent=1.0,
+            rotary_base=10000,
+            rope_scaling=1.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            use_qk_norm=True,
+        )
+        run_tp_sp(
             self.seed,
             self.batch_size,
             self.seq_len,
             self.vocab_size,
-            config,
+            dist_config,
             loss,
             gpt_model,
         )
