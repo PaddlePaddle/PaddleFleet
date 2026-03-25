@@ -83,7 +83,7 @@ jobs:
           pip cache dir
           echo "Install uv"
           export UV_HTTP_TIMEOUT=300
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           echo "uv build"
           git submodule update --init --recursive
           export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
@@ -175,7 +175,7 @@ jobs:
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -277,7 +277,7 @@ jobs:
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -394,7 +394,7 @@ jobs:
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -429,7 +429,7 @@ jobs:
           mkdir bos
           tar xf bos_new.tar.gz -C bos
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           '
 
       - name: Proprocess for integration test
@@ -582,7 +582,7 @@ jobs:
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           echo "paddlefleet commit:"
@@ -617,7 +617,7 @@ jobs:
           mkdir bos
           tar xf bos_new.tar.gz -C bos
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           '
 
       - name: GLM4.5 pre-train
@@ -908,7 +908,7 @@ jobs:
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           echo "paddlefleet commit:"
@@ -945,7 +945,7 @@ jobs:
           mkdir bos
           tar xf bos_new.tar.gz -C bos
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           '
 
       - name: GLM4.5 pre-train
@@ -1171,7 +1171,7 @@ jobs:
         if: always()
         run: |
           echo "=== 全量覆盖率检查 ==="
-          python -m pip install coverage==7.6.1
+          python -m pip install coverage==7.13.0
 
           # 定义所有覆盖率文件
           COVERAGE_FILES=(
