@@ -117,7 +117,6 @@ class MultiLatentAttention(Attention):
                 self.config.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_base=self.config.rope_theta,
-                rotary_interleaved=self.config.rotary_interleaved,
                 scaling_factor=self.config.rotary_scaling_factor,
                 original_max_position_embeddings=self.config.original_max_position_embeddings,
                 beta_fast=self.config.beta_fast,
