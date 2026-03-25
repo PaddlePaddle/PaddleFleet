@@ -1114,7 +1114,8 @@ class MLASelfAttentionWithDSA(MLASelfAttention):
                 indexer_float_mask,
                 bool(self.dsa_indexer_use_sparse_loss),
                 self.pg_collection.tp
-                if self.pg_collection.tp.nranks > 1
+                if self.pg_collection.tp is not None
+                and self.pg_collection.tp.nranks > 1
                 else None,
             )
             topk_indices = FusedDSAIndexerLoss._last_topk_indices
