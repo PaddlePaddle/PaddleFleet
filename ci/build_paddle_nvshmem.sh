@@ -16,8 +16,6 @@
 #   └── paddle_nvidia_nvshmem_cu13-3.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
 # ============================================================================
 set -e
-export http_proxy=agent.baidu.com:8188
-export https_proxy=agent.baidu.com:8188
 
 # ============================================================================
 # 配置区（按需修改）
