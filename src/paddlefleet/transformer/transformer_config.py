@@ -221,6 +221,12 @@ class TransformerConfig(ModelParallelConfig):
 
     multimodal_embedding: bool = False
     """Whether to use multimodal embedding."""
+
+    gated_attention: bool = False
+    """If True, enables gated attention where a learnable sigmoid gate is applied to the
+    attention output before the output projection. The gate is produced alongside the query
+    from the fused QKV projection (doubling the query projection size). This allows the model
+    to dynamically control the information flow from attention. See Qwen3.5 for reference."""
     ####################
     # mixed-precision
     ####################

@@ -287,7 +287,11 @@ class Attention(FleetLayer, ABC):
         )
         attn_mask_type = self.attn_mask_type
         block_table = None
-        query, key, value = qkv_output
+        if len(qkv_output) == 4:
+            query, key, value, gate = qkv_output
+        else:
+            query, key, value = qkv_output
+            gate = None
 
         # ================================================
         # relative positional embedding (rotary embedding)
@@ -423,6 +427,11 @@ class Attention(FleetLayer, ABC):
 
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
+
+        # Apply gated attention: gate the attention output before output projection
+        if gate is not None:
+            core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
+
         output, bias = self.o_proj(core_attn_out)
 
         return output, bias
@@ -460,10 +469,17 @@ class SelfAttention(Attention):
             pg_collection=pg_collection,
         )
 
+        self.gated_attention = getattr(self.config, "gated_attention", False)
+        gate_projection_size = (
+            self.query_projection_size if self.gated_attention else 0
+        )
+
         self.qkv_proj = build_layer(
             sublayers_spec.qkv_proj,
             self.config.hidden_size,
-            self.query_projection_size + 2 * self.kv_projection_size,
+            self.query_projection_size
+            + 2 * self.kv_projection_size
+            + gate_projection_size,
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -499,42 +515,61 @@ class SelfAttention(Attention):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`. If `split_qkv=False`, then
         the unsplit mixed_qkv tensor is returned.
+        When gated_attention is enabled, also returns a gate tensor for output gating.
         """
-        # Attention heads [b, sq, h] --> [b, sq, ng * (np/ng + 2) * hn)]
+        # Attention heads [b, sq, h] --> [b, sq, ng * group_dim]
         mixed_qkv, _ = self.qkv_proj(hidden_states)
 
-        # [b, sq, hp] --> [b, sq, ng, (np/ng + 2) * hn]
+        heads_per_group = (
+            self.num_attention_heads_per_partition
+            // self.num_query_groups_per_partition
+        )
+        q_dim = heads_per_group * self.hidden_size_per_attention_head
+
+        if self.gated_attention:
+            # Per group: Q + Gate + K + V
+            group_dim = (
+                heads_per_group * 2 + 2
+            ) * self.hidden_size_per_attention_head
+        else:
+            # Per group: Q + K + V
+            group_dim = (
+                heads_per_group + 2
+            ) * self.hidden_size_per_attention_head
+
+        # [b, sq, hp] --> [b, sq, ng, group_dim]
         new_tensor_shape = (
             *mixed_qkv.shape[:-1],
             self.num_query_groups_per_partition,
-            (
-                (
-                    self.num_attention_heads_per_partition
-                    // self.num_query_groups_per_partition
-                    + 2
-                )
-                * self.hidden_size_per_attention_head
-            ),
+            group_dim,
         )
         mixed_qkv = mixed_qkv.reshape(*new_tensor_shape)
 
-        split_arg_list = [
-            (
-                self.num_attention_heads_per_partition
-                // self.num_query_groups_per_partition
-                * self.hidden_size_per_attention_head
-            ),
-            self.hidden_size_per_attention_head,
-            self.hidden_size_per_attention_head,
-        ]
+        if self.gated_attention:
+            split_arg_list = [
+                q_dim,
+                q_dim,
+                self.hidden_size_per_attention_head,
+                self.hidden_size_per_attention_head,
+            ]
+        else:
+            split_arg_list = [
+                q_dim,
+                self.hidden_size_per_attention_head,
+                self.hidden_size_per_attention_head,
+            ]
 
         # Return unsplit mixed_qkv and split_arg_list
         if not split_qkv:
             return mixed_qkv, split_arg_list
 
-        # [b, sq, ng, (np/ng + 2) * hn]
-        # --> [b, sq, ng, np/ng * hn], [b, sq, ng, hn], [b, sq, ng, hn]
-        (query, key, value) = paddle.split(mixed_qkv, split_arg_list, axis=3)
+        parts = paddle.split(mixed_qkv, split_arg_list, axis=3)
+
+        if self.gated_attention:
+            query, gate, key, value = parts
+        else:
+            query, key, value = parts
+            gate = None
 
         # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
         query = query.reshape(
@@ -549,6 +584,11 @@ class SelfAttention(Attention):
 
         if self.k_norm is not None:
             key = self.k_norm(key)
+
+        if gate is not None:
+            # [b, sq, ng, np/ng * hn] -> [b, sq, np * hn]
+            gate = gate.reshape(*gate.shape[:2], -1)
+            return query, key, value, gate
 
         return query, key, value
 
