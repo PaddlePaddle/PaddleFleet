@@ -150,8 +150,8 @@ class YarnRotaryEmbedding(RotaryEmbedding):
             emb = paddle.cat((freqs, freqs), axis=-1)
         else:
             emb = paddle.stack(
-                (freqs.reshape((-1, 1)), freqs.reshape((-1, 1))), axis=-1
-            ).reshape((freqs.shape[0], -1))
+                (freqs.view(-1, 1), freqs.view(-1, 1)), axis=-1
+            ).view(freqs.shape[0], -1)
         # emb [1, seq_len, 1, dim]
         emb = emb[None, :, None, :]
         return emb, _mscale
