@@ -107,6 +107,7 @@ class MultiLatentAttention(Attention):
         if self.config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
                 self.config.qk_rope_head_dim,
+                rotary_interleaved=self.config.rotary_interleaved,
                 rotary_percent=self.config.rotary_percent,
                 rotary_base=self.config.rope_theta,
                 cp_group=self.pg_collection.cp,
@@ -114,6 +115,7 @@ class MultiLatentAttention(Attention):
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.config.qk_rope_head_dim,
+                rotary_interleaved=self.config.rotary_interleaved,
                 rotary_base=self.config.rope_theta,
                 scaling_factor=self.config.rotary_scaling_factor,
                 original_max_position_embeddings=self.config.original_max_position_embeddings,
