@@ -396,11 +396,12 @@ class Attention(FleetLayer, ABC):
                 if attn_mask_startend_row_indices.shape[2] != local_seq:
                     tp_rank = get_pg_rank(self.pg_collection.tp)
                     offset = tp_rank * local_seq
-                    attn_mask_startend_row_indices = (
+                    attn_mask_startend_row_indices = paddle.clip(
                         attn_mask_startend_row_indices[
                             :, :, offset : offset + local_seq, :
                         ]
-                        - offset
+                        - offset,
+                        min=0,
                     ).astype(paddle.int32)
 
         if self.recompute_core_attention and self.training:

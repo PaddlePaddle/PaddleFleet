@@ -185,15 +185,17 @@ def _make_attn(sp=False):
 
 class TestMRoPEFreqsReshape(unittest.TestCase):
     def test_reshape_and_numerical_correctness(self):
-        """freqs [S,B,D] auto-reshaped to [B,S,D]; result matches manual reshape."""
+        """freqs [S,B,D] auto-transposed to [B,S,D]; result matches manual transpose."""
         B, S, H, D = 2, 4, 2, 8
         t = paddle.randn([B, S, H, D])
         freqs_sb = paddle.randn([S, B, D])
         result = _apply_rotary_pos_emb_bshd(t, freqs_sb)
         assert result.shape == [B, S, H, D]
+        # Manual transpose [S,B,D] -> [B,S,D] should match auto-transpose
+        freqs_bs = freqs_sb.transpose([1, 0, 2]).contiguous()
         np.testing.assert_allclose(
             result.numpy(),
-            _apply_rotary_pos_emb_bshd(t, freqs_sb.reshape([B, S, D])).numpy(),
+            _apply_rotary_pos_emb_bshd(t, freqs_bs).numpy(),
             rtol=1e-5,
             atol=1e-5,
         )

@@ -332,15 +332,15 @@ class GPTEmbedding(FleetLayer):
                 rotary_pos_cos = paddle.cos(rotary_pos_emb)
                 rotary_pos_sin = paddle.sin(rotary_pos_emb)
             if self.config.sequence_parallel:
-                if rotary_pos_emb.ndim == 4:
-                    # RoPE: [1, S, 1, head_dim] -> [S, 1, 1, head_dim]
-                    rotary_pos_emb = rotary_pos_emb.transpose(
-                        [1, 0, 2, 3]
-                    ).contiguous()
-                else:
+                if self.position_embedding_type == "mrope":
                     # MRoPE: [B, S, head_dim] -> [S, B, head_dim]
                     rotary_pos_emb = rotary_pos_emb.transpose(
                         [1, 0, 2]
+                    ).contiguous()
+                else:
+                    # RoPE: [1, S, 1, head_dim] -> [S, 1, 1, head_dim]
+                    rotary_pos_emb = rotary_pos_emb.transpose(
+                        [1, 0, 2, 3]
                     ).contiguous()
 
         preproc_output = {
