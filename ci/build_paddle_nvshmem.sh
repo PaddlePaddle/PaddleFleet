@@ -90,6 +90,40 @@ export PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST:-"pypi.tuna.tsinghua.edu.cn"}
 log() { echo -e "\n\033[1;32m[$(date '+%H:%M:%S')] $1\033[0m"; }
 err() { echo -e "\n\033[1;31m[ERROR] $1\033[0m"; exit 1; }
 
+# 自动查找库文件路径
+find_lib_path() {
+    local lib_name="$1"
+    local lib_path=""
+
+    # 方法1: 使用 ldconfig -p 查找（最可靠）
+    if command -v ldconfig &>/dev/null; then
+        lib_path=$(ldconfig -p 2>/dev/null | grep -E "${lib_name}\.so" | head -1 | sed 's/.*=> \(.*\)/\1/')
+        if [ -f "$lib_path" ]; then
+            echo "$lib_path"
+            return
+        fi
+    fi
+
+    # 方法2: 常见系统路径尝试
+    local common_paths=(
+        "/usr/lib/x86_64-linux-gnu/${lib_name}.so"     # Ubuntu/Debian
+        "/usr/lib64/${lib_name}.so"                    # CentOS/RHEL
+        "/usr/lib/${lib_name}.so"                      # 其他系统
+        "/usr/local/lib64/${lib_name}.so"              # 本地安装
+        "/usr/local/lib/${lib_name}.so"                # 本地安装
+    )
+
+    for path in "${common_paths[@]}"; do
+        if [ -f "$path" ]; then
+            echo "$path"
+            return
+        fi
+    done
+
+    # 如果都找不到，返回错误
+    err "找不到库文件: ${lib_name}.so，请安装对应的 rdma/ibverbs 相关包"
+}
+
 # 执行 CUDA 自动检测
 detect_cuda
 
@@ -98,7 +132,8 @@ retag_wheel_platform() {
     local whl="$1"
     local outdir="$2"
     local basename=$(basename "$whl")
-    local new_name="${basename%-none-any.whl}-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+    # 只替换平台标签: none-any -> none-manylinux_2_17_x86_64
+    local new_name="${basename/none-any.whl/none-manylinux_2_17_x86_64.whl}"
 
     python3 -c "
 import zipfile, os, tempfile, shutil
@@ -110,7 +145,8 @@ for root, dirs, files in os.walk(tmpdir):
         if f == 'WHEEL':
             p = os.path.join(root, f)
             txt = open(p).read()
-            txt = txt.replace('Tag: py3-none-any', 'Tag: py3-none-manylinux2014_x86_64\nTag: py3-none-manylinux_2_17_x86_64')
+            # 只添加一个 manylinux 标签
+            txt = txt.replace('Tag: py3-none-any', 'Tag: py3-none-manylinux_2_17_x86_64')
             open(p, 'w').write(txt)
 with zipfile.ZipFile('$outdir/$new_name', 'w', zipfile.ZIP_DEFLATED) as z:
     for root, dirs, files in os.walk(tmpdir):
@@ -178,13 +214,21 @@ build_core_lib() {
 
     cd "$WORK_DIR/nvshmem"
 
+    # 自动检测库路径（兼容不同 Linux 发行版）
+    local mlx5_lib=$(find_lib_path "libmlx5")
+    local ibverbs_lib=$(find_lib_path "libibverbs")
+    local include_path=$(dirname "$(dirname "$mlx5_lib")")/include
+    [ ! -d "$include_path" ] && include_path="/usr/include"
+
+    log "检测到库路径: MLX5=${mlx5_lib}, IBVERBS=${ibverbs_lib}"
+
     cmake -G Ninja -S . -B "$build_dir" \
         -DCMAKE_INSTALL_PREFIX="$install_dir" \
         -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHITECTURES" \
-        -DCMAKE_CUDA_FLAGS="-I/usr/include -I/usr/include/x86_64-linux-gnu" \
-        -DCMAKE_CXX_FLAGS="-I/usr/include -I/usr/include/x86_64-linux-gnu" \
-        -DMLX5_lib=/usr/lib/x86_64-linux-gnu/libmlx5.so \
-        -DIBVERBS_lib=/usr/lib/x86_64-linux-gnu/libibverbs.so
+        -DCMAKE_CUDA_FLAGS="-I${include_path}" \
+        -DCMAKE_CXX_FLAGS="-I${include_path}" \
+        -DMLX5_lib="$mlx5_lib" \
+        -DIBVERBS_lib="$ibverbs_lib"
 
     cmake --build "$build_dir" --target install -j
 
