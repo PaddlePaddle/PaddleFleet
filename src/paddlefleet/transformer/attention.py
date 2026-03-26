@@ -39,7 +39,7 @@ from paddlefleet.recompute_utils import (
 )
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.utils import divide, get_pg_size
+from paddlefleet.utils import divide, get_pg_rank, get_pg_size
 
 from .enums import AttnMaskType
 
@@ -366,6 +366,22 @@ class Attention(FleetLayer, ABC):
             query = query.transpose([1, 0, 2, 3]).contiguous()
             key = key.transpose([1, 0, 2, 3]).contiguous()
             value = value.transpose([1, 0, 2, 3]).contiguous()
+            # Slice and adjust attn_mask_startend_row_indices for the local SP sequence
+            # range. The full mask has shape [B, 1, S, 1] with absolute row indices.
+            # Each SP rank processes key/query positions [tp_rank*L : (tp_rank+1)*L],
+            # so we need the local slice with row indices adjusted to local space.
+            if attn_mask_startend_row_indices is not None:
+                local_seq = key.shape[1]  # S / tp_size after transpose
+                if attn_mask_startend_row_indices.shape[2] != local_seq:
+                    tp_rank = get_pg_rank(self.pg_collection.tp)
+                    offset = tp_rank * local_seq
+                    attn_mask_startend_row_indices = paddle.clip(
+                        attn_mask_startend_row_indices[
+                            :, :, offset : offset + local_seq, :
+                        ]
+                        - offset,
+                        min=0,
+                    ).astype(paddle.int32)
 
         if self.recompute_core_attention and self.training:
             core_attn_out = recompute(

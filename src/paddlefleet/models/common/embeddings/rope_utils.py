@@ -155,6 +155,16 @@ def _apply_rotary_pos_emb_bshd(
     """
     rot_dim = freqs.shape[-1]
 
+    # For M-RoPE with sequence parallel, freqs may be [S, B, D] while t is [B, S, H, D].
+    # When the first two dims are swapped (same product but different order), transpose
+    # freqs to align with t's [batch, seq] layout.  A plain reshape would silently
+    # reinterpret the memory without reordering data, giving wrong results for B > 1.
+    if freqs.ndim == 3:
+        t_d0, t_d1 = t.shape[0], t.shape[1]
+        f_d0, f_d1 = freqs.shape[0], freqs.shape[1]
+        if (t_d0 != f_d0 or t_d1 != f_d1) and t_d0 * t_d1 == f_d0 * f_d1:
+            freqs = freqs.transpose([1, 0, 2]).contiguous()
+
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
