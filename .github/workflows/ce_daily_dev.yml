@@ -160,7 +160,6 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           echo "Install uv"
-          export WITH_COVERAGE=ON
           pip install --upgrade pip
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           git config --global --add safe.directory /paddle/PaddleFleet
@@ -179,15 +178,11 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          export PYTHONPATH=/paddle/PaddleFleet:$PYTHONPATH
+          export PYTHONPATH=PaddleFleet/PaddleFleet:$PYTHONPATH
+          export COVERAGE_FILE=/paddle/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/PaddleFleet/ci/.coveragerc
+          export WITH_COVERAGE=ON
           bash ci/single_card_test.sh
-          single_card_exit_code=$?
-          if [[ "$single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mSingle card test succeeded.\033[0m"
-          fi
           '
 
       - name: Single card sonic moe test
@@ -202,17 +197,35 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          export COVERAGE_FILE=/paddle/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/PaddleFleet/ci/.coveragerc
+          export WITH_COVERAGE=ON
           cd PaddleFleet
           bash ci/single_card_sonic.sh
-          single_card_exit_code=$?
-          if [[ "$single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mSingle card test succeeded.\033[0m"
-          fi
           '
 
+      - name: Single card Coverage Upload to BOS
+        if: matrix.python == '3.12' && matrix.cuda == '12.9' && success()
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          export COVERAGE_FILE=/paddle/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/PaddleFleet/ci/.coveragerc
+          export WITH_COVERAGE=ON
+          ls -a /paddle/PaddleFleet/coveragedata/
+          coverage combine
+          coverage report -m
+          coverage xml -o /paddle/PaddleFleet/coveragedata/coverage.xml
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/PaddleFleet/coveragedata/coverage.xml coverage.xml
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/single-card"
+          python ${push_file} coverage.xml ${target_path}
+          '
       - name: Terminate and delete the container
         if: ${{ always() }}
         run: |
@@ -360,14 +373,26 @@ jobs:
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           export PYTHONPATH=/paddle/PaddleFleet:$PYTHONPATH
+          export WITH_COVERAGE=ON
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           bash PaddleFleet/ci/multi-card_test.sh
-          multi_card_exit_code=$?
-          if [[ "$multi_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mMulti card test failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mMulti card test succeeded.\033[0m"
-          fi
+          '
+
+      - name: Multi-card Coverage Upload to BOS
+        if: ${{ matrix.python == '3.12' && matrix.cuda == '12.9' && success() }}
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          export COVERAGE_FILE=/paddle/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export WITH_COVERAGE=ON
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /paddle/coveragedata/coverage.xml coverage.xml
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/multi-card"
+          python ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
