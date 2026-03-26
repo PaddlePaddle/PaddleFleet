@@ -335,6 +335,11 @@ def main():
         default="merged_coverage.xml",
         help="Output file for merged coverage (default: merged_coverage.xml)",
     )
+    parser.add_argument(
+        "--output-xml",
+        action="store_true",
+        help="Output merged coverage XML file (default: False)",
+    )
 
     args = parser.parse_args()
 
@@ -357,6 +362,10 @@ def main():
     print_full_coverage_report(
         filename_coverage, coverage_rate, total_lines, covered_lines
     )
+
+    # Save merged coverage to XML file (only if --output-xml is set)
+    if args.output_xml:
+        save_merged_coverage(merged_root, args.output)
 
     # Check coverage (only if not in report-only mode)
     if args.report_only:

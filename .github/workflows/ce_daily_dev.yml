@@ -1,6 +1,9 @@
 name: CE Daily Dev
 
 on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [develop]
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -53,18 +56,18 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.10"
-          - cuda: "13.0"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "12.6"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
+          # - cuda: "13.0"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+            # - cuda: "12.9"
+            #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -208,7 +211,6 @@ jobs:
         if: matrix.python == '3.12' && matrix.cuda == '12.9' && success()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${{ matrix.python }}
           export COVERAGE_FILE=/paddle/PaddleFleet/coveragedata/.coverage
@@ -242,18 +244,18 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.10"
-          - cuda: "13.0"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "12.6"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
+          # - cuda: "13.0"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+            # - cuda: "12.9"
+            #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-multi-card_test-dev
@@ -374,8 +376,8 @@ jobs:
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           export PYTHONPATH=/paddle/PaddleFleet:$PYTHONPATH
           export WITH_COVERAGE=ON
-          export COVERAGE_FILE=/paddle/coveragedata/.coverage
-          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          export COVERAGE_FILE=/paddle/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/PaddleFleet/ci/.coveragerc
           bash PaddleFleet/ci/multi-card_test.sh
           '
 
@@ -383,15 +385,21 @@ jobs:
         if: ${{ matrix.python == '3.12' && matrix.cuda == '12.9' && success() }}
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          export COVERAGE_FILE=/paddle/coveragedata/.coverage
-          export COVERAGE_RCFILE=/paddle/ci/.coveragerc
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          export COVERAGE_FILE=/paddle/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/paddle/PaddleFleet/ci/.coveragerc
           export WITH_COVERAGE=ON
+          ls -a /paddle/PaddleFleet/coveragedata/
+          coverage combine
+          coverage report -m
+          coverage xml -o /paddle/PaddleFleet/coveragedata/coverage.xml
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
-          cp /paddle/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/multi-card"
+          cp /paddle/PaddleFleet/coveragedata/coverage.xml coverage.xml
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/multi-card"
           python ${push_file} coverage.xml ${target_path}
           '
 
@@ -412,18 +420,18 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.10"
-          - cuda: "13.0"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "12.6"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
+          # - cuda: "13.0"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+            # - cuda: "12.9"
+            #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -598,6 +606,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-single
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
@@ -617,6 +628,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-single
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
@@ -636,6 +650,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-single
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -644,6 +661,27 @@ jobs:
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-single-card.\033[0m"
           fi
+          '
+
+      - name: H20 Coverage Upload to BOS
+        if: ${{matrix.cuda == '12.9' && matrix.python == '3.12' && success()}}
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          ls -a /workspace/PaddleFleet/coveragedata-single
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
+          coverage report -m
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage.xml
+          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/ce/$(date +%Y%m%d)/h20-single"
+          python ${push_file} coverage.xml ${target_path_single}
           '
 
 
@@ -663,18 +701,18 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.10"
-          - cuda: "13.0"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "12.6"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
+          # - cuda: "13.0"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+            # - cuda: "12.9"
+            #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -825,6 +863,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -844,6 +885,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -863,6 +907,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -882,6 +929,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -901,6 +951,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -924,6 +977,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -946,6 +1002,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -965,6 +1024,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -984,6 +1046,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen.sh pt
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1003,6 +1068,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen.sh sft
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1022,6 +1090,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/qwen.sh lora
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1041,6 +1112,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1060,6 +1134,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1079,6 +1156,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1098,6 +1178,9 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1106,6 +1189,27 @@ jobs:
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-fsdp.\033[0m"
           fi
+          '
+
+      - name: H20 Coverage Upload to BOS
+        if: ${{ matrix.cuda == '12.9' && matrix.python == '3.12' && success()}}
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          ls -a /workspace/PaddleFleet/coveragedata-multi
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi/coverage.xml
+          coverage report -m
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /workspace/PaddleFleet/coveragedata-multi/coverage.xml coverage.xml
+          target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/h20-multi"
+          python ${push_file} coverage.xml ${target_path_multi}
           '
 
       - name: Terminate and delete the container
@@ -1125,18 +1229,18 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.10"
-          - cuda: "13.0"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "12.6"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
+          # - cuda: "13.0"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+            # - cuda: "12.9"
+            #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -1288,6 +1392,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1307,6 +1413,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1326,6 +1434,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1345,6 +1455,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1364,6 +1476,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1383,6 +1497,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1402,6 +1518,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1421,6 +1539,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1440,6 +1560,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1459,6 +1581,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1478,6 +1602,8 @@ jobs:
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
           fi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1488,9 +1614,141 @@ jobs:
           fi
           '
 
+      - name: A100 Coverage Upload to BOS
+        if: ${{ matrix.python == '3.12' && matrix.cuda == '12.9' && success() }}
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${{ matrix.python }}
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          ls -a /workspace/PaddleFleet/coveragedata
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
+          coverage report -m
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          cp /workspace/PaddleFleet/coveragedata/coverage.xml coverage.xml
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/a100"
+          python ${push_file} coverage.xml ${target_path}
+          '
+
       - name: Terminate and delete the container
         if: ${{ always() }}
         run: |
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
+
+  coverage_check:
+    name: Coverage Upload And Check
+    needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card]
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_REPO_NAME: ${{ github.repository }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: coverage file download
+        shell: bash
+        run: |
+          coverage_configs="
+          multi_coverage.xml:multi-card/coverage.xml
+          single_coverage.xml:single-card/coverage.xml
+          h20_multi_coverage.xml:h20-multi/coverage.xml
+          h20_single_coverage.xml:h20-single/coverage.xml
+          a100_coverage.xml:a100/coverage.xml
+          "
+          base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)"
+
+          echo "$coverage_configs" | while IFS= read -r config; do
+            if [ -n "$config" ]; then
+                filename="${config%%:*}"
+                filepath="${config#*:}"
+                wget "${base_url}/${filepath}" -O "$filename" --no-proxy
+                sed -i "s|<source></source>|<source>paddlefleet</source>|" "$filename"
+                sed -i "s|/usr/local/lib/python3.10/dist-packages/|src/|" "$filename"
+                sed -i "s|.usr.local.lib.python3.10.dist-packages.paddlefleet|src|" "$filename"
+            fi
+          done
+
+      - name: Check full coverage
+        if: always()
+        run: |
+          echo "=== 全量覆盖率检查 ==="
+          python -m pip install coverage==7.13.0
+
+          # 定义所有覆盖率文件
+          COVERAGE_FILES=(
+            "multi_coverage.xml"
+            "single_coverage.xml"
+            "h20_multi_coverage.xml"
+            "h20_single_coverage.xml"
+            "a100_coverage.xml"
+          )
+
+          # 检查哪些文件存在
+          EXISTING_FILES=()
+          for FILE in "${COVERAGE_FILES[@]}"; do
+            if [ -f "$FILE" ]; then
+              EXISTING_FILES+=("$FILE")
+            fi
+          done
+
+          echo "找到 ${#EXISTING_FILES[@]} 个覆盖率文件"
+
+          # 使用脚本合并 XML 覆盖率文件并输出全量覆盖率报告
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
+          git config pull.rebase false
+          git pull --no-edit origin pull/${PR_ID}/head
+          python ci/merge_and_check_coverage.py "${EXISTING_FILES[@]}" --report-only --output-xml > coverage-full.txt
+          cat coverage-full.txt
+          # 上传文件
+          wget -q --no-proxy --no-check-certificate \
+            https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
+            -O bos_tools.py
+          push_file=$(realpath bos_tools.py)
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)"
+          python ${push_file} merged_coverage.xml ${target_path}
+          python ${push_file} coverage-full.txt ${target_path}
+
+      - name: filter coverage files and remove backup files
+        if: always()
+        run: |
+          echo "=== CHECKING COVERAGE FILES ==="
+
+          COVERAGE_FILES=(
+            "multi_coverage.xml"
+            "single_coverage.xml"
+            "h20_multi_coverage.xml"
+            "h20_single_coverage.xml"
+            "a100_coverage.xml"
+          )
+
+          for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
+            python ci/filter_coverage.py "$COVERAGE_FILE" diff.txt
+            BACKUP_FILE="${COVERAGE_FILE}.backup"
+            if [ -f "$BACKUP_FILE" ]; then
+              rm -f "$BACKUP_FILE"
+              echo "Removed backup: $BACKUP_FILE"
+            fi
+          done
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          files: |
+            ./merged_coverage.xml
+          flags: coverage_combine
+          name: "${{ env.TASK }}-${{ github.run_id }}"
+          fail_ci_if_error: true
+          verbose: true
