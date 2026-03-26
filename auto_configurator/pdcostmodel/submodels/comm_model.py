@@ -15,7 +15,22 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 from enum import Enum
 
-from ..config import HardwareConfig, ParallelConfig, ModelConfig, TrainingConfig
+from ..config import (
+    HardwareConfig,
+    ParallelConfig,
+    ModelConfig,
+    TrainingConfig,
+    TRANSFORMER_DENSE_LAYER_KIND,
+    TRANSFORMER_MOE_LAYER_KIND,
+    INPUT_EMBEDDING_LAYER_KIND,
+    OUTPUT_HEAD_LAYER_KIND,
+)
+from ..stage_layout import (
+    resolve_chunk_ranges,
+    resolve_stage_chunk_ranges,
+    resolve_stage_layer_indices,
+)
+from .pipeline_schedule import simulate_1f1b_makespan
 
 
 class CommType(Enum):
@@ -44,15 +59,276 @@ class CommModel:
     
     支持感知网络拓扑 (节点内/节点间)
     """
+
+    DEFAULT_DP_BUCKET_BYTES = 40 * 1024 * 1024
+    MAX_DP_BUCKET_BYTES = 256 * 1024 * 1024
     
     def __init__(self, hardware_config: HardwareConfig):
         self.hardware = hardware_config
+
+    def _get_virtual_pipeline_size(self, parallel: ParallelConfig) -> int:
+        raw_value = getattr(parallel, "vpp", 1)
+        try:
+            return max(1, int(raw_value))
+        except Exception:
+            return 1
+
+    def _chunk_layer_ranges(self, model_config: ModelConfig,
+                            parallel: ParallelConfig) -> list[tuple[int, int]]:
+        return resolve_chunk_ranges(int(model_config.num_hidden_layers), parallel)
+
+    def _stage_chunk_ranges(self, model_config: ModelConfig,
+                            parallel: ParallelConfig) -> list[list[tuple[int, int]]]:
+        return resolve_stage_chunk_ranges(int(model_config.num_hidden_layers), parallel)
+
+    def _stage_layer_indices(self, model_config: ModelConfig,
+                             parallel: ParallelConfig,
+                             stage_id: int) -> list[int]:
+        return resolve_stage_layer_indices(
+            int(model_config.num_hidden_layers), parallel, stage_id
+        )
+
+    def _is_moe_layer(self, model_config: ModelConfig, layer_idx: int) -> bool:
+        return model_config.is_moe_layer(layer_idx)
+
+    def _transformer_layer_kind(self,
+                                model_config: ModelConfig,
+                                layer_idx: int) -> str:
+        return model_config.transformer_layer_kind(layer_idx)
+
+    def _estimate_stage_parameter_counts_per_gpu(self,
+                                                 model_config: ModelConfig,
+                                                 parallel: ParallelConfig) -> list[int]:
+        h = max(1, int(model_config.hidden_size))
+        ffn = max(1, int(model_config.intermediate_size))
+        moe_ffn = max(1, int(model_config.moe_intermediate_size))
+        v = max(1, int(model_config.vocab_size))
+        tp = max(1, int(parallel.tp))
+        ep = max(1, int(parallel.ep))
+        pp = max(1, int(parallel.pp))
+
+        q_size = h
+        kv_size = max(1, int(model_config.num_key_value_heads * model_config.head_dim))
+        attention_params = q_size * h + 2 * kv_size * h + h * h
+        dense_mlp_params = 3 * h * ffn
+        router_params = h * max(1, int(model_config.num_experts))
+        expert_params = 3 * h * moe_ffn * max(1, int(model_config.num_experts))
+        layernorm_params = 2 * h
+        embedding_params = v * h
+
+        stage_parameter_templates = {
+            TRANSFORMER_DENSE_LAYER_KIND: (
+                math.ceil(attention_params / tp) +
+                layernorm_params +
+                math.ceil(dense_mlp_params / tp)
+            ),
+            TRANSFORMER_MOE_LAYER_KIND: (
+                math.ceil(attention_params / tp) +
+                layernorm_params +
+                router_params +
+                math.ceil(expert_params / ep)
+            ),
+            INPUT_EMBEDDING_LAYER_KIND: math.ceil(embedding_params / tp),
+            OUTPUT_HEAD_LAYER_KIND: math.ceil(embedding_params / tp) + 2 * h,
+        }
+
+        stage_param_counts = []
+        for stage_id in range(pp):
+            stage_params = 0
+            if stage_id == 0:
+                stage_params += stage_parameter_templates[INPUT_EMBEDDING_LAYER_KIND]
+            if stage_id == pp - 1:
+                stage_params += stage_parameter_templates[OUTPUT_HEAD_LAYER_KIND]
+
+            for layer_idx in self._stage_layer_indices(model_config, parallel, stage_id):
+                stage_params += stage_parameter_templates[
+                    self._transformer_layer_kind(model_config, layer_idx)
+                ]
+
+            stage_param_counts.append(max(0, int(stage_params)))
+        return stage_param_counts
+
+    def _group_topology(self, num_gpus: int) -> tuple[int, int]:
+        local_degree = min(max(1, int(self.hardware.gpus_per_node)), max(1, int(num_gpus)))
+        num_nodes = max(1, math.ceil(max(1, int(num_gpus)) / local_degree))
+        return local_degree, num_nodes
+
+    def _predict_hierarchical_allreduce(self, data_size_bytes: int,
+                                        num_gpus: int) -> CommResult:
+        local_degree, num_nodes = self._group_topology(num_gpus)
+        if num_nodes <= 1:
+            return self.predict_allreduce(data_size_bytes, num_gpus, is_intra_node=True)
+
+        local_reduce = self.predict_reduce_scatter(data_size_bytes, local_degree, True)
+        inter_shard_bytes = max(1, math.ceil(data_size_bytes / local_degree))
+        inter_reduce = self.predict_allreduce(inter_shard_bytes, num_nodes, False)
+        local_gather = self.predict_allgather(data_size_bytes, local_degree, True)
+        total_time_ms = (
+            local_reduce.time_ms +
+            inter_reduce.time_ms +
+            local_gather.time_ms
+        )
+        return CommResult(
+            time_ms=total_time_ms,
+            bandwidth_gbps=min(
+                local_reduce.bandwidth_gbps or float("inf"),
+                inter_reduce.bandwidth_gbps or float("inf"),
+                local_gather.bandwidth_gbps or float("inf"),
+            ),
+            volume_bytes=(
+                local_reduce.volume_bytes +
+                inter_reduce.volume_bytes +
+                local_gather.volume_bytes
+            ),
+            latency_ms=(
+                local_reduce.latency_ms +
+                inter_reduce.latency_ms +
+                local_gather.latency_ms
+            ),
+            transfer_ms=(
+                local_reduce.transfer_ms +
+                inter_reduce.transfer_ms +
+                local_gather.transfer_ms
+            ),
+        )
+
+    def _predict_hierarchical_reduce_scatter(self, data_size_bytes: int,
+                                             num_gpus: int) -> CommResult:
+        local_degree, num_nodes = self._group_topology(num_gpus)
+        if num_nodes <= 1:
+            return self.predict_reduce_scatter(
+                data_size_bytes, num_gpus, is_intra_node=True
+            )
+
+        local_reduce = self.predict_reduce_scatter(data_size_bytes, local_degree, True)
+        inter_shard_bytes = max(1, math.ceil(data_size_bytes / local_degree))
+        inter_reduce = self.predict_reduce_scatter(inter_shard_bytes, num_nodes, False)
+        total_time_ms = local_reduce.time_ms + inter_reduce.time_ms
+        return CommResult(
+            time_ms=total_time_ms,
+            bandwidth_gbps=min(
+                local_reduce.bandwidth_gbps or float("inf"),
+                inter_reduce.bandwidth_gbps or float("inf"),
+            ),
+            volume_bytes=local_reduce.volume_bytes + inter_reduce.volume_bytes,
+            latency_ms=local_reduce.latency_ms + inter_reduce.latency_ms,
+            transfer_ms=local_reduce.transfer_ms + inter_reduce.transfer_ms,
+        )
+
+    def _estimate_dp_bucket_bytes(self, gradient_size_bytes: int) -> int:
+        return int(
+            min(
+                self.MAX_DP_BUCKET_BYTES,
+                max(self.DEFAULT_DP_BUCKET_BYTES, gradient_size_bytes / 32.0),
+            )
+        )
+
+    def _simulate_overlap_exposed_tail(self,
+                                       raw_comm_ms: float,
+                                       bucket_count: int,
+                                       stage_backward_ms: float,
+                                       overlap_horizon_ms: float) -> float:
+        if raw_comm_ms <= 0:
+            return 0.0
+        if bucket_count <= 1 or stage_backward_ms <= 0 or overlap_horizon_ms <= 0:
+            return raw_comm_ms
+
+        per_bucket_comm_ms = raw_comm_ms / bucket_count
+        comm_stream_free_ms = 0.0
+        finish_time_ms = 0.0
+        for bucket_idx in range(bucket_count):
+            ready_time_ms = stage_backward_ms * (bucket_idx + 1) / bucket_count
+            start_time_ms = max(comm_stream_free_ms, ready_time_ms)
+            finish_time_ms = start_time_ms + per_bucket_comm_ms
+            comm_stream_free_ms = finish_time_ms
+
+        return max(0.0, finish_time_ms - overlap_horizon_ms)
+
+    def _estimate_dp_overlap(self,
+                             model_config: ModelConfig,
+                             training_config: TrainingConfig,
+                             parallel: ParallelConfig,
+                             dp_degree: int,
+                             use_sharding: bool,
+                             stage_backward_time_ms: Optional[List[float]]) -> Dict[str, float]:
+        stage_param_counts = self._estimate_stage_parameter_counts_per_gpu(
+            model_config, parallel
+        )
+        if not stage_param_counts:
+            return {
+                "raw_time_ms": 0.0,
+                "exposed_time_ms": 0.0,
+                "hidden_time_ms": 0.0,
+                "peak_stage": 0,
+                "stage_raw_time_ms": [],
+                "stage_exposed_time_ms": [],
+            }
+
+        overlap_enabled = False
+        if use_sharding:
+            overlap_enabled = bool(
+                training_config.stage1_overlap or
+                training_config.enable_sharding_comm_overlap
+            )
+        else:
+            overlap_enabled = dp_degree > 1
+
+        if not stage_backward_time_ms or len(stage_backward_time_ms) != len(stage_param_counts):
+            stage_backward_time_ms = [0.0] * len(stage_param_counts)
+
+        stage_raw_times = []
+        stage_exposed_times = []
+        for stage_id, param_count in enumerate(stage_param_counts):
+            gradient_size_bytes = max(
+                1,
+                int(param_count) * max(1, int(training_config.dtype_bytes)),
+            )
+            raw_result = self.predict_dp_comm(
+                gradient_size_bytes, dp_degree, use_sharding
+            )
+            raw_time_ms = raw_result.time_ms
+            stage_raw_times.append(raw_time_ms)
+
+            if not overlap_enabled:
+                stage_exposed_times.append(raw_time_ms)
+                continue
+
+            bucket_bytes = self._estimate_dp_bucket_bytes(gradient_size_bytes)
+            bucket_count = max(1, math.ceil(gradient_size_bytes / max(1, bucket_bytes)))
+            local_backward_ms = max(0.0, float(stage_backward_time_ms[stage_id]))
+            overlap_horizon_ms = sum(
+                max(0.0, float(value))
+                for value in stage_backward_time_ms[:stage_id + 1]
+            )
+            exposed_tail_ms = self._simulate_overlap_exposed_tail(
+                raw_time_ms,
+                bucket_count,
+                local_backward_ms,
+                overlap_horizon_ms,
+            )
+            stage_exposed_times.append(exposed_tail_ms)
+
+        raw_peak = max(stage_raw_times) if stage_raw_times else 0.0
+        exposed_peak = max(stage_exposed_times) if stage_exposed_times else 0.0
+        peak_stage = (
+            max(range(len(stage_exposed_times)), key=stage_exposed_times.__getitem__)
+            if stage_exposed_times else 0
+        )
+        return {
+            "raw_time_ms": raw_peak,
+            "exposed_time_ms": exposed_peak,
+            "hidden_time_ms": max(0.0, raw_peak - exposed_peak),
+            "peak_stage": peak_stage,
+            "stage_raw_time_ms": stage_raw_times,
+            "stage_exposed_time_ms": stage_exposed_times,
+        }
     
-    def _get_bandwidth(self, is_intra_node: bool) -> float:
-        """获取带宽 (GB/s)"""
-        if is_intra_node:
-            return self.hardware.network.intra_node_bandwidth_gbps
-        return self.hardware.network.inter_node_bandwidth_gbps
+    def _get_bandwidth(self, is_intra_node: bool,
+                       data_size_bytes: int = 0) -> float:
+        """获取有效带宽 (GB/s)，支持消息大小感知"""
+        return self.hardware.network.get_effective_bandwidth(
+            is_intra_node, data_size_bytes
+        )
     
     def _get_latency(self, is_intra_node: bool) -> float:
         """获取延迟 (us)"""
@@ -79,7 +355,7 @@ class CommModel:
         ring_factor = 2 * (num_gpus - 1) / num_gpus
         comm_volume = int(data_size_bytes * ring_factor)
         
-        bandwidth = self._get_bandwidth(is_intra_node)
+        bandwidth = self._get_bandwidth(is_intra_node, comm_volume)
         latency_us = self._get_latency(is_intra_node)
         efficiency = self.hardware.network.allreduce_efficiency
         
@@ -117,7 +393,7 @@ class CommModel:
         gather_factor = (num_gpus - 1) / num_gpus
         comm_volume = int(data_size_bytes * gather_factor)
         
-        bandwidth = self._get_bandwidth(is_intra_node)
+        bandwidth = self._get_bandwidth(is_intra_node, comm_volume)
         latency_us = self._get_latency(is_intra_node)
         efficiency = self.hardware.network.allgather_efficiency
         
@@ -155,7 +431,7 @@ class CommModel:
         scatter_factor = (num_gpus - 1) / num_gpus
         comm_volume = int(data_size_bytes * scatter_factor)
         
-        bandwidth = self._get_bandwidth(is_intra_node)
+        bandwidth = self._get_bandwidth(is_intra_node, comm_volume)
         latency_us = self._get_latency(is_intra_node)
         efficiency = self.hardware.network.allreduce_efficiency
         
@@ -198,7 +474,7 @@ class CommModel:
         a2a_factor = (num_gpus - 1) / num_gpus
         comm_volume = int(data_size_bytes * a2a_factor)
         
-        bandwidth = self._get_bandwidth(is_intra_node)
+        bandwidth = self._get_bandwidth(is_intra_node, comm_volume)
         latency_us = self._get_latency(is_intra_node)
         efficiency = self.hardware.network.alltoall_efficiency
         
@@ -231,7 +507,7 @@ class CommModel:
         
         用于 PP 流水线
         """
-        bandwidth = self._get_bandwidth(is_intra_node)
+        bandwidth = self._get_bandwidth(is_intra_node, data_size_bytes)
         latency_us = self._get_latency(is_intra_node)
         efficiency = self.hardware.network.p2p_efficiency
         
@@ -252,6 +528,25 @@ class CommModel:
             latency_ms=latency_ms,
             transfer_ms=transfer_ms,
         )
+
+    def _is_pipeline_boundary_intra_node(self, boundary_idx: int, stage_width: int) -> bool:
+        """
+        判断相邻两个 PP stage 的边界是否完全位于同一节点内。
+
+        近似假设单个 model-parallel group 按 rank 连续映射，stage 宽度约等于 TP 度数。
+        只要该边界上的任一 TP lane 跨节点，就按节点间 P2P 处理。
+        """
+        gpus_per_node = max(1, int(self.hardware.gpus_per_node))
+        width = max(1, int(stage_width))
+        left_stage_base = max(0, int(boundary_idx)) * width
+        right_stage_base = left_stage_base + width
+
+        for lane in range(width):
+            src_rank = left_stage_base + lane
+            dst_rank = right_stage_base + lane
+            if (src_rank // gpus_per_node) != (dst_rank // gpus_per_node):
+                return False
+        return True
     
     def predict_tp_comm(self, activation_size_bytes: int, tp_degree: int) -> CommResult:
         """
@@ -275,12 +570,12 @@ class CommModel:
         """
         if dp_degree <= 1:
             return CommResult()
-        
-        is_intra_node = self.hardware.is_intra_node(dp_degree)
-        
+
         if use_sharding:
-            return self.predict_reduce_scatter(gradient_size_bytes, dp_degree, is_intra_node)
-        return self.predict_allreduce(gradient_size_bytes, dp_degree, is_intra_node)
+            return self._predict_hierarchical_reduce_scatter(
+                gradient_size_bytes, dp_degree
+            )
+        return self._predict_hierarchical_allreduce(gradient_size_bytes, dp_degree)
     
     def predict_ep_comm(self, token_data_bytes: int, ep_degree: int,
                         topk: int = 8, num_experts: int = 128) -> CommResult:
@@ -300,30 +595,77 @@ class CommModel:
         )
     
     def predict_pp_comm(self, activation_size_bytes: int, pp_degree: int,
-                        num_micro_batches: int) -> CommResult:
+                        num_micro_batches: int, stage_width: int = 1,
+                        stage_forward_time_ms: Optional[List[float]] = None,
+                        stage_backward_time_ms: Optional[List[float]] = None) -> CommResult:
         """
         预测 PP 通信时间
-        
-        每个 micro-batch 需要在 stage 之间传递激活值
+
+        1F1B 流水线调度中：
+        - 稳态阶段：P2P 通信与计算高度重叠，暴露时间接近零
+        - 启动阶段 (warm-up)：前 pp-1 个 micro-batch 的前向 P2P 无法重叠
+        - 排空阶段 (drain)：最后 pp-1 个 micro-batch 的后向 P2P 无法重叠
+        - 非重叠 P2P 次数 = 2 * (pp-1) 次（每次跨 1 个 stage 边界）
         """
         if pp_degree <= 1:
             return CommResult()
-        
-        # PP 通常跨节点
-        is_intra_node = False
-        
-        # 单次 P2P
-        single_p2p = self.predict_p2p(activation_size_bytes, is_intra_node)
-        
-        # 每个 micro-batch: (pp_degree - 1) 次前向 + (pp_degree - 1) 次后向
-        num_comms = 2 * (pp_degree - 1)
-        
+
+        boundary_results = []
+        for boundary_idx in range(pp_degree - 1):
+            is_intra_node = self._is_pipeline_boundary_intra_node(boundary_idx, stage_width)
+            boundary_results.append(
+                self.predict_p2p(activation_size_bytes, is_intra_node)
+            )
+        if not boundary_results:
+            return CommResult()
+
+        total_volume = activation_size_bytes * 2 * num_micro_batches * (pp_degree - 1)
+        bottleneck_bw = min(r.bandwidth_gbps for r in boundary_results)
+        total_latency_ms = 2.0 * num_micro_batches * sum(
+            r.latency_ms for r in boundary_results
+        )
+        total_transfer_ms = 2.0 * num_micro_batches * sum(
+            r.transfer_ms for r in boundary_results
+        )
+
+        if (
+            stage_forward_time_ms is not None
+            and stage_backward_time_ms is not None
+            and len(stage_forward_time_ms) == pp_degree
+            and len(stage_backward_time_ms) == pp_degree
+        ):
+            boundary_time_ms = [r.time_ms for r in boundary_results]
+            compute_only_ms = simulate_1f1b_makespan(
+                stage_forward_time_ms,
+                stage_backward_time_ms,
+                num_micro_batches,
+            )
+            with_p2p_ms = simulate_1f1b_makespan(
+                stage_forward_time_ms,
+                stage_backward_time_ms,
+                num_micro_batches,
+                boundary_time_ms,
+                boundary_time_ms,
+            )
+            total_time_ms = max(0.0, with_p2p_ms - compute_only_ms)
+        else:
+            warmup_and_drain_time_ms = 2.0 * sum(r.time_ms for r in boundary_results)
+            steady_micro_batches = max(0, num_micro_batches - (pp_degree - 1))
+            avg_boundary_latency_ms = (
+                sum(r.latency_ms for r in boundary_results) / len(boundary_results)
+            )
+            steady_exposed_per_mb = avg_boundary_latency_ms * 2
+            total_time_ms = (
+                warmup_and_drain_time_ms +
+                steady_exposed_per_mb * steady_micro_batches
+            )
+
         return CommResult(
-            time_ms=single_p2p.time_ms * num_comms,
-            bandwidth_gbps=single_p2p.bandwidth_gbps,
-            volume_bytes=single_p2p.volume_bytes * num_comms,
-            latency_ms=single_p2p.latency_ms * num_comms,
-            transfer_ms=single_p2p.transfer_ms * num_comms,
+            time_ms=total_time_ms,
+            bandwidth_gbps=bottleneck_bw,
+            volume_bytes=total_volume,
+            latency_ms=total_latency_ms,
+            transfer_ms=total_transfer_ms,
         )
     
     def predict_sp_comm(self, activation_size_bytes: int, tp_degree: int) -> CommResult:
@@ -342,7 +684,9 @@ class CommModel:
                                 model_config: ModelConfig,
                                 training_config: TrainingConfig,
                                 parallel: ParallelConfig,
-                                num_micro_batches: int) -> Dict[str, float]:
+                                num_micro_batches: int,
+                                stage_forward_time_ms: Optional[List[float]] = None,
+                                stage_backward_time_ms: Optional[List[float]] = None) -> Dict[str, float]:
         """
         估算一个 step 的通信时间
         
@@ -357,27 +701,26 @@ class CommModel:
         # 激活大小
         activation_size = micro_bsz * seq_len * h * dtype_bytes
         
-        # ========== TP 通信 ==========
-        # 每层 2 次 AllReduce (Attention 后 + MLP 后)
-        layers_per_stage = model_config.num_hidden_layers // parallel.pp
         tp_comm_result = self.predict_tp_comm(activation_size, parallel.tp)
-        tp_comm_time = tp_comm_result.time_ms * 2 * layers_per_stage * num_micro_batches
-        
+
         # ========== EP 通信 ==========
         # MoE 层的 dispatch + combine
-        moe_layers_per_stage = model_config.num_moe_layers // parallel.pp
         topk = model_config.num_experts_per_tok
         token_data_size = micro_bsz * seq_len * h * topk * dtype_bytes
-        
+
         ep_comm_result = self.predict_ep_comm(
             token_data_size, parallel.ep,
             topk=topk, num_experts=model_config.num_experts
         )
-        ep_comm_time = ep_comm_result.time_ms * moe_layers_per_stage * num_micro_batches
         
         # ========== PP 通信 ==========
         pp_comm_result = self.predict_pp_comm(
-            activation_size, parallel.pp, num_micro_batches
+            activation_size,
+            parallel.pp,
+            num_micro_batches,
+            stage_width=max(1, parallel.tp),
+            stage_forward_time_ms=stage_forward_time_ms,
+            stage_backward_time_ms=stage_backward_time_ms,
         )
         pp_comm_time = pp_comm_result.time_ms
         
@@ -391,19 +734,88 @@ class CommModel:
         dp_degree = parallel.effective_sharding_degree if use_sharding else parallel.dp
         
         dp_comm_result = self.predict_dp_comm(grad_size, dp_degree, use_sharding)
-        dp_comm_time = dp_comm_result.time_ms
+        dp_overlap_result = self._estimate_dp_overlap(
+            model_config,
+            training_config,
+            parallel,
+            dp_degree,
+            use_sharding,
+            stage_backward_time_ms,
+        )
+        dp_comm_time = dp_overlap_result["raw_time_ms"]
+        dp_exposed_time = dp_overlap_result["exposed_time_ms"]
         
         # ========== SP 通信 ==========
         sp_comm_time = 0.0
+        stage_sp_comm_micro_ms = [0.0] * max(1, int(parallel.pp))
         if parallel.sp and parallel.tp > 1:
             sp_comm_result = self.predict_sp_comm(activation_size, parallel.tp)
-            sp_comm_time = sp_comm_result.time_ms * layers_per_stage * num_micro_batches
-        
+
+        layer_comm_templates = {
+            TRANSFORMER_DENSE_LAYER_KIND: {
+                "tp": tp_comm_result.time_ms * 2,
+                "ep": 0.0,
+                "sp": (
+                    sp_comm_result.time_ms
+                    if parallel.sp and parallel.tp > 1
+                    else 0.0
+                ),
+            },
+            TRANSFORMER_MOE_LAYER_KIND: {
+                "tp": tp_comm_result.time_ms * 2,
+                "ep": ep_comm_result.time_ms,
+                "sp": (
+                    sp_comm_result.time_ms
+                    if parallel.sp and parallel.tp > 1
+                    else 0.0
+                ),
+            },
+        }
+
+        stage_tp_comm_micro_ms = []
+        stage_ep_comm_micro_ms = []
+        stage_sp_comm_micro_ms = []
+        for stage_id in range(max(1, int(parallel.pp))):
+            stage_tp_time = 0.0
+            stage_ep_time = 0.0
+            stage_sp_time = 0.0
+            for layer_idx in self._stage_layer_indices(model_config, parallel, stage_id):
+                template = layer_comm_templates[
+                    self._transformer_layer_kind(model_config, layer_idx)
+                ]
+                stage_tp_time += template["tp"]
+                stage_ep_time += template["ep"]
+                stage_sp_time += template["sp"]
+            stage_tp_comm_micro_ms.append(stage_tp_time)
+            stage_ep_comm_micro_ms.append(stage_ep_time)
+            stage_sp_comm_micro_ms.append(stage_sp_time)
+
+        tp_comm_time = (
+            max(stage_tp_comm_micro_ms) * num_micro_batches
+            if stage_tp_comm_micro_ms else 0.0
+        )
+        ep_comm_time = (
+            max(stage_ep_comm_micro_ms) * num_micro_batches
+            if stage_ep_comm_micro_ms else 0.0
+        )
+        sp_comm_time = (
+            max(stage_sp_comm_micro_ms) * num_micro_batches
+            if stage_sp_comm_micro_ms else 0.0
+        )
+
         return {
             "tp_comm_time_ms": tp_comm_time,
             "ep_comm_time_ms": ep_comm_time,
             "pp_comm_time_ms": pp_comm_time,
             "dp_comm_time_ms": dp_comm_time,
+            "dp_exposed_comm_time_ms": dp_exposed_time,
+            "dp_hidden_comm_time_ms": dp_overlap_result["hidden_time_ms"],
+            "dp_overlap_peak_stage": dp_overlap_result["peak_stage"],
+            "dp_stage_raw_comm_time_ms": dp_overlap_result.get("stage_raw_time_ms", []),
+            "dp_stage_exposed_comm_time_ms": dp_overlap_result.get("stage_exposed_time_ms", []),
+            "stage_tp_comm_micro_ms": stage_tp_comm_micro_ms,
+            "stage_ep_comm_micro_ms": stage_ep_comm_micro_ms,
+            "stage_sp_comm_micro_ms": stage_sp_comm_micro_ms,
             "sp_comm_time_ms": sp_comm_time,
             "total_comm_time_ms": tp_comm_time + ep_comm_time + pp_comm_time + dp_comm_time + sp_comm_time,
         }
