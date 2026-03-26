@@ -225,14 +225,14 @@ def get_special_build_deps():
         deps = [
             "paddlepaddle-gpu==3.3.1",
         ]
+        # for deep_ep build
         if cuda_major == 12:
-            deps.append(
-                "nvidia-nvshmem-cu12>=3.3.9,!=3.5.*"
-            )  # for deep_ep build
+            if cuda_minor > 6:
+                deps.append("paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5")
+            else:
+                deps.append("nvidia-nvshmem-cu12>=3.3.9,<3.5")
         elif cuda_major == 13:
-            deps.append(
-                "nvidia-nvshmem-cu13>=3.3.9,!=3.5.*"
-            )  # for deep_ep build
+            deps.append("paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5")
         else:
             raise ValueError(
                 f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
