@@ -100,6 +100,8 @@ index-strategy = "unsafe-best-match"
 [tool.uv.sources]
 paddlepaddle-gpu = {index = "paddlepaddle-gpu"}
 paddlepaddle-xpu = {index = "paddlepaddle-xpu"}
+paddle-nvidia-nvshmem-cu12 = {index = "paddlepaddle-gpu"}
+paddle-nvidia-nvshmem-cu13 = {index = "paddlepaddle-gpu"}
 
 
 [[tool.uv.index]]

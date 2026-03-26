@@ -227,11 +227,11 @@ def get_special_build_deps():
         ]
         if cuda_major == 12:
             deps.append(
-                "nvidia-nvshmem-cu12>=3.3.9,!=3.5.*"
+                "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5"
             )  # for deep_ep build
         elif cuda_major == 13:
             deps.append(
-                "nvidia-nvshmem-cu13>=3.3.9,!=3.5.*"
+                "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5"
             )  # for deep_ep build
         else:
             raise ValueError(
