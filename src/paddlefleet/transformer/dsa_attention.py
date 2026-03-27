@@ -201,11 +201,11 @@ class Indexer(paddle.nn.Layer):
         super().__init__()
         self.config = config
 
-        self.n_heads = config.index_n_heads
-        self.head_dim = config.index_head_dim
+        self.n_heads = config.dsa_index_n_heads
+        self.head_dim = config.dsa_index_head_dim
         self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = self.head_dim - self.rope_head_dim
-        self.index_topk = config.index_topk
+        self.index_topk = config.dsa_index_topk
         self.softmax_scale = self.head_dim**-0.5
         self.layer_number = layer_number
 
@@ -236,13 +236,17 @@ class Indexer(paddle.nn.Layer):
     def _apply_rope(
         self, x: Tensor, freqs: Tensor, mscale: float = 1.0
     ) -> Tensor:
-        """Apply non-interleaved RoPE to the pe portion of x.
+        """Apply RoPE to the pe portion of x.
 
         Split order: [pe | nope], matching DeepSeek-V3.2 Indexer (model.py:462).
 
+        RoPE format is controlled by config.dsa_indexer_rotary_interleaved:
+        - False (default): non-interleaved RoPE with half-head frequencies [θ₁,θ₂,...,θ₁,θ₂,...]
+        - True: interleaved RoPE with paired frequencies [θ₁,θ₁,θ₂,θ₂,...]
+
         Args:
             x: [..., head_dim] (rope_dim + nope_dim)
-            freqs: RoPE frequencies (must be half-half format for non-interleaved)
+            freqs: RoPE frequencies
             mscale: YaRN concentration factor (1.0 for plain RoPE, ~1.37 for YaRN)
         """
         x_pe = x[..., : self.rope_head_dim]
@@ -250,7 +254,7 @@ class Indexer(paddle.nn.Layer):
         x_pe = _apply_rotary_pos_emb_bshd(
             x_pe,
             freqs,
-            rotary_interleaved=False,
+            rotary_interleaved=self.config.dsa_indexer_rotary_interleaved,
             multi_latent_attention=False,
             mscale=mscale,
         )
@@ -927,10 +931,10 @@ class MLASelfAttentionWithDSA(MLASelfAttention):
 
         # DSA loss config
         self.dsa_indexer_loss_coeff = getattr(
-            config, "indexer_loss_coeff", None
+            config, "dsa_indexer_loss_coeff", None
         )
         self.dsa_indexer_use_sparse_loss = getattr(
-            config, "indexer_use_sparse_loss", False
+            config, "dsa_indexer_use_sparse_loss", False
         )
 
     def forward(

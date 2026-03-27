@@ -554,21 +554,74 @@ class TransformerConfig(ModelParallelConfig):
     # DSA (DeepSeek Sparse Attention)
     ####################
 
-    index_n_heads: int | None = None
+    dsa_index_n_heads: int | None = None
     """Number of DSA Indexer heads. None disables DSA; non-None activates
-    DeepSeek V3.2 sparse attention path."""
+    DeepSeek V3.2 sparse attention path.
 
-    index_head_dim: int = 128
-    """Per-head dimension for Indexer Q/K vectors."""
+    Note: This field corresponds to the HuggingFace config.json field "index_n_heads".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
 
-    index_topk: int = 2048
-    """Number of token positions selected by Indexer per query token."""
+    dsa_index_head_dim: int = 128
+    """Per-head dimension for Indexer Q/K vectors.
 
-    indexer_loss_coeff: float | None = None
+    Note: This field corresponds to the HuggingFace config.json field "index_head_dim".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
+
+    dsa_index_topk: int = 2048
+    """Number of token positions selected by Indexer per query token.
+
+    Note: This field corresponds to the HuggingFace config.json field "index_topk".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
+
+    dsa_indexer_loss_coeff: float | None = None
+    """KL loss coefficient for DSA Indexer training. None disables the KL loss.
+
+    Note: This field corresponds to the HuggingFace config.json field "indexer_loss_coeff".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
+
+    dsa_indexer_use_sparse_loss: bool = False
+    """Whether to restrict DSA KL loss to top-k positions only.
+
+    Note: This field corresponds to the HuggingFace config.json field "indexer_use_sparse_loss".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
+
+    dsa_indexer_rotary_interleaved: bool = False
+    """
+    Whether Indexer uses interleaved Rotary Position Embeddings.
+
+    When False (default), Indexer uses non-interleaved RoPE with
+    half-head frequencies [θ₁,θ₂,...,θ₁,θ₂,...].
+
+    When True, Indexer uses interleaved RoPE with paired frequencies
+    [θ₁,θ₁,θ₂,θ₂,...].
+
+    This allows compatibility with MLA's YaRN RoPE which always generates
+    interleaved frequencies.
+    """
+
+    dsa_indexer_loss_coeff: float = 0.01
     """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
 
-    indexer_use_sparse_loss: bool = False
-    """Whether to restrict DSA KL loss to top-k positions only."""
+    # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
+    transform_rules = {
+        # DSA field mapping
+        "index_n_heads": "dsa_index_n_heads",
+        "index_head_dim": "dsa_index_head_dim",
+        "index_topk": "dsa_index_topk",
+        "indexer_loss_coeff": "dsa_indexer_loss_coeff",
+        "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
+        "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
+    }
 
     @classmethod
     def from_config(cls, config_dict):

@@ -122,11 +122,12 @@ def _create_dsa_config(
     config.apply_rope_fusion = False  # DSA requires unfused RoPE
 
     # DSA Indexer fields
-    config.index_n_heads = index_n_heads
-    config.index_head_dim = index_head_dim
-    config.index_topk = index_topk
-    config.indexer_loss_coeff = indexer_loss_coeff
-    config.indexer_use_sparse_loss = indexer_use_sparse_loss
+    config.dsa_index_n_heads = index_n_heads
+    config.dsa_index_head_dim = index_head_dim
+    config.dsa_index_topk = index_topk
+    config.dsa_indexer_loss_coeff = indexer_loss_coeff
+    config.dsa_indexer_use_sparse_loss = indexer_use_sparse_loss
+    config.dsa_indexer_rotary_interleaved = False  # Test default value
 
     # Attention generic fields
     config.softmax_scale = None
@@ -328,17 +329,17 @@ class TestIndexer(unittest.TestCase):
             [
                 self.b,
                 self.s,
-                self.config.index_n_heads,
-                self.config.index_head_dim,
+                self.config.dsa_index_n_heads,
+                self.config.dsa_index_head_dim,
             ],
         )
         self.assertEqual(
             list(k.shape),
-            [self.b, self.s, self.config.index_head_dim],
+            [self.b, self.s, self.config.dsa_index_head_dim],
         )
         self.assertEqual(
             list(weights.shape),
-            [self.b, self.s, self.config.index_n_heads],
+            [self.b, self.s, self.config.dsa_index_n_heads],
         )
 
     def test_compute_index_scores_shapes(self):
@@ -346,19 +347,19 @@ class TestIndexer(unittest.TestCase):
             [
                 self.b,
                 self.s,
-                self.config.index_n_heads,
-                self.config.index_head_dim,
+                self.config.dsa_index_n_heads,
+                self.config.dsa_index_head_dim,
             ]
         )
-        k = paddle.randn([self.b, self.s, self.config.index_head_dim])
-        weights = paddle.randn([self.b, self.s, self.config.index_n_heads])
+        k = paddle.randn([self.b, self.s, self.config.dsa_index_head_dim])
+        weights = paddle.randn([self.b, self.s, self.config.dsa_index_n_heads])
         index_scores, topk_indices = self.indexer.compute_index_scores(
             q, k, weights, mask=None
         )
         self.assertEqual(list(index_scores.shape), [self.b, self.s, self.s])
         self.assertEqual(
             list(topk_indices.shape),
-            [self.b, self.s, self.config.index_topk],
+            [self.b, self.s, self.config.dsa_index_topk],
         )
 
     def test_topk_in_range(self):
@@ -366,12 +367,12 @@ class TestIndexer(unittest.TestCase):
             [
                 self.b,
                 self.s,
-                self.config.index_n_heads,
-                self.config.index_head_dim,
+                self.config.dsa_index_n_heads,
+                self.config.dsa_index_head_dim,
             ]
         )
-        k = paddle.randn([self.b, self.s, self.config.index_head_dim])
-        weights = paddle.randn([self.b, self.s, self.config.index_n_heads])
+        k = paddle.randn([self.b, self.s, self.config.dsa_index_head_dim])
+        weights = paddle.randn([self.b, self.s, self.config.dsa_index_n_heads])
         _, topk_indices = self.indexer.compute_index_scores(
             q, k, weights, mask=None
         )
@@ -1193,7 +1194,7 @@ class TestIndexerForward(unittest.TestCase):
         self.assertEqual(list(index_scores.shape), [self.b, self.s, self.s])
         self.assertEqual(
             list(topk_indices.shape),
-            [self.b, self.s, self.config.index_topk],
+            [self.b, self.s, self.config.dsa_index_topk],
         )
 
     def test_forward_no_mask(self):
@@ -1226,13 +1227,13 @@ class TestIndexerComputeScoresWithMask(unittest.TestCase):
             [
                 self.b,
                 self.s,
-                self.config.index_n_heads,
-                self.config.index_head_dim,
+                self.config.dsa_index_n_heads,
+                self.config.dsa_index_head_dim,
             ]
         )
-        k = paddle.randn([self.b, self.s, self.config.index_head_dim])
+        k = paddle.randn([self.b, self.s, self.config.dsa_index_head_dim])
         weights = paddle.abs(
-            paddle.randn([self.b, self.s, self.config.index_n_heads])
+            paddle.randn([self.b, self.s, self.config.dsa_index_n_heads])
         )
         causal = paddle.triu(
             paddle.full([self.s, self.s], float("-inf"), dtype="float32"),
