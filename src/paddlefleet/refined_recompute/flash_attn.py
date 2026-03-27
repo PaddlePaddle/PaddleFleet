@@ -20,6 +20,7 @@ import paddle
 from paddle import _C_ops, framework
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
+from paddle.nn.functional.flash_attention import flashmask_attention
 
 from paddlefleet.context_parallel_utils import (
     cp_flashmask_allgatherkv_balance_backward,
@@ -27,24 +28,14 @@ from paddlefleet.context_parallel_utils import (
 )
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
-fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-    "FLAGS_flash_attn_version"
-]
-if fa_version != 4:
-    from paddle.nn.functional.flash_attention import flashmask_attention
-else:
-    try:
-        from paddlefleet.ops.flash_mask.cute.flashmask_utils import (
-            FlashMaskInfoPaddle,
-        )
-        from paddlefleet.ops.flash_mask.cute.interface import (
-            _flash_attn_bwd,
-            _flash_attn_fwd,
-        )
-    except (ImportError, ModuleNotFoundError):
-        FlashMaskInfoPaddle = None
-        _flash_attn_fwd = None
-        _flash_attn_bwd = None
+if paddle.cuda.get_device_capability()[0] == 10:
+    from paddlefleet.ops.flash_mask.cute.flashmask_utils import (
+        FlashMaskInfoPaddle,
+    )
+    from paddlefleet.ops.flash_mask.cute.interface import (
+        _flash_attn_bwd,
+        _flash_attn_fwd,
+    )
 
 logger = logging.getLogger(__name__)
 

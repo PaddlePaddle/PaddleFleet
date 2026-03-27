@@ -45,22 +45,6 @@ from paddlefleet.transformer.utils import (
 )
 from paddlefleet.utils import divide
 
-fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-    "FLAGS_flash_attn_version"
-]
-if fa_version != 4:
-    from paddle.nn.functional.flash_attention import flashmask_attention
-else:
-    try:
-        from paddlefleet.ops.flash_mask.cute.interface import (
-            flashmask_attention,
-        )
-
-    except ImportError:
-        logger.warning(
-            "flash_mask package is not found, please install it first: pip install flash_mask"
-        )
-
 
 class DotProductAttention(FleetLayer):
     """
@@ -266,12 +250,20 @@ class DotProductAttention(FleetLayer):
         elif (
             query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
         ) and attn_mask_startend_row_indices is not None:
+            if self.config.fa_version == 4:
+                from paddlefleet.ops.flash_mask.cute.interface import (
+                    flashmask_attention as _flashmask_attention,
+                )
+            else:
+                from paddle.nn.functional.flash_attention import (
+                    flashmask_attention as _flashmask_attention,
+                )
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             flashmask_attention_func = (
                 self.rr_flashmask_attention_func
                 if use_rr_flash_attention
-                else flashmask_attention
+                else _flashmask_attention
             )
 
             # Handle MLA case where query/key head_dim != value head_dim

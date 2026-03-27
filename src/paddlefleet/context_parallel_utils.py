@@ -18,26 +18,16 @@ import paddle
 from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
+from paddle.nn.functional.flash_attention import flashmask_attention
 
-fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-    "FLAGS_flash_attn_version"
-]
-if fa_version != 4:
-    from paddle.nn.functional.flash_attention import flashmask_attention
-else:
-    try:
-        from paddlefleet.ops.flash_mask.cute.flashmask_utils import (
-            FlashMaskInfoPaddle,
-        )
-        from paddlefleet.ops.flash_mask.cute.interface import (
-            _flash_attn_bwd,
-            _flash_attn_fwd,
-        )
-
-    except (ImportError, ModuleNotFoundError):
-        FlashMaskInfoPaddle = None
-        _flash_attn_fwd = None
-        _flash_attn_bwd = None
+if paddle.cuda.get_device_capability()[0] == 10:
+    from paddlefleet.ops.flash_mask.cute.flashmask_utils import (
+        FlashMaskInfoPaddle,
+    )
+    from paddlefleet.ops.flash_mask.cute.interface import (
+        _flash_attn_bwd,
+        _flash_attn_fwd,
+    )
 
 
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
