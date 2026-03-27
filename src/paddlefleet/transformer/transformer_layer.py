@@ -33,6 +33,7 @@ from paddlefleet.recompute_utils import (
     need_recompute_in_first_n,
 )
 from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddlefleet.transformer.hyper_connection import HyperConnectionModule
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -110,6 +111,7 @@ class TransformerLayerSublayersSpec:
     """
 
     input_layernorm: LayerSpec | type = IdentityOp
+    self_attention_hyper_connection: LayerSpec | type = IdentityOp
     self_attn: LayerSpec | type = IdentityOp
     self_attn_bda: LayerSpec | type = IdentityFuncOp
 
@@ -118,6 +120,7 @@ class TransformerLayerSublayersSpec:
     cross_attn_bda: LayerSpec | type = IdentityFuncOp
 
     post_attention_layernorm: LayerSpec | type = IdentityOp
+    mlp_hyper_connection: LayerSpec | type = IdentityOp
     mlp: LayerSpec | type = IdentityOp
     mlp_bda: LayerSpec | type = IdentityFuncOp
 
@@ -701,6 +704,258 @@ class TransformerLayer(nn.Layer):
     def use_fp8(self):
         if isinstance(self.mlp, MoELayer):
             return self.mlp.use_fp8()
+
+
+class TransformerLayerWithMHC(TransformerLayer):
+    """A transformer layer with Manifold-Constrained Hyper-Connections (mHC).
+
+    Implementation that uses the HyperConnectionModule as a pluggable submodule
+    via the layer spec system. Uses a flat [s, b, n*C] tensor format for
+    multi-stream hidden states.
+
+    The n-stream hidden states are aggregated before each sub-layer and
+    expanded back afterwards using learned mappings (H_pre, H_post, H_res).
+
+    Expand/contract of streams is handled at the block level (in the model
+    forward), not per-layer.
+
+    Reference: https://arxiv.org/abs/2502.20358
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        sublayers_spec: TransformerLayerSublayersSpec,
+        layer_number: int = 1,
+        hidden_dropout_prob: float | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
+        **kwargs,
+    ):
+        super().__init__(
+            config=config,
+            sublayers_spec=sublayers_spec,
+            layer_number=layer_number,
+            hidden_dropout_prob=hidden_dropout_prob,
+            pg_collection=pg_collection,
+        )
+
+        # Check if cross-attention is enabled (not IdentityOp)
+        self._has_cross_attention = not isinstance(
+            self.cross_attention, IdentityOp
+        )
+        if self._has_cross_attention:
+            log_single_rank(
+                logger,
+                logging.WARNING,
+                f"TransformerLayerWithMHC[{layer_number}]: Cross-attention is enabled. "
+                f"Using reduce/expand around cross-attention which may affect MHC benefits.",
+            )
+
+        # Build hyper connection modules from spec
+        self.self_attention_hyper_connection = build_layer(
+            sublayers_spec.self_attention_hyper_connection,
+            config=self.config,
+            layer_number=self.layer_number,
+        )
+
+        self.mlp_hyper_connection = build_layer(
+            sublayers_spec.mlp_hyper_connection,
+            config=self.config,
+            layer_number=self.layer_number,
+        )
+
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"HyperConnectionTransformerLayer[{layer_number}] initialized with "
+            f"{config.mhc_num_residual_streams} residual streams",
+        )
+
+    def _forward_impl(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
+        **kwargs,
+    ):
+        hidden_states, context = self._forward_attention(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+            context=context,
+            context_mask=context_mask,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            position_ids=position_ids,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            in_recompute=self.full_recompute,
+        )
+        output = self._forward_mlp(hidden_states)
+        if context is not None:
+            return output, context
+        return output
+
+    def _forward_attention(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
+        in_recompute: bool = False,
+        is_first_fwd: bool = False,
+        **kwargs,
+    ):
+        """Forward attention with hyper connection pre/post processing."""
+        # Step 1: Width connection -> branch_input, residuals (H_res mixed), H_post
+        hidden_states, mhc_residuals, self_attn_h_post = (
+            self.self_attention_hyper_connection.width_connection(hidden_states)
+        )
+
+        # Step 2: Optional Input Layer norm
+        if self.recompute_input_layernorm:
+            input_layernorm_output = recompute(
+                self.input_layernorm, hidden_states
+            )
+        else:
+            input_layernorm_output = self.input_layernorm(hidden_states)
+
+        # Step 3: Self attention
+        attention_output_with_bias = self.self_attn(
+            input_layernorm_output,
+            attention_mask=attention_mask,
+            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            position_ids=position_ids,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            in_recompute=in_recompute,
+        )
+
+        # Step 4: Depth connection with dropout
+        with paddle.enable_grad():
+            hidden_states = (
+                self.self_attention_hyper_connection.depth_connection(
+                    layer_output_with_bias=attention_output_with_bias,
+                    residuals=mhc_residuals,
+                    h_post=self_attn_h_post,
+                    dropout_prob=self.hidden_dropout_prob,
+                    training=self.training,
+                    fused=self.config.bias_dropout_fusion,
+                )
+            )
+
+        # Cross-attention (no hyper connection support)
+        # Handle dimension mismatch: hidden_states is [s, b, n*C] but cross-attention
+        # expects [s, b, C]. Reduce before cross-attention, expand after.
+        n = self.config.mhc_num_residual_streams
+        if self._has_cross_attention:
+            # Reduce: [s, b, n*C] -> [s, b, C]
+            hidden_states = HyperConnectionModule.reduce_stream(
+                hidden_states, n
+            )
+
+        residual = hidden_states
+        pre_cross_attn_layernorm_output = self.pre_cross_attn_layernorm(
+            hidden_states
+        )
+
+        attention_output_with_bias = self.cross_attention(
+            pre_cross_attn_layernorm_output,
+            attention_mask=context_mask,
+            key_value_states=context,
+        )
+
+        if (
+            isinstance(attention_output_with_bias, dict)
+            and "context" in attention_output_with_bias
+        ):
+            context = attention_output_with_bias["context"]
+
+        with paddle.enable_grad():
+            residual.stop_gradient = False
+            hidden_states = self.cross_attn_bda(
+                self.training, self.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.hidden_dropout_prob)
+
+        if self._has_cross_attention:
+            # Expand: [s, b, C] -> [s, b, n*C]
+            hidden_states = HyperConnectionModule.expand_stream(
+                hidden_states, n
+            )
+
+        if is_first_fwd:
+            hidden_states.stop_gradient = False
+
+        return hidden_states, context
+
+    def _forward_mlp(self, hidden_states, is_first_fwd=False, **kwargs):
+        """Forward MLP with hyper connection pre/post processing."""
+        # Step 1: Width connection -> branch_input, residuals (H_res mixed), H_post
+        hidden_states, mhc_residuals, mlp_h_post = (
+            self.mlp_hyper_connection.width_connection(hidden_states)
+        )
+
+        # Step 2: Optional Layer norm
+        if self.recompute_post_attention_layernorm:
+            post_attention_layernorm_output = recompute(
+                self.post_attention_layernorm, hidden_states
+            )
+        else:
+            post_attention_layernorm_output = self.post_attention_layernorm(
+                hidden_states
+            )
+
+        # Step 3: MLP forward
+        if self.recompute_mlp:
+
+            def recompute_handler(post_attention_layernorm_output):
+                mlp_output, bias = self.mlp(post_attention_layernorm_output)
+                if bias is None:
+                    return mlp_output
+                return mlp_output, bias
+
+            mlp_output_with_bias = recompute(
+                recompute_handler, post_attention_layernorm_output
+            )
+            if not isinstance(mlp_output_with_bias, tuple):
+                mlp_output_with_bias = (mlp_output_with_bias, None)
+        else:
+            mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
+
+        # Step 4: Depth connection with dropout
+        with paddle.enable_grad():
+            hidden_states = self.mlp_hyper_connection.depth_connection(
+                layer_output_with_bias=mlp_output_with_bias,
+                residuals=mhc_residuals,
+                h_post=mlp_h_post,
+                dropout_prob=self.hidden_dropout_prob,
+                training=self.training,
+                fused=self.config.bias_dropout_fusion,
+            )
+
+        if is_first_fwd:
+            hidden_states.stop_gradient = False
+
+        return hidden_states
 
 
 class TransformerLayerWithOverlap(TransformerLayer):

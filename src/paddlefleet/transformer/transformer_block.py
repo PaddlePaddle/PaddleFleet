@@ -26,6 +26,9 @@ from paddle import Tensor
 from paddlefleet import tensor_parallel
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddlefleet.transformer.hyper_connection import (
+    HyperConnectionModule,
+)
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_layer import (
@@ -246,6 +249,13 @@ class TransformerBlock(FleetLayer):
         else:
             rng_context = nullcontext()
 
+        # Expand hidden states for hyper connections
+        use_mhc = getattr(self.config, "use_mhc", False)
+        if use_mhc and self.pre_process:
+            hidden_states = HyperConnectionModule.expand_stream(
+                hidden_states, self.config.mhc_num_residual_streams
+            )  # [s, b, C] -> [s, b, n*C]
+
         with rng_context:
             # Forward pass.
             for l_no, layer in enumerate(self.layers):
@@ -260,6 +270,12 @@ class TransformerBlock(FleetLayer):
                     attention_bias=attention_bias,
                     packed_seq_params=packed_seq_params,
                 )
+
+        # Contract hidden states for hyper connections
+        if use_mhc and self.post_process:
+            hidden_states = HyperConnectionModule.reduce_stream(
+                hidden_states, self.config.mhc_num_residual_streams
+            )  # [s, b, n*C] -> [s, b, C]
 
         # Final layer norm.
         if self.norm is not None:

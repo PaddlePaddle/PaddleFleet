@@ -14,26 +14,27 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-from paddlefleet.pipeline_parallel import (
-    LayerDesc,
-    PipelineLayer,
-    SharedLayerDesc,
-)
-from paddlefleet.pipeline_parallel.pp_utils.utils import (
-    dict_to_tuple_helper,
-)
-
-if TYPE_CHECKING:
-    from paddlefleet.spec_utils import LayerSpec
 
 from paddle.distributed import fleet
 
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
-from paddlefleet.pipeline_parallel import ScheduleChunk
+from paddlefleet.pipeline_parallel import (
+    LayerDesc,
+    PipelineLayer,
+    ScheduleChunk,
+    SharedLayerDesc,
+)
+from paddlefleet.pipeline_parallel.pp_utils.utils import (
+    dict_to_tuple_helper,
+)
+from paddlefleet.spec_utils import LayerSpec
+from paddlefleet.transformer.hyper_connection import (
+    MHCContractLayer,
+    MHCExpandLayer,
+)
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerNode,
@@ -239,6 +240,21 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(head_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
+
+        # Insert MHC expand layer before transformer layers
+        use_mhc = getattr(self.config, "use_mhc", False)
+        if use_mhc:
+            self.add_sequential_layer(
+                layers,
+                LayerDesc(
+                    LayerSpec(
+                        layer=MHCExpandLayer,
+                        extra_kwargs={"config": self.config},
+                    )
+                ),
+                f"{name_prefix}.mhc_expand",
+            )
+
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
                 layers,
@@ -246,6 +262,19 @@ class GPTModel(PipelineLayer):
                 f"{name_prefix}.layers.{i}",
             )
             i += 1
+
+        # Insert MHC contract layer after transformer layers
+        if use_mhc:
+            self.add_sequential_layer(
+                layers,
+                LayerDesc(
+                    LayerSpec(
+                        layer=MHCContractLayer,
+                        extra_kwargs={"config": self.config},
+                    )
+                ),
+                f"{name_prefix}.mhc_contract",
+            )
 
         # Always place layer_norm after transformer_layers and before tail_empty_layers/MTP,
         # so that the model structure is consistent regardless of whether MTP is enabled.
@@ -617,8 +646,6 @@ class GPTModel(PipelineLayer):
             sharded_state_dict[self._pp_to_single_mapping[k]] = v
 
         def increment_expert_number(s, increment):
-            import re
-
             def replace(match):
                 original_number = int(match.group(0))
                 new_number = original_number + increment
