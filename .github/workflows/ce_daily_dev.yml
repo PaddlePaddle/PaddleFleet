@@ -1649,6 +1649,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GITHUB_REPO_NAME: ${{ github.repository }}
+      TASK: coverage_check
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -1657,6 +1658,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.10'
+
       - name: coverage file download
         shell: bash
         run: |
@@ -1753,28 +1755,6 @@ jobs:
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)"
           python ${push_file} merged_coverage.xml ${target_path}
           python ${push_file} coverage-full.txt ${target_path}
-
-      - name: filter coverage files and remove backup files
-        if: always()
-        run: |
-          echo "=== CHECKING COVERAGE FILES ==="
-
-          COVERAGE_FILES=(
-            "multi_coverage.xml"
-            "single_coverage.xml"
-            "h20_multi_coverage.xml"
-            "h20_single_coverage.xml"
-            "a100_coverage.xml"
-          )
-
-          for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
-            python ci/filter_coverage.py "$COVERAGE_FILE" diff.txt
-            BACKUP_FILE="${COVERAGE_FILE}.backup"
-            if [ -f "$BACKUP_FILE" ]; then
-              rm -f "$BACKUP_FILE"
-              echo "Removed backup: $BACKUP_FILE"
-            fi
-          done
 
       - name: Upload coverage to Codecov
         if: always()
