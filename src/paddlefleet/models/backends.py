@@ -24,6 +24,7 @@ from paddlefleet.parallel_state import (
 )
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
+    Linear,
     RowParallelLinear,
 )
 from paddlefleet.transformer.dot_product_attention import (
@@ -96,6 +97,10 @@ class BackendSpecProvider(Protocol):
 
 class LocalSpecProvider(BackendSpecProvider):
     """A protocol for providing Local sublayers_spec used in Spec building."""
+
+    def linear(self) -> type:
+        """Which linear layer the backend uses"""
+        return Linear
 
     def column_parallel_linear(self) -> type:
         """Which column parallel linear layer the backend uses"""
