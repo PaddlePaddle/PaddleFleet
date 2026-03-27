@@ -1645,6 +1645,7 @@ jobs:
   coverage_check:
     name: Coverage Upload And Check
     needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card]
+    if: always()
     runs-on: ubuntu-latest
     env:
       GITHUB_REPO_NAME: ${{ github.repository }}
@@ -1660,24 +1661,44 @@ jobs:
         shell: bash
         run: |
           coverage_configs="
-          multi_coverage.xml:multi-card/coverage.xml
-          single_coverage.xml:single-card/coverage.xml
-          h20_multi_coverage.xml:h20-multi/coverage.xml
-          h20_single_coverage.xml:h20-single/coverage.xml
-          a100_coverage.xml:a100/coverage.xml
+          multi_coverage.xml:multi-card/coverage.xml:multi-card_test
+          single_coverage.xml:single-card/coverage.xml:single_card_test
+          h20_multi_coverage.xml:h20-multi/coverage.xml:integration-test-H20-multi-card
+          h20_single_coverage.xml:h20-single/coverage.xml:integration-test-H20-single-card
+          a100_coverage.xml:a100/coverage.xml:integration-test-a100
           "
           base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)"
+
+          # 记录失败的任务
+          FAILED_TASKS=""
 
           echo "$coverage_configs" | while IFS= read -r config; do
             if [ -n "$config" ]; then
                 filename="${config%%:*}"
-                filepath="${config#*:}"
-                wget "${base_url}/${filepath}" -O "$filename" --no-proxy
-                sed -i "s|<source></source>|<source>paddlefleet</source>|" "$filename"
-                sed -i "s|/usr/local/lib/python3.10/dist-packages/|src/|" "$filename"
-                sed -i "s|.usr.local.lib.python3.10.dist-packages.paddlefleet|src|" "$filename"
+                rest="${config#*:}"
+                filepath="${rest%%:*}"
+                task_name="${rest##*:}"
+
+                if wget "${base_url}/${filepath}" -O "$filename" --no-proxy -q; then
+                    echo "Downloaded: $filename from $task_name"
+                    sed -i "s|<source></source>|<source>paddlefleet</source>|" "$filename"
+                    sed -i "s|/usr/local/lib/python3.10/dist-packages/|src/|" "$filename"
+                    sed -i "s|.usr.local.lib.python3.10.dist-packages.paddlefleet|src|" "$filename"
+                else
+                    echo "Warning: Failed to download ${filepath} from ${task_name}"
+                    echo "$task_name" >> failed_tasks.txt
+                fi
             fi
           done
+
+          # 检查是否有失败的任务
+          if [ -f failed_tasks.txt ] && [ -s failed_tasks.txt ]; then
+            echo "=== 以下任务未生成覆盖率文件 ===" > coverage_missing_tasks.txt
+            cat failed_tasks.txt >> coverage_missing_tasks.txt
+            cat coverage_missing_tasks.txt
+          else
+            echo "all_success" > coverage_missing_tasks.txt
+          fi
 
       - name: Check full coverage
         if: always()
@@ -1709,7 +1730,20 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          python ci/merge_and_check_coverage.py "${EXISTING_FILES[@]}" --report-only --output-xml > coverage-full.txt
+          python -u ci/merge_and_check_coverage.py "${EXISTING_FILES[@]}" --report-only --output-xml >> coverage-full.txt
+
+          # 将失败任务信息追加到覆盖率报告中
+          if [ ! "all_success" = "$(cat coverage_missing_tasks.txt)" ]; then
+            echo "" >> coverage-full.txt
+            echo "" >> coverage-full.txt
+            echo "========================================" >> coverage-full.txt
+            echo "⚠️  以下任务未生成覆盖率文件，已从统计中排除：" >> coverage-full.txt
+            echo "========================================" >> coverage-full.txt
+            cat coverage_missing_tasks.txt >> coverage-full.txt
+            echo "" >> coverage-full.txt
+            echo "注意：覆盖率统计仅包含成功运行的任务。" >> coverage-full.txt
+          fi
+
           cat coverage-full.txt
           # 上传文件
           wget -q --no-proxy --no-check-certificate \
