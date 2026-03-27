@@ -107,6 +107,10 @@ def setup_ops_extension():
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
     from build_utils import get_cuda_version
+    import paddle.core
+
+    # 检测 Paddle 编译配置，确保 ABI 兼容
+    paddle_compiled_with_onednn = paddle.core.is_compiled_with_onednn()
 
     # 定义 NVCC 编译参数
     nvcc_args = [
@@ -127,6 +131,12 @@ def setup_ops_extension():
         "-gencode=arch=compute_100,code=sm_100",
         "-DNDEBUG",
     ]
+
+    # 如果 Paddle 编译时启用了 OneDNN，需要同步定义 PADDLE_WITH_DNNL
+    # 确保 DenseTensor 等 ABI 兼容
+    if paddle_compiled_with_onednn:
+        nvcc_args.append("-DPADDLE_WITH_DNNL")
+
     cuda_major, cuda_minor = get_cuda_version()
 
     if cuda_major == 12 and cuda_minor < 8:
@@ -161,7 +171,7 @@ def setup_ops_extension():
                 "-Wno-abi",
                 "-fPIC",
                 "-std=c++17",
-            ],
+            ] + (["-DPADDLE_WITH_DNNL"] if paddle_compiled_with_onednn else []),
             "nvcc": nvcc_args,
         },
     )
