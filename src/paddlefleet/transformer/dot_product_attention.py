@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 
 import paddle
 from paddle import Tensor
-from paddle.nn.functional.flash_attention import flashmask_attention
 
 from paddlefleet.context_parallel_utils import flashmask_attention_cp
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
@@ -45,6 +44,22 @@ from paddlefleet.transformer.utils import (
     is_layer_window_attention,
 )
 from paddlefleet.utils import divide
+
+fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+    "FLAGS_flash_attn_version"
+]
+if fa_version != 4:
+    from paddle.nn.functional.flash_attention import flashmask_attention
+else:
+    try:
+        from paddlefleet.ops.flash_mask.cute.interface import (
+            flashmask_attention,
+        )
+
+    except ImportError:
+        logger.warning(
+            "flash_mask package is not found, please install it first: pip install flash_mask"
+        )
 
 
 class DotProductAttention(FleetLayer):

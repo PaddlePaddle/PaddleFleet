@@ -20,13 +20,31 @@ import paddle
 from paddle import _C_ops, framework
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
-from paddle.nn.functional.flash_attention import flashmask_attention
 
 from paddlefleet.context_parallel_utils import (
     cp_flashmask_allgatherkv_balance_backward,
     cp_flashmask_allgatherkv_balance_forward,
 )
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
+
+fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+    "FLAGS_flash_attn_version"
+]
+if fa_version != 4:
+    from paddle.nn.functional.flash_attention import flashmask_attention
+else:
+    try:
+        from paddlefleet.ops.flash_mask.cute.flashmask_utils import (
+            FlashMaskInfoPaddle,
+        )
+        from paddlefleet.ops.flash_mask.cute.interface import (
+            _flash_attn_bwd,
+            _flash_attn_fwd,
+        )
+    except (ImportError, ModuleNotFoundError):
+        FlashMaskInfoPaddle = None
+        _flash_attn_fwd = None
+        _flash_attn_bwd = None
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +157,13 @@ class FlashAttnFunctor(PyLayer):
             ctx.save_for_backward(
                 q, k, v, result_attention, softmax_lse, causal
             )
+        elif fa_version == 4:
+            result_attention = hold_tensors["result_attention"]
+            softmax_lse = hold_tensors["softmax_lse"]
+            causal = hold_tensors["causal"]
+            ctx.save_for_backward(
+                q, k, v, result_attention, softmax_lse, causal
+            )
         else:
             raise ValueError(f"Invalid flash attention version: {fa_version}")
 
@@ -202,6 +227,24 @@ class FlashAttnFunctor(PyLayer):
                 -1,  # window_size_right
                 0.0,  # softcap
                 0,  # sm_margin
+            )
+        elif fa_version == 4:
+            flashmask_info = None
+            q, k, v, result_attention, softmax_lse, causal = ctx.saved_tensor()
+            q_grad, k_grad, v_grad = _flash_attn_bwd(
+                q.detach(),
+                k.detach(),
+                v.detach(),
+                result_attention,
+                grad,
+                softmax_lse,
+                flashmask_info,
+                causal=causal,
+                deterministic=bool(
+                    paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+                        "FLAGS_cudnn_deterministic"
+                    ]
+                ),
             )
         else:
             raise ValueError(f"Invalid flash attention version: {fa_version}")
@@ -332,6 +375,22 @@ class RefinedRcomputeFlashAttention:
                 "causal": causal,
             }
             result_softmax = None  # FA v3 does not return softmax.
+        elif fa_version == 4:
+            (result_attention, softmax_lse) = _flash_attn_fwd(
+                query_states,
+                key_states,
+                value_states,
+                causal=causal,
+                return_lse=True,
+                startend_row_indices=None,
+                pack_gqa=False,
+            )
+            hold_tensors = {
+                "result_attention": result_attention,
+                "softmax_lse": softmax_lse,
+                "causal": causal,
+            }
+            result_softmax = None
         else:
             raise ValueError(f"Invalid flash attention version: {fa_version}")
 
@@ -398,6 +457,19 @@ class FlashMaskAttnFunctor(PyLayer):
                 causal,
             )
         elif fa_version == 3:
+            result_attention = hold_tensors["result_attention"]
+            softmax_lse = hold_tensors["softmax_lse"]
+            causal = hold_tensors["causal"]
+            ctx.save_for_backward(
+                q,
+                k,
+                v,
+                startend_row_indices,
+                result_attention,
+                softmax_lse,
+                causal,
+            )
+        elif fa_version == 4:
             result_attention = hold_tensors["result_attention"]
             softmax_lse = hold_tensors["softmax_lse"]
             causal = hold_tensors["causal"]
@@ -487,6 +559,38 @@ class FlashMaskAttnFunctor(PyLayer):
                     q.shape[-1] ** (-0.5),
                     causal,
                 )
+        elif fa_version == 4:
+            (
+                q,
+                k,
+                v,
+                startend_row_indices,
+                result_attention,
+                softmax_lse,
+                causal,
+            ) = ctx.saved_tensor()
+            if startend_row_indices is not None:
+                flashmask_info = FlashMaskInfoPaddle(
+                    startend_row_indices=startend_row_indices,
+                    is_causal=causal,
+                )
+            else:
+                flashmask_info = None
+            q_grad, k_grad, v_grad = _flash_attn_bwd(
+                q.detach(),
+                k.detach(),
+                v.detach(),
+                result_attention,
+                grad,
+                softmax_lse,
+                flashmask_info,
+                causal=causal,
+                deterministic=bool(
+                    paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+                        "FLAGS_cudnn_deterministic"
+                    ]
+                ),
+            )
         else:
             raise ValueError(f"Invalid flash attention version: {fa_version}")
 
@@ -614,6 +718,21 @@ class RefinedRcomputeFlashMaskAttention:
                     query_states.shape[-1] ** (-0.5),
                     causal,
                 )
+            hold_tensors = {
+                "result_attention": result_attention,
+                "softmax_lse": softmax_lse,
+                "causal": causal,
+            }
+        elif fa_version == 4:
+            (result_attention, softmax_lse) = _flash_attn_fwd(
+                query_states,
+                key_states,
+                value_states,
+                causal=causal,
+                return_lse=True,
+                startend_row_indices=startend_row_indices,
+                pack_gqa=False,
+            )
             hold_tensors = {
                 "result_attention": result_attention,
                 "softmax_lse": softmax_lse,
