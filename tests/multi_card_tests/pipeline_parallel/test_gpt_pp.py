@@ -198,24 +198,25 @@ class TestPP(unittest.TestCase):
 
         if paddle.distributed.get_rank() == 0:
             baseline = {
-                "_layers.9.0.input_layernorm.weight": "501258cec315cb78a8ee9e63f5066396",
-                "_layers.9.0.mlp.down_proj.weight": "56005e1e5bd6ac59748a658a9fe5b46d",
-                "_layers.9.0.mlp.up_gate_proj.weight": "c8df6287aad81f3b54b763818477118c",
-                "_layers.9.0.post_attention_layernorm.weight": "51bb0e05628fce8cf41b2c5f7ffbcc95",
-                "_layers.9.0.self_attn.k_norm.weight": "1f793bd2ce6614093ec186d31341056d",
-                "_layers.9.0.self_attn.o_proj.weight": "117b4c42d33e7db01547d8003bc82d39",
-                "_layers.9.0.self_attn.q_norm.weight": "b4d1c92ee7ed06e61cf4667508861093",
-                "_layers.9.0.self_attn.qkv_proj.weight": "70adb77e1680d7b8c38e8be91f439e09",
-                "_layers.9.1.input_layernorm.weight": "7e3a92d5ca53fe2f6902667f5f3fd33e",
-                "_layers.9.1.mlp.down_proj.weight": "65c219403359dba8bf9c53ef74a8f1e7",
-                "_layers.9.1.mlp.up_gate_proj.weight": "a32b4353f5b0547a2d34fd9c4a7c0e85",
-                "_layers.9.1.post_attention_layernorm.weight": "453e36caa0f9007710381757ea4d4479",
-                "_layers.9.1.self_attn.k_norm.weight": "963bdd76309b2a0bf35f458445b7a367",
-                "_layers.9.1.self_attn.o_proj.weight": "e3d5b74bed8b47725961202b41787623",
-                "_layers.9.1.self_attn.q_norm.weight": "75a36db183b3b676423bbb35c2127485",
-                "_layers.9.1.self_attn.qkv_proj.weight": "da92c4047a99953688efcb8fce415bde",
-                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "161fb3e084d8dfb71046a13310dd7857",
+                "_layers.9.0.input_layernorm.weight": "b75652fc8c6d4bba4513e90a2c5a7596",
+                "_layers.9.0.mlp.down_proj.weight": "7becd6a8b649192155befc2ec16fe250",
+                "_layers.9.0.mlp.up_gate_proj.weight": "121d4eb684ed0c9f63b357bc00f4815a",
+                "_layers.9.0.post_attention_layernorm.weight": "4c3f808bf274eddd33dad2d96f4b8804",
+                "_layers.9.0.self_attn.k_norm.weight": "8a94851abc94463b6eee1e18440ad6ef",
+                "_layers.9.0.self_attn.o_proj.weight": "1d2477b05c078e71bacd435fac5731e8",
+                "_layers.9.0.self_attn.q_norm.weight": "ac1adb34d94a0cf8e9154ed3cbf097c0",
+                "_layers.9.0.self_attn.qkv_proj.weight": "1a6e380b99c46f8f360bec6dc4bbea33",
+                "_layers.9.1.input_layernorm.weight": "74e13bcebc22f55da1ea996996faa1f1",
+                "_layers.9.1.mlp.down_proj.weight": "bd18ba2e343c07ddcb43133995917c03",
+                "_layers.9.1.mlp.up_gate_proj.weight": "f1d4215e022a65e3401ae3e2c80fb4ba",
+                "_layers.9.1.post_attention_layernorm.weight": "91df0009a11c69192fafa1dd13690bff",
+                "_layers.9.1.self_attn.k_norm.weight": "0a17912c1aaf609354cfdb7ba9289fbb",
+                "_layers.9.1.self_attn.o_proj.weight": "bb579d22c85c7d7d9b266d2195dc0326",
+                "_layers.9.1.self_attn.q_norm.weight": "74cc012f0bc84b6aff0c3372bb62c9c4",
+                "_layers.9.1.self_attn.qkv_proj.weight": "d71928b0d80a20082fd7f9ed794e0cae",
+                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "ab8ed982bcd685d6617717b0da1aafda",
             }
+
             for name, p in overlap_gpt_model.named_parameters():
                 assert p.grad._md5sum() == baseline[name]
 

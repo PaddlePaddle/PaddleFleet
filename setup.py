@@ -40,7 +40,7 @@ def get_special_setup_deps():
     if backends.IS_NVIDIA:
         deps = [
             "triton",  # for deep_gemm, flashmask
-            "nvidia-cutlass-dsl==4.2.1",  # for sonic_moe
+            "nvidia-cutlass-dsl==4.3.0",  # for sonic_moe
             "filelock",  # for sonic_moe
         ]
         return deps
@@ -195,9 +195,17 @@ def setup_install_no_extension():
     )
 
 
-dependencies = (
-    common_dependencies + get_special_build_deps() + get_special_setup_deps()
-)
+try:
+    dependencies = (
+        common_dependencies
+        + get_special_build_deps()
+        + get_special_setup_deps()
+    )
+except Exception as e:
+    raise Exception(
+        f"Failed to resolve special dependencies: {e}, using common dependencies only"
+    )
+
 if backends.IS_NVIDIA:
     setup_ops_extension()
 elif backends.IS_XPU:

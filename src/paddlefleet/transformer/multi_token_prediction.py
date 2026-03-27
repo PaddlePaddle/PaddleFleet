@@ -169,7 +169,9 @@ def get_mtp_layer_spec_for_backend(
     column_parallel_linear_impl: type = backend.column_parallel_linear()
     layer_norm_impl: type = backend.layer_norm()
     mtp_layer_spec = LayerSpec(
-        layer=MultiTokenPredictionLayer,
+        layer=WeightOnlyMTPLayer
+        if config.mtp_load_weight_only
+        else MultiTokenPredictionLayer,
         sublayers_spec=MultiTokenPredictionLayerSublayersSpec(
             enorm=layer_norm_impl,
             hnorm=layer_norm_impl,
@@ -322,6 +324,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             hidden_size=self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
+
         self.offload_context = nullcontext()
 
     def _concat_embeddings(
@@ -469,24 +472,65 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         hidden_states_concat = dict_args["hidden_states"]
-        tensor_list = paddle.split(
-            hidden_states_concat, self.config.num_nextn_predict_layers + 1
-        )
-        dict_args["hidden_states"] = tensor_list[0]
-        dict_args["decoder_input"] = tensor_list[self.layer_number + 1]
+        if self.config.train_mtp_only:
+            for i in range(self.config.num_nextn_predict_layers):
+                tensor_list = paddle.split(
+                    hidden_states_concat,
+                    self.config.num_nextn_predict_layers + 1,
+                )
+                dict_args["hidden_states"] = tensor_list[i]
+                dict_args["decoder_input"] = tensor_list[i + 1]
 
-        if self.config.recompute_granularity == "full" and self.training:
-            hidden_states = self._checkpointed_forward(
-                self._proj_and_transformer_layer, **dict_args
-            )
+                if (
+                    self.config.recompute_granularity == "full"
+                    and self.training
+                ):
+                    hidden_states = self._checkpointed_forward(
+                        self._proj_and_transformer_layer, **dict_args
+                    )
+                else:
+                    hidden_states = self._proj_and_transformer_layer(
+                        **dict_args
+                    )
+
+                tensor_list[i + 1] = hidden_states
+                hidden_states_concat = paddle.concat(tensor_list)
+            dict_args["hidden_states"] = hidden_states_concat
+            dict_args.pop("decoder_input")
         else:
-            hidden_states = self._proj_and_transformer_layer(**dict_args)
+            tensor_list = paddle.split(
+                hidden_states_concat, self.config.num_nextn_predict_layers + 1
+            )
+            dict_args["hidden_states"] = tensor_list[self.layer_number]
+            dict_args["decoder_input"] = tensor_list[self.layer_number + 1]
 
-        tensor_list[self.layer_number + 1] = hidden_states
-        hidden_states_concat = paddle.concat(tensor_list)
-        dict_args["hidden_states"] = hidden_states_concat
-        dict_args.pop("decoder_input")
+            if self.config.recompute_granularity == "full" and self.training:
+                hidden_states = self._checkpointed_forward(
+                    self._proj_and_transformer_layer, **dict_args
+                )
+            else:
+                hidden_states = self._proj_and_transformer_layer(**dict_args)
+
+            tensor_list[self.layer_number + 1] = hidden_states
+            hidden_states_concat = paddle.concat(tensor_list)
+            dict_args["hidden_states"] = hidden_states_concat
+            dict_args.pop("decoder_input")
         return dict_args
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="MultiTokenPredictionLayer")
+
+
+class WeightOnlyMTPLayer(MultiTokenPredictionLayer):
+    """MTP layer that only holds weights without participating in forward computation."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for _, param in self.state_dict().items():
+            param.is_weight_only_mtp = True
+
+    def forward(self, dict_args: dict):
+        return dict_args
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="WeightOnlyMTPLayer")

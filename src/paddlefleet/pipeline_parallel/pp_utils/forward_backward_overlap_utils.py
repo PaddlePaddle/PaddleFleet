@@ -28,13 +28,12 @@ logger = logging.getLogger(__name__)
 
 from paddle.distributed.fleet.recompute import custom_state_manager
 
-if custom_state_manager.custom_get_state_func is None:
-    assert custom_state_manager.custom_set_state_func is None
-    custom_get_state_func = lambda x=None: None
-    custom_set_state_func = lambda x=None: None
-    custom_state_manager.custom_get_state_func = custom_get_state_func
-    custom_state_manager.custom_set_state_func = custom_set_state_func
-
+# if custom_state_manager.custom_get_state_func is None:
+#     assert custom_state_manager.custom_set_state_func is None
+#     custom_get_state_func = lambda x=None: None
+#     custom_set_state_func = lambda x=None: None
+#     custom_state_manager.custom_get_state_func = custom_get_state_func
+#     custom_state_manager.custom_set_state_func = custom_set_state_func
 from paddle.distributed.fleet.recompute.recompute import (
     switch_rng_state_tracker,
 )

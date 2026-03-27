@@ -20,6 +20,7 @@ from .rope_utils import (
 )
 from .rotary_pos_embedding import (
     MultimodalRotaryEmbedding as MultimodalRotaryEmbedding,
+    Rope2DPosEmbRepeated as Rope2DPosEmbRepeated,
     RotaryEmbedding as RotaryEmbedding,
 )
 from .yarn_rotary_pos_embedding import (

@@ -117,10 +117,6 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         Returns:
             Tensor: Embeddings after applying Yarn RoPE.
         """
-        assert not self.rotary_interleaved, (
-            "Yarn RoPE does not support interleaved rotary embeddings"
-        )
-
         low, high = _yarn_find_correction_range(
             self.beta_fast,
             self.beta_slow,
@@ -150,7 +146,12 @@ class YarnRotaryEmbedding(RotaryEmbedding):
             self.scaling_factor, self.mscale, self.mscale_all_dim
         )
 
-        emb = paddle.cat((freqs, freqs), axis=-1)
+        if not self.rotary_interleaved:
+            emb = paddle.cat((freqs, freqs), axis=-1)
+        else:
+            emb = paddle.stack(
+                (freqs.view(-1, 1), freqs.view(-1, 1)), axis=-1
+            ).view(freqs.shape[0], -1)
         # emb [1, seq_len, 1, dim]
         emb = emb[None, :, None, :]
         return emb, _mscale

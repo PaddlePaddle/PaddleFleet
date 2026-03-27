@@ -458,10 +458,6 @@ class PipelineParallelWithInterleave(PipelineParallel):
                     0
                 ].build_schedule_node()
                 forward_loss_fn_node.labels = labels
-                if self.accumulate_steps > 1 and not self._delay_scale_loss:
-                    forward_loss_fn_node.scale_loss_factor = (
-                        self.accumulate_steps
-                    )
             else:
                 forward_loss_fn_node = None
 

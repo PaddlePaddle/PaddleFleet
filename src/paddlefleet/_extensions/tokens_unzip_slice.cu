@@ -34,7 +34,7 @@ __global__ void tokens_unzip_slice_kernel(
            static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
            static_cast<int64_t>(threadIdx.x);
        elem < total;
-       elem += blockDim.x * gridDim.x) {
+       elem += static_cast<int64_t>(blockDim.x) * gridDim.x) {
     int64_t row = elem / num_experts;
     int64_t u = zipped_expertwise_rowmap[elem];
     if (u < 0) continue;
@@ -60,6 +60,9 @@ std::vector<paddle::Tensor> tokens_unzip_slice(
 
   auto index_unzipped =
       paddle::full({total_unzipped_rows}, -1, paddle::DataType::INT64, place);
+  if (total_zipped_rows == 0) {
+    return {index_unzipped};
+  }
   int block = 1024;
   int grid = LimitGridDim(total_zipped_rows);
 

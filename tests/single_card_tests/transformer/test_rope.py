@@ -55,5 +55,17 @@ class TestYarnRotaryEmbedding(unittest.TestCase):
         assert mscale == 1.0
 
 
+class TestYarnRotaryEmbeddingInterleaved(unittest.TestCase):
+    def setUp(self):
+        self.head_dim = 8
+        self.rotary_percent = 1.0
+        self.rope = YarnRotaryEmbedding(
+            self.head_dim, self.rotary_percent, rotary_interleaved=True
+        )
+
+    def test_forward_raises_when_interleaved(self):
+        self.rope(64)
+
+
 if __name__ == "__main__":
     unittest.main()

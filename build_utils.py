@@ -168,6 +168,7 @@ def check_submodule_updated():
             and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
             and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
             and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "flash-attention" / ".git").exists()
         ):
             logger.error(
                 "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
@@ -223,16 +224,16 @@ def get_special_build_deps():
         major = sys.version_info.major
         minor = sys.version_info.minor
         deps = [
-            "paddlepaddle-gpu==3.3.0.post20260204+eb5e3d41576",
+            "paddlepaddle-gpu==3.3.1",
         ]
+        # for deep_ep build
         if cuda_major == 12:
-            deps.append(
-                "nvidia-nvshmem-cu12>=3.3.9,!=3.5.*"
-            )  # for deep_ep build
+            if cuda_minor > 6:
+                deps.append("paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5")
+            else:
+                deps.append("nvidia-nvshmem-cu12>=3.3.9,<3.5")
         elif cuda_major == 13:
-            deps.append(
-                "nvidia-nvshmem-cu13>=3.3.9,!=3.5.*"
-            )  # for deep_ep build
+            deps.append("paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5")
         else:
             raise ValueError(
                 f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
@@ -269,7 +270,7 @@ def get_libs():
             ],
             extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
             if (cuda_major == 12 and cuda_minor < 8)
-            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0"},
+            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0;10.3"},
         ),
         EcosystemLibrary(
             name="sonic-moe",
@@ -284,6 +285,14 @@ def get_libs():
             artifacts=[
                 Artifact("quack", "quack"),
             ],
+        ),
+        EcosystemLibrary(
+            name="flash-attention",
+            source_rel_path="third_party/flash-attention/flashmask",
+            artifacts=[
+                Artifact("flash_mask", "flash_mask"),
+            ],
+            extra_env={"FLASHMASK_BUILD": "fa4"},
         ),
     ]
     return LIBRARIES

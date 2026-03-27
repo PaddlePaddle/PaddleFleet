@@ -108,6 +108,7 @@ class GPTLMHead(ColumnParallelLinear):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             hidden_states_concat = dict_args["hidden_states"]
             tensor_list = paddle.split(
