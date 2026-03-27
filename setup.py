@@ -40,7 +40,7 @@ def get_special_setup_deps():
     if backends.IS_NVIDIA:
         deps = [
             "triton",  # for deep_gemm, flashmask
-            "nvidia-cutlass-dsl==4.3.0",  # for sonic_moe
+            "nvidia-cutlass-dsl==4.4.1",  # for sonic_moe and flash_attention
             "filelock",  # for sonic_moe
         ]
         return deps
