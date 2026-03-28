@@ -18,11 +18,13 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 )
 
 from paddlefleet.pipeline_parallel import ScheduleNode
+from paddlefleet.spec_utils import build_layer
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     _initialize_affine_weight_cpu,
     _initialize_affine_weight_gpu,
 )
+from paddlefleet.transformer.identity_op import IdentityOp
 
 
 class GPTLMHead(ColumnParallelLinear):
@@ -32,6 +34,9 @@ class GPTLMHead(ColumnParallelLinear):
             "skip_weight_param_allocation"
         ]
         self._dtype = self.config.params_dtype
+
+        # Extract block_attn_res spec before passing kwargs to super
+        block_attn_res_spec = kwargs.pop("block_attn_res", IdentityOp)
 
         kwargs["skip_weight_param_allocation"] = True
         super().__init__(**kwargs)
@@ -83,6 +88,11 @@ class GPTLMHead(ColumnParallelLinear):
                     )
             self.weight.is_distributed = True if self.world_size > 1 else False
 
+        # Final Block Attention Residual (applied before LM head projection)
+        self.block_attn_res = build_layer(
+            block_attn_res_spec, config=self.config
+        )
+
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="GPTLMHead")
 
@@ -105,21 +115,28 @@ class GPTLMHead(ColumnParallelLinear):
         return logits
 
     def forward(self, dict_args: dict):
+        hidden_states = dict_args["hidden_states"]
+
+        # Apply final Block Attention Residual if enabled
+        if self.config.block_attention_residuals:
+            blocks = dict_args.get("blocks", [])
+            hidden_states = self.block_attn_res(hidden_states, blocks)
+
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not self.config.mtp_load_weight_only
         ):
-            hidden_states_concat = dict_args["hidden_states"]
             tensor_list = paddle.split(
-                hidden_states_concat, self.config.num_nextn_predict_layers + 1
+                hidden_states,
+                self.config.num_nextn_predict_layers + 1,
             )
             logits = [self._forward(tensor_list[0])]
             for i in range(self.config.num_nextn_predict_layers):
                 logits.append(self._forward(tensor_list[i + 1]))
             return logits
         else:
-            return self._forward(dict_args["hidden_states"])
+            return self._forward(hidden_states)
 
     @property
     def embedding_weight(self):

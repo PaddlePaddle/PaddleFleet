@@ -505,12 +505,14 @@ class SelfAttention(Attention):
             tp_group=self.pg_collection.tp,
         )
 
+        norm_input_parallel = config.tensor_model_parallel_size > 1
         if sublayers_spec.q_norm is not None:
             self.q_norm = build_layer(
                 sublayers_spec.q_norm,
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
+                input_is_parallel=norm_input_parallel,
             )
         else:
             self.q_norm = None
@@ -521,6 +523,7 @@ class SelfAttention(Attention):
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
+                input_is_parallel=norm_input_parallel,
             )
         else:
             self.k_norm = None

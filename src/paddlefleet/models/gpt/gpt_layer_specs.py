@@ -45,6 +45,10 @@ from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
 )
+from paddlefleet.transformer.block_attn_res import (
+    BlockAttnRes,
+    BlockAttnResSublayersSpec,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
@@ -111,6 +115,15 @@ def get_gpt_layer_local_spec(
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
     )
+
+    block_attn_res = IdentityOp
+    if config is not None and config.block_attention_residuals:
+        block_attn_res = LayerSpec(
+            layer=BlockAttnRes,
+            sublayers_spec=BlockAttnResSublayersSpec(
+                norm=layer_norm,
+            ),
+        )
     transformer_cls = getattr(config, "specific_layer", TransformerLayer)
     if paddle.distributed.is_initialized():
         use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
@@ -147,6 +160,7 @@ def get_gpt_layer_local_spec(
                 post_attention_layernorm=layer_norm,
                 mlp=mlp,
                 mlp_bda=get_bias_dropout_add,
+                block_attn_res=block_attn_res,
             ),
             extra_kwargs={
                 "config": config,
@@ -184,6 +198,7 @@ def get_gpt_layer_local_spec(
                 post_attention_layernorm=layer_norm,
                 mlp=mlp,
                 mlp_bda=get_bias_dropout_add,
+                block_attn_res=block_attn_res,
                 sharded_state_dict_keys_map={
                     "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
                     "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
@@ -419,6 +434,24 @@ def get_gpt_spec(
         rope_embedding=rope_embedding_spec,
     )
 
+    # Build block_attn_res spec for GPTLMHead
+    lm_head_block_attn_res = IdentityOp
+    if config.block_attention_residuals:
+        backend = LocalSpecProvider()
+        lm_head_norm = backend.layer_norm(
+            rms_norm=(config.normalization == "RMSNorm"),
+            for_qk=False,
+        )
+        lm_head_block_attn_res = LayerSpec(
+            layer=BlockAttnRes,
+            sublayers_spec=BlockAttnResSublayersSpec(
+                norm=lm_head_norm,
+            ),
+        )
+
+    norm_input_parallel = (
+        config.sequence_parallel and config.tensor_model_parallel_size > 1
+    )
     return LayerSpec(
         layer=GPTModel,
         extra_kwargs={
@@ -441,6 +474,7 @@ def get_gpt_spec(
                     "config": config,
                     "hidden_size": config.hidden_size,
                     "eps": config.rms_norm_eps,
+                    "input_is_parallel": norm_input_parallel,
                 },
             ),
             lm_head=LayerSpec(
@@ -454,6 +488,7 @@ def get_gpt_spec(
                     "skip_bias_add": False,
                     "gather_output": not parallel_output,
                     "skip_weight_param_allocation": skip_weight_param_allocation,
+                    "block_attn_res": lm_head_block_attn_res,
                 },
             ),
         ),

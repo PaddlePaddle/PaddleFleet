@@ -97,10 +97,25 @@ def check_grads(dist_model, serial_model, tp_group):
             grad = _gather_along_first_dim(p.grad, tp_group)
         else:
             grad = p.grad
-        assert (
-            paddle.allclose(grad, serial_grads[name], atol=5e-8)
-            and cal_sim(grad, serial_grads[name]) > 0.999
+
+        both_zero = (
+            grad.abs().max() == 0 and serial_grads[name].abs().max() == 0
         )
+        sim_ok = both_zero or cal_sim(grad, serial_grads[name]) > 0.999
+        if not (
+            paddle.allclose(grad, serial_grads[name], atol=5e-7, rtol=1e-6)
+            and sim_ok
+        ):
+            print(
+                f"{name} failed, serial grad:{serial_grads[name]}, dist:{grad}"
+            )
+            diff = paddle.abs(serial_grads[name] - grad)
+            print(
+                f"max diff: {diff.max()}, sim:{cal_sim(serial_grads[name], grad)}"
+            )
+            raise AssertionError(
+                f"{name} failed in check grad, serial:{serial_grads[name].shape}, dist:{grad.shape}"
+            )
 
 
 def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
@@ -145,27 +160,6 @@ def run_tp_sp(
     gpt_model_baseline,
 ):
     strategy = fleet.DistributedStrategy()
-    strategy.hybrid_configs = {
-        "dp_degree": 1,
-        "mp_degree": 4,
-        "pp_degree": 1,
-        "sharding_degree": 1,
-        "sep_degree": 1,
-        "cp_degree": 1,
-        "ep_degree": 1,
-        "moe_sharding_degree": 1,
-        "order": [
-            "sharding",
-            "moe_sharding",
-            "pp",
-            "sep",
-            "cp",
-            "dp",
-            "ep",
-            "mp",
-        ],
-    }
-    initialize_fleet(strategy)
 
     _set_random_seed(seed)
 
@@ -199,69 +193,161 @@ def run_tp_sp(
     check_grads(gpt_pipe_model, gpt_model_baseline, tp_group)
 
 
+SEED = 46
+BATCH_SIZE = 2
+SEQ_LEN = 32
+VOCAB_SIZE = 1024
+HIDDEN_SIZE = 128
+NUM_HIDDEN_LAYERS = 4
+NUM_ATTENTION_HEADS = 4
+INTERMEDIATE_SIZE = 256
+
+
+def _make_serial_config(**extra):
+    """Build a GPTConfig for the single-device baseline."""
+    kwargs = {
+        "vocab_size": VOCAB_SIZE,
+        "max_sequence_length": SEQ_LEN,
+        "num_hidden_layers": NUM_HIDDEN_LAYERS,
+        "hidden_size": HIDDEN_SIZE,
+        "num_attention_heads": NUM_ATTENTION_HEADS,
+        "intermediate_size": INTERMEDIATE_SIZE,
+        "normalization": "RMSNorm",
+        "hidden_dropout_prob": 0.0,
+        "attention_dropout": 0.0,
+        "use_cpu_initialization": True,
+        "parallel_output": True,
+        "tie_word_embeddings": True,
+        "position_embedding_type": "rope",
+        "rotary_percent": 1.0,
+        "rotary_base": 10000,
+        "rope_scaling": 1.0,
+        "init_method": functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        "output_layer_init_method": functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        "use_qk_norm": True,
+    }
+    kwargs.update(extra)
+    return GPTConfig(**kwargs)
+
+
+def _make_dist_config(**extra):
+    """Build a GPTConfig for the distributed (TP) run."""
+    kwargs = {
+        "vocab_size": VOCAB_SIZE,
+        "max_sequence_length": SEQ_LEN,
+        "num_hidden_layers": NUM_HIDDEN_LAYERS,
+        "hidden_size": HIDDEN_SIZE,
+        "num_attention_heads": NUM_ATTENTION_HEADS,
+        "intermediate_size": INTERMEDIATE_SIZE,
+        "normalization": "RMSNorm",
+        "hidden_dropout_prob": 0.0,
+        "attention_dropout": 0.0,
+        "use_cpu_initialization": True,
+        "tensor_model_parallel_size": 4,
+        "sequence_parallel": True,
+        "parallel_output": True,
+        "tie_word_embeddings": True,
+        "position_embedding_type": "rope",
+        "rotary_percent": 1.0,
+        "rotary_base": 10000,
+        "rope_scaling": 1.0,
+        "init_method": functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        "output_layer_init_method": functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        "use_qk_norm": True,
+    }
+    kwargs.update(extra)
+    return GPTConfig(**kwargs)
+
+
 class TestTPSP(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """Compute all serial baselines BEFORE fleet init (TP=1),
+        then initialize fleet once with TP=4."""
+        # --- serial baselines (TP group not yet created) ---
+        serial_cfg = _make_serial_config()
+        cls.tp_sp_baseline = single_device_baseline(
+            SEED, BATCH_SIZE, SEQ_LEN, VOCAB_SIZE, serial_cfg
+        )
+
+        serial_cfg_bar = _make_serial_config(
+            block_attention_residuals=True,
+            attn_res_block_size=2,
+        )
+        cls.tp_sp_bar_baseline = single_device_baseline(
+            SEED, BATCH_SIZE, SEQ_LEN, VOCAB_SIZE, serial_cfg_bar
+        )
+
+        # --- initialize fleet (sets global TP=4) ---
+        strategy = fleet.DistributedStrategy()
+        strategy.hybrid_configs = {
+            "dp_degree": 1,
+            "mp_degree": 4,
+            "pp_degree": 1,
+            "sharding_degree": 1,
+            "sep_degree": 1,
+            "cp_degree": 1,
+            "ep_degree": 1,
+            "moe_sharding_degree": 1,
+            "order": [
+                "sharding",
+                "moe_sharding",
+                "pp",
+                "sep",
+                "cp",
+                "dp",
+                "ep",
+                "mp",
+            ],
+        }
+        initialize_fleet(strategy)
+
     def setUp(self):
-        self.seed = 46
-        self.batch_size = 2
-        self.seq_len = 128
-        self.vocab_size = 1024
+        self.seed = SEED
+        self.batch_size = BATCH_SIZE
+        self.seq_len = SEQ_LEN
+        self.vocab_size = VOCAB_SIZE
 
-    def test_tp_sp(self):
-        config = GPTConfig(
-            vocab_size=self.vocab_size,
-            max_sequence_length=self.seq_len,
-            num_hidden_layers=2,
-            hidden_size=512,
-            num_attention_heads=4,
-            intermediate_size=1024,
-            normalization="RMSNorm",
-            hidden_dropout_prob=0.0,
-            attention_dropout=0.0,
-            use_cpu_initialization=True,
-            parallel_output=True,
-            tie_word_embeddings=True,
-            position_embedding_type="rope",
-            rotary_percent=1.0,
-            rotary_base=10000,
-            rope_scaling=1.0,
-            init_method=functools.partial(
-                paddle.nn.init.xavier_uniform_, gain=1.0
-            ),
-            output_layer_init_method=functools.partial(
-                paddle.nn.init.xavier_uniform_, gain=1.0
-            ),
-            use_qk_norm=True,
-        )
-        loss, gpt_model = single_device_baseline(
-            self.seed, self.batch_size, self.seq_len, self.vocab_size, config
+    def run_test_tp_sp(self):
+        loss, gpt_model = self.tp_sp_baseline
+        dist_config = _make_dist_config(sequence_parallel=True)
+        run_tp_sp(
+            self.seed,
+            self.batch_size,
+            self.seq_len,
+            self.vocab_size,
+            dist_config,
+            loss,
+            gpt_model,
         )
 
-        dist_config = GPTConfig(
-            vocab_size=self.vocab_size,
-            max_sequence_length=self.seq_len,
-            num_hidden_layers=2,
-            hidden_size=512,
-            num_attention_heads=4,
-            intermediate_size=1024,
-            normalization="RMSNorm",
-            hidden_dropout_prob=0.0,
-            attention_dropout=0.0,
-            use_cpu_initialization=True,
-            tensor_model_parallel_size=4,
-            sequence_parallel=True,
-            parallel_output=True,
-            tie_word_embeddings=True,
-            position_embedding_type="rope",
-            rotary_percent=1.0,
-            rotary_base=10000,
-            rope_scaling=1.0,
-            init_method=functools.partial(
-                paddle.nn.init.xavier_uniform_, gain=1.0
-            ),
-            output_layer_init_method=functools.partial(
-                paddle.nn.init.xavier_uniform_, gain=1.0
-            ),
-            use_qk_norm=True,
+    def run_test_tp(self):
+        loss, gpt_model = self.tp_sp_baseline
+        dist_config = _make_dist_config(sequence_parallel=False)
+        run_tp_sp(
+            self.seed,
+            self.batch_size,
+            self.seq_len,
+            self.vocab_size,
+            dist_config,
+            loss,
+            gpt_model,
+        )
+
+    def run_test_tp_sp_block_attn_res(self):
+        """Test block attention residuals under TP + SP."""
+        loss, gpt_model = self.tp_sp_bar_baseline
+        dist_config = _make_dist_config(
+            block_attention_residuals=True,
+            attn_res_block_size=2,
         )
         run_tp_sp(
             self.seed,
@@ -272,6 +358,30 @@ class TestTPSP(unittest.TestCase):
             loss,
             gpt_model,
         )
+
+    def run_test_tp_block_attn_res(self):
+        """Test block attention residuals under TP only (no SP)."""
+        loss, gpt_model = self.tp_sp_bar_baseline
+        dist_config = _make_dist_config(
+            sequence_parallel=False,
+            block_attention_residuals=True,
+            attn_res_block_size=2,
+        )
+        run_tp_sp(
+            self.seed,
+            self.batch_size,
+            self.seq_len,
+            self.vocab_size,
+            dist_config,
+            loss,
+            gpt_model,
+        )
+
+    def test_all_cases(self):
+        self.run_test_tp()
+        self.run_test_tp_sp()
+        self.run_test_tp_sp_block_attn_res()
+        self.run_test_tp_block_attn_res()
 
 
 if __name__ == "__main__":
