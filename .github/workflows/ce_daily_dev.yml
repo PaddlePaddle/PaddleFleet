@@ -1705,6 +1705,7 @@ jobs:
       - name: Check full coverage
         if: always()
         run: |
+          set -x
           echo "=== 全量覆盖率检查 ==="
           python -m pip install coverage==7.13.0
 
