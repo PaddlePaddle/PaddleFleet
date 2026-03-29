@@ -1733,7 +1733,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          python ci/merge_and_check_coverage.py "${EXISTING_FILES[@]}" --report-only --output-xml >> coverage-full.txt
+          python ci/merge_and_check_coverage.py "${EXISTING_FILES[@]}" --report-only --output-xml 2>&1 | tee -a coverage-full.txt
 
           # 将失败任务信息追加到覆盖率报告中
           if [ ! "all_success" = "$(cat coverage_missing_tasks.txt)" ]; then
