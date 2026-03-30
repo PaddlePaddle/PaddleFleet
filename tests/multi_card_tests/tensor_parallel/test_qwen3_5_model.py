@@ -27,7 +27,9 @@ Run with 4 GPUs:
 """
 
 import functools
+import os
 import random
+import sys
 import unittest
 
 import numpy as np
@@ -38,16 +40,27 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 )
 
 import paddlefleet
-from paddlefleet.models.common.empty_layer import EmptyLayer
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.models.gpt.gpt_layer_specs import (
-    get_gpt_layer_local_spec,
-    get_gpt_spec,
+
+# Add single_card_tests to path so we can reuse test helpers
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "single_card_tests",
+        "model",
+    ),
 )
-from paddlefleet.models.qwen3_5.qwen3_5_model import Qwen3_5Model
-from paddlefleet.models.qwen3_5.qwen3_5_provider import Qwen3_5VisionProvider
+from test_qwen3_5_vision_model import (
+    Qwen3_5Model,
+    Qwen3_5VisionProvider,
+    get_qwen3_5_language_spec,
+)
+
 from paddlefleet.pipeline_parallel import NoPipelineParallel
-from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddlefleet.spec_utils import build_layer
 from paddlefleet.tensor_parallel.mappings import (
     _gather_along_first_dim,
     _gather_along_last_dim,
@@ -271,62 +284,6 @@ def _make_language_config(
 
 
 # ======================================================================
-# Build Qwen3.5 language spec (supports MoE)
-# ======================================================================
-
-
-def _build_qwen3_5_language_spec(config):
-    """Build the Qwen3.5 language model spec.
-
-    Unlike the production ``get_qwen3_5_language_spec`` which does not pass
-    ``num_experts`` to ``get_gpt_layer_local_spec``, this test helper correctly
-    forwards MoE settings so that expert layers are actually created.
-    """
-    layer_types = getattr(config, "layer_types", None)
-    if layer_types is None:
-        layer_types = ["full_attention"] * config.num_hidden_layers
-
-    empty_layer_spec = LayerSpec(
-        layer=EmptyLayer, extra_kwargs={"config": config}
-    )
-    head_empty_layers = [empty_layer_spec] * config.num_empty_layers_add_in_head
-    tail_empty_layers = [empty_layer_spec] * config.num_empty_layers_add_in_tail
-    head_offset = getattr(config, "num_empty_layers_add_in_head", 0)
-
-    transformer_layers_spec = []
-    for i, lt in enumerate(layer_types):
-        attn_type = LAYER_TYPE_MAP.get(lt)
-        if attn_type is None:
-            raise ValueError(f"Unknown layer type: {lt!r} at index {i}")
-        transformer_layers_spec.append(
-            get_gpt_layer_local_spec(
-                config=config,
-                normalization=config.normalization,
-                layer_number=i + head_offset,
-                attention_layer_type=attn_type,
-                num_experts=config.n_routed_experts,
-                moe_grouped_gemm=config.moe_grouped_gemm,
-            )
-        )
-
-    return get_gpt_spec(
-        config=config,
-        transformer_layers_spec=transformer_layers_spec,
-        mtp_layers_spec=None,
-        vocab_size=config.vocab_size,
-        max_sequence_length=config.max_sequence_length,
-        head_empty_layers_spec=head_empty_layers,
-        tail_empty_layers_spec=tail_empty_layers,
-        position_embedding_type=config.position_embedding_type,
-        rotary_percent=config.rotary_percent,
-        rotary_base=config.rotary_base,
-        rope_scaling=config.rope_scaling,
-        parallel_output=config.parallel_output,
-        tie_word_embeddings=config.tie_word_embeddings,
-    )
-
-
-# ======================================================================
 # Build Qwen3.5 VL model
 # ======================================================================
 
@@ -336,7 +293,7 @@ def _build_qwen3_5_model(language_config, strategy):
     vision_config = _make_vision_config()
     vision_model = vision_config.provide()
 
-    language_spec = _build_qwen3_5_language_spec(config=language_config)
+    language_spec = get_qwen3_5_language_spec(config=language_config)
     language_model = build_layer(
         language_spec,
         seg_method="layer:TransformerLayer|EmptyLayer",
@@ -393,12 +350,17 @@ def single_device_baseline(seed, use_moe=False):
     language_config = _make_language_config(use_moe=use_moe)
     model = _build_qwen3_5_model(language_config, strategy)
 
+    # Convert model params to bf16 (attention requires fp16/bf16 with
+    # packed_seq_params, and TP reduce_scatter needs matching dtypes).
+    model = paddle.amp.decorate(models=model, level="O2", dtype="bfloat16")
+
     dict_args = _make_input_data(batch_size=1)
 
-    # Forward
-    output = model.forward(dict_args)
-    loss = output.sum()
-    loss.backward()
+    # Forward + backward under bf16 autocast
+    with paddle.amp.auto_cast(level="O2", dtype="bfloat16", use_promote=False):
+        output = model.forward(dict_args)
+        loss = output.sum()
+        loss.backward()
 
     return loss.item(), model
 
@@ -421,14 +383,18 @@ def run_tp_sp(seed, loss_baseline, serial_model, use_moe=False):
     )
     model = _build_qwen3_5_model(language_config, strategy)
 
+    # Convert model params to bf16
+    model = paddle.amp.decorate(models=model, level="O2", dtype="bfloat16")
+
     register_sequence_parallel_allreduce_hooks(model, 1, False)
 
     dict_args = _make_input_data(batch_size=1)
 
-    # Forward
-    output = model.forward(dict_args)
-    loss = output.sum()
-    loss.backward()
+    # Forward + backward under bf16 autocast
+    with paddle.amp.auto_cast(level="O2", dtype="bfloat16", use_promote=False):
+        output = model.forward(dict_args)
+        loss = output.sum()
+        loss.backward()
 
     loss_val = loss.item()
 

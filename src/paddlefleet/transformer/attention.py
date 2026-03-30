@@ -42,7 +42,6 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import divide, get_pg_rank, get_pg_size
 
 from .enums import AttnMaskType
-from .paddle_norm import WrappedPaddleNorm
 
 
 @dataclass
@@ -510,7 +509,7 @@ class SelfAttention(Attention):
         if sublayers_spec.q_norm is not None:
             self.q_norm = build_layer(
                 sublayers_spec.q_norm,
-                normalized_shape=self.hidden_size_per_attention_head,
+                hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
                 input_is_parallel=norm_input_parallel,
@@ -521,37 +520,13 @@ class SelfAttention(Attention):
         if sublayers_spec.k_norm is not None:
             self.k_norm = build_layer(
                 sublayers_spec.k_norm,
-                normalized_shape=self.hidden_size_per_attention_head,
+                hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
                 input_is_parallel=norm_input_parallel,
             )
-            if norm_cls is WrappedPaddleNorm:
-                extra_args = {
-                    "config": self.config,
-                    "hidden_size": self.hidden_size_per_attention_head,
-                    "eps": self.config.rms_norm_eps,
-                    "input_is_parallel": norm_input_parallel,
-                }
-            else:
-                extra_args = {
-                    "normalized_shape": self.hidden_size_per_attention_head,
-                    "config": self.config,
-                    "norm_eps": self.config.rms_norm_eps,
-                    "input_is_parallel": norm_input_parallel,
-                }
-            return build_layer(norm_spec, **extra_args)
-
-        self.q_norm = (
-            _build_norm(sublayers_spec.q_norm)
-            if sublayers_spec.q_norm is not None
-            else None
-        )
-        self.k_norm = (
-            _build_norm(sublayers_spec.k_norm)
-            if sublayers_spec.k_norm is not None
-            else None
-        )
+        else:
+            self.k_norm = None
 
     def get_query_key_value_tensors(
         self, hidden_states, key_value_states=None, split_qkv=True
