@@ -24,6 +24,7 @@ Tests for packed sequence flashmask attention and total_seq_len rope.
 
 import unittest
 
+import numpy as np
 import paddle
 
 from paddlefleet.models.common.embeddings.rope_utils import (
@@ -108,9 +109,9 @@ class TestPackedSeqFlashMaskAttention(unittest.TestCase):
             causal=False,
         )
 
-        paddle.testing.assert_allclose(
-            ref_output.astype("float32"),
-            fm_output.astype("float32"),
+        np.testing.assert_allclose(
+            ref_output.astype("float32").numpy(),
+            fm_output.astype("float32").numpy(),
             atol=1e-2,
             rtol=1e-2,
         )
@@ -166,8 +167,11 @@ class TestTotalSeqLenRoPE(unittest.TestCase):
             t, cu_seqlens, total_seq_len=None, freqs=freqs
         )
 
-        paddle.testing.assert_allclose(
-            result_with_total, result_without_total, atol=1e-6, rtol=1e-6
+        np.testing.assert_allclose(
+            result_with_total.numpy(),
+            result_without_total.numpy(),
+            atol=1e-6,
+            rtol=1e-6,
         )
 
     def test_padded_cu_seqlens_with_total_seq_len(self):
@@ -224,8 +228,11 @@ class TestTotalSeqLenRoPE(unittest.TestCase):
             t, cu_seqlens, total_seq_len=total_tokens, freqs=freqs
         )
 
-        paddle.testing.assert_allclose(
-            result_none, result_explicit, atol=1e-6, rtol=1e-6
+        np.testing.assert_allclose(
+            result_none.numpy(),
+            result_explicit.numpy(),
+            atol=1e-6,
+            rtol=1e-6,
         )
 
 
