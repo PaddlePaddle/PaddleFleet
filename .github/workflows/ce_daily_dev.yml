@@ -1748,7 +1748,7 @@ jobs:
           fi
 
           cat coverage-full.txt
-          pip install baidubce protocol
+          pip install baidubce protocol utils
           # 上传文件
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
