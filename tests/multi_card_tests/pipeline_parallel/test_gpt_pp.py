@@ -14,6 +14,7 @@
 
 
 import functools
+import os
 import pprint
 import random
 import unittest
@@ -29,6 +30,8 @@ from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
+REPO_FLAG = os.getenv("repo_flag")
+SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
 def _set_random_seed(
@@ -139,6 +142,10 @@ def run_pp(
     return loss, gpt_pipe_model
 
 
+@unittest.skipIf(
+    SKIP_TESTS,
+    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')",
+)
 class TestPP(unittest.TestCase):
     def setUp(self):
         self.seed = 46
