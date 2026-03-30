@@ -202,12 +202,15 @@ class VisionEmbedding(FleetLayer):
         cu_seqlens = cu_seqlens.squeeze().contiguous()
 
         max_seqlen = seqlens.max().item()
+        total_seqlen = cu_seqlens[-1].item()
 
         return PackedSeqParams(
             cu_seqlens_q=cu_seqlens,
             cu_seqlens_kv=cu_seqlens,
             max_seqlen_q=max_seqlen,
             max_seqlen_kv=max_seqlen,
+            total_seqlen_q=total_seqlen,
+            total_seqlen_kv=total_seqlen,
             qkv_format="thd",
         )
 
