@@ -168,6 +168,7 @@ def check_submodule_updated():
             and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
             and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
             and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "flash-attention" / ".git").exists()
         ):
             logger.error(
                 "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
@@ -272,18 +273,31 @@ def get_libs():
             else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0;10.3"},
         ),
         EcosystemLibrary(
-            name="sonic-moe",
-            source_rel_path="third_party/sonic-moe",
+            name="flash-attention",
+            source_rel_path="third_party/flash-attention/flashmask",
             artifacts=[
-                Artifact("sonicmoe", "sonicmoe"),
+                Artifact("flash_mask", "flash_mask"),
             ],
-        ),
-        EcosystemLibrary(
-            name="quack",
-            source_rel_path="third_party/quack",
-            artifacts=[
-                Artifact("quack", "quack"),
-            ],
+            extra_env={"FLASHMASK_BUILD": "fa4"},
         ),
     ]
+    if sys.version_info >= (3, 12):
+        LIBRARIES.append(
+            EcosystemLibrary(
+                name="quack",
+                source_rel_path="third_party/quack",
+                artifacts=[
+                    Artifact("quack", "quack"),
+                ],
+            )
+        )
+        LIBRARIES.append(
+            EcosystemLibrary(
+                name="sonic-moe",
+                source_rel_path="third_party/sonic-moe",
+                artifacts=[
+                    Artifact("sonicmoe", "sonicmoe"),
+                ],
+            )
+        )
     return LIBRARIES

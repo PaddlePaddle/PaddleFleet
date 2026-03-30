@@ -80,6 +80,11 @@ SONIC_MOE_HINT = (
     "For users: set `using_sonic_moe=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 9.0 to enable."
 )
 
+FLASH_MASK_HINT = (
+    "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet.ops.flash_mask` when flag branch enabled.\n"
+    "For users: use a GPU with compute capability >= 10.0 (Blackwell) to enable."
+)
+
 
 def _build_notice(
     lib_module: str, reason: str, hint_for_error: str | None = None
@@ -96,6 +101,16 @@ def _hopper_requirement(
 ) -> tuple[str, str]:
     reason = (
         f"{lib_module} requires GPU compute capability >= 9.0 (Hopper). "
+        f"Current capability: {_capability_str}."
+    )
+    return _build_notice(lib_module, reason, hint_for_error=hint)
+
+
+def _blackwell_requirement(
+    lib_module: str, hint: str | None = None
+) -> tuple[str, str]:
+    reason = (
+        f"{lib_module} requires GPU compute capability >= 10.0 (Blackwell). "
         f"Current capability: {_capability_str}."
     )
     return _build_notice(lib_module, reason, hint_for_error=hint)
@@ -122,11 +137,14 @@ def _sonic_moe_requirement(
 _DEEP_GEMM_AVAILABLE = False
 _DEEP_EP_AVAILABLE = False
 _SONIC_MOE_AVAILABLE = False
+_FLASH_MASK_AVAILABLE = False
 
 if paddle.is_compiled_with_cuda():
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
         _DEEP_EP_AVAILABLE = True
+    if paddle.cuda.get_device_capability()[0] == 10:
+        _FLASH_MASK_AVAILABLE = True
     if (
         sys.version_info >= (3, 12)
         and paddle.cuda.get_device_capability()[0] == 9
@@ -145,6 +163,10 @@ def is_deep_ep_available():
 
 def is_sonic_moe_available():
     return _SONIC_MOE_AVAILABLE
+
+
+def is_flash_mask_available():
+    return _FLASH_MASK_AVAILABLE
 
 
 def _try_load_nvshmem(ops_dir: Path):
@@ -227,6 +249,14 @@ else:
     logger.warning(warning)
     blocked_import_messages["paddlefleet.ops.sonicmoe"] = error
 
+if is_flash_mask_available():
+    _safe_load_ecosystem_lib("flash_mask", ops_dir, globals())
+else:
+    warning, error = _blackwell_requirement(
+        "paddlefleet.ops.flash_mask", hint=FLASH_MASK_HINT
+    )
+    logger.warning(warning)
+    blocked_import_messages["paddlefleet.ops.flash_mask"] = error
 
 if blocked_import_messages:
     sys.meta_path.insert(

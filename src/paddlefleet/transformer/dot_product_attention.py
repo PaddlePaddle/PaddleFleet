@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 
 import paddle
 from paddle import Tensor
-from paddle.nn.functional.flash_attention import flashmask_attention
 
 from paddlefleet.context_parallel_utils import flashmask_attention_cp
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
@@ -251,12 +250,20 @@ class DotProductAttention(FleetLayer):
         elif (
             query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
         ) and attn_mask_startend_row_indices is not None:
+            if self.config.fa_version == 4:
+                from paddlefleet.ops.flash_mask.cute.interface import (
+                    flashmask_attention as _flashmask_attention,
+                )
+            else:
+                from paddle.nn.functional.flash_attention import (
+                    flashmask_attention as _flashmask_attention,
+                )
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             flashmask_attention_func = (
                 self.rr_flashmask_attention_func
                 if use_rr_flash_attention
-                else flashmask_attention
+                else _flashmask_attention
             )
 
             # Handle MLA case where query/key head_dim != value head_dim
