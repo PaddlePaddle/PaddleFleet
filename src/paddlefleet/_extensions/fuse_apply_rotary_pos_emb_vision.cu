@@ -232,6 +232,12 @@ std::vector<paddle::Tensor> ApplyRopevisionForward(
     heads = static_cast<int>(shape[2]);
     dim = static_cast<int>(shape[3]);
   }
+
+  PD_CHECK(dim % 2 == 0 && dim > 0,
+           "fused_apply_rotary_pos_emb_vision: tensor dim must be positive "
+           "even number, got ",
+           dim);
+
   int half = dim / 2;
 
   // Cast freqs to float32 if needed (kernel reads float*)
@@ -297,6 +303,12 @@ std::vector<paddle::Tensor> ApplyRopevisionBackward(
     heads = static_cast<int>(shape[2]);
     dim = static_cast<int>(shape[3]);
   }
+
+  PD_CHECK(dim % 2 == 0 && dim > 0,
+           "fused_apply_rotary_pos_emb_vision: tensor dim must be positive "
+           "even number, got ",
+           dim);
+
   int half = dim / 2;
 
   // Cast freqs to float32 if needed
