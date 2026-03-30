@@ -250,6 +250,7 @@ def _get_thd_freqs_on_this_cp_rank(
 def _apply_rotary_pos_emb_thd(
     t: Tensor,
     cu_seqlens: Tensor,
+    total_seq_len: int,
     freqs: Tensor,
     rotary_interleaved: bool = False,
     multi_latent_attention: bool = False,
@@ -272,14 +273,16 @@ def _apply_rotary_pos_emb_thd(
     cp_size = get_pg_size(cp_group)
     cp_rank = get_pg_rank(cp_group)
 
-    seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
+    total_seq_len = (
+        total_seq_len if total_seq_len is not None else cu_seqlens[-1]
+    )
 
     # Handle two different frequency tensor formats:
     # 1. If freqs.size(0) == cu_seqlens[-1]: freqs contains all positions across all sequences
     #    -> Use offset-based mapping for exact positional correspondence
     # 2. Otherwise: freqs contains only max sequence length positions
     #    -> Use traditional mapping without offsets (map first :seqlen part)
-    if freqs.dim() >= 1 and freqs.size(1) == cu_seqlens[-1]:
+    if freqs.dim() >= 1 and freqs.size(1) == total_seq_len:
         # CASE 1: Exact mapping with offsets
         # When cp_size==1, every per-segment slice concatenates back to the original freqs.
         # Skip the split+cat and call bshd directly with the original freqs.
@@ -292,6 +295,7 @@ def _apply_rotary_pos_emb_thd(
                 mscale=mscale,
                 high_precision_rope=high_precision_rope,
             )
+        seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
         # Build packed freqs in one pass, then apply once to the whole packed tensor
         cu_seqlens_list = cu_seqlens.tolist()
         sequence_splits = paddle.split(t, seqlens, axis=1 if t.ndim == 4 else 0)
@@ -318,6 +322,7 @@ def _apply_rotary_pos_emb_thd(
     else:
         # CASE 2: Traditional mapping without offsets
         # Build packed freqs for all sequences using the standard mapping, then apply once
+        seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
         sequence_splits = paddle.split(t, seqlens, axis=1 if t.ndim == 4 else 0)
         freqs_packed = paddle.cat(
             [
@@ -344,6 +349,7 @@ def apply_rotary_pos_emb(
     sin: Tensor | None,
     config: TransformerConfig,
     cu_seqlens: Tensor | None = None,
+    total_seq_len: int | None = None,
     mscale: float = 1.0,
     cp_group: Group = None,
     position_ids: Tensor | None = None,
@@ -396,6 +402,7 @@ def apply_rotary_pos_emb(
         return _apply_rotary_pos_emb_thd(
             t,
             cu_seqlens,
+            total_seq_len,
             freqs,
             rotary_interleaved=config.rotary_interleaved,
             multi_latent_attention=config.multi_latent_attention,

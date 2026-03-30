@@ -328,8 +328,11 @@ class Attention(FleetLayer, ABC):
                     cu_seqlens_kv = packed_seq_params.cu_seqlens_kv_padded
                 else:
                     cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
+                total_seqlen_q = packed_seq_params.total_seqlen_q
+                total_seqlen_kv = packed_seq_params.total_seqlen_kv
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
+                total_seqlen_q = total_seqlen_kv = None
 
             if (
                 self.config.apply_rope_fusion
@@ -358,6 +361,7 @@ class Attention(FleetLayer, ABC):
                         None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_q,
+                        total_seq_len=total_seqlen_q,
                         position_ids=position_ids,
                         mscale=_yarn_get_concentration_factor_from_config(
                             self.config
@@ -373,6 +377,7 @@ class Attention(FleetLayer, ABC):
                         None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_kv,
+                        total_seq_len=total_seqlen_kv,
                         position_ids=position_ids,
                         mscale=_yarn_get_concentration_factor_from_config(
                             self.config
