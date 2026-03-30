@@ -112,8 +112,8 @@ class TestPackedSeqFlashMaskAttention(unittest.TestCase):
         np.testing.assert_allclose(
             ref_output.astype("float32").numpy(),
             fm_output.astype("float32").numpy(),
-            atol=1e-2,
-            rtol=1e-2,
+            atol=1e-9,
+            rtol=1e-9,
         )
 
     def test_multiple_segments(self):
