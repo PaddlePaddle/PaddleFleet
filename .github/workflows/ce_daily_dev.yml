@@ -1644,7 +1644,7 @@ jobs:
 
   coverage_check:
     name: Coverage Upload And Check
-    needs: [single_card_test, multi-card_test, integration-test-H20-single-card, integration-test-a100]
+    needs: [single_card_test, multi-card_test, integration-test-H20-single-card, integration-test-a100, integration-test-H20-multi-card]
     if: always()
     runs-on: ubuntu-latest
     env:
