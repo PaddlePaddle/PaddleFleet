@@ -193,6 +193,14 @@ class DotProductAttention(FleetLayer):
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
+        if self.config.fa_version == 4:
+            from paddlefleet.ops.flash_mask.cute.interface import (
+                flashmask_attention as _flashmask_attention,
+            )
+        else:
+            from paddle.nn.functional.flash_attention import (
+                flashmask_attention as _flashmask_attention,
+            )
         if packed_seq_params is not None:
             assert (
                 query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
@@ -230,7 +238,7 @@ class DotProductAttention(FleetLayer):
             flashmask_attention_func = (
                 self.rr_flashmask_attention_func
                 if use_rr_flash_attention
-                else flashmask_attention
+                else _flashmask_attention
             )
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
@@ -270,14 +278,6 @@ class DotProductAttention(FleetLayer):
         elif (
             query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
         ) and attn_mask_startend_row_indices is not None:
-            if self.config.fa_version == 4:
-                from paddlefleet.ops.flash_mask.cute.interface import (
-                    flashmask_attention as _flashmask_attention,
-                )
-            else:
-                from paddle.nn.functional.flash_attention import (
-                    flashmask_attention as _flashmask_attention,
-                )
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             flashmask_attention_func = (
