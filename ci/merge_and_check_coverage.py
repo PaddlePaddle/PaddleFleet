@@ -23,6 +23,7 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from xml.dom import minidom
 
 
 def parse_coverage_file(file_path):
@@ -304,8 +305,19 @@ def check_coverage(coverage_rate, fail_under, strict=False):
 
 def save_merged_coverage(root, output_path):
     """Save merged coverage to file."""
-    tree = ET.ElementTree(root)
-    tree.write(output_path, encoding="utf-8", xml_declaration=True)
+    # Convert to string and pretty print
+    rough_string = ET.tostring(root, encoding="unicode")
+    dom = minidom.parseString(rough_string)
+    pretty_string = dom.toprettyxml(indent="  ", encoding="utf-8")
+
+    # Remove extra blank lines that minidom adds
+    lines = pretty_string.decode("utf-8").split("\n")
+    pretty_lines = [line for line in lines if line.strip()]
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(pretty_lines))
+        f.write("\n")
+
     print(f"\n✅ 已保存合并后的覆盖率文件: {output_path}")
 
 
