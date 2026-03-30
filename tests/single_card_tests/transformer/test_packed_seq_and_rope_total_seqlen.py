@@ -30,6 +30,9 @@ import paddle
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_thd,
 )
+from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class TestPackedSeqFlashMaskAttention(unittest.TestCase):
@@ -37,6 +40,29 @@ class TestPackedSeqFlashMaskAttention(unittest.TestCase):
 
     def setUp(self):
         paddle.seed(42)
+
+    def _create_config(self, num_heads=4, head_dim=32):
+        """Create a TransformerConfig for packed seq attention testing."""
+        config = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=num_heads * head_dim,
+            num_attention_heads=num_heads,
+        )
+        config.num_key_value_heads = num_heads
+        config.head_dim = head_dim
+        config.softmax_scale = None
+        config.use_bias = True
+        config.context_parallel_size = 1
+        config.apply_query_key_layer_scaling = False
+        config.sliding_window = None
+        config.window_attn_skip_freq = None
+        config.fp16 = True
+        config.bf16 = False
+        config.masked_softmax_fusion = False
+        config.attention_softmax_in_fp32 = True
+        config.attention_dropout = 0.0
+        config.softmax_type = "vanilla"
+        return config
 
     def _reference_split_loop_attention(self, query, key, value, cu_seqlens):
         """Reference implementation: split by segments, per-segment sdpa, concat."""
@@ -95,22 +121,31 @@ class TestPackedSeqFlashMaskAttention(unittest.TestCase):
             query, key, value, cu_seqlens
         )
 
-        indices = self._build_flashmask_indices(cu_seqlens, total_seq)
-        from paddlefleet.transformer.dot_product_attention import (
-            flashmask_attention,
+        # Use DotProductAttention with attn_mask_startend_row_indices
+        # (same pattern as test_mla_flash_mask.py)
+        config = self._create_config(num_heads=num_heads, head_dim=head_dim)
+        attention = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.no_mask,
+            attention_type="self",
         )
 
-        fm_output = flashmask_attention(
-            query,
-            key,
-            value,
-            startend_row_indices=indices,
-            dropout=0.0,
-            causal=False,
+        indices = self._build_flashmask_indices(cu_seqlens, total_seq)
+
+        fm_output = attention(
+            query=query,
+            key=key,
+            value=value,
+            attention_mask=None,
+            attn_mask_startend_row_indices=indices,
+            attn_mask_type=AttnMaskType.no_mask,
         )
+        # DotProductAttention returns [b, s, h*d], reshape ref to match
+        ref_flat = ref_output.reshape([0, 0, -1])
 
         np.testing.assert_allclose(
-            ref_output.astype("float32").numpy(),
+            ref_flat.astype("float32").numpy(),
             fm_output.astype("float32").numpy(),
             atol=1e-6,
             rtol=1e-6,
@@ -175,10 +210,12 @@ class TestTotalSeqLenRoPE(unittest.TestCase):
         )
 
     def test_padded_cu_seqlens_with_total_seq_len(self):
-        """When cu_seqlens is padded, total_seq_len ensures correct branch selection.
+        """When cu_seqlens is padded, total_seq_len should also be padded.
 
-        Without total_seq_len, padded cu_seqlens[-1] != freqs.size(1) would
-        incorrectly select CASE 2. With total_seq_len, CASE 1 is selected.
+        Both cu_seqlens and total_seqlen are members of PackedSeqParams,
+        so when cu_seqlens is padded, total_seqlen must be updated accordingly.
+        In this case freqs.size(1) != total_seq_len, so CASE 2 (traditional
+        mapping without offsets) is selected. Verify it produces correct results.
         """
         actual_total = 48
         padded_total = 64  # cu_seqlens[-1] after padding
@@ -189,19 +226,19 @@ class TestTotalSeqLenRoPE(unittest.TestCase):
             [1, padded_total, num_heads, head_dim], dtype="float32"
         )
 
-        # Padded cu_seqlens: last value is padded_total, not actual_total
+        # Padded cu_seqlens: last value is padded_total
         cu_seqlens_padded = paddle.to_tensor(
             [0, 16, padded_total], dtype="int32"
         )
 
-        # freqs shaped for actual_total (CASE 1 expects freqs.size(1) == total_seq_len)
-        freqs_actual = paddle.randn(
-            [1, actual_total, 1, head_dim], dtype="float32"
-        )
+        # freqs covers max_seqlen positions (CASE 2: traditional mapping)
+        max_seqlen = padded_total  # max segment length
+        freqs = paddle.randn([1, max_seqlen, 1, head_dim], dtype="float32")
 
-        # With total_seq_len=actual_total, freqs.size(1)==total_seq_len -> CASE 1
+        # total_seq_len = padded_total (consistent with padded cu_seqlens),
+        # freqs.size(1) == padded_total == total_seq_len -> CASE 1
         result = _apply_rotary_pos_emb_thd(
-            t, cu_seqlens_padded, total_seq_len=actual_total, freqs=freqs_actual
+            t, cu_seqlens_padded, total_seq_len=padded_total, freqs=freqs
         )
 
         # Verify output shape matches input
