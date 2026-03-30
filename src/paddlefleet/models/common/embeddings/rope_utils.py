@@ -250,7 +250,7 @@ def _get_thd_freqs_on_this_cp_rank(
 def _apply_rotary_pos_emb_thd(
     t: Tensor,
     cu_seqlens: Tensor,
-    total_seq_len: int,
+    total_seq_len: int | None,
     freqs: Tensor,
     rotary_interleaved: bool = False,
     multi_latent_attention: bool = False,
@@ -264,6 +264,9 @@ def _apply_rotary_pos_emb_thd(
         t (Tensor): Input tensor T is of shape [t, h, d]
         cu_seqlens(Tensor):  Cumulative sum of sequence lengths in a batch for `t`,
         with shape [b + 1] and dtype paddle.int32.
+        total_seq_len (int | None): The actual total sequence length before padding.
+            When cu_seqlens uses a padded version, this provides the true total length
+            for correct frequency tensor selection. If None, falls back to cu_seqlens[-1].
         freqs (Tensor): Rotary Positional embedding tensor freq is of shape [max_s, 1, 1, d]
         cp_group (Group): The context parallel group
 
@@ -278,7 +281,7 @@ def _apply_rotary_pos_emb_thd(
     )
 
     # Handle two different frequency tensor formats:
-    # 1. If freqs.size(0) == cu_seqlens[-1]: freqs contains all positions across all sequences
+    # 1. If freqs.size(1) == total_seq_len: freqs contains all positions across all sequences
     #    -> Use offset-based mapping for exact positional correspondence
     # 2. Otherwise: freqs contains only max sequence length positions
     #    -> Use traditional mapping without offsets (map first :seqlen part)
@@ -365,6 +368,9 @@ def apply_rotary_pos_emb(
         sin (Tensor | None): Pre-computed sine values of freqs (used for fused implementation)
         config (TransformerConfig): Transformer configuration
         cu_seqlens (Tensor | None): Cumulative sequence lengths
+        total_seq_len (int | None): The actual total sequence length before padding.
+            Used in thd format to correctly select frequency tensor when cu_seqlens
+            is padded. If None, falls back to cu_seqlens[-1].
         mscale (float): Scaling factor
         cp_group (Group): Context parallel group
     """
