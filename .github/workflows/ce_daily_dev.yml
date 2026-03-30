@@ -1684,8 +1684,8 @@ jobs:
                 if wget "${base_url}/${filepath}" -O "$filename" --no-proxy -q; then
                     echo "Downloaded: $filename from $task_name"
                     sed -i "s|<source></source>|<source>paddlefleet</source>|" "$filename"
-                    sed -i "s|/usr/local/lib/python3.10/dist-packages/|src/|" "$filename"
-                    sed -i "s|.usr.local.lib.python3.10.dist-packages.paddlefleet|src|" "$filename"
+                    sed -i "s|/root/miniconda/envs/python3.12/lib/python3.12/site-packages/|src/|" "$filename"
+                    sed -i "s|.root.miniconda.envs.python3.12.lib.python3.12.site-packages|src|" "$filename"
                 else
                     echo "Warning: Failed to download ${filepath} from ${task_name}"
                     echo "$task_name" >> failed_tasks.txt
