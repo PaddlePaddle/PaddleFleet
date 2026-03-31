@@ -1691,11 +1691,12 @@ jobs:
             -e repo_flag="paddlefleet" \
             -w /paddle --network host ${docker_image_cu129}
 
-      - name: coverage file download
+      - name: download code
         shell: bash
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           set -x
+          source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -1703,6 +1704,14 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
+          '
+
+      - name: Check full coverage
+        if: always()
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          set -x
+          cd /workspace/PaddleFleet
           coverage_configs="
           multi_coverage.xml:multi-card/coverage.xml:multi-card_test
           single_coverage.xml:single-card/coverage.xml:single_card_test
@@ -1742,16 +1751,8 @@ jobs:
           else
             echo "all_success" > coverage_missing_tasks.txt
           fi
-          '
-
-      - name: Check full coverage
-        if: always()
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          set -x
           echo "=== 全量覆盖率检查 ==="
           python -m pip install coverage==7.13.0
-          cd /workspace/PaddleFleet
 
           # 定义所有覆盖率文件
           COVERAGE_FILES=(
