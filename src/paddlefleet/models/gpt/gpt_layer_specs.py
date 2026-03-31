@@ -98,6 +98,7 @@ def get_attention_spec(
     Returns:
         LayerSpec for the attention sublayer inside a TransformerLayer.
     """
+    assert config is not None, "config must be specified."
     backend = LocalSpecProvider()
     if config.normalization == "RMSNorm":
         qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)

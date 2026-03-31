@@ -17,7 +17,6 @@ from .layer_specs import (
 )
 from .qwen3_5_model import (
     Qwen3_5RMSNorm,
-    Qwen3_5RMSNormPipe,
     Qwen3_5VisionModel,
     Qwen3_5VisionSublayersSpec,
 )
@@ -25,7 +24,6 @@ from .qwen3_5_model import (
 __all__ = [
     "get_qwen3_5_vision_spec",
     "Qwen3_5RMSNorm",
-    "Qwen3_5RMSNormPipe",
     "Qwen3_5VisionModel",
     "Qwen3_5VisionSublayersSpec",
 ]

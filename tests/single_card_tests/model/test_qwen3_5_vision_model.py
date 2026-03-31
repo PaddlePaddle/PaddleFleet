@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import copy
 import itertools
 import random
 import unittest
@@ -132,6 +133,7 @@ def get_qwen3_5_language_spec(config):
             attention_layer_type=attn_type,
             num_experts=config.n_routed_experts,
             moe_grouped_gemm=config.moe_grouped_gemm,
+            multi_latent_attention=config.multi_latent_attention,
         )
 
         sub = spec.sublayers_spec
@@ -707,6 +709,7 @@ class TestQwen3_5Model(unittest.TestCase):
             gated_attention=True,
         )
         self.language_config = language_config
+        self.language_config.model_type = "qwen3_5"
 
         language_spec = get_qwen3_5_language_spec(
             config=language_config,
@@ -968,6 +971,17 @@ class TestQwen3_5Model(unittest.TestCase):
 
         # No video tokens in this input
         assert not video_mask.any().item(), "No video tokens should be detected"
+
+    def test_create_mla(self):
+        language_config = copy.deepcopy(self.language_config)
+        language_config.multi_latent_attention = True
+
+        language_spec = get_qwen3_5_language_spec(
+            config=language_config,
+        )
+
+    def test_sharded_state_dict(self):
+        state_dict = self.model.state_dict()
 
 
 if __name__ == "__main__":
