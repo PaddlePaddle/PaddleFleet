@@ -260,7 +260,7 @@ def test_RowParallelLinear(
         rank * (in_f // tensor_parallel),
         0,
     )
-    assert bias_shard.global_shape == [out_f]
+    assert bias_shard.global_shape == (out_f,)
     assert bias_shard.local_shape == bias_shard.global_shape
     assert bias_shard.global_offset == (0,)
 
