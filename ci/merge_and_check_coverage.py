@@ -58,7 +58,12 @@ def merge_coverage_files(coverage_files):
     files_skipped = 0
 
     # Exclude third-party or non-PaddleFleet code
-    exclude_patterns = ["ops/deep_ep", "ops/deep_gemm", "ops/quack"]
+    exclude_patterns = [
+        "ops/deep_ep",
+        "ops/deep_gemm",
+        "ops/quack",
+        "ops/flash_mask",
+    ]
 
     for file_path in coverage_files:
         root = parse_coverage_file(file_path)
