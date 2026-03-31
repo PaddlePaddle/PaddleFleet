@@ -41,6 +41,7 @@ from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import divide, get_pg_rank, get_pg_size
 
+from .dot_product_attention import CPDotProductAttention
 from .enums import AttnMaskType
 
 
@@ -395,7 +396,11 @@ class Attention(FleetLayer, ABC):
             # range. The full mask has shape [B, 1, S, 1] with absolute row indices.
             # Each SP rank processes key/query positions [tp_rank*L : (tp_rank+1)*L],
             # so we need the local slice with row indices adjusted to local space.
-            if attn_mask_startend_row_indices is not None:
+            if attn_mask_startend_row_indices is not None and not isinstance(
+                self.core_attention, CPDotProductAttention
+            ):
+                # Skip this adjustment when CP is active, as CPDotProductAttention
+                # expects the full global mask and handles CP splitting internally.
                 local_seq = key.shape[1]  # S / tp_size after transpose
                 if attn_mask_startend_row_indices.shape[2] != local_seq:
                     tp_rank = get_pg_rank(self.pg_collection.tp)
