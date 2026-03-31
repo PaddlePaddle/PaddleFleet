@@ -1649,7 +1649,7 @@ jobs:
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
-      TASK: paddlefleet-CE-${{ github.event.pull_request.number }}-coverage_check
+      TASK: paddlefleet-CE-coverage_check
       GITHUB_REPO_NAME: ${{ github.repository }}
     steps:
       - name: Determine the runner
