@@ -1710,7 +1710,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           set -x
-          cd /workspace/PaddleFleet
+          cd /paddle/PaddleFleet
           coverage_configs="
           multi_coverage.xml:multi-card/coverage.xml:multi-card_test
           single_coverage.xml:single-card/coverage.xml:single_card_test
