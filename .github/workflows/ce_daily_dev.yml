@@ -54,18 +54,18 @@ jobs:
   #     max-parallel: 2
   #     matrix:
   #       include:
-  # - cuda: "12.6"
-  #   python: "3.10"
-  # - cuda: "12.9"
-  #   python: "3.10"
-  # - cuda: "13.0"
-  #   python: "3.10"
-  # - cuda: "12.9"
-  #   python: "3.11"
-  # - cuda: "12.9"
-  #   python: "3.12"
-  # - cuda: "12.9"
-  #   python: "3.13"
+  #       - cuda: "12.6"
+  #         python: "3.10"
+  #       - cuda: "12.9"
+  #         python: "3.10"
+  #       - cuda: "13.0"
+  #         python: "3.10"
+  #       - cuda: "12.9"
+  #         python: "3.11"
+  #       - cuda: "12.9"
+  #         python: "3.12"
+  #       - cuda: "12.9"
+  #         python: "3.13"
   # env:
   #   PIP_CACHE_DIR: /home/.cache/pip
   #   CACHE_DIR: /home/.cache
@@ -1643,7 +1643,6 @@ jobs:
   coverage_check:
     name: Coverage Upload And Check
     # needs: [single_card_test, multi-card_test, integration-test-H20-single-card, integration-test-a100, integration-test-H20-multi-card]
-    needs: [single_card_test]
     if: always()
     runs-on:
       group: Fleet-H-single-card
@@ -1663,7 +1662,8 @@ jobs:
           GPU_DEVICES: ${{ env.GPU_DEVICES }}
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
-          echo "container_name=${container_name}" >> ${{ github.env }}
+          echo "container_name=${container_name}" >> $GITHUB_ENV
+          echo "${container_name}" > /tmp/container_name.txt
           docker pull $docker_image_cu129
           docker run -d -t --name ${container_name} --gpus "\"device=${GPU_DEVICES}\"" --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
@@ -1798,3 +1798,11 @@ jobs:
           python ${push_file} merged_coverage.xml ${target_path}
           python ${push_file} coverage-full.txt ${target_path}
           '
+
+      - name: Clean up container
+        if: always()
+        run: |
+          if [ -f /tmp/container_name.txt ]; then
+            container_name=$(cat /tmp/container_name.txt)
+            docker rm -f ${container_name} || true
+          fi
