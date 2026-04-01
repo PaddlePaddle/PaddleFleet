@@ -335,7 +335,6 @@ jobs:
           git checkout ${fleet_branch}
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
           pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
