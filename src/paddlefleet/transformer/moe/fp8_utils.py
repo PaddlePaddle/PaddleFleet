@@ -1176,7 +1176,9 @@ class ExpertsGroupGemmContiguousNode:
         probs_grad = paddle.concat(probs_grad, axis=0)
         return out_grad, probs_grad
 
-    def _lora_weight_grad(self, dw, lora_A, lora_B, scaling, grad_attr="main_grad"):
+    def _lora_weight_grad(
+        self, dw, lora_A, lora_B, scaling, grad_attr="main_grad"
+    ):
         """
         Given dw (gradient w.r.t. effective weight = w + lora_A @ lora_B * scaling),
         compute and accumulate gradients for lora_A and lora_B.
@@ -1188,15 +1190,22 @@ class ExpertsGroupGemmContiguousNode:
         """
         dw_f32 = dw.cast("float32")
         # d_lora_B: [E, r, out] = [E, r, in] @ [E, in, out]
-        d_lora_B = paddle.bmm(lora_A.cast("float32").transpose([0, 2, 1]), dw_f32) * scaling
+        d_lora_B = (
+            paddle.bmm(lora_A.cast("float32").transpose([0, 2, 1]), dw_f32)
+            * scaling
+        )
         # d_lora_A: [E, in, r] = [E, in, out] @ [E, out, r]
-        d_lora_A = paddle.bmm(dw_f32, lora_B.cast("float32").transpose([0, 2, 1])) * scaling
+        d_lora_A = (
+            paddle.bmm(dw_f32, lora_B.cast("float32").transpose([0, 2, 1]))
+            * scaling
+        )
 
         if not hasattr(self, "_lora_grad_log_count"):
             self._lora_grad_log_count = 0
         if self._lora_grad_log_count < 3:
             self._lora_grad_log_count += 1
             import logging as _logging
+
             _log = _logging.getLogger(__name__)
             _log.info(
                 f"[LORA GRAD EP] step={self._lora_grad_log_count}: "
@@ -1209,7 +1218,9 @@ class ExpertsGroupGemmContiguousNode:
             dgrad = dgrad.cast(param.dtype)
             if hasattr(param, "main_grad"):
                 if param.main_grad is None:
-                    param.main_grad = paddle.zeros(param.shape, dtype=paddle.float32)
+                    param.main_grad = paddle.zeros(
+                        param.shape, dtype=paddle.float32
+                    )
                 param.main_grad.add_(dgrad.cast(paddle.float32))
             else:
                 if param.grad is None:
@@ -1228,7 +1239,11 @@ class ExpertsGroupGemmContiguousNode:
                 "bf16 fuse node do not support a2a_async_fn currently"
             )
         # Detect LoRA on grouped_gemm_experts
-        _ge = getattr(self, "grouped_gemm_experts", None) if self.moe_grouped_gemm else None
+        _ge = (
+            getattr(self, "grouped_gemm_experts", None)
+            if self.moe_grouped_gemm
+            else None
+        )
         _has_lora = (
             _ge is not None
             and hasattr(_ge, "get_delta_weight")
@@ -1238,8 +1253,12 @@ class ExpertsGroupGemmContiguousNode:
 
         if self.moe_grouped_gemm:
             if _has_lora:
-                expert_w1 = _ge.weight1 + _ge.get_delta_weight(_ge.weight1_lora_A, _ge.weight1_lora_B)
-                expert_w2 = _ge.weight2 + _ge.get_delta_weight(_ge.weight2_lora_A, _ge.weight2_lora_B)
+                expert_w1 = _ge.weight1 + _ge.get_delta_weight(
+                    _ge.weight1_lora_A, _ge.weight1_lora_B
+                )
+                expert_w2 = _ge.weight2 + _ge.get_delta_weight(
+                    _ge.weight2_lora_A, _ge.weight2_lora_B
+                )
             else:
                 expert_w1 = self.grouped_gemm_experts.weight1
                 expert_w2 = self.grouped_gemm_experts.weight2
@@ -1278,7 +1297,9 @@ class ExpertsGroupGemmContiguousNode:
                 dw1 = paddle.incubate.nn.functional.batched_gemm(
                     _input, do1, self.tokens_per_expert, trans_lhs=True
                 )
-                self._lora_weight_grad(dw1, _ge.weight1_lora_A, _ge.weight1_lora_B, _ge.scaling)
+                self._lora_weight_grad(
+                    dw1, _ge.weight1_lora_A, _ge.weight1_lora_B, _ge.scaling
+                )
             self.input = None
         else:
             self.bf16_weight_grad(do1, self.input, expert_w1)
@@ -1290,7 +1311,9 @@ class ExpertsGroupGemmContiguousNode:
                 dw2 = paddle.incubate.nn.functional.batched_gemm(
                     o2_s, out_grad, self.tokens_per_expert, trans_lhs=True
                 )
-                self._lora_weight_grad(dw2, _ge.weight2_lora_A, _ge.weight2_lora_B, _ge.scaling)
+                self._lora_weight_grad(
+                    dw2, _ge.weight2_lora_A, _ge.weight2_lora_B, _ge.scaling
+                )
         else:
             self.bf16_weight_grad(out_grad, o2_s, expert_w2)
 

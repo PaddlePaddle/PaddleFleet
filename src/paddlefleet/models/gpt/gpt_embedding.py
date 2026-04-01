@@ -345,7 +345,7 @@ class GPTEmbedding(FleetLayer):
                     ).contiguous()
 
         if paddle.core._has_grad():
-            decoder_input.stop_gradient = False  #Prevent errors in recompute_pylayer during LoRA training caused by base_weight lacking gradients.
+            decoder_input.stop_gradient = False  # Prevent errors in recompute_pylayer during LoRA training caused by base_weight lacking gradients.
 
         preproc_output = {
             "hidden_states": decoder_input,
