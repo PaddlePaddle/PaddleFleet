@@ -128,12 +128,24 @@ def _apply_rotary_pos_emb_bshd(
 
     if config.apply_rope_fusion:
         if config.high_precision_rope:
+            rot_dim = freqs.shape[-1]
+
+            # For M-RoPE with sequence parallel, freqs may be [S, B, D] while
+            # t is [B, S, H, D]. Align freqs before splitting rotary/pass dims.
+            if freqs.ndim == 3:
+                t_d0, t_d1 = t.shape[0], t.shape[1]
+                f_d0, f_d1 = freqs.shape[0], freqs.shape[1]
+                if (
+                    t_d0 != f_d0 or t_d1 != f_d1
+                ) and t_d0 * t_d1 == f_d0 * f_d1:
+                    freqs = freqs.transpose([1, 0, 2]).contiguous()
+
+            # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+            t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
             assert not config.rotary_interleaved and mscale == 1.0, (
                 "fused_apply_rotary_pos_emb_vision only supports "
                 "non-interleaved mode and mscale=1.0"
             )
-            rot_dim = freqs.shape[-1]
-            t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
             if freqs.ndim == 3:
                 freqs_2d = freqs.reshape([-1, freqs.shape[-1]])
             else:
@@ -155,7 +167,6 @@ def _apply_rotary_pos_emb_bshd(
                 time_major=config.sequence_parallel,
             )
 
-    # Unfused path
     rot_dim = freqs.shape[-1]
 
     # For M-RoPE with sequence parallel, freqs may be [S, B, D] while t is
