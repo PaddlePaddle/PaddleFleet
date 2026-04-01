@@ -1,9 +1,6 @@
 name: CE Daily Dev
 
 on:
-  pull_request:
-    types: [opened, synchronize]
-    branches: [develop]
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -1700,7 +1697,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git pull --no-edit origin pull/${PR_ID}/head
+          # git pull --no-edit origin pull/${PR_ID}/head
           '
 
       - name: Check full coverage
