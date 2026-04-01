@@ -193,35 +193,63 @@ class DotProductAttention(FleetLayer):
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
+        if self.config.fa_version == 4:
+            from paddlefleet.ops.flash_mask.cute.interface import (
+                flashmask_attention as _flashmask_attention,
+            )
+        else:
+            from paddle.nn.functional.flash_attention import (
+                flashmask_attention as _flashmask_attention,
+            )
         if packed_seq_params is not None:
             assert (
                 query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
             ), "attention only support fp16/bf16 when use packed_seq_params"
-            lengths = (
-                packed_seq_params.cu_seqlens_kv[1:]
-                - packed_seq_params.cu_seqlens_kv[:-1]
-            )
-            splits = [
-                paddle.split(tensor, lengths.tolist(), axis=1)
-                for tensor in (query, key, value)
-            ]
-            attn_outputs = []
-            for q, k, v in zip(*splits):
-                attn_outputs.append(
-                    paddle.nn.functional.scaled_dot_product_attention(
-                        q,
-                        k,
-                        v,
-                        None,
-                        self.config.attention_dropout,
-                        is_causal=False,
+
+            if attn_mask_startend_row_indices is None:
+                # Build flashmask startend_row_indices from cu_seqlens for block-diagonal
+                # non-causal attention. Each token in segment i gets [end_i, total, 0, start_i],
+                # so it attends only to tokens within its own segment.
+                # This replaces the per-segment split + Python loop with a single FA call.
+                cu_seqlens = packed_seq_params.cu_seqlens_kv
+                seq_length = query.shape[1]
+                lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+                indices_per_segment = paddle.stack(
+                    [
+                        cu_seqlens[1:],  # col 0: lower_start = end_i
+                        paddle.full_like(
+                            cu_seqlens[1:], seq_length
+                        ),  # col 1: lower_end   = total_seq
+                        paddle.zeros_like(
+                            cu_seqlens[:-1]
+                        ),  # col 2: upper_start = 0
+                        cu_seqlens[:-1],  # col 3: upper_end   = start_i
+                    ],
+                    axis=1,
+                )  # [num_segments, 4]
+                attn_mask_startend_row_indices = (
+                    paddle.repeat_interleave(
+                        indices_per_segment, lengths, axis=0
                     )
-                )
-            # [b,s,h_n,h_dim]
-            attn_output = paddle.cat(attn_outputs, axis=1)
-            return attn_output.reshape(
-                [0, 0, attn_output.shape[2] * attn_output.shape[3]]
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                )  # [1, 1, seq_len, 4]
+
+            flashmask_attention_func = (
+                self.rr_flashmask_attention_func
+                if use_rr_flash_attention
+                else _flashmask_attention
             )
+            attn_output = flashmask_attention_func(
+                query.astype(value.dtype),
+                key.astype(value.dtype),
+                value.astype(value.dtype),
+                startend_row_indices=attn_mask_startend_row_indices,
+                dropout=self.config.attention_dropout,
+                causal=False,
+            )
+            attn_output = attn_output.reshape([0, 0, -1])
+            return attn_output
         if (
             query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
         ) and attn_mask_startend_row_indices is None:
@@ -250,14 +278,6 @@ class DotProductAttention(FleetLayer):
         elif (
             query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
         ) and attn_mask_startend_row_indices is not None:
-            if self.config.fa_version == 4:
-                from paddlefleet.ops.flash_mask.cute.interface import (
-                    flashmask_attention as _flashmask_attention,
-                )
-            else:
-                from paddle.nn.functional.flash_attention import (
-                    flashmask_attention as _flashmask_attention,
-                )
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             flashmask_attention_func = (
