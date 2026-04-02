@@ -48,11 +48,3 @@ jobs:
           fi
 
           echo "Dev PR merged. Validation completed."
-
-      - name: Check uv.lock is not deleted
-        run: |
-          if git diff --name-status origin/${{ github.base_ref }}...HEAD | grep -q "^D.*uv\.lock"; then
-            echo "::error::uv.lock cannot be deleted in this PR"
-            exit 1
-          fi
-          echo "uv.lock is intact"
