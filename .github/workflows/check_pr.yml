@@ -24,7 +24,13 @@ jobs:
             echo "✅ PR 描述符合要求。"
             echo "字数统计: ${#DESCRIPTION} 个字符"
           fi
-
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
       - name: Check uv.lock is not deleted
         run: |
           if git diff --name-status origin/${{ github.base_ref }}...HEAD | grep -q "^D.*uv\.lock"; then
