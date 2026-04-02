@@ -206,7 +206,7 @@ jobs:
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
-          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest
           pip install dist/paddlefleet-0.0.0-cp313-cp313-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -328,7 +328,7 @@ jobs:
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
-          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest
           pip install dist/paddlefleet-0.0.0-cp313-cp313-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
