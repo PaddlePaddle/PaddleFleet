@@ -201,6 +201,8 @@ class MoELayer(nn.Layer):
                     False  # TODO: Support EP>1 alltoall moe_grouped_gemm
                 )
                 self.fp8_dispatch = False
+        else:
+            self.moe_use_fusion_node = config.moe_use_fusion_node
 
         if self.fp8:
             if paddle.version.cuda() == "12.6":
