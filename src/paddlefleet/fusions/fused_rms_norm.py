@@ -25,7 +25,7 @@ from paddlefleet.transformer import TransformerConfig
 
 HAVE_PERSIST_LAYER_NORM = False
 
-from paddle.nn.functional import rms_norm
+from paddle.incubate.nn.functional.fused_rms_norm import fused_rms_norm
 
 
 class FusedRmsNorm(paddle.nn.Layer):
@@ -121,7 +121,7 @@ class FusedRmsNorm(paddle.nn.Layer):
                 + ", but got input shape "
                 + str(input_shape)
             )
-        output = rms_norm(
+        output = fused_rms_norm(
             input.cast("bfloat16"),
             weight.cast("bfloat16"),
             self.bias.cast("bfloat16"),

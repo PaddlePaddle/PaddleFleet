@@ -73,7 +73,10 @@ class RMSNorm(paddle.nn.Layer):
 
     def forward(self, hidden_states: Tensor):
         rms_norm_out = rms_norm(
-            hidden_states, self.weight, self.variance_epsilon
+            hidden_states,
+            hidden_states.shape[-1:],
+            self.weight,
+            self.variance_epsilon,
         )
         if isinstance(rms_norm_out, (tuple, list)):
             return rms_norm_out[0].astype(self.weight.dtype)
@@ -136,10 +139,13 @@ class LayerNorm(paddle.nn.Layer):
 class FusedRMSNorm(RMSNorm):
     def forward(self, hidden_states: Tensor):
         rms_norm_out = rms_norm(
-            hidden_states, self.weight, self.variance_epsilon
+            hidden_states,
+            hidden_states.shape[-1:],
+            self.weight,
+            self.variance_epsilon,
         )
         if isinstance(rms_norm_out, (tuple, list)):
-            rms_norm_out[0].astype(self.weight.dtype)
+            return rms_norm_out[0].astype(self.weight.dtype)
         else:
             return rms_norm_out.astype(self.weight.dtype)
 
