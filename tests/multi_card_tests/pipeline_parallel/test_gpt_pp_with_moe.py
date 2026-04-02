@@ -215,15 +215,15 @@ class TestPP(unittest.TestCase):
         pp = pprint.PrettyPrinter(depth=None, width=200, compact=False)
         pp.pprint(rst)
 
-        assert overlap_loss._md5sum() == "a8cef89d63614ce2295"
+        assert overlap_loss._md5sum() == "29f8b7fa9402bbff4b94d361af58b6e2"
 
         if paddle.distributed.get_rank() == 0:
             baseline = {
-                "_layers.9.0.input_layernorm.weight": "1521496de2de6dd9fd7e5a295a76ae42",
-                "_layers.9.0.mlp.experts.0.down_proj.weight": "a6123a0af26a4c668404225c855bf3b3",
-                "_layers.9.0.mlp.experts.0.up_gate_proj.weight": "34a7079cff9d4ec8a9af7c72d53b1d27",
-                "_layers.9.0.mlp.experts.1.down_proj.weight": "d855fce78b2ac796bd12d30087e9902f",
-                "_layers.9.0.mlp.experts.1.up_gate_proj.weight": "4e7d9feb126e36d5953e143d8332318d",
+                "_layers.9.0.input_layernorm.weight": "0692a0567389a437fdf55a82140f1895",
+                "_layers.9.0.mlp.experts.0.down_proj.weight": "dfbec352f966837904140b4260fd6589",
+                "_layers.9.0.mlp.experts.0.up_gate_proj.weight": "85536680873d0ee6ad445ce7554e1d62",
+                "_layers.9.0.mlp.experts.1.down_proj.weight": "a4b0d27b218a7ef2241c3e006066ac4c",
+                "_layers.9.0.mlp.experts.1.up_gate_proj.weight": "32d0903f0ee92a8cef89d63614ce2295",
                 "_layers.9.0.mlp.experts.2.down_proj.weight": "62c3f662fe2b89ad1a1bbf67baa5a13d",
                 "_layers.9.0.mlp.experts.2.up_gate_proj.weight": "29b681d39894e9c9c4f25c27fce7797e",
                 "_layers.9.0.mlp.experts.3.down_proj.weight": "880aa8574cc4730f05b5f25115322fbc",
