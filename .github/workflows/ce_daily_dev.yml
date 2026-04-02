@@ -402,7 +402,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
-
   integration-test-H20-single-card:
     name: Integration test (H20, single card)
     runs-on:
@@ -671,7 +670,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage.xml
-          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/ce/$(date +%Y%m%d)/h20-single"
+          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/h20-single"
           python ${push_file} coverage.xml ${target_path_single}
           '
 
