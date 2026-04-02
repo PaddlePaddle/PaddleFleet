@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from paddle import nn
@@ -65,9 +66,8 @@ class Qwen3VLVisionPathMerger(nn.Module):
             )
         )
 
-    def forward(self, x):
-        if isinstance(x, dict):
-            x = x["hidden_states"].squeeze(0)
+    def forward(self, dict_args):
+        x = dict_args["hidden_states"].squeeze(0)
         if self.use_postshuffle_norm:
             x = self.norm(x.reshape([-1, self.hidden_size]))
             x = x.reshape([-1, self.hidden_size])
@@ -78,4 +78,7 @@ class Qwen3VLVisionPathMerger(nn.Module):
         x, output_bias = self.mlp(x)
         if output_bias is not None:
             x += output_bias
-        return x, None
+        rst = OrderedDict()
+        rst = {"hidden_states": x}
+        rst = {**dict_args, **rst}
+        return rst

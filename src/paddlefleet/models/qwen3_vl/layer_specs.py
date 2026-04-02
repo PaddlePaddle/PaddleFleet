@@ -26,7 +26,7 @@ from .embedding import (
     VisionEmbeddingSpec,
     VisionRotaryEmbedding,
 )
-from .patch_merger import Qwen3VLVisionPathMerger
+from .patch_merger import Qwen3VLVisionPatchMergerSpec, Qwen3VLVisionPathMerger
 from .qwen3_vl_model import (
     Qwen3VLVisionModel,
     Qwen3VLVisionSublayersSpec,
@@ -54,6 +54,11 @@ def get_qwen3_vl_vision_layer_local_spec(
     transformer_cls = Qwen3VLVisionTransformerLayer
     merger_spec = LayerSpec(
         layer=Qwen3VLVisionPathMerger,
+        sublayers_spec=Qwen3VLVisionPatchMergerSpec(
+            norm=backend.layer_norm(
+                rms_norm=False, for_qk=False, fused=False, eps=1e-6
+            )
+        ),
         extra_kwargs={"config": config, "use_postshuffle_norm": True},
     )
     return LayerSpec(
@@ -123,6 +128,7 @@ def get_qwen3_vl_vision_spec(
     tail_empty_layer_spec: list[LayerSpec] | None = None,
     rotary_base: int = 10000.0,
 ):
+    backend = LocalSpecProvider()
     embedding_extra_kwargs = {"config": config}
     rotary_emb_extra_kwargs = {
         "dim": config.head_dim // 2,
@@ -136,6 +142,11 @@ def get_qwen3_vl_vision_spec(
     )
     merger_spec = LayerSpec(
         layer=Qwen3VLVisionPathMerger,
+        sublayers_spec=Qwen3VLVisionPatchMergerSpec(
+            norm=backend.layer_norm(
+                rms_norm=False, for_qk=False, fused=False, eps=1e-6
+            )
+        ),
         extra_kwargs={
             "config": config,
             "dim": config.out_hidden_size,

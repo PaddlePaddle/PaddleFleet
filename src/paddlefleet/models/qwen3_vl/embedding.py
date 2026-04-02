@@ -267,7 +267,14 @@ class VisionEmbedding(FleetLayer):
         grid_thw = dict_args["grid_thw"]
 
         # Pathed embedding
-        hidden_states = self.patch_embed(pixel_values).view(-1, self.embed_dim)
+        hidden_states = pixel_values.reshape(
+            -1,
+            self.in_channels,
+            self.temporal_patch_size,
+            self.patch_size,
+            self.patch_size,
+        )
+        hidden_states = self.patch_embed(hidden_states).view(-1, self.embed_dim)
 
         # Share token-to-image mapping to avoid redundant computation
         image_id, frame_local_idx, total_tokens, max_hw = (
