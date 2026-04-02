@@ -442,67 +442,73 @@ class MoELayer(nn.Layer):
 
         if self.using_sonic_moe:
             T = dispatched_hidden_states.shape[0]
-            K = self.num_experts_per_tok
-            stream_id = paddle.device.cuda.current_stream().cuda_stream
-            topk_scores = filter_scores(
-                dispatched_probs,
-                dispatched_indices,
-            )
-            expert_frequency, expert_frequency_offset = count_cumsum(
-                dispatched_indices, self.num_experts_per_device, do_cumsum=True
-            )
-            activation_type = ActivationType("swiglu")
+            # no tokens need to be process
+            if T == 0:
+                hidden_states = dispatched_hidden_states
+            else:
+                K = self.num_experts_per_tok
+                stream_id = paddle.device.cuda.current_stream().cuda_stream
+                topk_scores = filter_scores(
+                    dispatched_probs,
+                    dispatched_indices,
+                )
+                expert_frequency, expert_frequency_offset = count_cumsum(
+                    dispatched_indices,
+                    self.num_experts_per_device,
+                    do_cumsum=True,
+                )
+                activation_type = ActivationType("swiglu")
 
-            (
-                expert_frequency_offset,
-                x_gather_idx,
-                s_scatter_idx,
-                s_reverse_scatter_idx,
-                num_activated_expert_per_token_offset,
-            ) = fused_expert_parallel_TC_topk_router_metadata(
-                dispatched_indices,
-                expert_frequency_offset,
-                K,
-            )
+                (
+                    expert_frequency_offset,
+                    x_gather_idx,
+                    s_scatter_idx,
+                    s_reverse_scatter_idx,
+                    num_activated_expert_per_token_offset,
+                ) = fused_expert_parallel_TC_topk_router_metadata(
+                    dispatched_indices,
+                    expert_frequency_offset,
+                    K,
+                )
 
-            TK = s_scatter_idx.shape[0]
-            is_varlen_K = True
-            w1 = self.grouped_gemm_experts.weight1
-            y1, z = _UpProjection.apply(
-                dispatched_hidden_states,
-                w1.permute(1, 2, 0),
-                None,
-                expert_frequency_offset,
-                TK,
-                K,
-                stream_id,
-                x_gather_idx,
-                s_scatter_idx,
-                s_reverse_scatter_idx,
-                num_activated_expert_per_token_offset,
-                is_varlen_K,
-                activation_type,
-                is_inference_mode_enabled=False,
-            )
+                TK = s_scatter_idx.shape[0]
+                is_varlen_K = True
+                w1 = self.grouped_gemm_experts.weight1
+                y1, z = _UpProjection.apply(
+                    dispatched_hidden_states,
+                    w1.permute(1, 2, 0),
+                    None,
+                    expert_frequency_offset,
+                    TK,
+                    K,
+                    stream_id,
+                    x_gather_idx,
+                    s_scatter_idx,
+                    s_reverse_scatter_idx,
+                    num_activated_expert_per_token_offset,
+                    is_varlen_K,
+                    activation_type,
+                    is_inference_mode_enabled=False,
+                )
 
-            w2 = self.grouped_gemm_experts.weight2
-            hidden_states = _DownProjection.apply(
-                y1,
-                z,
-                w2.permute(1, 2, 0),
-                None,
-                topk_scores,
-                expert_frequency_offset,
-                T,
-                K,
-                stream_id,
-                x_gather_idx,
-                s_scatter_idx,
-                s_reverse_scatter_idx,
-                num_activated_expert_per_token_offset,
-                is_varlen_K,
-                activation_type,
-            )
+                w2 = self.grouped_gemm_experts.weight2
+                hidden_states = _DownProjection.apply(
+                    y1,
+                    z,
+                    w2.permute(1, 2, 0),
+                    None,
+                    topk_scores,
+                    expert_frequency_offset,
+                    T,
+                    K,
+                    stream_id,
+                    x_gather_idx,
+                    s_scatter_idx,
+                    s_reverse_scatter_idx,
+                    num_activated_expert_per_token_offset,
+                    is_varlen_K,
+                    activation_type,
+                )
         else:
             hidden_states = FusionMoePyLayer.apply(
                 dispatched_hidden_states,
