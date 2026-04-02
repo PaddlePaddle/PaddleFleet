@@ -62,17 +62,21 @@ class GPTEmbedding(FleetLayer):
             position_embedding_type=position_embedding_type,
         )
         self.sequence_parallel = self.config.sequence_parallel
-        if (
-            config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
-            and self.sequence_parallel
+
+        self.multimodal_embedding = config.multimodal_embedding
+        if self.sequence_parallel and (
+            self.multimodal_embedding
+            or (
+                config.num_nextn_predict_layers is not None
+                and self.config.num_nextn_predict_layers > 0
+                and not config.mtp_load_weight_only
+            )
         ):
             self.embedding.embed_tokens.reduce_scatter_embeddings = False
             self.embedding.scatter_to_sequence_parallel = False
             self.embedding.reduce_scatter_embeddings = False
             self.embedding.sequence_parallel = False
         self.rotary_pos_emb = None
-        self.multimodal_embedding = config.multimodal_embedding
         self.mrope_section = mrope_section
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
@@ -100,14 +104,20 @@ class GPTEmbedding(FleetLayer):
     ):
         input_ids = dict_args["input_ids"]
         position_ids = dict_args.get("position_ids", None)
+        device = paddle.device.get_device().split(":")[0].lower()
         position_ids = (
-            position_ids.to("gpu") if position_ids is not None else None
+            position_ids.to(device) if position_ids is not None else None
         )
         attention_mask = dict_args.get("attention_mask", None)
         attn_mask_startend_row_indices = dict_args.get(
             "attn_mask_startend_row_indices", None
         )
         mtp_emb_res = None
+        if input_ids is None:
+            assert dict_args["decoder_input"] is not None, (
+                "input_ids or decoder_input must be provided"
+            )
+            decoder_input = dict_args["decoder_input"]
         if decoder_input is None:
             decoder_input = self.embedding(
                 input_ids=input_ids,
@@ -118,6 +128,7 @@ class GPTEmbedding(FleetLayer):
             if (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
+                and not self.config.mtp_load_weight_only
             ):
                 assert not self.multimodal_embedding, (
                     "MTP not support mm for now."
@@ -258,9 +269,16 @@ class GPTEmbedding(FleetLayer):
                 rotary_pos_cos = paddle.cos(rotary_pos_emb)
                 rotary_pos_sin = paddle.sin(rotary_pos_emb)
             if self.config.sequence_parallel:
-                rotary_pos_emb = rotary_pos_emb.transpose(
-                    [1, 0, 2, 3]
-                ).contiguous()
+                if self.position_embedding_type == "mrope":
+                    # MRoPE: [B, S, head_dim] -> [S, B, head_dim]
+                    rotary_pos_emb = rotary_pos_emb.transpose(
+                        [1, 0, 2]
+                    ).contiguous()
+                else:
+                    # RoPE: [1, S, 1, head_dim] -> [S, 1, 1, head_dim]
+                    rotary_pos_emb = rotary_pos_emb.transpose(
+                        [1, 0, 2, 3]
+                    ).contiguous()
 
         preproc_output = {
             "hidden_states": decoder_input,
@@ -275,6 +293,7 @@ class GPTEmbedding(FleetLayer):
             assert (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
+                and not self.config.mtp_load_weight_only
             )
             assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
             hidden_states_concat = paddle.concat(mtp_emb_res)

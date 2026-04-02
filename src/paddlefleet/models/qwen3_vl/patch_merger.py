@@ -11,14 +11,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import dataclass
 
 from paddle import nn
+from paddle.nn import functional as F
+
+from ...spec_utils import LayerSpec, build_layer
+from ...tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
+from ...transformer.identity_op import IdentityOp
+from ...transformer.mlp import MLP, MLPSublayersSpec
+
+
+@dataclass
+class Qwen3VLVisionPatchMergerSpec:
+    norm: LayerSpec = IdentityOp
 
 
 class Qwen3VLVisionPathMerger(nn.Module):
     def __init__(
         self,
         config,
+        sublayers_spec: Qwen3VLVisionPatchMergerSpec,
         dim: int | None = None,
         context_dim: int | None = None,
         use_postshuffle_norm: bool = False,
@@ -31,15 +44,30 @@ class Qwen3VLVisionPathMerger(nn.Module):
 
         self.hidden_size = context_dim * (config.spatial_merge_size**2)
         norm_dim = self.hidden_size if use_postshuffle_norm else context_dim
-        self.norm = nn.LayerNorm(norm_dim, epsilon=1e-6)
+        self.norm = build_layer(
+            sublayers_spec.norm, config=config, hidden_size=norm_dim
+        )
         self.use_postshuffle_norm = use_postshuffle_norm
+        self.mlp = build_layer(
+            LayerSpec(
+                layer=MLP,
+                sublayers_spec=MLPSublayersSpec(
+                    up_gate_proj=ColumnParallelLinear,
+                    down_proj=RowParallelLinear,
+                    hidden_act=F.gelu,
+                ),
+                extra_kwargs={
+                    "config": config,
+                    "input_size": self.hidden_size,
+                    "intermediate_size": self.hidden_size,
+                    "hidden_size": dim,
+                },
+            )
+        )
 
-        self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
-        self.act_fn = nn.GELU()
-        self.linear_fc2 = nn.Linear(self.hidden_size, dim)
-
-    def forward(self, dict_args):
-        x = dict_args.pop("hidden_states")
+    def forward(self, x):
+        if isinstance(x, dict):
+            x = x["hidden_states"].squeeze(0)
         if self.use_postshuffle_norm:
             x = self.norm(x.reshape([-1, self.hidden_size]))
             x = x.reshape([-1, self.hidden_size])
@@ -47,7 +75,7 @@ class Qwen3VLVisionPathMerger(nn.Module):
             x = self.norm(x)
             x = x.reshape([-1, self.hidden_size])
 
-        x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
-        rst = {"hidden_states": x}
-        rst = {**dict_args, **rst}
-        return rst
+        x, output_bias = self.mlp(x)
+        if output_bias is not None:
+            x += output_bias
+        return x, None

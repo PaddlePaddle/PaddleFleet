@@ -39,8 +39,9 @@ from paddlefleet.recompute_utils import (
 )
 from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.utils import divide, get_pg_size
+from paddlefleet.utils import divide, get_pg_rank, get_pg_size
 
+from .dot_product_attention import CPDotProductAttention
 from .enums import AttnMaskType
 
 
@@ -230,6 +231,7 @@ class Attention(FleetLayer, ABC):
         rotary_pos_emb: Tensor | tuple[Tensor, Tensor] | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
+        rope_freqs_cis: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
@@ -286,12 +288,36 @@ class Attention(FleetLayer, ABC):
         )
         attn_mask_type = self.attn_mask_type
         block_table = None
-        query, key, value = qkv_output
+        if len(qkv_output) == 4:
+            query, key, value, gate = qkv_output
+        else:
+            query, key, value = qkv_output
+            gate = None
 
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
-        if rotary_pos_emb is not None:
+        if rope_freqs_cis is not None:
+            rope_freqs_cis = rope_freqs_cis.unsqueeze(-2)  # ..., 1, head_dim/2
+            # ..., num_heads, head_dim/2
+            query_ = paddle.view_as_complex(
+                query.float().view(*query.shape[:-1], -1, 2)
+            )
+            key_ = paddle.view_as_complex(
+                key.float().view(*key.shape[:-1], -1, 2)
+            )
+            query = (
+                paddle.view_as_real(query_ * rope_freqs_cis)
+                .flatten(-2)
+                .to(hidden_states.dtype)
+            )  # ..., num_heads, head_dim
+            key = (
+                paddle.view_as_real(key_ * rope_freqs_cis)
+                .flatten(-2)
+                .to(hidden_states.dtype)
+            )  # ..., num_heads, head_dim
+
+        elif rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
 
             if packed_seq_params is not None:
@@ -303,8 +329,11 @@ class Attention(FleetLayer, ABC):
                     cu_seqlens_kv = packed_seq_params.cu_seqlens_kv_padded
                 else:
                     cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
+                total_seqlen_q = packed_seq_params.total_seqlen_q
+                total_seqlen_kv = packed_seq_params.total_seqlen_kv
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
+                total_seqlen_q = total_seqlen_kv = None
 
             if (
                 self.config.apply_rope_fusion
@@ -333,6 +362,7 @@ class Attention(FleetLayer, ABC):
                         None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_q,
+                        total_seq_len=total_seqlen_q,
                         position_ids=position_ids,
                         mscale=_yarn_get_concentration_factor_from_config(
                             self.config
@@ -348,6 +378,7 @@ class Attention(FleetLayer, ABC):
                         None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_kv,
+                        total_seq_len=total_seqlen_kv,
                         position_ids=position_ids,
                         mscale=_yarn_get_concentration_factor_from_config(
                             self.config
@@ -366,6 +397,26 @@ class Attention(FleetLayer, ABC):
             query = query.transpose([1, 0, 2, 3]).contiguous()
             key = key.transpose([1, 0, 2, 3]).contiguous()
             value = value.transpose([1, 0, 2, 3]).contiguous()
+            # Slice and adjust attn_mask_startend_row_indices for the local SP sequence
+            # range. The full mask has shape [B, 1, S, 1] with absolute row indices.
+            # Each SP rank processes key/query positions [tp_rank*L : (tp_rank+1)*L],
+            # so we need the local slice with row indices adjusted to local space.
+            if attn_mask_startend_row_indices is not None and not isinstance(
+                self.core_attention, CPDotProductAttention
+            ):
+                # Skip this adjustment when CP is active, as CPDotProductAttention
+                # expects the full global mask and handles CP splitting internally.
+                local_seq = key.shape[1]  # S / tp_size after transpose
+                if attn_mask_startend_row_indices.shape[2] != local_seq:
+                    tp_rank = get_pg_rank(self.pg_collection.tp)
+                    offset = tp_rank * local_seq
+                    attn_mask_startend_row_indices = paddle.clip(
+                        attn_mask_startend_row_indices[
+                            :, :, offset : offset + local_seq, :
+                        ]
+                        - offset,
+                        min=0,
+                    ).astype(paddle.int32)
 
         if self.recompute_core_attention and self.training:
             core_attn_out = recompute(
@@ -402,6 +453,11 @@ class Attention(FleetLayer, ABC):
 
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
+
+        # Apply gated attention: gate the attention output before output projection
+        if gate is not None:
+            core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
+
         output, bias = self.o_proj(core_attn_out)
 
         return output, bias
@@ -439,10 +495,17 @@ class SelfAttention(Attention):
             pg_collection=pg_collection,
         )
 
+        self.gated_attention = getattr(self.config, "gated_attention", False)
+        gate_projection_size = (
+            self.query_projection_size if self.gated_attention else 0
+        )
+
         self.qkv_proj = build_layer(
             sublayers_spec.qkv_proj,
             self.config.hidden_size,
-            self.query_projection_size + 2 * self.kv_projection_size,
+            self.query_projection_size
+            + 2 * self.kv_projection_size
+            + gate_projection_size,
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -452,12 +515,14 @@ class SelfAttention(Attention):
             tp_group=self.pg_collection.tp,
         )
 
+        norm_input_parallel = config.tensor_model_parallel_size > 1
         if sublayers_spec.q_norm is not None:
             self.q_norm = build_layer(
                 sublayers_spec.q_norm,
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
+                input_is_parallel=norm_input_parallel,
             )
         else:
             self.q_norm = None
@@ -468,6 +533,7 @@ class SelfAttention(Attention):
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
+                input_is_parallel=norm_input_parallel,
             )
         else:
             self.k_norm = None
@@ -478,42 +544,61 @@ class SelfAttention(Attention):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`. If `split_qkv=False`, then
         the unsplit mixed_qkv tensor is returned.
+        When gated_attention is enabled, also returns a gate tensor for output gating.
         """
-        # Attention heads [b, sq, h] --> [b, sq, ng * (np/ng + 2) * hn)]
+        # Attention heads [b, sq, h] --> [b, sq, ng * group_dim]
         mixed_qkv, _ = self.qkv_proj(hidden_states)
 
-        # [b, sq, hp] --> [b, sq, ng, (np/ng + 2) * hn]
+        heads_per_group = (
+            self.num_attention_heads_per_partition
+            // self.num_query_groups_per_partition
+        )
+        q_dim = heads_per_group * self.hidden_size_per_attention_head
+
+        if self.gated_attention:
+            # Per group: Q + Gate + K + V
+            group_dim = (
+                heads_per_group * 2 + 2
+            ) * self.hidden_size_per_attention_head
+        else:
+            # Per group: Q + K + V
+            group_dim = (
+                heads_per_group + 2
+            ) * self.hidden_size_per_attention_head
+
+        # [b, sq, hp] --> [b, sq, ng, group_dim]
         new_tensor_shape = (
             *mixed_qkv.shape[:-1],
             self.num_query_groups_per_partition,
-            (
-                (
-                    self.num_attention_heads_per_partition
-                    // self.num_query_groups_per_partition
-                    + 2
-                )
-                * self.hidden_size_per_attention_head
-            ),
+            group_dim,
         )
-        mixed_qkv = mixed_qkv.view(*new_tensor_shape)
+        mixed_qkv = mixed_qkv.reshape(*new_tensor_shape)
 
-        split_arg_list = [
-            (
-                self.num_attention_heads_per_partition
-                // self.num_query_groups_per_partition
-                * self.hidden_size_per_attention_head
-            ),
-            self.hidden_size_per_attention_head,
-            self.hidden_size_per_attention_head,
-        ]
+        if self.gated_attention:
+            split_arg_list = [
+                q_dim,
+                q_dim,
+                self.hidden_size_per_attention_head,
+                self.hidden_size_per_attention_head,
+            ]
+        else:
+            split_arg_list = [
+                q_dim,
+                self.hidden_size_per_attention_head,
+                self.hidden_size_per_attention_head,
+            ]
 
         # Return unsplit mixed_qkv and split_arg_list
         if not split_qkv:
             return mixed_qkv, split_arg_list
 
-        # [b, sq, ng, (np/ng + 2) * hn]
-        # --> [b, sq, ng, np/ng * hn], [b, sq, ng, hn], [b, sq, ng, hn]
-        (query, key, value) = paddle.split(mixed_qkv, split_arg_list, axis=3)
+        parts = paddle.split(mixed_qkv, split_arg_list, axis=3)
+
+        if self.gated_attention:
+            query, gate, key, value = parts
+        else:
+            query, key, value = parts
+            gate = None
 
         # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
         query = query.reshape(
@@ -528,6 +613,11 @@ class SelfAttention(Attention):
 
         if self.k_norm is not None:
             key = self.k_norm(key)
+
+        if gate is not None:
+            # [b, sq, ng, np/ng * hn] -> [b, sq, np * hn]
+            gate = gate.reshape(*gate.shape[:2], -1)
+            return query, key, value, gate
 
         return query, key, value
 

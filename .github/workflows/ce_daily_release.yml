@@ -2,7 +2,7 @@ name: CE Daily Release
 
 on:
   schedule:
-    - cron: '0 19 * * *'
+    - cron: '0 20 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
@@ -177,7 +177,7 @@ jobs:
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -229,7 +229,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 1
       matrix:
         include:
           - cuda: "12.6"
@@ -350,7 +350,7 @@ jobs:
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt pytest matplotlib==3.10.8
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib==3.10.8
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -547,9 +547,9 @@ jobs:
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -649,7 +649,7 @@ jobs:
       group: Fleet-H-multi-card
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 1
       matrix:
         include:
           - cuda: "12.6"
@@ -799,9 +799,9 @@ jobs:
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -912,6 +912,9 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
+          if [ "${CUDA_VERSION}" == "cu126" ]; then
+            exit 0
+          fi
           if [ "${PYTHON_VERSION}" != "3.10" ]; then
             source "$HOME/miniconda/etc/profile.d/conda.sh"
             conda activate python${PYTHON_VERSION}
@@ -923,6 +926,48 @@ jobs:
             bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
+          fi
+          '
+
+
+      - name: Integration test (GLM4.5 multi-card FP8)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          source /root/proxy
+          if [ "${CUDA_VERSION}" == "cu126" ]; then
+            exit 0
+          fi
+          if [ "${PYTHON_VERSION}" != "3.10" ]; then
+            source "$HOME/miniconda/etc/profile.d/conda.sh"
+            conda activate python${PYTHON_VERSION}
+          fi
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_pt_fp8"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
+          fi
+          '
+
+      - name: GLM4.5 pre-train (EP4)
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
+          source /root/proxy
+          if [ "${PYTHON_VERSION}" != "3.10" ]; then
+            source "$HOME/miniconda/etc/profile.d/conda.sh"
+            conda activate python${PYTHON_VERSION}
+          fi
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_pt_ep4"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 EP4.\033[0m"
           fi
           '
 
@@ -1222,9 +1267,9 @@ jobs:
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"

@@ -22,9 +22,20 @@ from paddle.nn import functional as F
 
 from ...packed_seq_params import PackedSeqParams
 from ...spec_utils import LayerSpec, build_layer
+from ...tensor_parallel.mappings import (
+    scatter_to_sequence_parallel_region,
+)
 from ...transformer import TransformerConfig
 from ...transformer.layer import FleetLayer
 from ..gpt.gpt_embedding import GPTEmbedding
+
+
+def safe_repeat_interleave_values(values, repeats):
+    max_repeats = paddle.max(repeats)
+    mask = paddle.arange(max_repeats).unsqueeze(0) < repeats.unsqueeze(1)
+    expanded_values = values.unsqueeze(1).expand([values.shape[0], max_repeats])
+    result = paddle.masked_select(expanded_values, mask)
+    return result
 
 
 @dataclass
@@ -88,136 +99,156 @@ class VisionEmbedding(FleetLayer):
                 sublayers_spec.rope_embedding,
             )
 
-    def rot_pos_emb(self, grid_thw):
-        pos_ids = []
-        for t, h, w in grid_thw:
-            hpos_ids = paddle.arange(h).unsqueeze(1).expand([-1, w])
-            hpos_ids = hpos_ids.reshape(
-                [
-                    h // self.spatial_merge_size,
-                    self.spatial_merge_size,
-                    w // self.spatial_merge_size,
-                    self.spatial_merge_size,
-                ]
-            )
-            hpos_ids = hpos_ids.transpose(perm=[0, 2, 1, 3])
-            hpos_ids = hpos_ids.flatten()
+    def _build_token_image_mapping(self, grid_thw):
+        """Build token-to-image mapping, shared by rot_pos_emb and fast_pos_embed_interpolate"""
+        heights = grid_thw[:, 1]
+        widths = grid_thw[:, 2]
+        frames = grid_thw[:, 0]
 
-            wpos_ids = paddle.arange(w).unsqueeze(0).expand([h, -1])
-            wpos_ids = wpos_ids.reshape(
-                [
-                    h // self.spatial_merge_size,
-                    self.spatial_merge_size,
-                    w // self.spatial_merge_size,
-                    self.spatial_merge_size,
-                ]
-            )
-            wpos_ids = wpos_ids.transpose([0, 2, 1, 3])
-            wpos_ids = wpos_ids.flatten()
-            pos_ids.append(
-                paddle.stack(x=[hpos_ids, wpos_ids], axis=-1).tile(
-                    repeat_times=[t, 1]
-                )
-            )
-        pos_ids = paddle.cat(x=pos_ids, axis=0)
-        max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(start_axis=1)
-        return rotary_pos_emb
+        num_tokens = frames * heights * widths  # [N]
 
-    def fast_pos_embed_interpolate(self, grid_thw):
-        grid_ts, grid_hs, grid_ws = (
-            grid_thw[:, 0],
-            grid_thw[:, 1],
-            grid_thw[:, 2],
+        total_tokens = num_tokens.sum().item()  # 1 D2H
+        max_hw = paddle.max(paddle.maximum(heights, widths)).item()  # 1 D2H
+
+        # token-to-image mapping: image_id[j] = i, where cu_tokens[i] <= j < cu_tokens[i+1]
+        cu_tokens = paddle.concat(
+            [paddle.zeros([1], dtype="int64"), num_tokens.cumsum(0)]
         )
-        device = paddle.get_device()
+        global_idx = paddle.arange(total_tokens, dtype="int64")
+        image_id = (
+            global_idx.unsqueeze(-1) >= cu_tokens[:-1].unsqueeze(0)
+        ).astype("int64").sum(-1) - 1
 
-        idx_list = [[] for _ in range(4)]
-        weight_list = [[] for _ in range(4)]
+        local_idx = global_idx - cu_tokens[image_id]
 
-        for t, h, w in zip(grid_ts, grid_hs, grid_ws):
-            h_idxs = paddle.linspace(0, self.num_grid_per_side - 1, h)
-            w_idxs = paddle.linspace(0, self.num_grid_per_side - 1, w)
+        # frame-local index
+        token_hw = (heights * widths)[image_id]
+        frame_local_idx = local_idx % token_hw
 
-            h_idxs_floor = h_idxs.int()
-            w_idxs_floor = w_idxs.int()
-            h_idxs_ceil = (h_idxs.int() + 1).clip(
-                max=self.num_grid_per_side - 1
+        return image_id, frame_local_idx, total_tokens, max_hw
+
+    def rot_pos_emb(
+        self,
+        grid_thw,
+        image_id=None,
+        frame_local_idx=None,
+        total_tokens=None,
+        max_hw=None,
+    ):
+        m = self.spatial_merge_size
+        widths = grid_thw[:, 2]
+        merged_w = widths // m
+
+        if image_id is None:
+            image_id, frame_local_idx, total_tokens, max_hw = (
+                self._build_token_image_mapping(grid_thw)
             )
-            w_idxs_ceil = (w_idxs.int() + 1).clip(
-                max=self.num_grid_per_side - 1
+
+        freq_table = self.rotary_pos_emb(max_hw)
+
+        token_mw = merged_w[image_id]  # [total_tokens]
+
+        # Decompose linear index to coordinates: layout [merged_h, merged_w, m, m]
+        mm = m * m
+        mw_mm = token_mw * mm
+        block_row = frame_local_idx // mw_mm
+        r1 = frame_local_idx % mw_mm
+        block_col = r1 // mm
+        r2 = r1 % mm
+        intra_row = r2 // m
+        intra_col = r2 % m
+
+        row_idx = block_row * m + intra_row
+        col_idx = block_col * m + intra_col
+
+        pos_ids = paddle.stack([row_idx, col_idx], axis=-1)  # [total_tokens, 2]
+
+        embeddings = freq_table[pos_ids]
+        embeddings = embeddings.flatten(start_axis=1)
+        return embeddings
+
+    def fast_pos_embed_interpolate(
+        self,
+        grid_thw,
+        image_id=None,
+        frame_local_idx=None,
+        total_tokens=None,
+        max_hw=None,
+    ):
+        N = self.num_grid_per_side
+        m = self.spatial_merge_size
+        heights = grid_thw[:, 1]
+        widths = grid_thw[:, 2]
+        merged_w = widths // m
+
+        if image_id is None:
+            image_id, frame_local_idx, total_tokens, max_hw = (
+                self._build_token_image_mapping(grid_thw)
             )
 
-            dh = h_idxs - h_idxs_floor.astype("float32")
-            dw = w_idxs - w_idxs_floor.astype("float32")
+        token_mw = merged_w[image_id]
 
-            base_h = h_idxs_floor * self.num_grid_per_side
-            base_h_ceil = h_idxs_ceil * self.num_grid_per_side
+        # Decompose linear index to coordinates (same layout as rot_pos_emb)
+        mm = m * m
+        mw_mm = token_mw * mm
+        block_row = frame_local_idx // mw_mm
+        r1 = frame_local_idx % mw_mm
+        block_col = r1 // mm
+        r2 = r1 % mm
+        intra_row = r2 // m
+        intra_col = r2 % m
 
-            indices = [
-                (base_h[None].T + w_idxs_floor[None]).flatten(),
-                (base_h[None].T + w_idxs_ceil[None]).flatten(),
-                (base_h_ceil[None].T + w_idxs_floor[None]).flatten(),
-                (base_h_ceil[None].T + w_idxs_ceil[None]).flatten(),
+        # Pixel coordinates
+        j_h = (block_row * m + intra_row).astype("float32")
+        j_w = (block_col * m + intra_col).astype("float32")
+
+        # Bilinear interpolation: h_idx = j_h * (N-1) / (h-1)
+        token_h = heights[image_id].astype("float32")
+        token_w = widths[image_id].astype("float32")
+        h_denom = (token_h - 1).clip(min=1.0)
+        w_denom = (token_w - 1).clip(min=1.0)
+        h_idx = j_h * (N - 1) / h_denom
+        w_idx = j_w * (N - 1) / w_denom
+
+        h_floor = h_idx.astype("int32")
+        w_floor = w_idx.astype("int32")
+        h_ceil = (h_floor + 1).clip(max=N - 1)
+        w_ceil = (w_floor + 1).clip(max=N - 1)
+
+        dh = h_idx - h_floor.astype("float32")
+        dw = w_idx - w_floor.astype("float32")
+
+        base_h = h_floor * N
+        base_h_ceil = h_ceil * N
+
+        idx_tensor = paddle.stack(
+            [
+                (base_h + w_floor).astype("int64"),
+                (base_h + w_ceil).astype("int64"),
+                (base_h_ceil + w_floor).astype("int64"),
+                (base_h_ceil + w_ceil).astype("int64"),
             ]
+        )  # [4, total_tokens]
 
-            weights = [
-                ((1 - dh)[None].T * (1 - dw)[None]).flatten(),
-                ((1 - dh)[None].T * dw[None]).flatten(),
-                (dh[None].T * (1 - dw)[None]).flatten(),
-                (dh[None].T * dw[None]).flatten(),
-            ]
+        weight_tensor = paddle.stack(
+            [(1 - dh) * (1 - dw), (1 - dh) * dw, dh * (1 - dw), dh * dw]
+        ).astype(self.pos_embed.weight.dtype)  # [4, total_tokens]
 
-            for i in range(4):
-                idx_list[i].extend(indices[i].tolist())
-                weight_list[i].extend(weights[i].tolist())
-
-        idx_tensor = paddle.tensor(idx_list, dtype=paddle.long, device=device)
-        weight_tensor = paddle.tensor(
-            weight_list, dtype=self.pos_embed.weight.dtype
-        )
         pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
         patch_pos_embeds = (
             pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
         )
-
-        patch_pos_embeds = patch_pos_embeds.split(
-            [h * w for h, w in zip(grid_hs, grid_ws)]
-        )
-
-        patch_pos_embeds_permute = []
-        merge_size = self.spatial_merge_size
-        for pos_embed, t, h, w in zip(
-            patch_pos_embeds, grid_ts, grid_hs, grid_ws
-        ):
-            pos_embed = pos_embed.repeat([t, 1])
-            pos_embed = (
-                pos_embed.view(
-                    [
-                        t,
-                        h // merge_size,
-                        merge_size,
-                        w // merge_size,
-                        merge_size,
-                        -1,
-                    ]
-                )
-                .permute(0, 1, 3, 2, 4, 5)
-                .flatten(0, 4)
-            )
-            patch_pos_embeds_permute.append(pos_embed)
-        patch_pos_embeds = paddle.cat(patch_pos_embeds_permute)
+        # Already in (block_h, block_w, intra_h, intra_w) order, no merge_reshape needed
         return patch_pos_embeds
 
     def get_packed_seq_params(
         self,
         grid_thw: paddle.Tensor,
     ):
-        seqlens = paddle.repeat_interleave(
+        seqlens = safe_repeat_interleave_values(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).contiguous()
-        cu_seqlens = seqlens.cumsum(dim=0, dtype=paddle.int32)
+        )
+        cu_seqlens = seqlens.cumsum(axis=0, dtype=paddle.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0).contiguous()
         cu_seqlens = cu_seqlens.squeeze().contiguous()
 
@@ -231,40 +262,71 @@ class VisionEmbedding(FleetLayer):
             qkv_format="thd",
         )
 
-    def forward(self, dict_args: dict):
+    def forward(self, dict_args: dict) -> paddle.Tensor:
         pixel_values = dict_args["pixel_values"]
         grid_thw = dict_args["grid_thw"]
 
-        target_dtype = self.patch_embed.weight.dtype
-        hidden_states = pixel_values.view(
-            -1,
-            self.in_channels,
-            self.temporal_patch_size,
-            self.patch_size,
-            self.patch_size,
-        )
-        hidden_states = (
-            self.patch_embed(hidden_states)
-            .to(dtype=target_dtype)
-            .view(-1, self.embed_dim)
+        # Pathed embedding
+        hidden_states = self.patch_embed(pixel_values).view(-1, self.embed_dim)
+
+        # Share token-to-image mapping to avoid redundant computation
+        image_id, frame_local_idx, total_tokens, max_hw = (
+            self._build_token_image_mapping(grid_thw)
         )
 
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+        pos_embeds = self.fast_pos_embed_interpolate(
+            grid_thw,
+            image_id=image_id,
+            frame_local_idx=frame_local_idx,
+            total_tokens=total_tokens,
+            max_hw=max_hw,
+        )
         hidden_states = hidden_states + pos_embeds
 
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape([seq_len, -1])
         hidden_states = hidden_states.unsqueeze(0)
 
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
+        rotary_pos_emb = self.rot_pos_emb(
+            grid_thw,
+            image_id=image_id,
+            frame_local_idx=frame_local_idx,
+            total_tokens=total_tokens,
+            max_hw=max_hw,
+        )
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        rotary_pos_emb = paddle.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        rotary_pos_cos = rotary_pos_emb.cos()
-        rotary_pos_sin = rotary_pos_emb.sin()
+        rotary_pos_emb = paddle.cat((rotary_pos_emb, rotary_pos_emb), axis=-1)
+        # Cast freqs to float32 and compute cos/sin inside auto_cast(False) to match the
+        # precision of _apply_rotary_pos_emb_bshd_fp32, which computes cos/sin on the same
+        # bf16 freqs but under auto_cast(False) using a float32 kernel.
+        with paddle.amp.auto_cast(False):
+            _freqs_f32 = rotary_pos_emb.astype("float32")
+            rotary_pos_cos = paddle.cos(_freqs_f32)
+            rotary_pos_sin = paddle.sin(_freqs_f32)
         rotary_pos_emb = rotary_pos_emb[:, None, None, :]
-        rotary_pos_emb = rotary_pos_emb.transpose([1, 0])
+        rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
+
         packed_seq_params = self.get_packed_seq_params(grid_thw)
+
+        # Pre-compute attn_mask_startend_row_indices once for all ViT layers
+        cu_seqlens = packed_seq_params.cu_seqlens_kv
+        lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        indices_per_segment = paddle.stack(
+            [
+                cu_seqlens[1:],  # col 0: lower_start = end_i
+                paddle.full_like(
+                    cu_seqlens[1:], seq_len
+                ),  # col 1: lower_end   = total_seq
+                paddle.zeros_like(cu_seqlens[:-1]),  # col 2: upper_start = 0
+                cu_seqlens[:-1],  # col 3: upper_end   = start_i
+            ],
+            axis=1,
+        )  # [num_segments, 4]
+        attn_mask_startend_row_indices = (
+            paddle.repeat_interleave(indices_per_segment, lengths, axis=0)
+            .unsqueeze(0)
+            .unsqueeze(0)
+        )  # [1, 1, seq_len, 4]
 
         preproc_output = {
             "hidden_states": hidden_states,
@@ -273,6 +335,7 @@ class VisionEmbedding(FleetLayer):
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
             "packed_seq_params": packed_seq_params,
+            "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
         }
 
         return preproc_output
@@ -423,8 +486,8 @@ class Qwen3VLTextEmbedding(GPTEmbedding):
                     deepstack_visual_embeds = deepstack_video_embeds
 
                 if image_embeds is not None and video_embeds is not None:
-                    image_mask = image_mask[..., 0]
-                    video_mask = video_mask[..., 0]
+                    image_mask = image_mask[..., 0]  # [B, S] bool
+                    video_mask = video_mask[..., 0]  # [B, S] bool
                     visual_pos_masks = image_mask | video_mask
                     deepstack_visual_embeds = []
                     for img_embed, vid_embed in zip(
@@ -461,6 +524,18 @@ class Qwen3VLTextEmbedding(GPTEmbedding):
                             * vid_mask_in_vis_f
                         )
                         deepstack_visual_embeds.append(embed_joint)
+                # Scatter decoder_input to SP format [S/tp, B, H] after multimodal
+                # token replacement, since LanguageModelEmbedding's internal scatter
+                # was disabled to allow image/video embedding insertion first.
+                if self.sequence_parallel:
+                    decoder_input = decoder_input.transpose(
+                        [1, 0, 2]
+                    ).contiguous()
+                    decoder_input = scatter_to_sequence_parallel_region(
+                        decoder_input, group=self.embedding.tp_group
+                    )
+                    if self.config.clone_scatter_output_in_embedding:
+                        decoder_input = decoder_input.clone()
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
         rotary_pos_cos = None

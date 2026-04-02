@@ -185,6 +185,28 @@ class TransformerEncoder(PipelineLayer):
             )
             i += 1
 
+    def _get_weight_only_params(self):
+        """Get all parameters marked with is_weight_only_mtp flag."""
+        return [
+            param
+            for param in self.state_dict().values()
+            if getattr(param, "is_weight_only_mtp", False)
+        ]
+
+    def offload_weight_only_params(self):
+        """Offload all weight-only MTP parameters to CPU pinned memory."""
+        for param in self._get_weight_only_params():
+            if param.place.is_gpu_place():
+                cpu_param = param.pin_memory()
+                cpu_param._share_buffer_to(param)
+
+    def reload_weight_only_params(self):
+        """Reload weight-only MTP parameters from CPU pinned memory back to GPU."""
+        for param in self._get_weight_only_params():
+            if not param.place.is_gpu_place():
+                gpu_param = param.cuda()
+                gpu_param._share_buffer_to(param)
+
     def overlapped_forward_backward(
         self,
         forward_chunk,
@@ -436,8 +458,8 @@ class TransformerEncoder(PipelineLayer):
         """
         state_dict = super().state_dict(*args, **kwargs)
 
-        if self.modal is not None:
-            name_prefix = f"model.{self.modal}."
+        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+            name_prefix = "model.language_model."
         else:
             name_prefix = ""
         if self._pipeline_name_mapping is None:
@@ -503,8 +525,8 @@ class TransformerEncoder(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        if self.modal is not None:
-            name_prefix = f"model.{self.modal}."
+        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+            name_prefix = "model.language_model."
         else:
             name_prefix = ""
 

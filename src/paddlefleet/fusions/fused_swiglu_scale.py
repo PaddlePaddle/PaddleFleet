@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import paddle
+import paddle.nn.functional as F
+from paddle.nn.functional import swiglu
 
 
 def fused_swiglu_scale_forward(x, scale):
@@ -21,9 +23,14 @@ def fused_swiglu_scale_forward(x, scale):
 
         return fused_swiglu_scale(x, scale)
     else:
-        raise NotImplementedError(
-            "fused_swiglu_scale not implemented on this backend!"
-        )
+        out = swiglu(x)
+
+        # scale broadcast
+        scale_exp = scale.cast(x.dtype)
+        while scale_exp.ndim < out.ndim:
+            scale_exp = scale_exp.unsqueeze(-1)
+
+        return out * scale_exp
 
 
 def fused_swiglu_scale_backward(x, scale, out_grad):
@@ -32,6 +39,46 @@ def fused_swiglu_scale_backward(x, scale, out_grad):
 
         return fused_swiglu_scale_bwd(x, scale, out_grad)
     else:
-        raise NotImplementedError(
-            "fused_swiglu_scale_backward not implemented on this backend!"
-        )
+        # ----------------------------
+        # XPU / CPU fallback
+        # ----------------------------
+        hidden = x.shape[-1] // 2
+
+        gate = x[..., :hidden]
+        val = x[..., hidden:]
+
+        sig = F.sigmoid(gate).cast(x.dtype)
+        silu = gate * sig
+        swiglu = silu * val
+
+        # scale broadcast
+        scale_exp = scale.cast(x.dtype)
+        while scale_exp.ndim < out_grad.ndim:
+            scale_exp = scale_exp.unsqueeze(-1)
+
+        d_u = out_grad * scale_exp
+
+        # ----------------------------
+        # dv
+        # ----------------------------
+        d_val = d_u * silu
+
+        # ----------------------------
+        # dg
+        # ----------------------------
+        d_gate = d_u * val * sig * (1.0 + gate * (1.0 - sig))
+
+        # ----------------------------
+        # d_x concat back
+        # ----------------------------
+        d_x = paddle.concat([d_gate, d_val], axis=-1).cast(x.dtype)
+
+        # ----------------------------
+        # d_scale
+        # sum(dout * swiglu) over hidden dim
+        # ----------------------------
+        d_scale = paddle.sum(
+            out_grad.cast(paddle.float32) * swiglu.cast(paddle.float32), axis=-1
+        ).cast(scale.dtype)
+
+        return d_x, d_scale

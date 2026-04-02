@@ -15,13 +15,27 @@
 # Refer to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+import os
+import sys
+
+sys.path.insert(
+    0,
+    os.path.dirname(
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+    ),
+)
+
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import ShardedWeight
 
 import paddlefleet.parallel_state as ps
+from paddlefleet.models.backends import LocalSpecProvider
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
+    Linear,
     RowParallelLinear,
     VocabParallelEmbedding,
     linear_with_frozen_weight,
@@ -258,7 +272,7 @@ def test_RowParallelLinear(
         rank * (in_f // tensor_parallel),
         0,
     )
-    assert bias_shard.global_shape == [out_f]
+    assert bias_shard.global_shape == (out_f,)
     assert bias_shard.local_shape == bias_shard.global_shape
     assert bias_shard.global_offset == (0,)
 
@@ -344,6 +358,285 @@ def test_VocabParallelEmbedding(
     )
 
 
+# ---------------------------------------------------------------------------
+# Tests for Linear (non-TP, weight replicated across TP ranks).
+# backend.linear() in gpt_layer_specs.py resolves to this class via
+# LocalSpecProvider.linear() -> Linear.
+# ---------------------------------------------------------------------------
+
+
+def _make_linear_config():
+    return TransformerConfig(
+        num_hidden_layers=1,
+        hidden_size=12,
+        num_attention_heads=4,
+        use_cpu_initialization=True,
+    )
+
+
+def test_Linear_forward_basic():
+    """forward(): output shape is correct and backward propagates to input."""
+    config = _make_linear_config()
+    paddle.manual_seed(0)
+    layer = Linear(
+        input_size=8,
+        output_size=6,
+        config=config,
+        init_method=config.init_method,
+        bias=True,
+        skip_bias_add=False,
+    )
+
+    input_data = paddle.randn([4, 8])
+    input_data.requires_grad = True
+
+    output, output_bias = layer(input_data)
+
+    assert output.shape == [4, 6], f"Expected [4,6], got {output.shape}"
+    assert output_bias is None, (
+        "skip_bias_add=False should return None as output_bias"
+    )
+
+    output.sum().backward()
+    assert input_data.grad is not None
+    assert input_data.grad.shape == [4, 8]
+
+
+def test_Linear_skip_bias_add():
+    """forward() with skip_bias_add=True returns (output, bias) instead of adding bias."""
+    config = _make_linear_config()
+    paddle.manual_seed(1)
+    layer = Linear(
+        input_size=8,
+        output_size=6,
+        config=config,
+        init_method=config.init_method,
+        bias=True,
+        skip_bias_add=True,
+    )
+
+    input_data = paddle.randn([4, 8])
+    output, output_bias = layer(input_data)
+
+    assert output.shape == [4, 6]
+    assert output_bias is not None, (
+        "skip_bias_add=True should return the bias tensor"
+    )
+    assert output_bias.shape == [6]
+
+    # Verify: output + broadcast(bias) equals the manually computed result.
+    expected = paddle.matmul(input_data, layer.weight) + output_bias
+    assert paddle.allclose(output + output_bias, expected, atol=1e-5)
+
+
+def test_Linear_no_bias():
+    """forward() with bias=False: layer.bias is None, output_bias is None."""
+    config = _make_linear_config()
+    paddle.manual_seed(2)
+    layer = Linear(
+        input_size=8,
+        output_size=6,
+        config=config,
+        init_method=config.init_method,
+        bias=False,
+        skip_bias_add=False,
+    )
+
+    assert layer.bias is None
+
+    input_data = paddle.randn([4, 8])
+    output, output_bias = layer(input_data)
+
+    assert output.shape == [4, 6]
+    assert output_bias is None
+
+
+def test_Linear_skip_weight_param_allocation():
+    """forward() accepts an externally supplied weight when
+    skip_weight_param_allocation=True."""
+    config = _make_linear_config()
+    paddle.manual_seed(3)
+    layer = Linear(
+        input_size=8,
+        output_size=6,
+        config=config,
+        init_method=config.init_method,
+        bias=False,
+        skip_weight_param_allocation=True,
+    )
+
+    assert layer.weight is None
+
+    ext_weight = paddle.randn([8, 6])
+    input_data = paddle.randn([4, 8])
+    output, _ = layer(input_data, weight=ext_weight)
+
+    assert output.shape == [4, 6]
+    expected = paddle.matmul(input_data, ext_weight)
+    assert paddle.allclose(output, expected, atol=1e-5)
+
+
+def test_Linear_forward_wrong_weight_shape():
+    """forward() raises RuntimeError when supplied weight has wrong shape."""
+    config = _make_linear_config()
+    paddle.manual_seed(4)
+    layer = Linear(
+        input_size=8,
+        output_size=6,
+        config=config,
+        init_method=config.init_method,
+        bias=False,
+        skip_weight_param_allocation=True,
+    )
+
+    bad_weight = paddle.randn([8, 99])  # wrong output dim
+    input_data = paddle.randn([4, 8])
+    try:
+        layer(input_data, weight=bad_weight)
+        raise AssertionError("Expected RuntimeError was not raised")
+    except RuntimeError as e:
+        assert "not" in str(e).lower() or "expected" in str(e).lower()
+
+
+def test_Linear_frozen_weight():
+    """forward() switches to linear_with_frozen_weight when weight.stop_gradient=True."""
+    config = _make_linear_config()
+    paddle.manual_seed(5)
+    layer = Linear(
+        input_size=8,
+        output_size=6,
+        config=config,
+        init_method=config.init_method,
+        bias=True,
+        skip_bias_add=False,
+    )
+    layer.weight.stop_gradient = True
+
+    input_data = paddle.randn([4, 8])
+    input_data.requires_grad = True
+
+    output, _ = layer(input_data)
+    output.sum().backward()
+
+    # Weight gradient must not be computed (frozen).
+    assert layer.weight.grad is None
+    # Input gradient must still exist.
+    assert input_data.grad is not None
+
+
+def test_Linear_sharded_state_dict():
+    """sharded_state_dict(): weight and bias are present; weight is replicated
+    so it should NOT carry per-rank shard offsets (global_offset == (0, 0))."""
+    config = _make_linear_config()
+    paddle.manual_seed(6)
+    layer = Linear(
+        input_size=8,
+        output_size=6,
+        config=config,
+        init_method=config.init_method,
+        bias=True,
+    )
+
+    sharded_dict = layer.sharded_state_dict()
+
+    assert "weight" in sharded_dict
+    assert "bias" in sharded_dict
+
+    weight_entry = sharded_dict["weight"]
+    bias_entry = sharded_dict["bias"]
+
+    # Weight is replicated: either a plain tensor or a ShardedWeight with no
+    # actual sharding (global_offset all-zeros, local == global).
+    if isinstance(weight_entry, ShardedWeight):
+        assert weight_entry.global_shape == (8, 6)
+        assert weight_entry.local_shape == (8, 6)
+        assert weight_entry.global_offset == (0, 0)
+    else:
+        assert list(weight_entry.shape) == [8, 6]
+
+    if isinstance(bias_entry, ShardedWeight):
+        assert bias_entry.global_shape == (6,)
+        assert bias_entry.local_shape == (6,)
+        assert bias_entry.global_offset == (0,)
+    else:
+        assert list(bias_entry.shape) == [6]
+
+
+def test_Linear_extra_state():
+    """get_extra_state() returns None; set_extra_state() is a no-op."""
+    config = _make_linear_config()
+    layer = Linear(
+        input_size=8,
+        output_size=6,
+        config=config,
+        init_method=config.init_method,
+    )
+
+    assert layer.get_extra_state() is None
+    # set_extra_state must not raise.
+    layer.set_extra_state({"some": "state"})
+    layer.set_extra_state(None)
+
+
+def test_Linear_repr():
+    """__repr__() contains the expected fields."""
+    config = _make_linear_config()
+    layer = Linear(
+        input_size=8,
+        output_size=6,
+        config=config,
+        init_method=config.init_method,
+        bias=True,
+    )
+
+    r = repr(layer)
+    assert "Linear" in r
+    assert "8" in r  # in_features
+    assert "6" in r  # out_features
+    assert "TP=1" in r
+
+
+def test_Linear_via_backend_linear():
+    """Verify that LocalSpecProvider().linear() returns the Linear class and
+    that instances built from it behave identically to directly-constructed ones.
+
+    This mirrors how gpt_layer_specs.py uses backend.linear() for
+    q_a_proj / kv_a_proj_with_mqa in the MLA attention path."""
+
+    backend = LocalSpecProvider()
+    LinearCls = backend.linear()
+    assert LinearCls is Linear, (
+        f"backend.linear() should return Linear, got {LinearCls}"
+    )
+
+    config = _make_linear_config()
+    paddle.manual_seed(7)
+    layer = LinearCls(
+        input_size=16,
+        output_size=8,
+        config=config,
+        init_method=config.init_method,
+        bias=True,
+        skip_bias_add=False,
+    )
+
+    # Weight should be replicated (not distributed).
+    assert layer.weight.allreduce is True
+    assert layer.weight.is_distributed is False
+
+    input_data = paddle.randn([3, 16])
+    input_data.requires_grad = True
+    output, output_bias = layer(input_data)
+
+    assert output.shape == [3, 8]
+    assert output_bias is None
+
+    output.sum().backward()
+    assert input_data.grad is not None
+    assert layer.weight.grad is not None
+    assert layer.weight.grad.shape == [16, 8]
+
+
 if __name__ == "__main__":
     tensor_parallel = 4
     Utils.initialize_model_parallel(tensor_parallel, 1)
@@ -370,3 +663,13 @@ if __name__ == "__main__":
     )
     output_tp1, weight_grad_tp1 = embedding_baseline()
     test_VocabParallelEmbedding(4, output_tp1, weight_grad_tp1)
+    test_Linear_forward_basic()
+    test_Linear_skip_bias_add()
+    test_Linear_no_bias()
+    test_Linear_skip_weight_param_allocation()
+    test_Linear_forward_wrong_weight_shape()
+    test_Linear_frozen_weight()
+    test_Linear_sharded_state_dict()
+    test_Linear_extra_state()
+    test_Linear_repr()
+    test_Linear_via_backend_linear()

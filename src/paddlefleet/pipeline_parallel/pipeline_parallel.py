@@ -286,9 +286,7 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
         self.accumulate_steps = self._strategy.pipeline_configs[
             "accumulate_steps"
         ]
-        self._delay_scale_loss = self._strategy.hybrid_configs[
-            "pp_configs"
-        ].delay_scale_loss
+
         self._dp_comm_overlap = False
         self._sharding_comm_overlap = False
 
@@ -361,13 +359,12 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
         return data
 
     def _optimizer_step(self):
-        if self._delay_scale_loss:
-            for p in self._layers.parameters():
-                if hasattr(p, "main_grad") and p.main_grad is not None:
-                    assert p.grad is None
-                    p.main_grad = p.main_grad.scale(1.0 / self.accumulate_steps)
-                elif p.grad is not None:
-                    p.grad = p.grad.scale(1.0 / self.accumulate_steps)
+        for p in self._layers.parameters():
+            if hasattr(p, "main_grad") and p.main_grad is not None:
+                assert p.grad is None
+                p.main_grad = p.main_grad.scale(1.0 / self.accumulate_steps)
+            elif p.grad is not None:
+                p.grad = p.grad.scale(1.0 / self.accumulate_steps)
 
         if self.scaler:
             self.scaler.step(self.optimizer)
@@ -426,9 +423,7 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
                 assert isinstance(loss_tensor, paddle.Tensor), (
                     "Currently, loss_fn should obtain Paddle.Tensor dtype"
                 )
-                with paddle.amp.auto_cast(enable=False):
-                    if self.accumulate_steps > 1 and not self._delay_scale_loss:
-                        loss_tensor = loss_tensor / self.accumulate_steps
+
                 if self.total_loss is None:
                     self.total_loss = []
                 # when self.total_loss length is less than idx, append a new tensor
@@ -460,10 +455,7 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
                     tmp = paddle.zeros_like(self.total_loss[idx][0])
                     for loss in self.total_loss[idx]:
                         tmp += loss.detach()
-                    if not self._delay_scale_loss:
-                        losses.append(tmp)
-                    else:
-                        losses.append(tmp / self.accumulate_steps)
+                    losses.append(tmp / self.accumulate_steps)
                 else:
                     losses.append(self.total_loss[idx].detach())
         return losses[0] if len(losses) == 1 else losses
@@ -544,9 +536,6 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
                 assert isinstance(loss_tensor, paddle.Tensor), (
                     "Currently, loss_fn should obtain Paddle.Tensor dtype"
                 )
-                with paddle.amp.auto_cast(enable=False):
-                    if self.accumulate_steps > 1 and not self._delay_scale_loss:
-                        loss_tensor = loss_tensor / self.accumulate_steps
                 if self.total_loss is None:
                     self.total_loss = []
                 # when self.total_loss length is less than idx, append a new tensor
@@ -571,10 +560,7 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
                 tmp = paddle.zeros_like(self.total_loss[idx][0])
                 for loss in self.total_loss[idx]:
                     tmp += loss.detach()
-                if not self._delay_scale_loss:
-                    losses.append(tmp)
-                else:
-                    losses.append(tmp / self.accumulate_steps)
+                losses.append(tmp / self.accumulate_steps)
             else:
                 losses.append(self.total_loss[idx].detach())
         return losses[0] if len(losses) == 1 else losses
@@ -637,9 +623,6 @@ class PipelineParallel(nn.Layer, ParallelBase):
         self._real_pp_world_size = self.num_stages
         self._real_pp_rank = self.stage_id
 
-        self._delay_scale_loss = self._strategy.hybrid_configs[
-            "pp_configs"
-        ].delay_scale_loss
         # TODO(PP Dev): support dp_comm_overlap without use_main_grad training.
         # This combination will trigger inplace check error during `reshape_` in function `_split_tensors`.
         self._dp_comm_overlap = self._strategy.hybrid_configs[
@@ -1408,28 +1391,12 @@ class PipelineParallel(nn.Layer, ParallelBase):
                     if overlap_schedule_mode:
                         loss_fn_node = loss_fn.build_schedule_node()
                         loss_fn_node.labels = labels
-                        if (
-                            self.accumulate_steps > 1
-                            and not self._delay_scale_loss
-                        ):
-                            loss_fn_node.scale_loss_factor = (
-                                self.accumulate_steps
-                            )
                         loss_tensor = loss_fn_node.forward(output_tensor)
                     else:
                         loss_tensor = loss_fn(output_tensor, labels)
                         assert isinstance(loss_tensor, paddle.Tensor), (
                             "Currently, loss_fn should obtain Paddle.Tensor dtype"
                         )
-
-                        with paddle.amp.auto_cast(enable=False):
-                            if (
-                                self.accumulate_steps > 1
-                                and not self._delay_scale_loss
-                            ):
-                                loss_tensor = (
-                                    loss_tensor / self.accumulate_steps
-                                )
 
                     if self.total_loss is None:
                         self.total_loss = []
@@ -1633,10 +1600,7 @@ class PipelineParallel(nn.Layer, ParallelBase):
                     tmp = paddle.zeros_like(self.total_loss[idx][0])
                     for loss in self.total_loss[idx]:
                         tmp += loss.detach()
-                    if not self._delay_scale_loss:
-                        losses.append(tmp)
-                    else:
-                        losses.append(tmp / self.accumulate_steps)
+                    losses.append(tmp / self.accumulate_steps)
                 else:
                     losses.append(self.total_loss[idx].detach())
 
@@ -1686,13 +1650,12 @@ class PipelineParallel(nn.Layer, ParallelBase):
         return losses[0] if len(losses) == 1 else losses
 
     def _optimizer_step(self):
-        if self._delay_scale_loss:
-            for p in self._layers.parameters():
-                if hasattr(p, "main_grad") and p.main_grad is not None:
-                    assert p.grad is None
-                    p.main_grad = p.main_grad.scale(1.0 / self.accumulate_steps)
-                elif p.grad is not None:
-                    p.grad = p.grad.scale(1.0 / self.accumulate_steps)
+        for p in self._layers.parameters():
+            if hasattr(p, "main_grad") and p.main_grad is not None:
+                assert p.grad is None
+                p.main_grad = p.main_grad.scale(1.0 / self.accumulate_steps)
+            elif p.grad is not None:
+                p.grad = p.grad.scale(1.0 / self.accumulate_steps)
 
         if self.scaler:
             self.scaler.step(self.optimizer)

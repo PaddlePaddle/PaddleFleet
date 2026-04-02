@@ -21,6 +21,8 @@ import paddle
 from paddle.incubate.nn.functional.fused_rms_norm_ext import fused_rms_norm_ext
 from paddle.nn.functional import layer_norm
 
+from ..spec_utils import LayerSpec
+
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
         mark_as_sequence_parallel_parameter,
@@ -141,7 +143,7 @@ class WrappedPaddleNorm:
         config: TransformerConfig,
         hidden_size: int,
         eps: float = 1e-5,
-        input_is_parallel: bool = False,
+        input_is_parallel: bool | None = None,
     ):
         if config.normalization == "RMSNorm":
             norm_cls = RMSNorm
@@ -150,7 +152,11 @@ class WrappedPaddleNorm:
         else:
             raise Exception("Only RMSNorm for now.")
 
-        input_is_parallel = config.sequence_parallel
+        if input_is_parallel is None:
+            input_is_parallel = (
+                config.sequence_parallel
+                or config.tensor_model_parallel_size > 1
+            )
         return norm_cls(
             config=config,
             normalized_shape=hidden_size,
@@ -180,7 +186,7 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
         config: TransformerConfig,
         hidden_size: int,
         eps: float = 1e-5,
-        input_is_parallel: bool = False,
+        input_is_parallel: bool | None = None,
     ):
         super().__init__()
         self.config = config
@@ -192,6 +198,7 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             hidden_states_concat = dict_args["hidden_states"]
             tensor_list = paddle.split(
@@ -205,11 +212,13 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
         ):
             hidden_states_concat = paddle.concat(
                 [rst["hidden_states"], *tensor_list[1:]]
             )
             rst["hidden_states"] = hidden_states_concat
+        rst = {**dict_args, **rst}
         return rst
 
     def build_schedule_node(self):
@@ -262,3 +271,29 @@ class L2Norm(paddle.nn.Layer):
             paddle.Tensor: L2-normalized tensor with the same dtype as input.
         """
         return self._norm(x)
+
+
+def get_norm_extra_args(
+    layer_or_spec, config, output_size, eps, input_is_parallel
+):
+    """
+    Handle the difference of arguments signature between
+    WrappedPaddleNorm and other Norm implementation.
+    """
+    norm_cls = (
+        layer_or_spec.layer
+        if isinstance(layer_or_spec, LayerSpec)
+        else layer_or_spec
+    )
+    extra_args = {
+        "config": config,
+        "input_is_parallel": input_is_parallel,
+    }
+    if norm_cls is WrappedPaddleNorm:
+        extra_args["hidden_size"] = output_size
+        extra_args["eps"] = eps
+    else:
+        extra_args["normalized_shape"] = output_size
+        extra_args["norm_eps"] = eps
+
+    return extra_args

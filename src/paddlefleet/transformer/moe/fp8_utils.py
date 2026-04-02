@@ -303,7 +303,7 @@ class ExpertsGroupGemmContiguousNode:
         """
         clear_cached_tensors
         """
-        self.set_cached_tensors([None] * len(self.cached_tensors))
+        self.set_cached_tensors([None] * len(self.cached_tensors()))
 
     def reset_state(self):
         """
