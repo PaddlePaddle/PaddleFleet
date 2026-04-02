@@ -37,7 +37,7 @@ jobs:
           if cat changed_files.txt | grep -q "^D.*uv\.lock"; then
             echo "::error::uv.lock cannot be deleted in this PR"
             exit 1
-          else if cat changed_files.txt | grep -q "^R.*uv\.lock"; then
+          elif cat changed_files.txt | grep -q "^R.*uv\.lock"; then
             echo "::error::uv.lock cannot be renamed in this PR"
             exit 1
           fi
