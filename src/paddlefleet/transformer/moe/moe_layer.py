@@ -60,6 +60,16 @@ from .moe_utils import (
     unpermute,
 )
 
+class FakeMLP(PyLayer):
+    @staticmethod
+    def forward(ctx, hidden_states):
+        ctx.size = hidden_states.shape[-1]
+        ctx.dtype = hidden_states.dtype
+        return paddle.empty([0, ctx.size],dtype=ctx.dtype,requires_grad=True,)
+    @staticmethod
+    def backward(ctx, grad):
+        return paddle.empty([0, ctx.size],dtype=ctx.dtype,requires_grad=True,)
+
 
 class GradDtypeGuard(PyLayer):
     """Guard the grad's dtype if different from input's dtype."""
@@ -444,7 +454,7 @@ class MoELayer(nn.Layer):
             T = dispatched_hidden_states.shape[0]
             # no tokens need to be process
             if T == 0:
-                hidden_states = dispatched_hidden_states
+                hidden_states = FakeMLP.apply(dispatched_hidden_states)
             else:
                 K = self.num_experts_per_tok
                 stream_id = paddle.device.cuda.current_stream().cuda_stream
