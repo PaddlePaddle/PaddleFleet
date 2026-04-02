@@ -198,6 +198,8 @@ class MoELayer(nn.Layer):
                         "moe_grouped_gemm is only supported when moe_token_dispatcher_type is 'deepep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
                     )
                 self.fp8_dispatch = False
+        else:
+            self.moe_use_fusion_node = config.moe_use_fusion_node
 
         if self.fp8:
             if paddle.version.cuda() == "12.6":
