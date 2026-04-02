@@ -132,4 +132,7 @@ class BlockAttnRes(FleetLayer):
         # Equivalent to einsum("n b s, n b s d -> b s d", weights, V)
         h = (weights.unsqueeze(-1) * V).sum(axis=0)
 
+        if partial_block is not None and h.dtype != partial_block.dtype:
+            h = h.to(partial_block.dtype)
+
         return h

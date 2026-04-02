@@ -256,6 +256,7 @@ def get_gpt_layer_local_spec(
             post_attention_layernorm=layer_norm,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
+            block_attn_res=block_attn_res,
             sharded_state_dict_keys_map={
                 "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
                 "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
