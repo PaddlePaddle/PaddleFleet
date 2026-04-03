@@ -412,17 +412,12 @@ class TransformerLayer(nn.Layer):
             # process position_ids
             if "position_ids" in dict_args.keys():
                 position_ids = dict_args["position_ids"]
-                if self.config.context_parallel_size > 1:
-                    tensor_list = paddle.split(position_ids, self.config.num_nextn_predict_layers + 1)
-                    decoder_ids = tensor_list[0]
-                    mtp_ids = tensor_list[1:]
-                else:
-                    decoder_ids = position_ids[
-                        :, : -self.config.num_nextn_predict_layers
-                    ]
-                    mtp_ids = position_ids[
-                        :, -self.config.num_nextn_predict_layers :
-                    ]
+                decoder_ids = position_ids[
+                    :, : -self.config.num_nextn_predict_layers
+                ]
+                mtp_ids = position_ids[
+                    :, -self.config.num_nextn_predict_layers :
+                ]
                 dict_args["position_ids"] = decoder_ids
 
             # #process attn_mask_startend_row_indices
@@ -505,14 +500,9 @@ class TransformerLayer(nn.Layer):
             rst["hidden_states"] = hidden_states_concat
 
             if "position_ids" in dict_args.keys():
-                if self.config.context_parallel_size > 1:
-                    position_ids = paddle.concat(
-                        [dict_args["position_ids"], *mtp_ids], axis=0
-                    )
-                else:
-                    position_ids = paddle.concat(
-                        [dict_args["position_ids"], mtp_ids], axis=1
-                    )
+                position_ids = paddle.concat(
+                    [dict_args["position_ids"], mtp_ids], axis=1
+                )
                 dict_args["position_ids"] = position_ids
 
             if "attn_mask_startend_row_indices" in dict_args.keys():

@@ -142,24 +142,13 @@ class GPTEmbedding(FleetLayer):
                 assert not self.multimodal_embedding, (
                     "MTP not support mm for now."
                 )
-                if self.config.context_parallel_size > 1:
-                    # when mtp and cp are opened at the same time,
-                    # shape of decoder_input is [(K + 1)*B, S, H]
-                    # K is the number of num_nextn_predict_layers
-                    tensor_list = paddle.split(decoder_input, self.config.num_nextn_predict_layers+1)
-                    inputs_embeds = tensor_list[0] # [B, S, H]
-                    inputs_embeds_extra = tensor_list[1:] # K * [B, S, H]
-                else:
-                    # when just mtp is opened,
-                    # shape of decoder_input is [B, S + K, H]
-                    # K is the number of num_nextn_predict_layers
-                    inputs_embeds_extra = decoder_input[
-                        :, -self.config.num_nextn_predict_layers :, :
-                    ]  # [B, k, H]
-                    inputs_embeds = decoder_input[
-                        :, : -self.config.num_nextn_predict_layers, :
-                    ]  # [B, S, H]
-                    inputs_embeds_ori = inputs_embeds
+                inputs_embeds_extra = decoder_input[
+                    :, -self.config.num_nextn_predict_layers :, :
+                ]  # [B, S, H]
+                inputs_embeds = decoder_input[
+                    :, : -self.config.num_nextn_predict_layers, :
+                ]
+                inputs_embeds_ori = inputs_embeds
                 batch_size, seq_length, hidden_size = inputs_embeds.shape
 
                 if self.sequence_parallel:
@@ -174,16 +163,13 @@ class GPTEmbedding(FleetLayer):
                     )  # change to [S, B, H]
                 mtp_emb_res = [inputs_embeds]
                 for depth in range(self.config.num_nextn_predict_layers):
-                    if self.config.context_parallel_size > 1:
-                        inputs_embeds_mtp = inputs_embeds_extra[depth]
-                    else:
-                        inputs_embeds_mtp = paddle.concat(
-                            [
-                                inputs_embeds_ori[:, (depth + 1) :, :],
-                                inputs_embeds_extra[:, : (depth + 1), :],
-                            ],
-                            axis=1,
-                        )
+                    inputs_embeds_mtp = paddle.concat(
+                        [
+                            inputs_embeds_ori[:, (depth + 1) :, :],
+                            inputs_embeds_extra[:, : (depth + 1), :],
+                        ],
+                        axis=1,
+                    )
                     if self.sequence_parallel:
                         inputs_embeds_mtp = inputs_embeds_mtp.reshape(
                             [-1, inputs_embeds_mtp.shape[-1]]

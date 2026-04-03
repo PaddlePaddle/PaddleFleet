@@ -267,7 +267,7 @@ def is_paddle_min_version(version, check_equality=True):
 ########################
 
 
-def get_batch_on_this_cp_rank(inputs, num_nextn_predict_layers=0):
+def get_batch_on_this_cp_rank(inputs):
     if isinstance(inputs, paddle.Tensor):
         return ContextParallelScatterOp.apply(inputs, axis=-1)
     elif isinstance(inputs, dict):
@@ -275,14 +275,7 @@ def get_batch_on_this_cp_rank(inputs, num_nextn_predict_layers=0):
         keys = ["input_ids", "position_ids", "labels"]
         for k, tensor in inputs.items():
             if k in keys:
-                seq_len = tensor.shape[-1]
-                chunk_size = seq_len - num_nextn_predict_layers
-                res[k] = []
-                for i in range(num_nextn_predict_layers+1):
-                    tensor_chunk = tensor[:, i : i+chunk_size]
-                    res[k].append(ContextParallelScatterOp.apply(tensor_chunk, axis=-1))
-                # tensor shape = [(k+1)*b, s]
-                res[k] = paddle.concat(res[k])
+                res[k] = ContextParallelScatterOp.apply(tensor, axis=-1)
             else:
                 res[k] = tensor
     elif isinstance(inputs, list):
