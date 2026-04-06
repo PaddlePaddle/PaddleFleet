@@ -15,50 +15,19 @@
 
 import functools
 import random
-import subprocess
 import unittest
 
 import numpy as np
 import paddle
 from paddle.distributed import fleet
 
-# from tests.unit_tests.test_utilities import Utils
 import paddlefleet.parallel_state as ps
-
-# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.pipeline_parallel import NoPipelineParallel
 
 
-def get_gpu_models_via_nvidia_smi():
-    try:
-        output = subprocess.check_output(
-            "nvidia-smi --query-gpu=name --format=csv,noheader", shell=True
-        )
-        models = output.decode().strip().replace("NVIDIA", "")
-        return models
-    except Exception as e:
-        return ["Unknown"]
-
-
-def judge_machine_type():
-    if not paddle.is_compiled_with_cuda():
-        return "No CUDA GPU"
-    models = get_gpu_models_via_nvidia_smi()
-    for model in models:
-        name = model.upper()
-        if "V" in name:
-            return "V"
-        elif "H" in name:
-            return "H"
-
-
-result = judge_machine_type()
-print("The type of your machine", result)
-
-
-class TestGPTModel(unittest.TestCase):
+class TestBlockAttnRes(unittest.TestCase):
     def setUp(self):
         seed = 46
         random.seed(seed)
@@ -90,8 +59,9 @@ class TestGPTModel(unittest.TestCase):
         ps.initialize_model_parallel(hcg)
         self.strategy = strategy
 
+    def test_block_attn_res(self):
         config = GPTConfig(
-            num_hidden_layers=2,
+            num_hidden_layers=4,
             hidden_size=512,
             rotary_base=10000,
             vocab_size=100,
@@ -112,19 +82,13 @@ class TestGPTModel(unittest.TestCase):
             ),
             tie_word_embeddings=True,
             use_qk_norm=True,
+            block_attention_residuals=True,
+            attn_res_block_size=2,
         )
-        self.gpt_model = gpt_builder(config, num_stages=1)
-        self.config = config
+        gpt_model = gpt_builder(config, num_stages=1)
 
-    def test_forward(self) -> None:
-        sequence_length = self.config.max_sequence_length
+        sequence_length = config.max_sequence_length
         micro_batch_size = 1
-
-        for name, param in self.gpt_model.named_parameters():
-            # 计算 L2 范数
-            param_norm = param.detach().norm().item()
-            param_abssum = param.detach().abs().sum().item()
-            print(f"{name}: {param_norm:.6f}, {param_abssum:.6f}")
 
         data = list(range(sequence_length))
         input_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
@@ -134,13 +98,14 @@ class TestGPTModel(unittest.TestCase):
             (micro_batch_size, 1)
         )
         attention_mask = paddle.ones(
-            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+            (micro_batch_size, 1, sequence_length, sequence_length),
+            dtype=bool,
         )
         labels = paddle.to_tensor(
             list(range(1, sequence_length + 1)), dtype=paddle.int64
         ).repeat((micro_batch_size, 1))
 
-        gpt_pipe_model = NoPipelineParallel(self.gpt_model, self.strategy)
+        gpt_pipe_model = NoPipelineParallel(gpt_model, self.strategy)
         data = (
             {
                 "input_ids": [input_ids],
@@ -152,34 +117,31 @@ class TestGPTModel(unittest.TestCase):
 
         loss = gpt_pipe_model.forward_backward_pipeline(data)
 
-        for name, param in self.gpt_model.named_parameters():
+        # Verify loss is finite
+        assert paddle.isfinite(loss).item(), (
+            f"loss is not finite: {loss.item()}"
+        )
+        print("block_attn_res loss", loss.item())
+
+        # Verify gradients exist and are finite
+        for name, param in gpt_model.named_parameters():
+            assert param.grad is not None, f"param {name} has no gradient"
             grad_norm = param.grad.detach().norm().item()
-            grad_abssum = param.grad.detach().abs().sum().item()
-            print(f"{name}: {grad_norm:.6f}, {grad_abssum:.6f}")
-            if name == "0.embedding.embed_tokens.weight":
-                embed_tokens_grad_norm = grad_norm
-
-        print("loss", loss.item())
-        print("embed_tokens_grad_norm", embed_tokens_grad_norm)
-
-        if judge_machine_type() == "H":
-            assert loss.item() == 5.399779796600342, (
-                f"loss is not equal ({loss.item()} != 5.399779796600342), please check your modify"
-            )
-            assert embed_tokens_grad_norm == 4.742391586303711, (
-                f"grad norm of embed_tokens is not equal ({embed_tokens_grad_norm} != 4.742391586303711), please check your modify"
-            )
-        elif judge_machine_type() == "V":
-            assert loss.item() == 5.344659805297852, (
-                f"loss is not equal ({loss.item()} != 5.344659805297852), please check your modify"
-            )
-            assert embed_tokens_grad_norm == 4.078969478607178, (
-                f"grad norm of embed_tokens is not equal ({embed_tokens_grad_norm} != 4.078969478607178), please check your modify"
+            assert np.isfinite(grad_norm), (
+                f"param {name} has non-finite gradient: {grad_norm}"
             )
 
-        state_dict = self.gpt_model.sharded_state_dict()
-        for name, tensor in state_dict.items():
-            assert tensor.local_shape == tensor.global_shape
+        # Verify block_attn_res parameters have gradients
+        has_block_attn_res_param = False
+        for name, param in gpt_model.named_parameters():
+            if "block_attn_res" in name:
+                has_block_attn_res_param = True
+                assert param.grad is not None, (
+                    f"block_attn_res param {name} has no gradient"
+                )
+        assert has_block_attn_res_param, (
+            "No block_attn_res parameters found in model"
+        )
 
 
 if __name__ == "__main__":

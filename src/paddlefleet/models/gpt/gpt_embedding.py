@@ -23,6 +23,9 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 
 from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddlefleet.tensor_parallel.mappings import (
+    scatter_to_sequence_parallel_region,
+)
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -62,18 +65,21 @@ class GPTEmbedding(FleetLayer):
             position_embedding_type=position_embedding_type,
         )
         self.sequence_parallel = self.config.sequence_parallel
-        if (
-            config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
-            and self.sequence_parallel
-            and not config.mtp_load_weight_only
+
+        self.multimodal_embedding = config.multimodal_embedding
+        if self.sequence_parallel and (
+            self.multimodal_embedding
+            or (
+                config.num_nextn_predict_layers is not None
+                and self.config.num_nextn_predict_layers > 0
+                and not config.mtp_load_weight_only
+            )
         ):
             self.embedding.embed_tokens.reduce_scatter_embeddings = False
             self.embedding.scatter_to_sequence_parallel = False
             self.embedding.reduce_scatter_embeddings = False
             self.embedding.sequence_parallel = False
         self.rotary_pos_emb = None
-        self.multimodal_embedding = config.multimodal_embedding
         self.mrope_section = mrope_section
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
@@ -101,8 +107,9 @@ class GPTEmbedding(FleetLayer):
     ):
         input_ids = dict_args["input_ids"]
         position_ids = dict_args.get("position_ids", None)
+        device = paddle.device.get_device().split(":")[0].lower()
         position_ids = (
-            position_ids.to("gpu") if position_ids is not None else None
+            position_ids.to(device) if position_ids is not None else None
         )
         attention_mask = dict_args.get("attention_mask", None)
         attn_mask_startend_row_indices = dict_args.get(
@@ -282,6 +289,18 @@ class GPTEmbedding(FleetLayer):
                             * vid_mask_in_vis_f
                         )
                         deepstack_visual_embeds.append(embed_joint)
+                # Scatter decoder_input to SP format [S/tp, B, H] after multimodal
+                # token replacement, since LanguageModelEmbedding's internal scatter
+                # was disabled to allow image/video embedding insertion first.
+                if self.sequence_parallel:
+                    decoder_input = decoder_input.transpose(
+                        [1, 0, 2]
+                    ).contiguous()
+                    decoder_input = scatter_to_sequence_parallel_region(
+                        decoder_input, group=self.embedding.tp_group
+                    )
+                    if self.config.clone_scatter_output_in_embedding:
+                        decoder_input = decoder_input.clone()
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
         rotary_pos_cos = None
@@ -314,9 +333,16 @@ class GPTEmbedding(FleetLayer):
                 rotary_pos_cos = paddle.cos(rotary_pos_emb)
                 rotary_pos_sin = paddle.sin(rotary_pos_emb)
             if self.config.sequence_parallel:
-                rotary_pos_emb = rotary_pos_emb.transpose(
-                    [1, 0, 2, 3]
-                ).contiguous()
+                if self.position_embedding_type == "mrope":
+                    # MRoPE: [B, S, head_dim] -> [S, B, head_dim]
+                    rotary_pos_emb = rotary_pos_emb.transpose(
+                        [1, 0, 2]
+                    ).contiguous()
+                else:
+                    # RoPE: [1, S, 1, head_dim] -> [S, 1, 1, head_dim]
+                    rotary_pos_emb = rotary_pos_emb.transpose(
+                        [1, 0, 2, 3]
+                    ).contiguous()
 
         preproc_output = {
             "hidden_states": decoder_input,

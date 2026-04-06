@@ -102,11 +102,17 @@ cache-keys = [{ file = "pyproject.toml" }, { file = "src/paddlefleet/_extensions
 [tool.uv.sources]
 paddlepaddle-gpu = {index = "paddlepaddle-gpu"}
 paddlepaddle-xpu = {index = "paddlepaddle-xpu"}
+paddle-nvidia-nvshmem-cu12 = {index = "paddlepaddle-gpu"}
+paddle-nvidia-nvshmem-cu13 = {index = "paddlepaddle-cu13"}
 
 
 [[tool.uv.index]]
 name = "paddlepaddle-gpu"
 url = "https://www.paddlepaddle.org.cn/packages/stable/cu129/"
+
+[[tool.uv.index]]
+name = "paddlepaddle-cu13"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu130/"
 
 [[tool.uv.index]]
 name = "paddlepaddle-xpu"

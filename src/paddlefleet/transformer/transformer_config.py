@@ -227,6 +227,21 @@ class TransformerConfig(ModelParallelConfig):
     attention output before the output projection. The gate is produced alongside the query
     from the fused QKV projection (doubling the query projection size). This allows the model
     to dynamically control the information flow from attention. See Qwen3.5 for reference."""
+
+    ####################
+    # block attention residuals
+    ####################
+    block_attention_residuals: bool = False
+    """Whether to use block attention residuals. When True,
+    replaces standard fixed-weight residual connections with
+    learned softmax attention over block-level representations."""
+
+    attn_res_block_size: int = 1
+    """Number of consecutive layers per block for
+    block attention residuals. Controls how many layers
+    accumulate standard residuals before applying the learned
+    attention-weighted combination across blocks."""
+
     ####################
     # mixed-precision
     ####################

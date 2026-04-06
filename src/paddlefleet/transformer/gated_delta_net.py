@@ -184,18 +184,18 @@ class GatedDeltaNet(FleetLayer):
         # Time step projection (discretization)
         self.num_v_heads_local_tp = self.num_value_heads // self.tp_size
 
-        # dt_bias parameter
+        # dt_bias parameter — fp32 for numerical stability in softplus
         self.dt_bias = self.create_parameter(
             shape=[self.num_v_heads_local_tp],
-            dtype=config.params_dtype,
+            dtype="float32",
             default_initializer=nn.initializer.Constant(1.0),
         )
         self.dt_bias.is_distributed = True if self.tp_size > 1 else False
 
-        # A_log parameter
+        # A_log parameter — fp32 to avoid exp() overflow in bf16
         self.A_log = self.create_parameter(
             shape=[self.num_v_heads_local_tp],
-            dtype=config.params_dtype,
+            dtype="float32",
             default_initializer=nn.initializer.Constant(0.0),
         )
         self.A_log.is_distributed = True if self.tp_size > 1 else False
@@ -246,9 +246,7 @@ class GatedDeltaNet(FleetLayer):
             nn.initializer.Constant(1.0)(self.dt_bias)
 
             # A_log: initialize to log(uniform(A_init_range))
-            A = paddle.empty(
-                [self.num_v_heads_local_tp], dtype=self.config.params_dtype
-            )
+            A = paddle.empty([self.num_v_heads_local_tp], dtype="float32")
             nn.initializer.Uniform(
                 low=self.A_init_range[0], high=self.A_init_range[1]
             )(A)
@@ -362,8 +360,8 @@ class GatedDeltaNet(FleetLayer):
 
         # Calculate g and beta
         nvtx_range_push(suffix="g_and_beta")
-        g = -self.A_log.exp() * F.softplus(
-            alpha.astype(paddle.float32) + self.dt_bias
+        g = -self.A_log.astype(paddle.float32).exp() * F.softplus(
+            alpha.astype(paddle.float32) + self.dt_bias.astype(paddle.float32)
         )
         beta = beta.sigmoid()
         nvtx_range_pop(suffix="g_and_beta")

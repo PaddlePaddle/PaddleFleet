@@ -161,6 +161,16 @@ def _apply_rotary_pos_emb_bshd(
     """
     rot_dim = freqs.shape[-1]
 
+    # For M-RoPE with sequence parallel, freqs may be [S, B, D] while t is [B, S, H, D].
+    # When the first two dims are swapped (same product but different order), transpose
+    # freqs to align with t's [batch, seq] layout.  A plain reshape would silently
+    # reinterpret the memory without reordering data, giving wrong results for B > 1.
+    if freqs.ndim == 3:
+        t_d0, t_d1 = t.shape[0], t.shape[1]
+        f_d0, f_d1 = freqs.shape[0], freqs.shape[1]
+        if (t_d0 != f_d0 or t_d1 != f_d1) and t_d0 * t_d1 == f_d0 * f_d1:
+            freqs = freqs.transpose([1, 0, 2]).contiguous()
+
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
@@ -240,6 +250,7 @@ def _get_thd_freqs_on_this_cp_rank(
 def _apply_rotary_pos_emb_thd(
     t: Tensor,
     cu_seqlens: Tensor,
+    total_seq_len: int | None,
     freqs: Tensor,
     rotary_interleaved: bool = False,
     multi_latent_attention: bool = False,
@@ -253,6 +264,9 @@ def _apply_rotary_pos_emb_thd(
         t (Tensor): Input tensor T is of shape [t, h, d]
         cu_seqlens(Tensor):  Cumulative sum of sequence lengths in a batch for `t`,
         with shape [b + 1] and dtype paddle.int32.
+        total_seq_len (int | None): The actual total sequence length before padding.
+            When cu_seqlens uses a padded version, this provides the true total length
+            for correct frequency tensor selection. If None, falls back to cu_seqlens[-1].
         freqs (Tensor): Rotary Positional embedding tensor freq is of shape [max_s, 1, 1, d]
         cp_group (Group): The context parallel group
 
@@ -262,14 +276,16 @@ def _apply_rotary_pos_emb_thd(
     cp_size = get_pg_size(cp_group)
     cp_rank = get_pg_rank(cp_group)
 
-    seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
+    total_seq_len = (
+        total_seq_len if total_seq_len is not None else cu_seqlens[-1]
+    )
 
     # Handle two different frequency tensor formats:
-    # 1. If freqs.size(0) == cu_seqlens[-1]: freqs contains all positions across all sequences
+    # 1. If freqs.size(1) == total_seq_len: freqs contains all positions across all sequences
     #    -> Use offset-based mapping for exact positional correspondence
     # 2. Otherwise: freqs contains only max sequence length positions
     #    -> Use traditional mapping without offsets (map first :seqlen part)
-    if freqs.dim() >= 1 and freqs.size(1) == cu_seqlens[-1]:
+    if freqs.dim() >= 1 and freqs.size(1) == total_seq_len:
         # CASE 1: Exact mapping with offsets
         # When cp_size==1, every per-segment slice concatenates back to the original freqs.
         # Skip the split+cat and call bshd directly with the original freqs.
@@ -282,6 +298,7 @@ def _apply_rotary_pos_emb_thd(
                 mscale=mscale,
                 high_precision_rope=high_precision_rope,
             )
+        seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
         # Build packed freqs in one pass, then apply once to the whole packed tensor
         cu_seqlens_list = cu_seqlens.tolist()
         sequence_splits = paddle.split(t, seqlens, axis=1 if t.ndim == 4 else 0)
@@ -308,6 +325,7 @@ def _apply_rotary_pos_emb_thd(
     else:
         # CASE 2: Traditional mapping without offsets
         # Build packed freqs for all sequences using the standard mapping, then apply once
+        seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
         sequence_splits = paddle.split(t, seqlens, axis=1 if t.ndim == 4 else 0)
         freqs_packed = paddle.cat(
             [
@@ -334,6 +352,7 @@ def apply_rotary_pos_emb(
     sin: Tensor | None,
     config: TransformerConfig,
     cu_seqlens: Tensor | None = None,
+    total_seq_len: int | None = None,
     mscale: float = 1.0,
     cp_group: Group = None,
     position_ids: Tensor | None = None,
@@ -349,6 +368,9 @@ def apply_rotary_pos_emb(
         sin (Tensor | None): Pre-computed sine values of freqs (used for fused implementation)
         config (TransformerConfig): Transformer configuration
         cu_seqlens (Tensor | None): Cumulative sequence lengths
+        total_seq_len (int | None): The actual total sequence length before padding.
+            Used in thd format to correctly select frequency tensor when cu_seqlens
+            is padded. If None, falls back to cu_seqlens[-1].
         mscale (float): Scaling factor
         cp_group (Group): Context parallel group
     """
@@ -386,6 +408,7 @@ def apply_rotary_pos_emb(
         return _apply_rotary_pos_emb_thd(
             t,
             cu_seqlens,
+            total_seq_len,
             freqs,
             rotary_interleaved=config.rotary_interleaved,
             multi_latent_attention=config.multi_latent_attention,

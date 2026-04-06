@@ -13,7 +13,6 @@
 # limitations under the License.
 from dataclasses import dataclass
 
-import paddle
 from paddle import nn
 from paddle.nn import functional as F
 
@@ -66,7 +65,9 @@ class Qwen3VLVisionPathMerger(nn.Module):
             )
         )
 
-    def forward(self, x: paddle.Tensor):
+    def forward(self, x):
+        if isinstance(x, dict):
+            x = x["hidden_states"].squeeze(0)
         if self.use_postshuffle_norm:
             x = self.norm(x.reshape([-1, self.hidden_size]))
             x = x.reshape([-1, self.hidden_size])
@@ -74,5 +75,7 @@ class Qwen3VLVisionPathMerger(nn.Module):
             x = self.norm(x)
             x = x.reshape([-1, self.hidden_size])
 
-        x = self.mlp(x)
-        return x
+        x, output_bias = self.mlp(x)
+        if output_bias is not None:
+            x += output_bias
+        return x, None

@@ -123,6 +123,7 @@ class MLP(FleetLayer):
                 )
 
             intermediate_size = self.config.intermediate_size
+
         self.hidden_size = (
             hidden_size if hidden_size is not None else self.config.hidden_size
         )

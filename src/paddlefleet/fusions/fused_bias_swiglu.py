@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
 
-@jit_fuser
 def swiglu(y):
     """Performs SwiGLU (Swish-Gated Linear Unit) activation function.
 
@@ -38,8 +37,7 @@ def swiglu(y):
     Returns:
         paddle.Tensor: Result of SwiGLU activation: SiLU(y1) * y2, where y1, y2 are the split halves.
     """
-    y_1, y_2 = paddle.chunk(y, 2, -1)
-    return F.silu(y_1) * y_2
+    return F.swiglu(y)
 
 
 @jit_fuser

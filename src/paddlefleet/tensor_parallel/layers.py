@@ -758,6 +758,258 @@ def linear_with_grad_accumulation_and_async_allreduce(
 linear_with_grad_accumulation_and_async_allreduce.warned = False
 
 
+class Linear(paddle.nn.Layer):
+    """Linear layer with no tensor parallelism (weight duplicated across TP ranks).
+
+    The linear layer is defined as Y = XA + b. Weight is not split and is
+    replicated on all tensor parallel ranks. Interface is identical to
+    ColumnParallelLinear for drop-in compatibility.
+
+    Refer to Megatron-LM's TELinear with parallel_mode="duplicated" for the
+    equivalent design.
+
+    Args:
+        input_size:
+            first dimension of matrix A.
+        output_size:
+            second dimension of matrix A.
+        bias:
+            If true, add bias.
+        gather_output:
+            Unused. Kept for interface compatibility with ColumnParallelLinear.
+        init_method:
+            method to initialize weights. Note that bias is always set to zero.
+        stride:
+            For the strided linear layers.
+        keep_master_weight_for_test:
+            This was added for testing and should be set to False. It
+            returns the master weights used for initialization.
+        skip_bias_add:
+            If True, do not add the bias term, instead return it to be added by
+            the caller. This enables performance optimizations where bias can be
+            fused with other elementwise operations.
+        skip_weight_param_allocation:
+            If True, weight parameter is not allocated and must be passed as a
+            keyword argument `weight` during the forward pass. Defaults to False.
+        embedding_activation_buffer:
+            This buffer holds the input activations of the final embedding linear
+            layer on the last pipeline stage when defer_embedding_wgrad_compute
+            is enabled.
+        grad_output_buffer:
+            This buffer holds the gradient outputs of the final embedding linear
+            layer on the last pipeline stage when defer_embedding_wgrad_compute
+            is enabled.
+        is_expert:
+            If True, the layer is treated as an MoE expert layer.
+        config:
+            ModelParallelConfig object.
+        tp_comm_buffer_name:
+            Not used. Kept for interface compatibility.
+        disable_grad_reduce:
+            Not used. Weight is replicated so no TP grad reduction is needed.
+        tp_group:
+            Not used. Kept for interface compatibility.
+    """
+
+    def __init__(
+        self,
+        input_size,
+        output_size,
+        *,
+        config: TransformerConfig,
+        init_method: Callable,
+        bias=True,
+        gather_output=False,
+        stride=1,
+        keep_master_weight_for_test=False,
+        skip_bias_add=False,
+        skip_weight_param_allocation: bool = False,
+        embedding_activation_buffer: list[paddle.Tensor] | None = None,
+        grad_output_buffer: list[paddle.Tensor] | None = None,
+        is_expert: bool = False,
+        tp_comm_buffer_name: str | None = None,
+        disable_grad_reduce: bool = False,
+        tp_group: paddle.core.ProcessGroup | None = None,
+    ):
+        super().__init__()
+
+        self.input_size = input_size
+        self.output_size = output_size
+        self.gather_output = gather_output
+        self.skip_bias_add = skip_bias_add
+        self.is_expert = is_expert
+        self.embedding_activation_buffer = embedding_activation_buffer
+        self.grad_output_buffer = grad_output_buffer
+        self.config = config
+        self._dtype = config.params_dtype
+
+        # No TP: output_size_per_partition equals the full output_size.
+        self.output_size_per_partition = output_size
+
+        if not skip_weight_param_allocation:
+            if config.use_cpu_initialization:
+                self.weight = self.create_parameter(
+                    shape=[self.input_size, self.output_size],
+                    dtype=config.params_dtype,
+                    is_bias=False,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
+                )
+                if config.perform_initialization:
+                    _initialize_affine_weight_cpu(
+                        self.weight,
+                        self.input_size,
+                        self.output_size,
+                        self.output_size,  # full output, no partition
+                        1,
+                        init_method,
+                        stride=stride,
+                        return_master_weight=keep_master_weight_for_test,
+                        rank=0,
+                        world_size=1,
+                    )
+            else:
+                self.weight = self.create_parameter(
+                    shape=[self.input_size, self.output_size],
+                    dtype=config.params_dtype,
+                    is_bias=False,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
+                )
+                if config.perform_initialization:
+                    _initialize_affine_weight_gpu(
+                        self.weight,
+                        init_method,
+                        partition_dim=0,
+                        stride=stride,
+                        is_expert=self.is_expert,
+                    )
+
+            # Weight is duplicated across TP ranks; reduce gradient on DP group.
+            self.weight.allreduce = True
+            self.weight.is_distributed = False
+        else:
+            self.weight = None
+
+        if bias:
+            self.bias = self.create_parameter(
+                shape=[self.output_size],
+                dtype=config.params_dtype,
+                is_bias=True,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+            if config.perform_initialization:
+                with paddle.no_grad():
+                    self.bias.zero_()
+            self.bias.allreduce = True
+            self.bias.is_distributed = False
+        else:
+            self.bias = None
+
+        self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
+
+    def forward(
+        self,
+        input_: paddle.Tensor,
+        weight: paddle.Tensor | None = None,
+        runtime_gather_output: bool | None = None,
+    ):
+        """Forward of Linear (no tensor parallelism).
+
+        Args:
+            input_:
+                3D tensor whose order of dimension is [sequence, batch, hidden].
+            weight (optional):
+                weight tensor to use, compulsory when skip_weight_param_allocation is True.
+            runtime_gather_output (bool): Unused. Kept for interface compatibility.
+
+        Returns:
+            - output
+            - bias
+        """
+        if weight is None:
+            if self.weight is None:
+                raise RuntimeError(
+                    "weight was not supplied to Linear forward pass "
+                    "and skip_weight_param_allocation is True."
+                )
+            weight = self.weight
+        else:
+            expected_shape = [self.input_size, self.output_size]
+            if weight.shape != expected_shape:
+                raise RuntimeError(
+                    f"supplied weight's shape is {tuple(weight.shape)}, "
+                    f"not {expected_shape} as expected"
+                )
+
+        bias = self.bias if not self.skip_bias_add else None
+
+        if self.config.defer_embedding_wgrad_compute:
+            if (
+                self.config.wgrad_deferral_limit == 0
+                or len(self.embedding_activation_buffer)
+                < self.config.wgrad_deferral_limit
+            ):
+                self.embedding_activation_buffer.append(input_)
+
+        if not weight.requires_grad:
+            self._forward_impl = linear_with_frozen_weight
+        else:
+            self._forward_impl = (
+                linear_with_grad_accumulation_and_async_allreduce
+            )
+
+        output = self._forward_impl(
+            input=input_,
+            weight=weight,
+            bias=bias,
+            gradient_accumulation_fusion=False,
+            allreduce_dgrad=False,
+            sequence_parallel=False,
+            grad_output_buffer=(
+                self.grad_output_buffer
+                if self.config.defer_embedding_wgrad_compute
+                else None
+            ),
+            wgrad_deferral_limit=(
+                self.config.wgrad_deferral_limit
+                if self.config.defer_embedding_wgrad_compute
+                else None
+            ),
+            tp_group=None,
+        )
+
+        output_bias = (
+            self.bias.clone()
+            if (self.skip_bias_add and self.bias is not None)
+            else None
+        )
+
+        return output, output_bias
+
+    def sharded_state_dict(
+        self,
+        structured_name_prefix: str = "",
+    ):
+        """Weight is replicated, no sharding rules needed."""
+        state_dict = self.state_dict(structured_name_prefix="")
+        return build_sharded_state_dict(
+            state_dict, None, structured_name_prefix
+        )
+
+    def set_extra_state(self, state):
+        """Extra state is ignored"""
+
+    def get_extra_state(self) -> None:
+        """Keep compatibility with TE state dict."""
+        return None
+
+    def __repr__(self):
+        use_bias = self.bias is not None and self.bias is True
+        return (
+            f"{type(self).__name__}(in_features={self.input_size}, "
+            f"out_features={self.output_size}, bias={use_bias}, TP=1)"
+        )
+
+
 class ColumnParallelLinear(paddle.nn.Layer):
     """Linear layer with column parallelism.
 
