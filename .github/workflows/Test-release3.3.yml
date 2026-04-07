@@ -238,6 +238,7 @@ jobs:
           '
 
       - name: Single card Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -361,6 +362,7 @@ jobs:
           '
 
       - name: Multi-card Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -583,6 +585,7 @@ jobs:
           '
 
       - name: H20 Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -959,6 +962,7 @@ jobs:
           '
 
       - name: H20 Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -1267,6 +1271,7 @@ jobs:
           '
 
       - name: A100 Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           source "$HOME/miniconda/etc/profile.d/conda.sh"
