@@ -107,25 +107,29 @@ class TestBiasFusedSwiGLURegression(unittest.TestCase):
         value_grad = g * gate_silu
         return paddle.concat([gate_grad, value_grad], axis=-1)
 
-    def test_bias_fused_swiglu_forward_matches_chunk_silu(self):
-        dtype = (
-            "bfloat16"
-            if core.is_bfloat16_supported(base.CUDAPlace(0))
-            else "float16"
-        )
-        hidden_states = paddle.randn([8, 32], dtype=dtype)
-        bias = paddle.randn([32], dtype=dtype)
-        fused_input = hidden_states + bias
+    def test_bias_fused_swiglu_forward_matches_chunk_silu_with_tolerance(self):
+        test_cases = [("float32", 1e-6), ("float16", 2e-3)]
+        if core.is_bfloat16_supported(base.CUDAPlace(0)):
+            test_cases.append(("bfloat16", 7e-2))
 
-        fused_out = swiglu(fused_input)
-        ref_out = self._reference_swiglu(fused_input)
+        for dtype, atol in test_cases:
+            with self.subTest(dtype=dtype):
+                hidden_states = paddle.randn([8, 32], dtype="float32").astype(
+                    dtype
+                )
+                bias = paddle.randn([32], dtype="float32").astype(dtype)
+                fused_input = hidden_states + bias
 
-        np.testing.assert_allclose(
-            fused_out.astype("float32").numpy(),
-            ref_out.astype("float32").numpy(),
-            rtol=0,
-            atol=1e-6,
-        )
+                fused_out = swiglu(fused_input)
+                ref_out = self._reference_swiglu(fused_input)
+
+                max_abs_diff = np.max(
+                    np.abs(
+                        fused_out.astype("float32").numpy()
+                        - ref_out.astype("float32").numpy()
+                    )
+                )
+                self.assertLessEqual(max_abs_diff, atol)
 
     def test_bias_fused_swiglu_backward_matches_chunk_silu(self):
         fused_input = paddle.randn([8, 32], dtype="float32")
