@@ -1,6 +1,9 @@
 name: CE-CUDA-129-Release
 
 on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [develop]
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
