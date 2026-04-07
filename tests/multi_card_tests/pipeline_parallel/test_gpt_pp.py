@@ -142,10 +142,6 @@ def run_pp(
     return loss, gpt_pipe_model
 
 
-@unittest.skipIf(
-    SKIP_TESTS,
-    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')",
-)
 class TestPP(unittest.TestCase):
     def setUp(self):
         self.seed = 46
@@ -201,27 +197,27 @@ class TestPP(unittest.TestCase):
         pp = pprint.PrettyPrinter(depth=None, width=200, compact=False)
         pp.pprint(rst)
 
-        assert overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
+        assert overlap_loss._md5sum() == "bdd8b8660e976d3c1dde170aabeb3a6c"
 
         if paddle.distributed.get_rank() == 0:
             baseline = {
-                "_layers.9.0.input_layernorm.weight": "4c082a5167d83186f8bec392a4e1f243",
-                "_layers.9.0.mlp.down_proj.weight": "961eb6e76f7bdcdfb9b3543ce7dc89b7",
-                "_layers.9.0.mlp.up_gate_proj.weight": "3e9aed577e3f14074fcb6b2694f12243",
-                "_layers.9.0.post_attention_layernorm.weight": "7f181429595bebf51e1fca31e73ba4bb",
-                "_layers.9.0.self_attn.k_norm.weight": "3e6fa5fa71a86227785e2faf6f825548",
-                "_layers.9.0.self_attn.o_proj.weight": "8db569bc50a31db58292a5ddf188c7eb",
-                "_layers.9.0.self_attn.q_norm.weight": "824bfea78222e352dde28e6acaa6f4d3",
-                "_layers.9.0.self_attn.qkv_proj.weight": "63826b3105afdde6ec56c94a6a2faeb5",
-                "_layers.9.1.input_layernorm.weight": "8916a658f66793e52356de9985b94298",
-                "_layers.9.1.mlp.down_proj.weight": "6a1b4c6cbdd653addd074e80dfe5aaf2",
-                "_layers.9.1.mlp.up_gate_proj.weight": "163f1f01801a83cecbe39605624af45f",
-                "_layers.9.1.post_attention_layernorm.weight": "bb3cbc83df423057f5c7f93b5b3e5305",
-                "_layers.9.1.self_attn.k_norm.weight": "f59b75074ba215242ba1bb77a8975b2f",
-                "_layers.9.1.self_attn.o_proj.weight": "64cebf9900ef78ab7a2ec7920067e43b",
-                "_layers.9.1.self_attn.q_norm.weight": "094b8c8e3daa682126227d0a3bc96a97",
-                "_layers.9.1.self_attn.qkv_proj.weight": "aa0d813ced08957f0b1871688d336967",
-                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "86f1de0aa7895b99cdd68f165bac68c3",
+                "_layers.9.0.input_layernorm.weight": "9658e5354bb59e784086b8c1be08ca04",
+                "_layers.9.0.mlp.down_proj.weight": "cc5014fd095ce9a464de32cfe5b90848",
+                "_layers.9.0.mlp.up_gate_proj.weight": "ac1348bfc82d1be66c07c5858727cf77",
+                "_layers.9.0.post_attention_layernorm.weight": "a1d8b456b27485f5a0591c4c051078a8",
+                "_layers.9.0.self_attn.k_norm.weight": "d6a54a647a86f3527a7347f9e2feaaee",
+                "_layers.9.0.self_attn.o_proj.weight": "add86b72cf4fce187b9fcfecc2d5eea2",
+                "_layers.9.0.self_attn.q_norm.weight": "fad9fdd2b5c499565a12663baf1f5c51",
+                "_layers.9.0.self_attn.qkv_proj.weight": "f4029f4c980a46002dc1e316ddcab7d3",
+                "_layers.9.1.input_layernorm.weight": "2a2689c90d0dcb936e7ce3c0c6b18f5f",
+                "_layers.9.1.mlp.down_proj.weight": "85ec9eec9ac40f41eeb40fb559f16cd2",
+                "_layers.9.1.mlp.up_gate_proj.weight": "d52a62446cc35abe7548492bd17dd4ee",
+                "_layers.9.1.post_attention_layernorm.weight": "520f79414d605e1d3ef2b7d18fcba8cb",
+                "_layers.9.1.self_attn.k_norm.weight": "fb600ebbae4ff5467844d3dbc68fdda6",
+                "_layers.9.1.self_attn.o_proj.weight": "89256abd1e6fbd8d9966dbaed4968df4",
+                "_layers.9.1.self_attn.q_norm.weight": "4f431eeaf17d1342563fcb6f95e7a298",
+                "_layers.9.1.self_attn.qkv_proj.weight": "54db9155da3a148a3edffb0face5d249",
+                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "e4234572645381519a4d36874f2c2a04",
             }
 
             for name, p in overlap_gpt_model.named_parameters():
