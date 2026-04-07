@@ -15,9 +15,12 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from paddle import nn
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    build_spec_layer,
+)
 from paddle.nn import functional as F
 
-from ...spec_utils import LayerSpec, build_layer
 from ...tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from ...transformer.identity_op import IdentityOp
 from ...transformer.mlp import MLP, MLPSublayersSpec
@@ -78,14 +81,14 @@ class KimiK25VisionPathMerger(nn.Layer):
         self.hidden_size = config.mm_hidden_size * (
             config.merge_kernel_size[0] * config.merge_kernel_size[1]
         )
-        self.pre_norm = build_layer(
+        self.pre_norm = build_spec_layer(
             sublayers_spec.norm,
             config=config,
             hidden_size=config.mm_hidden_size,
             eps=eps,
         )
 
-        self.proj = build_layer(
+        self.proj = build_spec_layer(
             LayerSpec(
                 layer=MLP,
                 sublayers_spec=MLPSublayersSpec(

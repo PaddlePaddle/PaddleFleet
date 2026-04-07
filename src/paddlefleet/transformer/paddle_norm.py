@@ -19,9 +19,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 from paddle.nn.functional import layer_norm, rms_norm
-
-from ..spec_utils import LayerSpec
 
 # Alignment switch: when enabled, use ErnieCore's fused_ln kernel for bit-level alignment
 _ERNIECORE_ALIGNMENT = (

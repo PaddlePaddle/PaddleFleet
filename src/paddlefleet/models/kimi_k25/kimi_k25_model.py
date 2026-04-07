@@ -15,12 +15,11 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerDesc, LayerSpec
 from paddle.distributed.fleet.utils import recompute
 
 from ...packed_seq_params import PackedSeqParams
-from ...pipeline_parallel import LayerDesc
 from ...process_groups_config import ProcessGroupCollection
-from ...spec_utils import LayerSpec
 from ...transformer.transformer_config import TransformerConfig
 from ...transformer.transformer_encoder import TransformerEncoder
 from ...transformer.transformer_layer import (

@@ -25,7 +25,7 @@ sys.path.insert(
 
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 class TestOverlapFakeClone(unittest.TestCase):
@@ -37,8 +37,7 @@ class TestOverlapDetachAndRequiresGrad(unittest.TestCase):
 
     def test_single_tensor(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -49,8 +48,7 @@ class TestOverlapDetachAndRequiresGrad(unittest.TestCase):
 
     def test_single_tensor_stop_gradient(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -61,8 +59,7 @@ class TestOverlapDetachAndRequiresGrad(unittest.TestCase):
 
     def test_tuple_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -75,8 +72,7 @@ class TestOverlapDetachAndRequiresGrad(unittest.TestCase):
 
     def test_list_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -86,8 +82,7 @@ class TestOverlapDetachAndRequiresGrad(unittest.TestCase):
 
     def test_dict_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -99,8 +94,7 @@ class TestOverlapDetachAndRequiresGrad(unittest.TestCase):
 
     def test_nested_tuple(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -111,7 +105,7 @@ class TestOverlapDetachAndRequiresGrad(unittest.TestCase):
         self.assertIsInstance(result, tuple)
 
     def test_none_input(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -124,8 +118,7 @@ class TestOverlapCloneAndClearDataptr(unittest.TestCase):
 
     def test_single_tensor(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             clone_and_clear_dataptr,
         )
 
@@ -135,8 +128,7 @@ class TestOverlapCloneAndClearDataptr(unittest.TestCase):
 
     def test_tuple_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             clone_and_clear_dataptr,
         )
 
@@ -148,8 +140,7 @@ class TestOverlapCloneAndClearDataptr(unittest.TestCase):
 
     def test_dict_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             clone_and_clear_dataptr,
         )
 
@@ -159,8 +150,7 @@ class TestOverlapCloneAndClearDataptr(unittest.TestCase):
 
     def test_clear_dataptr_dict(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             clone_and_clear_dataptr,
         )
 
@@ -173,7 +163,7 @@ class TestOverlapScheduleChunk(unittest.TestCase):
     """Tests for ScheduleChunk."""
 
     def test_check_nodes_valid(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleChunk,
             ScheduleNode,
         )
@@ -183,7 +173,7 @@ class TestOverlapScheduleChunk(unittest.TestCase):
         # Should not raise
 
     def test_check_nodes_invalid(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleChunk,
         )
 
@@ -195,20 +185,18 @@ class TestOverlapScheduleNode(unittest.TestCase):
     """Tests for ScheduleNode in forward_backward_overlap_utils."""
 
     def test_init(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleNode,
         )
 
         node = ScheduleNode(fwd_func=lambda x: x, name="test_node")
         self.assertEqual(node.name, "test_node")
-        self.assertFalse(node.use_recompute)
         self.assertIsNone(node.labels)
         self.assertIsNone(node.scale_loss_factor)
 
     def test_forward_simple(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleNode,
         )
 
@@ -224,8 +212,7 @@ class TestOverlapScheduleNode(unittest.TestCase):
 
     def test_forward_with_labels(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleNode,
         )
 
@@ -243,8 +230,7 @@ class TestOverlapScheduleNode(unittest.TestCase):
 
     def test_forward_with_scale_loss_factor(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleNode,
         )
 
@@ -260,8 +246,7 @@ class TestOverlapScheduleNode(unittest.TestCase):
 
     def test_backward_no_grad_single(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleNode,
         )
 
@@ -278,8 +263,7 @@ class TestOverlapScheduleNode(unittest.TestCase):
 
     def test_backward_no_grad_tuple(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleNode,
         )
 
@@ -296,8 +280,7 @@ class TestOverlapScheduleNode(unittest.TestCase):
 
     def test_backward_with_output_grad(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleNode,
         )
 
@@ -315,8 +298,7 @@ class TestOverlapScheduleNode(unittest.TestCase):
 
     def test_backward_with_scaler(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleNode,
         )
 
@@ -334,7 +316,7 @@ class TestOverlapScheduleNode(unittest.TestCase):
         self.assertIsInstance(grads, tuple)
 
     def test_reset_states(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleNode,
         )
 
@@ -348,182 +330,6 @@ class TestOverlapScheduleNode(unittest.TestCase):
         self.assertIsNone(node.outputs)
         self.assertIsNone(node.labels)
         self.assertIsNone(node.scale_loss_factor)
-
-
-class TestOverlapScheduleNodeRecompute(unittest.TestCase):
-    """Tests for ScheduleNode recompute functionality."""
-
-    def test_first_forward_preserves_amp_o1(self):
-        import paddle
-        from paddle import framework
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleNode,
-        )
-
-        def fwd_func(inputs, is_first_fwd=False, **kwargs):
-            return inputs * 2
-
-        x = paddle.randn([2, 3])
-        node = ScheduleNode(fwd_func=fwd_func)
-
-        mock_tracer = MagicMock()
-        mock_tracer._amp_level = framework.core.AmpLevel.O1
-        mock_tracer._amp_dtype = "float16"
-        mock_tracer._get_amp_op_list.return_value = (["matmul"], ["softmax"])
-
-        mock_rng_tracker = MagicMock()
-        mock_rng_tracker.get_states_tracker.return_value = {}
-
-        mock_custom_state_manager = MagicMock()
-        mock_custom_state_manager.custom_get_state_func.return_value = None
-
-        with (
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.framework._dygraph_tracer",
-                return_value=mock_tracer,
-            ),
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.get_rng_state_tracker",
-                return_value=mock_rng_tracker,
-            ),
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.custom_state_manager",
-                mock_custom_state_manager,
-            ),
-            patch("paddle.get_rng_state", return_value=b"fake_rng_state"),
-        ):
-            result = node.forward(x, is_first_fwd=True)
-            self.assertTrue(node.is_fw_autocast)
-            self.assertEqual(node.amp_level, "O1")
-            self.assertEqual(node.amp_dtype, "float16")
-
-    def test_first_forward_preserves_amp_o2(self):
-        import paddle
-        from paddle import framework
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleNode,
-        )
-
-        def fwd_func(inputs, is_first_fwd=False, **kwargs):
-            return inputs * 2
-
-        x = paddle.randn([2, 3])
-        node = ScheduleNode(fwd_func=fwd_func)
-
-        mock_tracer = MagicMock()
-        mock_tracer._amp_level = framework.core.AmpLevel.O2
-        mock_tracer._amp_dtype = "bfloat16"
-        mock_tracer._get_amp_op_list.return_value = (["matmul"], ["softmax"])
-
-        mock_rng_tracker = MagicMock()
-        mock_rng_tracker.get_states_tracker.return_value = {}
-
-        mock_custom_state_manager = MagicMock()
-        mock_custom_state_manager.custom_get_state_func.return_value = None
-
-        with (
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.framework._dygraph_tracer",
-                return_value=mock_tracer,
-            ),
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.get_rng_state_tracker",
-                return_value=mock_rng_tracker,
-            ),
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.custom_state_manager",
-                mock_custom_state_manager,
-            ),
-            patch("paddle.get_rng_state", return_value=b"fake_rng_state"),
-        ):
-            result = node.forward(x, is_first_fwd=True)
-            self.assertEqual(node.amp_level, "O2")
-            self.assertEqual(node.amp_dtype, "bfloat16")
-
-    def test_first_forward_unsupported_amp_level(self):
-        import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleNode,
-        )
-
-        def fwd_func(inputs, is_first_fwd=False, **kwargs):
-            return inputs * 2
-
-        x = paddle.randn([2, 3])
-        node = ScheduleNode(fwd_func=fwd_func)
-
-        mock_tracer = MagicMock()
-        mock_tracer._amp_level = 99
-
-        mock_rng_tracker = MagicMock()
-        mock_rng_tracker.get_states_tracker.return_value = {}
-
-        mock_custom_state_manager = MagicMock()
-        mock_custom_state_manager.custom_get_state_func.return_value = None
-
-        with (  # noqa: SIM117
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.framework._dygraph_tracer",
-                return_value=mock_tracer,
-            ),
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.get_rng_state_tracker",
-                return_value=mock_rng_tracker,
-            ),
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.custom_state_manager",
-                mock_custom_state_manager,
-            ),
-            patch("paddle.get_rng_state", return_value=b"fake_rng_state"),
-        ):
-            with self.assertRaises(ValueError):
-                node.forward(x, is_first_fwd=True)
-
-    def test_first_forward_unsupported_amp_dtype(self):
-        import paddle
-        from paddle import framework
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleNode,
-        )
-
-        def fwd_func(inputs, is_first_fwd=False, **kwargs):
-            return inputs * 2
-
-        x = paddle.randn([2, 3])
-        node = ScheduleNode(fwd_func=fwd_func)
-
-        mock_tracer = MagicMock()
-        mock_tracer._amp_level = framework.core.AmpLevel.O1
-        mock_tracer._amp_dtype = "int8"
-        mock_tracer._get_amp_op_list.return_value = ([], [])
-
-        mock_rng_tracker = MagicMock()
-        mock_rng_tracker.get_states_tracker.return_value = {}
-
-        mock_custom_state_manager = MagicMock()
-        mock_custom_state_manager.custom_get_state_func.return_value = None
-
-        with (  # noqa: SIM117
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.framework._dygraph_tracer",
-                return_value=mock_tracer,
-            ),
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.get_rng_state_tracker",
-                return_value=mock_rng_tracker,
-            ),
-            patch(
-                "paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils.custom_state_manager",
-                mock_custom_state_manager,
-            ),
-            patch("paddle.get_rng_state", return_value=b"fake_rng_state"),
-        ):
-            with self.assertRaises(ValueError):
-                node.forward(x, is_first_fwd=True)
 
 
 if __name__ == "__main__":

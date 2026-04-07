@@ -20,11 +20,11 @@ import unittest
 import numpy as np
 import paddle
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
 import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.pipeline_parallel import NoPipelineParallel
 from paddlefleet.transformer.multi_token_prediction import WeightOnlyMTPLayer
 
 

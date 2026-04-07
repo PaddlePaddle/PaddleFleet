@@ -13,12 +13,13 @@
 # limitations under the License.
 
 import paddle
-from paddle.distributed.fleet.meta_parallel import ScheduleNode
+from paddle.distributed.fleet.meta_parallel import (
+    ScheduleNode,
+    build_spec_layer,
+)
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
-from paddle.distributed.fleet.meta_parallel import build_spec_layer
-
 
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,

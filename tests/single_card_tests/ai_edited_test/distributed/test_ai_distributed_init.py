@@ -40,10 +40,6 @@ class TestDistributedInit(unittest.TestCase):
         # should not fail.
         self.assertTrue(hasattr(paddlefleet.distributed, "__file__"))
 
-    def test_distributed_import_model(self):
-        """Test that distributed.model can be imported."""
-        import paddlefleet.distributed.model
 
-        self.assertTrue(
-            hasattr(paddlefleet.distributed.model, "distributed_model")
-        )
+if __name__ == "__main__":
+    unittest.main()

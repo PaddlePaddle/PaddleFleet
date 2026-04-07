@@ -29,17 +29,16 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor
+from paddle.distributed.fleet.meta_parallel import LayerDesc, ScheduleNode
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     mark_as_sequence_parallel_parameter,
 )
 
-from paddlefleet.pipeline_parallel import ScheduleNode
-
-from ...pipeline_parallel import LayerDesc
 from ...transformer.transformer_encoder import TransformerEncoder
 
 if TYPE_CHECKING:
-    from ...spec_utils import LayerSpec
+    from paddle.distributed.fleet.meta_parallel import LayerSpec
+
     from ...transformer.transformer_config import TransformerConfig
 
 logger = logging.getLogger(__name__)

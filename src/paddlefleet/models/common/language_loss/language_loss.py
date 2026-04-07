@@ -14,10 +14,6 @@
 
 
 import functools
-import paddle
-from paddle import Tensor
-from paddle.distributed.fleet.meta_parallel import ScheduleNode
-from paddle.distributed.fleet.utils import recompute
 
 import numpy as np
 import paddle
@@ -26,6 +22,7 @@ from paddle import Tensor, nn
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.distributed.fleet.layers.mpu import mp_ops
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 

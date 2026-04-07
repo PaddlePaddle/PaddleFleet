@@ -26,11 +26,10 @@ sys.path.insert(
 
 import unittest
 
-from paddlefleet.pipeline_parallel.pp_layers import (
+from paddle.distributed.fleet.meta_parallel.parallel_layers.pp_layers import (
     PipelineLayerChunk,
     SegmentLayers,
 )
-from paddlefleet.spec_utils import build_layer
 
 
 class TestScheduleChunk(unittest.TestCase):
@@ -72,10 +71,11 @@ class TestPipelineLayerChunk(unittest.TestCase):
 
 
 class TestBuildLayer(unittest.TestCase):
-    """Tests for build_layer."""
+    """Tests for build_spec_layer."""
 
     def test_build_layer_with_class(self):
         from paddle import nn
+        from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
-        layer = build_layer(nn.Linear, 10, 5)
+        layer = build_spec_layer(nn.Linear, 10, 5)
         self.assertIsInstance(layer, nn.Linear)

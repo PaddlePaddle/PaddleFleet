@@ -32,7 +32,7 @@ class TestP2PAsyncHandle(unittest.TestCase):
     """Tests for P2PAsyncHandle dataclass."""
 
     def test_forward_handle_wait(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -47,7 +47,7 @@ class TestP2PAsyncHandle(unittest.TestCase):
         mock_fn.assert_called_once()
 
     def test_backward_handle_wait(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -62,7 +62,7 @@ class TestP2PAsyncHandle(unittest.TestCase):
         mock_fn.assert_called_once()
 
     def test_forward_async_comm(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -79,7 +79,7 @@ class TestP2PAsyncHandle(unittest.TestCase):
         self.assertEqual(handle.input_tensor, "input")
 
     def test_backward_async_comm(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -101,7 +101,7 @@ class TestPipelineParallelWithInterleaveVirtualRank(unittest.TestCase):
     """Tests for _get_virtual_pp_rank logic."""
 
     def test_get_virtual_pp_rank_first_chunk(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -118,7 +118,7 @@ class TestPipelineParallelWithInterleaveVirtualRank(unittest.TestCase):
         self.assertEqual(rank, 0)
 
     def test_get_virtual_pp_rank_backward(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -138,7 +138,7 @@ class TestPipelineParallelWithInterleaveCheckSanity(unittest.TestCase):
     """Tests for _check_sanity."""
 
     def test_check_sanity_pass(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -151,7 +151,7 @@ class TestPipelineParallelWithInterleaveCheckSanity(unittest.TestCase):
             pp._check_sanity()
 
     def test_check_sanity_fail_not_dynamic(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -167,7 +167,7 @@ class TestPipelineParallelWithInterleaveCheckSanity(unittest.TestCase):
             pp._check_sanity()
 
     def test_check_sanity_fail_stages(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -183,7 +183,7 @@ class TestPipelineParallelWithInterleaveCheckSanity(unittest.TestCase):
             pp._check_sanity()
 
     def test_check_sanity_fail_acc_steps(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -203,7 +203,7 @@ class TestGetSchedulerName(unittest.TestCase):
     """Tests for _get_scheduler_name."""
 
     def test_scheduler_name(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -221,7 +221,7 @@ class TestOverlapCommGrads(unittest.TestCase):
     """Tests for _overlap_comm_grads."""
 
     def test_no_comm_overlap(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -233,7 +233,7 @@ class TestOverlapCommGrads(unittest.TestCase):
         pp._overlap_comm_grads()
 
     def test_stage_zero(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -255,7 +255,7 @@ class TestSyncOverlapGrads(unittest.TestCase):
     """Tests for _sync_overlap_grads."""
 
     def test_no_comm_overlap(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -266,7 +266,7 @@ class TestSyncOverlapGrads(unittest.TestCase):
         pp._sync_overlap_grads()
 
     def test_with_comm_overlap(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 
@@ -289,7 +289,7 @@ class TestSyncOverlapGrads(unittest.TestCase):
                 buf.scale_grads.assert_called_once()
 
     def test_with_comm_overlap_mismatch_count(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel import (
             PipelineParallelWithInterleave,
         )
 

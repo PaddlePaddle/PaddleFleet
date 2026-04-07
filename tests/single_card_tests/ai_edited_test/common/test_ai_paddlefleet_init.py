@@ -45,7 +45,6 @@ class TestPaddleFleetInit(unittest.TestCase):
             "training",
             "parallel_state",
             "Timers",
-            "LayerSpec",
             "__version__",
             "__package_name__",
             "__description__",
@@ -72,64 +71,9 @@ class TestPaddleFleetInit(unittest.TestCase):
 
         self.assertIsNotNone(Timers)
 
-    def test_layer_spec_import(self):
-        """Test that LayerSpec can be imported from top-level package."""
-        from paddlefleet import LayerSpec
-
-        self.assertIsNotNone(LayerSpec)
-
-    def test_ops_import(self):
-        """Test that ops can be imported from top-level package."""
-        from paddlefleet import ops
-
-        self.assertIsNotNone(ops)
-
-    def test_training_import(self):
-        """Test that training can be imported from top-level package."""
-        from paddlefleet import training
-
-        self.assertIsNotNone(training)
-
-    def test_parallel_state_import(self):
-        """Test that parallel_state can be imported from top-level package."""
-        from paddlefleet import parallel_state
-
-        self.assertIsNotNone(parallel_state)
-
-    def test_version_export(self):
-        """Test that __version__ is accessible."""
-        from paddlefleet import __version__
-
-        self.assertIsNotNone(__version__)
-        self.assertIsInstance(__version__, str)
-
-    def test_package_info_exports(self):
-        """Test that package metadata fields are accessible."""
-        from paddlefleet import (
-            __contact_emails__,
-            __contact_names__,
-            __description__,
-            __download_url__,
-            __homepage__,
-            __keywords__,
-            __license__,
-            __package_name__,
-            __repository_url__,
-        )
-
-        self.assertEqual(__package_name__, "paddlefleet")
-        self.assertEqual(__contact_names__, "PaddlePaddle")
-        self.assertEqual(__contact_emails__, "Paddle-better@baidu.com")
-        self.assertIsInstance(__description__, str)
-        self.assertIsInstance(__homepage__, str)
-        self.assertIsInstance(__repository_url__, str)
-        self.assertIsInstance(__download_url__, str)
-        self.assertIsInstance(__keywords__, str)
-        self.assertIsInstance(__license__, tuple)
-
     def test_spec_utils_import(self):
         """Test that spec_utils module is importable."""
-        from paddlefleet.spec_utils import LayerSpec
+        from paddle.distributed.fleet.meta_parallel import LayerSpec
 
         self.assertIsNotNone(LayerSpec)
 

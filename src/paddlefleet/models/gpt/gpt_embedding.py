@@ -26,8 +26,6 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
 )
 
-
-
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )

@@ -394,10 +394,10 @@ class TransformerLayer(nn.Layer):
             assert self.recompute_mlp is False, (
                 "block_attention_residuals cannot use selective recompute mlp."
             )
-            self.block_attn_res_before_attention = build_layer(
+            self.block_attn_res_before_attention = build_spec_layer(
                 sublayers_spec.block_attn_res, config=self.config
             )
-            self.block_attn_res_before_mlp = build_layer(
+            self.block_attn_res_before_mlp = build_spec_layer(
                 sublayers_spec.block_attn_res, config=self.config
             )
             self.attn_res_block_size = self.config.attn_res_block_size

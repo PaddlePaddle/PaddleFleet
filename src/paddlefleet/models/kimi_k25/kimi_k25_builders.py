@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from ...spec_utils import LayerSpec, build_layer
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    build_spec_layer,
+)
+
 from ..common.empty_layer import EmptyLayer
 from .layer_specs import (
     get_kimi_k25_vision_encoder_layers_spec,
@@ -43,4 +47,4 @@ def kimi_k25_vision_builder(config, **kwargs):
         tail_empty_layer_spec=tail_empty_layers_spec,
     )
 
-    return build_layer(res_spec, **kwargs)
+    return build_spec_layer(res_spec, **kwargs)
