@@ -101,6 +101,7 @@ jobs:
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
           conda init bash
+          rm -rf /root/miniconda/envs/python3.12/
           conda create -n python312 python=3.12 -y
           conda activate python312
           mkdir -p /home/.cache/pip
@@ -109,7 +110,6 @@ jobs:
           export WITH_COVERAGE=ON
           pip install --upgrade pip
           pip install colorlog>=6.10.1
-          rm /root/miniconda/envs/python3.12/lib/python3.12/site-packages/paddlefleet/ops/build/count_cumsum/sonicmoe_count_cumsum/sonicmoe_count_cumsum.so
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
