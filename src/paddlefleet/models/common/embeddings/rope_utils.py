@@ -97,11 +97,16 @@ def get_unsqueeze_dim(t, freqs):
 def _apply_rotary_pos_emb_bshd(
     t: Tensor | tuple[Tensor, ...],
     freqs: Tensor | None,
-    config: TransformerConfig = None,
     cos: Tensor | None = None,
     sin: Tensor | None = None,
     mscale: float = 1.0,
     position_ids: Tensor | None = None,
+    apply_rope_fusion: bool = False,
+    rotary_interleaved: bool = False,
+    multi_latent_attention: bool = False,
+    high_precision_rope: bool = False,
+    rope_theta: float = 10000.0,
+    time_major: bool = False,
 ) -> Tensor | tuple[Tensor, ...]:
     """Apply rotary positional embedding to input tensor T.
 
@@ -112,19 +117,24 @@ def _apply_rotary_pos_emb_bshd(
             or a tuple of tensors (e.g. (query, key)) for the fused path.
         freqs (Tensor | None): Rotary Positional embedding tensor freq is of shape
             [seq_length, ..., dim]. Can be None when using fused path.
-        config (TransformerConfig): Transformer configuration providing
-            apply_rope_fusion, rotary_interleaved, multi_latent_attention,
-            high_precision_rope, rope_theta, sequence_parallel.
         cos (Tensor | None): Pre-computed cosine values (for fused path).
         sin (Tensor | None): Pre-computed sine values (for fused path).
         mscale (float): Scaling factor for rotary embedding.
         position_ids (Tensor | None): Position indices (for fused path).
+        apply_rope_fusion (bool): Whether to use fused RoPE kernel.
+        rotary_interleaved (bool): Whether to use interleaved rotary embedding.
+        multi_latent_attention (bool): Whether to use multi-latent attention
+            interleave reordering.
+        high_precision_rope (bool): Whether to use float32 precision for RoPE
+            computation.
+        rope_theta (float): Base frequency for rotary embedding (used in fused path).
+        time_major (bool): Whether the input is time-major (used in fused path).
 
     Returns:
         Tensor | tuple[Tensor, ...]: The input tensor(s) after applying RoPE.
     """
-    if config is not None and config.apply_rope_fusion:
-        if config.high_precision_rope:
+    if apply_rope_fusion:
+        if high_precision_rope:
             raise NotImplementedError(
                 "high_precision_rope is not yet supported with "
                 "apply_rope_fusion in bshd format"
@@ -137,22 +147,11 @@ def _apply_rotary_pos_emb_bshd(
             *t,
             sin=sin,
             cos=cos,
-            rotary_emb_base=config.rope_theta,
+            rotary_emb_base=rope_theta,
             position_ids=position_ids,
-            use_neox_rotary_style=config.rotary_interleaved,
-            time_major=config.sequence_parallel,
+            use_neox_rotary_style=rotary_interleaved,
+            time_major=time_major,
         )
-
-    # Unfused path
-    rotary_interleaved = (
-        config.rotary_interleaved if config is not None else False
-    )
-    multi_latent_attention = (
-        config.multi_latent_attention if config is not None else False
-    )
-    high_precision_rope = (
-        config.high_precision_rope if config is not None else False
-    )
 
     rot_dim = freqs.shape[-1]
 
@@ -261,12 +260,17 @@ def _apply_rotary_pos_emb_thd(
     cu_seqlens: Tensor,
     total_seq_len: int | None,
     freqs: Tensor | None,
-    config: TransformerConfig = None,
     cos: Tensor | None = None,
     sin: Tensor | None = None,
     mscale: float = 1.0,
     cp_group: Group = None,
     position_ids: Tensor | None = None,
+    apply_rope_fusion: bool = False,
+    rotary_interleaved: bool = False,
+    multi_latent_attention: bool = False,
+    high_precision_rope: bool = False,
+    rope_theta: float = 10000.0,
+    time_major: bool = False,
 ) -> Tensor | tuple[Tensor, ...]:
     """A baseline implementation of applying RoPE for `thd` format.
 
@@ -280,14 +284,19 @@ def _apply_rotary_pos_emb_thd(
             for correct frequency tensor selection. If None, falls back to cu_seqlens[-1].
         freqs (Tensor | None): Rotary Positional embedding tensor freq is of shape
             [max_s, 1, 1, d]. Can be None when using fused path.
-        config (TransformerConfig): Transformer configuration providing
-            apply_rope_fusion, rotary_interleaved, multi_latent_attention,
-            high_precision_rope, rope_theta, sequence_parallel.
         cos (Tensor | None): Pre-computed cosine values (for fused path).
         sin (Tensor | None): Pre-computed sine values (for fused path).
         mscale (float): Scaling factor for rotary embedding.
         cp_group (Group): The context parallel group.
         position_ids (Tensor | None): Position indices (for fused path).
+        apply_rope_fusion (bool): Whether to use fused RoPE kernel.
+        rotary_interleaved (bool): Whether to use interleaved rotary embedding.
+        multi_latent_attention (bool): Whether to use multi-latent attention
+            interleave reordering.
+        high_precision_rope (bool): Whether to use float32 precision for RoPE
+            computation.
+        rope_theta (float): Base frequency for rotary embedding (used in fused path).
+        time_major (bool): Whether the input is time-major (used in fused path).
 
     Returns:
         Tensor | tuple[Tensor, ...]: Shape [t, h, d]. The input tensor(s) after
@@ -313,8 +322,16 @@ def _apply_rotary_pos_emb_thd(
             return _apply_rotary_pos_emb_bshd(
                 t,
                 freqs,
-                config,
+                cos=cos,
+                sin=sin,
                 mscale=mscale,
+                position_ids=position_ids,
+                apply_rope_fusion=apply_rope_fusion,
+                rotary_interleaved=rotary_interleaved,
+                multi_latent_attention=multi_latent_attention,
+                high_precision_rope=high_precision_rope,
+                rope_theta=rope_theta,
+                time_major=time_major,
             )
         seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
         # Build packed freqs in one pass, then apply once to the whole packed tensor
@@ -335,8 +352,16 @@ def _apply_rotary_pos_emb_thd(
         return _apply_rotary_pos_emb_bshd(
             t,
             freqs_packed,
-            config,
+            cos=cos,
+            sin=sin,
             mscale=mscale,
+            position_ids=position_ids,
+            apply_rope_fusion=apply_rope_fusion,
+            rotary_interleaved=rotary_interleaved,
+            multi_latent_attention=multi_latent_attention,
+            high_precision_rope=high_precision_rope,
+            rope_theta=rope_theta,
+            time_major=time_major,
         )
     else:
         # CASE 2: Traditional mapping without offsets
@@ -354,8 +379,16 @@ def _apply_rotary_pos_emb_thd(
         return _apply_rotary_pos_emb_bshd(
             t,
             freqs_packed,
-            config,
+            cos=cos,
+            sin=sin,
             mscale=mscale,
+            position_ids=position_ids,
+            apply_rope_fusion=apply_rope_fusion,
+            rotary_interleaved=rotary_interleaved,
+            multi_latent_attention=multi_latent_attention,
+            high_precision_rope=high_precision_rope,
+            rope_theta=rope_theta,
+            time_major=time_major,
         )
 
 
@@ -396,15 +429,23 @@ def apply_rotary_pos_emb(
         cp_group (Group): Context parallel group.
         position_ids (Tensor | None): Position indices.
     """
+    rope_kwargs = dict(
+        apply_rope_fusion=config.apply_rope_fusion,
+        rotary_interleaved=config.rotary_interleaved,
+        multi_latent_attention=config.multi_latent_attention,
+        high_precision_rope=config.high_precision_rope,
+        rope_theta=config.rope_theta,
+        time_major=config.sequence_parallel,
+    )
     if cu_seqlens is None:
         return _apply_rotary_pos_emb_bshd(
             t,
             freqs,
-            config,
             cos=cos,
             sin=sin,
             mscale=mscale,
             position_ids=position_ids,
+            **rope_kwargs,
         )
     else:
         return _apply_rotary_pos_emb_thd(
@@ -412,10 +453,10 @@ def apply_rotary_pos_emb(
             cu_seqlens,
             total_seq_len,
             freqs,
-            config,
             cos=cos,
             sin=sin,
             mscale=mscale,
             cp_group=cp_group,
             position_ids=position_ids,
+            **rope_kwargs,
         )
