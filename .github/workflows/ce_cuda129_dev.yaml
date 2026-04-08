@@ -101,7 +101,7 @@ jobs:
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
           conda init bash
-          rm -rf /root/miniconda/envs/python3.12/
+          rm -rf /root/miniconda/envs/python312/
           conda create -n python312 python=3.12 -y
           conda activate python312
           mkdir -p /home/.cache/pip
