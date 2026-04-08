@@ -519,7 +519,13 @@ class SelfAttention(Attention):
             tp_group=self.pg_collection.tp,
         )
 
-        norm_input_parallel = config.tensor_model_parallel_size > 1
+        # For per_layer qk_norm, norm operates on gathered (full) tensors,
+        # so input_is_parallel should be False to avoid extra allreduce.
+        if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
+            norm_input_parallel = False
+        else:
+            norm_input_parallel = config.tensor_model_parallel_size > 1
+
         if sublayers_spec.q_norm is not None:
             if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
                 q_norm_hidden_size = (
@@ -618,17 +624,11 @@ class SelfAttention(Attention):
             query, key, value = parts
             gate = None
 
-        # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
-        query = query.reshape(
-            query.shape[0],
-            query.shape[1],
-            -1,
-            self.hidden_size_per_attention_head,
-        )
         if getattr(self.config, "qk_norm_type", "per_head") == "per_layer" and (
             self.q_norm is not None or self.k_norm is not None
         ):
-            # per_layer qk_norm: normalize across all heads jointly before reshape.
+            # per_layer qk_norm: normalize across all heads jointly
+
             # Flatten to [b, sq, np * hn] / [b, sq, ng * hn]
             query = query.reshape(*query.shape[:2], -1)
             key = key.reshape(*key.shape[:2], -1)
@@ -672,6 +672,7 @@ class SelfAttention(Attention):
             )
         else:
             # per_head qk_norm (default): reshape first, then normalize per head
+            # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
             query = query.reshape(
                 query.shape[0],
                 query.shape[1],
