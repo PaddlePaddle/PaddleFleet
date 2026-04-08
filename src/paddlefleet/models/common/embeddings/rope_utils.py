@@ -141,8 +141,8 @@ def _apply_rotary_pos_emb_bshd(
         if high_precision_rope:
             # Fused vision RoPE CUDA kernel path:
             # - internally computes cos/sin in fp32, equivalent to high_precision_rope
+            # - only supports single Tensor input with explicit freqs
             # - only supports non-interleaved mode and mscale=1.0
-            # - requires a single Tensor input and explicit freqs
             # - freqs must be reshaped to [s, dim//2]
             if (
                 not rotary_interleaved
@@ -159,8 +159,7 @@ def _apply_rotary_pos_emb_bshd(
                 freqs_half = freqs_2d[..., : freqs_2d.shape[-1] // 2]
                 t = fused_apply_rotary_pos_emb_vision(t, freqs_half)
                 return paddle.cat((t, t_pass), axis=-1)
-            # Fall through to unfused path for interleaved, tuple input,
-            # or non-unit mscale
+            # Fall through to unfused path for unsupported cases
         # Fused path: delegate to Paddle's fused_rope kernel
         assert isinstance(t, tuple), (
             "The input for fused_rope should be a tuple of tensors"
