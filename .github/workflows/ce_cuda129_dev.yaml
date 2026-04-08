@@ -132,10 +132,6 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          export COVERAGE_FILE=/paddle/PaddleFleet/coveragedata/.coverage
-          export COVERAGE_RCFILE=/paddle/PaddleFleet/ci/.coveragerc
-          export WITH_COVERAGE=ON
-          cd PaddleFleet
           bash ci/single_card_sonic.sh
           '
 
