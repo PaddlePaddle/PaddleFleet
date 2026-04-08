@@ -110,6 +110,9 @@ jobs:
           export WITH_COVERAGE=ON
           pip install --upgrade pip
           pip install colorlog>=6.10.1
+          # 清理上次编译的 .so 文件
+          rm -rf /root/miniconda/envs/python312/lib/python3.12/site-packages/paddlefleet/ops.build/
+          rm -rf /root/miniconda/envs/python312/lib/python3.12/site-packages/paddlefleet/_extensions/
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
