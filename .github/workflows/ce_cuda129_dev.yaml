@@ -89,6 +89,12 @@ jobs:
           pwd
           rm -rf * .[^.]*
           source /root/proxy
+          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
+          git config --global --add safe.directory /paddle
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
+          git config pull.rebase false
+          # create conda env and install dependencies
           wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
@@ -102,11 +108,6 @@ jobs:
           echo "Install uv"
           export WITH_COVERAGE=ON
           pip install --upgrade pip
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
-          git config --global --add safe.directory /paddle
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
