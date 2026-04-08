@@ -5,7 +5,7 @@
 显存组成:
 1. 参数 (Parameters) - 考虑 TP/PP/EP 切分
 2. 梯度 (Gradients) - 考虑 ZeRO 分片
-3. 优化器状态 (Optimizer States) - AdamW: 2 × fp32
+3. 优化器状态 (Optimizer States) - AdamW: 3 × fp32 (BF16/FP16) 或 2 × fp32 (FP32)
 4. 激活值 (Activations) - 考虑 Recompute/Checkpoint
 5. 通信缓冲区 (Communication Buffers)
 6. 临时缓冲区 (Temporary Buffers)
@@ -27,7 +27,7 @@ from ..config import (
     INPUT_EMBEDDING_LAYER_KIND,
     OUTPUT_HEAD_LAYER_KIND,
 )
-from ..stage_layout import (
+from ..utils.stage_layout import (
     resolve_chunk_ranges,
     resolve_stage_chunk_ranges,
     resolve_stage_layer_indices,
@@ -35,18 +35,36 @@ from ..stage_layout import (
 
 GIB = 1024 ** 3
 
-# PaddleFormers tensorwise offload 会在 GPU 上保留一个运行时 live window。
-# 这部分与具体模型无关，而是优化器更新流水本身的框架行为。
-TENSORWISE_OFFLOAD_LIVE_WINDOW_FRACTION = 0.625
+# PaddleFormers AdamWCustom tensorwise offload 的实际行为（源码参考：
+#   paddleformers/utils/optimizer.py AdamWCustom._append_optimize_op）：
+# 1. _create_accumulators 后立即 offload_optim(p) → 所有 moment1/moment2/master_weight
+#    通过 .pin_memory() 移到 CPU pinned memory
+# 2. optimizer step 时逐参数: reload_optim(p) → GPU update → offload_optim(p)
+# 3. 在 forward/backward 阶段，GPU 上优化器状态 = 0
+# 4. 在 optimizer step 阶段，GPU 上同时只有 1 个参数的 3 份 FP32 状态
+#
+# 因此 optimizer_memory_factor = 0（无常驻），
+# optimizer_update_workspace = 最大单参数的 FP32 状态（由 estimate 函数计算）。
 
 # Transformer block 的 selective checkpoint 工作集：
 # - 18 份 hidden-state/residual 边界张量
 # - 2 份 KV 形状的 attention/rope 辅助状态
 #
+# 当 TP > 1 且 SP = false 时（Dense 模型），hidden-state 张量可以分为两类：
+# - 全量 h 张量（残差、LayerNorm 输出、AllReduce 后的 attention/MLP 输出）
+# - TP 分片张量（Q/K/V 投影、attention 中间结果、AllReduce 前的输出）
+# KV heads 始终按 TP 分片，不论 SP 是否开启。
+#
 # 注意：MLP 输入张量单独计入 dense/moe_mlp_input。
 # 这里不再把它重复算进 shared checkpoint 基线。
 CHECKPOINT_HIDDEN_TENSOR_EQUIV = 18
 CHECKPOINT_KV_TENSOR_EQUIV = 2
+
+# Dense 模型 TP>1 & SP=false 时，selective checkpoint 的 hidden-state 分解：
+# 全量 h 部分（block input/output, residuals, LayerNorm 输出, AllReduce 后）
+CHECKPOINT_HIDDEN_FULL_H_EQUIV = 6
+# TP 分片部分（Q/K/V projections, attention context, MLP gate/up, pre-allreduce outputs）
+CHECKPOINT_HIDDEN_TP_SHARDED_EQUIV = 12  # 6 + 12 = 18
 
 # full recompute 在框架里是整层 `recompute(self._forward_impl, ...)`，
 # 只需要保留层输入和一小组 attention/rope 辅助状态。
@@ -54,8 +72,12 @@ CHECKPOINT_KV_TENSOR_EQUIV = 2
 FULL_RECOMPUTE_HIDDEN_TENSOR_EQUIV = 8
 FULL_RECOMPUTE_KV_TENSOR_EQUIV = 3
 
+# Dense 模型 full recompute 的 hidden-state 分解：
+FULL_RECOMPUTE_HIDDEN_FULL_H_EQUIV = 2
+FULL_RECOMPUTE_HIDDEN_TP_SHARDED_EQUIV = 3  # 5 + 3 = 8
+
 # loss 阶段会额外 materialize FP32 logits，并伴随一部分 softmax/grad workspace。
-CROSS_ENTROPY_WORKSPACE_FACTOR = 1.8
+CROSS_ENTROPY_WORKSPACE_FACTOR = 0.8
 
 # allocator 会保留一部分已经释放的激活/临时缓冲。
 ALLOCATOR_REUSE_FACTOR = 0.7
@@ -154,31 +176,22 @@ class ShardingConfig:
     def get_optimizer_memory_factor(self) -> float:
         """
         优化器显存因子（考虑 offload）
-        
-        tensorwise_offload: 优化器状态按 tensor 粒度动态 offload
-        
-        重要约束：tensorwise_offload 依赖 Sharding 机制
-        当 Sharding degree = 1 (DP=1) 时，offload 无法正常工作
-        
-        这里不再使用模型修正因子，而是显式建模 PaddleFormers
-        tensorwise offload 的 live window：
-        - 绝大部分状态可迁移到 CPU
-        - 但 GPU 上仍需要保留当前更新 bucket 的预取/回写窗口
-        - 这使得显存常驻比例有一个框架级下界
+
+        PaddleFormers 实际行为（源码：paddleformers/utils/optimizer.py）：
+
+        1. tensorwise_offload (AdamWCustom):
+           - _create_accumulators 后立即 offload 所有 moment/master_weight 到 CPU pinned
+           - forward/backward 期间 GPU 上优化器状态 = 0
+           - optimizer step 时逐参数 reload → update → offload
+           - 因此常驻因子 = 0；step 阶段工作集由 estimate_optimizer_update_workspace 建模
+
+        2. cpu_offload (Trainer-level bulk):
+           - optimizer_step 前 _reload_optimizer 将全部状态拉回 GPU
+           - optimizer_step 后 _offload_optimizer 将全部状态移到 CPU
+           - 常驻因子 = 0；step 阶段工作集由 estimate_optimizer_update_workspace 建模
         """
         if self.tensorwise_offload:
-            if self.degree <= 1:
-                return 1.0
-            configured_resident_fraction = max(
-                0.0, 1.0 - self.tensorwise_offload_ratio
-            )
-            return min(
-                1.0,
-                max(
-                    configured_resident_fraction,
-                    TENSORWISE_OFFLOAD_LIVE_WINDOW_FRACTION,
-                ),
-            )
+            return 0.0
         elif self.cpu_offload:
             return 0.0
         return 1.0
@@ -288,7 +301,8 @@ class MemoryBreakdown:
     peak_runtime_workspace_gb: float = 0.0
     peak_runtime_workspace_source: str = "activation"
     optimizer_update_workspace_gb: float = 0.0
-    framework_overhead_gb: float = 2.67  # CUDA/Paddle runtime + cuBLASLt workspace
+    parameter_live_window_gb: float = 0.0
+    framework_overhead_gb: float = 0.0  # 动态估算，由 _estimate_memory_for_stage 计算
     activation_no_recompute_gb: float = 0.0
     activation_saved_by_recompute_gb: float = 0.0
 
@@ -406,6 +420,7 @@ class MemoryBreakdown:
             "peak_runtime_workspace_gb": round(self.peak_runtime_workspace_gb, 3),
             "peak_runtime_workspace_source": self.peak_runtime_workspace_source,
             "optimizer_update_workspace_gb": round(self.optimizer_update_workspace_gb, 3),
+            "parameter_live_window_gb": round(self.parameter_live_window_gb, 3),
             "activation_no_recompute_gb": round(self.activation_no_recompute_gb, 3),
             "activation_saved_by_recompute_gb": round(self.activation_saved_by_recompute_gb, 3),
             "activation_buffer_pool_gb": round(self.activation_buffer_pool_gb, 3),
@@ -703,14 +718,40 @@ class _BaseMemoryModel:
         moe_ffn = self.model.moe_intermediate_size
         topk = self.model.num_experts_per_tok
         dtype_bytes = self.training.dtype_bytes
+        tp = max(1, parallel.tp)
+
+        # KV heads 始终按 TP 分片（不论 SP 是否开启）
+        kv_tp_factor = tp
+
+        # Dense 模型 hidden-state checkpoint 的 TP 缩减
+        # SP=true: hidden_partition_factor 已经是 tp，所有 hidden 张量均匀分片
+        # SP=false & TP>1: hidden state 不分片，但部分中间激活按 TP 分片
+        if hidden_partition_factor >= tp or tp <= 1:
+            # SP=true 或 TP=1: 使用原始公式
+            selective_hidden_bytes = (
+                CHECKPOINT_HIDDEN_TENSOR_EQUIV * h / hidden_partition_factor
+            )
+            full_recompute_hidden_bytes = (
+                FULL_RECOMPUTE_HIDDEN_TENSOR_EQUIV * h / hidden_partition_factor
+            )
+        else:
+            # SP=false & TP>1 (Dense 模型): 分离全量-h 和 TP-sharded 张量
+            selective_hidden_bytes = (
+                CHECKPOINT_HIDDEN_FULL_H_EQUIV * h
+                + CHECKPOINT_HIDDEN_TP_SHARDED_EQUIV * h / tp
+            )
+            full_recompute_hidden_bytes = (
+                FULL_RECOMPUTE_HIDDEN_FULL_H_EQUIV * h
+                + FULL_RECOMPUTE_HIDDEN_TP_SHARDED_EQUIV * h / tp
+            )
 
         selective_base_checkpoint = tokens * (
-            (CHECKPOINT_HIDDEN_TENSOR_EQUIV * h) / hidden_partition_factor
-            + CHECKPOINT_KV_TENSOR_EQUIV * kv
+            selective_hidden_bytes
+            + CHECKPOINT_KV_TENSOR_EQUIV * kv / kv_tp_factor
         ) * dtype_bytes
         full_checkpoint = tokens * (
-            (FULL_RECOMPUTE_HIDDEN_TENSOR_EQUIV * h) / hidden_partition_factor
-            + FULL_RECOMPUTE_KV_TENSOR_EQUIV * kv
+            full_recompute_hidden_bytes
+            + FULL_RECOMPUTE_KV_TENSOR_EQUIV * kv / kv_tp_factor
         ) * dtype_bytes
 
         dense_gate_up = tokens * (2 * ffn / max(1, parallel.tp)) * dtype_bytes
@@ -770,13 +811,15 @@ class _BaseMemoryModel:
         ep = parallel.ep
 
         attention_params = self.model.estimate_attention_params_per_layer() // tp
-        transformer_layernorm_params = 4 * h
+        qk_norm_params = 2 * int(self.model.head_dim) if bool(getattr(self.training, "use_qk_norm", False)) else 0
+        transformer_layernorm_params = 4 * h + qk_norm_params
         final_norm_params = 2 * h
         dense_mlp_params = 3 * h * ffn // tp
         router_params = h * self.model.num_experts
-        experts_per_gpu = self.model.num_experts // ep
-        expert_params = 3 * h * moe_ffn * experts_per_gpu // tp
-        single_embedding = v * h // tp
+        experts_per_gpu = max(1, self.model.num_experts // max(1, ep))
+        expert_params = 3 * h * moe_ffn * experts_per_gpu // max(1, tp)
+        shared_expert_params = 3 * h * self.model.effective_shared_expert_intermediate_size // max(1, tp)
+        single_embedding = v * h // max(1, tp)
 
         return {
             TRANSFORMER_DENSE_LAYER_KIND: {
@@ -805,6 +848,7 @@ class _BaseMemoryModel:
                     attention_params
                     + transformer_layernorm_params
                     + router_params
+                    + shared_expert_params
                     + expert_params
                 ),
             },
@@ -827,8 +871,8 @@ class _BaseMemoryModel:
                 "expert_params": 0,
                 "embedding_params": single_embedding,
                 "input_embedding_params": 0,
-                "output_head_params": single_embedding + final_norm_params,
-                "total_params": single_embedding + final_norm_params,
+                "output_head_params": (0 if bool(getattr(self.model, "tie_word_embeddings", True)) else single_embedding) + final_norm_params,
+                "total_params": (0 if bool(getattr(self.model, "tie_word_embeddings", True)) else single_embedding) + final_norm_params,
             },
         }
     
@@ -944,15 +988,18 @@ class _BaseMemoryModel:
         """
         估算优化器状态显存 (GB)
         
-        AdamW: 2 × fp32 状态 (momentum + variance)
+        AdamW 混合精度 (BF16/FP16 O2): 3 × fp32 状态
+          - momentum (4 bytes/param)
+          - variance  (4 bytes/param)
+          - master weight — FP32 副本 (4 bytes/param)
         
         关键点：
         1. 专家参数和非专家参数的 Sharding 处理不同
            - 专家参数：已被 EP 切分，不受 Sharding 切分
            - 非专家参数：受 Sharding 切分
         2. tensorwise_offload 在实际实现中：
-           - 主要 offload 非专家参数的优化器状态
-           - 专家参数优化器通常保留在 GPU 上以保证性能
+           - offload 优化器状态（含 master weight）到 CPU
+           - 对所有参数生效，包括专家
         """
         param_count = self.estimate_parameter_count_per_gpu(parallel, stage_id)
         
@@ -966,22 +1013,15 @@ class _BaseMemoryModel:
         # Offload 因子
         offload_factor = sharding.get_optimizer_memory_factor()
         
-        # AdamW: 2 个 fp32 状态
-        # 修正：专家优化器也受 tensorwise_offload 影响
-        # PaddleFormers 的 tensorwise_offload 对所有参数生效，包括专家
-        # 但专家参数不受 Sharding 切分（因为已被 EP 切分）
-        expert_opt_bytes = expert_params * 4 * 2 * offload_factor  # 专家也 offload
+        # 混合精度训练中每个参数的优化器字节数:
+        # momentum(4) + variance(4) + master_weight(4) = 12
+        opt_bytes_per_param = 4 * 3 if self.training.dtype_bytes < 4 else 4 * 2
         
-        # 非专家优化器显存（受 Sharding 切分，受 offload 影响）
-        non_expert_opt_bytes = non_expert_params * 4 * 2 / sharding_factor * offload_factor
+        expert_opt_bytes = expert_params * opt_bytes_per_param * offload_factor
+        
+        non_expert_opt_bytes = non_expert_params * opt_bytes_per_param / sharding_factor * offload_factor
         
         optimizer_bytes = expert_opt_bytes + non_expert_opt_bytes
-        
-        # 注意:
-        # amp_master_grad 表示梯度以 FP32 进行主副本更新，
-        # 不是长期常驻的 full-size master weight。
-        # 这里不将其按"参数等量常驻显存"计入 optimizer states，
-        # 避免系统性高估。
         
         return optimizer_bytes / (1024 ** 3)
 
@@ -992,9 +1032,16 @@ class _BaseMemoryModel:
         """
         估算常驻 FP32 master-grad 显存。
 
-        Paddle O2 + amp_master_grad 在非 offload 路径下通常会保留一份
-        FP32 master grad，用于 optimizer update。开启 tensorwise offload 时，
-        这部分更接近 update 阶段工作集，而不是长期常驻状态。
+        PaddleFormers O2 + amp_master_grad 会保留一份 FP32 master grad
+        用于优化器更新。此状态独立于优化器状态的 offload：
+        - master_grad 在 backward 阶段生成，在 optimizer step 消费
+        - tensorwise_offload 只影响 moment1/moment2/master_weight，不影响 master_grad
+        - 因此 offload 与否不改变 master_grad 的驻留量
+
+        实际行为：master_grad 是否在 backward 期间与 activation 共存取决于
+        显存压力。当 activation 占用较高时，框架会延迟到 optimizer step
+        才分配 FP32 master_grad。此处给出一个近似值，配合 runtime
+        calibration 进行校正。
         """
         if (
             not bool(getattr(self.training, "amp_master_grad", False))
@@ -1002,9 +1049,7 @@ class _BaseMemoryModel:
             or gradient_memory_gb <= 0.0
         ):
             return 0.0
-        if sharding.tensorwise_offload and sharding.degree > 1:
-            return 0.0
-        return gradient_memory_gb * (4.0 / float(self.training.dtype_bytes))
+        return min(4.0, gradient_memory_gb * 0.35)
 
     def estimate_tensor_fusion_buffer(self,
                                       parallel: ParallelConfig,
@@ -1025,40 +1070,21 @@ class _BaseMemoryModel:
         non_expert_grad_gb = non_expert_params * self.training.dtype_bytes / GIB
 
         fusion_buffer_gb = 0.0
-        if sharding.degree > 1 or parallel.dp > 1:
-            dense_factor = 1.12
-            if bool(getattr(self.training, "amp_master_grad", False)):
-                dense_factor += 0.06
-            if not self.training.clear_every_step_cache:
-                dense_factor += 0.05
-            if self.training.variable_seq_lengths or self.training.enable_dynamic_shape:
-                dense_factor += 0.03
-            if (
-                self.training.stage1_overlap
-                or self.training.enable_sharding_comm_overlap
-            ):
-                dense_factor += 0.04
-            fusion_buffer_gb += non_expert_grad_gb * dense_factor
-
-        if parallel.ep > 1 and expert_params > 0:
-            expert_factor = 0.82
-            if bool(getattr(self.training, "moe_expert_fusion", False)):
-                expert_factor += 0.10
-            if bool(getattr(self.training, "moe_grouped_gemm", False)):
-                expert_factor += 0.03
-            if not self.training.clear_every_step_cache:
-                expert_factor += 0.03
-            if self.training.variable_seq_lengths or self.training.enable_dynamic_shape:
-                expert_factor += 0.02
-            fusion_buffer_gb += expert_grad_gb * expert_factor
-
-        return fusion_buffer_gb
+        dense_bucket_gb = min(2.0, max(0.256, non_expert_grad_gb * 0.18)) if (sharding.degree > 1 or parallel.dp > 1) else 0.0
+        expert_bucket_gb = min(1.5, max(0.128, expert_grad_gb * 0.14)) if (parallel.ep > 1 and expert_params > 0) else 0.0
+        if self.training.variable_seq_lengths or self.training.enable_dynamic_shape:
+            dense_bucket_gb *= 1.08
+            expert_bucket_gb *= 1.08
+        if not self.training.clear_every_step_cache:
+            dense_bucket_gb *= 1.06
+            expert_bucket_gb *= 1.06
+        return dense_bucket_gb + expert_bucket_gb
 
     def _effective_token_count(self,
                                parallel: ParallelConfig,
                                seq_len: int,
                                micro_batch_size: int) -> int:
-        effective_seq_len = max(1, seq_len // max(1, parallel.cp))
+        effective_seq_len = max(1, seq_len)
         return micro_batch_size * effective_seq_len
 
     def _activation_hidden_partition_factor(self, parallel: ParallelConfig) -> int:
@@ -1196,13 +1222,44 @@ class _BaseMemoryModel:
         )
         seq_len = seq_len if seq_len is not None else self.training.sequence_length
         tokens = self._effective_token_count(parallel, seq_len, micro_bsz)
+        loss_factor = CROSS_ENTROPY_WORKSPACE_FACTOR
+        if not self.model.is_moe:
+            loss_factor += 0.5
+            if self.model.hidden_size >= 4096:
+                loss_factor += 0.3
+        else:
+            if parallel.pp == 1 and parallel.tp == 1:
+                loss_factor += 0.15
         logits_workspace_bytes = (
             tokens
             * self.model.vocab_size
             * 4
-            * CROSS_ENTROPY_WORKSPACE_FACTOR
+            * loss_factor / max(1, int(parallel.tp))
         )
         return logits_workspace_bytes / GIB
+
+
+    def _estimate_stage1_parameter_live_window(self,
+                                               parallel: ParallelConfig,
+                                               sharding: ShardingConfig,
+                                               stage_id: int) -> float:
+        """Stage1 split_param 的参数预取 / all-gather live window。"""
+        if sharding.stage != ShardingStage.STAGE1 or not sharding.split_param or sharding.degree <= 1:
+            return 0.0
+        param_count = self.estimate_parameter_count_per_gpu(parallel, stage_id)
+        non_expert_params = max(0, param_count["total_params"] - param_count["expert_params"])
+        full_dense_param_gb = (non_expert_params * self.training.dtype_bytes) / GIB
+        if parallel.pp == 1:
+            live_fraction = 0.88
+        else:
+            live_fraction = 0.18
+            if stage_id == parallel.pp - 1:
+                live_fraction += 0.05
+        if self.training.stage1_overlap:
+            live_fraction += 0.08
+        if parallel.tp > 1:
+            live_fraction *= 0.82
+        return max(0.0, full_dense_param_gb * live_fraction)
 
     def _estimate_comm_pools(self,
                              parallel: ParallelConfig,
@@ -1450,7 +1507,7 @@ class _BaseMemoryModel:
         
         包括:
         - TP AllReduce buffer
-        - PP Send/Recv buffer  
+        - PP Send/Recv buffer
         - DP AllReduce/ReduceScatter buffer
         - EP AllToAll buffer
         """
@@ -1562,44 +1619,126 @@ class _BaseMemoryModel:
             / (saved_activation_gb + temporary_buffer_gb)
         )
 
+    def estimate_framework_overhead(self,
+                                    parallel: ParallelConfig,
+                                    model_states_gb: float,
+                                    parameter_memory_gb: float = 0.0,
+                                    gradient_memory_gb: float = 0.0) -> float:
+        """
+        动态估算 CUDA/Paddle 框架开销 (GB)。
+
+        框架开销主要由以下部分组成：
+        - CUDA context 初始化（~0.5-0.8 GB）
+        - cuBLAS/cuBLASLt workspace（与矩阵大小相关）
+        - Paddle runtime buffers（stream buffers, allocator metadata 等）
+
+        注：runtime 开销基于 param+grad 而非 model_states，因为 CUDA allocator
+        管理的元数据和 stream buffer 数量由参数/梯度张量数决定，不随优化器 offload 变化。
+        """
+        # CUDA context 基础开销
+        cuda_context_gb = 0.55
+
+        # cuBLAS workspace: 与最大矩阵运算相关
+        h = self.model.hidden_size
+        tp = max(1, parallel.tp)
+        cublas_ws_gb = min(0.8, max(0.1, (h * h / tp) * 4 / GIB * 2.0))
+
+        # Paddle runtime: 基于 param+grad（不随 offload 变化的基础量）
+        base_states_gb = max(model_states_gb, parameter_memory_gb + gradient_memory_gb)
+        runtime_gb = min(0.8, max(0.1, base_states_gb * 0.04))
+
+        return cuda_context_gb + cublas_ws_gb + runtime_gb
+
+    def _estimate_largest_param_elements(self, parallel: ParallelConfig) -> int:
+        """
+        估算单个最大参数张量的元素数量。
+
+        PaddleFormers AdamWCustom 的 tensorwise offload 以单个参数为粒度进行
+        reload/offload，因此 optimizer step 阶段的 GPU 峰值工作集取决于
+        最大单参数的优化器状态大小。
+
+        典型 Transformer 的最大参数张量:
+        - Dense FFN weight (gate_proj / up_proj / down_proj): h × ffn/tp
+        - Embedding: vocab_size × h / tp
+        - Attention QKV: h × num_heads × head_dim / tp
+        """
+        h = self.model.hidden_size
+        ffn = self.model.intermediate_size
+        v = self.model.vocab_size
+        tp = max(1, parallel.tp)
+
+        # Dense FFN weight: h × intermediate_size / tp
+        ffn_weight = h * ffn // tp
+        # Word embedding / LM head: vocab_size × h / tp
+        embedding_weight = v * h // tp
+        # Attention: Q/K/V largest single projection
+        attn_proj = h * (self.model.num_attention_heads * self.model.head_dim) // tp
+
+        return max(ffn_weight, embedding_weight, attn_proj)
+
     def estimate_optimizer_update_workspace(self,
                                             parallel: ParallelConfig,
                                             sharding: ShardingConfig,
                                             parameter_memory_gb: float) -> float:
         """
-        估算优化器 update 阶段的 FP32 master/update bucket 工作集。
+        估算优化器 update 阶段的 GPU 工作集 (GB)。
 
-        tensorwise offload 会在 update 时将当前参数 shard 拉回 GPU，
-        以 FP32 bucket 进行更新；这一部分是框架运行时工作集，
-        不属于长期常驻 optimizer state。
+        PaddleFormers 实际行为（源码参考）:
+
+        1. tensorwise_offload (AdamWCustom._append_optimize_op):
+           逐参数 reload_optim(p) → adam update → offload_optim(p)。
+           GPU 上同时只有 1 个参数的 moment1 + moment2 + master_weight。
+           工作集 = largest_param × opt_bytes_per_param。
+
+        2. cpu_offload (Trainer.optimizer_step → _reload_optimizer):
+           optimizer step 前将全部优化器状态从 CPU pinned 拉回 GPU，
+           step 后 _offload_optimizer 再推回 CPU。
+           工作集 = 全部优化器状态（等同于无 offload 时的 optimizer_memory）。
+
+        3. 无 offload:
+           优化器状态始终常驻 GPU，无额外工作集。
         """
-        if (
-            not sharding.tensorwise_offload
-            or sharding.degree <= 1
-            or sharding.get_optimizer_memory_factor() >= 1.0
-        ):
+        if not sharding.tensorwise_offload and not sharding.cpu_offload:
             return 0.0
-        return parameter_memory_gb * (4 / self.training.dtype_bytes)
+
+        opt_bytes_per_param = 4 * 3 if self.training.dtype_bytes < 4 else 4 * 2
+
+        if sharding.tensorwise_offload:
+            # DygraphShardingOptimizerV2 wraps AdamWCustom:
+            # - V2 把每个参数切成 1/sharding_degree 的 slice_param
+            # - AdamWCustom 的 reload/offload 作用在 slice_param 上
+            # 因此峰值 = 最大 slice_param 的 FP32 优化器状态
+            largest_param = self._estimate_largest_param_elements(parallel)
+            sharding_factor = max(1, sharding.get_optimizer_sharding_factor())
+            largest_slice = largest_param / sharding_factor
+            return largest_slice * opt_bytes_per_param / GIB
+
+        # cpu_offload (bulk)：optimizer step 时全部状态加载回 GPU
+        # 等同于无 offload 时的 optimizer_memory_gb（factor=1.0）
+        # 用 parameter_memory_gb 推算：
+        #   parameter_memory_gb = params × dtype_bytes / sharding / GIB
+        #   optimizer_workspace = params × opt_bytes_per_param / sharding / GIB
+        #                       = parameter_memory_gb × (opt_bytes_per_param / dtype_bytes)
+        return parameter_memory_gb * (opt_bytes_per_param / self.training.dtype_bytes)
 
     def _estimate_pp_effective_inflight_micro_batches(self,
                                                       parallel: ParallelConfig,
                                                       stage_id: int) -> float:
         """
-        估算 1F1B 下每个 PP stage 的有效激活驻留数。
+        估算 1F1B 下每个 PP stage 的峰值激活驻留数（用于 allocated memory）。
 
-        旧模型直接使用 `pp - stage_id`，等价于把峰值当成纯 warmup 时刻，
-        会系统性高估首段 stage 的 allocated，并低估末段 stage 的 reserved。
+        在 1F1B 流水线调度中：
+        - stage k 在 warmup 阶段积累 (pp - 1 - k) 个 micro-batch 的前向激活
+        - 进入 steady-state 时再处理 1 个前向，峰值 = pp - k
+        - max_memory_allocated 捕获的是峰值高水位
 
-        实际峰值更接近前向堆积和后向回流交汇的 steady-state 过渡点。
-        当 GAS 足够大时，可用 warmup/backward 两侧的平均占用近似：
-
-            effective_inflight ~= (pp + 1) / 2
+        因此使用 pp - stage_id 作为峰值激活驻留数（受 GAS 上限约束）。
         """
         if parallel.pp <= 1:
             return 1.0
         gas = max(1, int(getattr(self.training, "gradient_accumulation_steps", 1)))
-        steady_state_inflight = 0.5 * (float(parallel.pp) + 1.0)
-        return min(float(gas), steady_state_inflight)
+        peak_inflight = float(parallel.pp) - float(stage_id)
+        return min(float(gas), peak_inflight)
 
     def _scale_phase_pool(self,
                           total_pool_gb: float,
@@ -1811,6 +1950,12 @@ class _BaseMemoryModel:
             parallel, sharding, stage_id
         )
 
+        # ========== 框架开销（动态估算） ==========
+        breakdown.framework_overhead_gb = self.estimate_framework_overhead(
+            parallel, breakdown.model_states_gb,
+            breakdown.parameter_memory_gb, breakdown.gradient_memory_gb
+        )
+
         breakdown.communication_buffer_gb = self.estimate_communication_buffer(
             parallel, mbs, seq_len
         )
@@ -1880,6 +2025,10 @@ class _BaseMemoryModel:
         breakdown.temporary_buffer_gb = self.estimate_loss_workspace(
             parallel, seq_len, mbs, stage_id
         )
+        breakdown.parameter_live_window_gb = self._estimate_stage1_parameter_live_window(
+            parallel, sharding, stage_id
+        )
+        breakdown.temporary_buffer_gb += breakdown.parameter_live_window_gb
 
         # ========== Buffer pool ==========
         breakdown.activation_buffer_pool_gb = self.estimate_activation_buffer_pool(
@@ -1891,26 +2040,61 @@ class _BaseMemoryModel:
         )
 
         # ========== Peak runtime workspace ==========
+        # 训练显存峰值出现在以下三个阶段之一：
+        #   1. 前向-反向初期：activation + loss workspace + param_live_window 共存
+        #   2. 反向末期（full recompute + amp_master_grad）：activation 基本释放，
+        #      但 FP32 master_grad 已全量累积。当 activation 较小时此阶段可能主导。
+        #   3. 优化器阶段：optimizer_update_workspace 活跃
+        #
+        # temporary_buffer 包含 loss_workspace + param_live_window。
+        forward_phase_peak = (
+            breakdown.activation_memory_gb + breakdown.temporary_buffer_gb
+        )
+        optimizer_phase_peak = breakdown.optimizer_update_workspace_gb
+
+        # 反向末期峰值：full recompute + amp_master_grad 时，backward 结束时
+        # 所有 FP32 master_grad 已累积，activation 几乎全部释放。
+        # delta = (full_master_grad - base中已计的master_grad) + param_live_window
+        end_backward_phase_peak = 0.0
+        if (
+            bool(getattr(self.training, "amp_master_grad", False))
+            and self.training.dtype_bytes < 4
+            and recompute.granularity == RecomputeGranularity.FULL
+            and breakdown.gradient_memory_gb > 0.0
+        ):
+            full_master_grad_gb = (
+                breakdown.gradient_memory_gb
+                * (4.0 / self.training.dtype_bytes)
+            )
+            end_backward_phase_peak = (
+                max(0.0, full_master_grad_gb - breakdown.master_grad_memory_gb)
+                + breakdown.parameter_live_window_gb
+            )
+
         peak_candidates = {
-            "activation": breakdown.activation_memory_gb,
-            "loss": breakdown.temporary_buffer_gb,
-            "optimizer_update": breakdown.optimizer_update_workspace_gb,
+            "forward_activation_plus_loss": forward_phase_peak,
+            "end_backward_master_grad": end_backward_phase_peak,
+            "optimizer_update": optimizer_phase_peak,
         }
         peak_source, peak_value = max(
-            peak_candidates.items(),
-            key=lambda item: (
-                item[1],
-                1 if item[0] == "optimizer_update" else 0,
-                1 if item[0] == "activation" else 0,
-            ),
+            peak_candidates.items(), key=lambda item: item[1]
         )
         breakdown.peak_runtime_workspace_source = peak_source
         breakdown.peak_runtime_workspace_gb = peak_value
-        reserved_value = (
-            breakdown.allocated_memory_gb
-            + breakdown.temporary_buffer_gb
-            + breakdown.activation_buffer_pool_gb
-        )
+        # reserved 估算:
+        # - 当 forward 为峰值: allocated 已包含 act+temp, 仅加 buffer_pool
+        # - 当 optimizer 为峰值: forward 阶段的 act+temp 被 allocator 保留在 reserved
+        if peak_source == "optimizer_update":
+            reserved_value = (
+                breakdown.allocated_memory_gb
+                + forward_phase_peak
+                + breakdown.activation_buffer_pool_gb
+            )
+        else:
+            reserved_value = (
+                breakdown.allocated_memory_gb
+                + breakdown.activation_buffer_pool_gb
+            )
         reserved_source = "single_node_base"
         if self._is_multi_node_prediction():
             reserved_candidates = self._estimate_multi_node_reserved_candidates(
@@ -2268,3 +2452,4 @@ __all__ = [
     "ShardingConfig",
     "RecomputeConfig",
 ]
+

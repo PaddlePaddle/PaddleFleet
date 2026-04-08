@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 from .config import (
     ModelConfig, ParallelConfig, TrainingConfig, HardwareConfig,
-    GPUSpec, NetworkSpec, ShardingStage, RecomputeGranularity
+    GPUSpec, ShardingStage, RecomputeGranularity
 )
 from .submodels.memory_model import MemoryModel, MemoryBreakdown, ShardingConfig, RecomputeConfig
 from .submodels.compute_model import ComputeModel
@@ -88,6 +89,14 @@ class PredictionResult:
     stage_cycle_micro_ms: List[float] = field(default_factory=list)
     slowest_stage_id: int = 0
     slowest_stage_time_ms: float = 0.0
+    stage_recompute_detail: List[Dict] = field(default_factory=list)
+
+    # ========== 置信度 ==========
+    confidence: float = 0.0
+    memory_confidence: float = 0.0
+    time_confidence: float = 0.0
+    confidence_breakdown: Dict = field(default_factory=dict)
+    confidence_reasons: List[str] = field(default_factory=list)
     
     def to_dict(self) -> Dict:
         """转换为字典"""
@@ -139,6 +148,14 @@ class PredictionResult:
                 "cycle_micro_ms": [round(v, 2) for v in self.stage_cycle_micro_ms],
                 "slowest_stage_id": self.slowest_stage_id,
                 "slowest_stage_time_ms": round(self.slowest_stage_time_ms, 2),
+                "recompute_detail": list(self.stage_recompute_detail),
+            },
+            "confidence": {
+                "confidence": round(self.confidence, 4),
+                "memory_confidence": round(self.memory_confidence, 4),
+                "time_confidence": round(self.time_confidence, 4),
+                "breakdown": dict(self.confidence_breakdown),
+                "reasons": list(self.confidence_reasons),
             },
         }
     
@@ -194,7 +211,7 @@ class _BasePDCostModel:
     OFFLOAD_BUCKET_MIN_BYTES = 64 * 1024 * 1024
     OFFLOAD_BUCKET_MAX_BYTES = 512 * 1024 * 1024
     
-    def __init__(self, 
+    def __init__(self,
                  model_config: ModelConfig,
                  hardware_config: HardwareConfig = None,
                  training_config: TrainingConfig = None,
@@ -249,7 +266,7 @@ class _BasePDCostModel:
         当存在 hardware_spec.py 对应条目时，用其覆盖/补全硬件参数。
         """
         try:
-            from .calibration import HardwareCalibrator
+            from .utils.calibration import HardwareCalibrator
 
             calibrator = HardwareCalibrator()
             gpu_name = self.hardware_config.gpu.name
@@ -285,7 +302,7 @@ class _BasePDCostModel:
         Returns:
             HardwareConfig: 硬件配置
         """
-        from .calibration import HardwareCalibrator, get_hardware_config
+        from .utils.calibration import HardwareCalibrator, get_hardware_config
 
         # 与公共入口保持一致：默认优先复用 hardware_spec.py 中的已采集数据，
         # 在无 GPU 的离线预测环境也能正确构造多机硬件配置。
@@ -311,7 +328,7 @@ class _BasePDCostModel:
         self.compute_model = ComputeModel(self.model_config, self.hardware_config, self.training_config)
         self.comm_model = CommModel(self.hardware_config)
     
-    def calibrate(self, 
+    def calibrate(self,
                   num_nodes: int = 1,
                   gpus_per_node: int = None,
                   device_id: int = 0,
@@ -337,7 +354,7 @@ class _BasePDCostModel:
         Returns:
             HardwareConfig: 校准后的硬件配置
         """
-        from .calibration import HardwareCalibrator
+        from .utils.calibration import HardwareCalibrator
         
         calibrator = HardwareCalibrator(device_id=device_id)
         self._calibration_result = calibrator.calibrate(
@@ -395,6 +412,7 @@ class _BasePDCostModel:
                 num_empty_layers_add_in_tail: Optional[int] = None,
                 attn_implementation: Optional[str] = None,
                 apply_rope_fusion: Optional[bool] = None,
+                use_qk_norm: Optional[bool] = None,
                 moe_token_dispatcher_type: Optional[str] = None,
                 moe_grouped_gemm: Optional[bool] = None,
                 moe_router_fusion: Optional[bool] = None,
@@ -431,6 +449,7 @@ class _BasePDCostModel:
             num_empty_layers_add_in_tail: pipeline tail 额外空层
             attn_implementation: attention kernel 实现
             apply_rope_fusion: rope 融合
+            use_qk_norm: Q/K 额外 RMSNorm（如 Qwen3）
             moe_token_dispatcher_type: MoE token dispatcher 类型
             moe_grouped_gemm: MoE expert grouped GEMM
             moe_router_fusion: router fusion
@@ -499,6 +518,8 @@ class _BasePDCostModel:
             runtime_training_config.attn_implementation = str(attn_implementation)
         if apply_rope_fusion is not None:
             runtime_training_config.apply_rope_fusion = bool(apply_rope_fusion)
+        if use_qk_norm is not None:
+            runtime_training_config.use_qk_norm = bool(use_qk_norm)
         if moe_token_dispatcher_type is not None:
             runtime_training_config.moe_token_dispatcher_type = str(
                 moe_token_dispatcher_type
@@ -605,13 +626,16 @@ class _BasePDCostModel:
         memory_model = MemoryModel(
             self.model_config, runtime_training_config, self.hardware_config
         )
-        result.memory_breakdown = memory_model.estimate_memory(
+        peak_memory_breakdown = memory_model.estimate_memory(
             parallel, sharding_config, recompute_config, max_seq_len, micro_batch_size
         )
-        result.allocated_memory_gb = result.memory_breakdown.allocated_memory_gb
-        result.reserved_memory_gb = result.memory_breakdown.reserved_memory_gb
-        result.memory_gb = result.memory_breakdown.total_memory_gb
+        result.memory_breakdown = peak_memory_breakdown
+        result.allocated_memory_gb = peak_memory_breakdown.allocated_memory_gb
+        result.reserved_memory_gb = peak_memory_breakdown.reserved_memory_gb
+        result.memory_gb = peak_memory_breakdown.total_memory_gb
         result.fits_memory = result.memory_gb <= self.hardware_config.gpu.memory_gb
+        result.parallel_config["memory_peak_stage_id"] = int(getattr(peak_memory_breakdown, "peak_stage_id", 0))
+        result.parallel_config["display_memory_stage_id"] = 0 if int(getattr(parallel, "pp", 1) or 1) > 1 else int(getattr(peak_memory_breakdown, "peak_stage_id", 0))
         
         # ========== 计算时间预测 ==========
         # compute_model 需要使用当前调用的 runtime training config，
@@ -692,7 +716,7 @@ class _BasePDCostModel:
                 compute_result=compute_result,
                 comm_result=comm_result,
             )
-        if sharding_degree > 1:
+        if sharding_degree > 0:
             optimizer_step_time_ms = self._estimate_optimizer_step_time_ms(
                 parallel=parallel,
                 sharding_degree=sharding_degree,
@@ -781,6 +805,8 @@ class _BasePDCostModel:
         # ========== 吞吐量 ==========
         result.tokens_per_step, result.tokens_per_second, result.tokens_per_second_per_gpu = \
             self._calculate_throughput(result, parallel, micro_batch_size, max_seq_len, gradient_accumulation_steps)
+
+        self._finalize_confidence(result, parallel, runtime_training_config)
         
         return result
 
@@ -946,6 +972,93 @@ class _BasePDCostModel:
             result.fits_memory = result.memory_gb <= self.hardware_config.gpu.memory_gb
 
         return result
+
+    def _finalize_confidence(self, result: PredictionResult, parallel: ParallelConfig, runtime_training_config: TrainingConfig) -> None:
+        structure = 1.0
+        if int(getattr(self.model_config, "num_experts", 1) or 1) > 1:
+            structure -= 0.03
+        if bool(getattr(self.model_config, "uses_low_rank_attention", False)):
+            structure -= 0.02
+        if int(getattr(parallel, "cp", 1) or 1) > 1:
+            structure -= 0.10
+        structure = max(0.35, min(1.0, structure))
+
+        hardware = 1.0
+        gpu = self.hardware_config.gpu
+        if not getattr(gpu, "bf16_gemm_samples", None) and not getattr(gpu, "fp16_gemm_samples", None):
+            hardware -= 0.20
+        network = self.hardware_config.network
+        if int(getattr(parallel, "tp", 1) or 1) > 1 and not getattr(network, "intra_node_bw_curve", None):
+            hardware -= 0.08
+        if int(getattr(self.hardware_config, "num_nodes", 1) or 1) > 1 and not getattr(network, "inter_node_bw_curve", None):
+            hardware -= 0.12
+        hardware = max(0.35, min(1.0, hardware))
+
+        extrapolation = 1.0
+        max_pos = max(1, int(getattr(self.model_config, "max_position_embeddings", runtime_training_config.sequence_length) or runtime_training_config.sequence_length))
+        seq_ratio = float(runtime_training_config.sequence_length) / float(max_pos)
+        if seq_ratio > 1.0:
+            extrapolation -= min(0.20, 0.10 * (seq_ratio - 1.0) + 0.03)
+        elif seq_ratio > 0.85:
+            extrapolation -= 0.03
+        headroom = float(self.hardware_config.gpu.memory_gb) - float(result.reserved_memory_gb)
+        if headroom < 4.0:
+            extrapolation -= 0.14
+        elif headroom < 8.0:
+            extrapolation -= 0.08
+        extrapolation = max(0.30, min(1.0, extrapolation))
+
+        peaks = [
+            float(getattr(result.memory_breakdown, "reserved_candidate_forward_backward_gb", 0.0)),
+            float(getattr(result.memory_breakdown, "reserved_candidate_loss_gb", 0.0)),
+            float(getattr(result.memory_breakdown, "reserved_candidate_optimizer_gb", 0.0)),
+            float(getattr(result.memory_breakdown, "reserved_candidate_post_step_gb", 0.0)),
+            float(getattr(result.memory_breakdown, "allocated_peak_memory_gb", 0.0)),
+        ]
+        peaks = sorted([max(0.0, x) for x in peaks], reverse=True)
+        gap = ((peaks[0] - peaks[1]) / peaks[0]) if len(peaks) >= 2 and peaks[0] > 0 else 1.0
+        peak_clarity = max(0.35, min(1.0, 0.55 + 0.90 * gap))
+
+        stability = 1.0
+        if bool(getattr(runtime_training_config, "variable_seq_lengths", False)):
+            stability -= 0.08
+        if bool(getattr(runtime_training_config, "enable_dynamic_shape", False)):
+            stability -= 0.08
+        if bool(getattr(runtime_training_config, "overlap_p2p_comm", False)):
+            stability -= 0.04
+        if bool(getattr(runtime_training_config, "tensorwise_offload_optimizer", False)):
+            stability -= 0.06
+        if bool(getattr(runtime_training_config, "best_unbalanced_scheduler", False)):
+            stability -= 0.04
+        stability = max(0.35, min(1.0, stability))
+
+        memory_conf = 0.34 * structure + 0.18 * hardware + 0.20 * extrapolation + 0.20 * peak_clarity + 0.08 * stability
+        time_conf = 0.26 * structure + 0.30 * hardware + 0.24 * extrapolation + 0.20 * stability
+        confidence = 0.55 * memory_conf + 0.45 * time_conf
+
+        reasons = []
+        if int(getattr(parallel, "cp", 1) or 1) > 1:
+            reasons.append("cp is ignored semantically; predictions assume no context-parallel effects")
+        if bool(getattr(runtime_training_config, "variable_seq_lengths", False)):
+            reasons.append("variable sequence lengths increase runtime variance")
+        if bool(getattr(runtime_training_config, "enable_dynamic_shape", False)):
+            reasons.append("dynamic shape execution increases runtime variance")
+        if peak_clarity < 0.60:
+            reasons.append("multiple memory peak candidates are close")
+        if seq_ratio > 1.0:
+            reasons.append("sequence length exceeds nominal max_position_embeddings")
+
+        result.confidence = max(0.0, min(1.0, float(confidence)))
+        result.memory_confidence = max(0.0, min(1.0, float(memory_conf)))
+        result.time_confidence = max(0.0, min(1.0, float(time_conf)))
+        result.confidence_breakdown = {
+            "structure_coverage": round(structure, 4),
+            "hardware_coverage": round(hardware, 4),
+            "extrapolation_safety": round(extrapolation, 4),
+            "peak_clarity": round(peak_clarity, 4),
+            "runtime_stability": round(stability, 4),
+        }
+        result.confidence_reasons = reasons
 
     def _calculate_compute_efficiency(self, result: PredictionResult,
                                       parallel: ParallelConfig) -> float:
@@ -1223,7 +1336,7 @@ class _BasePDCostModel:
                                       training_config: TrainingConfig,
                                       compute_result: Dict[str, float],
                                       comm_result: Dict[str, float]) -> float:
-        if sharding_degree <= 1:
+        if sharding_degree <= 0:
             return 0.0
 
         ratio = max(0.0, min(1.0, float(offload_ratio)))
@@ -1342,7 +1455,7 @@ class _BasePDCostModel:
                                          comm_result: Dict[str, float],
                                          offload_tail_ms: float) -> float:
         """估算 optimizer-step 阶段的暴露时间。"""
-        if sharding_degree <= 1:
+        if sharding_degree <= 0:
             return 0.0
 
         stage_param_counts = self.comm_model._estimate_stage_parameter_counts_per_gpu(
@@ -1424,9 +1537,47 @@ class _BasePDCostModel:
             optimizer_stage_times.append(stage_time_ms)
 
         peak_stage_ms = max(optimizer_stage_times) if optimizer_stage_times else 0.0
+
+        # ------------------------------------------------------------------
+        # MoE expert offload overhead correction
+        # When offloading with many experts per GPU, the optimizer step incurs
+        # significant per-expert-tensor overhead from framework state management
+        # (H2D scheduling, routing bookkeeping, per-expert sync). An additional
+        # memory-pressure factor accounts for CUDA allocator contention when
+        # model states fill most of GPU memory.
+        # ------------------------------------------------------------------
+        num_experts = int(getattr(self.model_config, "num_experts", 0) or 0)
+        experts_per_gpu = max(1, num_experts // max(1, int(parallel.ep))) if num_experts > 1 else 0
+        if experts_per_gpu > 64 and ratio > 0.0:
+            # Count expert tensors in the peak stage
+            peak_stage_id = (
+                optimizer_stage_times.index(peak_stage_ms) if optimizer_stage_times else 0
+            )
+            layer_indices = self.compute_model._stage_layer_indices(parallel, peak_stage_id)
+            moe_layers_in_stage = sum(
+                1 for idx in layer_indices if self.compute_model._is_moe_layer(idx)
+            )
+            expert_tensor_count = moe_layers_in_stage * experts_per_gpu * 3
+
+            # Memory-pressure ratio from model states (weights + grads + master_grad)
+            max_stage_params = float(max(stage_param_counts))
+            dtype_bytes = float(training_config.dtype_bytes)
+            has_master_grad = bool(getattr(training_config, "amp_master_grad", False))
+            grad_bytes = 4.0 if (has_master_grad and dtype_bytes < 4) else dtype_bytes
+            model_state_gb = max_stage_params * (dtype_bytes + dtype_bytes + grad_bytes) / (1024 ** 3)
+            gpu_gb = float(getattr(self.hardware_config.gpu, "memory_gb", 80.0) or 80.0)
+            mem_ratio = min(1.0, model_state_gb * 1.2 / gpu_gb)
+
+            # Per-expert-tensor overhead (~30 ms base, scaled by memory pressure)
+            mem_pressure_factor = 1.0
+            if mem_ratio > 0.55:
+                mem_pressure_factor = 1.0 + 0.3 * (mem_ratio - 0.55)
+            per_tensor_overhead_ms = 30.0 * mem_pressure_factor
+            peak_stage_ms += expert_tensor_count * per_tensor_overhead_ms
+
         return max(peak_stage_ms, offload_tail_ms)
     
-    def rank_configurations(self, configs: List[Dict], 
+    def rank_configurations(self, configs: List[Dict],
                             top_k: int = 10,
                             micro_batch_size: int = None,
                             max_seq_len: int = None) -> List[Dict]:
@@ -1520,11 +1671,11 @@ class _BasePDCostModel:
                 if dp < 1 or tp * pp * dp != total_gpus:
                     continue
                 
-                # EP 搜索
+                # EP 搜索：ep <= sd(dp) 且 num_experts % ep == 0
                 ep_candidates = [1]
                 if num_experts > 1:
                     for ep in [2, 4, 8, 16, 32]:
-                        if ep <= num_experts and ep <= total_gpus:
+                        if ep <= dp and num_experts % ep == 0:
                             ep_candidates.append(ep)
                 
                 for ep in ep_candidates:
@@ -1589,16 +1740,14 @@ class _BasePDCostModel:
                 if dp < 1 or tp * pp * dp != total_gpus:
                     continue
                 
-                # 关键约束：当使用 tensorwise_offload 时，DP 必须 > 1
-                # 因为 offload 依赖 Sharding 机制，DP=1 时 Sharding 不工作
-                if use_offload and dp <= 1:
-                    continue
+                # PaddleFormers 的 tensorwise optimizer offload 在 dp=1 时仍可能生效，
+                # 这里不再硬性过滤这类配置。
                 
-                # EP 候选
+                # EP 候选：ep <= sd(dp) 且 num_experts % ep == 0
                 ep_candidates = [1]
                 if num_experts > 1:
                     for ep in [2, 4, 8]:
-                        if ep <= num_experts and ep <= dp:
+                        if ep <= dp and num_experts % ep == 0:
                             ep_candidates.append(ep)
                 
                 for ep in ep_candidates:
@@ -1879,22 +2028,197 @@ def create_deepseek_v3_costmodel(gpu_memory_gb: float = 80.0,
 
 PDCostModel = _BasePDCostModel
 
-# --- merged refined wrapper logic ---
-import copy
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-from .config import ParallelConfig, TrainingConfig, RecomputeGranularity
-from .submodels.compute_model import ComputeModel
-from .submodels.memory_model import MemoryModel, RecomputeConfig, ShardingConfig
+from typing import Any, Iterable, Sequence
 from .submodels.recompute_stage_sim import (
     build_stage_plans_from_recompute_configs,
     build_uniform_stage_plans,
     plans_to_dicts,
+)
+from .utils.runtime_model_calibration import (
+    RuntimeCalibrationFitter,
+    RuntimeCalibrationStore,
+    apply_runtime_calibration_to_result,
+    build_runtime_context_snapshot,
+    canonicalize_model_name,
+    default_model_key_from_config,
+    get_runtime_calibration_supported_fields,
+)
+from .utils.similarity_calibration import (
+    SimilarityCalibrationStore,
+    apply_similarity_calibration_to_result,
+    default_similarity_model_key_from_config,
 )
 
 class PDCostModel(_BasePDCostModel):
     TP_COLLECTIVES_PER_LAYER = 4.0
     TP_INTRA_NODE_SAFETY = 1.08
     TP_INTER_NODE_SAFETY = 1.18
+
+    def __init__(self,
+                 model_config: ModelConfig,
+                 hardware_config: HardwareConfig = None,
+                 training_config: TrainingConfig = None,
+                 auto_calibrate: bool = False,
+                 calibrate_on_predict: bool = False,
+                 use_cached_profile: bool = True,
+                 node_count: int = 1,
+                 enable_runtime_calibration: bool = False,
+                 runtime_calibration_store_path: Optional[str] = None,
+                 runtime_calibration_model_name: Optional[str] = None,
+                 enable_similarity_calibration: bool = True,
+                 similarity_calibration_store_path: Optional[str] = None,
+                 similarity_calibration_model_name: Optional[str] = None):
+        super().__init__(
+            model_config=model_config,
+            hardware_config=hardware_config,
+            training_config=training_config,
+            auto_calibrate=auto_calibrate,
+            calibrate_on_predict=calibrate_on_predict,
+            use_cached_profile=use_cached_profile,
+            node_count=node_count,
+        )
+        env_enable = str(os.getenv("PDCOST_ENABLE_RUNTIME_CALIBRATION", "")).strip().lower() in {"1", "true", "yes", "on"}
+        self.enable_runtime_calibration = bool(enable_runtime_calibration or env_enable)
+        self.runtime_calibration_store_path = (
+            runtime_calibration_store_path
+            or os.getenv("PDCOST_RUNTIME_CALIBRATION_STORE")
+            or str(Path(__file__).parent / "utils" / "runtime_model_calibrations.json")
+        )
+        self.runtime_calibration_model_name = runtime_calibration_model_name
+        self._runtime_calibration_store = RuntimeCalibrationStore(self.runtime_calibration_store_path)
+        self._runtime_calibration_entry = None
+        self.reload_runtime_calibration()
+
+        env_similarity = str(os.getenv("PDCOST_ENABLE_SIMILARITY_CALIBRATION", "")).strip().lower()
+        if env_similarity in {"0", "false", "no", "off"}:
+            self.enable_similarity_calibration = False
+        elif env_similarity in {"1", "true", "yes", "on"}:
+            self.enable_similarity_calibration = True
+        else:
+            self.enable_similarity_calibration = bool(enable_similarity_calibration)
+        self.similarity_calibration_store_path = (
+            similarity_calibration_store_path
+            or os.getenv("PDCOST_SIMILARITY_CALIBRATION_STORE")
+            or str(Path(__file__).parent / "utils" / "similarity_calibrations.json")
+        )
+        self.similarity_calibration_model_name = similarity_calibration_model_name
+        self._similarity_calibration_store = SimilarityCalibrationStore(self.similarity_calibration_store_path)
+        self._similarity_calibration_entry = None
+        self.reload_similarity_calibration()
+
+    def _runtime_calibration_model_key(self) -> str:
+        return canonicalize_model_name(
+            self.runtime_calibration_model_name or default_model_key_from_config(self.model_config)
+        )
+
+    def reload_runtime_calibration(self) -> Optional[Dict[str, Any]]:
+        self._runtime_calibration_store = RuntimeCalibrationStore(self.runtime_calibration_store_path)
+        self._runtime_calibration_entry = self._runtime_calibration_store.get(self._runtime_calibration_model_key())
+        return self._runtime_calibration_entry
+
+    def _similarity_calibration_model_key(self) -> str:
+        return canonicalize_model_name(
+            self.similarity_calibration_model_name or default_similarity_model_key_from_config(self.model_config)
+        )
+
+    def reload_similarity_calibration(self) -> Optional[Dict[str, Any]]:
+        self._similarity_calibration_store = SimilarityCalibrationStore(self.similarity_calibration_store_path)
+        self._similarity_calibration_entry = self._similarity_calibration_store.get(self._similarity_calibration_model_key())
+        return self._similarity_calibration_entry
+
+    def fit_runtime_calibration_from_logs(self,
+                                          log_paths: Sequence[str],
+                                          model_name: Optional[str] = None,
+                                          persist: bool = True,
+                                          min_ok_observations: int = 4) -> Dict[str, Any]:
+        fitter = RuntimeCalibrationFitter(self, self._runtime_calibration_store)
+        entry = fitter.fit_from_log_files(
+            model_name=model_name or self._runtime_calibration_model_key(),
+            log_paths=list(log_paths),
+            persist=persist,
+            min_ok_observations=min_ok_observations,
+        )
+        self.reload_runtime_calibration()
+        return entry
+
+    def fit_runtime_calibration_from_log_texts(self,
+                                               log_texts: Sequence[str],
+                                               source_names: Optional[Sequence[str]] = None,
+                                               model_name: Optional[str] = None,
+                                               persist: bool = True,
+                                               min_ok_observations: int = 4) -> Dict[str, Any]:
+        fitter = RuntimeCalibrationFitter(self, self._runtime_calibration_store)
+        entry = fitter.fit_from_log_texts(
+            model_name=model_name or self._runtime_calibration_model_key(),
+            log_texts=list(log_texts),
+            source_names=list(source_names) if source_names is not None else None,
+            persist=persist,
+            min_ok_observations=min_ok_observations,
+        )
+        self.reload_runtime_calibration()
+        return entry
+
+    def get_runtime_calibration_supported_fields(self) -> List[Dict[str, Any]]:
+        return get_runtime_calibration_supported_fields()
+
+    def _maybe_apply_runtime_calibration(self,
+                                         result: PredictionResult,
+                                         *,
+                                         parallel: ParallelConfig,
+                                         runtime_training_config: TrainingConfig,
+                                         recompute_granularity: Optional[str],
+                                         recompute_method: Optional[str],
+                                         recompute_num_layers: Optional[int],
+                                         tensorwise_offload_optimizer: Optional[bool],
+                                         tensorwise_offload_ratio: Optional[float],
+                                         split_param: Optional[bool],
+                                         sd_release_grads: Optional[bool],
+                                         micro_batch_size: Optional[int],
+                                         gradient_accumulation_steps: Optional[int],
+                                         max_seq_len: Optional[int]) -> PredictionResult:
+        if not self.enable_runtime_calibration:
+            return result
+        if not self._runtime_calibration_entry:
+            return result
+        runtime_context = build_runtime_context_snapshot(
+            parallel=parallel,
+            runtime_training_config=runtime_training_config,
+            recompute_granularity=recompute_granularity,
+            recompute_method=recompute_method,
+            recompute_num_layers=recompute_num_layers,
+            tensorwise_offload_optimizer=tensorwise_offload_optimizer,
+            tensorwise_offload_ratio=tensorwise_offload_ratio,
+            split_param=split_param,
+            sd_release_grads=sd_release_grads,
+            micro_batch_size=micro_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            max_seq_len=max_seq_len,
+        )
+        apply_runtime_calibration_to_result(
+            result=result,
+            calibration_entry=self._runtime_calibration_entry,
+            parallel=parallel,
+            runtime_context=runtime_context,
+            gpu_memory_gb=float(getattr(self.hardware_config.gpu, "memory_gb", 0.0) or 0.0),
+            total_layers=int(getattr(self.model_config, "num_hidden_layers", 1) or 1),
+        )
+        return result
+
+    def _maybe_apply_similarity_calibration(self,
+                                            result: PredictionResult,
+                                            *,
+                                            runtime_context: Optional[Dict[str, Any]]) -> PredictionResult:
+        if not self.enable_similarity_calibration:
+            return result
+        if not self._similarity_calibration_entry:
+            return result
+        apply_similarity_calibration_to_result(
+            result=result,
+            calibration_entry=self._similarity_calibration_entry,
+            runtime_context=runtime_context,
+            gpu_memory_gb=float(getattr(self.hardware_config.gpu, "memory_gb", 0.0) or 0.0),
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Public API
@@ -1916,6 +2240,8 @@ class PDCostModel(_BasePDCostModel):
         sd_release_grads: bool = None,
         **kwargs,
     ) -> PredictionResult:
+        apply_runtime_calibration = bool(kwargs.pop("apply_runtime_calibration", True))
+        apply_similarity_calibration = bool(kwargs.pop("apply_similarity_calibration", True))
         result = super().predict(
             parallel,
             micro_batch_size=micro_batch_size,
@@ -1946,12 +2272,51 @@ class PDCostModel(_BasePDCostModel):
             max_seq_len=max_seq_len,
             gradient_accumulation_steps=gradient_accumulation_steps,
         )
-        self._apply_tp_correction(
-            result=result,
+        runtime_training_config = self._build_runtime_training_config(
             parallel=parallel,
-            stage_layers=stage_layers,
             micro_batch_size=runtime["micro_batch_size"],
             max_seq_len=runtime["max_seq_len"],
+            gradient_accumulation_steps=runtime["gradient_accumulation_steps"],
+            kwargs=dict(kwargs),
+        )
+        runtime_context = build_runtime_context_snapshot(
+            parallel=parallel,
+            runtime_training_config=runtime_training_config,
+            recompute_granularity=(recompute_granularity if recompute_granularity is not None else getattr(self.training_config, "recompute_config", "none")),
+            recompute_method=(recompute_method if recompute_method is not None else getattr(self.training_config, "recompute_method", None)),
+            recompute_num_layers=(recompute_num_layers if recompute_num_layers is not None else getattr(self.training_config, "recompute_num_layers", None)),
+            tensorwise_offload_optimizer=(tensorwise_offload_optimizer if tensorwise_offload_optimizer is not None else getattr(self.training_config, "tensorwise_offload_optimizer", False)),
+            tensorwise_offload_ratio=(tensorwise_offload_ratio if tensorwise_offload_ratio is not None else getattr(self.training_config, "tensorwise_offload_ratio", 0.95)),
+            split_param=split_param,
+            sd_release_grads=sd_release_grads,
+            micro_batch_size=runtime["micro_batch_size"],
+            gradient_accumulation_steps=runtime["gradient_accumulation_steps"],
+            max_seq_len=runtime["max_seq_len"],
+        )
+        if apply_runtime_calibration:
+            self._maybe_apply_runtime_calibration(
+                result,
+                parallel=parallel,
+                runtime_training_config=runtime_training_config,
+                recompute_granularity=(recompute_granularity if recompute_granularity is not None else getattr(self.training_config, "recompute_config", "none")),
+                recompute_method=(recompute_method if recompute_method is not None else getattr(self.training_config, "recompute_method", None)),
+                recompute_num_layers=(recompute_num_layers if recompute_num_layers is not None else getattr(self.training_config, "recompute_num_layers", None)),
+                tensorwise_offload_optimizer=(tensorwise_offload_optimizer if tensorwise_offload_optimizer is not None else getattr(self.training_config, "tensorwise_offload_optimizer", False)),
+                tensorwise_offload_ratio=(tensorwise_offload_ratio if tensorwise_offload_ratio is not None else getattr(self.training_config, "tensorwise_offload_ratio", 0.95)),
+                split_param=split_param,
+                sd_release_grads=sd_release_grads,
+                micro_batch_size=micro_batch_size,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+                max_seq_len=max_seq_len,
+            )
+        if apply_similarity_calibration:
+            self._maybe_apply_similarity_calibration(result, runtime_context=runtime_context)
+        result.tokens_per_step, result.tokens_per_second, result.tokens_per_second_per_gpu = self._calculate_throughput(
+            result,
+            parallel,
+            runtime["micro_batch_size"],
+            runtime["max_seq_len"],
+            runtime["gradient_accumulation_steps"],
         )
         return result
 
@@ -1965,6 +2330,8 @@ class PDCostModel(_BasePDCostModel):
         per_stage_offload_ratio: List[float] = None,
         **kwargs,
     ) -> PredictionResult:
+        apply_runtime_calibration = bool(kwargs.pop("apply_runtime_calibration", True))
+        apply_similarity_calibration = bool(kwargs.pop("apply_similarity_calibration", True))
         stage_count = max(1, int(getattr(parallel, "pp", 1) or 1))
         runtime = self._resolve_runtime_inputs(
             micro_batch_size=kwargs.get("micro_batch_size"),
@@ -2063,11 +2430,26 @@ class PDCostModel(_BasePDCostModel):
             runtime["max_seq_len"],
             runtime["micro_batch_size"],
         )
-        result.memory_breakdown = mem_breakdown
-        result.allocated_memory_gb = getattr(mem_breakdown, "allocated_memory_gb", result.allocated_memory_gb)
-        result.reserved_memory_gb = getattr(mem_breakdown, "reserved_memory_gb", result.reserved_memory_gb)
+        observed_mem_breakdown = mem_breakdown
+        if int(getattr(parallel, "pp", 1) or 1) > 1:
+            try:
+                observed_mem_breakdown = memory_model._estimate_memory_for_stage(
+                    parallel,
+                    sharding_config,
+                    per_stage_rc[0],
+                    runtime["max_seq_len"],
+                    runtime["micro_batch_size"],
+                    0,
+                )
+            except Exception:
+                observed_mem_breakdown = mem_breakdown
+        result.memory_breakdown = observed_mem_breakdown
+        result.allocated_memory_gb = getattr(observed_mem_breakdown, "allocated_memory_gb", result.allocated_memory_gb)
+        result.reserved_memory_gb = getattr(observed_mem_breakdown, "reserved_memory_gb", result.reserved_memory_gb)
         result.memory_gb = getattr(mem_breakdown, "total_memory_gb", result.memory_gb)
         result.fits_memory = result.memory_gb <= self.hardware_config.gpu.memory_gb
+        result.parallel_config["memory_peak_stage_id"] = int(getattr(mem_breakdown, "peak_stage_id", 0))
+        result.parallel_config["display_memory_stage_id"] = 0 if int(getattr(parallel, "pp", 1) or 1) > 1 else int(getattr(mem_breakdown, "peak_stage_id", 0))
 
         # -------- exact compute with per-stage recompute --------
         self.compute_model.training = runtime_training_config
@@ -2131,7 +2513,7 @@ class PDCostModel(_BasePDCostModel):
                 compute_result=compute_result,
                 comm_result=comm_result,
             )
-        if sharding_degree > 1:
+        if sharding_degree > 0:
             optimizer_step_time_ms = self._estimate_optimizer_step_time_ms(
                 parallel=parallel,
                 sharding_degree=sharding_degree,
@@ -2161,6 +2543,43 @@ class PDCostModel(_BasePDCostModel):
             runtime["max_seq_len"],
             runtime["gradient_accumulation_steps"],
         )
+        self._calculate_throughput(
+            result,
+            parallel,
+            runtime["micro_batch_size"],
+            runtime["max_seq_len"],
+            runtime["gradient_accumulation_steps"],
+        )
+        if apply_runtime_calibration:
+            # per-stage path uses representative recompute/offload state for residual correction.
+            self._maybe_apply_runtime_calibration(
+                result,
+                parallel=parallel,
+                runtime_training_config=runtime_training_config,
+                recompute_granularity=global_gran,
+                recompute_method=global_method,
+                recompute_num_layers=global_num_layers,
+                tensorwise_offload_optimizer=any_offload,
+                tensorwise_offload_ratio=max_offload_ratio,
+                split_param=kwargs.get("split_param", True),
+                sd_release_grads=kwargs.get("sd_release_grads"),
+            )
+        if apply_similarity_calibration:
+            runtime_context = build_runtime_context_snapshot(
+                parallel=parallel,
+                runtime_training_config=runtime_training_config,
+                recompute_granularity=global_gran,
+                recompute_method=global_method,
+                recompute_num_layers=global_num_layers,
+                tensorwise_offload_optimizer=any_offload,
+                tensorwise_offload_ratio=max_offload_ratio,
+                split_param=kwargs.get("split_param", True),
+                sd_release_grads=kwargs.get("sd_release_grads"),
+                micro_batch_size=runtime["micro_batch_size"],
+                gradient_accumulation_steps=runtime["gradient_accumulation_steps"],
+                max_seq_len=runtime["max_seq_len"],
+            )
+            self._maybe_apply_similarity_calibration(result, runtime_context=runtime_context)
         self._calculate_throughput(
             result,
             parallel,
@@ -2507,4 +2926,98 @@ class PDCostModel(_BasePDCostModel):
             result.slowest_stage_time_ms = float(result.stage_cycle_micro_ms[result.slowest_stage_id])
 
 
-__all__ = ["PDCostModel", "PredictionResult"]
+__all__ = ["PDCostModel", "PredictionResult", "predict"]
+
+
+# ============================================================
+# 简化入口函数
+# ============================================================
+
+def predict(
+    model_config_path: str,
+    parallel_config_path: str,
+    num_nodes: int = 1,
+    gpus_per_node: int = 8,
+) -> PredictionResult:
+    """
+    分布式训练代价模型预测（简化接口）
+
+    只需提供三个输入即可获得预测结果，无需手动构造各类配置对象。
+
+    Args:
+        model_config_path: 模型配置文件路径，支持:
+            - HuggingFace/PaddleFormers 的 config.json 文件路径
+            - 包含 config.json 的模型目录路径
+            - yaml/json 格式的模型架构配置文件
+            - 内置模型名称 (如 "qwen3-30b-a3b", "deepseek-v3")
+
+        parallel_config_path: 并行方案配置文件路径，支持:
+            - PaddleFormers 训练 yaml 文件（从中提取并行和训练配置）
+            - json/yaml 格式的并行配置文件
+
+        num_nodes: 节点数量 (默认 1)
+
+        gpus_per_node: 每节点 GPU 数量 (默认 8)
+
+    Returns:
+        PredictionResult: 预测结果，包含:
+            - step_time_ms: 总 step 时间 (ms)
+            - memory_gb: 显存占用 (GB)
+            - fits_memory: 是否满足显存约束
+            - mfu: Model FLOPs Utilization
+            - tokens_per_second: 总吞吐量
+            - tokens_per_second_per_gpu: 每卡吞吐量
+            - 以及详细的时延/显存/通信分解
+
+    示例:
+        result = predict(
+            model_config_path="qwen3-30b-a3b",
+            parallel_config_path="./parallel.yaml",
+            num_nodes=2,
+            gpus_per_node=8,
+        )
+        print(result)
+    """
+    from .config import ModelConfig, ParallelConfig, TrainingConfig, HardwareConfig, GPUSpec
+    from .utils.io import load_dict_from_file
+
+    # 1. 加载模型配置（自动识别名称/目录/文件）
+    model_config = ModelConfig.from_any(model_config_path)
+
+    # 2. 加载并行配置（同时保存原始字典用于提取训练参数）
+    parallel_data = load_dict_from_file(parallel_config_path)
+    parallel_config = ParallelConfig.from_dict(parallel_data)
+
+    # 3. 提取训练配置（从同一份 yaml 中获取 recompute/offload 等）
+    training_config = TrainingConfig.from_dict(parallel_data)
+
+    # 4. 构建硬件配置，交由 PDCostModel 内部自动加载校准数据
+    hardware_config = HardwareConfig(
+        gpu=GPUSpec(memory_gb=80.0),
+        num_nodes=num_nodes,
+        gpus_per_node=gpus_per_node,
+    )
+
+    # 5. 创建 CostModel 并预测
+    costmodel = PDCostModel(
+        model_config=model_config,
+        hardware_config=hardware_config,
+        training_config=training_config,
+        use_cached_profile=True,
+        auto_calibrate=False,
+    )
+
+    result = costmodel.predict(
+        parallel_config,
+        micro_batch_size=training_config.micro_batch_size,
+        max_seq_len=training_config.sequence_length,
+        gradient_accumulation_steps=training_config.gradient_accumulation_steps,
+        recompute_granularity=training_config.recompute_granularity,
+        recompute_method=training_config.recompute_method,
+        recompute_num_layers=training_config.recompute_num_layers,
+        tensorwise_offload_optimizer=training_config.tensorwise_offload_optimizer,
+        tensorwise_offload_ratio=training_config.tensorwise_offload_ratio,
+    )
+
+    return result
+

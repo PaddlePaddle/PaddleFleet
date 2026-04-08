@@ -45,7 +45,7 @@ except ImportError:
     pass
 
 # 你原本的配置类型（保持不动）
-from .config import GPUSpec, NetworkSpec, NetworkBandwidthCurve, HardwareConfig
+from ..config import GPUSpec, NetworkSpec, NetworkBandwidthCurve, HardwareConfig
 
 
 # ============================================================

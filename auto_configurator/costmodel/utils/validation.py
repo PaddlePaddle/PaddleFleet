@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence
 
-from .config import ModelConfig, ParallelConfig
+from ..config import ModelConfig, ParallelConfig
 
 
 _VALID_SHARDING_STAGES = {"none", "", "stage1", "stage2", "stage3"}
@@ -72,8 +72,7 @@ def _physical_world_size(parallel: ParallelConfig) -> int:
     return (
         max(1, int(parallel.tp))
         * max(1, int(parallel.pp))
-        * max(1, int(parallel.cp))
-        * max(1, int(parallel.dp))
+                * max(1, int(parallel.dp))
     )
 
 
@@ -125,7 +124,6 @@ def validate_parallel_config(
         "dp": int(parallel.dp),
         "ep": int(parallel.ep),
         "vpp": int(parallel.vpp),
-        "cp": int(parallel.cp),
     }
     for field_name, value in positive_fields.items():
         if value < 1:
@@ -190,15 +188,14 @@ def validate_parallel_config(
     dense_group_size = (
         max(1, int(parallel.tp))
         * max(1, int(parallel.pp))
-        * max(1, int(parallel.cp))
-    )
+            )
     dense_dp = None
     if total_gpus % dense_group_size != 0:
         result.add_error(
             "dense_world_size_not_divisible",
             (
                 f"total_gpus={total_gpus} 不能整除 dense group size "
-                f"tp*pp*cp={dense_group_size}"
+                f"tp*pp={dense_group_size}"
             ),
         )
     else:
@@ -370,6 +367,19 @@ def validate_parallel_config(
         result.add_error(
             "ep_not_divide_num_experts",
             f"num_experts={model.num_experts} 不能整除 ep={parallel.ep}",
+        )
+
+    # EP 必须 <= sharding_degree 且 sharding_degree % ep == 0
+    resolved_sd = _resolved_sharding_degree(parallel)
+    if int(parallel.ep) > resolved_sd:
+        result.add_error(
+            "ep_gt_sharding_degree",
+            f"ep={parallel.ep} 不能大于 sharding_degree={resolved_sd}",
+        )
+    elif resolved_sd % int(parallel.ep) != 0:
+        result.add_error(
+            "sd_not_divisible_by_ep",
+            f"sharding_degree={resolved_sd} 必须能整除 ep={parallel.ep}",
         )
 
     if moe_router_num_groups is not None:

@@ -25,7 +25,7 @@ from ..config import (
     INPUT_EMBEDDING_LAYER_KIND,
     OUTPUT_HEAD_LAYER_KIND,
 )
-from ..stage_layout import (
+from ..utils.stage_layout import (
     resolve_chunk_ranges,
     resolve_stage_chunk_ranges,
     resolve_stage_layer_indices,
@@ -680,7 +680,7 @@ class CommModel:
         is_intra_node = self.hardware.is_intra_node(tp_degree)
         return self.predict_allgather(activation_size_bytes, tp_degree, is_intra_node)
     
-    def estimate_step_comm_time(self, 
+    def estimate_step_comm_time(self,
                                 model_config: ModelConfig,
                                 training_config: TrainingConfig,
                                 parallel: ParallelConfig,
@@ -819,3 +819,4 @@ class CommModel:
             "sp_comm_time_ms": sp_comm_time,
             "total_comm_time_ms": tp_comm_time + ep_comm_time + pp_comm_time + dp_comm_time + sp_comm_time,
         }
+

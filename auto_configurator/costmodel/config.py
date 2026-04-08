@@ -218,8 +218,6 @@ class GPUSpec:
             ratio = (size_log - left_log) / (right_log - left_log)
             return left_tflops + ratio * (right_tflops - left_tflops)
 
-        return None
-
     def _lookup_bf16_gemm_sample_tflops(self, m: int, n: int, k: int) -> Optional[float]:
         """
         基于少量代表性 BF16 GEMM 样本做最近邻查询。
@@ -286,7 +284,7 @@ class GPUSpec:
         """
         peak = max(1e-6, float(self.bf16_tflops))
         efficiency = self.get_roofline_efficiency(m, n, k, dtype_bytes)
-        return min(peak, max(1e-6, peak * efficiency))
+        return max(1e-6, peak * efficiency)
 
     def get_tflops_for_gemm(self, dtype: str, m: int, n: int, k: int,
                             dtype_bytes: int = 2) -> float:
@@ -376,7 +374,7 @@ class GPUSpec:
                 memory_bandwidth_gbps=2039.0,
             ),
             "A100-40GB": cls(
-                name="A100-40GB", 
+                name="A100-40GB",
                 memory_gb=40.0,
                 fp32_tflops=19.5,
                 fp16_tflops=312.0,
@@ -470,8 +468,6 @@ class NetworkBandwidthCurve:
 
             ratio = (size_log - left_log) / (right_log - left_log)
             return left_bw + ratio * (right_bw - left_bw)
-
-        return points[-1][1]
 
     def effective_bandwidth(self, data_size_bytes: int) -> float:
         """返回给定消息大小的有效带宽 (GB/s)"""
@@ -649,6 +645,8 @@ class ModelConfig:
     # 其他参数
     vocab_size: int = 152064
     max_position_embeddings: int = 32768
+    model_type: str = ""
+    tie_word_embeddings: bool = True
     
     # 计算得到的属性
     @property
@@ -666,20 +664,43 @@ class ModelConfig:
         return self.num_hidden_layers - self.num_moe_layers
 
     @property
+    def is_moe(self) -> bool:
+        return self.num_experts > 1
+
+    @property
+    def model_family(self) -> str:
+        mt = self.model_type.lower()
+        if "qwen" in mt and self.is_moe:
+            return "qwen_moe"
+        if "qwen" in mt:
+            return "qwen"
+        if "deepseek" in mt:
+            return "deepseek"
+        if "llama" in mt:
+            return "llama"
+        if "gpt" in mt:
+            return "gpt"
+        return "generic_moe" if self.is_moe else "generic_dense"
+
+    @property
+    def attention_style(self) -> str:
+        return "mla" if self.uses_low_rank_attention else "mha"
+
+    @property
     def effective_shared_expert_intermediate_size(self) -> int:
         """shared expert 的总 FFN 宽度。"""
-        explicit = int(self.shared_expert_intermediate_size or 0)
+        explicit = self.shared_expert_intermediate_size or 0
         if explicit > 0:
             return explicit
         if self.num_shared_experts <= 0:
             return 0
-        return int(self.moe_intermediate_size) * int(self.num_shared_experts)
+        return self.moe_intermediate_size * self.num_shared_experts
 
     @property
     def uses_low_rank_attention(self) -> bool:
         """是否启用 MLA / LoRA 风格的 attention 参数化。"""
         return any(
-            int(value or 0) > 0
+            (value or 0) > 0
             for value in (
                 self.q_lora_rank,
                 self.kv_lora_rank,
@@ -691,45 +712,45 @@ class ModelConfig:
 
     @property
     def effective_query_head_dim(self) -> int:
-        if int(self.qk_nope_head_dim or 0) > 0 or int(self.qk_rope_head_dim or 0) > 0:
-            return int(self.qk_nope_head_dim or 0) + int(self.qk_rope_head_dim or 0)
-        return int(self.head_dim)
+        if (self.qk_nope_head_dim or 0) > 0 or (self.qk_rope_head_dim or 0) > 0:
+            return (self.qk_nope_head_dim or 0) + (self.qk_rope_head_dim or 0)
+        return self.head_dim
 
     @property
     def effective_value_head_dim(self) -> int:
-        if int(self.v_head_dim or 0) > 0:
-            return int(self.v_head_dim)
-        return int(self.head_dim)
+        if (self.v_head_dim or 0) > 0:
+            return self.v_head_dim
+        return self.head_dim
 
     def estimate_attention_params_per_layer(self) -> int:
         """估算单层 attention 参数量。"""
-        h = int(self.hidden_size)
+        h = self.hidden_size
 
         if not self.uses_low_rank_attention:
             q_size = h
-            kv_size = int(self.num_key_value_heads) * int(self.head_dim)
+            kv_size = self.num_key_value_heads * self.head_dim
             return q_size * h + 2 * kv_size * h + h * h
 
-        query_out_dim = int(self.num_attention_heads) * self.effective_query_head_dim
-        value_out_dim = int(self.num_attention_heads) * self.effective_value_head_dim
+        query_out_dim = self.num_attention_heads * self.effective_query_head_dim
+        value_out_dim = self.num_attention_heads * self.effective_value_head_dim
 
-        if int(self.q_lora_rank or 0) > 0:
-            q_proj_params = h * int(self.q_lora_rank) + int(self.q_lora_rank) * query_out_dim
-            q_norm_params = int(self.q_lora_rank)
+        if (self.q_lora_rank or 0) > 0:
+            q_proj_params = h * self.q_lora_rank + self.q_lora_rank * query_out_dim
+            q_norm_params = self.q_lora_rank
         else:
             q_proj_params = h * query_out_dim
             q_norm_params = 0
 
-        if int(self.kv_lora_rank or 0) > 0:
-            kv_latent_dim = int(self.kv_lora_rank)
-            kv_a_out_dim = kv_latent_dim + int(self.qk_rope_head_dim or 0)
-            kv_b_out_dim = int(self.num_attention_heads) * (
-                int(self.qk_nope_head_dim or self.head_dim) + self.effective_value_head_dim
+        if (self.kv_lora_rank or 0) > 0:
+            kv_latent_dim = self.kv_lora_rank
+            kv_a_out_dim = kv_latent_dim + (self.qk_rope_head_dim or 0)
+            kv_b_out_dim = self.num_attention_heads * (
+                (self.qk_nope_head_dim or self.head_dim) + self.effective_value_head_dim
             )
             kv_proj_params = h * kv_a_out_dim + kv_latent_dim * kv_b_out_dim
             kv_norm_params = kv_latent_dim
         else:
-            kv_size = int(self.num_key_value_heads) * int(self.head_dim)
+            kv_size = self.num_key_value_heads * self.head_dim
             kv_proj_params = 2 * h * kv_size
             kv_norm_params = 0
 
@@ -740,10 +761,10 @@ class ModelConfig:
         """判断某个 Transformer block 是否为 MoE block。"""
         if self.num_experts <= 1:
             return False
-        if int(layer_idx) in {int(idx) for idx in self.mlp_only_layers}:
+        if layer_idx in {idx for idx in self.mlp_only_layers}:
             return False
-        sparse_step = max(1, int(self.decoder_sparse_step))
-        return ((int(layer_idx) + 1) % sparse_step) == 0
+        sparse_step = max(1, self.decoder_sparse_step)
+        return ((layer_idx + 1) % sparse_step) == 0
 
     def transformer_layer_kind(self, layer_idx: int) -> str:
         """返回某个 Transformer block 的层类型。"""
@@ -787,7 +808,7 @@ class ModelConfig:
         total_dense_mlp = dense_mlp_params * self.num_dense_layers
         total_moe = moe_layer_params * self.num_moe_layers
         total_layernorm = layernorm_params * self.num_hidden_layers
-        total_embedding = embedding_params * 2  # input + output (if not tied)
+        total_embedding = embedding_params if self.tie_word_embeddings else embedding_params * 2
         
         total = total_attention + total_dense_mlp + total_moe + total_layernorm + total_embedding
         
@@ -808,19 +829,75 @@ class ModelConfig:
             return "".join(ch for ch in str(raw_name).lower() if ch.isalnum())
 
         presets = {
-            # Qwen3 MoE 系列 (实际配置从 config.json 读取)
+            # Qwen3 系列
             "qwen3-30b-a3b": cls(
                 num_hidden_layers=48,
-                hidden_size=2048,           # 实际值
-                intermediate_size=6144,     # 实际值 (Dense MLP, 但 Qwen3-30B 全是 MoE 层)
+                hidden_size=2048,
+                intermediate_size=6144,
                 num_attention_heads=32,
                 num_key_value_heads=4,
-                head_dim=128,               # 实际值
+                head_dim=128,
+                q_lora_rank=512,
+                kv_lora_rank=512,
+                qk_nope_head_dim=64,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
                 num_experts=128,
                 num_experts_per_tok=8,
-                moe_intermediate_size=768,  # 实际值
+                moe_intermediate_size=768,
                 decoder_sparse_step=1,
-                vocab_size=151936,          # 实际值
+                vocab_size=151936,
+                model_type="qwen3_moe",
+                tie_word_embeddings=False,
+            ),
+            "qwen3-8b": cls(
+                num_hidden_layers=36,
+                hidden_size=4096,
+                intermediate_size=12288,
+                num_attention_heads=32,
+                num_key_value_heads=8,
+                head_dim=128,
+                q_lora_rank=512,
+                kv_lora_rank=512,
+                qk_nope_head_dim=64,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+                num_experts=1,
+                vocab_size=151936,
+                model_type="qwen3",
+                tie_word_embeddings=False,
+                max_position_embeddings=4096,
+            ),
+            "qwen3-1.7b": cls(
+                num_hidden_layers=28,
+                hidden_size=2048,
+                intermediate_size=6144,
+                num_attention_heads=16,
+                num_key_value_heads=8,
+                head_dim=128,
+                q_lora_rank=512,
+                kv_lora_rank=512,
+                qk_nope_head_dim=64,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+                num_experts=1,
+                vocab_size=151936,
+                model_type="qwen3",
+                tie_word_embeddings=True,
+                max_position_embeddings=4096,
+            ),
+            "qwen3-14b": cls(
+                num_hidden_layers=48,
+                hidden_size=5120,
+                intermediate_size=13824,
+                num_attention_heads=40,
+                num_key_value_heads=8,
+                head_dim=128,
+                num_experts=1,
+                vocab_size=152064,
+                model_type="qwen3",
+                tie_word_embeddings=False,
+                max_position_embeddings=131072,
             ),
             "qwen3-235b-a22b": cls(
                 num_hidden_layers=94,
@@ -912,10 +989,20 @@ class ModelConfig:
             if candidate in presets:
                 return presets[candidate]
 
+        alias_presets = {
+            "qwen8b": "qwen3-8b",
+            "qwen38b": "qwen3-8b",
+            "qwen317b": "qwen3-1.7b",
+            "qwen31p7b": "qwen3-1.7b",
+            "qwen17b": "qwen3-1.7b",
+            "qwen1_7b": "qwen3-1.7b",
+        }
         canonical_presets = {
             _canonical_model_name(preset_name): preset_name
             for preset_name in presets
         }
+        for alias_name, preset_name in alias_presets.items():
+            canonical_presets[_canonical_model_name(alias_name)] = preset_name
         for candidate in normalized_candidates:
             canonical = _canonical_model_name(candidate)
             matched_name = canonical_presets.get(canonical)
@@ -924,6 +1011,42 @@ class ModelConfig:
         
         raise ValueError(f"Unknown model: {name}. Available: {list(presets.keys())}")
     
+    @classmethod
+    def from_any(cls, path_or_name: str) -> "ModelConfig":
+        """
+        智能加载模型配置。
+
+        支持三种输入:
+        1. 内置模型名称 (如 "qwen3-30b-a3b") — 调用 from_name()
+        2. 模型目录 (包含 config.json) — 调用 from_config_json()
+        3. yaml/json 文件 — 加载为 dict 后调用 from_dict()
+
+        自动判断输入类型，无需手动指定。
+        """
+        expanded = os.path.expanduser(path_or_name)
+
+        # 如果路径不存在，尝试作为模型名称
+        if not os.path.exists(expanded):
+            try:
+                return cls.from_name(path_or_name)
+            except (ValueError, Exception):
+                pass
+            raise FileNotFoundError(
+                f"模型配置文件不存在，也不是已知模型名: {path_or_name}"
+            )
+
+        # 如果是目录，查找 config.json
+        if os.path.isdir(expanded):
+            config_json = os.path.join(expanded, "config.json")
+            if os.path.exists(config_json):
+                return cls.from_config_json(expanded)
+            raise FileNotFoundError(f"目录中未找到 config.json: {expanded}")
+
+        # 文件路径：根据格式解析
+        from .utils.io import load_dict_from_file
+        data = load_dict_from_file(path_or_name)
+        return cls.from_dict(data)
+
     @classmethod
     def from_json(cls, path: str) -> "ModelConfig":
         """从 config.json 加载"""
@@ -957,18 +1080,13 @@ class ModelConfig:
         hidden_size = int(data.get("hidden_size", data.get("n_embd", 6144)))
         num_attention_heads = int(data.get("num_attention_heads", data.get("n_head", 32)))
         num_key_value_heads = int(data.get("num_key_value_heads", data.get("n_kv_head", 4)))
-        head_dim = int(
-            data.get(
-                "head_dim",
-                data.get("hidden_size", hidden_size) // max(1, data.get("num_attention_heads", num_attention_heads)),
-            )
-        )
+        head_dim_fallback = hidden_size // max(1, num_attention_heads)
+        head_dim = int(data.get("head_dim", head_dim_fallback))
 
         intermediate_size = int(
-            data.get(
-                "intermediate_size",
-                data.get("ffn_hidden_size", data.get("ffn_size", 16384)),
-            )
+            data.get("intermediate_size",
+                     data.get("ffn_hidden_size",
+                              data.get("ffn_size", 16384)))
         )
 
         # HF/MoE 兼容字段：
@@ -976,55 +1094,32 @@ class ModelConfig:
         # - GLM4 MoE 常见: n_routed_experts (+ n_shared_experts)
         # 这里按 routed experts 作为 EP 约束基数，避免 shared experts 影响可整除搜索。
         num_experts = int(
-            data.get(
-                "num_experts",
-                data.get("n_routed_experts", data.get("num_local_experts", 1)),
-            )
+            data.get("num_experts",
+                     data.get("n_routed_experts",
+                              data.get("num_local_experts", 1)))
         )
         num_shared_experts = int(
             data.get("num_shared_experts", data.get("n_shared_experts", 0))
         )
         num_experts_per_tok = int(
-            data.get(
-                "num_experts_per_tok",
-                data.get("moe_top_k", data.get("top_k", 8)),
-            )
+            data.get("num_experts_per_tok",
+                     data.get("moe_top_k",
+                              data.get("top_k", 8)))
         )
         moe_intermediate_size = int(
-            data.get(
-                "moe_intermediate_size",
-                data.get("expert_intermediate_size", intermediate_size),
-            )
+            data.get("moe_intermediate_size",
+                     data.get("expert_intermediate_size", intermediate_size))
         )
         shared_expert_intermediate_size = int(
-            data.get(
-                "shared_expert_intermediate_size",
-                data.get(
-                    "shared_expert_ffn_hidden_size",
-                    num_shared_experts * moe_intermediate_size,
-                ),
-            )
+            data.get("shared_expert_intermediate_size",
+                     data.get("shared_expert_ffn_hidden_size",
+                              num_shared_experts * moe_intermediate_size))
         )
 
         model_type = str(data.get("model_type", "")).lower()
-        q_lora_rank_raw = data.get("q_lora_rank")
-        kv_lora_rank_raw = data.get("kv_lora_rank")
-        qk_nope_head_dim_raw = data.get("qk_nope_head_dim")
-        qk_rope_head_dim_raw = data.get("qk_rope_head_dim")
-        v_head_dim_raw = data.get("v_head_dim")
-        if model_type.startswith("qwen3"):
-            if q_lora_rank_raw is None:
-                q_lora_rank_raw = max(1, hidden_size // 4)
-            if kv_lora_rank_raw is None:
-                kv_lora_rank_raw = max(1, hidden_size // 4)
-            if qk_nope_head_dim_raw is None:
-                qk_nope_head_dim_raw = max(1, head_dim // 2)
-            if qk_rope_head_dim_raw is None:
-                qk_rope_head_dim_raw = max(
-                    1, head_dim - int(qk_nope_head_dim_raw)
-                )
-            if v_head_dim_raw is None:
-                v_head_dim_raw = head_dim
+        # 仅在 config.json 明确给出 MLA / LoRA 风格字段时，才启用低秩注意力参数化。
+        # 普通 dense Qwen3（如 Qwen3-1.7B / 8B）在公开 Hugging Face 实现中使用
+        # 标准 Q/K/V/O 投影，并额外带 q_norm / k_norm，而不是自动推断的低秩 MLA。
         default_sparse_step = 1 if ("moe" in model_type or num_experts > 1) else num_hidden_layers + 1
         decoder_sparse_step = int(data.get("decoder_sparse_step", default_sparse_step))
 
@@ -1040,11 +1135,11 @@ class ModelConfig:
             num_attention_heads=num_attention_heads,
             num_key_value_heads=num_key_value_heads,
             head_dim=head_dim,
-            q_lora_rank=int(q_lora_rank_raw or 0),
-            kv_lora_rank=int(kv_lora_rank_raw or 0),
-            qk_nope_head_dim=int(qk_nope_head_dim_raw or 0),
-            qk_rope_head_dim=int(qk_rope_head_dim_raw or 0),
-            v_head_dim=int(v_head_dim_raw or 0),
+            q_lora_rank=int(data.get("q_lora_rank") or 0),
+            kv_lora_rank=int(data.get("kv_lora_rank") or 0),
+            qk_nope_head_dim=int(data.get("qk_nope_head_dim") or 0),
+            qk_rope_head_dim=int(data.get("qk_rope_head_dim") or 0),
+            v_head_dim=int(data.get("v_head_dim") or 0),
             num_experts=num_experts,
             num_shared_experts=num_shared_experts,
             num_experts_per_tok=num_experts_per_tok,
@@ -1054,6 +1149,11 @@ class ModelConfig:
             mlp_only_layers=mlp_only_layers,
             vocab_size=int(data.get("vocab_size", 152064)),
             max_position_embeddings=int(data.get("max_position_embeddings", 32768)),
+            model_type=model_type,
+            tie_word_embeddings=bool(
+                data.get("tie_word_embeddings",
+                         data.get("share_embeddings_and_output_weights",
+                                  data.get("share_embedding_weights", num_experts <= 1))))
         )
 
 
@@ -1112,16 +1212,16 @@ class ParallelConfig:
     @property
     def world_size(self) -> int:
         """总 GPU 数"""
-        return self.dp * self.tp * self.pp * self.cp
+        return self.dp * self.tp * self.pp
     
     def validate(self, total_gpus: int) -> bool:
         """验证配置是否合法"""
         # 基本约束
-        if self.tp < 1 or self.pp < 1 or self.dp < 1 or self.cp < 1:
+        if self.tp < 1 or self.pp < 1 or self.dp < 1:
             return False
         
         # dense 主干 world size 匹配
-        if self.dp * self.tp * self.pp * self.cp != total_gpus:
+        if self.dp * self.tp * self.pp != total_gpus:
             return False
         
         # EP 约束: EP 度数不能超过 Expert 数（由用户保证）
@@ -1245,6 +1345,7 @@ class TrainingConfig:
     # 算子 / runtime 细节
     attn_implementation: str = ""
     apply_rope_fusion: bool = False
+    use_qk_norm: bool = False
     moe_token_dispatcher_type: str = "deepep"
     moe_grouped_gemm: bool = False
     moe_router_fusion: bool = False
@@ -1298,6 +1399,7 @@ class TrainingConfig:
             "hybrid_parallel_topo_order": self.hybrid_parallel_topo_order,
             "attn_implementation": self.attn_implementation,
             "apply_rope_fusion": self.apply_rope_fusion,
+            "use_qk_norm": self.use_qk_norm,
             "moe_token_dispatcher_type": self.moe_token_dispatcher_type,
             "moe_grouped_gemm": self.moe_grouped_gemm,
             "moe_router_fusion": self.moe_router_fusion,
@@ -1404,3 +1506,4 @@ class TrainingConfig:
             ),
             moe_ep_barrier=bool(data.get("moe_ep_barrier", True)),
         )
+

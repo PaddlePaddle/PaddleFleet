@@ -28,7 +28,7 @@ from ..config import (
     INPUT_EMBEDDING_LAYER_KIND,
     OUTPUT_HEAD_LAYER_KIND,
 )
-from ..stage_layout import (
+from ..utils.stage_layout import (
     build_balanced_partition_counts,
     has_custom_stage_layer_counts,
     partition_counts_to_ranges,
@@ -83,7 +83,7 @@ class _BaseComputeModel:
     BACKWARD_DENSE_MLP_MIN_RATIO = 1.35
     BACKWARD_MOE_MIN_RATIO = 1.25
     
-    def __init__(self, model_config: ModelConfig, 
+    def __init__(self, model_config: ModelConfig,
                  hardware_config: HardwareConfig,
                  training_config: TrainingConfig):
         self.model = model_config
@@ -299,6 +299,9 @@ class _BaseComputeModel:
                 ),
                 "attn_implementation": str(
                     getattr(self.training, "attn_implementation", "")
+                ),
+                "use_qk_norm": bool(
+                    getattr(self.training, "use_qk_norm", False)
                 ),
                 "moe_token_dispatcher_type": str(
                     getattr(self.training, "moe_token_dispatcher_type", "")
@@ -780,10 +783,18 @@ class _BaseComputeModel:
         o_time = self._gemm_time_ms(tokens, h, max(1, h // tp))
 
         # memory-bound ops 穿插在 GEMM 之间:
-        #   bias add (Q/K/V/O 各一次, 如果存在): read+write h/tp 或 h
-        #   residual add: read 2 × h, write h
-        # 合计约 4 次 read+write，保守估计 ~6 passes × tokens × (h/tp) × dtype
-        non_gemm_bytes = tokens * max(1, h // tp) * db * 6.0
+        #   bias/residual/pack/rope 等按张量字节量估算。Qwen3 一类模型还包含 q_norm/k_norm，
+        #   它们是对 Q/K projection 输出做 head-dim RMSNorm。
+        q_out = max(1, h // tp)
+        kv_out = max(1, kv_size // tp)
+        non_gemm_bytes = (
+            tokens * q_out * db * 4.0 +
+            tokens * kv_out * db * 6.0 +
+            tokens * h * db * 3.0
+        )
+        if bool(getattr(self.training, "use_qk_norm", False)):
+            qk_norm_bytes = tokens * (q_out + kv_out) * db * 5.0
+            non_gemm_bytes += qk_norm_bytes
         non_gemm_time = self._membound_time_ms(non_gemm_bytes)
 
         return q_time + k_time + v_time + o_time + non_gemm_time
@@ -901,8 +912,12 @@ class _BaseComputeModel:
         residual_bytes = tokens * h * db * 3.0
         rope_bytes = tokens * (q_out + kv_out) * db * 4.0
         qkv_pack_bytes = tokens * (q_out + 2 * kv_out) * db * 2.0
+        qk_norm_backward_bytes = 0.0
+        if bool(getattr(self.training, "use_qk_norm", False)):
+            # backward: 读 x/y/norm 参数并写 dx，近似 8 passes
+            qk_norm_backward_bytes = tokens * (q_out + kv_out) * db * 8.0
         non_gemm_time = self._membound_time_ms(
-            residual_bytes + rope_bytes + qkv_pack_bytes
+            residual_bytes + rope_bytes + qkv_pack_bytes + qk_norm_backward_bytes
         )
 
         return (
@@ -1183,43 +1198,25 @@ class _BaseComputeModel:
                                       batch_size: int,
                                       seq_len: int,
                                       parallel: ParallelConfig) -> list[float]:
-        """估算每个 PP stage 的反向时间。"""
+        """估算每个 PP stage 的反向时间。
+
+        直接使用按子算子展开的 backward 模板，而不再对 forward 结果乘经验比值。
+        这样能显式保留不同模型结构（如 q_norm/k_norm、不同 MLP 宽度、MoE dispatch）
+        对 backward 时间的影响，泛化性也更好。
+        """
         layer_payload = self._get_layer_runtime_profile(
             batch_size, seq_len, parallel.tp, parallel.ep
         )
         layers = layer_payload["layers"]
 
-        ratios = self._estimate_backward_component_ratios(
-            batch_size, seq_len, parallel
-        )
-        attention_ratio = ratios["attention"]
-        dense_mlp_ratio = ratios["dense_mlp"]
-        moe_ratio = ratios["moe"]
-        layernorm_ratio = ratios["layernorm"]
-
         stage_times = []
         stage_count = max(1, int(parallel.pp))
         for stage_id in range(stage_count):
             stage_layer_indices = self._stage_layer_indices(parallel, stage_id)
-            stage_time = 0.0
-            for layer_idx in stage_layer_indices:
-                layer = self._get_runtime_layer_template(
-                    layer_payload, layers[layer_idx]
-                )
-                stage_time += layer["attention_core"] * attention_ratio
-                stage_time += layer["attention_projection"] * attention_ratio
-                stage_time += layer["layernorm"] * layernorm_ratio
-                if layer["layer_kind"] == TRANSFORMER_MOE_LAYER_KIND:
-                    stage_time += layer["backward_moe_dispatch"]
-                    stage_time += layer["backward_moe_router"]
-                    moe_expert_forward = (
-                        layer["moe_gate_up"] +
-                        layer["moe_act"] +
-                        layer["moe_down"]
-                    )
-                    stage_time += moe_expert_forward * moe_ratio
-                else:
-                    stage_time += layer["mlp"] * dense_mlp_ratio
+            stage_time = sum(
+                self._get_runtime_layer_template(layer_payload, layers[layer_idx])["backward_full"]
+                for layer_idx in stage_layer_indices
+            )
             if stage_id == 0:
                 stage_time += layer_payload["templates"][INPUT_EMBEDDING_LAYER_KIND][
                     "backward_full"
@@ -1661,28 +1658,25 @@ class _BaseComputeModel:
         if total_kernels <= 0:
             return 0.0
 
-        # ── CPU dispatch 时间 ──
-        # 包括: Python interpreter (~5us) + Paddle op dispatch (~10-15us)
-        #       + CUDA launch (~5-8us) + memory management (~5-10us)
-        # 总计约 30-40us per kernel
+        # CPU 侧 launch/dispatch 延迟。这里保留为硬件相关常数，
+        # 其余部分尽量从张量字节量和 kernel 数量符号化推导。
         cpu_dispatch_us = 35.0
 
-        # ── 计算每个 kernel 的平均 GPU 执行时间 ──
-        pure_compute_ms = forward_time_ms * num_passes
-        avg_kernel_time_us = pure_compute_ms / total_kernels * 1000.0
+        tokens = max(1, batch_size * seq_len)
+        tp = max(1, parallel.tp)
+        db = self.training.dtype_bytes
+        h = int(self.model.hidden_size)
+        kv = int(self.model.num_key_value_heads * self.model.head_dim)
+        ffn = int(self.model.intermediate_size)
+        h_act = h // (tp if bool(getattr(parallel, "sp", False)) and tp > 1 else 1)
+        q_out = max(1, h // tp)
+        kv_out = max(1, kv // tp)
+        ffn_tp = max(1, ffn // tp)
 
-        # ── 小 kernel 的 overhead 计算 ──
-        # kernel 时间分布极度不均匀：大 GEMM/FlashAttn 可能 100-1000+ us，
-        # 而 elementwise ops (SiLU, multiply, bias, LayerNorm) 只有 1-20us。
-        # 简单用平均值无法反映这种分布。
-        #
-        # 策略: 估算"小 kernel"（exec_time < cpu_dispatch_time）的比例和平均时间。
-        # 小 kernel: LayerNorm, RoPE, bias, SiLU, multiply, TopK, dispatch/gather, residual
-        # 大 kernel: Q/K/V/O proj GEMM, Flash Attention, Expert GEMM (batched)
-        dense_small_per_layer = 9   # LN, RoPE, bias×2, SiLU, mul, residual, LN, residual
-        dense_big_per_layer = 6     # Q,K,V,O proj, FlashAttn, Down GEMM (gate+up may fuse)
-        moe_small_per_layer = 13    # LN×2, RoPE, bias×2, SiLU, mul, TopK, dispatch×3, gather, residual
-        moe_big_per_layer = 10      # Q,K,V,O proj, FlashAttn, Router, Expert×3 (batched)
+        dense_small_per_layer = 9 + (2 if bool(getattr(self.training, "use_qk_norm", False)) else 0)
+        dense_big_per_layer = 6
+        moe_small_per_layer = 13 + (2 if bool(getattr(self.training, "use_qk_norm", False)) else 0)
+        moe_big_per_layer = 10
 
         total_small_kernels = (
             dense_layers_per_stage * dense_small_per_layer +
@@ -1693,25 +1687,38 @@ class _BaseComputeModel:
             moe_layers_per_stage * moe_big_per_layer
         ) * num_passes
 
-        # 小 kernel 的平均 GPU 执行时间与 tokens 成正比
-        # 基准: tokens=4096 时约 5-15us, tokens=8192 时约 10-30us
-        tokens = max(1, batch_size * seq_len)
-        small_kernel_exec_us = max(1.0, 8.0 * tokens / 4096.0)
+        dense_small_bytes_per_layer = (
+            tokens * h_act * db * 10.0 +
+            tokens * (q_out + kv_out) * db * 4.0 +
+            tokens * ffn_tp * db * 5.0
+        )
+        if bool(getattr(self.training, "use_qk_norm", False)):
+            dense_small_bytes_per_layer += tokens * (q_out + kv_out) * db * 5.0
 
-        # 小 kernel 的 overhead: CPU dispatch 中无法被 GPU 隐藏的部分
+        moe_small_bytes_per_layer = (
+            tokens * h_act * db * 10.0 +
+            tokens * (q_out + kv_out) * db * 4.0 +
+            tokens * db * 16.0 * max(1, int(self.model.num_experts_per_tok))
+        )
+        if bool(getattr(self.training, "use_qk_norm", False)):
+            moe_small_bytes_per_layer += tokens * (q_out + kv_out) * db * 5.0
+
+        small_total_compute_ms = self._membound_time_ms(
+            num_passes * (
+                dense_layers_per_stage * dense_small_bytes_per_layer +
+                moe_layers_per_stage * moe_small_bytes_per_layer
+            )
+        )
+        pure_compute_ms = forward_time_ms * num_passes
+
+        small_kernel_exec_us = (small_total_compute_ms / max(1.0, total_small_kernels)) * 1000.0
         small_overhead_us = max(0.0, cpu_dispatch_us - small_kernel_exec_us)
         small_total_ms = total_small_kernels * small_overhead_us / 1000.0
 
-        # 大 kernel 通常 > cpu_dispatch_time，overhead ≈ 0
-        # 但有些"中等" kernel (K proj, Router) 在小 seq 时可能接近 dispatch 时间
-        # 用一个简单的 soft threshold: overhead = dispatch × max(0, 1 - exec/dispatch)
         if total_big_kernels > 0 and pure_compute_ms > 0:
-            # 大 kernel 平均执行时间
-            small_total_compute_ms = total_small_kernels * small_kernel_exec_us / 1000.0
             big_total_compute_ms = max(0.001, pure_compute_ms - small_total_compute_ms)
             avg_big_kernel_us = big_total_compute_ms / total_big_kernels * 1000.0
-            big_overlap = min(1.0, avg_big_kernel_us / (cpu_dispatch_us * 3.0))
-            big_overhead_us = cpu_dispatch_us * (1.0 - big_overlap)
+            big_overhead_us = max(0.0, cpu_dispatch_us - min(avg_big_kernel_us, cpu_dispatch_us))
             big_total_ms = total_big_kernels * big_overhead_us / 1000.0
         else:
             big_total_ms = 0.0
@@ -1888,23 +1895,23 @@ class _BaseComputeModel:
                     stage_times.append(0.0)
                     continue
 
-                gemm_recompute_time = 0.0
-                if "mlp" in modules:
-                    for layer_idx in selected_layers:
-                        layer = self._get_runtime_layer_template(
-                            layer_payload, layers[layer_idx]
-                        )
+                stage_time = 0.0
+                for layer_idx in selected_layers:
+                    layer = self._get_runtime_layer_template(
+                        layer_payload, layers[layer_idx]
+                    )
+                    if any(m in modules for m in {"mlp", "dense_mlp"}):
                         if layer["layer_kind"] == TRANSFORMER_MOE_LAYER_KIND:
-                            gemm_recompute_time += layer["moe_total"]
+                            stage_time += layer["moe_total"]
                         else:
-                            gemm_recompute_time += layer["mlp"]
-                    gemm_recompute_time *= 0.85
-
-                light_overhead = 0.0
-                if "norm" in modules:
-                    light_overhead += 0.06 * len(selected_layers)
-
-                stage_times.append(gemm_recompute_time + light_overhead)
+                            stage_time += layer["mlp"]
+                    if any(m in modules for m in {"attention", "core_attn", "flash_attn"}):
+                        stage_time += layer["attention_core"]
+                    if any(m in modules for m in {"proj", "qkv_proj", "o_proj"}):
+                        stage_time += layer["attention_projection"]
+                    if any(m in modules for m in {"norm", "layernorm", "qk_norm"}):
+                        stage_time += layer["layernorm"]
+                stage_times.append(stage_time)
 
         return stage_times if stage_times else [0.0] * max(1, int(parallel.pp))
 
@@ -2295,3 +2302,4 @@ class ComputeModel(_BaseComputeModel):
 
 
 __all__ = ["ComputeModel"]
+
