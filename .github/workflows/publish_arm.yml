@@ -92,8 +92,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          # export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          # export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
           wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
