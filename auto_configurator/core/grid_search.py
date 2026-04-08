@@ -115,6 +115,7 @@ class GPTGridSearch:
 
     Implements heuristic rules similar to NeMo's GPT3GridSearch,
     adapted for PaddleFleet's configuration system.
+    Optimized for NVIDIA H100 80GB GPUs.
 
     Args:
         model_size_in_b: Model size in billions
@@ -138,6 +139,158 @@ class GPTGridSearch:
     min_model_parallel: int = 1
     max_model_parallel: int = 8
 
+    # Data-driven lookup tables for search space initialization.
+    # Keys: (max_model_size, seq_length) or just max_model_size for non-seq-specific.
+    # Values: dict with optional keys: tp, pp, mbs, gbs, min_model_parallel, max_model_parallel.
+    # PP values with "valid_pp_max" use valid_pp filtering: [x for x in valid_pp if 1<=x<=max].
+
+    # 80GB GPU, seq_length=2048
+    _SEARCH_SPACE_80GB_2048 = [
+        # (max_size, config_dict)
+        (1.0, {"tp": [1, 2], "gbs": 256}),
+        (4.0, {"tp": [1, 2, 4], "gbs": 1024}),
+        (8.0, {"tp": [1, 2, 4], "gbs": 2048}),
+        (
+            13.0,
+            {
+                "tp": [1, 2, 4, 8],
+                "gbs": 2048,
+                "min_model_parallel": 4,
+                "max_model_parallel": 8,
+            },
+        ),
+        (
+            23.0,
+            {
+                "tp": [1, 2, 4],
+                "valid_pp_max": 4,
+                "mbs": [1, 2, 4],
+                "min_model_parallel": 4,
+                "max_model_parallel": 8,
+                "gbs": 2048,
+            },
+        ),
+        (
+            45.0,
+            {
+                "tp": [2, 4, 8],
+                "valid_pp_max": 4,
+                "mbs": [1, 2, 4],
+                "min_model_parallel": 8,
+                "max_model_parallel": 32,
+                "gbs": 2048,
+            },
+        ),
+        (
+            95.0,
+            {
+                "tp": [2, 4, 8],
+                "valid_pp_max": 8,
+                "mbs": [1, 2, 4, 8],
+                "min_model_parallel": 8,
+                "max_model_parallel": 64,
+                "gbs": 2048,
+            },
+        ),
+    ]
+
+    # 80GB GPU, seq_length=4096
+    _SEARCH_SPACE_80GB_4096 = [
+        (1.0, {"tp": [1, 2, 4], "mbs": [1, 2, 4, 8], "gbs": 128}),
+        (4.0, {"tp": [1, 2, 4], "mbs": [1, 2, 4, 8], "gbs": 512}),
+        (
+            8.0,
+            {"tp": [1, 2, 4], "valid_pp_max": 2, "mbs": [1, 2, 4], "gbs": 1024},
+        ),
+        (
+            13.0,
+            {
+                "tp": [1, 2, 4, 8],
+                "mbs": [1, 2, 4, 8],
+                "gbs": 1024,
+                "min_model_parallel": 4,
+                "max_model_parallel": 8,
+            },
+        ),
+    ]
+
+    # 80GB GPU, seq_length=8192
+    _SEARCH_SPACE_80GB_8192 = [
+        (1.0, {"tp": [1, 2], "valid_pp_max": 2, "mbs": [1, 2, 4], "gbs": 64}),
+        (
+            4.0,
+            {"tp": [1, 2, 4], "valid_pp_max": 2, "mbs": [1, 2, 4], "gbs": 128},
+        ),
+    ]
+
+    # 80GB GPU, seq_length=16384
+    _SEARCH_SPACE_80GB_16384 = [
+        (1.0, {"tp": [2, 4], "mbs": [1, 2], "gbs": 32}),
+        (4.0, {"tp": [2, 4], "valid_pp_max": 2, "mbs": [1], "gbs": 64}),
+    ]
+
+    # 80GB GPU, seq_length=32768
+    _SEARCH_SPACE_80GB_32768 = [
+        (1.0, {"tp": [2, 4], "valid_pp_max": 2, "mbs": [1], "gbs": 16}),
+        (4.0, {"tp": [2, 4], "valid_pp_max": 2, "mbs": [1], "gbs": 32}),
+    ]
+
+    # 40GB GPU
+    _SEARCH_SPACE_40GB = [
+        (1.0, {"tp": [1, 2, 4], "mbs": [1, 2, 4, 8], "gbs": 256}),
+        (4.0, {"tp": [1, 2, 4, 8], "mbs": [1, 2, 4, 8], "gbs": 1024}),
+        (
+            8.0,
+            {
+                "tp": [2, 4, 8],
+                "pp": [1, 2],
+                "mbs": [1, 2, 4],
+                "min_model_parallel": 2,
+                "gbs": 2048,
+            },
+        ),
+        (
+            13.0,
+            {
+                "tp": [4, 8],
+                "pp": [1, 2, 4],
+                "mbs": [1, 2, 4],
+                "min_model_parallel": 4,
+                "max_model_parallel": 32,
+                "gbs": 2048,
+            },
+        ),
+    ]
+
+    def _apply_search_space(self, model_size: float, search_table: list):
+        """Apply search space from a lookup table based on model size.
+
+        Args:
+            model_size: Model size in billions
+            search_table: List of (max_size, config_dict) tuples, ordered by max_size
+        """
+        for max_size, config in search_table:
+            if model_size <= max_size:
+                if "tp" in config:
+                    self.tp = config["tp"]
+                if "valid_pp_max" in config:
+                    self.pp = [
+                        x
+                        for x in self.valid_pp
+                        if 1 <= x <= config["valid_pp_max"]
+                    ]
+                elif "pp" in config:
+                    self.pp = config["pp"]
+                if "mbs" in config:
+                    self.mbs = config["mbs"]
+                if "gbs" in config:
+                    self.gbs = config["gbs"]
+                if "min_model_parallel" in config:
+                    self.min_model_parallel = config["min_model_parallel"]
+                if "max_model_parallel" in config:
+                    self.max_model_parallel = config["max_model_parallel"]
+                return
+
     def init_params(self):
         """Initialize search space based on model size and hardware."""
         model_size = self.model_size_in_b
@@ -150,243 +303,22 @@ class GPTGridSearch:
         self.mbs = [1, 2, 4, 8]
 
         if self.gpu_memory_gb == 80:
-            self._init_80gb_params(model_size)
+            seq_table_map = {
+                2048: self._SEARCH_SPACE_80GB_2048,
+                4096: self._SEARCH_SPACE_80GB_4096,
+                8192: self._SEARCH_SPACE_80GB_8192,
+                16384: self._SEARCH_SPACE_80GB_16384,
+                32768: self._SEARCH_SPACE_80GB_32768,
+            }
+            table = seq_table_map.get(self.seq_length)
+            if table:
+                self._apply_search_space(model_size, table)
         else:  # 40GB
-            self._init_40gb_params(model_size)
+            self._apply_search_space(model_size, self._SEARCH_SPACE_40GB)
 
         logger.info(
             f"Grid search space: TP={self.tp}, PP={self.pp}, "
             f"MBS={self.mbs}, GBS={self.gbs}"
-        )
-
-    def _init_80gb_params(self, model_size: float):
-        """Initialize search space for 80GB GPUs."""
-        if self.seq_length == 2048:
-            if model_size <= 1.0:
-                self.tp, self.gbs = [1, 2], 256
-            elif model_size <= 4.0:
-                self.tp, self.gbs = [1, 2, 4], 1024
-            elif model_size <= 8.0:
-                self.tp, self.gbs = [1, 2, 4], 2048
-            elif model_size <= 13.0:
-                (
-                    self.tp,
-                    self.gbs,
-                    self.min_model_parallel,
-                    self.max_model_parallel,
-                ) = ([1, 2, 4, 8], 2048, 4, 8)
-            elif model_size <= 23.0:
-                (
-                    self.tp,
-                    self.pp,
-                    self.mbs,
-                    self.min_model_parallel,
-                    self.max_model_parallel,
-                    self.gbs,
-                ) = (
-                    [1, 2, 4],
-                    [x for x in self.valid_pp if 1 <= x <= 4],
-                    [1, 2, 4],
-                    4,
-                    8,
-                    2048,
-                )
-            elif model_size <= 45.0:
-                (
-                    self.tp,
-                    self.pp,
-                    self.mbs,
-                    self.min_model_parallel,
-                    self.max_model_parallel,
-                    self.gbs,
-                ) = (
-                    [2, 4, 8],
-                    [x for x in self.valid_pp if 1 <= x <= 4],
-                    [1, 2, 4],
-                    8,
-                    32,
-                    2048,
-                )
-            elif model_size <= 95:
-                (
-                    self.tp,
-                    self.pp,
-                    self.mbs,
-                    self.min_model_parallel,
-                    self.max_model_parallel,
-                    self.gbs,
-                ) = (
-                    [2, 4, 8],
-                    [x for x in self.valid_pp if 1 <= x <= 8],
-                    [1, 2, 4, 8],
-                    8,
-                    64,
-                    2048,
-                )
-            # Larger models follow similar patterns...
-
-        elif self.seq_length == 4096:
-            if model_size <= 1.0:
-                self.tp, self.mbs, self.gbs = [1, 2, 4], [1, 2, 4, 8], 128
-            elif model_size <= 4.0:
-                self.tp, self.mbs, self.gbs = [1, 2, 4], [1, 2, 4, 8], 512
-            elif model_size <= 8.0:
-                self.tp, self.pp, self.mbs, self.gbs = (
-                    [1, 2, 4],
-                    [x for x in self.valid_pp if 1 <= x <= 2],
-                    [1, 2, 4],
-                    1024,
-                )
-            elif model_size <= 13.0:
-                (
-                    self.tp,
-                    self.mbs,
-                    self.gbs,
-                    self.min_model_parallel,
-                    self.max_model_parallel,
-                ) = ([1, 2, 4, 8], [1, 2, 4, 8], 1024, 4, 8)
-            # ... additional cases
-
-        # Add support for 8192, 16384, 32768 sequence lengths
-        elif self.seq_length == 8192:
-            self._init_80gb_8192(model_size)
-        elif self.seq_length == 16384:
-            self._init_80gb_16384(model_size)
-        elif self.seq_length == 32768:
-            self._init_80gb_32768(model_size)
-
-    def _init_40gb_params(self, model_size: float):
-        """Initialize search space for 40GB GPUs."""
-        if model_size <= 1.0:
-            self.tp, self.mbs, self.gbs = [1, 2, 4], [1, 2, 4, 8], 256
-        elif model_size <= 4.0:
-            self.tp, self.mbs, self.gbs = [1, 2, 4, 8], [1, 2, 4, 8], 1024
-        elif model_size <= 8.0:
-            self.tp, self.pp, self.mbs, self.min_model_parallel, self.gbs = (
-                [2, 4, 8],
-                [1, 2],
-                [1, 2, 4],
-                2,
-                2048,
-            )
-        elif model_size <= 13.0:
-            (
-                self.tp,
-                self.pp,
-                self.mbs,
-                self.min_model_parallel,
-                self.max_model_parallel,
-                self.gbs,
-            ) = ([4, 8], [1, 2, 4], [1, 2, 4], 4, 32, 2048)
-        # ... additional cases
-
-    def _init_80gb_8192(self, model_size: float):
-        """Initialize for 80GB GPUs with 8192 seq length."""
-        if model_size <= 1.0:
-            self.tp, self.pp, self.mbs, self.gbs = [1, 2], [1, 2], [1, 2, 4], 64
-        elif model_size <= 4.0:
-            self.tp, self.pp, self.mbs, self.gbs = (
-                [1, 2, 4],
-                [1, 2],
-                [1, 2, 4],
-                128,
-            )
-        # ... additional cases
-
-    def _init_80gb_16384(self, model_size: float):
-        """Initialize for 80GB GPUs with 16384 seq length."""
-        if model_size <= 1.0:
-            self.tp, self.mbs, self.gbs = [2, 4], [1, 2], [1, 2], 32
-        elif model_size <= 4.0:
-            self.tp, self.pp, self.mbs, self.gbs = [2, 4], [1, 2], [1], 64
-        # ... additional cases
-
-    def _init_80gb_32768(self, model_size: float):
-        """Initialize for 80GB GPUs with 32768 seq length."""
-        if model_size <= 1.0:
-            self.tp, self.pp, self.mbs, self.gbs = [2, 4], [1, 2], [1], 16
-        elif model_size <= 4.0:
-            self.tp, self.pp, self.mbs, self.gbs = [2, 4], [1, 2], [1], 32
-        # ... additional cases
-
-
-@dataclass
-class T5GridSearch:
-    """Grid search rules for T5/mT5 models on 40GB/80GB GPUs.
-
-    Note: T5/mT5 models are currently not supported in PaddleFleet.
-    This interface is provided for future extension.
-
-    Args:
-        model_size_in_b: Model size in billions
-        valid_pp: List of valid pipeline parallel sizes
-        seq_length: Training sequence length
-        gpu_memory_gb: GPU memory (40 or 80)
-    """
-
-    model_size_in_b: float
-    valid_pp: list[int]
-    seq_length: int
-    gpu_memory_gb: int
-
-    tp: list[int] = None
-    pp: list[int] = None
-    cp: list[int] = None
-    ep: list[int] = None
-    mbs: list[int] = None
-    gbs: int = 1920
-    min_model_parallel: int = 1
-    max_model_parallel: int = 8
-
-    def init_params(self):
-        """Initialize search space based on model size and hardware.
-
-        Raises:
-            NotImplementedError: T5/mT5 models are not currently supported.
-        """
-        raise NotImplementedError(
-            "T5/mT5 models are currently not supported in PaddleFleet. "
-            "Please use GPT-based models (gpt, llama, qwen, mixtral, mistral, gemma, glm)."
-        )
-
-
-@dataclass
-class BertGridSearch:
-    """Grid search rules for BERT models on 40GB/80GB GPUs.
-
-    Note: BERT models are currently not supported in PaddleFleet.
-    This interface is provided for future extension.
-
-    Args:
-        model_size_in_b: Model size in billions
-        valid_pp: List of valid pipeline parallel sizes
-        seq_length: Training sequence length
-        gpu_memory_gb: GPU memory (40 or 80)
-    """
-
-    model_size_in_b: float
-    valid_pp: list[int]
-    seq_length: int
-    gpu_memory_gb: int
-
-    tp: list[int] = None
-    pp: list[int] = None
-    cp: list[int] = None
-    ep: list[int] = None
-    mbs: list[int] = None
-    gbs: int = 1920
-    min_model_parallel: int = 1
-    max_model_parallel: int = 8
-
-    def init_params(self):
-        """Initialize search space based on model size and hardware.
-
-        Raises:
-            NotImplementedError: BERT models are not currently supported.
-        """
-        raise NotImplementedError(
-            "BERT models are currently not supported in PaddleFleet. "
-            "Please use GPT-based models (gpt, llama, qwen, mixtral, mistral, gemma, glm)."
         )
 
 
@@ -412,11 +344,11 @@ def get_grid_search_params(
 ) -> GridSearchConfig:
     """Get grid search parameters for the given configuration.
 
-    Selects the appropriate search class (GPTGridSearch, T5GridSearch, BertGridSearch)
-    based on model type, and allows override via explicit parameters.
+    Selects the appropriate search class based on model type,
+    and allows override via explicit parameters.
 
     Args:
-        model_type: Type of model (gpt, bert, t5)
+        model_type: Type of model (gpt, llama, qwen, mixtral, mistral, gemma, glm)
         model_size_in_b: Model size in billions
         num_layers: Number of transformer layers
         seq_length: Sequence length
@@ -434,26 +366,18 @@ def get_grid_search_params(
         GridSearchConfig with search space parameters
     """
     # Calculate valid PP sizes (must divide num_layers)
-    multiplier = 1 if model_type.lower() in GPT_BASED_MODELS else 2
     valid_pp = [1] + [
-        multiplier * x for x in range(1, num_layers + 1) if num_layers % x == 0
+        x for x in range(1, num_layers + 1) if num_layers % x == 0
     ]
 
     # Create appropriate search class
     if model_type.lower() in GPT_BASED_MODELS:
         search_class = GPTGridSearch
-    elif model_type.lower() in ["t5", "mt5"]:
-        raise NotImplementedError(
-            "T5/mT5 models are currently not supported in PaddleFleet. "
-            "Please use GPT-based models (gpt, llama, qwen, mixtral, mistral, gemma, glm)."
-        )
-    elif model_type.lower() == "bert":
-        raise NotImplementedError(
-            "BERT models are currently not supported in PaddleFleet. "
-            "Please use GPT-based models (gpt, llama, qwen, mixtral, mistral, gemma, glm)."
-        )
     else:
-        raise ValueError(f"Unsupported model type: {model_type}")
+        raise ValueError(
+            f"Unsupported model type: {model_type}. "
+            f"Supported: {GPT_BASED_MODELS}"
+        )
 
     # Initialize search class
     params = search_class(
@@ -464,22 +388,32 @@ def get_grid_search_params(
     )
     params.init_params()
 
-    # Override with explicit parameters if provided
-    if tensor_parallel_sizes != "auto":
+    # Override with explicit parameters if provided.
+    # None and "auto" both mean "use defaults from init_params";
+    # only explicit lists / ints override.
+    def _is_auto(val):
+        """Return True if val is None or the string 'auto'."""
+        if val is None:
+            return True
+        if isinstance(val, str) and val.lower() == "auto":
+            return True
+        return False
+
+    if not _is_auto(tensor_parallel_sizes):
         params.tp = tensor_parallel_sizes
-    if pipeline_parallel_sizes != "auto":
+    if not _is_auto(pipeline_parallel_sizes):
         params.pp = pipeline_parallel_sizes
-    if context_parallel_sizes is not None:
+    if not _is_auto(context_parallel_sizes):
         params.cp = context_parallel_sizes
-    if expert_parallel_sizes is not None:
+    if not _is_auto(expert_parallel_sizes):
         params.ep = expert_parallel_sizes
-    if micro_batch_sizes != "auto":
+    if not _is_auto(micro_batch_sizes):
         params.mbs = micro_batch_sizes
-    if global_batch_size is not None:
+    if not _is_auto(global_batch_size):
         params.gbs = global_batch_size
-    if min_model_parallel_size != "auto":
+    if not _is_auto(min_model_parallel_size):
         params.min_model_parallel = min_model_parallel_size
-    if max_model_parallel_size != "auto":
+    if not _is_auto(max_model_parallel_size):
         params.max_model_parallel = max_model_parallel_size
 
     return GridSearchConfig(
@@ -536,9 +470,9 @@ def generate_grid_search_configs(
     model_name = runner_config.model_type.lower()
     multiplier = 1 if model_name in GPT_BASED_MODELS else 2
 
-    # Generate valid TP/PP/CP/EP combinations
+    # Generate valid TP/PP/CP/EP combinations (MBS-independent validation)
     configs = {}
-    valid_tp_pp_list = []
+    valid_tp_pp_set = set()
 
     num_layers = model_config.get_num_layers()
     num_gpus = (
@@ -551,58 +485,50 @@ def generate_grid_search_configs(
         for pp in grid_params.pp:
             for cp in grid_params.cp:
                 for ep in grid_params.ep:
-                    for mbs in grid_params.mbs:
-                        # Validate parallel constraints
-                        model_parallelism = (
-                            (tp * pp * cp * ep) if (cp and ep) else (tp * pp)
+                    # Validate parallel constraints
+                    model_parallelism = (
+                        (tp * pp * cp * ep) if (cp and ep) else (tp * pp)
+                    )
+
+                    # Check: attention heads divisible by TP
+                    if att_heads % tp != 0:
+                        continue
+                    # Check: layers divisible by PP (with multiplier)
+                    if (multiplier * num_layers) % pp != 0:
+                        continue
+
+                    # Check: model parallelism in bounds
+                    if (
+                        grid_params.min_model_parallel is not None
+                        and grid_params.max_model_parallel is not None
+                        and (
+                            model_parallelism < grid_params.min_model_parallel
+                            or model_parallelism
+                            > grid_params.max_model_parallel
                         )
+                    ):
+                        continue
 
-                        # Check: GBS divisible by (MBS * GPUs / MP)
-                        mod_gbs = (
-                            grid_params.gbs
-                            % (mbs * num_gpus / model_parallelism)
-                            if model_parallelism > 0
-                            else 0
-                        )
-                        # Check: attention heads divisible by TP
-                        mod_att_heads = att_heads % tp
-                        # Check: layers divisible by PP (with multiplier)
-                        mod_layers = (multiplier * num_layers) % pp
-
-                        # Check: model parallelism in bounds
-                        if (
-                            grid_params.min_model_parallel is not None
-                            and grid_params.max_model_parallel is not None
-                            and (
-                                model_parallelism
-                                < grid_params.min_model_parallel
-                                or model_parallelism
-                                > grid_params.max_model_parallel
-                            )
-                        ):
+                    # Check: EP/CP compatibility
+                    # CP and EP must have a divisibility relationship
+                    mod_cp = cp if cp else 1
+                    mod_ep = ep if ep else 1
+                    if mod_cp > 1 and mod_ep > 1:
+                        if mod_cp % mod_ep != 0 and mod_ep % mod_cp != 0:
                             continue
 
-                        # Check: EP/CP compatibility
-                        mod_cp = cp if cp else 1
-                        mod_ep = ep if ep else 1
-                        if not (
-                            mod_cp // mod_ep == mod_cp
-                            or mod_ep // mod_cp == mod_ep
-                        ):
-                            continue
+                    valid_tp_pp_set.add((tp, pp, cp, ep))
 
-                        # Skip duplicates
-                        if (tp, pp, cp, ep) in valid_tp_pp_list:
-                            continue
-
-                        # Valid configuration
-                        valid_tp_pp_list.append((tp, pp, cp, ep))
+    # NOTE: We intentionally do NOT check tp * pp * cp * ep <= num_gpus.
+    # EP's communication group is not orthogonal to other parallel
+    # dimensions, so this constraint would be incorrect for MoE models.
+    valid_tp_pp_list = sorted(valid_tp_pp_set)
 
     logger.info(
         f"Generated {len(valid_tp_pp_list)} valid parallel configurations"
     )
 
-    # Generate configs
+    # Generate configs: iterate over all valid (TP,PP,CP,EP) x MBS combinations
     for tp, pp, cp, ep in valid_tp_pp_list:
         # Determine virtual pipeline and activation recompute parameters
         virtual_pipelines, act_layers, num_mbs_act, act_per_pipe = (
@@ -611,42 +537,57 @@ def generate_grid_search_configs(
             )
         )
 
-        # Generate config for each activation checkpoint setting
-        if act_layers[0] is not None:
-            for act in act_layers:
-                for num_mbs in num_mbs_act:
-                    for act_pipe in act_per_pipe:
-                        config = _create_config(
-                            runner_config,
-                            tp,
-                            pp,
-                            cp,
-                            ep,
-                            virtual_pipelines,
-                            mbs,
-                            act,
-                            num_mbs,
-                            act_pipe,
-                            grid_params,
-                        )
-                        if config:
-                            configs[config.name] = config
-        else:
-            config = _create_config(
-                runner_config,
-                tp,
-                pp,
-                cp,
-                ep,
-                virtual_pipelines,
-                grid_params.mbs[0] if grid_params.mbs else 1,
-                None,
-                None,
-                None,
-                grid_params,
+        model_parallelism = (tp * pp * cp * ep) if (cp and ep) else (tp * pp)
+
+        for mbs in grid_params.mbs:
+            # Check: GBS divisible by (MBS * data_parallel_size)
+            data_parallel_size = (
+                num_gpus / model_parallelism
+                if model_parallelism > 0
+                else num_gpus
             )
-            if config:
-                configs[config.name] = config
+            if (
+                data_parallel_size > 0
+                and grid_params.gbs % (mbs * data_parallel_size) != 0
+            ):
+                continue
+
+            # Generate config for each activation checkpoint setting
+            if act_layers[0] is not None:
+                for act in act_layers:
+                    for num_mbs in num_mbs_act:
+                        for act_pipe in act_per_pipe:
+                            config = _create_config(
+                                runner_config,
+                                tp,
+                                pp,
+                                cp,
+                                ep,
+                                virtual_pipelines,
+                                mbs,
+                                act,
+                                num_mbs,
+                                act_pipe,
+                                grid_params,
+                            )
+                            if config:
+                                configs[config.name] = config
+            else:
+                config = _create_config(
+                    runner_config,
+                    tp,
+                    pp,
+                    cp,
+                    ep,
+                    virtual_pipelines,
+                    mbs,
+                    None,
+                    None,
+                    None,
+                    grid_params,
+                )
+                if config:
+                    configs[config.name] = config
 
     logger.info(f"Total candidate configurations: {len(configs)}")
     return configs
@@ -702,8 +643,14 @@ def _create_config(
     multiplier = 1 if model_name in GPT_BASED_MODELS else 2
 
     # Validate constraints
+    model_parallelism = tp * pp * (cp if cp else 1) * (ep if ep else 1)
+    data_parallel_size = (
+        num_gpus / model_parallelism if model_parallelism > 0 else num_gpus
+    )
     mod_gbs = (
-        grid_params.gbs % (mbs * num_gpus / (tp * pp)) if (tp * pp) > 0 else 0
+        grid_params.gbs % (mbs * data_parallel_size)
+        if data_parallel_size > 0
+        else 0
     )
     mod_att_heads = att_heads % tp
     mod_layers = (multiplier * num_layers) % pp
