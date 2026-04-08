@@ -1,4 +1,4 @@
-name: Publish wheel nightly
+name: Publish Arm whl nightly
 
 on:
   # workflow_dispatch:
