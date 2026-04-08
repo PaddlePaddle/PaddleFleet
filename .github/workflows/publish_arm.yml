@@ -82,6 +82,15 @@ jobs:
             -e PR_ID \
             -e COMMIT_ID \
             -e BRANCH \
+            --shm-size 128G \
+            --ulimit core=-1 \
+            --cap-add SYS_ADMIN \
+            --privileged=true \
+            -v $PWD:/workspace \
+            -v /ssd1:/ssd1 \
+            -v /ssd2:/ssd2 \
+            -v /ssd3:/ssd3 \
+            --net=host \
             -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
             -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
@@ -125,7 +134,7 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          uv build --wheel -v
+          uv build --wheel -v --python /usr/bin/python
           '
 
       - name: Upload wheel
