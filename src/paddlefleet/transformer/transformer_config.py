@@ -269,6 +269,12 @@ class TransformerConfig(ModelParallelConfig):
     use_qk_norm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
 
+    qk_norm_type: str = "per_head"
+    """Type of qk normalization:
+    - "per_head": normalize each attention head independently (default for most models)
+    - "per_layer": normalize across all heads jointly (full-dimension, used by MiniMax)
+    """
+
     rms_norm_eps: float = 1e-5
     """Epsilon value for norm."""
 
