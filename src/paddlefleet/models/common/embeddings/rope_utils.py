@@ -429,14 +429,14 @@ def apply_rotary_pos_emb(
         cp_group (Group): Context parallel group.
         position_ids (Tensor | None): Position indices.
     """
-    rope_kwargs = dict(
-        apply_rope_fusion=config.apply_rope_fusion,
-        rotary_interleaved=config.rotary_interleaved,
-        multi_latent_attention=config.multi_latent_attention,
-        high_precision_rope=config.high_precision_rope,
-        rope_theta=config.rope_theta,
-        time_major=config.sequence_parallel,
-    )
+    rope_kwargs = {
+        "apply_rope_fusion": config.apply_rope_fusion,
+        "rotary_interleaved": config.rotary_interleaved,
+        "multi_latent_attention": config.multi_latent_attention,
+        "high_precision_rope": config.high_precision_rope,
+        "rope_theta": config.rope_theta,
+        "time_major": config.sequence_parallel,
+    }
     if cu_seqlens is None:
         return _apply_rotary_pos_emb_bshd(
             t,
