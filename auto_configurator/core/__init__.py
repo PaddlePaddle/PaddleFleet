@@ -16,40 +16,47 @@
 Core modules for AutoConfigurator in PaddleFleet.
 
 This module contains:
-- Model size calculation
+- Model size calculation and estimation
 - Architecture parameter inference
 - Grid search generation for parallel strategies (GPT only)
+- TFLOPS calculation
+- Training log parsing
+- Results aggregation
 """
 
 from .grid_search import (
-    BertGridSearch,
     GeneratedConfig,
     GPTGridSearch,
     GridSearchConfig,
-    T5GridSearch,
     generate_grid_search_configs,
     get_grid_search_params,
 )
+from .log_parser import parse_training_logs
 from .model_size import (
     GPT_BASED_MODELS,
     ModelSizeParams,
     calculate_model_size,
+    estimate_model_size,
 )
 from .performance import calculate_tflops
+from .results import get_results
 
 __all__ = [
     # From model_size
     "GPT_BASED_MODELS",
     "ModelSizeParams",
     "calculate_model_size",
+    "estimate_model_size",
     # From grid_search
-    "BertGridSearch",
     "GeneratedConfig",
     "GPTGridSearch",
     "GridSearchConfig",
-    "T5GridSearch",
     "generate_grid_search_configs",
     "get_grid_search_params",
     # From performance
     "calculate_tflops",
+    # From log_parser
+    "parse_training_logs",
+    # From results
+    "get_results",
 ]

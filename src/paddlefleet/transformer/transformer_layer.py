@@ -568,6 +568,11 @@ class TransformerLayer(nn.Layer):
             )
 
             # Accumulate attn output into partial_block
+            if (
+                partial_block is not None
+                and partial_block.dtype != hidden_states.dtype
+            ):
+                partial_block = partial_block.to(hidden_states.dtype)
             partial_block = (
                 partial_block + hidden_states
                 if partial_block is not None

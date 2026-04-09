@@ -24,3 +24,21 @@ jobs:
             echo "✅ PR 描述符合要求。"
             echo "字数统计: ${#DESCRIPTION} 个字符"
           fi
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: Check uv.lock is not deleted
+        run: |
+          git diff --name-status origin/${{ github.base_ref }}...HEAD | tee changed_files.txt
+          if cat changed_files.txt | grep -q "^D.*uv\.lock"; then
+            echo "::error::uv.lock cannot be deleted in this PR"
+            exit 1
+          elif cat changed_files.txt | grep -q "^R.*uv\.lock"; then
+            echo "::error::uv.lock cannot be renamed in this PR"
+            exit 1
+          fi
+          echo "uv.lock is intact"

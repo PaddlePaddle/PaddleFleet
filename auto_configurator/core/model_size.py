@@ -34,7 +34,11 @@ logger = logging.getLogger(__name__)
 GPT_BASED_MODELS = [
     "gpt",
     "llama",
+    "llama2",
+    "llama3",
     "qwen",
+    "qwen2",
+    "qwen3",
     "mixtral",
     "mistral",
     "gemma",
@@ -412,3 +416,56 @@ class ModelSizeParams:
                 return layers
 
         return None
+
+
+# ============================================================================
+# Model Size Estimation
+# ============================================================================
+
+
+def estimate_model_size(
+    gpu_count: int,
+    max_training_days: float,
+    model_size_in_b: float | None = None,
+    tflops_per_gpu: int = 989,  # H100 BF16 peak TFLOPS
+    num_tokens_in_b: int = 300,
+    model_name: str = "gpt",
+) -> float:
+    """Estimates model size to train given constraints.
+
+    If model_size is provided, estimates the time to train it.
+    If not provided, estimates the model size that can be trained.
+
+    Args:
+        gpu_count: Number of GPUs to use
+        max_training_days: Number of days to train
+        model_size_in_b: Model size in billions (if known)
+        tflops_per_gpu: Estimated TFLOPS per GPU
+        num_tokens_in_b: Number of tokens in dataset (billions)
+        model_name: Model type for penalty adjustment (unused - kept for API compatibility)
+
+    Returns:
+        Estimated model size in billions of parameters
+    """
+    # Calculate model size if not provided
+    if model_size_in_b is None:
+        model_size_in_b = (
+            (max_training_days * 3600 * 24 * gpu_count * tflops_per_gpu * 1e12)
+            / (8 * num_tokens_in_b * 1e9)
+            / 1e9
+        )
+        model_size_in_b = round(model_size_in_b, 2)
+    else:
+        # Calculate training time if model size is provided
+        max_training_days = (
+            model_size_in_b * 1e9 * 8 * num_tokens_in_b * 1e9
+        ) / (3600 * 24 * gpu_count * tflops_per_gpu * 1e12)
+        max_training_days = round(max_training_days, 2)
+
+    logger.info(
+        f"You can train a {model_size_in_b}B parameter model in "
+        f"{max_training_days} days using {gpu_count} GPUs. "
+        f"Assuming {num_tokens_in_b}B tokens, {tflops_per_gpu} TFLOPS/GPU."
+    )
+
+    return model_size_in_b

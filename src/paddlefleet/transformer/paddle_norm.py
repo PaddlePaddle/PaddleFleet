@@ -18,8 +18,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
-from paddle.incubate.nn.functional.fused_rms_norm_ext import fused_rms_norm_ext
-from paddle.nn.functional import layer_norm
+from paddle.nn.functional import layer_norm, rms_norm
 
 from ..spec_utils import LayerSpec
 
@@ -73,9 +72,16 @@ class RMSNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
-        return fused_rms_norm_ext(
-            hidden_states, self.weight, self.variance_epsilon
-        )[0].astype(self.weight.dtype)
+        rms_norm_out = rms_norm(
+            hidden_states,
+            hidden_states.shape[-1:],
+            self.weight,
+            self.variance_epsilon,
+        )
+        if isinstance(rms_norm_out, (tuple, list)):
+            return rms_norm_out[0].astype(self.weight.dtype)
+        else:
+            return rms_norm_out.astype(self.weight.dtype)
 
     def enable_sequence_parallel(self):
         mark_as_sequence_parallel_parameter(self.weight)
@@ -132,9 +138,16 @@ class LayerNorm(paddle.nn.Layer):
 
 class FusedRMSNorm(RMSNorm):
     def forward(self, hidden_states: Tensor):
-        return fused_rms_norm_ext(
-            hidden_states, self.weight, self.variance_epsilon
-        )[0].astype(self.weight.dtype)
+        rms_norm_out = rms_norm(
+            hidden_states,
+            hidden_states.shape[-1:],
+            self.weight,
+            self.variance_epsilon,
+        )
+        if isinstance(rms_norm_out, (tuple, list)):
+            return rms_norm_out[0].astype(self.weight.dtype)
+        else:
+            return rms_norm_out.astype(self.weight.dtype)
 
 
 class WrappedPaddleNorm:

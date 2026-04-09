@@ -19,20 +19,11 @@ This module provides TFLOPS calculation for model performance evaluation.
 Note: T5/mT5 and BERT models are currently not supported in PaddleFleet.
 """
 
+from .model_size import GPT_BASED_MODELS
 
 # ============================================================================
 # TFLOPS Calculation
 # ============================================================================
-
-GPT_BASED_MODELS = [
-    "gpt",
-    "llama",
-    "qwen",
-    "mixtral",
-    "mistral",
-    "gemma",
-    "glm",
-]
 
 
 def calculate_tflops(
