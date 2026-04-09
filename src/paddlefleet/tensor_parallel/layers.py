@@ -498,9 +498,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         else:
             total_input = input
 
-        output = paddle.matmul(total_input, weight)
         if bias is not None:
-            output = output + bias
+            output = paddle.nn.functional.linear(total_input, weight, bias)
+        else:
+            output = paddle.matmul(total_input, weight)
         return output
 
     @staticmethod

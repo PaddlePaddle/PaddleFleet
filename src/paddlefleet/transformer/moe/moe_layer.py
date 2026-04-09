@@ -138,6 +138,7 @@ class MoELayer(nn.Layer):
             )
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
+        self.moe_deep_gemm = config.moe_deep_gemm
         self.moe_ep_barrier = config.moe_ep_barrier
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
@@ -170,7 +171,6 @@ class MoELayer(nn.Layer):
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
-        self.moe_deep_gemm = False  # Paddle batched_gemm has better performance than DeepGEMM, so disable DeepGEMM.
         if (
             paddle.is_compiled_with_cuda()
             and paddle.device.get_device_capability()[0] < 9
