@@ -63,11 +63,6 @@ SEQ_LENGTH = 64
 SEED = 123
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _set_random_seed(seed: int):
     """Set all random seeds for reproducibility."""
     random.seed(seed)
