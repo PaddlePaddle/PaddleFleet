@@ -49,6 +49,9 @@ from paddlefleet.transformer.block_attn_res import (
     BlockAttnRes,
     BlockAttnResSublayersSpec,
 )
+from paddlefleet.transformer.dsa_attention import (
+    MLASelfAttentionWithDSA,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.gated_delta_net import (
     GatedDeltaNet,
@@ -150,8 +153,14 @@ def get_attention_spec(
         )
     elif attention_layer_type == "multi_latent_attention":
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
+        # Decide attention class: DSA variant if index_n_heads is configured
+        use_dsa = (
+            config is not None
+            and getattr(config, "index_n_heads", None) is not None
+        )
+        attn_cls = MLASelfAttentionWithDSA if use_dsa else MLASelfAttention
         return LayerSpec(
-            layer=MLASelfAttention,
+            layer=attn_cls,
             extra_kwargs={"attn_mask_type": attn_mask_type},
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
@@ -256,6 +265,7 @@ def get_gpt_layer_local_spec(
             post_attention_layernorm=layer_norm,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
+            block_attn_res=block_attn_res,
             sharded_state_dict_keys_map={
                 "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
                 "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",

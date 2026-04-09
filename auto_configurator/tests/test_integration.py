@@ -91,7 +91,7 @@ class TestAutoConfiguratorInitialization:
             min_model_parallel_size="auto",
             max_model_parallel_size="auto",
             num_tokens_in_b=1400,
-            tflops_per_gpu=140,
+            tflops_per_gpu=989,
             max_minutes_per_run=30,
             max_training_days=2,
             max_steps_per_run=50,
@@ -159,7 +159,7 @@ class TestAutoConfiguratorInitialization:
             hidden_size: int = 2048
             num_attention_heads: int = 32
             intermediate_size: int = 8192
-            max_sequence_length: int = 1024  # Invalid for GPT
+            max_sequence_length: int = 500  # Invalid: not a multiple of 1024
             vocab_size: int = 32000
             tensor_model_parallel_size: int = 1
             pipeline_model_parallel_size: int = 1
@@ -433,7 +433,7 @@ class TestEstimateModelSize:
             gpu_count=32,
             max_training_days=7,
             model_size_in_b=None,
-            tflops_per_gpu=140,
+            tflops_per_gpu=989,
             num_tokens_in_b=1400,
             model_name="gpt",
         )
@@ -453,7 +453,7 @@ class TestEstimateModelSize:
             gpu_count=32,
             max_training_days=max_training_days,
             model_size_in_b=7.0,
-            tflops_per_gpu=140,
+            tflops_per_gpu=989,
             num_tokens_in_b=1400,
             model_name="gpt",
         )
@@ -467,7 +467,7 @@ class TestEstimateModelSize:
             gpu_count=32,
             max_training_days=7,
             model_size_in_b=None,
-            tflops_per_gpu=140,
+            tflops_per_gpu=989,
             num_tokens_in_b=1400,
             model_name="t5",
         )
@@ -573,6 +573,173 @@ class TestConfigGeneration:
             assert "gpt" in config.log_dir
             assert "tp_" in config.log_dir
             assert "pp_" in config.log_dir
+
+
+# ============================================================================
+# Bug 3 Fix Verification: finetune with None parallel sizes
+# ============================================================================
+
+
+class TestFinetuneValidation:
+    """Verify finetune mode validates None and 'auto' parallel sizes correctly."""
+
+    def test_finetune_with_none_tp_raises_error(self):
+        """tensor_parallel_sizes=None in finetune mode should raise ValueError."""
+        recipe = PaddleFleetRecipe(model_config=MockGPTConfig())
+
+        with pytest.raises(
+            ValueError, match="tensor_parallel_sizes must be specified"
+        ):
+            AutoConfigurator(
+                recipe=recipe,
+                path_to_logs="/tmp/test_logs",
+                mode="finetune",
+                tensor_parallel_sizes=None,  # None should be caught
+                pipeline_parallel_sizes=[1, 2],
+            )
+
+    def test_finetune_with_none_pp_raises_error(self):
+        """pipeline_parallel_sizes=None in finetune mode should raise ValueError."""
+        recipe = PaddleFleetRecipe(model_config=MockGPTConfig())
+
+        with pytest.raises(
+            ValueError, match="pipeline_parallel_sizes must be specified"
+        ):
+            AutoConfigurator(
+                recipe=recipe,
+                path_to_logs="/tmp/test_logs",
+                mode="finetune",
+                tensor_parallel_sizes=[1, 2],
+                pipeline_parallel_sizes=None,  # None should be caught
+            )
+
+    def test_finetune_with_explicit_tp_pp_passes(self):
+        """Explicit TP/PP in finetune mode should pass validation."""
+        recipe = PaddleFleetRecipe(model_config=MockGPTConfig())
+
+        # Should not raise
+        runner = AutoConfigurator(
+            recipe=recipe,
+            path_to_logs="/tmp/test_logs",
+            mode="finetune",
+            tensor_parallel_sizes=[1, 2],
+            pipeline_parallel_sizes=[1, 2],
+        )
+        assert runner.mode == "finetune"
+
+
+# ============================================================================
+# Sequence Length Boundary Tests (relaxed validation)
+# ============================================================================
+
+
+class TestSeqLengthValidation:
+    """Verify relaxed sequence length validation accepts valid multiples of 1024."""
+
+    def test_seq_length_1024_valid(self):
+        """seq_length=1024 should now be valid."""
+
+        @dataclass
+        class Config1024:
+            num_hidden_layers: int = 24
+            hidden_size: int = 2048
+            num_attention_heads: int = 32
+            intermediate_size: int = 8192
+            max_sequence_length: int = 1024
+            vocab_size: int = 32000
+            tensor_model_parallel_size: int = 1
+            pipeline_model_parallel_size: int = 1
+            virtual_pipeline_model_parallel_size: int | None = None
+            context_parallel_size: int = 1
+            expert_model_parallel_size: int = 1
+
+        recipe = PaddleFleetRecipe(model_config=Config1024())
+        runner = AutoConfigurator(recipe=recipe, path_to_logs="/tmp/test_logs")
+        assert runner.seq_length == 1024
+
+    def test_seq_length_65536_valid(self):
+        """seq_length=65536 (64K) should now be valid."""
+
+        @dataclass
+        class Config65536:
+            num_hidden_layers: int = 24
+            hidden_size: int = 2048
+            num_attention_heads: int = 32
+            intermediate_size: int = 8192
+            max_sequence_length: int = 65536
+            vocab_size: int = 32000
+            tensor_model_parallel_size: int = 1
+            pipeline_model_parallel_size: int = 1
+            virtual_pipeline_model_parallel_size: int | None = None
+            context_parallel_size: int = 1
+            expert_model_parallel_size: int = 1
+
+        recipe = PaddleFleetRecipe(model_config=Config65536())
+        runner = AutoConfigurator(recipe=recipe, path_to_logs="/tmp/test_logs")
+        assert runner.seq_length == 65536
+
+    def test_seq_length_131072_valid(self):
+        """seq_length=131072 (128K) should be valid."""
+
+        @dataclass
+        class Config128K:
+            num_hidden_layers: int = 24
+            hidden_size: int = 2048
+            num_attention_heads: int = 32
+            intermediate_size: int = 8192
+            max_sequence_length: int = 131072
+            vocab_size: int = 32000
+            tensor_model_parallel_size: int = 1
+            pipeline_model_parallel_size: int = 1
+            virtual_pipeline_model_parallel_size: int | None = None
+            context_parallel_size: int = 1
+            expert_model_parallel_size: int = 1
+
+        recipe = PaddleFleetRecipe(model_config=Config128K())
+        runner = AutoConfigurator(recipe=recipe, path_to_logs="/tmp/test_logs")
+        assert runner.seq_length == 131072
+
+    def test_seq_length_not_multiple_of_1024_invalid(self):
+        """seq_length=3000 (not multiple of 1024) should be invalid."""
+
+        @dataclass
+        class Config3000:
+            num_hidden_layers: int = 24
+            hidden_size: int = 2048
+            num_attention_heads: int = 32
+            intermediate_size: int = 8192
+            max_sequence_length: int = 3000
+            vocab_size: int = 32000
+            tensor_model_parallel_size: int = 1
+            pipeline_model_parallel_size: int = 1
+            virtual_pipeline_model_parallel_size: int | None = None
+            context_parallel_size: int = 1
+            expert_model_parallel_size: int = 1
+
+        recipe = PaddleFleetRecipe(model_config=Config3000())
+        with pytest.raises(ValueError, match="seq_length.*not supported"):
+            AutoConfigurator(recipe=recipe, path_to_logs="/tmp/test_logs")
+
+    def test_seq_length_too_small_invalid(self):
+        """seq_length=512 (< 1024) should be invalid."""
+
+        @dataclass
+        class Config512:
+            num_hidden_layers: int = 24
+            hidden_size: int = 2048
+            num_attention_heads: int = 32
+            intermediate_size: int = 8192
+            max_sequence_length: int = 512
+            vocab_size: int = 32000
+            tensor_model_parallel_size: int = 1
+            pipeline_model_parallel_size: int = 1
+            virtual_pipeline_model_parallel_size: int | None = None
+            context_parallel_size: int = 1
+            expert_model_parallel_size: int = 1
+
+        recipe = PaddleFleetRecipe(model_config=Config512())
+        with pytest.raises(ValueError, match="seq_length.*not supported"):
+            AutoConfigurator(recipe=recipe, path_to_logs="/tmp/test_logs")
 
 
 # ============================================================================

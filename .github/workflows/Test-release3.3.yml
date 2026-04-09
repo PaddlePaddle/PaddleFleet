@@ -185,7 +185,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           set -x
           source /root/proxy
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
@@ -309,7 +308,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           set -x
           source /root/proxy
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
@@ -444,7 +442,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           set -x
           source /root/proxy
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
@@ -662,7 +659,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           set -x
           source /root/proxy
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
@@ -1039,7 +1035,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           set -x
           source /root/proxy
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r

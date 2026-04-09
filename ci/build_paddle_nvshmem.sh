@@ -254,7 +254,7 @@ build_core_wheel() {
     cp -r "$install_dir/include/"* "$pkg_dir/nvidia/nvshmem/include/"
 
     # 复制 .so.3 文件
-    for f in "$install_dir/lib/"*.so.3; do
+    for f in "$install_dir/lib/"*.so*; do
         [ -f "$f" ] && cp "$f" "$pkg_dir/nvidia/nvshmem/lib/"
     done
 
