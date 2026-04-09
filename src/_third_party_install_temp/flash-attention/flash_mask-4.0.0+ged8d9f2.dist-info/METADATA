@@ -1,0 +1,13 @@
+Metadata-Version: 2.2
+Name: flash_mask
+Version: 4.0.0+ged8d9f2
+Summary: FlashMask: Efficient and Rich Mask Extension of FlashAttention
+Author: PaddlePaddle
+Requires-Python: >=3.10
+Requires-Dist: typing_extensions
+Requires-Dist: nvidia-cutlass==4.2.0.0
+Requires-Dist: nvidia-cutlass-dsl==4.3.0
+Dynamic: author
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
