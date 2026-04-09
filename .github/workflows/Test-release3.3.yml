@@ -3,7 +3,7 @@ name: Test-release3.3
 on:
   pull_request:
     types: [opened, synchronize]
-    branches: [develop, release/**]
+    branches: [release/**]
 
 permissions: read-all
 

@@ -90,7 +90,6 @@ jobs:
             -v /ssd1:/ssd1 \
             -v /ssd2:/ssd2 \
             -v /ssd3:/ssd3 \
-            --net=host \
             -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
             -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
@@ -101,8 +100,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
-          # export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
-          # export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
           wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
@@ -121,8 +118,6 @@ jobs:
       - name: Build wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          # export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
-          # export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
           git submodule update --init --recursive
@@ -140,8 +135,6 @@ jobs:
       - name: Upload wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
