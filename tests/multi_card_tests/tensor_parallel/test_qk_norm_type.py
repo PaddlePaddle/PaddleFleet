@@ -79,6 +79,7 @@ def _build_config(
     tp_size: int = 1,
     sp: bool = False,
     qk_norm_type: str = "per_head",
+    use_qk_norm: bool = True,
 ) -> TransformerConfig:
     """Build a TransformerConfig for qk_norm_type testing."""
     return TransformerConfig(
@@ -98,7 +99,7 @@ def _build_config(
         sequence_parallel=sp,
         deterministic_mode=True,
         gated_attention=False,
-        use_qk_norm=True,
+        use_qk_norm=use_qk_norm,
         qk_norm_type=qk_norm_type,
     )
 
@@ -166,13 +167,18 @@ class TestQKNormTypeDistributed(unittest.TestCase):
         self.tp_size = TENSOR_PARALLEL
         self.seed = SEED
 
-    def _check_gpu_forward(self, sp: bool, qk_norm_type: str):
+    def _check_gpu_forward(
+        self, sp: bool, qk_norm_type: str, use_qk_norm: bool = True
+    ):
         """Test that forward produces correct shape and dtype."""
         _set_random_seed(self.seed)
         model_parallel_cuda_manual_seed(self.seed)
 
         config = _build_config(
-            tp_size=self.tp_size, sp=sp, qk_norm_type=qk_norm_type
+            tp_size=self.tp_size,
+            sp=sp,
+            qk_norm_type=qk_norm_type,
+            use_qk_norm=use_qk_norm,
         )
         pg_collection = ProcessGroupCollection.use_mpu_process_groups(
             required_pgs=["tp", "cp"]
@@ -213,11 +219,27 @@ class TestQKNormTypeDistributed(unittest.TestCase):
 
     def test_per_layer_forward_no_sp(self):
         """Test per_layer qk_norm_type forward without SP."""
-        self._check_gpu_forward(sp=False, qk_norm_type="per_layer")
+        self._check_gpu_forward(
+            sp=False, qk_norm_type="per_layer", use_qk_norm=True
+        )
 
     def test_per_layer_forward_with_sp(self):
         """Test per_layer qk_norm_type forward with SP."""
-        self._check_gpu_forward(sp=True, qk_norm_type="per_layer")
+        self._check_gpu_forward(
+            sp=True, qk_norm_type="per_layer", use_qk_norm=True
+        )
+
+    def test_no_qk_norm_forward_no_sp(self):
+        """Test forward without QK normalization and without SP."""
+        self._check_gpu_forward(
+            sp=False, qk_norm_type="per_head", use_qk_norm=False
+        )
+
+    def test_no_qk_norm_forward_with_sp(self):
+        """Test forward without QK normalization and with SP."""
+        self._check_gpu_forward(
+            sp=True, qk_norm_type="per_head", use_qk_norm=False
+        )
 
 
 if __name__ == "__main__":
