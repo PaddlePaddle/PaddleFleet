@@ -128,6 +128,37 @@ class TestFp8E4m3WgradFalseBf16Backward(unittest.TestCase):
         self.assertEqual(list(dx.shape), [self.total_tokens, HIDDEN])
         self.assertEqual(probs_grad.shape[0], self.total_tokens)
 
+    def test_bwd_gate_up_input_bf16_does_not_raise(self):
+        """bwd_gate_up_input_bf16 with use_fp8_mlp=True + moe_grouped_gemm=True
+        must not raise (pre-fix: tried to access grouped_gemm_experts weight tensor)."""
+        expert_w1 = [e.up_gate_proj.weight for e in self.node.experts]
+        do1 = paddle.randn(
+            [self.total_tokens, INTER * 2], dtype=paddle.bfloat16
+        )
+        try:
+            dx = self.node.bwd_gate_up_input_bf16(do1, expert_w1)
+        except AttributeError as exc:
+            self.fail(
+                f"bwd_gate_up_input_bf16 raised AttributeError (bug: accessed "
+                f"grouped_gemm_experts instead of per-expert list): {exc}"
+            )
+        self.assertEqual(list(dx.shape), [self.total_tokens, HIDDEN])
+
+    def test_bwd_gate_up_input_bf16_zero_tokens_does_not_raise(self):
+        """bwd_gate_up_input_bf16 else branch (numpy.prod == 0): must use
+        expert_w1[0].shape[0] for dx_shape, not expert_w1.shape[1]."""
+        expert_w1 = [e.up_gate_proj.weight for e in self.node.experts]
+        do1 = paddle.empty([0, INTER * 2], dtype=paddle.bfloat16)
+        self.node.tokens_per_expert = [0] * NUM_EXPERTS
+        try:
+            dx = self.node.bwd_gate_up_input_bf16(do1, expert_w1)
+        except AttributeError as exc:
+            self.fail(
+                f"bwd_gate_up_input_bf16 zero-token branch raised AttributeError: {exc}"
+            )
+        self.assertEqual(dx.shape[0], 0)
+        self.assertEqual(dx.shape[1], HIDDEN)
+
 
 if __name__ == "__main__":
     unittest.main()
