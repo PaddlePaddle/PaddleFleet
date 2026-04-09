@@ -213,10 +213,17 @@ def get_gpt_layer_local_spec(
 
     backend = LocalSpecProvider()
     # Adjust for RMS norm.
+    norm_eps = config.rms_norm_eps if config is not None else 1e-5
     if normalization == "RMSNorm":
-        layer_norm = backend.layer_norm(rms_norm=True, for_qk=False)
+        layer_norm = backend.layer_norm(
+            rms_norm=True, for_qk=False, eps=norm_eps
+        )
+        qk_norm = backend.layer_norm(rms_norm=True, for_qk=True, eps=norm_eps)
     else:
-        layer_norm = backend.layer_norm(rms_norm=False, for_qk=False)
+        layer_norm = backend.layer_norm(
+            rms_norm=False, for_qk=False, eps=norm_eps
+        )
+        qk_norm = backend.layer_norm(rms_norm=False, for_qk=True, eps=norm_eps)
 
     mlp = get_mlp_layer_spec_for_backend(
         backend=backend,
@@ -232,7 +239,9 @@ def get_gpt_layer_local_spec(
                 norm=layer_norm,
             ),
         )
-    transformer_cls = getattr(config, "specific_layer", TransformerLayer)
+    transformer_cls = getattr(
+        config, "specific_transformer_layer", TransformerLayer
+    )
     if paddle.distributed.is_initialized():
         use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
             "pp_configs"
@@ -500,6 +509,7 @@ def get_gpt_spec(
         language_embedding=language_embedding_spec,
         rope_embedding=rope_embedding_spec,
     )
+    embedding_cls = getattr(config, "specific_embedding", GPTEmbedding)
 
     # Build block_attn_res spec for GPTLMHead
     lm_head_block_attn_res = IdentityOp
@@ -524,10 +534,11 @@ def get_gpt_spec(
         extra_kwargs={
             "config": config,
             "tie_word_embeddings": tie_word_embeddings,
+            "modal": "language_model" if config.multimodal_embedding else None,
         },
         sublayers_spec=GPTSublayersSpec(
             embedding=LayerSpec(
-                layer=GPTEmbedding,
+                layer=embedding_cls,
                 sublayers_spec=embedding_spec,
                 extra_kwargs=embedding_extra_kwargs,
             ),

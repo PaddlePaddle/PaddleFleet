@@ -42,8 +42,6 @@ def qwen3_vl_vision_builder(config, **kwargs):
         transformer_layers_spec=transformer_layer_specs,
         tail_empty_layer_spec=tail_empty_layers_spec,
         rotary_base=config.rope_theta,
-        rotary_percent=config.rotary_percent,
-        rope_scaling=config.rope_scaling,
     )
 
     return build_layer(res_spec, **kwargs)

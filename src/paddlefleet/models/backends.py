@@ -33,6 +33,8 @@ from paddlefleet.transformer.dot_product_attention import (
 )
 from paddlefleet.transformer.mlp import MLPSublayersSpec
 
+from ..spec_utils import LayerSpec
+
 
 # from paddlefleet.transformer.moe.experts import GroupedMLP, SequentialMLP
 # HACK(Guoxia Wang): need remove later
@@ -118,14 +120,23 @@ class LocalSpecProvider(BackendSpecProvider):
         """Which layer for sequential layernorm and linear"""
         return None
 
-    def layer_norm(self, rms_norm: bool = False, for_qk: bool = False) -> type:
+    def layer_norm(
+        self,
+        rms_norm: bool = False,
+        for_qk: bool = False,
+        fused: bool = True,
+        eps: float = 1e-5,
+    ) -> type:
         """Which module to use for layer norm"""
         if rms_norm:
             # Matching get_gpt_layer_local_spec.
             # Why does the global need to be updated?
             global LNImpl
             LNImpl = WrappedPaddleNorm
-        return LNImpl
+        return LayerSpec(
+            layer=LNImpl,
+            extra_kwargs={"eps": eps},
+        )
 
     def core_attention(self) -> type:
         """Which layer to use for attention"""

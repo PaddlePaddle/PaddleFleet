@@ -23,9 +23,6 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 
 from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.spec_utils import LayerSpec, build_layer
-from paddlefleet.tensor_parallel.mappings import (
-    scatter_to_sequence_parallel_region,
-)
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -115,12 +112,6 @@ class GPTEmbedding(FleetLayer):
         attn_mask_startend_row_indices = dict_args.get(
             "attn_mask_startend_row_indices", None
         )
-        deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
-        deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
-        visual_pos_masks = None
-        # Deepstack
-        deepstack_visual_embeds = None
-        visual_pos_mask = None
         mtp_emb_res = None
         if input_ids is None:
             assert dict_args["decoder_input"] is not None, (
@@ -225,8 +216,6 @@ class GPTEmbedding(FleetLayer):
                         image_embeds.astype(decoder_input.dtype).reshape([-1]),
                     )  # scatter bwd is a simple gather — no sparse atomics
                     decoder_input = image_src_flat.reshape(decoder_input.shape)
-                    visual_pos_masks = image_mask[..., 0]
-                    deepstack_visual_embeds = deepstack_image_embeds
 
                 if video_embeds is not None:
                     _, video_mask = self.get_placeholder_mask(
@@ -247,60 +236,7 @@ class GPTEmbedding(FleetLayer):
                         video_embeds.astype(decoder_input.dtype).reshape([-1]),
                     )
                     decoder_input = video_src_flat.reshape(decoder_input.shape)
-                    visual_pos_masks = video_mask[..., 0]
-                    deepstack_visual_embeds = deepstack_video_embeds
 
-                if image_embeds is not None and video_embeds is not None:
-                    image_mask = image_mask[..., 0]  # [B, S] bool
-                    video_mask = video_mask[..., 0]  # [B, S] bool
-                    visual_pos_masks = image_mask | video_mask
-                    deepstack_visual_embeds = []
-                    for img_embed, vid_embed in zip(
-                        deepstack_image_embeds, deepstack_video_embeds
-                    ):
-                        # Build embed_joint [N_visual, H] without boolean-index
-                        # scatter. Use dense mask arithmetic instead.
-                        #   img_embed : [N_img, H]
-                        #   vid_embed : [N_vid, H]
-                        #   visual_pos_masks: [B, S] bool, N_visual True entries
-                        # img_mask_in_visual[i] = True  iff visual position i is image
-                        # Computed as: image_mask flattened, keep only visual positions,
-                        # expressed as a dense [N_visual] float mask — no indexing.
-                        h = img_embed.shape[-1]
-                        n_visual = int(visual_pos_masks.sum())
-                        # visual_pos_flat: [B*S] bool
-                        visual_pos_flat = visual_pos_masks.reshape([-1])
-                        image_mask_flat = image_mask.reshape([-1])  # [B*S] bool
-                        video_mask_flat = video_mask.reshape([-1])  # [B*S] bool
-                        # Dense [B*S] float masks, then compress to [N_visual] via
-                        # paddle.masked_select (forward: gather, backward: scatter_add
-                        # — but scalar backward is efficient, no sparse atomics)
-                        img_mask_in_vis_f = paddle.masked_select(
-                            image_mask_flat.astype(img_embed.dtype),
-                            visual_pos_flat,
-                        ).unsqueeze(-1)  # [N_visual, 1]
-                        vid_mask_in_vis_f = paddle.masked_select(
-                            video_mask_flat.astype(vid_embed.dtype),
-                            visual_pos_flat,
-                        ).unsqueeze(-1)  # [N_visual, 1]
-                        embed_joint = (
-                            img_embed.reshape([n_visual, h]) * img_mask_in_vis_f
-                            + vid_embed.reshape([n_visual, h])
-                            * vid_mask_in_vis_f
-                        )
-                        deepstack_visual_embeds.append(embed_joint)
-                # Scatter decoder_input to SP format [S/tp, B, H] after multimodal
-                # token replacement, since LanguageModelEmbedding's internal scatter
-                # was disabled to allow image/video embedding insertion first.
-                if self.sequence_parallel:
-                    decoder_input = decoder_input.transpose(
-                        [1, 0, 2]
-                    ).contiguous()
-                    decoder_input = scatter_to_sequence_parallel_region(
-                        decoder_input, group=self.embedding.tp_group
-                    )
-                    if self.config.clone_scatter_output_in_embedding:
-                        decoder_input = decoder_input.clone()
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
         rotary_pos_cos = None
@@ -355,8 +291,6 @@ class GPTEmbedding(FleetLayer):
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
             "position_ids": position_ids,
-            "deepstack_visual_emb": deepstack_visual_embeds,
-            "visual_pos_masks": visual_pos_masks,
         }
         if mtp_emb_res is not None:
             assert (

@@ -339,6 +339,7 @@ class PipelineLayer(nn.Layer):
 
         world_size = dist.get_world_size()
         self.global_rank = dist.get_rank()
+        self.global_rank = 0
 
         if self._topo:
             if hasattr(self._topo, "_parent_hcg"):
