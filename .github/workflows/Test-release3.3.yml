@@ -20,7 +20,7 @@ env:
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   CI_name: test
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
-  docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
+  docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
   build_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:cuda12.9-cudnn9.9-trt10.5-gcc11"
   formers_branch: "release/1.1"
 
@@ -180,27 +180,12 @@ jobs:
             -e repo_flag="paddlefleet" \
             -w /paddle --network host ${docker_image}
 
-      - name: install miniconda
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          set -x
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-          conda init bash
-          echo "conda installed"
-          conda create -n py312 python=3.12 -y
-          '
-
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           set -x
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
@@ -215,8 +200,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -240,8 +223,6 @@ jobs:
         if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -303,26 +284,12 @@ jobs:
             -e repo_flag="paddlefleet" \
             -w /paddle --network host ${docker_image}
 
-      - name: install miniconda
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          set -x
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-          conda init bash
-          echo "conda installed"
-          conda create -n py312 python=3.12 -y
-          '
 
       - name: Clone PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           set -x
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
@@ -340,8 +307,6 @@ jobs:
       - name: Multi-card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export WITH_COVERAGE=ON
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
@@ -363,8 +328,6 @@ jobs:
         if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -437,18 +400,6 @@ jobs:
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
 
-      - name: install miniconda
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          set -x
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-          conda init bash
-          echo "conda installed"
-          conda create -n py312 python=3.12 -y
-          '
 
       - name: Install PaddleFleet
         run: |
@@ -457,8 +408,6 @@ jobs:
           rm -rf * .[^.]*
           set -x
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir PaddleFleet && cd PaddleFleet
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
@@ -478,8 +427,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           set -x
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           python -m pip install --upgrade pip
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -509,8 +456,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           bash -x PaddleFormers/tests/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
@@ -526,8 +471,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -546,8 +489,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -566,8 +507,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen3vl-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -585,8 +524,6 @@ jobs:
         if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           ls -a /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -654,26 +591,12 @@ jobs:
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
 
-      - name: install miniconda
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          set -x
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-          conda init bash
-          echo "conda installed"
-          conda create -n py312 python=3.12 -y
-          '
 
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           set -x
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           source /root/proxy
           mkdir PaddleFleet && cd PaddleFleet
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
@@ -695,8 +618,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           set -x
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           python -m pip install --upgrade pip
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -725,8 +646,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -745,8 +664,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -765,8 +682,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -785,8 +700,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -805,8 +718,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -818,8 +729,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -838,8 +747,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -858,8 +765,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -871,8 +776,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -884,8 +787,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -897,8 +798,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -910,8 +809,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -923,8 +820,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -936,8 +831,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -949,8 +842,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
@@ -961,8 +852,6 @@ jobs:
         if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           ls -a /workspace/PaddleFleet/coveragedata-multi
@@ -1030,18 +919,6 @@ jobs:
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
 
-      - name: install miniconda
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          set -x
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-          conda init bash
-          echo "conda installed"
-          conda create -n py312 python=3.12 -y
-          '
 
       - name: Install PaddleFleet
         run: |
@@ -1049,8 +926,6 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           set -x
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           mkdir PaddleFleet && cd PaddleFleet
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
@@ -1071,8 +946,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           set -x
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           python -m pip install --upgrade pip
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -1102,8 +975,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
@@ -1121,8 +992,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
@@ -1140,8 +1009,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
@@ -1159,8 +1026,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
@@ -1178,8 +1043,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
@@ -1197,8 +1060,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
@@ -1209,8 +1070,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
@@ -1221,8 +1080,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
@@ -1233,8 +1090,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
@@ -1245,8 +1100,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
@@ -1258,8 +1111,6 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
@@ -1269,8 +1120,6 @@ jobs:
         if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate py312
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           ls -a /workspace/PaddleFleet/coveragedata
@@ -1326,8 +1175,8 @@ jobs:
                 filepath="${config#*:}"
                 wget "${base_url}/${filepath}" -O "$filename" --no-proxy
                 sed -i "s|<source></source>|<source>paddlefleet</source>|" "$filename"
-                sed -i "s|/root/miniconda/envs/py312/lib/python3.12/site-packages/|src/|" "$filename"
-                sed -i "s|.root.miniconda.envs.py312.lib.python3.12.site-packages|src|" "$filename"
+                sed -i "s|/usr/local/lib/python3.12/site-packages/|src/|" "$filename"
+                sed -i "s|.usr.local.lib.python3.12.site-packages|src|" "$filename"
             fi
           done
           git diff origin/${{ github.event.pull_request.base.ref }}...HEAD  --unified=0 > diff.txt
