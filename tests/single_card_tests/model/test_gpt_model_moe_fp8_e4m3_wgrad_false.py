@@ -21,6 +21,18 @@ list path instead of grouped_gemm_experts.
 Only tests the bf16 backward path so that it can run on any GPU.
 """
 
+import os
+import sys
+
+sys.path.insert(
+    0,
+    os.path.dirname(
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+    ),
+)
+
 import unittest
 from unittest.mock import MagicMock
 

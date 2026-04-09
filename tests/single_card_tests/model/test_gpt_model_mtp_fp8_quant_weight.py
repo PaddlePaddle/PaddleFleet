@@ -21,6 +21,18 @@ Covers commits:
              trailing comma in fp8_quant_weight call)
 """
 
+import os
+import sys
+
+sys.path.insert(
+    0,
+    os.path.dirname(
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+    ),
+)
+
 import functools
 import random
 import unittest
