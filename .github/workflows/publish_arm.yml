@@ -110,9 +110,9 @@ jobs:
           cat pyproject.toml
           mkdir -p /root/.cache/pip
           pip cache dir
-          pip install --upgrade pip
-          pip install uv
-          python -m pip install bce-python-sdk==0.8.74
+          pip install --break-system-packages --upgrade pip
+          pip install --break-system-packages uv
+          python -m pip install --break-system-packages bce-python-sdk==0.8.74
           '
 
       - name: Build wheel
