@@ -172,7 +172,7 @@ class MoELayer(nn.Layer):
 
         self.moe_deep_gemm = False  # Paddle batched_gemm has better performance than DeepGEMM, so disable DeepGEMM.
         if (
-            not paddle.device.current_device_is_cpu
+            paddle.is_compiled_with_cuda()
             and paddle.device.get_device_capability()[0] < 9
         ):
             # TODO: Support Ampere architecture after upgrade deepep in paddlepaddle

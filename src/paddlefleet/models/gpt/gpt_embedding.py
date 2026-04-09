@@ -107,8 +107,9 @@ class GPTEmbedding(FleetLayer):
     ):
         input_ids = dict_args["input_ids"]
         position_ids = dict_args.get("position_ids", None)
+        device = paddle.device.get_device().split(":")[0].lower()
         position_ids = (
-            position_ids.to("gpu") if position_ids is not None else None
+            position_ids.to(device) if position_ids is not None else None
         )
         attention_mask = dict_args.get("attention_mask", None)
         attn_mask_startend_row_indices = dict_args.get(
@@ -342,6 +343,9 @@ class GPTEmbedding(FleetLayer):
                     rotary_pos_emb = rotary_pos_emb.transpose(
                         [1, 0, 2, 3]
                     ).contiguous()
+
+        if paddle.core._has_grad():
+            decoder_input.stop_gradient = False  # Prevent errors in recompute_pylayer during LoRA training caused by base_weight lacking gradients.
 
         preproc_output = {
             "hidden_states": decoder_input,

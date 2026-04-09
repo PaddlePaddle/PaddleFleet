@@ -476,7 +476,7 @@ class MlpNode:
             hs_2d_dispatched._record_stream()
         dispatched_indices._record_stream()
         dispatched_probs._record_stream()
-        if self.dispatched_indices.dtype is not dispatched_indices:
+        if self.dispatched_indices is not dispatched_indices:
             dispatched_indices._clear_to_zero_allocation()
 
         if not self.moe_expert_fusion:

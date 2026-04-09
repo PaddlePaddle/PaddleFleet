@@ -124,6 +124,8 @@ def get_packed_seq_params(
         cu_seqlens_kv_padded=cu_seqlens_padded,
         max_seqlen_q=combined_padded_seqlen,
         max_seqlen_kv=combined_padded_seqlen,
+        total_seqlen_q=batch_size * combined_valid_seqlen,
+        total_seqlen_kv=batch_size * combined_valid_seqlen,
         qkv_format=qkv_format,
     )
 

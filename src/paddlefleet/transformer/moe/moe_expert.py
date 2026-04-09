@@ -287,7 +287,8 @@ class GroupedMLPExpert(FleetLayer):
         structured_name_prefix: str = "",
     ):
         state_dict = self.state_dict(structured_name_prefix="")
-        if "qwen3_vl" not in getattr(self.config, "model_type", "none"):
+        model_type = getattr(self.config, "model_type", "none")
+        if "qwen3_vl" not in model_type and "qwen3_5" not in model_type:
             w1 = state_dict["weight1"].reshape(-1, self.weight1.shape[-1])
             w2 = state_dict["weight2"].reshape(-1, self.weight2.shape[-1])
             w1.name = self.weight1.name

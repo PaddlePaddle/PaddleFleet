@@ -45,7 +45,18 @@ from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
 )
+from paddlefleet.transformer.block_attn_res import (
+    BlockAttnRes,
+    BlockAttnResSublayersSpec,
+)
+from paddlefleet.transformer.dsa_attention import (
+    MLASelfAttentionWithDSA,
+)
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.gated_delta_net import (
+    GatedDeltaNet,
+    GatedDeltaNetSublayersSpec,
+)
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.multi_latent_attention import (
@@ -73,6 +84,103 @@ from paddlefleet.transformer.paddle_norm import (
 LNImpl = WrappedPaddleNorm
 
 
+def get_attention_spec(
+    config: TransformerConfig,
+    attention_layer_type: str,
+    attn_mask_type: AttnMaskType = AttnMaskType.causal,
+) -> LayerSpec:
+    """Build the self_attn LayerSpec based on attention_layer_type.
+
+    Args:
+        config: Transformer configuration.
+        attention_layer_type: ``"self_attention"`` for standard multi-head
+            attention or ``"gated_delta_net"`` for the GDN linear-attention
+            variant.
+        attn_mask_type: Attention mask type (only used for SelfAttention).
+
+    Returns:
+        LayerSpec for the attention sublayer inside a TransformerLayer.
+    """
+    assert config is not None, "config must be specified."
+    backend = LocalSpecProvider()
+    if config.normalization == "RMSNorm":
+        qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
+    else:
+        qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
+
+    use_qk_norm = getattr(config, "use_qk_norm", False)
+    qk_l2_norm = getattr(config, "qk_l2_norm", False)
+
+    if attention_layer_type == "self_attention":
+        return LayerSpec(
+            layer=SelfAttention,
+            extra_kwargs={"attn_mask_type": attn_mask_type},
+            sublayers_spec=SelfAttentionSublayersSpec(
+                qkv_proj=backend.column_parallel_linear(),
+                core_attention=backend.core_attention(),
+                o_proj=backend.row_parallel_linear(),
+                q_norm=(
+                    L2Norm
+                    if qk_l2_norm
+                    else (qk_norm if use_qk_norm else IdentityOp)
+                ),
+                k_norm=(
+                    L2Norm
+                    if qk_l2_norm
+                    else (qk_norm if use_qk_norm else IdentityOp)
+                ),
+            ),
+        )
+    elif attention_layer_type == "gated_delta_net":
+        gdn_extra_kwargs = {
+            "conv_kernel_dim": getattr(config, "linear_conv_kernel_dim", 4),
+            "key_head_dim": getattr(config, "linear_key_head_dim", 128),
+            "value_head_dim": getattr(config, "linear_value_head_dim", 128),
+            "num_key_heads": getattr(config, "linear_num_key_heads", 16),
+            "num_value_heads": getattr(config, "linear_num_value_heads", 32),
+        }
+        return LayerSpec(
+            layer=GatedDeltaNet,
+            sublayers_spec=GatedDeltaNetSublayersSpec(
+                in_proj=backend.column_parallel_linear(),
+                out_norm=backend.layer_norm(
+                    rms_norm=(config.normalization == "RMSNorm"),
+                    for_qk=False,
+                ),
+                out_proj=backend.row_parallel_linear(),
+            ),
+            extra_kwargs=gdn_extra_kwargs,
+        )
+    elif attention_layer_type == "multi_latent_attention":
+        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
+        # Decide attention class: DSA variant if index_n_heads is configured
+        use_dsa = (
+            config is not None
+            and getattr(config, "index_n_heads", None) is not None
+        )
+        attn_cls = MLASelfAttentionWithDSA if use_dsa else MLASelfAttention
+        return LayerSpec(
+            layer=attn_cls,
+            extra_kwargs={"attn_mask_type": attn_mask_type},
+            sublayers_spec=MLASelfAttentionSublayersSpec(
+                q_proj=backend.column_parallel_linear(),
+                q_a_proj=backend.column_parallel_linear(),
+                q_b_proj=backend.column_parallel_linear(),
+                kv_a_proj_with_mqa=backend.column_parallel_linear(),
+                kv_b_proj=backend.column_parallel_linear(),
+                core_attention=backend.core_attention(),
+                o_proj=backend.row_parallel_linear(),
+                q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+                kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+            ),
+        )
+    else:
+        raise ValueError(
+            f"Unknown attention_layer_type: {attention_layer_type!r}. "
+            f"Expected 'self_attention' or 'gated_delta_net'."
+        )
+
+
 def get_gpt_layer_local_spec(
     config: TransformerConfig | None = None,
     num_experts: int | None = None,
@@ -82,6 +190,8 @@ def get_gpt_layer_local_spec(
     normalization: str | None = None,
     qk_l2_norm: bool | None = False,
     layer_number: int | None = 1,
+    attention_layer_type: str = "self_attention",
+    attn_mask_type: AttnMaskType = AttnMaskType.causal,
 ) -> LayerSpec:
     """Use this spec for an implementation using only layers in Fleet-Core.
 
@@ -92,6 +202,10 @@ def get_gpt_layer_local_spec(
         use_qk_norm (bool, optional): To use layernorm for queries/keys. Defaults to False.
         fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
         qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
+        attention_layer_type (str, optional): Type of attention layer.
+            ``"self_attention"`` for standard multi-head attention,
+            ``"gated_delta_net"`` for the GDN linear-attention variant.
+            Defaults to ``"self_attention"``.
 
     Returns:
         LayerSpec: Layer specification with Fleet-Core layers
@@ -101,16 +215,23 @@ def get_gpt_layer_local_spec(
     # Adjust for RMS norm.
     if normalization == "RMSNorm":
         layer_norm = backend.layer_norm(rms_norm=True, for_qk=False)
-        qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
     else:
         layer_norm = backend.layer_norm(rms_norm=False, for_qk=False)
-        qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
 
     mlp = get_mlp_layer_spec_for_backend(
         backend=backend,
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
     )
+
+    block_attn_res = IdentityOp
+    if config is not None and config.block_attention_residuals:
+        block_attn_res = LayerSpec(
+            layer=BlockAttnRes,
+            sublayers_spec=BlockAttnResSublayersSpec(
+                norm=layer_norm,
+            ),
+        )
     transformer_cls = getattr(config, "specific_layer", TransformerLayer)
     if paddle.distributed.is_initialized():
         use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
@@ -123,80 +244,41 @@ def get_gpt_layer_local_spec(
             transformer_cls = TransformerLayerWithOverlap
 
     if multi_latent_attention:
-        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-        return LayerSpec(
-            layer=transformer_cls,
-            sublayers_spec=TransformerLayerSublayersSpec(
-                input_layernorm=layer_norm,
-                self_attn=LayerSpec(
-                    layer=MLASelfAttention,
-                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
-                    sublayers_spec=MLASelfAttentionSublayersSpec(
-                        q_proj=backend.column_parallel_linear(),
-                        q_a_proj=backend.column_parallel_linear(),
-                        q_b_proj=backend.column_parallel_linear(),
-                        kv_a_proj_with_mqa=backend.column_parallel_linear(),
-                        kv_b_proj=backend.column_parallel_linear(),
-                        core_attention=backend.core_attention(),
-                        o_proj=backend.row_parallel_linear(),
-                        q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                        kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                    ),
-                ),
-                self_attn_bda=get_bias_dropout_add,
-                post_attention_layernorm=layer_norm,
-                mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
-            ),
-            extra_kwargs={
-                "config": config,
-                "layer_number": layer_number,
-                "hidden_dropout_prob": config.hidden_dropout_prob
-                if config is not None
-                else None,
-            },
+        self_attn_spec = get_attention_spec(
+            config=config,
+            attention_layer_type="multi_latent_attention",
+            attn_mask_type=AttnMaskType.causal,
         )
     else:
-        return LayerSpec(
-            layer=transformer_cls,
-            sublayers_spec=TransformerLayerSublayersSpec(
-                input_layernorm=layer_norm,
-                self_attn=LayerSpec(
-                    layer=SelfAttention,
-                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
-                    sublayers_spec=SelfAttentionSublayersSpec(
-                        qkv_proj=backend.column_parallel_linear(),
-                        core_attention=backend.core_attention(),
-                        o_proj=backend.row_parallel_linear(),
-                        q_norm=(
-                            L2Norm
-                            if qk_l2_norm
-                            else (qk_norm if use_qk_norm else IdentityOp)
-                        ),
-                        k_norm=(
-                            L2Norm
-                            if qk_l2_norm
-                            else (qk_norm if use_qk_norm else IdentityOp)
-                        ),
-                    ),
-                ),
-                self_attn_bda=get_bias_dropout_add,
-                post_attention_layernorm=layer_norm,
-                mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
-                sharded_state_dict_keys_map={
-                    "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
-                    "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
-                },
-            ),
-            extra_kwargs={
-                "config": config,
-                "layer_number": layer_number,
-                "hidden_dropout_prob": config.hidden_dropout_prob
-                if config is not None
-                else None,
-            },
+        self_attn_spec = get_attention_spec(
+            config=config,
+            attention_layer_type=attention_layer_type,
+            attn_mask_type=attn_mask_type,
         )
+
+    return LayerSpec(
+        layer=transformer_cls,
+        sublayers_spec=TransformerLayerSublayersSpec(
+            input_layernorm=layer_norm,
+            self_attn=self_attn_spec,
+            self_attn_bda=get_bias_dropout_add,
+            post_attention_layernorm=layer_norm,
+            mlp=mlp,
+            mlp_bda=get_bias_dropout_add,
+            block_attn_res=block_attn_res,
+            sharded_state_dict_keys_map={
+                "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
+                "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
+            },
+        ),
+        extra_kwargs={
+            "config": config,
+            "layer_number": layer_number,
+            "hidden_dropout_prob": config.hidden_dropout_prob
+            if config is not None
+            else None,
+        },
+    )
 
 
 def get_mlp_layer_spec_for_backend(
@@ -353,7 +435,7 @@ def get_gpt_spec(
     head_empty_layers_spec: list[LayerSpec] | None = None,
     tail_empty_layers_spec: list[LayerSpec] | None = None,
     position_embedding_type: Literal[
-        "learned_absolute", "rope", "none"
+        "learned_absolute", "rope", "mrope", "none"
     ] = "learned_absolute",
     rotary_percent: float = 1.0,
     rotary_base: int = 10000,
@@ -419,6 +501,24 @@ def get_gpt_spec(
         rope_embedding=rope_embedding_spec,
     )
 
+    # Build block_attn_res spec for GPTLMHead
+    lm_head_block_attn_res = IdentityOp
+    if config.block_attention_residuals:
+        backend = LocalSpecProvider()
+        lm_head_norm = backend.layer_norm(
+            rms_norm=(config.normalization == "RMSNorm"),
+            for_qk=False,
+        )
+        lm_head_block_attn_res = LayerSpec(
+            layer=BlockAttnRes,
+            sublayers_spec=BlockAttnResSublayersSpec(
+                norm=lm_head_norm,
+            ),
+        )
+
+    norm_input_parallel = (
+        config.sequence_parallel and config.tensor_model_parallel_size > 1
+    )
     return LayerSpec(
         layer=GPTModel,
         extra_kwargs={
@@ -441,6 +541,7 @@ def get_gpt_spec(
                     "config": config,
                     "hidden_size": config.hidden_size,
                     "eps": config.rms_norm_eps,
+                    "input_is_parallel": norm_input_parallel,
                 },
             ),
             lm_head=LayerSpec(
@@ -454,6 +555,7 @@ def get_gpt_spec(
                     "skip_bias_add": False,
                     "gather_output": not parallel_output,
                     "skip_weight_param_allocation": skip_weight_param_allocation,
+                    "block_attn_res": lm_head_block_attn_res,
                 },
             ),
         ),

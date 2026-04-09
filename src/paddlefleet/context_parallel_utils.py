@@ -20,6 +20,15 @@ from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
 
+if paddle.cuda.get_device_capability()[0] == 10:
+    from paddlefleet.ops.flash_mask.cute.flashmask_utils import (
+        FlashMaskInfoPaddle,
+    )
+    from paddlefleet.ops.flash_mask.cute.interface import (
+        _flash_attn_bwd,
+        _flash_attn_fwd,
+    )
+
 
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
     """
@@ -572,15 +581,29 @@ def cp_flashmask_allgatherkv_balance_forward(
     )
 
     # Perform flashmask attention with startend_row_indices
-    output, log_sum_exp = flashmask_attention(
-        query,
-        key_gathered,
-        value_gathered,
-        startend_row_indices=startend_row_indices,
-        causal=causal,
-        return_softmax_lse=True,
-        training=is_training,
-    )
+    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+        "FLAGS_flash_attn_version"
+    ]
+    if fa_version == 4:
+        output, log_sum_exp = _flash_attn_fwd(
+            query,
+            key_gathered,
+            value_gathered,
+            causal=causal,
+            return_lse=True,
+            startend_row_indices=startend_row_indices,
+            pack_gqa=False,
+        )
+    else:
+        output, log_sum_exp = flashmask_attention(
+            query,
+            key_gathered,
+            value_gathered,
+            startend_row_indices=startend_row_indices,
+            causal=causal,
+            return_softmax_lse=True,
+            training=is_training,
+        )
 
     paddle.base.core.nvprof_nvtx_pop()
     return output, log_sum_exp, startend_row_indices
@@ -680,6 +703,27 @@ def cp_flashmask_allgatherkv_balance_backward(
                     False,
                 )
             )
+    elif fa_version == 4:
+        if startend_row_indices is not None:
+            flashmask_info = FlashMaskInfoPaddle(
+                startend_row_indices=startend_row_indices,
+                is_causal=causal,
+            )
+        else:
+            flashmask_info = None
+        query_grad, key_grad_gathered, value_grad_gathered = _flash_attn_bwd(
+            query,
+            key_gathered,
+            value_gathered,
+            output,
+            output_grad,
+            log_sum_exp,
+            flashmask_info,
+            causal=causal,
+            deterministic=paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+                "FLAGS_cudnn_deterministic"
+            ],
+        )
     else:
         raise ValueError(
             f"FlashAttention version {fa_version} is not supported."

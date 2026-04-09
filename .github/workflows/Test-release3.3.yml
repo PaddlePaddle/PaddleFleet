@@ -21,6 +21,7 @@ env:
   CI_name: test
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
+  build_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:cuda12.9-cudnn9.9-trt10.5-gcc11"
   formers_branch: "release/1.1"
 
 defaults:
@@ -45,32 +46,41 @@ jobs:
       group: GZ_BD-CPU
     env:
       TASK: fleet-ci-paddle-release-build-whl-${{ github.event.pull_request.number }}
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
+      UV_HTTP_TIMEOUT: 600
+      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
     steps:
       - name: Check docker image and run container
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
-          docker pull $docker_image
+          docker pull $build_image
           docker run -d -t --name ${container_name} \
-            -v "/dev/shm:/dev/shm"  \
             -v "/home/data/cfs:/home/data/cfs" \
-            -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
+            -v "/home/data/cfs/.cache:/home/.cache" \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
             -v ${{ github.workspace }}:/paddle \
-            -e BRANCH \
+            -e no_proxy \
+            -e CACHE_DIR \
+            -e PIP_CACHE_DIR \
+            -e UV_HTTP_TIMEOUT \
             -e PR_ID \
             -e COMMIT_ID \
-            -e PADDLE_ROOT \
-            -e ci_scripts \
-            -e no_proxy \
-            -e CI_name \
-            -w /paddle --network host ${docker_image}
+            -e BRANCH \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
+            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+            -e GITHUB_REPO_NAME=${{ github.repository }} \
+            -w /paddle --network=host $build_image
 
       - name: uv build whl
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           set -x
-          source ${{ github.workspace }}/../../../proxy
+          source /root/proxy
           git clone https://github.com/PaddlePaddle/PaddleFleet.git .
           git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
@@ -79,17 +89,19 @@ jobs:
           git checkout ${BRANCH}
           git log -1
           git pull --no-edit origin pull/${PR_ID}/head
-          mkdir -p /home/.cache/pip
-          pip cache dir
-          echo "Install uv"
-          export UV_HTTP_TIMEOUT=300
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          echo "uv build"
           git submodule update --init --recursive
-          export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
+          export UV_HTTP_TIMEOUT=300
+          echo "uv build"
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.12.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-3.12.0/bin/:${PATH}
+          export UV_PYTHON=3.12
           export PADDLEFLEET_VERSION=0.0.0
           export IS_NVIDIA=True
-          uv build --wheel
+          mkdir -p /root/.cache/pip
+          pip cache dir
+          pip install --upgrade pip
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          uv build --wheel -v
           '
 
       - name: upload whl to BOS
@@ -97,6 +109,9 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           export AK=paddle
           export SK=paddle
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.12.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-3.12.0/bin/:${PATH}
+          export UV_PYTHON=3.12
           cd /
           if [ ! -f "bos/BosClient.py" ]; then
             wget -q --no-proxy -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
@@ -165,18 +180,33 @@ jobs:
             -e repo_flag="paddlefleet" \
             -w /paddle --network host ${docker_image}
 
+      - name: install miniconda
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          echo "conda installed"
+          conda create -n py312 python=3.12 -y
+          '
+
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           set -x
           source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib
+          pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
@@ -185,12 +215,14 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
           echo "paddle commit:"
           python -c "import paddle; print(paddle.version.commit)"
-          timeout 10m bash ci/single_card_test.sh
+          timeout 20m bash ci/single_card_test.sh
           single_card_exit_code=$?
           ls -a /paddle/coveragedata/
           coverage combine
@@ -205,8 +237,11 @@ jobs:
           '
 
       - name: Single card Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -268,17 +303,32 @@ jobs:
             -e repo_flag="paddlefleet" \
             -w /paddle --network host ${docker_image}
 
+      - name: install miniconda
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          echo "conda installed"
+          conda create -n py312 python=3.12 -y
+          '
+
       - name: Clone PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           set -x
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest
+          pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "paddle commit:"
@@ -290,6 +340,8 @@ jobs:
       - name: Multi-card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           export WITH_COVERAGE=ON
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
@@ -308,8 +360,11 @@ jobs:
           '
 
       - name: Multi-card Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
@@ -382,6 +437,19 @@ jobs:
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
 
+      - name: install miniconda
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          echo "conda installed"
+          conda create -n py312 python=3.12 -y
+          '
+
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -389,13 +457,15 @@ jobs:
           rm -rf * .[^.]*
           set -x
           source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           mkdir PaddleFleet && cd PaddleFleet
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "paddle commit:"
@@ -408,6 +478,8 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           set -x
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           python -m pip install --upgrade pip
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -429,7 +501,7 @@ jobs:
           mkdir bos
           tar xf bos_new.tar.gz -C bos
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           '
 
       - name: Proprocess for integration test
@@ -437,6 +509,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           bash -x PaddleFormers/tests/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
@@ -452,15 +526,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-single
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
-          coverage report -m
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
             exit 1
@@ -474,15 +546,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen/.coverage
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-qwen
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen/coverage.xml
-          coverage report -m
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
             exit 1
@@ -496,14 +566,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen3vl-single
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen3vl-single/.coverage
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
-          ls -a /workspace/PaddleFleet/coveragedata-qwen3vl-single
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen3vl-single/coverage.xml
-          coverage report -m
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-vl-8k-single-card.\033[0m"
@@ -514,20 +582,25 @@ jobs:
           '
 
       - name: H20 Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          ls -a /workspace/PaddleFleet/coveragedata-single
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          ls -a /workspace/PaddleFleet/coveragedata-single
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-single/coverage.xml
+          coverage report -m
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
-          cd /workspace/PaddleFleet
-          cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage-single.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen/coverage.xml coverage-qwen.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen3vl-single/coverage.xml coverage-qwen3vl.xml
+          cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage.xml
           target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
-          python ${push_file} coverage-single.xml ${target_path_single}
-          python ${push_file} coverage-qwen.xml ${target_path_single}
-          python ${push_file} coverage-qwen3vl.xml ${target_path_single}
+          python ${push_file} coverage.xml ${target_path_single}
           '
 
       - name: Terminate and delete the container
@@ -581,19 +654,34 @@ jobs:
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
 
+      - name: install miniconda
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          echo "conda installed"
+          conda create -n py312 python=3.12 -y
+          '
+
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           set -x
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           source /root/proxy
           mkdir PaddleFleet && cd PaddleFleet
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -607,6 +695,8 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           set -x
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           python -m pip install --upgrade pip
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -627,7 +717,7 @@ jobs:
           mkdir bos
           tar xf bos_new.tar.gz -C bos
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           '
 
       - name: GLM4.5 pre-train
@@ -635,16 +725,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi-pt
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-pt/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-multi-pt
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -658,15 +745,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi-sft
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-sft/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-multi-sft
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -680,16 +765,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi-lora
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-lora/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-multi-lora
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -703,16 +785,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi-dpo
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-dpo/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-multi-dpo
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
             exit 1
@@ -726,15 +805,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-dpo-lora
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-dpo-lora/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
-          ls -a /workspace/PaddleFleet/coveragedata-dpo-lora
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-dpo-lora/coverage.xml
-          coverage report -m
           '
 
       - name: Integration test (GLM4.5 multi-card FP8)
@@ -742,16 +818,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi-fp8
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-fp8/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-multi-fp8
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -765,16 +838,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-grouped-gemm/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-multi-grouped-gemm
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
             exit 1
@@ -788,15 +858,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi-ep4
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi-ep4/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
-          ls -a /workspace/PaddleFleet/coveragedata-multi-ep4
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-multi-ep4/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen pre-train
@@ -804,15 +871,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-pt
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-pt/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen.sh pt
-          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-pt
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen sft
@@ -820,15 +884,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-sft
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-sft/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen.sh sft
-          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-sft
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen lora
@@ -836,15 +897,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-multi-pt
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-lora/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen.sh lora
-          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-lora
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen vl sft
@@ -852,14 +910,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-vl-sft
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-vl-sft/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-vl-sft/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen vl lora
@@ -867,14 +923,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-vl-lora
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-vl-lora/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-vl-lora/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen vl moe
@@ -882,14 +936,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-qwen-vl-moe
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-vl-moe/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-vl-moe/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen3-vl-8k-fsdp
@@ -897,55 +949,33 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          mkdir /workspace/PaddleFleet/coveragedata-qwen-vl-fsdp
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-vl-fsdp/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          mkdir -p /workspace/PaddleFleet/coveragedata-multi
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
-          coverage --version
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-vl-fsdp/coverage.xml
-          coverage report -m
           '
 
       - name: H20 Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          ls -a /workspace/PaddleFleet/coveragedata-multi
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata-multi/coverage.xml
+          coverage report -m
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
-          cd /workspace/PaddleFleet
-          cp /workspace/PaddleFleet/coveragedata-multi-pt/coverage.xml coverage-multi-pt.xml
-          cp /workspace/PaddleFleet/coveragedata-multi-sft/coverage.xml coverage-multi-sft.xml
-          cp /workspace/PaddleFleet/coveragedata-multi-lora/coverage.xml coverage-multi-lora.xml
-          cp /workspace/PaddleFleet/coveragedata-multi-fp8/coverage.xml coverage-multi-fp8.xml
-          cp /workspace/PaddleFleet/coveragedata-multi-grouped-gemm/coverage.xml coverage-multi-grouped-gemm.xml
-          cp /workspace/PaddleFleet/coveragedata-multi-ep4/coverage.xml coverage-multi-ep4.xml
-          cp /workspace/PaddleFleet/coveragedata-multi-dpo/coverage.xml coverage-multi-dpo.xml
-          cp /workspace/PaddleFleet/coveragedata-dpo-lora/coverage.xml coverage-dpo-lora.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml coverage-qwen-multi-pt.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-vl-sft/coverage.xml coverage-qwen-vl-sft.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-vl-lora/coverage.xml coverage-qwen-vl-lora.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-vl-moe/coverage.xml coverage-qwen-vl-moe.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-vl-fsdp/coverage.xml coverage-qwen-vl-fsdp.xml
+          cp /workspace/PaddleFleet/coveragedata-multi/coverage.xml coverage.xml
           target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
-          python ${push_file} coverage-multi-pt.xml ${target_path_multi}
-          python ${push_file} coverage-multi-sft.xml ${target_path_multi}
-          python ${push_file} coverage-multi-lora.xml ${target_path_multi}
-          python ${push_file} coverage-multi-dpo.xml ${target_path_multi}
-          python ${push_file} coverage-dpo-lora.xml ${target_path_multi}
-          python ${push_file} coverage-multi-fp8.xml ${target_path_multi}
-          python ${push_file} coverage-multi-grouped-gemm.xml ${target_path_multi}
-          python ${push_file} coverage-multi-ep4.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-multi-pt.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-multi-sft.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-multi-lora.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-vl-sft.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-vl-lora.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-vl-moe.xml ${target_path_multi}
-          python ${push_file} coverage-qwen-vl-fsdp.xml ${target_path_multi}
+          python ${push_file} coverage.xml ${target_path_multi}
           '
 
       - name: Terminate and delete the container
@@ -1000,19 +1030,34 @@ jobs:
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
 
+      - name: install miniconda
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          echo "conda installed"
+          conda create -n py312 python=3.12 -y
+          '
+
       - name: Install PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           rm -rf * .[^.]*
           source /root/proxy
           set -x
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           mkdir PaddleFleet && cd PaddleFleet
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
-          pip install dist/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -1026,6 +1071,8 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           set -x
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
           python -m pip install --upgrade pip
           git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
@@ -1048,21 +1095,19 @@ jobs:
           mkdir bos
           tar xf bos_new.tar.gz -C bos
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           '
 
       - name: GLM4.5 pre-train
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-pt/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-pt
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-pt/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
@@ -1076,14 +1121,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-sft/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-sft
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-sft/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 sft.\033[0m"
             exit 1
@@ -1097,14 +1140,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-lora/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-lora
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-lora/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 lora.\033[0m"
             exit 1
@@ -1118,14 +1159,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-dpo/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-dpo
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-dpo/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
             exit 1
@@ -1139,14 +1178,12 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-dpo_lora/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
           glm45_exit_code=$?
-          ls -a /workspace/PaddleFleet/coveragedata-dpo_lora
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-dpo_lora/coverage.xml
-          coverage report -m
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo lora.\033[0m"
             exit 1
@@ -1160,13 +1197,11 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-pt/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
-          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-pt
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen sft
@@ -1174,13 +1209,11 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-sft/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
-          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-sft
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen lora
@@ -1188,13 +1221,11 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen-multi-lora/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
-          ls -a /workspace/PaddleFleet/coveragedata-qwen-multi-lora
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen vl sft
@@ -1202,13 +1233,11 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen3vl-sft/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
-          ls -a /workspace/PaddleFleet/coveragedata-qwen3vl-sft
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen3vl-sft/coverage.xml
-          coverage report -m
           '
 
       - name: Qwen vl lora
@@ -1216,13 +1245,11 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen3vl-lora/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
-          ls -a /workspace/PaddleFleet/coveragedata-qwen3vl-lora
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen3vl-lora/coverage.xml
-          coverage report -m
           '
 
 
@@ -1231,46 +1258,32 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-qwen3vl-moe/.coverage
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
-          ls -a /workspace/PaddleFleet/coveragedata-qwen3vl-moe
-          coverage combine
-          coverage xml -o /workspace/PaddleFleet/coveragedata-qwen3vl-moe/coverage.xml
-          coverage report -m
           '
 
       - name: A100 Coverage Upload to BOS
+        if: always()
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate py312
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          ls -a /workspace/PaddleFleet/coveragedata
+          coverage combine
+          coverage xml -o /workspace/PaddleFleet/coveragedata/coverage.xml
+          coverage report -m
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
-          cd /workspace/PaddleFleet
-          cp /workspace/PaddleFleet/coveragedata-pt/coverage.xml coverage-a-pt.xml
-          cp /workspace/PaddleFleet/coveragedata-sft/coverage.xml coverage-sft.xml
-          cp /workspace/PaddleFleet/coveragedata-lora/coverage.xml coverage-lora.xml
-          cp /workspace/PaddleFleet/coveragedata-dpo/coverage.xml coverage-dpo.xml
-          cp /workspace/PaddleFleet/coveragedata-dpo_lora/coverage.xml coverage-dpo-lora.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-multi-pt/coverage.xml coverage-qwen-multi-pt.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-multi-sft/coverage.xml coverage-qwen-multi-sft.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen-multi-lora/coverage.xml coverage-qwen-multi-lora.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen3vl-sft/coverage.xml coverage-qwen3vl-sft.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen3vl-lora/coverage.xml coverage-qwen3vl-lora.xml
-          cp /workspace/PaddleFleet/coveragedata-qwen3vl-moe/coverage.xml coverage-qwen3vl-moe.xml
+          cp /workspace/PaddleFleet/coveragedata/coverage.xml coverage.xml
           target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
-          python ${push_file} coverage-a-pt.xml ${target_path}
-          python ${push_file} coverage-sft.xml ${target_path}
-          python ${push_file} coverage-lora.xml ${target_path}
-          python ${push_file} coverage-dpo.xml ${target_path}
-          python ${push_file} coverage-dpo-lora.xml ${target_path}
-          python ${push_file} coverage-qwen-multi-pt.xml ${target_path}
-          python ${push_file} coverage-qwen-multi-sft.xml ${target_path}
-          python ${push_file} coverage-qwen-multi-lora.xml ${target_path}
-          python ${push_file} coverage-qwen3vl-sft.xml ${target_path}
-          python ${push_file} coverage-qwen3vl-lora.xml ${target_path}
-          python ${push_file} coverage-qwen3vl-moe.xml ${target_path}
+          python ${push_file} coverage.xml ${target_path}
           '
 
       - name: Terminate and delete the container
@@ -1283,7 +1296,7 @@ jobs:
   coverage_check:
     name: Coverage Upload And Check
     needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, check-bypass]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on: ubuntu-latest
     env:
       GITHUB_REPO_NAME: ${{ github.repository }}
@@ -1301,35 +1314,9 @@ jobs:
           coverage_configs="
           multi_coverage.xml:multi-card/coverage.xml
           single_coverage.xml:single-card/coverage.xml
-          h20_multi_pt_coverage.xml:h20-multi/coverage-multi-pt.xml
-          h20_multi_sft_coverage.xml:h20-multi/coverage-multi-sft.xml
-          h20_multi_lora_coverage.xml:h20-multi/coverage-multi-lora.xml
-          h20_multi_dpo_coverage.xml:h20-multi/coverage-multi-dpo.xml
-          h20_dpo_lora_coverage.xml:h20-multi/coverage-dpo-lora.xml
-          h20_multi_fp8_coverage.xml:h20-multi/coverage-multi-fp8.xml
-          h20_multi_grouped_gemm_coverage.xml:h20-multi/coverage-multi-grouped-gemm.xml
-          h20_multi_ep4_coverage.xml:h20-multi/coverage-multi-ep4.xml
-          h20_single_coverage.xml:h20-single/coverage-single.xml
-          h20_qwen_coverage.xml:h20-single/coverage-qwen.xml
-          h20_qwen3vl_sft_single_coverage.xml:h20-single/coverage-qwen3vl.xml
-          a100_pt_coverage.xml:a100/coverage-a-pt.xml
-          a100_sft_coverage.xml:a100/coverage-sft.xml
-          a100_lora_coverage.xml:a100/coverage-lora.xml
-          a100_dpo_coverage.xml:a100/coverage-dpo.xml
-          a100_dpo_lora_coverage.xml:a100/coverage-dpo-lora.xml
-          a100_coverage-qwen-multi-pt.xml:a100/coverage-qwen-multi-pt.xml
-          a100_coverage-qwen-multi-sft.xml:a100/coverage-qwen-multi-sft.xml
-          a100_coverage-qwen-multi-lora.xml:a100/coverage-qwen-multi-lora.xml
-          a100_qwen3vl_sft_coverage.xml:a100/coverage-qwen3vl-sft.xml
-          a100_qwen3vl_lora_coverage.xml:a100/coverage-qwen3vl-lora.xml
-          a100_qwen3vl_moe_coverage.xml:a100/coverage-qwen3vl-moe.xml
-          h20_qwen_multi_pt_coverage.xml:h20-multi/coverage-qwen-multi-pt.xml
-          h20_qwen_multi_sft_coverage.xml:h20-multi/coverage-qwen-multi-sft.xml
-          h20_qwen_multi_lora_coverage.xml:h20-multi/coverage-qwen-multi-lora.xml
-          h20_qwen3vl_sft_coverage.xml:h20-multi/coverage-qwen-vl-sft.xml
-          h20_qwen3vl_lora_coverage.xml:h20-multi/coverage-qwen-vl-lora.xml
-          h20_qwen3vl_moe_coverage.xml:h20-multi/coverage-qwen-vl-moe.xml
-          h20_qwen3vl_fsdp_coverage.xml:h20-multi/coverage-qwen-vl-fsdp.xml
+          h20_multi_coverage.xml:h20-multi/coverage.xml
+          h20_single_coverage.xml:h20-single/coverage.xml
+          a100_coverage.xml:a100/coverage.xml
           "
           base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
 
@@ -1339,8 +1326,8 @@ jobs:
                 filepath="${config#*:}"
                 wget "${base_url}/${filepath}" -O "$filename" --no-proxy
                 sed -i "s|<source></source>|<source>paddlefleet</source>|" "$filename"
-                sed -i "s|/usr/local/lib/python3.10/dist-packages/|src/|" "$filename"
-                sed -i "s|.usr.local.lib.python3.10.dist-packages.paddlefleet|src|" "$filename"
+                sed -i "s|/root/miniconda/envs/py312/lib/python3.12/site-packages/|src/|" "$filename"
+                sed -i "s|.root.miniconda.envs.py312.lib.python3.12.site-packages|src|" "$filename"
             fi
           done
           git diff origin/${{ github.event.pull_request.base.ref }}...HEAD  --unified=0 > diff.txt
@@ -1359,41 +1346,15 @@ jobs:
         if: always()
         run: |
           echo "=== 全量覆盖率检查 ==="
-          python -m pip install coverage==7.6.1
+          python -m pip install coverage==7.13.0
 
           # 定义所有覆盖率文件
           COVERAGE_FILES=(
             "multi_coverage.xml"
             "single_coverage.xml"
-            "h20_multi_pt_coverage.xml"
-            "h20_multi_sft_coverage.xml"
-            "h20_multi_lora_coverage.xml"
-            "h20_multi_dpo_coverage.xml"
-            "h20_dpo_lora_coverage.xml"
-            "h20_multi_fp8_coverage.xml"
-            "h20_multi_grouped_gemm_coverage.xml"
-            "h20_multi_ep4_coverage.xml"
-            "h20_qwen_multi_pt_coverage.xml"
-            "h20_qwen_multi_sft_coverage.xml"
-            "h20_qwen_multi_lora_coverage.xml"
+            "h20_multi_coverage.xml"
             "h20_single_coverage.xml"
-            "h20_qwen_coverage.xml"
-            "a100_pt_coverage.xml"
-            "a100_sft_coverage.xml"
-            "a100_lora_coverage.xml"
-            "a100_dpo_coverage.xml"
-            "a100_dpo_lora_coverage.xml"
-            "a100_coverage-qwen-multi-pt.xml"
-            "a100_coverage-qwen-multi-sft.xml"
-            "a100_coverage-qwen-multi-lora.xml"
-            "h20_qwen3vl_sft_single_coverage.xml"
-            "a100_qwen3vl_moe_coverage.xml"
-            "a100_qwen3vl_lora_coverage.xml"
-            "a100_qwen3vl_sft_coverage.xml"
-            "h20_qwen3vl_sft_coverage.xml"
-            "h20_qwen3vl_lora_coverage.xml"
-            "h20_qwen3vl_moe_coverage.xml"
-            "h20_qwen3vl_fsdp_coverage.xml"
+            "a100_coverage.xml"
           )
 
           # 检查哪些文件存在
@@ -1417,35 +1378,9 @@ jobs:
           COVERAGE_FILES=(
             "multi_coverage.xml"
             "single_coverage.xml"
-            "h20_multi_pt_coverage.xml"
-            "h20_multi_sft_coverage.xml"
-            "h20_multi_lora_coverage.xml"
-            "h20_multi_dpo_coverage.xml"
-            "h20_dpo_lora_coverage.xml"
-            "h20_multi_fp8_coverage.xml"
-            "h20_multi_grouped_gemm_coverage.xml"
-            "h20_multi_ep4_coverage.xml"
-            "h20_qwen_multi_pt_coverage.xml"
-            "h20_qwen_multi_sft_coverage.xml"
-            "h20_qwen_multi_lora_coverage.xml"
+            "h20_multi_coverage.xml"
             "h20_single_coverage.xml"
-            "h20_qwen_coverage.xml"
-            "a100_pt_coverage.xml"
-            "a100_sft_coverage.xml"
-            "a100_lora_coverage.xml"
-            "a100_dpo_coverage.xml"
-            "a100_dpo_lora_coverage.xml"
-            "a100_coverage-qwen-multi-pt.xml"
-            "a100_coverage-qwen-multi-sft.xml"
-            "a100_coverage-qwen-multi-lora.xml"
-            "h20_qwen3vl_sft_single_coverage.xml"
-            "a100_qwen3vl_moe_coverage.xml"
-            "a100_qwen3vl_lora_coverage.xml"
-            "a100_qwen3vl_sft_coverage.xml"
-            "h20_qwen3vl_sft_coverage.xml"
-            "h20_qwen3vl_lora_coverage.xml"
-            "h20_qwen3vl_moe_coverage.xml"
-            "h20_qwen3vl_fsdp_coverage.xml"
+            "a100_coverage.xml"
           )
 
           for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
@@ -1464,36 +1399,10 @@ jobs:
           files: |
             ./multi_coverage.xml,
             ./single_coverage.xml,
-            ./h20_multi_pt_coverage.xml,
-            ./h20_multi_sft_coverage.xml,
-            ./h20_multi_lora_coverage.xml,
-            ./h20_multi_dpo_coverage.xml,
-            ./h20_dpo_lora_coverage.xml,
-            ./h20_qwen_multi_pt_coverage.xml,
-            ./h20_qwen_multi_sft_coverage.xml,
-            ./h20_qwen_multi_lora_coverage.xml,
-            ./h20_multi_fp8_coverage.xml,
-            ./h20_multi_grouped_gemm_coverage.xml,
-            ./h20_multi_ep4_coverage.xml,
+            ./h20_multi_coverage.xml,
             ./h20_single_coverage.xml,
             ./h20_qwen_coverage.xml,
-            ./a100_pt_coverage.xml,
-            ./a100_sft_coverage.xml,
-            ./a100_sft_coverage.xml,
-            ./a100_lora_coverage.xml,
-            ./a100_dpo_coverage.xml,
-            ./a100_dpo_lora_coverage.xml,
-            ./a100_coverage-qwen-multi-pt.xml,
-            ./a100_coverage-qwen-multi-sft.xml,
-            ./a100_coverage-qwen-multi-lora.xml,
-            ./a100_qwen3vl_sft_coverage.xml,
-            ./a100_qwen3vl_lora_coverage.xml,
-            ./a100_qwen3vl_moe_coverage.xml,
-            ./h20_qwen3vl_sft_single_coverage.xml
-            ./h20_qwen3vl_sft_coverage.xml,
-            ./h20_qwen3vl_lora_coverage.xml,
-            ./h20_qwen3vl_moe_coverage.xml,
-            ./h20_qwen3vl_fsdp_coverage.xml
+            ./a100_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true

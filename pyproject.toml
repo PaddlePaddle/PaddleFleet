@@ -108,11 +108,11 @@ paddle-nvidia-nvshmem-cu13 = {index = "paddlepaddle-cu13"}
 
 [[tool.uv.index]]
 name = "paddlepaddle-gpu"
-url = "https://www.paddlepaddle.org.cn/packages/stable/cu129/"
+url = "https://www.paddlepaddle.org.cn/packages/nightly/cu129/"
 
 [[tool.uv.index]]
 name = "paddlepaddle-cu13"
-url = "https://www.paddlepaddle.org.cn/packages/stable/cu130/"
+url = "https://www.paddlepaddle.org.cn/packages/nightly/cu130/"
 
 [[tool.uv.index]]
 name = "paddlepaddle-xpu"

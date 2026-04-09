@@ -156,6 +156,9 @@ if paddle.is_compiled_with_cuda():
     ):
         _SONIC_MOE_AVAILABLE = True
 
+if paddle.is_compiled_with_xpu():
+    _DEEP_EP_AVAILABLE = True
+
 
 def is_deep_gemm_available():
     return _DEEP_GEMM_AVAILABLE

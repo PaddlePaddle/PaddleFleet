@@ -41,6 +41,7 @@ from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import divide, get_pg_rank, get_pg_size
 
+from .dot_product_attention import CPDotProductAttention
 from .enums import AttnMaskType
 
 
@@ -328,8 +329,11 @@ class Attention(FleetLayer, ABC):
                     cu_seqlens_kv = packed_seq_params.cu_seqlens_kv_padded
                 else:
                     cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
+                total_seqlen_q = packed_seq_params.total_seqlen_q
+                total_seqlen_kv = packed_seq_params.total_seqlen_kv
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
+                total_seqlen_q = total_seqlen_kv = None
 
             if (
                 self.config.apply_rope_fusion
@@ -358,6 +362,7 @@ class Attention(FleetLayer, ABC):
                         None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_q,
+                        total_seq_len=total_seqlen_q,
                         position_ids=position_ids,
                         mscale=_yarn_get_concentration_factor_from_config(
                             self.config
@@ -373,6 +378,7 @@ class Attention(FleetLayer, ABC):
                         None,
                         config=self.config,
                         cu_seqlens=cu_seqlens_kv,
+                        total_seq_len=total_seqlen_kv,
                         position_ids=position_ids,
                         mscale=_yarn_get_concentration_factor_from_config(
                             self.config
@@ -395,7 +401,11 @@ class Attention(FleetLayer, ABC):
             # range. The full mask has shape [B, 1, S, 1] with absolute row indices.
             # Each SP rank processes key/query positions [tp_rank*L : (tp_rank+1)*L],
             # so we need the local slice with row indices adjusted to local space.
-            if attn_mask_startend_row_indices is not None:
+            if attn_mask_startend_row_indices is not None and not isinstance(
+                self.core_attention, CPDotProductAttention
+            ):
+                # Skip this adjustment when CP is active, as CPDotProductAttention
+                # expects the full global mask and handles CP splitting internally.
                 local_seq = key.shape[1]  # S / tp_size after transpose
                 if attn_mask_startend_row_indices.shape[2] != local_seq:
                     tp_rank = get_pg_rank(self.pg_collection.tp)
@@ -505,12 +515,14 @@ class SelfAttention(Attention):
             tp_group=self.pg_collection.tp,
         )
 
+        norm_input_parallel = config.tensor_model_parallel_size > 1
         if sublayers_spec.q_norm is not None:
             self.q_norm = build_layer(
                 sublayers_spec.q_norm,
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
+                input_is_parallel=norm_input_parallel,
             )
         else:
             self.q_norm = None
@@ -521,6 +533,7 @@ class SelfAttention(Attention):
                 hidden_size=self.hidden_size_per_attention_head,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
+                input_is_parallel=norm_input_parallel,
             )
         else:
             self.k_norm = None

@@ -37,7 +37,9 @@ class TestParallelMLP(unittest.TestCase):
     def setUp(self):
         self.mlp = MLP(
             self.transformer_config,
-            get_gpt_layer_local_spec().sublayers_spec.mlp.sublayers_spec,
+            get_gpt_layer_local_spec(
+                self.transformer_config
+            ).sublayers_spec.mlp.sublayers_spec,
         )
 
     def test_constructor(self):

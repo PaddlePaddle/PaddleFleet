@@ -224,7 +224,7 @@ def get_special_build_deps():
         major = sys.version_info.major
         minor = sys.version_info.minor
         deps = [
-            "paddlepaddle-gpu==3.3.1",
+            "paddlepaddle-gpu==3.3.1.post20260403+ef0820a64e9",
         ]
         # for deep_ep build
         if cuda_major == 12:
@@ -273,20 +273,6 @@ def get_libs():
             else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0;10.3"},
         ),
         EcosystemLibrary(
-            name="sonic-moe",
-            source_rel_path="third_party/sonic-moe",
-            artifacts=[
-                Artifact("sonicmoe", "sonicmoe"),
-            ],
-        ),
-        EcosystemLibrary(
-            name="quack",
-            source_rel_path="third_party/quack",
-            artifacts=[
-                Artifact("quack", "quack"),
-            ],
-        ),
-        EcosystemLibrary(
             name="flash-attention",
             source_rel_path="third_party/flash-attention/flashmask",
             artifacts=[
@@ -295,4 +281,23 @@ def get_libs():
             extra_env={"FLASHMASK_BUILD": "fa4"},
         ),
     ]
+    if sys.version_info >= (3, 12):
+        LIBRARIES.append(
+            EcosystemLibrary(
+                name="quack",
+                source_rel_path="third_party/quack",
+                artifacts=[
+                    Artifact("quack", "quack"),
+                ],
+            )
+        )
+        LIBRARIES.append(
+            EcosystemLibrary(
+                name="sonic-moe",
+                source_rel_path="third_party/sonic-moe",
+                artifacts=[
+                    Artifact("sonicmoe", "sonicmoe"),
+                ],
+            )
+        )
     return LIBRARIES
