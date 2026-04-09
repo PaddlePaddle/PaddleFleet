@@ -395,6 +395,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
+    moe_deep_gemm: bool = False
+    """Whether to use DeepGEMM. Only works when ``moe_grouped_gemm=True`` and the fp8 path is not used."""
+
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""
 
