@@ -72,26 +72,48 @@ def _generate_version_info():
     with open(version_file) as f:
         version = f.read().strip()
 
+    # Get git info
     git_commit_hash = get_git_commit_hash(_workspace_root)
     git_commit_date = get_git_commit_date(_workspace_root)
 
+    # Create version info in the source tree
     version_py = _pkg_root / "src" / "paddlefleet_ops" / "version.py"
 
+    # If file exists and not in git repo (installing from sdist), keep existing file
     if version_py.exists() and not is_git_repo():
-        logger.info("version.py already exists (not in git repo), keeping it")
+        logger.info(
+            "The version.py file already exists (not in git repo), keeping it"
+        )
         return version
 
+    # In git repo (editable) or file doesn't exist, create/update it
     final_version = f"{version}.dev{git_commit_date}"
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
     with open(version_py, "w") as f:
-        f.write('"""Auto-generated version file."""\n')
+        f.write("# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.\n")
+        f.write("#\n")
+        f.write("# Licensed under the Apache License, Version 2.0 (the \"License\");\n")
+        f.write("# you may not use this file except in compliance with the License.\n")
+        f.write("# You may obtain a copy of the License at\n")
+        f.write("#\n")
+        f.write("#     http://www.apache.org/licenses/LICENSE-2.0\n")
+        f.write("#\n")
+        f.write("# Unless required by applicable law or agreed to in writing, software\n")
+        f.write("# distributed under the License is distributed on an \"AS IS\" BASIS,\n")
+        f.write("# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n")
+        f.write("# See the License for the specific language governing permissions and\n")
+        f.write("# limitations under the License.\n")
+        f.write("\n")
+        f.write('"""Generate version info file with git metadata."""\n')
+        f.write("\n")
         f.write(f'__version__ = "{final_version}"\n')
         f.write(f'commit = "{git_commit_hash}"\n')
     logger.info(f"Created version.py with version {final_version}")
     return final_version
 
 
+# Generate version info as soon as this module is imported
 _generate_version_info()
 
 
@@ -102,6 +124,7 @@ def _prepare_ecosystem(use_symlinks: bool):
             lib.build()
             lib.install(use_symlinks=use_symlinks)
     elif backends.IS_XPU:
+        # xpu specific preparations
         pass
     elif backends.IS_ILUVATAR_GPU:
         pass

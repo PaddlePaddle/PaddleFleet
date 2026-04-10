@@ -37,6 +37,7 @@ THIRD_PARTY_INSTALL_TEMP = PKG_ROOT / "src" / "_third_party_install_temp"
 
 
 def remove_path(path: Path) -> None:
+    """Removes a path (file, directory, or symlink) if it exists."""
     if path.is_symlink() or path.exists():
         if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path)
@@ -45,6 +46,7 @@ def remove_path(path: Path) -> None:
 
 
 def create_symlink(src: Path, dst: Path) -> None:
+    """Creates a symlink from src to dst, overwriting dst if it exists."""
     remove_path(dst)
     logger.info(f"Symlinking {src} -> {dst}")
     dst.symlink_to(src, target_is_directory=src.is_dir())
@@ -52,11 +54,23 @@ def create_symlink(src: Path, dst: Path) -> None:
 
 @dataclass
 class Artifact:
+    """
+    Defines a mapping from a path in installation directory to a target name in ops directory.
+
+    source_rel_path: Relative path from the library's installation directory (e.g., 'deep_gemm').
+    target_name: Name of the symlink/directory to create in 'src/paddlefleet/ops' (e.g., 'deep_gemm').
+    """
+
     source_rel_path: str
     target_name: str
 
 
 class EcosystemLibrary:
+    """
+    Represents an external ecosystem operator library.
+    Encapsulates logic for building and installing library.
+    """
+
     def __init__(
         self,
         name: str,
@@ -67,27 +81,33 @@ class EcosystemLibrary:
         self.name = name
         # source_rel_path is relative to workspace root (where third_party/ lives)
         self.source_dir = ROOT_DIR / source_rel_path
+        # Install into a subdirectory named after the library
         self.install_dir = THIRD_PARTY_INSTALL_TEMP / name
         self.artifacts = artifacts
         self._extra_env = extra_env or {}
 
     def build(self) -> None:
+        """Builds library."""
         logger.info(f"Building ecosystem library: {self.name}")
         self.install_dir.mkdir(parents=True, exist_ok=True)
 
+        # Special pre-build step for DeepGEMM: link CUTLASS headers into deep_gemm/include
         if self.name.lower() == "deepgemm":
             cutlass_root = (
                 self.source_dir / "third-party" / "cutlass" / "include"
             )
             target_include_dir = self.source_dir / "deep_gemm" / "include"
             target_include_dir.mkdir(parents=True, exist_ok=True)
+
             links = {
                 cutlass_root / "cutlass": target_include_dir / "cutlass",
                 cutlass_root / "cute": target_include_dir / "cute",
             }
+
             for src, dst in links.items():
                 create_symlink(src, dst)
 
+        # pip install . --target  <install_dir> --no-deps --no-build-isolation --no-compile
         cmd = [
             sys.executable,
             "-m",
@@ -102,6 +122,7 @@ class EcosystemLibrary:
             "--upgrade",
             "-v",
         ]
+
         try:
             _env = os.environ.copy()
             _env.update(self._extra_env)
@@ -111,7 +132,9 @@ class EcosystemLibrary:
             raise
 
     def install(self, use_symlinks: bool = False) -> None:
+        """Installs artifacts to ops directory via symlink or copy."""
         for artifact in self.artifacts:
+            # Artifact source path is relative to the installation directory
             src = self.install_dir / artifact.source_rel_path
             dst = OPS_DIR / artifact.target_name
 
@@ -132,7 +155,7 @@ class EcosystemLibrary:
                     "patchelf",
                     "--add-rpath",
                     "$ORIGIN/../../nvidia/nvshmem/lib",
-                    str(dst),
+                    dst,
                 ]
                 try:
                     subprocess.check_call(cmd)
@@ -144,21 +167,15 @@ class EcosystemLibrary:
 
 def check_submodule_updated():
     if backends.IS_NVIDIA:
-        missing = not all(
-            [
-                (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists(),
-                (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists(),
-                (ROOT_DIR / "third_party" / "quack" / ".git").exists(),
-                (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists(),
-                (
-                    ROOT_DIR / "third_party" / "flash-attention" / ".git"
-                ).exists(),
-            ]
-        )
-        if missing:
+        if not (
+            (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "flash-attention" / ".git").exists()
+        ):
             logger.error(
-                "\033[91m Found uninitialized submodules. Please use "
-                "'git submodule update --init --recursive' to fix!\033[0m"
+                "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
             )
             sys.exit(1)
     elif backends.IS_XPU:
@@ -166,10 +183,11 @@ def check_submodule_updated():
 
 
 def check_patchelf_exists():
+    """Checks if patchelf is installed."""
     if shutil.which("patchelf") is None:
         logger.error(
             "\033[31m Error: 'patchelf' not found in PATH.\033[0m\n"
-            "\033[31m Please install 'patchelf' before proceeding.\033[0m"
+            "\033[31m Please install 'patchelf' using your package manager (apt, yum, conda, uv, etc.) before proceeding.\033[0m"
         )
         sys.exit(1)
 
@@ -178,20 +196,28 @@ def get_cuda_version():
     nvcc_path = shutil.which("nvcc")
     if nvcc_path is None:
         raise FileNotFoundError(
-            "nvcc not found. Please ensure CUDA toolkit is installed."
+            "nvcc command not found. Please make sure CUDA toolkit is installed and nvcc is in PATH."
         )
+
     result = subprocess.run(
-        ["nvcc", "--version"], capture_output=True, text=True, check=True
+        ["nvcc", "--version"],
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    match = re.search(r"release (\d+)\.(\d+)", result.stdout)
+    version_output = result.stdout
+
+    match = re.search(r"release (\d+)\.(\d+)", version_output)
     if not match:
         raise ValueError(
-            f"Cannot parse CUDA version from nvcc output:\n{result.stdout}"
+            f"Cannot parse CUDA version from nvcc output:\n{version_output}"
         )
-    cuda_major, cuda_minor = int(match.group(1)), int(match.group(2))
+    cuda_major = int(match.group(1))
+    cuda_minor = int(match.group(2))
+
     if cuda_major < 12:
         raise ValueError(
-            f"CUDA version must be >= 12. Detected: {cuda_major}.{cuda_minor}"
+            f"CUDA version must be >= 12. Detected version: {cuda_major}.{cuda_minor}"
         )
     return cuda_major, cuda_minor
 
@@ -199,7 +225,12 @@ def get_cuda_version():
 def get_special_build_deps():
     if backends.IS_NVIDIA:
         cuda_major, cuda_minor = get_cuda_version()
-        deps = ["paddlepaddle-gpu==3.3.1.post20260403+ef0820a64e9"]
+        major = sys.version_info.major
+        minor = sys.version_info.minor
+        deps = [
+            "paddlepaddle-gpu==3.3.1.post20260403+ef0820a64e9",
+        ]
+        # for deep_ep build
         if cuda_major == 12:
             if cuda_minor > 6:
                 deps.append("paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5")
@@ -213,7 +244,10 @@ def get_special_build_deps():
             )
         return deps
     elif backends.IS_XPU:
-        return ["paddlepaddle-xpu>=3.3.0"]
+        deps = [
+            "paddlepaddle-xpu>=3.3.0",
+        ]
+        return deps
     else:
         return []
 
@@ -226,6 +260,7 @@ def get_libs():
             name="DeepGEMM",
             source_rel_path="third_party/DeepGEMM",
             artifacts=[
+                # Updated paths to point to installation directory
                 Artifact("deep_gemm", "deep_gemm"),
                 Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
             ],
@@ -244,7 +279,9 @@ def get_libs():
         EcosystemLibrary(
             name="flash-attention",
             source_rel_path="third_party/flash-attention/flashmask",
-            artifacts=[Artifact("flash_mask", "flash_mask")],
+            artifacts=[
+                Artifact("flash_mask", "flash_mask"),
+            ],
             extra_env={"FLASHMASK_BUILD": "fa4"},
         ),
     ]
@@ -253,14 +290,18 @@ def get_libs():
             EcosystemLibrary(
                 name="quack",
                 source_rel_path="third_party/quack",
-                artifacts=[Artifact("quack", "quack")],
+                artifacts=[
+                    Artifact("quack", "quack"),
+                ],
             )
         )
         LIBRARIES.append(
             EcosystemLibrary(
                 name="sonic-moe",
                 source_rel_path="third_party/sonic-moe",
-                artifacts=[Artifact("sonicmoe", "sonicmoe")],
+                artifacts=[
+                    Artifact("sonicmoe", "sonicmoe"),
+                ],
             )
         )
     return LIBRARIES

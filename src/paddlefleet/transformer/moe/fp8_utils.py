@@ -602,7 +602,7 @@ class ExpertsGroupGemmContiguousNode:
         bwd_down_input_bf16
         """
         if numpy.prod(unzipped_grad.shape) != 0:
-            if self.moe_grouped_gemm:
+            if self.moe_grouped_gemm and not self.use_fp8_mlp:
                 if self.moe_deep_gemm:
                     do2_s = paddle.zeros(
                         [unzipped_grad.shape[0], expert_w2.shape[1]],
@@ -638,7 +638,7 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 do2_s = paddle.concat(do2_s_list, axis=0)
         else:
-            if self.moe_grouped_gemm:
+            if self.moe_grouped_gemm and not self.use_fp8_mlp:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2.shape[1]]
             else:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
@@ -731,7 +731,7 @@ class ExpertsGroupGemmContiguousNode:
         bwd_gate_up_input_bf16
         """
         if numpy.prod(do1.shape) != 0:
-            if self.moe_grouped_gemm:
+            if self.moe_grouped_gemm and not self.use_fp8_mlp:
                 if self.moe_deep_gemm:
                     dx = paddle.zeros(
                         [do1.shape[0], expert_w1.shape[1]],
@@ -763,7 +763,7 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 dx = paddle.concat(dx_list, axis=0)
         else:
-            if self.moe_grouped_gemm:
+            if self.moe_grouped_gemm and not self.use_fp8_mlp:
                 dx_shape = [do1.shape[0], expert_w1.shape[1]]
             else:
                 dx_shape = [do1.shape[0], expert_w1[0].shape[0]]
@@ -1251,7 +1251,7 @@ class ExpertsGroupGemmContiguousNode:
             and not getattr(_ge, "merged", False)
         )
 
-        if self.moe_grouped_gemm:
+        if self.moe_grouped_gemm and not self.use_fp8_mlp:
             if _has_lora:
                 expert_w1 = _ge.weight1 + _ge.get_delta_weight(
                     _ge.weight1_lora_A, _ge.weight1_lora_B
@@ -1416,7 +1416,7 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 x = self.input
 
-        if self.moe_grouped_gemm:
+        if self.moe_grouped_gemm and not self.use_fp8_mlp:
             if hasattr(weights, "main_grad"):
                 if weights.main_grad is None:
                     weights.main_grad = paddle.zeros(

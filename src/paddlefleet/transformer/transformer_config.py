@@ -269,6 +269,12 @@ class TransformerConfig(ModelParallelConfig):
     use_qk_norm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
 
+    qk_norm_type: str = "per_head"
+    """Type of qk normalization:
+    - "per_head": normalize each attention head independently (default for most models)
+    - "per_layer": normalize across all heads jointly (full-dimension, used by MiniMax)
+    """
+
     rms_norm_eps: float = 1e-5
     """Epsilon value for norm."""
 
@@ -418,6 +424,10 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
+
+    moe_deep_gemm: bool = False
+    """Whether to use DeepGEMM for the bf16 grouped-gemm MoE path. This option only takes effect when
+    ``moe_grouped_gemm=True`` and fp8 is disabled, it is ignored when fp8 is enabled."""
 
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""

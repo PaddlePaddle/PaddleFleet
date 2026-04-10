@@ -38,6 +38,10 @@ from paddlefleet.recompute_utils import (
     need_recompute_in_first_n,
 )
 from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddlefleet.tensor_parallel.mappings import (
+    gather_from_tensor_model_parallel_region,
+    scatter_to_tensor_model_parallel_region,
+)
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import divide, get_pg_rank, get_pg_size
 
@@ -515,11 +519,24 @@ class SelfAttention(Attention):
             tp_group=self.pg_collection.tp,
         )
 
-        norm_input_parallel = config.tensor_model_parallel_size > 1
+        # For per_layer qk_norm, norm operates on gathered (full) tensors,
+        # so input_is_parallel should be False to avoid extra allreduce.
+        if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
+            norm_input_parallel = False
+        else:
+            norm_input_parallel = config.tensor_model_parallel_size > 1
+
         if sublayers_spec.q_norm is not None:
+            if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
+                q_norm_hidden_size = (
+                    self.hidden_size_per_attention_head
+                    * self.config.num_attention_heads
+                )
+            else:
+                q_norm_hidden_size = self.hidden_size_per_attention_head
             self.q_norm = build_layer(
                 sublayers_spec.q_norm,
-                hidden_size=self.hidden_size_per_attention_head,
+                hidden_size=q_norm_hidden_size,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
                 input_is_parallel=norm_input_parallel,
@@ -528,9 +545,16 @@ class SelfAttention(Attention):
             self.q_norm = None
 
         if sublayers_spec.k_norm is not None:
+            if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
+                k_norm_hidden_size = (
+                    self.hidden_size_per_attention_head
+                    * self.config.num_key_value_heads
+                )
+            else:
+                k_norm_hidden_size = self.hidden_size_per_attention_head
             self.k_norm = build_layer(
                 sublayers_spec.k_norm,
-                hidden_size=self.hidden_size_per_attention_head,
+                hidden_size=k_norm_hidden_size,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
                 input_is_parallel=norm_input_parallel,
@@ -600,19 +624,67 @@ class SelfAttention(Attention):
             query, key, value = parts
             gate = None
 
-        # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
-        query = query.reshape(
-            query.shape[0],
-            query.shape[1],
-            -1,
-            self.hidden_size_per_attention_head,
-        )
+        if getattr(self.config, "qk_norm_type", "per_head") == "per_layer" and (
+            self.q_norm is not None or self.k_norm is not None
+        ):
+            # per_layer qk_norm: normalize across all heads jointly
 
-        if self.q_norm is not None:
-            query = self.q_norm(query)
+            # Flatten to [b, sq, np * hn] / [b, sq, ng * hn]
+            query = query.reshape(*query.shape[:2], -1)
+            key = key.reshape(*key.shape[:2], -1)
 
-        if self.k_norm is not None:
-            key = self.k_norm(key)
+            # TP gather: collect all TP shards so norm sees the full dimension
+            enable_tp = get_pg_size(self.pg_collection.tp) > 1
+            if enable_tp:
+                query = gather_from_tensor_model_parallel_region(
+                    query, group=self.pg_collection.tp
+                )
+                key = gather_from_tensor_model_parallel_region(
+                    key, group=self.pg_collection.tp
+                )
+
+            if self.q_norm is not None:
+                query = self.q_norm(query)
+            if self.k_norm is not None:
+                key = self.k_norm(key)
+
+            # TP scatter: split back to per-rank shards
+            if enable_tp:
+                query = scatter_to_tensor_model_parallel_region(
+                    query, group=self.pg_collection.tp
+                )
+                key = scatter_to_tensor_model_parallel_region(
+                    key, group=self.pg_collection.tp
+                )
+
+            # Reshape to per-head layout [b, sq, np, hn] / [b, sq, ng, hn]
+            query = query.reshape(
+                query.shape[0],
+                query.shape[1],
+                -1,
+                self.hidden_size_per_attention_head,
+            )
+            key = key.reshape(
+                key.shape[0],
+                key.shape[1],
+                -1,
+                self.hidden_size_per_attention_head,
+            )
+        else:
+            # per_head qk_norm (default): reshape first, then normalize per head
+            # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
+            query = query.reshape(
+                query.shape[0],
+                query.shape[1],
+                -1,
+                self.hidden_size_per_attention_head,
+            )
+
+            if self.q_norm is not None:
+                query = self.q_norm(query)
+
+            if self.k_norm is not None:
+                key = self.k_norm(key)
 
         if gate is not None:
             # [b, sq, ng, np/ng * hn] -> [b, sq, np * hn]
