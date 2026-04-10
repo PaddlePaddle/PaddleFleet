@@ -74,6 +74,8 @@ jobs:
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo DATE="$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
           if [ "${cuda}" == "12.9" ]; then
             docker_image=${docker_image_cu129}
             cuda_version="cu129"
@@ -122,6 +124,7 @@ jobs:
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
+            -e DATE \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
@@ -218,7 +221,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /paddle/PaddleFleet/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/single-card"
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/single-card"
           python ${push_file} coverage.xml ${target_path}
           '
       - name: Terminate and delete the container
@@ -274,6 +277,8 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -304,6 +309,7 @@ jobs:
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -391,7 +397,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /paddle/PaddleFleet/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/multi-card"
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/multi-card"
           python ${push_file} coverage.xml ${target_path}
           '
 
@@ -452,6 +458,8 @@ jobs:
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
           echo "BASE_NAME=${cuda_version}-${python_version}-H20" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           GPU_DEVICES: ${{ env.GPU_DEVICES }}
@@ -484,6 +492,7 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -670,7 +679,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage.xml
-          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/h20-single"
+          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/h20-single"
           python ${push_file} coverage.xml ${target_path_single}
           '
 
@@ -730,6 +739,8 @@ jobs:
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
           echo "BASE_NAME=${cuda_version}-${python_version}-H20" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -760,6 +771,7 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -1198,7 +1210,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-multi/coverage.xml coverage.xml
-          target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/h20-multi"
+          target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/h20-multi"
           python ${push_file} coverage.xml ${target_path_multi}
           '
 
@@ -1258,6 +1270,8 @@ jobs:
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
           echo "BASE_NAME=${cuda_version}-${python_version}-A100" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -1288,6 +1302,7 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -1620,7 +1635,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)/a100"
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}/a100"
           python ${push_file} coverage.xml ${target_path}
           '
 
@@ -1647,6 +1662,8 @@ jobs:
         run: |
           gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
+          # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
+          echo DATE="$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
 
       - name: Check docker image and run container
         env:
@@ -1671,6 +1688,7 @@ jobs:
             -e CE_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
+            -e DATE \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -1709,7 +1727,7 @@ jobs:
           h20_single_coverage.xml:h20-single/coverage.xml:integration-test-H20-single-card
           a100_coverage.xml:a100/coverage.xml:integration-test-a100
           "
-          base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)"
+          base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/ce/${DATE}"
 
           # 记录失败的任务
           FAILED_TASKS=""
@@ -1785,7 +1803,7 @@ jobs:
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/$(date +%Y%m%d)"
+          target_path="paddle-github-action/${GITHUB_REPO_NAME}/ce/${DATE}"
           python ${push_file} merged_coverage.xml ${target_path}
           python ${push_file} coverage-full.txt ${target_path}
           '
