@@ -139,12 +139,11 @@ class MoELayer(nn.Layer):
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
         self.moe_deep_gemm = config.moe_deep_gemm
+
         if self.moe_deep_gemm:
             incompatible_reasons = []
             if not self.moe_grouped_gemm:
-                incompatible_reasons.append(
-                    "moe_grouped_gemm must be True"
-                )
+                incompatible_reasons.append("moe_grouped_gemm must be True")
             if self.fp8:
                 incompatible_reasons.append("fp8 must be disabled")
             if incompatible_reasons:
