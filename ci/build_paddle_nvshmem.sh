@@ -127,16 +127,30 @@ find_lib_path() {
 # 执行 CUDA 自动检测
 detect_cuda
 
+# 检测系统架构，返回 wheel 平台标签使用的架构名
+detect_arch() {
+    local machine
+    machine=$(uname -m)
+    case "$machine" in
+        x86_64)  echo "x86_64" ;;
+        aarch64) echo "aarch64" ;;
+        *)       err "不支持的架构: $machine" ;;
+    esac
+}
+
 # 重新打包 wheel 的平台标签
 retag_wheel_platform() {
     local whl="$1"
     local outdir="$2"
+    local arch
+    arch=$(detect_arch)
+    local plat="manylinux_2_17_${arch}"
     local basename=$(basename "$whl")
-    # 只替换平台标签: none-any -> none-manylinux_2_17_x86_64
-    local new_name="${basename/none-any.whl/none-manylinux_2_17_x86_64.whl}"
+    local new_name="${basename/none-any.whl/none-${plat}.whl}"
 
     python3 -c "
 import zipfile, os, tempfile, shutil
+plat = '${plat}'
 tmpdir = tempfile.mkdtemp()
 with zipfile.ZipFile('$whl', 'r') as z:
     z.extractall(tmpdir)
@@ -145,8 +159,7 @@ for root, dirs, files in os.walk(tmpdir):
         if f == 'WHEEL':
             p = os.path.join(root, f)
             txt = open(p).read()
-            # 只添加一个 manylinux 标签
-            txt = txt.replace('Tag: py3-none-any', 'Tag: py3-none-manylinux_2_17_x86_64')
+            txt = txt.replace('Tag: py3-none-any', f'Tag: py3-none-{plat}')
             open(p, 'w').write(txt)
 with zipfile.ZipFile('$outdir/$new_name', 'w', zipfile.ZIP_DEFLATED) as z:
     for root, dirs, files in os.walk(tmpdir):
@@ -300,11 +313,11 @@ include = ["nvidia*"]
 
 [tool.setuptools.package-data]
 "nvidia.nvshmem.include" = ["**/*.h", "**/*.cuh", "**/*.hpp"]
-"nvidia.nvshmem.lib" = ["*.so.*", "*.a", "*.bc"]
+"nvidia.nvshmem.lib" = ["*.so*", "*.a", "*.bc"]
 TOMLEOF
 
     cat > "$pkg_dir/MANIFEST.in" << 'MANIFESTEOF'
-recursive-include nvidia *.h *.cuh *.hpp *.so.* *.a *.bc *.py
+recursive-include nvidia *.h *.cuh *.hpp *.so* *.a *.bc *.py
 MANIFESTEOF
 
     # 构建 wheel
