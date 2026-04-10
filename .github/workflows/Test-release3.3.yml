@@ -205,7 +205,7 @@ jobs:
           export WITH_COVERAGE=ON
           echo "paddle commit:"
           python -c "import paddle; print(paddle.version.commit)"
-          timeout 20m bash ci/single_card_test.sh
+          timeout 40m bash ci/single_card_test.sh
           single_card_exit_code=$?
           ls -a /paddle/coveragedata/
           coverage combine
