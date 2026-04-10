@@ -137,11 +137,13 @@ def _apply_rotary_pos_emb_bshd(
     # Normalize mscale to avoid TypeError when None is passed
     mscale = mscale if mscale is not None else 1.0
 
-    # Fused vision RoPE CUDA kernel path:
-    # - internally computes cos/sin in fp32, equivalent to high_precision_rope
-    # - only supports single Tensor input with explicit freqs
-    # - only supports non-interleaved mode and mscale=1.0
-    # - freqs must be reshaped to [s, dim//2]
+    if apply_rope_fusion:
+        if high_precision_rope:
+            # Fused vision RoPE CUDA kernel path:
+            # - internally computes cos/sin in fp32, equivalent to high_precision_rope
+            # - only supports single Tensor input with explicit freqs
+            # - only supports non-interleaved mode and mscale=1.0
+            # - freqs must be reshaped to [s, dim//2]
             if (
                 not rotary_interleaved
                 and mscale == 1.0
