@@ -416,6 +416,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_grouped_gemm: bool = False
     """Whether to use grouped gemm."""
 
+    moe_deep_gemm: bool = False
+    """Whether to use deep gemm."""
+
     router_z_loss_coef: float = None
     """Scaling coefficient for z-loss. Default is None."""
 
