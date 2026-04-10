@@ -160,19 +160,20 @@ def _apply_rotary_pos_emb_bshd(
                 t = fused_apply_rotary_pos_emb_vision(t, freqs_half)
                 return paddle.cat((t, t_pass), axis=-1)
             # Fall through to unfused path for unsupported cases
-        # Fused path: delegate to Paddle's fused_rope kernel
-        assert isinstance(t, tuple), (
-            "The input for fused_rope should be a tuple of tensors"
-        )
-        return fused_rope(
-            *t,
-            sin=sin,
-            cos=cos,
-            rotary_emb_base=rope_theta,
-            position_ids=position_ids,
-            use_neox_rotary_style=rotary_interleaved,
-            time_major=time_major,
-        )
+        else:
+            # Fused path: delegate to Paddle's fused_rope kernel
+            assert isinstance(t, tuple), (
+                "The input for fused_rope should be a tuple of tensors"
+            )
+            return fused_rope(
+                *t,
+                sin=sin,
+                cos=cos,
+                rotary_emb_base=rope_theta,
+                position_ids=position_ids,
+                use_neox_rotary_style=rotary_interleaved,
+                time_major=time_major,
+            )
 
     rot_dim = freqs.shape[-1]
 
