@@ -473,7 +473,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             main_grad = weight.main_grad
         else:
             main_grad = None
-        ctx.save_for_backward(input, weight)
+        ctx.save_for_backward(input._new_shared_tensor(), weight)
         # We can't save main_grad in save_for_backward as this module would be
         # reused across layers like MTP logits. So, to prevent in-place modification
         # checks we save the tensor in ctx.
