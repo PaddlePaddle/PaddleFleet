@@ -217,7 +217,9 @@ def _safe_load_ecosystem_lib(
 
 
 import_custom_ops(
-    package="paddlefleet_ops._extensions", module_name=".ops", global_ns=globals()
+    package="paddlefleet_ops._extensions",
+    module_name=".ops",
+    global_ns=globals(),
 )
 
 blocked_import_messages: dict[str, str] = {}

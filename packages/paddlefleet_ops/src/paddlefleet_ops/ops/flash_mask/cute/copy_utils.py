@@ -1,16 +1,15 @@
 # Copyright (c) 2025, Wentao Guo, Ted Zadouri, Tri Dao.
 
 import math
-from typing import Optional, Type, Tuple, Callable
+from collections.abc import Callable
 
 import cutlass
-import cutlass.cute as cute
-from cutlass import Float32, Int32, Boolean, const_expr
-from cutlass.cute.nvgpu import cpasync
-import cutlass.utils.blackwell_helpers as sm100_utils
-from cutlass.cutlass_dsl import T, dsl_user_op
-from cutlass._mlir.dialects import llvm
 import cutlass.pipeline
+import cutlass.utils.blackwell_helpers as sm100_utils
+from cutlass import Float32, Int32, const_expr, cute
+from cutlass._mlir.dialects import llvm
+from cutlass.cute.nvgpu import cpasync
+from cutlass.cutlass_dsl import T, dsl_user_op
 
 
 @dsl_user_op
@@ -19,12 +18,15 @@ def cvt_copy(
     src: cute.Tensor,
     dst: cute.Tensor,
     *,
-    pred: Optional[cute.Tensor] = None,
+    pred: cute.Tensor | None = None,
     loc=None,
     ip=None,
     **kwargs,
 ) -> None:
-    assert isinstance(src.iterator, cute.Pointer) and src.memspace == cute.AddressSpace.rmem
+    assert (
+        isinstance(src.iterator, cute.Pointer)
+        and src.memspace == cute.AddressSpace.rmem
+    )
     if const_expr(src.element_type != dst.element_type):
         src_cvt = cute.make_fragment_like(src, dst.element_type, loc=loc, ip=ip)
         src_cvt.store(src.load().to(dst.element_type))
@@ -41,7 +43,12 @@ def load_s2r(src: cute.Tensor, *, loc=None, ip=None) -> cute.Tensor:
 
 @dsl_user_op
 def get_copy_atom(
-    dtype: Type[cutlass.Numeric], num_copy_elems: int, is_async: bool = False, *, loc=None, ip=None
+    dtype: type[cutlass.Numeric],
+    num_copy_elems: int,
+    is_async: bool = False,
+    *,
+    loc=None,
+    ip=None,
 ) -> cute.CopyAtom:
     num_copy_bits = const_expr(min(128, num_copy_elems * dtype.width))
     copy_op = cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
@@ -52,12 +59,17 @@ def get_copy_atom(
 def make_tmem_copy(
     tmem_copy_atom: cute.CopyAtom, num_wg: int = 1, *, loc=None, ip=None
 ) -> cute.CopyAtom:
-    num_dp, num_bits, num_rep, _ = sm100_utils.get_tmem_copy_properties(tmem_copy_atom)
+    num_dp, num_bits, num_rep, _ = sm100_utils.get_tmem_copy_properties(
+        tmem_copy_atom
+    )
     assert num_dp == 32
     assert num_bits == 32
-    tiler_mn = (cute.make_layout((128 * num_rep * num_wg // 32, 32), stride=(32, 1)),)
+    tiler_mn = (
+        cute.make_layout((128 * num_rep * num_wg // 32, 32), stride=(32, 1)),
+    )
     layout_tv = cute.make_layout(
-        ((32, 4, num_wg), (num_rep, 32)), stride=((0, 1, 4 * num_rep), (4, 4 * num_rep * num_wg))
+        ((32, 4, num_wg), (num_rep, 32)),
+        stride=((0, 1, 4 * num_rep), (4, 4 * num_rep * num_wg)),
     )
     return cute.make_tiled_copy(tmem_copy_atom, layout_tv, tiler_mn)
 
@@ -67,7 +79,7 @@ def copy(
     src: cute.Tensor,
     dst: cute.Tensor,
     *,
-    pred: Optional[cute.Tensor] = None,
+    pred: cute.Tensor | None = None,
     num_copy_elems: int = 1,
     is_async: bool = False,
     loc=None,
@@ -79,23 +91,33 @@ def copy(
 
 
 def tiled_copy_1d(
-    dtype: Type[cutlass.Numeric], num_threads: int, num_copy_elems: int = 1, is_async: bool = False
+    dtype: type[cutlass.Numeric],
+    num_threads: int,
+    num_copy_elems: int = 1,
+    is_async: bool = False,
 ) -> cute.TiledCopy:
     num_copy_bits = num_copy_elems * dtype.width
     copy_op = cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
-    copy_atom = cute.make_copy_atom(copy_op, dtype, num_bits_per_copy=num_copy_bits)
+    copy_atom = cute.make_copy_atom(
+        copy_op, dtype, num_bits_per_copy=num_copy_bits
+    )
     thr_layout = cute.make_layout(num_threads)
     val_layout = cute.make_layout(num_copy_elems)
     return cute.make_tiled_copy_tv(copy_atom, thr_layout, val_layout)
 
 
 def tiled_copy_2d(
-    dtype: Type[cutlass.Numeric], major_mode_size: int, num_threads: int, is_async: bool = False
+    dtype: type[cutlass.Numeric],
+    major_mode_size: int,
+    num_threads: int,
+    is_async: bool = False,
 ) -> cute.TiledCopy:
     num_copy_bits = math.gcd(major_mode_size, 128 // dtype.width) * dtype.width
     copy_elems = num_copy_bits // dtype.width
     copy_op = cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
-    copy_atom = cute.make_copy_atom(copy_op, dtype, num_bits_per_copy=num_copy_bits)
+    copy_atom = cute.make_copy_atom(
+        copy_op, dtype, num_bits_per_copy=num_copy_bits
+    )
     gmem_threads_per_row = major_mode_size // copy_elems
     assert num_threads % gmem_threads_per_row == 0
     thr_layout = cute.make_ordered_layout(
@@ -108,7 +130,14 @@ def tiled_copy_2d(
 
 @dsl_user_op
 def atomic_add_fp32x4(
-    a: Float32, b: Float32, c: Float32, d: Float32, gmem_ptr: cute.Pointer, *, loc=None, ip=None
+    a: Float32,
+    b: Float32,
+    c: Float32,
+    d: Float32,
+    gmem_ptr: cute.Pointer,
+    *,
+    loc=None,
+    ip=None,
 ) -> None:
     gmem_ptr_i64 = gmem_ptr.toint(loc=loc, ip=ip).ir_value()
     # cache_hint = cutlass.Int64(0x12F0000000000000)
@@ -146,7 +175,11 @@ def atomic_add_fp32x4(
 
 @dsl_user_op
 def set_block_rank(
-    smem_ptr: cute.Pointer, peer_cta_rank_in_cluster: Int32, *, loc=None, ip=None
+    smem_ptr: cute.Pointer,
+    peer_cta_rank_in_cluster: Int32,
+    *,
+    loc=None,
+    ip=None,
 ) -> Int32:
     """Map the given smem pointer to the address at another CTA rank in the cluster."""
     smem_ptr_i32 = smem_ptr.toint(loc=loc, ip=ip).ir_value()
@@ -266,25 +299,33 @@ def cpasync_bulk_get_copy_fn(
     #     isinstance(src_tensor.iterator, cute.Pointer)
     #     and src_tensor.memspace == cute.AddressSpace.smem
     # )
-    group_rank_src = const_expr(cute.rank(src_tensor) - (1 if not single_stage else 0))
-    group_rank_dst = const_expr(cute.rank(dst_tensor) - (1 if not single_stage else 0))
+    group_rank_src = const_expr(
+        cute.rank(src_tensor) - (1 if not single_stage else 0)
+    )
+    group_rank_dst = const_expr(
+        cute.rank(dst_tensor) - (1 if not single_stage else 0)
+    )
     # ((atom_v, rest_v), STAGE), ((atom_v, rest_v), RestK)
     src = cute.group_modes(src_tensor, 0, group_rank_src)
     dst = cute.group_modes(dst_tensor, 0, group_rank_dst)
 
     def copy_bulk(src_idx, dst_idx, **new_kwargs):
-        size = const_expr(cute.size(src.shape[:-1]) * src.element_type.width // 8)
+        size = const_expr(
+            cute.size(src.shape[:-1]) * src.element_type.width // 8
+        )
         cpasync_bulk_g2s(
             src[None, src_idx].iterator,
             dst[None, dst_idx].iterator,
             size=size,
             **new_kwargs,
-            **kwargs
+            **kwargs,
         )
 
     def copy_bulk_single_stage(**new_kwargs):
         size = const_expr(cute.size(src.shape) * src.element_type.width // 8)
-        cpasync_bulk_g2s(src.iterator, dst.iterator, size=size, **new_kwargs, **kwargs)
+        cpasync_bulk_g2s(
+            src.iterator, dst.iterator, size=size, **new_kwargs, **kwargs
+        )
 
     return copy_bulk if const_expr(not single_stage) else copy_bulk_single_stage
 
@@ -303,9 +344,15 @@ def tma_get_copy_fn(
         isinstance(src_tensor.iterator, cute.Pointer)
         and src_tensor.memspace == cute.AddressSpace.smem
     )
-    smem_tensor, gmem_tensor = (src_tensor, dst_tensor) if src_is_smem else (dst_tensor, src_tensor)
-    group_rank_smem = const_expr(cute.rank(smem_tensor) - (1 if not single_stage else 0))
-    group_rank_gmem = const_expr(cute.rank(gmem_tensor) - (1 if not single_stage else 0))
+    smem_tensor, gmem_tensor = (
+        (src_tensor, dst_tensor) if src_is_smem else (dst_tensor, src_tensor)
+    )
+    group_rank_smem = const_expr(
+        cute.rank(smem_tensor) - (1 if not single_stage else 0)
+    )
+    group_rank_gmem = const_expr(
+        cute.rank(gmem_tensor) - (1 if not single_stage else 0)
+    )
     # ((atom_v, rest_v), STAGE), ((atom_v, rest_v), RestK)
     s, g = cpasync.tma_partition(
         atom,
@@ -320,16 +367,26 @@ def tma_get_copy_fn(
     src, dst = (s, g) if src_is_smem else (g, s)
 
     def copy_tma(src_idx, dst_idx, **new_kwargs):
-        cute.copy(atom, src[None, src_idx], dst[None, dst_idx], **new_kwargs, **kwargs)
+        cute.copy(
+            atom, src[None, src_idx], dst[None, dst_idx], **new_kwargs, **kwargs
+        )
 
     def copy_tma_single_stage(**new_kwargs):
         cute.copy(atom, src, dst, **new_kwargs, **kwargs)
 
-    return (copy_tma if const_expr(not single_stage) else copy_tma_single_stage), s, g
+    return (
+        (copy_tma if const_expr(not single_stage) else copy_tma_single_stage),
+        s,
+        g,
+    )
 
 
-def tma_producer_copy_fn(copy: Callable, pipeline: cutlass.pipeline.PipelineAsync):
-    def copy_fn(src_idx, producer_state: cutlass.pipeline.PipelineState, **new_kwargs):
+def tma_producer_copy_fn(
+    copy: Callable, pipeline: cutlass.pipeline.PipelineAsync
+):
+    def copy_fn(
+        src_idx, producer_state: cutlass.pipeline.PipelineState, **new_kwargs
+    ):
         copy(
             src_idx=src_idx,
             dst_idx=producer_state.index,

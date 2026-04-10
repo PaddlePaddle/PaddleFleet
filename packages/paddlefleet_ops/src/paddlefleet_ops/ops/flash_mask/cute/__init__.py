@@ -16,14 +16,13 @@
 
 __version__ = "4.0.0"
 
-import cutlass.cute as cute
+from cutlass import cute
+from flash_mask.cute.cute_dsl_utils import cute_compile_patched
 
 from .interface import (
     flash_attention,
     flashmask_attention,
 )
-
-from flash_mask.cute.cute_dsl_utils import cute_compile_patched
 
 # Patch cute.compile to optionally dump SASS
 cute.compile = cute_compile_patched

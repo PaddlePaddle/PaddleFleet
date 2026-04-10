@@ -2,9 +2,8 @@
 
 import os
 import pathlib
-from typing import Tuple
-from functools import partial, lru_cache
 from dataclasses import dataclass, fields
+from functools import lru_cache, partial
 
 import paddle
 
@@ -14,12 +13,19 @@ except ImportError:
     extract = None
 
 import cutlass
-import cutlass.cute as cute
+from cutlass import cute
 from cutlass.base_dsl.typing import JitArgument
 from cutlass.cutlass_dsl import NumericMeta
 
-
-StaticTypes = (cutlass.Constexpr, NumericMeta, int, bool, str, float, type(None))
+StaticTypes = (
+    cutlass.Constexpr,
+    NumericMeta,
+    int,
+    bool,
+    str,
+    float,
+    type(None),
+)
 
 
 load_cubin_module_data_og = cutlass.base_dsl.runtime.cuda.load_cubin_module_data
@@ -35,11 +41,13 @@ paddle2cute_dtype_map = {
 
 @lru_cache
 def get_max_active_clusters(cluster_size):
-    return cutlass.utils.HardwareInfo().get_max_active_clusters(cluster_size=cluster_size)
+    return cutlass.utils.HardwareInfo().get_max_active_clusters(
+        cluster_size=cluster_size
+    )
 
 
 @lru_cache
-def get_device_capacity(device: paddle.device = None) -> Tuple[int, int]:
+def get_device_capacity(device: paddle.device = None) -> tuple[int, int]:
     return paddle.cuda.get_device_capability(device)
 
 
@@ -47,7 +55,9 @@ def get_device_capacity(device: paddle.device = None) -> Tuple[int, int]:
 class ParamsBase:
     def __extract_mlir_values__(self):
         all_fields = [getattr(self, field.name) for field in fields(self)]
-        non_constexpr_fields = [f for f in all_fields if not isinstance(f, StaticTypes)]
+        non_constexpr_fields = [
+            f for f in all_fields if not isinstance(f, StaticTypes)
+        ]
         values, self._values_pos = [], []
         for obj in non_constexpr_fields:
             obj_values = cutlass.extract_mlir_values(obj)
@@ -56,13 +66,23 @@ class ParamsBase:
         return values
 
     def __new_from_mlir_values__(self, values):
-        all_fields = {field.name: getattr(self, field.name) for field in fields(self)}
-        constexpr_fields = {n: f for n, f in all_fields.items() if isinstance(f, StaticTypes)}
-        non_constexpr_fields = {
-            n: f for n, f in all_fields.items() if not isinstance(f, StaticTypes)
+        all_fields = {
+            field.name: getattr(self, field.name) for field in fields(self)
         }
-        for (name, field), n_items in zip(non_constexpr_fields.items(), self._values_pos):
-            non_constexpr_fields[name] = cutlass.new_from_mlir_values(field, values[:n_items])
+        constexpr_fields = {
+            n: f for n, f in all_fields.items() if isinstance(f, StaticTypes)
+        }
+        non_constexpr_fields = {
+            n: f
+            for n, f in all_fields.items()
+            if not isinstance(f, StaticTypes)
+        }
+        for (name, field), n_items in zip(
+            non_constexpr_fields.items(), self._values_pos
+        ):
+            non_constexpr_fields[name] = cutlass.new_from_mlir_values(
+                field, values[:n_items]
+            )
             values = values[n_items:]
         return self.__class__(**non_constexpr_fields, **constexpr_fields)
 
@@ -71,7 +91,9 @@ class ParamsBase:
 class ArgumentsBase(JitArgument):
     def __c_pointers__(self):
         all_fields = [getattr(self, field.name) for field in fields(self)]
-        non_constexpr_fields = [f for f in all_fields if not isinstance(f, StaticTypes)]
+        non_constexpr_fields = [
+            f for f in all_fields if not isinstance(f, StaticTypes)
+        ]
         c_ptrs = []
         for obj in non_constexpr_fields:
             if hasattr(obj, "__c_pointers__"):
@@ -80,7 +102,9 @@ class ArgumentsBase(JitArgument):
 
     def __get_mlir_types__(self):
         all_fields = [getattr(self, field.name) for field in fields(self)]
-        non_constexpr_fields = [f for f in all_fields if not isinstance(f, StaticTypes)]
+        non_constexpr_fields = [
+            f for f in all_fields if not isinstance(f, StaticTypes)
+        ]
         types, self._values_pos = [], []
         for obj in non_constexpr_fields:
             if hasattr(obj, "__get_mlir_types__"):
@@ -92,13 +116,23 @@ class ArgumentsBase(JitArgument):
         return types
 
     def __new_from_mlir_values__(self, values):
-        all_fields = {field.name: getattr(self, field.name) for field in fields(self)}
-        constexpr_fields = {n: f for n, f in all_fields.items() if isinstance(f, StaticTypes)}
-        non_constexpr_fields = {
-            n: f for n, f in all_fields.items() if not isinstance(f, StaticTypes)
+        all_fields = {
+            field.name: getattr(self, field.name) for field in fields(self)
         }
-        for (name, field), n_items in zip(non_constexpr_fields.items(), self._values_pos):
-            non_constexpr_fields[name] = cutlass.new_from_mlir_values(field, values[:n_items])
+        constexpr_fields = {
+            n: f for n, f in all_fields.items() if isinstance(f, StaticTypes)
+        }
+        non_constexpr_fields = {
+            n: f
+            for n, f in all_fields.items()
+            if not isinstance(f, StaticTypes)
+        }
+        for (name, field), n_items in zip(
+            non_constexpr_fields.items(), self._values_pos
+        ):
+            non_constexpr_fields[name] = cutlass.new_from_mlir_values(
+                field, values[:n_items]
+            )
             values = values[n_items:]
         return self.__class__(**non_constexpr_fields, **constexpr_fields)
 
@@ -117,8 +151,12 @@ def cute_compile_patched(*args, **kwargs):
         )
     output = cute_compile_og(*args, **kwargs)
     if cubin_path is not None:
-        cutlass.base_dsl.runtime.cuda.load_cubin_module_data = load_cubin_module_data_og
+        cutlass.base_dsl.runtime.cuda.load_cubin_module_data = (
+            load_cubin_module_data_og
+        )
         if extract is not None:
             sass = extract(cubin_path, None)
-            pathlib.Path(cubin_path).with_suffix(".annotated.sass").write_text(sass)
+            pathlib.Path(cubin_path).with_suffix(".annotated.sass").write_text(
+                sass
+            )
     return output

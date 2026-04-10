@@ -18,8 +18,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from setuptools import build_meta as orig
-
 import backends
 from build_utils import (
     check_patchelf_exists,
@@ -27,6 +25,7 @@ from build_utils import (
     get_libs,
     get_special_build_deps,
 )
+from setuptools import build_meta as orig
 
 backends.init_backend_type()
 
@@ -159,7 +158,9 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     check_patchelf_exists()
     check_submodule_updated()
     _prepare_ecosystem(use_symlinks=False)
-    return orig.build_wheel(wheel_directory, config_settings, metadata_directory)
+    return orig.build_wheel(
+        wheel_directory, config_settings, metadata_directory
+    )
 
 
 def build_editable(

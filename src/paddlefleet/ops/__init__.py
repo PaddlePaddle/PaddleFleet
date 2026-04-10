@@ -22,15 +22,15 @@ that existing code using `paddlefleet.ops` continues to work unchanged.
 
 from __future__ import annotations
 
+import sys as _sys
+
+from paddlefleet_ops import ops as _ops_module
 from paddlefleet_ops.ops import (  # noqa: F401
     is_deep_ep_available,
     is_deep_gemm_available,
     is_flash_mask_available,
     is_sonic_moe_available,
 )
-from paddlefleet_ops import ops as _ops_module  # noqa: F401
-
-import sys as _sys
 
 # Mirror the entire paddlefleet_ops.ops namespace into paddlefleet.ops so that
 # attribute access (e.g. `paddlefleet.ops.deep_gemm`) and wildcard imports

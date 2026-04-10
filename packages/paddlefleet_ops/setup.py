@@ -17,11 +17,10 @@ import os
 import shutil
 from pathlib import Path
 
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
-
 # backends.py and build_utils.py live alongside this file in packages/paddlefleet_ops/
 import backends
 from build_utils import get_special_build_deps
+from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 def change_pwd():
@@ -93,11 +92,10 @@ class CustomBdistWheel(_bdist_wheel):
 
 
 def setup_ops_extension():
-    from paddle.utils.cpp_extension import CUDAExtension, setup
-
     from build_utils import get_cuda_version
+
     # import paddle.core
-    from paddle.base.core import is_compiled_with_onednn
+    from paddle.utils.cpp_extension import CUDAExtension, setup
 
     # paddle_compiled_with_onednn = is_compiled_with_onednn()
     paddle_compiled_with_onednn = False
@@ -164,7 +162,8 @@ def setup_ops_extension():
                 "-Wno-abi",
                 "-fPIC",
                 "-std=c++17",
-            ] + (["-DPADDLE_WITH_DNNL"] if paddle_compiled_with_onednn else []),
+            ]
+            + (["-DPADDLE_WITH_DNNL"] if paddle_compiled_with_onednn else []),
             "nvcc": nvcc_args,
         },
     )

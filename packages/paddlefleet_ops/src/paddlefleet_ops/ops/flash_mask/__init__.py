@@ -20,6 +20,7 @@ __all__ = []
 _fa3_available = False
 try:
     import os as _os
+
     import paddle
 
     _so_loaded = False
@@ -27,9 +28,12 @@ try:
     # 尝试从已安装的模块中加载
     try:
         import flash_mask as _flash_mask_module
+
         _so_path = _flash_mask_module.__file__
-        if _so_path and _so_path.endswith('.so'):
-            paddle.utils.cpp_extension.load_op_meta_info_and_register_op(_so_path)
+        if _so_path and _so_path.endswith(".so"):
+            paddle.utils.cpp_extension.load_op_meta_info_and_register_op(
+                _so_path
+            )
             _so_loaded = True
     except Exception:
         pass
@@ -39,18 +43,28 @@ try:
         _curr_dir = _os.path.dirname(_os.path.abspath(__file__))
         _parent_dir = _os.path.dirname(_curr_dir)
         _possible_paths = [
-            _os.path.join(_parent_dir, "build", "flash_mask",
-                          "lib.linux-x86_64-cpython-310", "flash_mask.so"),
+            _os.path.join(
+                _parent_dir,
+                "build",
+                "flash_mask",
+                "lib.linux-x86_64-cpython-310",
+                "flash_mask.so",
+            ),
             _os.path.join(_parent_dir, "flash_mask.so"),
         ]
         for _so_path in _possible_paths:
             if _os.path.exists(_so_path):
-                paddle.utils.cpp_extension.load_op_meta_info_and_register_op(_so_path)
+                paddle.utils.cpp_extension.load_op_meta_info_and_register_op(
+                    _so_path
+                )
                 _so_loaded = True
                 break
 
     if _so_loaded:
-        from .flashmask_attention_v3.interface import flashmask_attention as flashmask_attention_v3
+        from .flashmask_attention_v3.interface import (
+            flashmask_attention as flashmask_attention_v3,  # noqa: F401
+        )
+
         __all__.append("flashmask_attention_v3")
         _fa3_available = True
     else:
@@ -64,11 +78,14 @@ except ImportError:
 _fa4_available = False
 try:
     from .cute import flash_attention, flashmask_attention
+
     __all__ += ["flash_attention", "flashmask_attention"]
     _fa4_available = True
 except ImportError:
     pass  # cute module not installed or dependencies missing
 
 if not _fa3_available and not _fa4_available:
-    print("[WARNING] flash_mask: neither FA3 nor FA4 is available. "
-          "Check your installation.")
+    print(
+        "[WARNING] flash_mask: neither FA3 nor FA4 is available. "
+        "Check your installation."
+    )

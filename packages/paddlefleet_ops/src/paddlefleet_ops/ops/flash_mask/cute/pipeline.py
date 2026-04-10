@@ -1,21 +1,25 @@
 # Copyright (c) 2025, Tri Dao.
 
 # import math
-from typing import Optional
 from dataclasses import dataclass
 
 import cutlass
-import cutlass.cute as cute
-from cutlass import Boolean, Int32, const_expr
+from cutlass import Boolean, Int32, const_expr, cute
 from cutlass.cutlass_dsl import if_generate
-from cutlass.pipeline import PipelineAsync, PipelineState, Agent, CooperativeGroup
-from cutlass.pipeline import PipelineUserType, PipelineOp
-from cutlass.pipeline import PipelineTmaAsync as PipelineTmaAsyncOg
-from cutlass.pipeline import PipelineTmaUmma as PipelineTmaUmmaOg
+from cutlass.pipeline import (
+    Agent,
+    CooperativeGroup,
+    PipelineAsync,
+    PipelineOp,
+    PipelineState,
+    PipelineTmaAsync as PipelineTmaAsyncOg,
+    PipelineTmaUmma as PipelineTmaUmmaOg,
+    PipelineUserType,
+)
 
 
 # We deviate from cute-dsl implementation to use cute.arch.cluster_arrive_relaxed
-def pipeline_init_wait(cta_layout_vmnk: Optional[cute.Layout] = None):
+def pipeline_init_wait(cta_layout_vmnk: cute.Layout | None = None):
     """
     Fences the mbarrier init and syncs the threadblock or cluster
     """
@@ -41,7 +45,7 @@ def _sync(group: Agent):
         cute.arch.cluster_arrive_relaxed()
         cute.arch.cluster_wait()
     else:
-        assert False, (
+        raise AssertionError(
             "Error: No explicit sync instruction exists. Please use barriers (named / mbarrier) instead."
         )
 
@@ -128,7 +132,9 @@ def make_pipeline_state(type: PipelineUserType, stages: int):
     elif type is PipelineUserType.Consumer:
         return PipelineStateSimple(stages, Int32(0))
     else:
-        assert False, "Error: invalid PipelineUserType specified for make_pipeline_state."
+        raise AssertionError(
+            "Error: invalid PipelineUserType specified for make_pipeline_state."
+        )
 
 
 @dataclass(frozen=True)
@@ -152,8 +158,8 @@ class PipelineTmaAsync(PipelineTmaAsyncOg):
         consumer_group: CooperativeGroup,
         tx_count: int,
         barrier_storage: cute.Pointer = None,
-        cta_layout_vmnk: Optional[cute.Layout] = None,
-        tidx: Optional[Int32] = None,
+        cta_layout_vmnk: cute.Layout | None = None,
+        tidx: Int32 | None = None,
         mcast_mode_mn: tuple[int, int] = (1, 1),
         init_wait: cutlass.Constexpr[bool] = True,
     ):
@@ -191,13 +197,17 @@ class PipelineTmaAsync(PipelineTmaAsyncOg):
             barrier_storage.align(min_align=8), num_stages, producer, tx_count
         )
         sync_object_empty = PipelineAsync._make_sync_object(
-            barrier_storage.align(min_align=8) + num_stages, num_stages, consumer
+            barrier_storage.align(min_align=8) + num_stages,
+            num_stages,
+            consumer,
         )
         if tidx is None:
             tidx, _, _ = cute.arch.thread_idx()
         if cta_layout_vmnk is None:
             cta_layout_vmnk = cute.make_layout((1, 1, 1, 1))
-        if const_expr(cta_layout_vmnk is None or cute.size(cta_layout_vmnk) == 1):
+        if const_expr(
+            cta_layout_vmnk is None or cute.size(cta_layout_vmnk) == 1
+        ):
             dst_rank = None
             is_signalling_thread = tidx % 128 == 0
         else:
@@ -225,7 +235,7 @@ class PipelineTmaAsync(PipelineTmaAsyncOg):
     def producer_acquire(
         self,
         state: PipelineState,
-        try_acquire_token: Optional[Boolean] = None,
+        try_acquire_token: Boolean | None = None,
         extra_tx_count: int = 0,
         **kwargs,
     ):
@@ -247,15 +257,21 @@ class PipelineTmaAsync(PipelineTmaAsyncOg):
         TMA consumer release conditionally signals the empty buffer to the producer.
         """
         # Only 1 thread per warp group signals the empty buffer.
-        if self.consumer_mask is None:  # No cluster, 1 thread per warp group to signal
+        if (
+            self.consumer_mask is None
+        ):  # No cluster, 1 thread per warp group to signal
             if_generate(
                 cute.arch.thread_idx()[0] % 128 == 0,
-                lambda: self.sync_object_empty.arrive(state.index, self.consumer_mask),
+                lambda: self.sync_object_empty.arrive(
+                    state.index, self.consumer_mask
+                ),
             )
         else:
             if_generate(
                 self.is_signalling_thread,
-                lambda: self.sync_object_empty.arrive(state.index, self.consumer_mask),
+                lambda: self.sync_object_empty.arrive(
+                    state.index, self.consumer_mask
+                ),
             )
 
 
@@ -269,7 +285,7 @@ class PipelineTmaUmma(PipelineTmaUmmaOg):
         consumer_group: CooperativeGroup,
         tx_count: int,
         barrier_storage: cute.Pointer = None,
-        cta_layout_vmnk: Optional[cute.Layout] = None,
+        cta_layout_vmnk: cute.Layout | None = None,
         mcast_mode_mn: tuple[int, int] = (1, 1),
         init_wait: cutlass.Constexpr[bool] = True,
     ):
@@ -305,7 +321,9 @@ class PipelineTmaUmma(PipelineTmaUmmaOg):
             barrier_storage.align(min_align=8), num_stages, producer, tx_count
         )
         sync_object_empty = PipelineTmaUmmaOg._make_sync_object(
-            barrier_storage.align(min_align=8) + num_stages, num_stages, consumer
+            barrier_storage.align(min_align=8) + num_stages,
+            num_stages,
+            consumer,
         )
 
         if cta_layout_vmnk is None or cute.size(cta_layout_vmnk) == 1:
@@ -317,11 +335,14 @@ class PipelineTmaUmma(PipelineTmaUmmaOg):
             producer_mask = PipelineTmaUmma._compute_mcast_arrival_mask(
                 cta_layout_vmnk, mcast_mode_mn
             )
-            is_leader_cta = PipelineTmaUmma._compute_is_leader_cta(cta_layout_vmnk)
+            is_leader_cta = PipelineTmaUmma._compute_is_leader_cta(
+                cta_layout_vmnk
+            )
 
         cta_group = (
             cute.nvgpu.tcgen05.CtaGroup.ONE
-            if cta_layout_vmnk is None or cute.size(cta_layout_vmnk, mode=[0]) == 1
+            if cta_layout_vmnk is None
+            or cute.size(cta_layout_vmnk, mode=[0]) == 1
             else cute.nvgpu.tcgen05.CtaGroup.TWO
         )
 
@@ -343,7 +364,7 @@ class PipelineTmaUmma(PipelineTmaUmmaOg):
     def producer_acquire(
         self,
         state: PipelineState,
-        try_acquire_token: Optional[Boolean] = None,
+        try_acquire_token: Boolean | None = None,
         extra_tx_count: int = 0,
         **kwargs,
     ):
@@ -357,11 +378,15 @@ class PipelineTmaUmma(PipelineTmaUmmaOg):
         if const_expr(extra_tx_count == 0):
             if_generate(
                 self.is_leader_cta,
-                lambda: self.sync_object_full.arrive(state.index, self.producer_mask),
+                lambda: self.sync_object_full.arrive(
+                    state.index, self.producer_mask
+                ),
             )
         else:
             tx_count = self.sync_object_full.tx_count + extra_tx_count
             if_generate(
                 self.is_leader_cta,
-                lambda: self.sync_object_full.arrive_and_expect_tx(state.index, tx_count),
+                lambda: self.sync_object_full.arrive_and_expect_tx(
+                    state.index, tx_count
+                ),
             )

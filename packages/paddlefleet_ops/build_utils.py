@@ -121,7 +121,9 @@ class EcosystemLibrary:
                 remove_path(dst)
                 logger.info(f"Copying {src} -> {dst}")
                 if src.is_dir():
-                    shutil.copytree(src, dst, symlinks=False, dirs_exist_ok=True)
+                    shutil.copytree(
+                        src, dst, symlinks=False, dirs_exist_ok=True
+                    )
                 else:
                     shutil.copy(src, dst)
 
@@ -142,13 +144,17 @@ class EcosystemLibrary:
 
 def check_submodule_updated():
     if backends.IS_NVIDIA:
-        missing = not all([
-            (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists(),
-            (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists(),
-            (ROOT_DIR / "third_party" / "quack" / ".git").exists(),
-            (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists(),
-            (ROOT_DIR / "third_party" / "flash-attention" / ".git").exists(),
-        ])
+        missing = not all(
+            [
+                (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists(),
+                (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists(),
+                (ROOT_DIR / "third_party" / "quack" / ".git").exists(),
+                (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists(),
+                (
+                    ROOT_DIR / "third_party" / "flash-attention" / ".git"
+                ).exists(),
+            ]
+        )
         if missing:
             logger.error(
                 "\033[91m Found uninitialized submodules. Please use "
@@ -202,7 +208,9 @@ def get_special_build_deps():
         elif cuda_major == 13:
             deps.append("paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5")
         else:
-            raise ValueError(f"Unsupported CUDA version: {cuda_major}.{cuda_minor}.")
+            raise ValueError(
+                f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
+            )
         return deps
     elif backends.IS_XPU:
         return ["paddlepaddle-xpu>=3.3.0"]

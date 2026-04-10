@@ -1,13 +1,10 @@
 # Copyright (c) 2025, Tri Dao.
-from typing import Optional, Tuple
 
 import cutlass
-import cutlass.cute as cute
-from cutlass import Int32, Boolean, const_expr
-from cutlass.cute.nvgpu import tcgen05
-from cutlass._mlir.dialects import llvm
-
 import flash_mask.cute.mma_sm100_desc as sm100_desc
+from cutlass import Boolean, Int32, const_expr, cute
+from cutlass._mlir.dialects import llvm
+from cutlass.cute.nvgpu import tcgen05
 from flash_mask.cute.utils import parse_swizzle_from_pointer
 
 
@@ -17,18 +14,29 @@ def gemm_w_idx(
     acc: cute.Tensor,
     tCrA: cute.Tensor,
     tCrB: cute.Tensor,
-    A_idx: Optional[Int32] = None,
-    B_idx: Optional[Int32] = None,
+    A_idx: Int32 | None = None,
+    B_idx: Int32 | None = None,
     zero_init: bool | Boolean = False,
     swap_AB: bool = False,
 ) -> None:
     if const_expr(swap_AB):
         return gemm_w_idx(
-            tiled_mma, acc, tCrB, tCrA, B_idx, A_idx, zero_init=zero_init, swap_AB=False
+            tiled_mma,
+            acc,
+            tCrB,
+            tCrA,
+            B_idx,
+            A_idx,
+            zero_init=zero_init,
+            swap_AB=False,
         )
     else:
-        rA = tCrA if const_expr(A_idx is None) else tCrA[None, None, None, A_idx]
-        rB = tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
+        rA = (
+            tCrA if const_expr(A_idx is None) else tCrA[None, None, None, A_idx]
+        )
+        rB = (
+            tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
+        )
         mma_atom = cute.make_mma_atom(tiled_mma.op)
         for k in cutlass.range_constexpr(cute.size(tCrA.shape[2])):
             mma_atom.set(tcgen05.Field.ACCUMULATE, not zero_init or k != 0)
@@ -41,10 +49,10 @@ def gemm_ptx_w_idx(
     acc: cute.Tensor,
     tCrA: cute.Tensor,
     tCrB: cute.Tensor,
-    sA: Optional[cute.Tensor],
+    sA: cute.Tensor | None,
     sB: cute.Tensor,
-    A_idx: Optional[Int32] = None,
-    B_idx: Optional[Int32] = None,
+    A_idx: Int32 | None = None,
+    B_idx: Int32 | None = None,
     zero_init: bool | Boolean = False,
     **kwargs,
 ) -> None:
@@ -52,12 +60,21 @@ def gemm_ptx_w_idx(
     rB = tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
     sA_cur = None
     if const_expr(sA is not None):
-        sA_cur = sA if const_expr(A_idx is None) else sA[None, None, None, A_idx]
+        sA_cur = (
+            sA if const_expr(A_idx is None) else sA[None, None, None, A_idx]
+        )
     sB_cur = sB if const_expr(B_idx is None) else sB[None, None, None, B_idx]
     mma_atom = cute.make_mma_atom(tiled_mma.op)
     acc_tmem_addr = acc.iterator.toint()
     gemm_ptx_partial(
-        mma_atom.op, acc_tmem_addr, rA, rB, sA_cur, sB_cur, zero_init=zero_init, **kwargs
+        mma_atom.op,
+        acc_tmem_addr,
+        rA,
+        rB,
+        sA_cur,
+        sB_cur,
+        zero_init=zero_init,
+        **kwargs,
     )
 
 
@@ -75,7 +92,7 @@ def gemm(
     return tiled_mma
 
 
-def i64_to_i32x2(i: int) -> Tuple[int, int]:
+def i64_to_i32x2(i: int) -> tuple[int, int]:
     """Convert a 64-bit integer to a tuple of two 32-bit integers."""
     return i & 0xFFFF_FFFF, (i >> 32) & 0xFFFF_FFFF
 
@@ -86,7 +103,7 @@ def gemm_ptx(
     acc: cute.Tensor,
     tCrA: cute.Tensor,
     tCrB: cute.Tensor,
-    sA: Optional[cute.Tensor],
+    sA: cute.Tensor | None,
     sB: cute.Tensor,
     zero_init: bool | Boolean = False,
 ) -> None:
@@ -103,7 +120,9 @@ def gemm_ptx(
                 cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
                 sA_swizzle,
                 sm100_desc.Major.K
-                if const_expr(op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+                if const_expr(
+                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+                )
                 else sm100_desc.Major.MN,
             )
         )
@@ -119,7 +138,9 @@ def gemm_ptx(
             cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
             sB_swizzle,
             sm100_desc.Major.K
-            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            if const_expr(
+                op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+            )
             else sm100_desc.Major.MN,
         )
     )
@@ -128,21 +149,27 @@ def gemm_ptx(
     smem_desc_b_hi = const_expr(smem_desc_b_hi)
 
     if const_expr(not is_ts):
-        smem_desc_start_a_lo = Int32(smem_desc_base_a_lo) | sm100_desc.make_smem_desc_start_addr(
-            sA[None, None, 0].iterator
-        )
+        smem_desc_start_a_lo = Int32(
+            smem_desc_base_a_lo
+        ) | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator)
     else:
         smem_desc_start_a_lo = None
-    smem_desc_start_b_lo = Int32(smem_desc_base_b_lo) | sm100_desc.make_smem_desc_start_addr(
-        sB[None, None, 0].iterator
-    )
+    smem_desc_start_b_lo = Int32(
+        smem_desc_base_b_lo
+    ) | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator)
     for k in cutlass.range_constexpr(cute.size(tCrA.shape[2])):
         if const_expr(not is_ts):
             smem_desc_a_lo = smem_desc_start_a_lo + (
-                (cute.crd2idx((0, 0, k), sA_layout) * sA.element_type.width // 8) >> 4
+                (
+                    cute.crd2idx((0, 0, k), sA_layout)
+                    * sA.element_type.width
+                    // 8
+                )
+                >> 4
             )
         smem_desc_b_lo = smem_desc_start_b_lo + (
-            (cute.crd2idx((0, 0, k), sB_layout) * sB.element_type.width // 8) >> 4
+            (cute.crd2idx((0, 0, k), sB_layout) * sB.element_type.width // 8)
+            >> 4
         )
         # with cute.arch.elect_one():
         #     cute.printf("smem_desc_a_lo = {}, smem_desc_b_lo = {}", smem_desc_a_lo, smem_desc_b_lo)
@@ -201,7 +228,7 @@ def gemm_ptx_loop(
     acc: cute.Tensor,
     tCrA: cute.Tensor,
     tCrB: cute.Tensor,
-    sA: Optional[cute.Tensor],
+    sA: cute.Tensor | None,
     sB: cute.Tensor,
     zero_init: bool | Boolean = False,
 ) -> None:
@@ -218,7 +245,9 @@ def gemm_ptx_loop(
                 cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
                 sA_swizzle,
                 sm100_desc.Major.K
-                if const_expr(op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+                if const_expr(
+                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+                )
                 else sm100_desc.Major.MN,
             )
         )
@@ -234,7 +263,9 @@ def gemm_ptx_loop(
             cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
             sB_swizzle,
             sm100_desc.Major.K
-            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            if const_expr(
+                op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+            )
             else sm100_desc.Major.MN,
         )
     )
@@ -244,7 +275,8 @@ def gemm_ptx_loop(
 
     if const_expr(not is_ts):
         offset_a = [
-            (cute.crd2idx((0, 0, k), sA_layout) * sA.element_type.width // 8) >> 4
+            (cute.crd2idx((0, 0, k), sA_layout) * sA.element_type.width // 8)
+            >> 4
             for k in cutlass.range_constexpr(cute.size(tCrA.shape[2]))
         ]
     else:
@@ -253,33 +285,43 @@ def gemm_ptx_loop(
             for k in cutlass.range_constexpr(cute.size(tCrA.shape[2]))
         ]
     offset_a_diff = [
-        offset_a[k] - offset_a[k - 1] for k in cutlass.range_constexpr(1, cute.size(tCrA.shape[2]))
+        offset_a[k] - offset_a[k - 1]
+        for k in cutlass.range_constexpr(1, cute.size(tCrA.shape[2]))
     ]
     offset_b = [
         (cute.crd2idx((0, 0, k), sB_layout) * sB.element_type.width // 8) >> 4
         for k in cutlass.range_constexpr(cute.size(tCrB.shape[2]))
     ]
     offset_b_diff = [
-        offset_b[k] - offset_b[k - 1] for k in cutlass.range_constexpr(1, cute.size(tCrB.shape[2]))
+        offset_b[k] - offset_b[k - 1]
+        for k in cutlass.range_constexpr(1, cute.size(tCrB.shape[2]))
     ]
 
     if const_expr(not is_ts):
         smem_desc_start_a_lo = Int32(
-            smem_desc_base_a_lo | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator)
+            smem_desc_base_a_lo
+            | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator)
         )
     else:
         smem_desc_start_a_lo = None
     smem_desc_start_b_lo = Int32(
-        smem_desc_base_b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator)
+        smem_desc_base_b_lo
+        | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator)
     )
-    pred_str = "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
+    pred_str = (
+        "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
+    )
     if const_expr(not is_ts):
         llvm.inline_asm(
             None,
             [
                 acc.iterator.toint().ir_value(),
-                Int32(cute.arch.make_warp_uniform(smem_desc_start_a_lo)).ir_value(),
-                Int32(cute.arch.make_warp_uniform(smem_desc_start_b_lo)).ir_value(),
+                Int32(
+                    cute.arch.make_warp_uniform(smem_desc_start_a_lo)
+                ).ir_value(),
+                Int32(
+                    cute.arch.make_warp_uniform(smem_desc_start_b_lo)
+                ).ir_value(),
                 Int32(not zero_init).ir_value(),
             ],
             "{\n\t"
@@ -364,14 +406,14 @@ def gemm_ptx_partial(
     acc_tmem_addr: Int32,
     tCrA: cute.Tensor,
     tCrB: cute.Tensor,
-    sA: Optional[cute.Tensor],
+    sA: cute.Tensor | None,
     sB: cute.Tensor,
-    mbar_ptr: Optional[cutlass.Pointer] = None,
-    mbar_phase: Optional[Int32] = None,
+    mbar_ptr: cutlass.Pointer | None = None,
+    mbar_phase: Int32 | None = None,
     zero_init: bool | Boolean = False,
     # sA_offset: Int32 = 0,
     # acc_offset: Int32 = 0,
-    tA_addr: Optional[Int32] = None,
+    tA_addr: Int32 | None = None,
 ) -> None:
     # acc_tmem_addr += acc_offset
     is_ts = op.a_src == cute.nvgpu.tcgen05.OperandSource.TMEM
@@ -387,7 +429,9 @@ def gemm_ptx_partial(
                 cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
                 sA_swizzle,
                 sm100_desc.Major.K
-                if const_expr(op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+                if const_expr(
+                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+                )
                 else sm100_desc.Major.MN,
             )
         )
@@ -403,7 +447,9 @@ def gemm_ptx_partial(
             cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
             sB_swizzle,
             sm100_desc.Major.K
-            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            if const_expr(
+                op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+            )
             else sm100_desc.Major.MN,
         )
     )
@@ -416,30 +462,50 @@ def gemm_ptx_partial(
         if const_expr(not is_ts)
         else cute.recast_layout(32, tCrA.element_type.width, tCrA.layout)
     )
-    offset_a = [cute.crd2idx((0, 0, k), tCrA_layout) for k in range(cute.size(tCrA.shape[2]))]
-    offset_a_diff = [offset_a[k] - offset_a[k - 1] for k in range(1, cute.size(tCrA.shape[2]))]
-    offset_b = [cute.crd2idx((0, 0, k), tCrB.layout) for k in range(cute.size(tCrB.shape[2]))]
-    offset_b_diff = [offset_b[k] - offset_b[k - 1] for k in range(1, cute.size(tCrB.shape[2]))]
+    offset_a = [
+        cute.crd2idx((0, 0, k), tCrA_layout)
+        for k in range(cute.size(tCrA.shape[2]))
+    ]
+    offset_a_diff = [
+        offset_a[k] - offset_a[k - 1]
+        for k in range(1, cute.size(tCrA.shape[2]))
+    ]
+    offset_b = [
+        cute.crd2idx((0, 0, k), tCrB.layout)
+        for k in range(cute.size(tCrB.shape[2]))
+    ]
+    offset_b_diff = [
+        offset_b[k] - offset_b[k - 1]
+        for k in range(1, cute.size(tCrB.shape[2]))
+    ]
 
     if const_expr(not is_ts):
         smem_desc_start_a_lo = Int32(
-            smem_desc_base_a_lo | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator)
+            smem_desc_base_a_lo
+            | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator)
         )
         # ) + sA_offset
     else:
         smem_desc_start_a_lo = None
     smem_desc_start_b_lo = Int32(
-        smem_desc_base_b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator)
+        smem_desc_base_b_lo
+        | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator)
     )
-    pred_str = "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
+    pred_str = (
+        "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
+    )
     if const_expr(not is_ts):
         assert mbar_ptr is None, "mbar_ptr must be None when a_src is not TMEM"
         llvm.inline_asm(
             None,
             [
                 # acc.iterator.toint().ir_value(),
-                Int32(cute.arch.make_warp_uniform(smem_desc_start_a_lo)).ir_value(),
-                Int32(cute.arch.make_warp_uniform(smem_desc_start_b_lo)).ir_value(),
+                Int32(
+                    cute.arch.make_warp_uniform(smem_desc_start_a_lo)
+                ).ir_value(),
+                Int32(
+                    cute.arch.make_warp_uniform(smem_desc_start_b_lo)
+                ).ir_value(),
                 Int32(not zero_init).ir_value(),
                 Int32(cute.arch.make_warp_uniform(acc_tmem_addr)).ir_value(),
             ],
@@ -486,7 +552,9 @@ def gemm_ptx_partial(
     else:
         # For TS gemm, somehow tCrA.iterator.toint() returns 0 no matter what, so we need to
         # explicitly pass in the tA_addr for correctness.
-        tA_addr = tCrA[None, None, 0].iterator.toint() if tA_addr is None else tA_addr
+        tA_addr = (
+            tCrA[None, None, 0].iterator.toint() if tA_addr is None else tA_addr
+        )
         input_args = [
             # Int32(cute.arch.make_warp_uniform(tCrA[None, None, 0].iterator.toint())).ir_value(),
             Int32(cute.arch.make_warp_uniform(tA_addr)).ir_value(),
@@ -495,7 +563,9 @@ def gemm_ptx_partial(
             Int32(cute.arch.make_warp_uniform(acc_tmem_addr)).ir_value(),
         ]
         if const_expr(mbar_ptr is not None):
-            assert mbar_phase is not None, "mbar_phase must be provided when mbar_ptr is not None"
+            assert mbar_phase is not None, (
+                "mbar_phase must be provided when mbar_ptr is not None"
+            )
             input_args.append(mbar_ptr.toint().ir_value())
             input_args.append(Int32(mbar_phase).ir_value())
             mbar_wait_str = (
@@ -561,7 +631,10 @@ def gemm_ptx_partial(
                         f"mov.b64 smem_desc_b, {{smem_desc_b_lo, smem_desc_b_hi}};\n\t"
                         f"@leader_thread tcgen05.mma.cta_group::1.kind::f16 [tmem_acc], [tmem_a + {hex(offset_a[k])}], smem_desc_b, idesc, 1;\n\t"
                     )
-                    for k in range(cute.size(tCrA.shape[2]) // 4 * 3, cute.size(tCrA.shape[2]))
+                    for k in range(
+                        cute.size(tCrA.shape[2]) // 4 * 3,
+                        cute.size(tCrA.shape[2]),
+                    )
                 )
                 if const_expr(mbar_ptr is not None)
                 else ""
@@ -586,16 +659,20 @@ def gemm_ptx_partial1(
     sB_base_addr_for_desc: Int32,
     sB_addr_offset_for_desc: cutlass.Constexpr[int],
     sB_stage: Int32,
-    sA_layout: Optional[cute.Layout],
-    sB_layout: Optional[cute.Layout],
-    sA_swizzle: Optional[cute.Swizzle],
+    sA_layout: cute.Layout | None,
+    sB_layout: cute.Layout | None,
+    sA_swizzle: cute.Swizzle | None,
     sB_swizzle: cute.Swizzle,
     zero_init: bool | Boolean = False,
 ) -> None:
     is_ts = op.a_src == cute.nvgpu.tcgen05.OperandSource.TMEM
     if const_expr(not is_ts):
-        assert sA_layout is not None, "sA_layout must be provided when a_src is not TMEM"
-        assert sA_swizzle is not None, "sA_swizzle must be provided when a_src is not TMEM"
+        assert sA_layout is not None, (
+            "sA_layout must be provided when a_src is not TMEM"
+        )
+        assert sA_swizzle is not None, (
+            "sA_swizzle must be provided when a_src is not TMEM"
+        )
     idesc: int = const_expr(sm100_desc.mma_op_to_idesc(op))
     if const_expr(not is_ts):
         smem_desc_base_a: int = const_expr(
@@ -603,7 +680,9 @@ def gemm_ptx_partial1(
                 cute.recast_layout(128, op.a_dtype.width, sA_layout[0]),
                 sA_swizzle,
                 sm100_desc.Major.K
-                if const_expr(op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+                if const_expr(
+                    op.a_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+                )
                 else sm100_desc.Major.MN,
             )
         )
@@ -618,7 +697,9 @@ def gemm_ptx_partial1(
             cute.recast_layout(128, op.b_dtype.width, sB_layout[0]),
             sB_swizzle,
             sm100_desc.Major.K
-            if const_expr(op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K)
+            if const_expr(
+                op.b_major_mode == cute.nvgpu.tcgen05.mma.OperandMajorMode.K
+            )
             else sm100_desc.Major.MN,
         )
     )
@@ -637,12 +718,18 @@ def gemm_ptx_partial1(
             cute.crd2idx((0, 0, k), sA_layout) * op.a_dtype.width // 32
             for k in range(cute.size(tCrA.shape[2]))
         ]
-    offset_a_diff = [offset_a[k] - offset_a[k - 1] for k in range(1, cute.size(tCrA.shape[2]))]
+    offset_a_diff = [
+        offset_a[k] - offset_a[k - 1]
+        for k in range(1, cute.size(tCrA.shape[2]))
+    ]
     offset_b = [
         (cute.crd2idx((0, 0, k), sB_layout) * op.b_dtype.width // 8) >> 4
         for k in range(cute.size(tCrB.shape[2]))
     ]
-    offset_b_diff = [offset_b[k] - offset_b[k - 1] for k in range(1, cute.size(tCrB.shape[2]))]
+    offset_b_diff = [
+        offset_b[k] - offset_b[k - 1]
+        for k in range(1, cute.size(tCrB.shape[2]))
+    ]
 
     if const_expr(not is_ts):
         # smem_desc_start_a_lo = Int32(smem_desc_base_a_lo | sm100_desc.make_smem_desc_start_addr(sA[None, None, 0].iterator))
@@ -651,7 +738,9 @@ def gemm_ptx_partial1(
         smem_desc_start_a_lo = None
     # smem_desc_start_b_lo = Int32(smem_desc_base_b_lo | sm100_desc.make_smem_desc_start_addr(sB[None, None, 0].iterator))
     smem_desc_start_b_lo = const_expr(smem_desc_base_b_lo)
-    pred_str = "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
+    pred_str = (
+        "p" if isinstance(zero_init, Boolean) else "0" if zero_init else "1"
+    )
     if const_expr(not is_ts):
         llvm.inline_asm(
             None,

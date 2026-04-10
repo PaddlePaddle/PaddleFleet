@@ -1,14 +1,25 @@
-from typing import Type
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from dataclasses import dataclass
 
 import cutlass
-import cutlass.cute as cute
+from cutlass import Int32, const_expr, cute
+from cutlass.cute import FastDivmodDivisor
 from cutlass.cute.nvgpu import cpasync
-from cutlass import Int32, const_expr
-
 from flash_mask.cute import utils
 from flash_mask.cute.cute_dsl_utils import ParamsBase
-from cutlass.cute import FastDivmodDivisor
 
 
 @dataclass
@@ -52,10 +63,12 @@ class PagedKVManager(ParamsBase):
         head_dim_padded: cutlass.Constexpr[Int32],
         head_dim_v_padded: cutlass.Constexpr[Int32],
         num_threads: cutlass.Constexpr[Int32],
-        dtype: Type[cutlass.Numeric],
+        dtype: type[cutlass.Numeric],
     ):
         universal_copy_bits = 128
-        gmem_threads_per_row = 8  # 8 threads loading 128 bits = 128 bytes = 1 cache line
+        gmem_threads_per_row = (
+            8  # 8 threads loading 128 bits = 128 bytes = 1 cache line
+        )
         async_copy_elems = universal_copy_bits // dtype.width
         atom_async_copy = cute.make_copy_atom(
             cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
@@ -67,9 +80,13 @@ class PagedKVManager(ParamsBase):
             order=(1, 0),
         )
         val_layout = cute.make_layout((1, async_copy_elems))
-        gmem_tiled_copy_KV = cute.make_tiled_copy_tv(atom_async_copy, thr_layout, val_layout)
+        gmem_tiled_copy_KV = cute.make_tiled_copy_tv(
+            atom_async_copy, thr_layout, val_layout
+        )
         gmem_thr_copy_KV = gmem_tiled_copy_KV.get_slice(thread_idx)
-        page_entry_per_thread = n_block_size * gmem_threads_per_row // num_threads
+        page_entry_per_thread = (
+            n_block_size * gmem_threads_per_row // num_threads
+        )
 
         tPrPage = cute.make_rmem_tensor((page_entry_per_thread,), Int32)
         tPrPageOffset = cute.make_rmem_tensor((page_entry_per_thread,), Int32)
@@ -115,13 +132,18 @@ class PagedKVManager(ParamsBase):
     @cute.jit
     def load_page_table(self, n_block: Int32):
         for i in cutlass.range(self.page_entry_per_thread, unroll=1):
-            row = (i * self.num_threads + self.thread_idx) // self.gmem_threads_per_row
+            row = (
+                i * self.num_threads + self.thread_idx
+            ) // self.gmem_threads_per_row
             row_idx = n_block * self.n_block_size + row
 
-            page_idx, page_offset = divmod(row_idx + self.leftpad_k, self.page_size_divmod)
+            page_idx, page_offset = divmod(
+                row_idx + self.leftpad_k, self.page_size_divmod
+            )
 
             is_valid = (
-                (i + 1) * self.num_threads <= self.n_block_size or row < self.n_block_size
+                (i + 1) * self.num_threads <= self.n_block_size
+                or row < self.n_block_size
             ) and row_idx < self.seqlen_k
             page = self.mPageTable[page_idx] if is_valid else 0
 
@@ -143,14 +165,22 @@ class PagedKVManager(ParamsBase):
 
         if const_expr(K_or_V == "V"):
             # Need to transpose V
-            sX_pi = cute.make_tensor(sX_pi.iterator, cute.select(sX_pi.layout, mode=[1, 0]))
+            sX_pi = cute.make_tensor(
+                sX_pi.iterator, cute.select(sX_pi.layout, mode=[1, 0])
+            )
 
-        head_dim = self.head_dim_v_padded if const_expr(K_or_V == "V") else self.head_dim_padded
+        head_dim = (
+            self.head_dim_v_padded
+            if const_expr(K_or_V == "V")
+            else self.head_dim_padded
+        )
         cX = cute.make_identity_tensor((self.n_block_size, head_dim))
         tXsX = self.gmem_thr_copy_KV.partition_D(sX_pi)
         tXcX = self.gmem_thr_copy_KV.partition_S(cX)
 
-        seqlenk_row_limit = self.seqlen_k - n_block * self.n_block_size if n_block >= 0 else 0
+        seqlenk_row_limit = (
+            self.seqlen_k - n_block * self.n_block_size if n_block >= 0 else 0
+        )
         for m in cutlass.range(cute.size(tXsX, mode=[1]), unroll=1):
             should_load = tXcX[0, m, 0][0] < seqlenk_row_limit
 
@@ -161,7 +191,9 @@ class PagedKVManager(ParamsBase):
                 if const_expr(K_or_V == "K")
                 else self.mV_paged[None, page_offset, page]
             )
-            mX_paged_cur_copy = cute.tiled_divide(mX_paged_cur, (self.async_copy_elems,))
+            mX_paged_cur_copy = cute.tiled_divide(
+                mX_paged_cur, (self.async_copy_elems,)
+            )
 
             if should_load:
                 for k in cutlass.range(cute.size(tXsX, mode=[2]), unroll=1):

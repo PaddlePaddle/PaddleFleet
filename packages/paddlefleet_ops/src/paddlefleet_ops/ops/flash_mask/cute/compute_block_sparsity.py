@@ -1,12 +1,24 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from collections.abc import Callable
 from functools import partial
-from typing import Callable, Optional, Tuple
 
 import cutlass
-from cutlass import Boolean, Int32, Int8, const_expr
-import cutlass.cute as cute
-from cutlass.cute.runtime import from_dlpack
 import paddle
-
+from cutlass import Boolean, Int8, Int32, const_expr, cute
+from cutlass.cute.runtime import from_dlpack
 from flash_mask.cute.block_sparsity import BlockSparseTensors
 from flash_mask.cute.utils import hash_callable, scalar_to_ssa, ssa_to_scalar
 
@@ -26,7 +38,7 @@ class BlockSparsityKernel:
     def __init__(
         self,
         mask_mod: Callable,
-        tile_mn: Tuple[int, int],
+        tile_mn: tuple[int, int],
         compute_full_blocks: bool = True,
         use_aux_tensors: bool = False,
         use_fast_sampling: bool = False,
@@ -43,9 +55,11 @@ class BlockSparsityKernel:
         blocksparse_tensors: BlockSparseTensors,
         seqlen_q: Int32,
         seqlen_k: Int32,
-        aux_tensors: Optional[list] = None,
+        aux_tensors: list | None = None,
     ):
-        self.mask_cnt, self.mask_idx, self.full_cnt, self.full_idx = blocksparse_tensors
+        self.mask_cnt, self.mask_idx, self.full_cnt, self.full_idx = (
+            blocksparse_tensors
+        )
         self.seqlen_q = seqlen_q
         self.seqlen_k = seqlen_k
 
@@ -54,7 +68,9 @@ class BlockSparsityKernel:
                 "full block tensors must be provided when computing full blocks"
             )
 
-        batch_size, num_heads, num_m_blocks, num_n_blocks = list(self.mask_idx.shape)
+        batch_size, num_heads, num_m_blocks, num_n_blocks = list(
+            self.mask_idx.shape
+        )
         grid = [num_m_blocks, num_heads, batch_size]
 
         # Fast sampling uses only 5 threads (4 corners + center), full sampling uses 1 thread per row
@@ -86,7 +102,7 @@ class BlockSparsityKernel:
         num_n_blocks: Int32,
         seqlen_q: Int32,
         seqlen_k: Int32,
-        aux_tensors: Optional[list] = None,
+        aux_tensors: list | None = None,
     ):
         # Store seqlens as instance variables for use in the kernel
         self.seqlen_q = seqlen_q
@@ -153,7 +169,11 @@ class BlockSparsityKernel:
                     kv_idx_ssa = ssa(kv_idx)
                     thread_result = ssa_to_scalar(
                         self.mask_mod(
-                            ssa(batch_idx), ssa(head_idx), q_idx_ssa, kv_idx_ssa, aux_tensors
+                            ssa(batch_idx),
+                            ssa(head_idx),
+                            q_idx_ssa,
+                            kv_idx_ssa,
+                            aux_tensors,
                         )
                     )
                 else:
@@ -161,8 +181,12 @@ class BlockSparsityKernel:
 
                 # Use vote_any_sync to see if any valid thread found unmasked or masked
                 # Only count results from threads that checked valid indices
-                has_unmasked = cute.arch.vote_any_sync(thread_result & thread_is_valid)
-                has_masked = cute.arch.vote_any_sync((Boolean(not thread_result)) & thread_is_valid)
+                has_unmasked = cute.arch.vote_any_sync(
+                    thread_result & thread_is_valid
+                )
+                has_masked = cute.arch.vote_any_sync(
+                    (Boolean(not thread_result)) & thread_is_valid
+                )
 
             else:
                 # Full path: check all elements in the block
@@ -207,14 +231,20 @@ class BlockSparsityKernel:
                 warp_has_unmasked_mask = cute.arch.vote_any_sync(
                     thread_has_unmasked & thread_is_valid
                 )
-                warp_has_masked_mask = cute.arch.vote_any_sync(thread_has_masked & thread_is_valid)
+                warp_has_masked_mask = cute.arch.vote_any_sync(
+                    thread_has_masked & thread_is_valid
+                )
 
                 # lane 0 writes the ballot mask to shared memory
                 lane_id = tidx % 32
                 if lane_id == 0:
                     # Store as Int8
-                    reduction_buffer[warp_idx, 0] = Int8(1) if warp_has_unmasked_mask else Int8(0)
-                    reduction_buffer[warp_idx, 1] = Int8(1) if warp_has_masked_mask else Int8(0)
+                    reduction_buffer[warp_idx, 0] = (
+                        Int8(1) if warp_has_unmasked_mask else Int8(0)
+                    )
+                    reduction_buffer[warp_idx, 1] = (
+                        Int8(1) if warp_has_masked_mask else Int8(0)
+                    )
 
                 cute.arch.sync_threads()
 
@@ -238,10 +268,14 @@ class BlockSparsityKernel:
                 is_full = Boolean(has_unmasked and (not has_masked))
 
                 if is_partial:
-                    mask_idx[batch_idx, head_idx, m_block, num_mask_blocks] = n_block
+                    mask_idx[batch_idx, head_idx, m_block, num_mask_blocks] = (
+                        n_block
+                    )
                     num_mask_blocks += 1
                 elif is_full and const_expr(self.compute_full_blocks):
-                    full_idx[batch_idx, head_idx, m_block, num_full_blocks] = n_block
+                    full_idx[batch_idx, head_idx, m_block, num_full_blocks] = (
+                        n_block
+                    )
                     num_full_blocks += 1
 
         # Only thread 0 writes back the counts
@@ -259,11 +293,14 @@ def compute_block_sparsity(
     seqlen_q,
     seqlen_k,
     mask_mod: Callable,
-    aux_tensors: Optional[list],  # list[cute.Tensor]
+    aux_tensors: list | None,  # list[cute.Tensor]
     device,
     compute_full_blocks: bool = True,
     use_fast_sampling: bool = False,
-) -> Tuple[BlockSparseTensors, Tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor, paddle.Tensor]]:
+) -> tuple[
+    BlockSparseTensors,
+    tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor, paddle.Tensor],
+]:
     """
     Computes block sparsity for a given `mask_mod`.
 
@@ -286,28 +323,32 @@ def compute_block_sparsity(
     num_m_blocks = (seqlen_q + tile_m - 1) // tile_m
     num_n_blocks = (seqlen_k + tile_n - 1) // tile_n
 
-    mask_block_cnt = paddle.zeros((batch_size, num_heads, num_m_blocks), dtype=paddle.int32)
+    mask_block_cnt = paddle.zeros(
+        (batch_size, num_heads, num_m_blocks), dtype=paddle.int32
+    )
     mask_block_idx = paddle.zeros(
         (batch_size, num_heads, num_m_blocks, num_n_blocks), dtype=paddle.int32
     )
-    full_block_cnt = paddle.zeros((batch_size, num_heads, num_m_blocks), dtype=paddle.int32)
+    full_block_cnt = paddle.zeros(
+        (batch_size, num_heads, num_m_blocks), dtype=paddle.int32
+    )
     full_block_idx = paddle.zeros(
         (batch_size, num_heads, num_m_blocks, num_n_blocks), dtype=paddle.int32
     )
 
     # Convert to cute tensors
-    mask_cnt_cute = from_dlpack(mask_block_cnt.detach(), assumed_align=4).mark_layout_dynamic(
-        leading_dim=2
-    )
-    mask_idx_cute = from_dlpack(mask_block_idx.detach(), assumed_align=4).mark_layout_dynamic(
-        leading_dim=3
-    )
-    full_cnt_cute = from_dlpack(full_block_cnt.detach(), assumed_align=4).mark_layout_dynamic(
-        leading_dim=2
-    )
-    full_idx_cute = from_dlpack(full_block_idx.detach(), assumed_align=4).mark_layout_dynamic(
-        leading_dim=3
-    )
+    mask_cnt_cute = from_dlpack(
+        mask_block_cnt.detach(), assumed_align=4
+    ).mark_layout_dynamic(leading_dim=2)
+    mask_idx_cute = from_dlpack(
+        mask_block_idx.detach(), assumed_align=4
+    ).mark_layout_dynamic(leading_dim=3)
+    full_cnt_cute = from_dlpack(
+        full_block_cnt.detach(), assumed_align=4
+    ).mark_layout_dynamic(leading_dim=2)
+    full_idx_cute = from_dlpack(
+        full_block_idx.detach(), assumed_align=4
+    ).mark_layout_dynamic(leading_dim=3)
 
     blocksparse_tensors = BlockSparseTensors(
         mask_block_cnt=mask_cnt_cute,
@@ -351,7 +392,12 @@ def compute_block_sparsity(
     )
 
     # Return both the BlockSparseTensors (cute) and the underlying paddle tensors
-    return blocksparse_tensors, (full_block_cnt, full_block_idx, mask_block_cnt, mask_block_idx)
+    return blocksparse_tensors, (
+        full_block_cnt,
+        full_block_idx,
+        mask_block_cnt,
+        mask_block_idx,
+    )
 
 
 compute_block_sparsity.compile_cache = {}

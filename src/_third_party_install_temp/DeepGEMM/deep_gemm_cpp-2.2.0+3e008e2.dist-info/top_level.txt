@@ -1,2 +1,0 @@
-deep_gemm
-deep_gemm_cpp

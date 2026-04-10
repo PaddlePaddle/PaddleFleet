@@ -12,6 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from paddlefleet_ops.version import __version__  # noqa: F401
-
 from paddlefleet_ops import ops  # noqa: F401
+from paddlefleet_ops.version import __version__  # noqa: F401

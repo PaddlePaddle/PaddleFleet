@@ -1,13 +1,11 @@
 # Copyright (c) 2025, Tri Dao.
-from typing import Type, Union, Optional
+
 import cutlass
-import cutlass.cute as cute
-from cutlass import Int32, Float32, Boolean, const_expr
+import cutlass.utils.hopper_helpers as sm90_utils_og
+from cutlass import Boolean, Float32, Int32, const_expr, cute
 from cutlass.cute.nvgpu import warpgroup
-from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import Numeric, dsl_user_op
 from cutlass.utils import LayoutEnum
-import cutlass.utils.hopper_helpers as sm90_utils_og
 
 
 @cute.jit
@@ -22,7 +20,15 @@ def gemm(
     swap_AB: cutlass.Constexpr[bool] = False,
 ) -> None:
     if const_expr(swap_AB):
-        gemm(tiled_mma, acc, tCrB, tCrA, zero_init=zero_init, wg_wait=wg_wait, swap_AB=False)
+        gemm(
+            tiled_mma,
+            acc,
+            tCrB,
+            tCrA,
+            zero_init=zero_init,
+            wg_wait=wg_wait,
+            swap_AB=False,
+        )
     else:
         warpgroup.fence()
         # We make a new mma_atom since we'll be modifying its attribute (accumulate).
@@ -30,7 +36,9 @@ def gemm(
         mma_atom = cute.make_mma_atom(tiled_mma.op)
         mma_atom.set(warpgroup.Field.ACCUMULATE, not zero_init)
         for k in cutlass.range_constexpr(cute.size(tCrA.shape[2])):
-            cute.gemm(mma_atom, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
+            cute.gemm(
+                mma_atom, acc, tCrA[None, None, k], tCrB[None, None, k], acc
+            )
             mma_atom.set(warpgroup.Field.ACCUMULATE, True)
         warpgroup.commit_group()
         if const_expr(wg_wait >= 0):
@@ -42,19 +50,30 @@ def gemm_zero_init(
     shape: cute.Shape,
     tCrA: cute.Tensor,
     tCrB: cute.Tensor,
-    A_idx: Optional[Int32] = None,
-    B_idx: Optional[Int32] = None,
+    A_idx: Int32 | None = None,
+    B_idx: Int32 | None = None,
     wg_wait: int = -1,
     swap_AB: bool = False,
 ) -> cute.Tensor:
     if const_expr(swap_AB):
         return gemm_zero_init(
-            tiled_mma, shape[::-1], tCrB, tCrA, B_idx, A_idx, wg_wait, swap_AB=False
+            tiled_mma,
+            shape[::-1],
+            tCrB,
+            tCrA,
+            B_idx,
+            A_idx,
+            wg_wait,
+            swap_AB=False,
         )
     else:
         acc = cute.make_fragment(tiled_mma.partition_shape_C(shape), Float32)
-        rA = tCrA if const_expr(A_idx is None) else tCrA[None, None, None, A_idx]
-        rB = tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
+        rA = (
+            tCrA if const_expr(A_idx is None) else tCrA[None, None, None, A_idx]
+        )
+        rB = (
+            tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
+        )
         gemm(tiled_mma, acc, rA, rB, zero_init=True, wg_wait=wg_wait)
         return acc
 
@@ -65,29 +84,43 @@ def gemm_w_idx(
     tCrA: cute.Tensor,
     tCrB: cute.Tensor,
     zero_init: Boolean,
-    A_idx: Optional[Int32] = None,
-    B_idx: Optional[Int32] = None,
+    A_idx: Int32 | None = None,
+    B_idx: Int32 | None = None,
     wg_wait: int = -1,
     swap_AB: bool = False,
 ) -> None:
     if const_expr(swap_AB):
-        gemm_w_idx(tiled_mma, acc, tCrB, tCrA, zero_init, B_idx, A_idx, wg_wait, swap_AB=False)
+        gemm_w_idx(
+            tiled_mma,
+            acc,
+            tCrB,
+            tCrA,
+            zero_init,
+            B_idx,
+            A_idx,
+            wg_wait,
+            swap_AB=False,
+        )
     else:
-        rA = tCrA if const_expr(A_idx is None) else tCrA[None, None, None, A_idx]
-        rB = tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
+        rA = (
+            tCrA if const_expr(A_idx is None) else tCrA[None, None, None, A_idx]
+        )
+        rB = (
+            tCrB if const_expr(B_idx is None) else tCrB[None, None, None, B_idx]
+        )
         gemm(tiled_mma, acc, rA, rB, zero_init=zero_init, wg_wait=wg_wait)
 
 
 @dsl_user_op
 def make_smem_layout(
-    dtype: Type[Numeric],
+    dtype: type[Numeric],
     layout: LayoutEnum,
     shape: cute.Shape,
-    stage: Optional[int] = None,
+    stage: int | None = None,
     *,
     loc=None,
     ip=None,
-) -> Union[cute.Layout, cute.ComposedLayout]:
+) -> cute.Layout | cute.ComposedLayout:
     major_mode_size = shape[1] if layout.is_n_major_c() else shape[0]
     smem_layout_atom = warpgroup.make_smem_layout_atom(
         sm90_utils_og.get_smem_layout_atom(layout, dtype, major_mode_size),
