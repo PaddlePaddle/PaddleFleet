@@ -62,10 +62,20 @@ class TestYarnRotaryEmbedding(unittest.TestCase):
 
 
 class TestYarnRotaryEmbeddingInterleaved(unittest.TestCase):
-    def test_forward_raises_when_interleaved(self):
-        with self.assertRaises(AssertionError):
-            rope = YarnRotaryEmbedding(8, 1.0, rotary_interleaved=True)
-            rope(64)
+    def test_forward_returns_interleaved_freqs(self):
+        rope = YarnRotaryEmbedding(8, 1.0, rotary_interleaved=True)
+        output, mscale = rope(64)
+        assert output.shape[0] == 1
+        assert output.shape[1] == 64
+        assert output.shape[2] == 1
+        assert output.shape[3] == 8
+        assert output.dtype == paddle.float32
+        assert output.place.is_gpu_place()
+        assert mscale == 1.0
+        np.testing.assert_array_equal(
+            output[0, :, 0, 0::2].numpy(),
+            output[0, :, 0, 1::2].numpy(),
+        )
 
 
 def build_freqs_half(seq_len, rot_dim, rope_theta=10000.0):
@@ -185,7 +195,7 @@ class TestApplyRotaryPosEmbFusedHighPrecision(unittest.TestCase):
             apply_rope_fusion=True, high_precision_rope=True
         )
         ref_config = make_config(
-            apply_rope_fusion=False, high_precision_rope=False
+            apply_rope_fusion=False, high_precision_rope=True
         )
 
         fused_out = apply_rotary_pos_emb(
@@ -197,13 +207,52 @@ class TestApplyRotaryPosEmbFusedHighPrecision(unittest.TestCase):
             mscale=0.5,
         )
         ref_out = apply_rotary_pos_emb(
-            x.astype("float32"),
+            x,
             freqs,
             cos=None,
             sin=None,
             config=ref_config,
             mscale=0.5,
-        ).astype(x.dtype)
+        )
+
+        self.assertTensorExactEqual(fused_out, ref_out)
+
+    def test_high_precision_fused_falls_back_to_unfused_path_when_interleaved(
+        self,
+    ):
+        batch_size, seq_len, num_heads, hidden_dim = 1, 96, 4, 72
+        x = paddle.randn(
+            [batch_size, seq_len, num_heads, hidden_dim], dtype="float32"
+        ).astype("bfloat16")
+        freqs = build_freqs(build_freqs_half(seq_len, hidden_dim))
+
+        fused_config = make_config(
+            apply_rope_fusion=True,
+            high_precision_rope=True,
+            rotary_interleaved=True,
+        )
+        ref_config = make_config(
+            apply_rope_fusion=False,
+            high_precision_rope=True,
+            rotary_interleaved=True,
+        )
+
+        fused_out = apply_rotary_pos_emb(
+            x,
+            freqs,
+            cos=None,
+            sin=None,
+            config=fused_config,
+            mscale=1.0,
+        )
+        ref_out = apply_rotary_pos_emb(
+            x,
+            freqs,
+            cos=None,
+            sin=None,
+            config=ref_config,
+            mscale=1.0,
+        )
 
         self.assertTensorExactEqual(fused_out, ref_out)
 
