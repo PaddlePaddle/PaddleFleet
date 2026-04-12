@@ -31,18 +31,18 @@ from .utils import (
     patch_module_namespace,
 )
 
-# paddle.compat.enable_torch_proxy(scope={"triton"}) enables the torch proxy
+# paddle.enable_compat(scope={"triton"}) enables the torch proxy
 # specifically for the 'triton' module. This means `import torch` inside 'triton'
 # will actually import paddle's compatibility layer (acting as torch).
 #
 # 'scope' acts as an allowlist. To add other modules, you can do:
-# paddle.compat.enable_torch_proxy(scope={"triton", "new_module"})
+# paddle.enable_compat(scope={"triton", "new_module"})
 #
 # Note: Ensure that any torch APIs used in 'new_module' are already implemented in Paddle.
 
 if "torch" in sys.modules and sys.modules["torch"] is None:
     # Note: In paddleformer's __init__.py, it will set sys.modules["torch"] to None
-    # We should restore or delete it before enable_torch_proxy
+    # We should restore or delete it before enabling compat mode.
     del sys.modules["torch"]
     if "torch_save" in sys.modules and sys.modules["torch_save"] is not None:
         sys.modules["torch"] = sys.modules["torch_save"]
@@ -224,9 +224,7 @@ blocked_import_messages: dict[str, str] = {}
 
 if paddle.is_compiled_with_cuda():
     if is_deep_gemm_available():
-        paddle.compat.enable_torch_proxy(
-            scope={"deep_gemm", "triton"}, silent=True
-        )
+        paddle.enable_compat(scope={"deep_gemm", "triton"}, silent=True)
         _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
     else:
         warning, error = _hopper_requirement(
@@ -236,7 +234,7 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet.ops.deep_gemm"] = error
 
     if is_deep_ep_available():
-        paddle.compat.enable_torch_proxy(scope={"deep_ep"}, silent=True)
+        paddle.enable_compat(scope={"deep_ep"}, silent=True)
         # Loading libnvshmem_host.so.* first when use editable install
         _try_load_nvshmem(ops_dir)
         _safe_load_ecosystem_lib("deep_ep", ops_dir, globals())
@@ -248,9 +246,7 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet.ops.deep_ep"] = error
 
     if is_sonic_moe_available():
-        paddle.compat.enable_torch_proxy(
-            scope={"sonicmoe", "quack", "triton"}, silent=True
-        )
+        paddle.enable_compat(scope={"sonicmoe", "quack", "triton"}, silent=True)
         _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
     else:
         warning, error = _sonic_moe_requirement(
@@ -274,12 +270,12 @@ if paddle.is_compiled_with_cuda():
         )
 
     try:
-        paddle.compat.enable_torch_proxy(scope={"triton"}, silent=True)
+        paddle.enable_compat(scope={"triton"}, silent=True)
         from .._extensions.flashmask import (
             rr_attn_estimate_triton_func,  # noqa: F401
         )
     finally:
-        paddle.compat.disable_torch_proxy()
+        paddle.disable_compat()
 
 
 def __getattr__(name):

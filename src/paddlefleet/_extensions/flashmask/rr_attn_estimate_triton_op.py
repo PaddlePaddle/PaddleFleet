@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import paddle
 
-# paddle.compat.enable_torch_proxy()
+# paddle.enable_compat()
 import triton
 import triton.language as tl
 

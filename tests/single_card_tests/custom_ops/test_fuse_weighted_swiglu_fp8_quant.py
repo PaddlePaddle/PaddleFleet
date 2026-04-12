@@ -18,7 +18,7 @@ import numpy as np
 import paddle
 import paddle.incubate.nn.functional as F
 
-paddle.compat.enable_torch_proxy()
+paddle.enable_compat()
 
 from paddlefleet.ops import deep_gemm, fuse_weighted_swiglu_fp8_quant
 from paddlefleet.ops.deep_gemm.testing import (
