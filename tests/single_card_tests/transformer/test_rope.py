@@ -22,9 +22,9 @@ from paddle.incubate.nn.functional import (
 )
 
 from paddlefleet.models.common.embeddings import (
-    apply_rotary_pos_emb,
     RotaryEmbedding,
     YarnRotaryEmbedding,
+    apply_rotary_pos_emb,
 )
 
 
@@ -64,17 +64,14 @@ class TestYarnRotaryEmbedding(unittest.TestCase):
 class TestYarnRotaryEmbeddingInterleaved(unittest.TestCase):
     def test_forward_raises_when_interleaved(self):
         with self.assertRaises(AssertionError):
-            rope = YarnRotaryEmbedding(
-                8, 1.0, rotary_interleaved=True
-            )
+            rope = YarnRotaryEmbedding(8, 1.0, rotary_interleaved=True)
             rope(64)
 
 
 def build_freqs_half(seq_len, rot_dim, rope_theta=10000.0):
     positions = paddle.arange(seq_len, dtype="float32")
     inv_freq = 1.0 / (
-        rope_theta
-        ** (paddle.arange(0, rot_dim, 2, dtype="float32") / rot_dim)
+        rope_theta ** (paddle.arange(0, rot_dim, 2, dtype="float32") / rot_dim)
     )
     return paddle.outer(positions, inv_freq)
 
@@ -89,7 +86,9 @@ def build_cos_sin(freqs):
     return cos, sin
 
 
-def make_config(apply_rope_fusion, high_precision_rope, rotary_interleaved=False):
+def make_config(
+    apply_rope_fusion, high_precision_rope, rotary_interleaved=False
+):
     return SimpleNamespace(
         apply_rope_fusion=apply_rope_fusion,
         rotary_interleaved=rotary_interleaved,
@@ -101,7 +100,9 @@ def make_config(apply_rope_fusion, high_precision_rope, rotary_interleaved=False
 
 
 def apply_fused_rope_reference(x, freqs):
-    freqs_2d = freqs.reshape([-1, freqs.shape[-1]]) if freqs.ndim == 3 else freqs
+    freqs_2d = (
+        freqs.reshape([-1, freqs.shape[-1]]) if freqs.ndim == 3 else freqs
+    )
     rot_dim = freqs_2d.shape[-1]
     cos, sin = build_cos_sin(freqs_2d)
     rotated, _, _ = fused_rope(
@@ -132,7 +133,9 @@ class TestApplyRotaryPosEmbFusedHighPrecision(unittest.TestCase):
         ).astype("bfloat16")
         freqs = build_freqs(build_freqs_half(seq_len, rot_dim))
 
-        fused_config = make_config(apply_rope_fusion=True, high_precision_rope=True)
+        fused_config = make_config(
+            apply_rope_fusion=True, high_precision_rope=True
+        )
         fused_out = apply_rotary_pos_emb(
             x,
             freqs,
@@ -154,7 +157,9 @@ class TestApplyRotaryPosEmbFusedHighPrecision(unittest.TestCase):
         ).astype("bfloat16")
         freqs = build_freqs(build_freqs_half(seq_len, hidden_dim)).unsqueeze(0)
 
-        fused_config = make_config(apply_rope_fusion=True, high_precision_rope=True)
+        fused_config = make_config(
+            apply_rope_fusion=True, high_precision_rope=True
+        )
         fused_out = apply_rotary_pos_emb(
             x,
             freqs,
@@ -176,7 +181,9 @@ class TestApplyRotaryPosEmbFusedHighPrecision(unittest.TestCase):
         ).astype("bfloat16")
         freqs = build_freqs(build_freqs_half(seq_len, hidden_dim))
 
-        fused_config = make_config(apply_rope_fusion=True, high_precision_rope=True)
+        fused_config = make_config(
+            apply_rope_fusion=True, high_precision_rope=True
+        )
         ref_config = make_config(
             apply_rope_fusion=False, high_precision_rope=False
         )
