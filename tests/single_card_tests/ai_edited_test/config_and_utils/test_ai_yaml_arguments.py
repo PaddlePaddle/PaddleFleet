@@ -30,9 +30,15 @@ sys.path.insert(
 
 import unittest
 
-from omegaconf import DictConfig, OmegaConf
+try:
+    from omegaconf import DictConfig, OmegaConf
+
+    HAVE_OMEGACONF = True
+except ImportError:
+    HAVE_OMEGACONF = False
 
 
+@unittest.skipUnless(HAVE_OMEGACONF, "omegaconf not available in CI")
 class TestFlattenConfigs(unittest.TestCase):
     """Tests for _flatten_configs function."""
 
@@ -149,6 +155,7 @@ class TestFlattenConfigs(unittest.TestCase):
         self.assertIsNone(result.none_val)
 
 
+@unittest.skipUnless(HAVE_OMEGACONF, "omegaconf not available in CI")
 class TestLoadYaml(unittest.TestCase):
     """Tests for load_yaml function."""
 
