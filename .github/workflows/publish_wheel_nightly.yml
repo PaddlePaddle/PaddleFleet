@@ -209,7 +209,6 @@ jobs:
             --ulimit core=-1 \
             --cap-add SYS_ADMIN \
             --privileged=true \
-            -v $PWD:/workspace \
             -v /ssd1:/ssd1 \
             -v /ssd2:/ssd2 \
             -v /ssd3:/ssd3 \
