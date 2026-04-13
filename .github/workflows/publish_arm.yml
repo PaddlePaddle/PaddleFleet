@@ -9,9 +9,6 @@ on:
   #       type: choice
   #       options:
   #         - publish-wheel
-  pull_request:
-    types: [opened, synchronize]
-    branches: [develop, release/**]
   schedule:
     - cron: '0 16 * * *'
   push:
