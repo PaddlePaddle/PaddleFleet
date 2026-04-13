@@ -240,6 +240,7 @@ items:
             load_yaml("/nonexistent/path/config.yaml")
 
 
+@unittest.skipUnless(HAVE_OMEGACONF, "omegaconf not available in CI")
 class TestYamlArgumentsModule(unittest.TestCase):
     """Tests for module structure."""
 
