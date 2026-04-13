@@ -21,7 +21,7 @@ on:
 permissions: read-all
 
 concurrency:
-  group: ${{ github.workflow }}-all-${{ github.sha }}
+  group: ${{ github.workflow }}-all-arm-${{ github.sha }}
   cancel-in-progress: true
 
 env:
