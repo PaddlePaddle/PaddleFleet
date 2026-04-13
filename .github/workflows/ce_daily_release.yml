@@ -29,8 +29,8 @@ env:
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image_cu126: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda126-dev"
-  docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
-  docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev"
+  docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
+  docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda130-py312-dev"
   paddle_url_cu126: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
   paddle_url_cu129: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
@@ -141,20 +141,14 @@ jobs:
           source /root/proxy
           mkdir -p /home/.cache/pip
           pip cache dir
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -315,20 +309,14 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           pip install --upgrade pip
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -358,10 +346,8 @@ jobs:
       - name: Multi-card test
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -487,16 +473,14 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
           pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -517,14 +501,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -564,10 +542,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
@@ -583,10 +559,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
@@ -602,10 +576,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
@@ -621,10 +593,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -740,16 +710,14 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
           pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -770,14 +738,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -816,10 +778,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -835,10 +795,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -854,10 +812,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -873,10 +829,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -892,10 +846,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -915,10 +867,8 @@ jobs:
           if [ "${CUDA_VERSION}" == "cu126" ]; then
             exit 0
           fi
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -938,10 +888,8 @@ jobs:
           if [ "${CUDA_VERSION}" == "cu126" ]; then
             exit 0
           fi
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -957,10 +905,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
@@ -976,10 +922,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/qwen.sh pt
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -995,10 +939,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/qwen.sh sft
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1014,10 +956,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/qwen.sh lora
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1033,10 +973,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1052,10 +990,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1071,10 +1007,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1090,10 +1024,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
@@ -1209,16 +1141,14 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          if [ ${PYTHON_VERSION} != "3.10" ]; then
-            wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-            bash miniconda.sh -b -p $HOME/miniconda -u
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-            conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-            conda init bash
-            conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
-            conda activate python${PYTHON_VERSION}
-          fi
+          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda init bash
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda activate python${PYTHON_VERSION}
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
           pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -1239,14 +1169,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          else
-            paddle_url=${PADDLE_URL}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -1283,10 +1207,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1302,10 +1224,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1321,10 +1241,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1340,10 +1258,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1359,10 +1275,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1378,10 +1292,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1397,10 +1309,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1416,10 +1326,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1435,10 +1343,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1454,10 +1360,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
@@ -1473,10 +1377,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          if [ "${PYTHON_VERSION}" != "3.10" ]; then
-            source "$HOME/miniconda/etc/profile.d/conda.sh"
-            conda activate python${PYTHON_VERSION}
-          fi
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
           timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
