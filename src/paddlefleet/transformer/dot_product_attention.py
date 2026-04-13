@@ -177,6 +177,26 @@ class DotProductAttention(FleetLayer):
             raise ValueError("Softmax type not supported")
         self.rr_flashmask_attention_func = rr_flashmask_attention()
 
+    @staticmethod
+    def _pad_value_for_mla(
+        query: Tensor,
+        value: Tensor,
+    ) -> tuple[Tensor, int]:
+        q_head_dim = query.shape[-1]
+        v_head_dim = value.shape[-1]
+        if q_head_dim == v_head_dim:
+            return value, v_head_dim
+        if q_head_dim < v_head_dim:
+            raise ValueError(
+                f"query head_dim ({q_head_dim}) must be >= value head_dim ({v_head_dim}) "
+                "when padding MLA value for flash attention."
+            )
+
+        pad_shape = list(value.shape)
+        pad_shape[-1] = q_head_dim - v_head_dim
+        value_padding = paddle.zeros(pad_shape, dtype=value.dtype)
+        return paddle.concat([value, value_padding], axis=-1), v_head_dim
+
     def forward(
         self,
         query: Tensor,
@@ -193,14 +213,6 @@ class DotProductAttention(FleetLayer):
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
-        if self.config.fa_version == 4:
-            from paddlefleet.ops.flash_mask.cute.interface import (
-                flashmask_attention as _flashmask_attention,
-            )
-        else:
-            from paddle.nn.functional.flash_attention import (
-                flashmask_attention as _flashmask_attention,
-            )
         if packed_seq_params is not None:
             assert (
                 query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
@@ -235,19 +247,42 @@ class DotProductAttention(FleetLayer):
                     .unsqueeze(0)
                 )  # [1, 1, seq_len, 4]
 
+            if self.config.fa_version == 4:
+                from paddlefleet.ops.flash_mask.cute.interface import (
+                    flashmask_attention as _flashmask_attention,
+                )
+            else:
+                from paddle.nn.functional.flash_attention import (
+                    flashmask_attention as _flashmask_attention,
+                )
             flashmask_attention_func = (
                 self.rr_flashmask_attention_func
                 if use_rr_flash_attention
                 else _flashmask_attention
             )
-            attn_output = flashmask_attention_func(
-                query.astype(value.dtype),
-                key.astype(value.dtype),
-                value.astype(value.dtype),
-                startend_row_indices=attn_mask_startend_row_indices,
-                dropout=self.config.attention_dropout,
-                causal=False,
-            )
+            if self.config.fa_version == 2:
+                value_input, v_head_dim = self._pad_value_for_mla(
+                    query,
+                    value.astype(value.dtype),
+                )
+                attn_output = flashmask_attention_func(
+                    query.astype(value.dtype),
+                    key.astype(value.dtype),
+                    value_input,
+                    startend_row_indices=attn_mask_startend_row_indices,
+                    dropout=self.config.attention_dropout,
+                    causal=False,
+                )
+                attn_output = attn_output[..., :v_head_dim]
+            else:
+                attn_output = flashmask_attention_func(
+                    query.astype(value.dtype),
+                    key.astype(value.dtype),
+                    value.astype(value.dtype),
+                    startend_row_indices=attn_mask_startend_row_indices,
+                    dropout=self.config.attention_dropout,
+                    causal=False,
+                )
             attn_output = attn_output.reshape([0, 0, -1])
             return attn_output
         if (
@@ -278,6 +313,14 @@ class DotProductAttention(FleetLayer):
         elif (
             query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
         ) and attn_mask_startend_row_indices is not None:
+            if self.config.fa_version == 4:
+                from paddlefleet.ops.flash_mask.cute.interface import (
+                    flashmask_attention as _flashmask_attention,
+                )
+            else:
+                from paddle.nn.functional.flash_attention import (
+                    flashmask_attention as _flashmask_attention,
+                )
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             flashmask_attention_func = (
@@ -285,38 +328,29 @@ class DotProductAttention(FleetLayer):
                 if use_rr_flash_attention
                 else _flashmask_attention
             )
-
-            # Handle MLA case where query/key head_dim != value head_dim
-            # flashmask_attention requires head_dim_q == head_dim_v for backward pass
-            q_head_dim = query.shape[-1]
-            v_head_dim = value.shape[-1]
-            need_value_padding = q_head_dim != v_head_dim
-
-            if need_value_padding:
-                # Pad value to match query head_dim
-                # value: [b, s, h, v_head_dim] -> [b, s, h, q_head_dim]
-                bsz, seq_len, num_heads, _ = value.shape
-                value_padding = paddle.zeros(
-                    [bsz, seq_len, num_heads, q_head_dim - v_head_dim],
-                    dtype=value.dtype,
+            if self.config.fa_version == 2:
+                value_input, v_head_dim = self._pad_value_for_mla(
+                    query,
+                    value,
                 )
-                value_padded = paddle.concat([value, value_padding], axis=-1)
-            else:
-                value_padded = value
-
-            attn_output = flashmask_attention_func(
-                query.astype(value.dtype),
-                key.astype(value.dtype),
-                value_padded.astype(value.dtype),
-                startend_row_indices=attn_mask_startend_row_indices,
-                dropout=self.config.attention_dropout,
-                causal=(attn_mask_type == AttnMaskType.causal),
-            )
-
-            if need_value_padding:
-                # Truncate output back to original v_head_dim
-                # attn_output: [b, s, h, q_head_dim] -> [b, s, h, v_head_dim]
+                attn_output = flashmask_attention_func(
+                    query.astype(value.dtype),
+                    key.astype(value.dtype),
+                    value_input.astype(value.dtype),
+                    startend_row_indices=attn_mask_startend_row_indices,
+                    dropout=self.config.attention_dropout,
+                    causal=(attn_mask_type == AttnMaskType.causal),
+                )
                 attn_output = attn_output[..., :v_head_dim]
+            else:
+                attn_output = flashmask_attention_func(
+                    query.astype(value.dtype),
+                    key.astype(value.dtype),
+                    value.astype(value.dtype),
+                    startend_row_indices=attn_mask_startend_row_indices,
+                    dropout=self.config.attention_dropout,
+                    causal=(attn_mask_type == AttnMaskType.causal),
+                )
 
             attn_output = attn_output.reshape([0, 0, -1])
 
