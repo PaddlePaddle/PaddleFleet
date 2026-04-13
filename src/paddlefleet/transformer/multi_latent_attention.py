@@ -44,6 +44,13 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_size
 
 try:
+    from paddlefleet.transformer.dot_product_attention import (
+        CPDotProductAttention,
+    )
+except Exception:
+    CPDotProductAttention = None
+
+try:
     from paddlefleet.fusions.fused_mla_yarn_rope_apply import (
         fused_apply_mla_rope_for_kv,
         fused_apply_mla_rope_for_q,

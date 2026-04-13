@@ -218,6 +218,12 @@ class GPTMainLMHead(GPTLMHead):
             "logits": logits,
             "mtp_loss": mtp_loss,
         }
+        # Filter out None values to avoid AttributeError in
+        # convert_tensor_dict_to_tuple when pipeline stage boundary
+        # separates GPTMainLMHead from MTPLanguageLoss
+        for key in list(ret.keys()):
+            if ret[key] is None:
+                ret.pop(key)
         return ret
 
     @property
