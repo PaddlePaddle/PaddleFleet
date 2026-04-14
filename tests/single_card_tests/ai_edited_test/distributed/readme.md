@@ -14,6 +14,7 @@ This directory contains unit tests for PaddleFleet's distributed module and rela
 | `test_context_parallel_utils.py` | `src/paddlefleet/context_parallel_utils.py` | Context parallel ops: scatter/gather/reduce-scatter, flashmask CP |
 | `test_recompute_utils.py` | `src/paddlefleet/recompute_utils.py` | Recompute layer selection: block, first_n, full |
 | `test_packed_seq_params.py` | `src/paddlefleet/packed_seq_params.py` | `PackedSeqParams` dataclass for packed sequence format |
+| `test_flashmask_version_dispatch.py` | `src/paddlefleet/context_parallel_utils.py` & `src/paddlefleet/refined_recompute/flash_attn.py` | Test flashmask API params for different dispatching different versions |
 
 ## Running Tests
 
