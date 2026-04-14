@@ -148,6 +148,7 @@ jobs:
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -327,6 +328,7 @@ jobs:
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -526,6 +528,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -788,6 +791,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
@@ -1283,6 +1287,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
