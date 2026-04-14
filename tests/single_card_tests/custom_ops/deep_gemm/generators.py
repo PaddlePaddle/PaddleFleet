@@ -14,7 +14,7 @@
 
 import paddle
 
-paddle.compat.enable_torch_proxy()
+paddle.enable_compat()
 import enum
 import random
 from collections.abc import Generator

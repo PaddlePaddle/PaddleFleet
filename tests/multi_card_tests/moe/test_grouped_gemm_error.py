@@ -87,7 +87,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(
-            num_experts=n_routed_experts
+            transformer_config, num_experts=n_routed_experts
         )
 
         # This configuration should raise a ValueError because:

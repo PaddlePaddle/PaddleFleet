@@ -34,6 +34,9 @@ from paddle.distributed import fleet
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
 from paddlefleet.pipeline_parallel import ScheduleChunk
+from paddlefleet.transformer.multi_token_prediction import (
+    MultiTokenPredictionLayer,
+)
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerNode,
@@ -215,7 +218,8 @@ class GPTModel(PipelineLayer):
 
     def get_layer_desc_list(self, spec, tie_word_embeddings):
         layers = []
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+        model_type = getattr(self.config, "model_type", "")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
             name_prefix = "model.language_model"
         else:
             name_prefix = "model"
@@ -533,7 +537,8 @@ class GPTModel(PipelineLayer):
         """
         state_dict = super().state_dict(*args, **kwargs)
 
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+        model_type = getattr(self.config, "model_type", "")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
             name_prefix = "model.language_model."
         else:
             name_prefix = ""
@@ -600,7 +605,8 @@ class GPTModel(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+        model_type = getattr(self.config, "model_type", "")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
             name_prefix = "model.language_model."
         else:
             name_prefix = ""
@@ -656,10 +662,19 @@ class GPTModel(PipelineLayer):
                             batch_mode=batch_mode,
                             quant_transpose=quant_transpose,
                         )
+                    elif isinstance(layer, MultiTokenPredictionLayer):
+                        layer.transformer_layer.fp8_quant_weight(
+                            batch_mode=batch_mode,
+                            quant_transpose=quant_transpose,
+                        )
         else:
             for idx, layer in enumerate(self.run_function):
                 if isinstance(layer, TransformerLayer):
                     layer.fp8_quant_weight(
+                        batch_mode=batch_mode, quant_transpose=quant_transpose
+                    )
+                elif isinstance(layer, MultiTokenPredictionLayer):
+                    layer.transformer_layer.fp8_quant_weight(
                         batch_mode=batch_mode, quant_transpose=quant_transpose
                     )
 

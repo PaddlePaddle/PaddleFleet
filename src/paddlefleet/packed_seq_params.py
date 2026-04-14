@@ -35,3 +35,5 @@ class PackedSeqParams:
     cu_seqlens_kv_padded: Tensor | None = None
     max_seqlen_q: int | None = None
     max_seqlen_kv: int | None = None
+    total_seqlen_q: int | None = None
+    total_seqlen_kv: int | None = None

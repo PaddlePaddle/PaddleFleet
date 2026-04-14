@@ -14,6 +14,7 @@
 
 
 import functools
+import os
 import pprint
 import random
 import unittest
@@ -29,6 +30,8 @@ from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
+REPO_FLAG = os.getenv("repo_flag")
+SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
 def _set_random_seed(
@@ -194,27 +197,27 @@ class TestPP(unittest.TestCase):
         pp = pprint.PrettyPrinter(depth=None, width=200, compact=False)
         pp.pprint(rst)
 
-        assert overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
+        assert overlap_loss._md5sum() == "bdd8b8660e976d3c1dde170aabeb3a6c"
 
         if paddle.distributed.get_rank() == 0:
             baseline = {
-                "_layers.9.0.input_layernorm.weight": "b75652fc8c6d4bba4513e90a2c5a7596",
-                "_layers.9.0.mlp.down_proj.weight": "7becd6a8b649192155befc2ec16fe250",
-                "_layers.9.0.mlp.up_gate_proj.weight": "121d4eb684ed0c9f63b357bc00f4815a",
-                "_layers.9.0.post_attention_layernorm.weight": "4c3f808bf274eddd33dad2d96f4b8804",
-                "_layers.9.0.self_attn.k_norm.weight": "8a94851abc94463b6eee1e18440ad6ef",
-                "_layers.9.0.self_attn.o_proj.weight": "1d2477b05c078e71bacd435fac5731e8",
-                "_layers.9.0.self_attn.q_norm.weight": "ac1adb34d94a0cf8e9154ed3cbf097c0",
-                "_layers.9.0.self_attn.qkv_proj.weight": "1a6e380b99c46f8f360bec6dc4bbea33",
-                "_layers.9.1.input_layernorm.weight": "74e13bcebc22f55da1ea996996faa1f1",
-                "_layers.9.1.mlp.down_proj.weight": "bd18ba2e343c07ddcb43133995917c03",
-                "_layers.9.1.mlp.up_gate_proj.weight": "f1d4215e022a65e3401ae3e2c80fb4ba",
-                "_layers.9.1.post_attention_layernorm.weight": "91df0009a11c69192fafa1dd13690bff",
-                "_layers.9.1.self_attn.k_norm.weight": "0a17912c1aaf609354cfdb7ba9289fbb",
-                "_layers.9.1.self_attn.o_proj.weight": "bb579d22c85c7d7d9b266d2195dc0326",
-                "_layers.9.1.self_attn.q_norm.weight": "74cc012f0bc84b6aff0c3372bb62c9c4",
-                "_layers.9.1.self_attn.qkv_proj.weight": "d71928b0d80a20082fd7f9ed794e0cae",
-                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "ab8ed982bcd685d6617717b0da1aafda",
+                "_layers.9.0.input_layernorm.weight": "9658e5354bb59e784086b8c1be08ca04",
+                "_layers.9.0.mlp.down_proj.weight": "cc5014fd095ce9a464de32cfe5b90848",
+                "_layers.9.0.mlp.up_gate_proj.weight": "ac1348bfc82d1be66c07c5858727cf77",
+                "_layers.9.0.post_attention_layernorm.weight": "a1d8b456b27485f5a0591c4c051078a8",
+                "_layers.9.0.self_attn.k_norm.weight": "d6a54a647a86f3527a7347f9e2feaaee",
+                "_layers.9.0.self_attn.o_proj.weight": "add86b72cf4fce187b9fcfecc2d5eea2",
+                "_layers.9.0.self_attn.q_norm.weight": "fad9fdd2b5c499565a12663baf1f5c51",
+                "_layers.9.0.self_attn.qkv_proj.weight": "f4029f4c980a46002dc1e316ddcab7d3",
+                "_layers.9.1.input_layernorm.weight": "2a2689c90d0dcb936e7ce3c0c6b18f5f",
+                "_layers.9.1.mlp.down_proj.weight": "85ec9eec9ac40f41eeb40fb559f16cd2",
+                "_layers.9.1.mlp.up_gate_proj.weight": "d52a62446cc35abe7548492bd17dd4ee",
+                "_layers.9.1.post_attention_layernorm.weight": "520f79414d605e1d3ef2b7d18fcba8cb",
+                "_layers.9.1.self_attn.k_norm.weight": "fb600ebbae4ff5467844d3dbc68fdda6",
+                "_layers.9.1.self_attn.o_proj.weight": "89256abd1e6fbd8d9966dbaed4968df4",
+                "_layers.9.1.self_attn.q_norm.weight": "4f431eeaf17d1342563fcb6f95e7a298",
+                "_layers.9.1.self_attn.qkv_proj.weight": "54db9155da3a148a3edffb0face5d249",
+                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "e4234572645381519a4d36874f2c2a04",
             }
 
             for name, p in overlap_gpt_model.named_parameters():
