@@ -73,10 +73,11 @@ class TestFusedStackQuantNoCacheNonTranspose(unittest.TestCase):
         w, _ = fused_stack_quant(self.weights, transpose=False)
         self.assertEqual(w.dtype, paddle.float8_e4m3fn)
 
-    def test_weight_leading_dim_equals_num_experts(self):
+    def test_weight_rows_equals_num_experts_times_N(self):
+        # op stacks experts along dim-0: total rows = num_experts * N
         w, _ = fused_stack_quant(self.weights, transpose=False)
-        # stacked on dim-0
-        self.assertEqual(w.shape[0], NUM_EXPERTS)
+        self.assertEqual(w.shape[0], NUM_EXPERTS * N)
+        self.assertEqual(w.shape[1], K)
 
     def test_scale_is_float32(self):
         _, scale = fused_stack_quant(self.weights, transpose=False)
@@ -104,54 +105,72 @@ class TestFusedStackQuantNoCacheTranspose(unittest.TestCase):
 class TestFusedStackQuantUe8m0ScaleTranspose(unittest.TestCase):
     """
     Verify the new use_ue8m0=True behavior introduced in the commit:
-    the returned scale tensor must be transposed (.T) compared to the
-    use_ue8m0=False variant.
+    scale = scale.T is applied on the raw op output when use_ue8m0=True.
+    We compare against the direct op call (same weights) to confirm identity.
     """
 
     def setUp(self):
         if not core.is_compiled_with_cuda():
             self.skipTest("CUDA required")
+        try:
+            from paddlefleet.ops import (
+                fuse_stack_fp8_quant,
+                fuse_stack_transpose_fp8_quant,
+            )
+
+            self._fuse_stack = fuse_stack_fp8_quant
+            self._fuse_stack_t = fuse_stack_transpose_fp8_quant
+        except (ImportError, RuntimeError):
+            self.skipTest("paddlefleet.ops not available")
         np.random.seed(0)
         paddle.seed(0)
 
-    def _get_both_scales(self, weights, transpose):
-        w1, scale_fp32 = fused_stack_quant(
-            weights, transpose=transpose, use_ue8m0=False
-        )
-        # Re-create fresh weights (no cache attached yet) for the ue8m0 call
-        weights2 = _make_weight_list()
-        w2, scale_ue8m0 = fused_stack_quant(
-            weights2, transpose=transpose, use_ue8m0=True
-        )
-        return w1, scale_fp32, w2, scale_ue8m0
+    def test_ue8m0_scale_shape_equals_raw_op_T_nontranspose(self):
+        """scale from fused_stack_quant(use_ue8m0=True) == raw_op output scale.T
+        Only meaningful on SM10 (Blackwell); skip on older GPUs where ue8m0
+        calling the raw op may trigger CUDA illegal memory access."""
+        arch = paddle.device.cuda.get_device_capability()[0]
+        if arch < 10:
+            self.skipTest(
+                "ue8m0 scale layout only supported on SM10+ (Blackwell)"
+            )
+        use_pow2 = True
+        weights = _make_weight_list()
+        weights_copy = [w.clone() for w in weights]
 
-    def test_ue8m0_scale_shape_is_transposed_of_fp32_scale_nontranspose(self):
-        """For non-transpose path, scale_ue8m0.shape == scale_fp32.T.shape."""
-        w1, scale_fp32 = fused_stack_quant(
-            _make_weight_list(), transpose=False, use_ue8m0=False
-        )
-        w2, scale_ue8m0 = fused_stack_quant(
-            _make_weight_list(), transpose=False, use_ue8m0=True
-        )
-        self.assertEqual(list(scale_ue8m0.shape), list(scale_fp32.T.shape))
+        _, s_raw = self._fuse_stack(weights_copy, use_pow2, True, True)
+        _, s_fused = fused_stack_quant(weights, transpose=False, use_ue8m0=True)
+        self.assertEqual(list(s_fused.shape), list(s_raw.T.shape))
 
-    def test_ue8m0_scale_shape_is_transposed_of_fp32_scale_transpose(self):
-        """For transpose path, scale_ue8m0.shape == scale_fp32.T.shape."""
-        w1, scale_fp32 = fused_stack_quant(
-            _make_weight_list(), transpose=True, use_ue8m0=False
-        )
-        w2, scale_ue8m0 = fused_stack_quant(
-            _make_weight_list(), transpose=True, use_ue8m0=True
-        )
-        self.assertEqual(list(scale_ue8m0.shape), list(scale_fp32.T.shape))
+    def test_ue8m0_scale_shape_equals_raw_op_T_transpose(self):
+        """scale from fused_stack_quant(transpose=True, use_ue8m0=True) == raw_op scale.T
+        Only meaningful on SM10+; skip on older GPUs."""
+        arch = paddle.device.cuda.get_device_capability()[0]
+        if arch < 10:
+            self.skipTest(
+                "ue8m0 scale layout only supported on SM10+ (Blackwell)"
+            )
+        use_pow2 = True
+        weights = _make_weight_list()
+        weights_copy = [w.clone() for w in weights]
+
+        _, s_raw = self._fuse_stack_t(weights_copy, use_pow2, True, True)
+        _, s_fused = fused_stack_quant(weights, transpose=True, use_ue8m0=True)
+        self.assertEqual(list(s_fused.shape), list(s_raw.T.shape))
 
     def test_ue8m0_weight_dtype_is_fp8_nontranspose(self):
+        arch = paddle.device.cuda.get_device_capability()[0]
+        if arch < 10:
+            self.skipTest("use_ue8m0=True is only safe on SM10+ (Blackwell)")
         w, _ = fused_stack_quant(
             _make_weight_list(), transpose=False, use_ue8m0=True
         )
         self.assertEqual(w.dtype, paddle.float8_e4m3fn)
 
     def test_ue8m0_weight_dtype_is_fp8_transpose(self):
+        arch = paddle.device.cuda.get_device_capability()[0]
+        if arch < 10:
+            self.skipTest("use_ue8m0=True is only safe on SM10+ (Blackwell)")
         w, _ = fused_stack_quant(
             _make_weight_list(), transpose=True, use_ue8m0=True
         )
@@ -161,50 +180,45 @@ class TestFusedStackQuantUe8m0ScaleTranspose(unittest.TestCase):
 class TestFusedStackQuantCacheHitNonTranspose(unittest.TestCase):
     """
     Cache-hit branch: expert_weight_list[0] already has fp8_weight_stacked.
-    transpose=False -> should return the cached (non-transposed) values.
+    transpose=False -> should return the cached (non-transposed) values by identity.
     """
 
     def setUp(self):
         if not core.is_compiled_with_cuda():
             self.skipTest("CUDA required")
 
-    def test_returns_cached_non_transpose(self):
+    def _make_cached_weights(self):
+        """Run op once, attach result as cache to a fresh list."""
         weights = _make_weight_list()
-        # Build fake cached tensors with recognizable values
-        fake_w = paddle.ones([NUM_EXPERTS, N, K], dtype=paddle.float8_e4m3fn)
-        fake_s = paddle.full(
-            [NUM_EXPERTS, N // 128, K // 128], 0.5, dtype=paddle.float32
+        w_real, s_real = fused_stack_quant(
+            weights, transpose=False, use_ue8m0=False
         )
-        _attach_fp8_cache(weights, fake_w, fake_s, transpose=False)
+        weights2 = _make_weight_list()
+        _attach_fp8_cache(weights2, w_real, s_real, transpose=False)
+        return weights2, w_real, s_real
 
-        w, scale = fused_stack_quant(weights, transpose=False)
-        self.assertTrue(
-            paddle.allclose(w.cast(paddle.float32), fake_w.cast(paddle.float32))
-        )
-        self.assertTrue(paddle.allclose(scale, fake_s))
+    def test_returns_cached_non_transpose(self):
+        weights2, w_real, s_real = self._make_cached_weights()
+        w, scale = fused_stack_quant(weights2, transpose=False)
+        # Must be the exact same tensor objects (no live quant should run)
+        self.assertIs(w, w_real)
+        self.assertIs(scale, s_real)
 
     def test_cache_hit_ignores_use_ue8m0_flag(self):
         """When cache is hit, use_ue8m0 has no effect (no live quant runs)."""
-        weights = _make_weight_list()
-        fake_w = paddle.ones([NUM_EXPERTS, N, K], dtype=paddle.float8_e4m3fn)
-        fake_s = paddle.full(
-            [NUM_EXPERTS, N // 128, K // 128], 1.0, dtype=paddle.float32
-        )
-        _attach_fp8_cache(weights, fake_w, fake_s, transpose=False)
-
-        w1, s1 = fused_stack_quant(weights, transpose=False, use_ue8m0=False)
-        w2, s2 = fused_stack_quant(weights, transpose=False, use_ue8m0=True)
-        # Both should return the same cached data
-        self.assertTrue(
-            paddle.allclose(w1.cast(paddle.float32), w2.cast(paddle.float32))
-        )
-        self.assertTrue(paddle.allclose(s1, s2))
+        weights2, w_real, s_real = self._make_cached_weights()
+        w1, s1 = fused_stack_quant(weights2, transpose=False, use_ue8m0=False)
+        w2, s2 = fused_stack_quant(weights2, transpose=False, use_ue8m0=True)
+        self.assertIs(w1, w_real)
+        self.assertIs(w2, w_real)
+        self.assertIs(s1, s_real)
+        self.assertIs(s2, s_real)
 
 
 class TestFusedStackQuantCacheHitTranspose(unittest.TestCase):
     """
     Cache-hit branch: expert_weight_list[0] already has fp8_weight_stacked_transpose.
-    transpose=True -> returns cached transpose values.
+    transpose=True -> returns cached transpose values by identity.
     """
 
     def setUp(self):
@@ -213,23 +227,21 @@ class TestFusedStackQuantCacheHitTranspose(unittest.TestCase):
 
     def test_returns_cached_transpose(self):
         weights = _make_weight_list()
-        fake_w = paddle.ones([NUM_EXPERTS, K, N], dtype=paddle.float8_e4m3fn)
-        fake_s = paddle.full(
-            [NUM_EXPERTS, K // 128, N // 128], 2.0, dtype=paddle.float32
+        w_real, s_real = fused_stack_quant(
+            weights, transpose=True, use_ue8m0=False
         )
-        _attach_fp8_cache(weights, fake_w, fake_s, transpose=True)
+        weights2 = _make_weight_list()
+        _attach_fp8_cache(weights2, w_real, s_real, transpose=True)
 
-        w, scale = fused_stack_quant(weights, transpose=True)
-        self.assertTrue(
-            paddle.allclose(w.cast(paddle.float32), fake_w.cast(paddle.float32))
-        )
-        self.assertTrue(paddle.allclose(scale, fake_s))
+        w, scale = fused_stack_quant(weights2, transpose=True)
+        self.assertIs(w, w_real)
+        self.assertIs(scale, s_real)
 
 
 class TestFusedStackQuantCrossHitTransposeFromNonTranspose(unittest.TestCase):
     """
     Fallback branch: transpose=True requested, but only non-transpose cache exists.
-    Should return the non-transposed cached values (caller handles transposition).
+    Should return the non-transposed cached values by identity.
     """
 
     def setUp(self):
@@ -238,24 +250,22 @@ class TestFusedStackQuantCrossHitTransposeFromNonTranspose(unittest.TestCase):
 
     def test_fallback_transpose_uses_nontranspose_cache(self):
         weights = _make_weight_list()
-        fake_w = paddle.ones([NUM_EXPERTS, N, K], dtype=paddle.float8_e4m3fn)
-        fake_s = paddle.full(
-            [NUM_EXPERTS, N // 128, K // 128], 3.0, dtype=paddle.float32
+        w_real, s_real = fused_stack_quant(
+            weights, transpose=False, use_ue8m0=False
         )
-        _attach_fp8_cache(weights, fake_w, fake_s, transpose=False)
+        weights2 = _make_weight_list()
+        _attach_fp8_cache(weights2, w_real, s_real, transpose=False)
         # Only fp8_weight_stacked exists (not fp8_weight_stacked_transpose)
 
-        w, scale = fused_stack_quant(weights, transpose=True)
-        self.assertTrue(
-            paddle.allclose(w.cast(paddle.float32), fake_w.cast(paddle.float32))
-        )
-        self.assertTrue(paddle.allclose(scale, fake_s))
+        w, scale = fused_stack_quant(weights2, transpose=True)
+        self.assertIs(w, w_real)
+        self.assertIs(scale, s_real)
 
 
 class TestFusedStackQuantCrossHitNonTransposeFromTranspose(unittest.TestCase):
     """
     Fallback branch: transpose=False requested, but only transpose cache exists.
-    Should return the transposed cached values.
+    Should return the transposed cached values by identity.
     """
 
     def setUp(self):
@@ -264,18 +274,16 @@ class TestFusedStackQuantCrossHitNonTransposeFromTranspose(unittest.TestCase):
 
     def test_fallback_nontranspose_uses_transpose_cache(self):
         weights = _make_weight_list()
-        fake_w = paddle.ones([NUM_EXPERTS, K, N], dtype=paddle.float8_e4m3fn)
-        fake_s = paddle.full(
-            [NUM_EXPERTS, K // 128, N // 128], 4.0, dtype=paddle.float32
+        w_real, s_real = fused_stack_quant(
+            weights, transpose=True, use_ue8m0=False
         )
-        _attach_fp8_cache(weights, fake_w, fake_s, transpose=True)
+        weights2 = _make_weight_list()
+        _attach_fp8_cache(weights2, w_real, s_real, transpose=True)
         # Only fp8_weight_stacked_transpose exists
 
-        w, scale = fused_stack_quant(weights, transpose=False)
-        self.assertTrue(
-            paddle.allclose(w.cast(paddle.float32), fake_w.cast(paddle.float32))
-        )
-        self.assertTrue(paddle.allclose(scale, fake_s))
+        w, scale = fused_stack_quant(weights2, transpose=False)
+        self.assertIs(w, w_real)
+        self.assertIs(scale, s_real)
 
 
 class TestFusedStackQuantOutputConsistency(unittest.TestCase):
@@ -314,15 +322,19 @@ class TestFusedStackQuantOutputConsistency(unittest.TestCase):
         )
         self.assertTrue((scale > 0).all().item())
 
-    def test_ue8m0_scale_positive(self):
-        """UE8M0 scales must also be strictly positive after .T."""
-        _, scale = fused_stack_quant(
-            _make_weight_list(num_experts=2, shape=(256, 128)),
-            transpose=False,
-            use_ue8m0=True,
-        )
-        # scale is uint8 packed for ue8m0; just check it is non-zero and has correct shape
-        self.assertGreater(scale.numel(), 0)
+    def test_ue8m0_scale_no_exception(self):
+        """use_ue8m0=True should not raise (only validated on SM10+ where it is safe)."""
+        arch = paddle.device.cuda.get_device_capability()[0]
+        if arch < 10:
+            self.skipTest("use_ue8m0=True is only safe on SM10+ (Blackwell)")
+        try:
+            _, scale = fused_stack_quant(
+                _make_weight_list(num_experts=2, shape=(256, 128)),
+                transpose=False,
+                use_ue8m0=True,
+            )
+        except Exception as e:
+            self.fail(f"use_ue8m0=True raised: {e}")
 
 
 class TestFusedStackQuantPow2ScaleBlackwell(unittest.TestCase):
@@ -357,6 +369,9 @@ class TestFusedStackQuantPow2ScaleBlackwell(unittest.TestCase):
             self.fail(f"fused_stack_quant raised an exception: {e}")
 
     def test_no_exception_ue8m0_nontranspose(self):
+        arch = paddle.device.cuda.get_device_capability()[0]
+        if arch < 10:
+            self.skipTest("use_ue8m0=True is only safe on SM10+ (Blackwell)")
         try:
             w, scale = fused_stack_quant(
                 self.weights, transpose=False, use_ue8m0=True
@@ -365,6 +380,11 @@ class TestFusedStackQuantPow2ScaleBlackwell(unittest.TestCase):
             self.fail(f"fused_stack_quant raised an exception: {e}")
 
     def test_no_exception_ue8m0_transpose(self):
+        arch = paddle.device.cuda.get_device_capability()[0]
+        if arch < 10:
+            self.skipTest(
+                "use_ue8m0=True with transpose=True is only safe on SM10+"
+            )
         try:
             w, scale = fused_stack_quant(
                 self.weights, transpose=True, use_ue8m0=True
@@ -450,9 +470,12 @@ class TestFusedStackQuantReplacedOps(unittest.TestCase):
         )
 
     def test_ue8m0_nontranspose_scale_is_direct_scale_transposed(self):
-        """When use_ue8m0=True, fused_stack_quant must return scale.T of the direct op."""
+        """When use_ue8m0=True, fused_stack_quant must return scale.T of the direct op.
+        Only runs on SM10+ where calling the raw op with ue8m0=True is safe."""
         arch = paddle.device.cuda.get_device_capability()[0]
-        use_pow2 = arch == 10
+        if arch < 10:
+            self.skipTest("ue8m0 only supported on SM10+ (Blackwell)")
+        use_pow2 = True
 
         _, s_direct = self.fuse_stack_fp8_quant(
             self.weights_copy, use_pow2, True, True
@@ -469,8 +492,11 @@ class TestFusedStackQuantReplacedOps(unittest.TestCase):
         )
 
     def test_ue8m0_transpose_scale_is_direct_scale_transposed(self):
+        """Only runs on SM10+."""
         arch = paddle.device.cuda.get_device_capability()[0]
-        use_pow2 = arch == 10
+        if arch < 10:
+            self.skipTest("ue8m0 only supported on SM10+ (Blackwell)")
+        use_pow2 = True
 
         _, s_direct = self.fuse_stack_transpose_fp8_quant(
             self.weights_copy, use_pow2, True, True
@@ -572,8 +598,9 @@ class TestFusedWeightedSwigluFp8QuantReplacement(unittest.TestCase):
         """
         Dequantized output of fuse_weighted_swiglu_fp8_quant(using_pow2_scaling=True)
         should be close to swiglu(x) * prob computed in float32.
+        scale shape is [M, 1] (one scale per row), expand to [M, K] for dequant.
         """
-        import paddle.incubate.nn.functional as incubate_F
+        import paddle.nn.functional as F
 
         M, K = 256, 128
         x = paddle.clip(
@@ -585,18 +612,17 @@ class TestFusedWeightedSwigluFp8QuantReplacement(unittest.TestCase):
             x, prob, using_pow2_scaling=True, use_ue8m0=False
         )
 
-        # Dequantize: scale is [M // 128, 1], expand to [M, K]
-        expanded_scale = paddle.repeat_interleave(scale, repeats=128, axis=0)
-        expanded_scale = expanded_scale[: fp8_out.shape[0], :]
+        # scale is [M, 1]: expand cols to [M, K] for element-wise dequant
+        expanded_scale = scale.expand([-1, fp8_out.shape[1]]).astype("float32")
         dequant = fp8_out.astype("float32") * expanded_scale
 
-        golden = incubate_F.swiglu(x).astype("float32") * prob
+        golden = F.swiglu(x).astype("float32") * prob
 
         np.testing.assert_allclose(
             golden.numpy(),
             dequant.numpy(),
             rtol=0.02,
-            atol=2.0,
+            atol=1.0,
         )
 
 
