@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -136,6 +138,35 @@ class TransformerLayer(nn.Layer):
     Transformer layer takes input with size [s, b, h] and returns an
     output of the same size.
     """
+
+    _ERNIECORE_ALIGNMENT = (
+        os.environ.get("gpt_model_use_experimental_version", "0") == "1"
+    )
+    _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
+    _skip_mtp_probes = (
+        False  # Set True during MTP forward to suppress MD5 probes
+    )
+
+    @staticmethod
+    def _log_md5(tensor, name, layer_idx):
+        """Log MD5 of a tensor for precision alignment debugging."""
+        if (
+            TransformerLayer._LOG_LAYER_MD5
+            and TransformerLayer._ERNIECORE_ALIGNMENT
+        ):
+            if TransformerLayer._skip_mtp_probes:
+                return  # Skip MTP passes — EC has no MTP
+            data = tensor.cast("float32").numpy().tobytes()
+            md5 = hashlib.md5(data).hexdigest()
+            rank = (
+                paddle.distributed.get_rank()
+                if paddle.distributed.is_initialized()
+                else 0
+            )
+            print(
+                f"[MD5 Probe] Rank={rank} Layer={layer_idx} {name} MD5={md5} shape={list(tensor.shape)}",
+                flush=True,
+            )
 
     def __init__(
         self,
@@ -394,6 +425,11 @@ class TransformerLayer(nn.Layer):
         values = tuple(dict_args.values())
 
         is_mtp = dict_args.pop("is_mtp", False)
+        TransformerLayer._skip_mtp_probes = (
+            is_mtp  # Suppress MD5 probes for MTP passes
+        )
+        mtp_input = None
+        mtp_ids = None
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
@@ -506,13 +542,19 @@ class TransformerLayer(nn.Layer):
                 dict_args["position_ids"] = position_ids
 
             if "attn_mask_startend_row_indices" in dict_args.keys():
-                attn_mask_startend_row_indices = paddle.concat(
-                    [
-                        dict_args["attn_mask_startend_row_indices"],
-                        attn_mask_startend_row_indices_mtp,
-                    ],
-                    axis=2,
-                )
+                if attn_mask_startend_row_indices_mtp is not None:
+                    attn_mask_startend_row_indices = paddle.concat(
+                        [
+                            dict_args["attn_mask_startend_row_indices"],
+                            attn_mask_startend_row_indices_mtp,
+                        ],
+                        axis=2,
+                    )
+                else:
+                    # alignment mode: MTP split was skipped
+                    attn_mask_startend_row_indices = dict_args[
+                        "attn_mask_startend_row_indices"
+                    ]
                 rst["attn_mask_startend_row_indices"] = (
                     attn_mask_startend_row_indices
                 )
@@ -593,6 +635,7 @@ class TransformerLayer(nn.Layer):
             # Accumulate mlp output into partial_block
             output = partial_block + mlp_out
         else:
+            self._log_md5(hidden_states, "input", self.layer_number)
             hidden_states, context = self._forward_attention(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -607,7 +650,11 @@ class TransformerLayer(nn.Layer):
                 packed_seq_params=packed_seq_params,
                 in_recompute=self.full_recompute,
             )
+            self._log_md5(
+                hidden_states, "post_attn_residual", self.layer_number
+            )
             output = self._forward_mlp(hidden_states)
+            self._log_md5(output, "layer_output", self.layer_number)
 
         if context is not None:
             return output, context
@@ -666,6 +713,10 @@ class TransformerLayer(nn.Layer):
             )
         else:
             input_layernorm_output = self.input_layernorm(hidden_states)
+
+        self._log_md5(
+            input_layernorm_output, "input_layernorm_out", self.layer_number
+        )
 
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
@@ -773,6 +824,12 @@ class TransformerLayer(nn.Layer):
                 hidden_states
             )
 
+        self._log_md5(
+            post_attention_layernorm_output,
+            "post_attn_layernorm_out",
+            self.layer_number,
+        )
+
         if self.recompute_mlp:
 
             def recompute_handler(post_attention_layernorm_output):
@@ -791,6 +848,18 @@ class TransformerLayer(nn.Layer):
                 )  # bias is None
         else:
             mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
+
+        # Log MLP raw output before BDA
+        if (
+            TransformerLayer._LOG_LAYER_MD5
+            and TransformerLayer._ERNIECORE_ALIGNMENT
+        ):
+            _mlp_tensor = (
+                mlp_output_with_bias[0]
+                if isinstance(mlp_output_with_bias, tuple)
+                else mlp_output_with_bias
+            )
+            self._log_md5(_mlp_tensor, "mlp_out", self.layer_number)
 
         with paddle.enable_grad():
             if block_attention_residuals:

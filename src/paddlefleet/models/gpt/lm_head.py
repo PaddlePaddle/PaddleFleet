@@ -112,6 +112,53 @@ class GPTLMHead(ColumnParallelLinear):
             logits, _ = super().forward(hidden_states, self.weight.T)
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
+
+        # Loss-path MD5 probe: lm_head weight and logits
+        import os
+
+        if (
+            os.environ.get("LOG_LAYER_MD5", "0") == "1"
+            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
+        ):
+            import hashlib
+
+            rank = paddle.distributed.get_rank()
+            w_md5 = hashlib.md5(
+                self.weight.cast("float32").numpy().tobytes()
+            ).hexdigest()
+            h_md5 = hashlib.md5(
+                hidden_states.cast("float32").numpy().tobytes()
+            ).hexdigest()
+            l_md5 = hashlib.md5(
+                logits.cast("float32").numpy().tobytes()
+            ).hexdigest()
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} lm_head_weight shape={list(self.weight.shape)} md5={w_md5}",
+                flush=True,
+            )
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} lm_head_input shape={list(hidden_states.shape)} md5={h_md5}",
+                flush=True,
+            )
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} lm_head_logits shape={list(logits.shape)} md5={l_md5}",
+                flush=True,
+            )
+            # Save tensors for offline comparison
+            save_dir = "/root/paddlejob/share-storage/gpfs/system-public/wangxiangzhe/V2Precision/loss_debug_tensors/pf"
+            os.makedirs(save_dir, exist_ok=True)
+            _lm_counter = getattr(self, "_lm_counter", 0)
+            paddle.save(
+                hidden_states,
+                f"{save_dir}/rank{rank}_mb{_lm_counter}_lm_head_input.pd",
+            )
+            paddle.save(
+                logits,
+                f"{save_dir}/rank{rank}_mb{_lm_counter}_lm_head_logits.pd",
+            )
+            paddle.save(self.weight, f"{save_dir}/rank{rank}_lm_head_weight.pd")
+            self._lm_counter = _lm_counter + 1
+
         return logits
 
     def forward(self, dict_args: dict):

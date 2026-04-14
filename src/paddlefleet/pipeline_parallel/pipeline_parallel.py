@@ -1405,6 +1405,20 @@ class PipelineParallel(nn.Layer, ParallelBase):
                         self.total_loss.append([])
                     self.total_loss[idx].append(loss_tensor.detach())
 
+                    # Debug: print per-microbatch loss value for alignment comparison
+                    import os as _os
+
+                    if (
+                        _os.environ.get("LOG_LAYER_MD5", "0") == "1"
+                        or _os.environ.get("LOG_LOSS_MD5", "0") == "1"
+                    ):
+                        _rank = paddle.distributed.get_rank()
+                        _mb = len(self.total_loss[idx]) - 1
+                        print(
+                            f"[LOSS_PATH_MD5] rank={_rank} pipeline_mb{_mb}_loss_fn{idx}={loss_tensor.item():.20f}",
+                            flush=True,
+                        )
+
                     if idx == self.loss_fn_idx:
                         backward_loss_tensor = loss_tensor
                         backward_loss_fn_node = loss_fn_node
@@ -1601,6 +1615,20 @@ class PipelineParallel(nn.Layer, ParallelBase):
                     for loss in self.total_loss[idx]:
                         tmp += loss.detach()
                     losses.append(tmp / self.accumulate_steps)
+
+                    # Debug: print averaged loss for alignment comparison
+                    import os as _bfl_os
+
+                    if (
+                        _bfl_os.environ.get("LOG_LAYER_MD5", "0") == "1"
+                        or _bfl_os.environ.get("LOG_LOSS_MD5", "0") == "1"
+                    ):
+                        _rank = paddle.distributed.get_rank()
+                        _per_mb = [l.item() for l in self.total_loss[idx]]
+                        print(
+                            f"[LOSS_PATH_MD5] rank={_rank} broadcast_final_loss fn{idx}: per_mb={_per_mb} avg={losses[-1].item():.20f}",
+                            flush=True,
+                        )
                 else:
                     losses.append(self.total_loss[idx].detach())
 
