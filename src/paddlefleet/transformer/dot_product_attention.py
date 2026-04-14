@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -44,6 +45,10 @@ from paddlefleet.transformer.utils import (
     is_layer_window_attention,
 )
 from paddlefleet.utils import divide
+
+_ERNIECORE_ALIGNMENT = (
+    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
+)
 
 
 class DotProductAttention(FleetLayer):
@@ -177,6 +182,72 @@ class DotProductAttention(FleetLayer):
             raise ValueError("Softmax type not supported")
         self.rr_flashmask_attention_func = rr_flashmask_attention()
 
+    def _ec_compatible_flash_attention(
+        self, query, key, value, attn_mask_startend_row_indices=None
+    ):
+        """EC-compatible flash attention path for alignment mode.
+
+        When startend_row_indices is provided (multi-doc packing), uses
+        flashmask_attention with causal=True (matching EC behavior).
+        Otherwise falls back to flash_attention with causal=True.
+        Handles MLA value padding (q_head_dim != v_head_dim).
+        """
+        if not hasattr(self, "_ec_attn_path_logged"):
+            print(
+                "[ALIGNMENT PATH HIT] dot_product_attention: _ec_compatible_flash_attention entered",
+                flush=True,
+            )
+            self._ec_attn_path_logged = True
+        bsz, q_len, num_heads, q_head_dim = query.shape
+        v_head_dim = value.shape[-1]
+        need_value_padding = q_head_dim != v_head_dim
+
+        if need_value_padding:
+            value_padding = paddle.zeros(
+                [bsz, q_len, value.shape[2], q_head_dim - v_head_dim],
+                dtype=value.dtype,
+            )
+            value = paddle.concat([value, value_padding], axis=-1)
+
+        if attn_mask_startend_row_indices is not None:
+            # flashmask path — matches EC's scaled_dot_product_attention
+            try:
+                from flash_mask.cute.interface import flashmask_attention
+            except (ImportError, ModuleNotFoundError):
+                from paddle.nn.functional.flash_attention import (
+                    flashmask_attention,
+                )
+
+            attn_output = flashmask_attention(
+                query.astype(value.dtype),
+                key.astype(value.dtype),
+                value,
+                startend_row_indices=attn_mask_startend_row_indices,
+                dropout=0.0,
+                causal=False,  # EC uses causal=False with 2-col startend_row_indices
+            )
+        else:
+            # simple causal path — no document boundaries
+            try:
+                from flash_mask.cute.interface import flash_attention
+            except (ImportError, ModuleNotFoundError):
+                from paddle.nn.functional.flash_attention import flash_attention
+
+            attn_output, _ = flash_attention(
+                query.astype(value.dtype),
+                key.astype(value.dtype),
+                value,
+                dropout=0.0,
+                causal=True,
+                return_softmax=False,
+            )
+
+        if need_value_padding:
+            attn_output = attn_output[..., :v_head_dim]
+
+        attn_output = attn_output.reshape([bsz, q_len, -1])
+        return attn_output
+
     def forward(
         self,
         query: Tensor,
@@ -193,6 +264,13 @@ class DotProductAttention(FleetLayer):
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
+
+        # EC-compatible flash attention path for alignment mode
+        if _ERNIECORE_ALIGNMENT:
+            return self._ec_compatible_flash_attention(
+                query, key, value, attn_mask_startend_row_indices
+            )
+
         if self.config.fa_version == 4:
             from paddlefleet.ops.flash_mask.cute.interface import (
                 flashmask_attention as _flashmask_attention,

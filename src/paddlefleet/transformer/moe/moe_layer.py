@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -44,6 +46,34 @@ from .moe_utils import AddAuxiliaryLoss
 from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
 
 logger = logging.getLogger(__name__)
+
+# Alignment switch and MD5 logging for MoE precision debugging
+_ERNIECORE_ALIGNMENT = (
+    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
+)
+_LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
+
+
+def _log_moe_md5(tensor, name, layer_idx=None):
+    """Log MD5 of a tensor for MoE precision alignment debugging."""
+    if _LOG_LAYER_MD5 and _ERNIECORE_ALIGNMENT:
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        if TransformerLayer._skip_mtp_probes:
+            return  # Skip MTP passes — EC has no MTP
+        data = tensor.detach().cast("float32").numpy().tobytes()
+        md5 = hashlib.md5(data).hexdigest()
+        rank = (
+            paddle.distributed.get_rank()
+            if paddle.distributed.is_initialized()
+            else 0
+        )
+        layer_str = f" Layer={layer_idx}" if layer_idx is not None else ""
+        print(
+            f"[MD5 MoE] Rank={rank}{layer_str} {name} MD5={md5} shape={list(tensor.shape)}",
+            flush=True,
+        )
+
 
 if paddlefleet.ops.is_sonic_moe_available():
     from paddlefleet.ops.sonicmoe.enums import ActivationType
@@ -653,6 +683,10 @@ class MoELayer(nn.Layer):
             hidden_states = GatherOp.apply(hidden_states)
         orig_shape = hidden_states.shape
         residuals = hidden_states
+
+        layer_idx = getattr(self, "layer_number", None)
+        _log_moe_md5(hidden_states, "moe_input", layer_idx)
+
         (
             capacity,
             topk_weights,
@@ -666,6 +700,9 @@ class MoELayer(nn.Layer):
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
         # gates_masked, mask: Shape is [seq_len, num_experts], sometimes their names are "probs" and "routing_map"
         # capacity, priorities are used for dropping tokens, currently they are not used
+
+        _log_moe_md5(gates_masked, "gates_masked", layer_idx)
+        _log_moe_md5(mask, "routing_mask", layer_idx)
 
         if (
             self.shared_experts is not None
@@ -701,6 +738,8 @@ class MoELayer(nn.Layer):
                     reshaped_input, topk_indices, topk_weights
                 )
 
+        _log_moe_md5(output, "moe_routed_output", layer_idx)
+
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(output, aux_loss)
@@ -712,6 +751,8 @@ class MoELayer(nn.Layer):
             else:
                 shared_output = self.shared_experts(residuals)[0]
             output = output + shared_output
+
+        _log_moe_md5(output, "moe_final_output", layer_idx)
 
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)
