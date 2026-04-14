@@ -407,6 +407,10 @@ class TransformerConfig(ModelParallelConfig):
     moe_subbatch_token_num_after_dispatch: int | None = None
     """Whether to enable subbatch after dispatch, the value means the number of tokens in one subbatch."""
 
+    use_auto_subbatch: bool = False
+    """When True, dynamically determine subbatch sizes based on VMM free block analysis
+    instead of using a fixed moe_subbatch_token_num_after_dispatch value."""
+
     moe_grouped_gemm: bool = False
     """Whether to use grouped gemm."""
 

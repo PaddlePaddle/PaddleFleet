@@ -130,6 +130,10 @@ class MoELayer(nn.Layer):
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
         self.using_sonic_moe = self.config.using_sonic_moe
+        self.moe_expert_fusion = config.moe_expert_fusion
+        self.moe_subbatch_token_num_after_dispatch = (
+            config.moe_subbatch_token_num_after_dispatch
+        )
         if self.using_sonic_moe:
             assert paddlefleet.ops.is_sonic_moe_available(), (
                 paddlefleet.ops.blocked_import_messages[
@@ -283,13 +287,22 @@ class MoELayer(nn.Layer):
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
                 )
 
-        self.recompute_moe_gate_up = (
+        self.recompute_moe_gate_up = getattr(
+            self.config, "recompute_moe_gate_up", False
+        ) or (
             self.config.recompute_granularity == "selective"
+            and self.config.recompute_modules is not None
             and "moe_gate_up" in self.config.recompute_modules
         )
-        self.recompute_moe_premute = (
+        self.recompute_moe_premute = getattr(
+            self.config, "recompute_moe_premute", False
+        ) or (
             self.config.recompute_granularity == "selective"
+            and self.config.recompute_modules is not None
             and "moe_premute" in self.config.recompute_modules
+        )
+        self.use_auto_subbatch = getattr(
+            self.config, "use_auto_subbatch", False
         )
 
         if self.expert_model_parallel_size > 1:
@@ -531,6 +544,9 @@ class MoELayer(nn.Layer):
                 recompute_moe_premute=self.recompute_moe_premute,
                 fp8_dispatched_handle=fp8_dispatched_handle,
                 use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+                use_auto_subbatch=self.use_auto_subbatch,
+                moe_expert_fusion=self.moe_expert_fusion,
+                moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
             )
 
         hidden_states = self.token_dispatcher._comm_manager.combine(
@@ -622,6 +638,8 @@ class MoELayer(nn.Layer):
                 recompute_moe_premute=self.recompute_moe_premute,
                 fp8_dispatched_handle=fp8_dispatched_handle,
                 use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+                use_auto_subbatch=self.use_auto_subbatch,
+                moe_expert_fusion=self.moe_expert_fusion,
             )
             if is_first_fwd:
                 hidden_states.stop_gradient = False
@@ -905,15 +923,16 @@ class MoELayer(nn.Layer):
             if weight_obj is None:
                 weight_obj = weight_list[0]
 
-            if quant_transpose is None:
-                fp8_weight, fp8_scale = (
-                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
-                        weight_list, transpose=False
-                    )
+            # 始终量化非转置版（行为对齐，fp8_weight_stacked 始终存在）
+            fp8_weight, fp8_scale = (
+                paddle.incubate.nn.functional.fused_stack_transpose_quant(
+                    weight_list, transpose=False
                 )
-                weight_obj.fp8_weight_stacked = fp8_weight
-                weight_obj.fp8_scale_stacked = fp8_scale
+            )
+            weight_obj.fp8_weight_stacked = fp8_weight
+            weight_obj.fp8_scale_stacked = fp8_scale
 
+            if quant_transpose is None or quant_transpose is True:
                 fp8_weight_t, fp8_scale_t = (
                     paddle.incubate.nn.functional.fused_stack_transpose_quant(
                         weight_list, transpose=True
@@ -922,23 +941,8 @@ class MoELayer(nn.Layer):
                 weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
                 weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
             elif quant_transpose is False:
-                # Only quantize without transpose
-                fp8_weight, fp8_scale = (
-                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
-                        weight_list, transpose=False
-                    )
-                )
-                weight_obj.fp8_weight_stacked = fp8_weight
-                weight_obj.fp8_scale_stacked = fp8_scale
-            elif quant_transpose is True:
-                # Only quantize with transpose
-                fp8_weight_t, fp8_scale_t = (
-                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
-                        weight_list, transpose=True
-                    )
-                )
-                weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
-                weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
+                weight_obj.fp8_weight_stacked_transpose = None
+                weight_obj.fp8_scale_stacked_transpose = None
             else:
                 raise ValueError("Invalid value for `quant_transpose`.")
 
