@@ -70,7 +70,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
@@ -424,7 +424,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
@@ -1564,7 +1564,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
           # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
           echo DATE="$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
