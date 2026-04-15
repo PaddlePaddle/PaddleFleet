@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import paddle
 
-# paddle.compat.enable_torch_proxy()
+# paddle.enable_compat()
 import triton
 import triton.language as tl
 
@@ -1050,7 +1050,7 @@ def _prepare_stride_maxmin_ptrs(
     )
 
 
-@paddle.compat.use_torch_proxy_guard()
+@paddle.use_compat_guard()
 def rr_attn_estimate_triton_func(
     q: paddle.Tensor,
     k: paddle.Tensor,

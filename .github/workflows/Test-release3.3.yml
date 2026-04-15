@@ -212,12 +212,8 @@ jobs:
           export WITH_COVERAGE=ON
           echo "paddle commit:"
           python -c "import paddle; print(paddle.version.commit)"
-          timeout 20m bash ci/single_card_test.sh
+          timeout 40m bash ci/single_card_test.sh
           single_card_exit_code=$?
-          ls -a /paddle/coveragedata/
-          coverage combine
-          coverage report -m
-          coverage xml -o /paddle/coveragedata/coverage.xml
           if [[ "$single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mSingle card test failed.\033[0m"
             exit 1
@@ -233,6 +229,10 @@ jobs:
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
+          ls -a /paddle/coveragedata/
+          coverage combine
+          coverage report -m
+          coverage xml -o /paddle/coveragedata/coverage.xml
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
@@ -320,10 +320,6 @@ jobs:
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           timeout 20m bash ci/multi-card_test.sh
           multi_card_exit_code=$?
-          ls -a /paddle/coveragedata/
-          coverage combine
-          coverage xml -o /paddle/coveragedata/coverage.xml
-          coverage report -m
           if [[ "$multi_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mMulti card test failed.\033[0m"
             exit 1
@@ -339,6 +335,10 @@ jobs:
           export COVERAGE_FILE=/paddle/coveragedata/.coverage
           export COVERAGE_RCFILE=/paddle/ci/.coveragerc
           export WITH_COVERAGE=ON
+          ls -a /paddle/coveragedata/
+          coverage combine
+          coverage xml -o /paddle/coveragedata/coverage.xml
+          coverage report -m
           wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py

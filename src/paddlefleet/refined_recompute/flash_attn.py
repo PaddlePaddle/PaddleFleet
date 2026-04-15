@@ -522,10 +522,24 @@ class FlashMaskAttnFunctor(PyLayer):
                 softmax_lse,
                 causal,
             ) = ctx.saved_tensor()
-            if (
-                "block_mask"
-                in inspect.signature(flashmask_attention).parameters
-            ):
+
+            sig_params = inspect.signature(flashmask_attention).parameters
+            if "group" in sig_params:
+                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
+                    q.detach(),
+                    k.detach(),
+                    v.detach(),
+                    result_attention,
+                    softmax_lse,
+                    startend_row_indices,
+                    None,  # block_mask
+                    grad,
+                    q.shape[-1] ** (-0.5),
+                    causal,
+                    0,  # rank
+                    1,  # nranks
+                )
+            elif "block_mask" in sig_params:
                 q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
                     q.detach(),
                     k.detach(),
@@ -687,10 +701,21 @@ class RefinedRcomputeFlashMaskAttention:
                 "causal": causal,
             }
         elif fa_version == 3:
-            if (
-                "block_mask"
-                in inspect.signature(flashmask_attention).parameters
-            ):
+            sig_params = inspect.signature(flashmask_attention).parameters
+            if "group" in sig_params:
+                (result_attention, softmax_lse) = _C_ops.flashmask_attention_v2(
+                    query_states,
+                    key_states,
+                    value_states,
+                    startend_row_indices,
+                    None,  # block_mask
+                    None,  # nvshmem unique id
+                    query_states.shape[-1] ** (-0.5),
+                    causal,
+                    0,  # rank
+                    1,  # nranks
+                )
+            elif "block_mask" in sig_params:
                 (result_attention, softmax_lse) = _C_ops.flashmask_attention_v2(
                     query_states,
                     key_states,

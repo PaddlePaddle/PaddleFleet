@@ -28,6 +28,7 @@ from paddle.incubate.nn.functional import (
     fused_rotary_position_embedding as fused_rope,
 )
 
+from paddlefleet.ops import fused_apply_rotary_pos_emb_vision
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
 logger = logging.getLogger(__name__)
@@ -133,25 +134,46 @@ def _apply_rotary_pos_emb_bshd(
     Returns:
         Tensor | tuple[Tensor, ...]: The input tensor(s) after applying RoPE.
     """
+    # Normalize mscale to avoid TypeError when None is passed
+    mscale = mscale if mscale is not None else 1.0
+
     if apply_rope_fusion:
         if high_precision_rope:
-            raise NotImplementedError(
-                "high_precision_rope is not yet supported with "
-                "apply_rope_fusion in bshd format"
+            # Fused vision RoPE CUDA kernel path:
+            # - internally computes cos/sin in fp32, equivalent to high_precision_rope
+            # - only supports single Tensor input with explicit freqs
+            # - only supports non-interleaved mode and mscale=1.0
+            # - freqs must be reshaped to [s, dim//2]
+            if (
+                not rotary_interleaved
+                and mscale == 1.0
+                and freqs is not None
+                and not isinstance(t, tuple)
+            ):
+                rot_dim = freqs.shape[-1]
+                t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+                if freqs.ndim == 3:
+                    freqs_2d = freqs.reshape([-1, freqs.shape[-1]])
+                else:
+                    freqs_2d = freqs
+                freqs_half = freqs_2d[..., : freqs_2d.shape[-1] // 2]
+                t = fused_apply_rotary_pos_emb_vision(t, freqs_half)
+                return paddle.cat((t, t_pass), axis=-1)
+            # Fall through to unfused path for unsupported cases
+        else:
+            # Fused path: delegate to Paddle's fused_rope kernel
+            assert isinstance(t, tuple), (
+                "The input for fused_rope should be a tuple of tensors"
             )
-        # Fused path: delegate to Paddle's fused_rope kernel
-        assert isinstance(t, tuple), (
-            "The input for fused_rope should be a tuple of tensors"
-        )
-        return fused_rope(
-            *t,
-            sin=sin,
-            cos=cos,
-            rotary_emb_base=rope_theta,
-            position_ids=position_ids,
-            use_neox_rotary_style=rotary_interleaved,
-            time_major=time_major,
-        )
+            return fused_rope(
+                *t,
+                sin=sin,
+                cos=cos,
+                rotary_emb_base=rope_theta,
+                position_ids=position_ids,
+                use_neox_rotary_style=rotary_interleaved,
+                time_major=time_major,
+            )
 
     rot_dim = freqs.shape[-1]
 

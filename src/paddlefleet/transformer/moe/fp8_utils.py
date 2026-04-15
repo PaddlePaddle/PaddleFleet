@@ -25,7 +25,12 @@ from paddlefleet.fusions.fused_swiglu_scale import (
 )
 
 try:
-    from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
+    from paddlefleet.ops import (
+        deep_gemm as paddlefleet_deep_gemm,
+        fuse_stack_fp8_quant,
+        fuse_stack_transpose_fp8_quant,
+        fuse_weighted_swiglu_fp8_quant,
+    )
 except (ImportError, RuntimeError):
     pass
 
@@ -87,7 +92,7 @@ def _get_fp8_weight_and_scale(weight, transpose=False):
     return fp8_weight, fp8_scale
 
 
-def fused_stack_quant(expert_weight_list, transpose=False):
+def fused_stack_quant(expert_weight_list, transpose=False, use_ue8m0=False):
     if transpose is False and hasattr(
         expert_weight_list[0], "fp8_weight_stacked"
     ):
@@ -113,9 +118,27 @@ def fused_stack_quant(expert_weight_list, transpose=False):
             expert_weight_list[0], transpose=True
         )
     else:
-        w, scale = paddle.incubate.nn.functional.fused_stack_transpose_quant(
-            expert_weight_list, transpose=transpose
-        )
+        use_pow2_scale = False
+        if paddle.device.cuda.get_device_capability()[0] == 10:
+            # Blackwell GPUs require the use of pow2_scales quantization.
+            use_pow2_scale = True
+        if transpose:
+            w, scale = fuse_stack_transpose_fp8_quant(
+                expert_weight_list,
+                use_pow2_scale,
+                use_ue8m0,
+                use_ue8m0,
+            )
+        else:
+            w, scale = fuse_stack_fp8_quant(
+                expert_weight_list,
+                use_pow2_scale,
+                use_ue8m0,
+                use_ue8m0,
+            )
+
+        if use_ue8m0:
+            scale = scale.T
     return w, scale
 
 
@@ -556,14 +579,10 @@ class ExpertsGroupGemmContiguousNode:
         w2_quant = w2_quant.reshape([num_expert, -1, w2_quant.shape[-1]])
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
-        # quant o2
-        with paddle.amp.auto_cast(False):
-            unzipped_probs = unzipped_probs.squeeze(-1)
-            o2_fp8, o2_scale = (
-                paddle.incubate.nn.functional.fused_weighted_swiglu_act_quant(
-                    o1, unzipped_probs, using_pow2_scaling=True
-                )
-            )
+        # TODO:support ue8m0 on SM100
+        o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant(
+            o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=False
+        )
         o2_scale = paddle.transpose(
             paddle.transpose(o2_scale, [1, 0]).contiguous(), [1, 0]
         )
