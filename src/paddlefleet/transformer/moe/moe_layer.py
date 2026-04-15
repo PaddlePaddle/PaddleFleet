@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 from paddlefleet import utils
 
+from .fp8_utils import fused_stack_quant
 from .fusion_layer_utils import FusionMoePyLayer
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
 from .moe_router import TopKRouter
@@ -906,36 +907,28 @@ class MoELayer(nn.Layer):
                 weight_obj = weight_list[0]
 
             if quant_transpose is None:
-                fp8_weight, fp8_scale = (
-                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
-                        weight_list, transpose=False
-                    )
+                fp8_weight, fp8_scale = fused_stack_quant(
+                    weight_list, transpose=False
                 )
                 weight_obj.fp8_weight_stacked = fp8_weight
                 weight_obj.fp8_scale_stacked = fp8_scale
 
-                fp8_weight_t, fp8_scale_t = (
-                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
-                        weight_list, transpose=True
-                    )
+                fp8_weight_t, fp8_scale_t = fused_stack_quant(
+                    weight_list, transpose=True
                 )
                 weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
                 weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
             elif quant_transpose is False:
                 # Only quantize without transpose
-                fp8_weight, fp8_scale = (
-                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
-                        weight_list, transpose=False
-                    )
+                fp8_weight, fp8_scale = fused_stack_quant(
+                    weight_list, transpose=False
                 )
                 weight_obj.fp8_weight_stacked = fp8_weight
                 weight_obj.fp8_scale_stacked = fp8_scale
             elif quant_transpose is True:
                 # Only quantize with transpose
-                fp8_weight_t, fp8_scale_t = (
-                    paddle.incubate.nn.functional.fused_stack_transpose_quant(
-                        weight_list, transpose=True
-                    )
+                fp8_weight_t, fp8_scale_t = fused_stack_quant(
+                    weight_list, transpose=True
                 )
                 weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
                 weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
