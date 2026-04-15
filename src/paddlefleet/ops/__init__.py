@@ -26,6 +26,8 @@ import sys as _sys
 
 from paddlefleet_ops import ops as _ops_module
 from paddlefleet_ops.ops import (  # noqa: F401
+    HardwareIncompatibleBlocker,
+    blocked_import_messages,
     is_deep_ep_available,
     is_deep_gemm_available,
     is_flash_mask_available,
@@ -36,3 +38,17 @@ from paddlefleet_ops.ops import (  # noqa: F401
 # attribute access (e.g. `paddlefleet.ops.deep_gemm`) and wildcard imports
 # both work transparently.
 _sys.modules[__name__] = _ops_module
+
+# The HardwareIncompatibleBlocker installed by paddlefleet_ops.ops only
+# catches ``import paddlefleet_ops.ops.*``.  Install a second blocker that
+# intercepts ``import paddlefleet.ops.*`` so that old-namespace import
+# attempts also raise the informative RuntimeError.
+_compat_blocker_messages = {
+    k.replace("paddlefleet_ops.ops.", "paddlefleet.ops."): v
+    for k, v in blocked_import_messages.items()
+    if k.startswith("paddlefleet_ops.ops.")
+}
+if _compat_blocker_messages:
+    _sys.meta_path.insert(
+        0, HardwareIncompatibleBlocker(_compat_blocker_messages)
+    )

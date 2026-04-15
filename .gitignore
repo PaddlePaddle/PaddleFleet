@@ -40,5 +40,6 @@ packages/paddlefleet_ops/src/paddlefleet_ops/ops/sonicmoe
 packages/paddlefleet_ops/src/paddlefleet_ops/ops/quack
 
 # Generated version files
-src/paddlefleet/version.py
+# Both version.py files are auto-generated at build time by build_backend.py.
 packages/paddlefleet_ops/src/paddlefleet_ops/version.py
+src/paddlefleet/version.py

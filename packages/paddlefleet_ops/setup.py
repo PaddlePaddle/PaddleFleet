@@ -30,9 +30,7 @@ def change_pwd():
         os.chdir(path)
 
 
-common_dependencies = [
-    "colorlog>=6.10.1",
-]
+common_dependencies: list[str] = []
 
 
 def get_special_setup_deps():
@@ -91,6 +89,80 @@ class CustomBdistWheel(_bdist_wheel):
             super().write_wheelfile(wheelfile_base)
 
 
+def _detect_local_gpu_arch():
+    """Auto-detect the compute capability of the first visible GPU via nvidia-smi.
+    Returns a dot-separated string like '9.0', or None if detection fails.
+    """
+    try:
+        import subprocess
+
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+        )
+        caps = {
+            line.strip() for line in out.decode().splitlines() if line.strip()
+        }
+        return ";".join(sorted(caps)) if caps else None
+    except Exception:
+        return None
+
+
+# Map "X.Y" arch strings to -gencode flags.
+# sm_90a is used for H100/H800 (full feature set including wgmma/tma).
+_ARCH_TO_GENCODE = {
+    "8.0": "-gencode=arch=compute_80,code=sm_80",
+    "9.0": "-gencode=arch=compute_90a,code=sm_90a",
+    "10.0": "-gencode=arch=compute_100,code=sm_100",
+    "10.3": "-gencode=arch=compute_103,code=sm_103",
+}
+
+
+def _build_gencode_flags(cuda_major: int, cuda_minor: int) -> list[str]:
+    """Return the -gencode flags for the current build.
+
+    Priority (highest first):
+    1. PADDLE_CUDA_ARCH_LIST env var (semicolon- or comma-separated, e.g. "9.0;10.0")
+    2. Auto-detect from the local GPU via nvidia-smi
+    3. Conservative default based on CUDA toolkit version:
+       - CUDA < 12.8  → sm_90 only
+       - CUDA ≥ 12.8  → sm_90 + sm_100 + sm_103
+    """
+    import re
+
+    raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", "").strip()
+
+    if not raw:
+        raw = _detect_local_gpu_arch() or ""
+
+    if not raw:
+        # Fallback: version-based default
+        raw = (
+            "9.0" if (cuda_major == 12 and cuda_minor < 8) else "9.0;10.0;10.3"
+        )
+
+    archs = [a.strip() for a in re.split(r"[;,]", raw) if a.strip()]
+    flags = []
+    for arch in archs:
+        flag = _ARCH_TO_GENCODE.get(arch)
+        if flag:
+            flags.append(flag)
+        else:
+            logging.warning(
+                f"Unsupported CUDA arch '{arch}', skipping. "
+                f"Supported: {list(_ARCH_TO_GENCODE)}"
+            )
+
+    if not flags:
+        logging.warning(
+            "No valid CUDA arch flags resolved; falling back to sm_90a."
+        )
+        flags = [_ARCH_TO_GENCODE["9.0"]]
+
+    logging.info(f"CUDA gencode flags: {flags}")
+    return flags
+
+
 def setup_ops_extension():
     from build_utils import get_cuda_version
 
@@ -99,6 +171,9 @@ def setup_ops_extension():
 
     # paddle_compiled_with_onednn = is_compiled_with_onednn()
     paddle_compiled_with_onednn = False
+
+    cuda_major, cuda_minor = get_cuda_version()
+    gencode_flags = _build_gencode_flags(cuda_major, cuda_minor)
 
     nvcc_args = [
         "-O3",
@@ -113,18 +188,12 @@ def setup_ops_extension():
         "-maxrregcount=32",
         "-lineinfo",
         "-DCUTLASS_DEBUG_TRACE_LEVEL=0",
-        "-gencode=arch=compute_80,code=sm_80",
-        "-gencode=arch=compute_90a,code=sm_90a",
-        "-gencode=arch=compute_100,code=sm_100",
+        *gencode_flags,
         "-DNDEBUG",
     ]
 
     if paddle_compiled_with_onednn:
         nvcc_args.append("-DPADDLE_WITH_DNNL")
-
-    cuda_major, cuda_minor = get_cuda_version()
-    if cuda_major == 12 and cuda_minor < 8:
-        nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
 
     # change_pwd() MUST be called before CUDAExtension() so that the
     # os.path.abspath() calls Paddle makes internally use _pkg_dir as the

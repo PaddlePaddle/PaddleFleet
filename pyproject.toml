@@ -55,7 +55,8 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 [build-system]
 requires = ["setuptools>=66.1.0"]
-build-backend = "setuptools.build_meta"
+build-backend = "build_backend"
+backend-path = ["."]
 
 [tool.setuptools]
 include-package-data = false

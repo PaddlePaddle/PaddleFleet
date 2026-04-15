@@ -160,8 +160,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_wheel} ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           echo "Install uv"
           export WITH_COVERAGE=ON
           pip install --upgrade pip
@@ -334,8 +336,10 @@ jobs:
             paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_wheel} ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           rm -rf ./*
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           git config --global --add safe.directory /paddle/PaddleFleet
@@ -498,8 +502,10 @@ jobs:
             conda activate python${PYTHON_VERSION}
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_wheel} ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -751,8 +757,10 @@ jobs:
             conda activate python${PYTHON_VERSION}
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_wheel} ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -1220,8 +1228,10 @@ jobs:
             conda activate python${PYTHON_VERSION}
           fi
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
-          pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_wheel} ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet

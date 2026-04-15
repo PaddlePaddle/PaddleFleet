@@ -16,6 +16,7 @@ import logging
 import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import backends
@@ -91,18 +92,32 @@ def _generate_version_info():
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
     with open(version_py, "w") as f:
-        f.write("# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.\n")
+        f.write(
+            "# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.\n"
+        )
         f.write("#\n")
-        f.write("# Licensed under the Apache License, Version 2.0 (the \"License\");\n")
-        f.write("# you may not use this file except in compliance with the License.\n")
+        f.write(
+            '# Licensed under the Apache License, Version 2.0 (the "License");\n'
+        )
+        f.write(
+            "# you may not use this file except in compliance with the License.\n"
+        )
         f.write("# You may obtain a copy of the License at\n")
         f.write("#\n")
         f.write("#     http://www.apache.org/licenses/LICENSE-2.0\n")
         f.write("#\n")
-        f.write("# Unless required by applicable law or agreed to in writing, software\n")
-        f.write("# distributed under the License is distributed on an \"AS IS\" BASIS,\n")
-        f.write("# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n")
-        f.write("# See the License for the specific language governing permissions and\n")
+        f.write(
+            "# Unless required by applicable law or agreed to in writing, software\n"
+        )
+        f.write(
+            '# distributed under the License is distributed on an "AS IS" BASIS,\n'
+        )
+        f.write(
+            "# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n"
+        )
+        f.write(
+            "# See the License for the specific language governing permissions and\n"
+        )
         f.write("# limitations under the License.\n")
         f.write("\n")
         f.write('"""Generate version info file with git metadata."""\n')
@@ -120,8 +135,15 @@ _generate_version_info()
 def _prepare_ecosystem(use_symlinks: bool):
     """Iterates over all registered libraries and prepares them."""
     if backends.IS_NVIDIA:
-        for lib in get_libs():
-            lib.build()
+        libs = get_libs()
+        # Build all libraries in parallel to exploit multi-core machines;
+        # install sequentially afterwards because install() has ordered
+        # side-effects (e.g. patchelf on deep_ep_cpp.so).
+        with ThreadPoolExecutor(max_workers=len(libs)) as executor:
+            futures = {executor.submit(lib.build): lib for lib in libs}
+            for future in as_completed(futures):
+                future.result()  # re-raise any build exception immediately
+        for lib in libs:
             lib.install(use_symlinks=use_symlinks)
     elif backends.IS_XPU:
         # xpu specific preparations

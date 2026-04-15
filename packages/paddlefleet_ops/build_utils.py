@@ -87,8 +87,14 @@ class EcosystemLibrary:
         self._extra_env = extra_env or {}
 
     def build(self) -> None:
-        """Builds library."""
+        """Builds the library unconditionally."""
         logger.info(f"Building ecosystem library: {self.name}")
+        # Clean any stale artifacts from a previous (possibly partial) build
+        # so that pip install does not warn about existing directories and
+        # leave inconsistent state.
+        if self.install_dir.exists():
+            logger.info(f"Removing stale install dir: {self.install_dir}")
+            shutil.rmtree(self.install_dir)
         self.install_dir.mkdir(parents=True, exist_ok=True)
 
         # Special pre-build step for DeepGEMM: link CUTLASS headers into deep_gemm/include
@@ -119,13 +125,26 @@ class EcosystemLibrary:
             "--no-deps",
             "--no-build-isolation",
             "--no-compile",
-            "--upgrade",
             "-v",
         ]
 
         try:
             _env = os.environ.copy()
             _env.update(self._extra_env)
+            # Remove parent build backend paths from PYTHONPATH so that
+            # sub-package builds (quack, sonic-moe, etc.) can correctly
+            # locate their own build backend (e.g. setuptools.build_meta)
+            # instead of resolving against the paddlefleet_ops backend-path.
+            pythonpath = _env.get("PYTHONPATH", "")
+            cleaned = os.pathsep.join(
+                p
+                for p in pythonpath.split(os.pathsep)
+                if p and str(PKG_ROOT) not in p
+            )
+            if cleaned:
+                _env["PYTHONPATH"] = cleaned
+            else:
+                _env.pop("PYTHONPATH", None)
             subprocess.check_call(cmd, cwd=self.source_dir, env=_env)
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to build {self.name}: {e}")
@@ -255,6 +274,23 @@ def get_special_build_deps():
 def get_libs():
     cuda_major, cuda_minor = get_cuda_version()
 
+    # Allow CI or users to pin the arch list via PADDLE_CUDA_ARCH_LIST.
+    # Falls back to sensible defaults derived from the detected CUDA version:
+    #   < 12.8  → SM90 only (H800)
+    #   ≥ 12.8 / 13.x → SM90 + SM100 + SM103 (H800 + B100/B200)
+    _default_arch = (
+        "9.0" if (cuda_major == 12 and cuda_minor < 8) else "9.0;10.0;10.3"
+    )
+    _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _default_arch)
+    # Normalize: some callers use comma-separated (e.g. "8.0,9.0,10.0,10.3").
+    # Paddle's _get_cuda_arch_flags only accepts semicolon-separated values,
+    # and DeepEP only supports SM90/SM100/SM103 — drop anything outside that set.
+    _supported = {"9.0", "10.0", "10.3"}
+    _deep_ep_arch = (
+        ";".join(a for a in re.split(r"[;,]", _raw) if a.strip() in _supported)
+        or _default_arch
+    )
+
     LIBRARIES: list[EcosystemLibrary] = [
         EcosystemLibrary(
             name="DeepGEMM",
@@ -272,9 +308,7 @@ def get_libs():
                 Artifact("deep_ep", "deep_ep"),
                 Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
             ],
-            extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
-            if (cuda_major == 12 and cuda_minor < 8)
-            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0;10.3"},
+            extra_env={"PADDLE_CUDA_ARCH_LIST": _deep_ep_arch},
         ),
         EcosystemLibrary(
             name="flash-attention",

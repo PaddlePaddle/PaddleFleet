@@ -50,6 +50,5 @@ __all__ = [
     "__license__",
     "__package_name__",
     "__repository_url__",
-    "__shortversion__",
     "__version__",
 ]
