@@ -506,6 +506,10 @@ class TransformerConfig(ModelParallelConfig):
     fp8_wgrad: bool = True
     """Whether to use fp8 wgrad."""
 
+    use_ue8m0: bool = False
+    """Whether to use UE8M0 (microscaling FP8 with unsigned exponent) for MoE computation.
+    UE8M0 uses integer32 scales with pow2 quantization and requires Blackwell GPU (SM100)."""
+
     ####################
     # initialization
     ####################

@@ -163,6 +163,7 @@ class MoELayer(nn.Layer):
         self.fp8 = config.fp8
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
+        self.use_ue8m0 = getattr(config, "use_ue8m0", False)
         self.using_sonic_moe = self.config.using_sonic_moe
         self.moe_expert_fusion = config.moe_expert_fusion
         self.moe_subbatch_token_num_after_dispatch = (
@@ -281,6 +282,14 @@ class MoELayer(nn.Layer):
             )
             assert not self.using_sonic_moe, (
                 "fp8 and sonic_moe cannot be used at the same time."
+            )
+
+        if self.use_ue8m0:
+            assert self.fp8, (
+                "use_ue8m0 requires fp8 to be enabled (set fp8='e4m3')."
+            )
+            assert paddle.device.cuda.get_device_capability()[0] == 10, (
+                "use_ue8m0 requires Blackwell GPU (SM100, compute capability 10.x)."
             )
 
         expert_args = {}
@@ -472,6 +481,7 @@ class MoELayer(nn.Layer):
                 hidden_states,
                 self.fp8_dispatch,
                 async_finish=async_finish,
+                use_ue8m0=self.use_ue8m0,
             )
         )
         return hidden_states, fp8_dispatched_handle
@@ -653,6 +663,7 @@ class MoELayer(nn.Layer):
                     moe_expert_fusion=self.moe_expert_fusion,
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
+                    use_ue8m0=self.use_ue8m0,
                 )
 
         with profile("combine"):
@@ -693,6 +704,7 @@ class MoELayer(nn.Layer):
                     token_weights,
                     self.fp8_dispatch,
                     async_finish=async_finish,
+                    use_ue8m0=self.use_ue8m0,
                 )
             )
             dispatched_indices = (
@@ -754,6 +766,7 @@ class MoELayer(nn.Layer):
                 use_auto_subbatch=self.use_auto_subbatch,
                 moe_expert_fusion=self.moe_expert_fusion,
                 moe_subbatch_diag=self.moe_subbatch_diag,
+                use_ue8m0=self.use_ue8m0,
             )
             if is_first_fwd:
                 hidden_states.stop_gradient = False
@@ -1079,19 +1092,20 @@ class MoELayer(nn.Layer):
             weight_list, weight_obj=None, quant_transpose=None
         ):
             """Helper function to quantize a list of weights."""
+
             if weight_obj is None:
                 weight_obj = weight_list[0]
 
             # 始终量化非转置版（行为对齐，fp8_weight_stacked 始终存在）
             fp8_weight, fp8_scale = fused_stack_quant_without_cache(
-                weight_list, transpose=False
+                weight_list, transpose=False, use_ue8m0=self.use_ue8m0
             )
             weight_obj.fp8_weight_stacked = fp8_weight
             weight_obj.fp8_scale_stacked = fp8_scale
 
             if quant_transpose is None or quant_transpose is True:
                 fp8_weight_t, fp8_scale_t = fused_stack_quant_without_cache(
-                    weight_list, transpose=True
+                    weight_list, transpose=True, use_ue8m0=self.use_ue8m0
                 )
                 weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
                 weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
