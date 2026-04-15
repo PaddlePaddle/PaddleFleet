@@ -414,10 +414,10 @@ jobs:
           #   python: "3.10"
           # - cuda: "12.9"
           #   python: "3.10"
-          - cuda: "13.0"
-            python: "3.10"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "13.0"
+          #   python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
             # - cuda: "12.9"
@@ -501,6 +501,10 @@ jobs:
           find . -maxdepth 1 -name "--*" -delete
           rm -rf * .[^.]*
           source /root/proxy
+          echo "No Proxy Variables:"
+          echo "http_proxy: $http_proxy"
+          echo "https_proxy: $https_proxy"
+          echo "no_proxy: $no_proxy"
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
