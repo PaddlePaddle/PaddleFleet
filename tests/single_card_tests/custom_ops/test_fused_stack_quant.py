@@ -31,7 +31,10 @@ from paddle.base import core
 
 # fused_stack_quant lives in fp8_utils but calls paddlefleet.ops internally.
 # We import it here and rely on the same try/except guard that fp8_utils uses.
-from paddlefleet.transformer.moe.fp8_utils import fused_stack_quant
+from paddlefleet.transformer.moe.fp8_utils import (
+    fused_stack_quant,
+    fused_stack_quant_without_cache,
+)
 
 NUM_EXPERTS = 4
 N, K = 512, 256  # small dims for fast tests
@@ -510,6 +513,76 @@ class TestFusedStackQuantReplacedOps(unittest.TestCase):
             s_fused.numpy(),
             err_msg="use_ue8m0=True (transpose) must return scale.T of the raw op output",
         )
+
+
+class TestFusedStackQuantWithoutCache(unittest.TestCase):
+    """Directly exercise the uncached helper added for MoELayer quantization."""
+
+    def setUp(self):
+        if not core.is_compiled_with_cuda():
+            self.skipTest("CUDA required")
+        try:
+            from paddlefleet.ops import (
+                fuse_stack_fp8_quant,
+                fuse_stack_transpose_fp8_quant,
+            )
+
+            self.fuse_stack_fp8_quant = fuse_stack_fp8_quant
+            self.fuse_stack_transpose_fp8_quant = fuse_stack_transpose_fp8_quant
+        except (ImportError, RuntimeError):
+            self.skipTest("paddlefleet.ops not available")
+        np.random.seed(11)
+        paddle.seed(11)
+
+    def test_nontranspose_matches_direct_op(self):
+        arch = paddle.device.cuda.get_device_capability()[0]
+        use_pow2 = arch == 10
+        weights = _make_weight_list(num_experts=2, shape=(256, 128))
+        weights_copy = [w.clone() for w in weights]
+
+        w_direct, s_direct = self.fuse_stack_fp8_quant(
+            weights_copy, use_pow2, False, False
+        )
+        w_helper, s_helper = fused_stack_quant_without_cache(
+            weights, transpose=False
+        )
+
+        np.testing.assert_array_equal(w_direct.numpy(), w_helper.numpy())
+        np.testing.assert_allclose(
+            s_direct.numpy(), s_helper.numpy(), rtol=0, atol=0
+        )
+
+    def test_transpose_matches_direct_op(self):
+        arch = paddle.device.cuda.get_device_capability()[0]
+        use_pow2 = arch == 10
+        weights = _make_weight_list(num_experts=2, shape=(256, 128))
+        weights_copy = [w.clone() for w in weights]
+
+        w_direct, s_direct = self.fuse_stack_transpose_fp8_quant(
+            weights_copy, use_pow2, False, False
+        )
+        w_helper, s_helper = fused_stack_quant_without_cache(
+            weights, transpose=True
+        )
+
+        np.testing.assert_array_equal(w_direct.numpy(), w_helper.numpy())
+        np.testing.assert_allclose(
+            s_direct.numpy(), s_helper.numpy(), rtol=0, atol=0
+        )
+
+    def test_ue8m0_returns_direct_op_scale_transpose(self):
+        arch = paddle.device.cuda.get_device_capability()[0]
+        if arch < 10:
+            self.skipTest("ue8m0 only supported on SM10+ (Blackwell)")
+        weights = _make_weight_list(num_experts=2, shape=(256, 128))
+        weights_copy = [w.clone() for w in weights]
+
+        _, s_direct = self.fuse_stack_fp8_quant(weights_copy, True, True, True)
+        _, s_helper = fused_stack_quant_without_cache(
+            weights, transpose=False, use_ue8m0=True
+        )
+
+        np.testing.assert_array_equal(s_direct.T.numpy(), s_helper.numpy())
 
 
 class TestFusedWeightedSwigluFp8QuantReplacement(unittest.TestCase):
