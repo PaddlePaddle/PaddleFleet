@@ -105,8 +105,10 @@ jobs:
           uv build --wheel --package paddlefleet-ops --out-dir dist -v
           ROOT_WHL=$(ls dist/paddlefleet-*.whl | head -n1)
           OPS_WHL=$(ls dist/paddlefleet_ops-*.whl | head -n1)
-          cp "${ROOT_WHL}" dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl
-          cp "${OPS_WHL}" dist/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
+          ROOT_DST=dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl
+          OPS_DST=dist/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
+          [ "${ROOT_WHL}" != "${ROOT_DST}" ] && cp "${ROOT_WHL}" "${ROOT_DST}"
+          [ "${OPS_WHL}" != "${OPS_DST}" ] && cp "${OPS_WHL}" "${OPS_DST}"
           ls -lh dist
           '
 

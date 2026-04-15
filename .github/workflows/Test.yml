@@ -103,10 +103,12 @@ jobs:
           target_path="paddle-github-action/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}"
           ROOT_WHL=$(ls paddlefleet-*.whl | head -n1)
           OPS_WHL=$(ls paddlefleet_ops-*.whl | head -n1)
-          cp "${ROOT_WHL}" paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          cp "${OPS_WHL}" paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          python bos/BosClient.py paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl ${target_path}
-          python bos/BosClient.py paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl ${target_path}
+          ROOT_DST=paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          OPS_DST=paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          [ "${ROOT_WHL}" != "${ROOT_DST}" ] && cp "${ROOT_WHL}" "${ROOT_DST}"
+          [ "${OPS_WHL}" != "${OPS_DST}" ] && cp "${OPS_WHL}" "${OPS_DST}"
+          python bos/BosClient.py "${ROOT_DST}" ${target_path}
+          python bos/BosClient.py "${OPS_DST}" ${target_path}
           '
       - name: Terminate and delete the container
         if: ${{ always() }}
