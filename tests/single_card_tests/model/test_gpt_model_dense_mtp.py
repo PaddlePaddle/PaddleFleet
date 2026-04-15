@@ -183,9 +183,6 @@ class TestDenseMTP(unittest.TestCase):
         position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
             (micro_batch_size, 1)
         )
-        attention_mask = paddle.ones(
-            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
-        )
         labels = paddle.to_tensor(
             list(range(1, sequence_length + 1)), dtype=paddle.int64
         ).repeat((micro_batch_size, 1))
@@ -195,7 +192,6 @@ class TestDenseMTP(unittest.TestCase):
             {
                 "input_ids": [input_ids],
                 "position_ids": [position_ids],
-                "attention_mask": [attention_mask],
             },
             [labels],
         )
