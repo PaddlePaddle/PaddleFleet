@@ -397,6 +397,76 @@ class TestNoPipelineParallel(unittest.TestCase):
         with self.assertRaises(AssertionError):
             npp._check_micro_batch_data_valid("not_a_tensor")
 
+    def _create_npp_for_eval(
+        self, accumulate_steps=1, micro_batch_size=2, delay_scale_loss=False
+    ):
+        """Helper to create a NoPipelineParallel instance for eval_batch tests."""
+        import paddle
+
+        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+            NoPipelineParallel,
+        )
+
+        npp = NoPipelineParallel.__new__(NoPipelineParallel)
+
+        # Mock loss function
+        def mock_loss_fn(output, label):
+            return paddle.mean(output - label)
+
+        mock_layers = MagicMock()
+        mock_layers._loss_fn = [mock_loss_fn]
+        mock_layers.forward = MagicMock(
+            side_effect=lambda x: paddle.randn([micro_batch_size, 1])
+        )
+
+        npp._layers = mock_layers
+        npp.accumulate_steps = accumulate_steps
+        npp.micro_batch_size = micro_batch_size
+        npp._delay_scale_loss = delay_scale_loss
+        npp.total_loss = None
+        npp.loss_fn_idx = 0
+
+        return npp
+
+    def test_eval_batch_compute_loss_single_accumulate(self):
+        """Test eval_batch with compute_loss=True and accumulate_steps=1."""
+        import paddle
+
+        npp = self._create_npp_for_eval(accumulate_steps=1, micro_batch_size=2)
+        data = (paddle.randn([2, 3]), paddle.randn([2, 1]))
+        result = npp.eval_batch(data, compute_loss=True)
+        self.assertIsInstance(result, paddle.Tensor)
+
+    def test_eval_batch_compute_loss_multiple_accumulate(self):
+        """Test eval_batch with compute_loss=True and accumulate_steps=2."""
+        import paddle
+
+        npp = self._create_npp_for_eval(accumulate_steps=2, micro_batch_size=2)
+        data = (paddle.randn([4, 3]), paddle.randn([4, 1]))
+        result = npp.eval_batch(data, compute_loss=True)
+        self.assertIsInstance(result, paddle.Tensor)
+
+    def test_eval_batch_compute_loss_delay_scale(self):
+        """Test eval_batch with _delay_scale_loss=True."""
+        import paddle
+
+        npp = self._create_npp_for_eval(
+            accumulate_steps=2, micro_batch_size=2, delay_scale_loss=True
+        )
+        data = (paddle.randn([4, 3]), paddle.randn([4, 1]))
+        result = npp.eval_batch(data, compute_loss=True)
+        self.assertIsInstance(result, paddle.Tensor)
+
+    def test_eval_batch_no_compute_loss(self):
+        """Test eval_batch with compute_loss=False returns output list."""
+        import paddle
+
+        npp = self._create_npp_for_eval(accumulate_steps=1, micro_batch_size=2)
+        data = (paddle.randn([2, 3]), paddle.randn([2, 1]))
+        result = npp.eval_batch(data, compute_loss=False)
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 1)
+
 
 class TestGetAlignModeScale(unittest.TestCase):
     """Tests for _get_align_mode_scale function."""
