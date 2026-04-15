@@ -234,6 +234,15 @@ class TestPipeLayerAPI(unittest.TestCase):
         result = npp.eval_batch(data, compute_loss=True)
         self.assertIsInstance(result, paddle.Tensor)
 
+    def test_eval_batch_return_host_tensor(self):
+        npp = self._create_no_pipeline_model()
+        data = self._create_eval_data(npp.accumulate_steps)
+        result = npp.eval_batch(
+            data, compute_loss=False, return_host_tensor=True
+        )
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), npp.accumulate_steps)
+
     def test_pipelayer_segment_method_list(self):
         alex_desc = get_alex_spec()
         pipe_model = build_layer(

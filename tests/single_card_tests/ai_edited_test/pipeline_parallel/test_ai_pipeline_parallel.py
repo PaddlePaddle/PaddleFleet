@@ -467,6 +467,44 @@ class TestNoPipelineParallel(unittest.TestCase):
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 1)
 
+    def test_eval_batch_return_host_tensor(self):
+        """Test eval_batch with return_host_tensor=True (line 566)."""
+        import paddle
+
+        npp = self._create_npp_for_eval(accumulate_steps=1, micro_batch_size=2)
+        data = (paddle.randn([2, 3]), paddle.randn([2, 1]))
+        with (
+            patch.object(type(paddle.randn([1])), "_share_buffer_to"),
+            patch.object(
+                type(paddle.randn([1])),
+                "cpu",
+                return_value=paddle.randn([2, 1]),
+            ),
+        ):
+            result = npp.eval_batch(
+                data, compute_loss=False, return_host_tensor=True
+            )
+            self.assertIsInstance(result, list)
+            self.assertEqual(len(result), 1)
+
+    def test_offload_tuple_of_tensors(self):
+        """Test _offload_tensors with a tuple of paddle.Tensors (lines 591-598)."""
+        import paddle
+
+        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+            NoPipelineParallel,
+        )
+
+        npp = NoPipelineParallel.__new__(NoPipelineParallel)
+        t1 = paddle.randn([2, 3])
+        t2 = paddle.randn([3, 4])
+        with (
+            patch.object(type(t1), "_share_buffer_to"),
+            patch.object(type(t1), "cpu", return_value=paddle.randn([2, 3])),
+        ):
+            npp._offload_tensors((t1, t2))
+            self.assertEqual(t1._share_buffer_to.call_count, 2)
+
 
 class TestGetAlignModeScale(unittest.TestCase):
     """Tests for _get_align_mode_scale function."""
