@@ -1,6 +1,9 @@
 name: CE-CUDA-CUDA-129-Dev
 
 on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [develop]
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
@@ -27,7 +30,7 @@ env:
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   CI_name: test
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
-  docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
+  docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
   use_release: ${{ inputs.use_release || 'true' }}
 defaults:
   run:
@@ -97,11 +100,12 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
+          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda129-Cudnn99-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           echo "Paddle Commit"
@@ -177,11 +181,12 @@ jobs:
           git config pull.rebase false
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
+          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda129-Cudnn99-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -275,7 +280,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -298,7 +302,7 @@ jobs:
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda129-Cudnn99-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
@@ -423,7 +427,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -445,7 +448,7 @@ jobs:
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda129-Cudnn99-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
@@ -563,6 +566,14 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          '
+
+      - name: GLM4.5 sft cp
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
           '
 
       - name: Qwen pre-train
@@ -684,7 +695,6 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -705,7 +715,7 @@ jobs:
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda129-Cudnn99-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
