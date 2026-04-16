@@ -22,6 +22,7 @@ from paddle import Tensor, nn
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.distributed.fleet.layers.mpu import mp_ops
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
@@ -33,7 +34,6 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
 )
-from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -199,6 +199,44 @@ class LanguageLoss(FleetLayer):
     def forward_impl(self, logits: Tensor, labels: Tensor) -> Tensor:
         seq_len = logits.shape[1]
 
+        # Loss-path MD5 probe: logits and labels before cross-entropy
+        import os
+
+        if (
+            os.environ.get("LOG_LAYER_MD5", "0") == "1"
+            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
+        ):
+            import hashlib
+
+            rank = paddle.distributed.get_rank()
+            lg_md5 = hashlib.md5(
+                logits.cast("float32").numpy().tobytes()
+            ).hexdigest()
+            lb_md5 = hashlib.md5(
+                labels.cast("int64").numpy().tobytes()
+            ).hexdigest()
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} loss_input_logits shape={list(logits.shape)} md5={lg_md5}",
+                flush=True,
+            )
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} loss_input_labels shape={list(labels.shape)} md5={lb_md5}",
+                flush=True,
+            )
+            # Save tensors for offline comparison
+            save_dir = "/root/paddlejob/share-storage/gpfs/system-public/wangxiangzhe/V2Precision/loss_debug_tensors/pf"
+            os.makedirs(save_dir, exist_ok=True)
+            _loss_counter = getattr(self, "_loss_counter", 0)
+            paddle.save(
+                logits,
+                f"{save_dir}/rank{rank}_mb{_loss_counter}_loss_logits.pd",
+            )
+            paddle.save(
+                labels,
+                f"{save_dir}/rank{rank}_mb{_loss_counter}_loss_labels.pd",
+            )
+            self._loss_counter = _loss_counter + 1
+
         if self.use_subbatch and seq_len > self.loss_subbatch_sequence_length:
 
             def _cast_loss_func(logits, labels):
@@ -224,10 +262,60 @@ class LanguageLoss(FleetLayer):
             loss = paddle.mean(loss) * 0.0
         else:
             lossmask = lossmask.reshape([-1]).cast(paddle.float32)
-            loss = paddle.sum(
-                loss.cast(paddle.float32).reshape([-1]) * lossmask
-            )
-            loss = loss / lossmask.sum()
+
+            # Loss-path MD5 probe: per-token loss and lossmask
+            if (
+                os.environ.get("LOG_LAYER_MD5", "0") == "1"
+                or os.environ.get("LOG_LOSS_MD5", "0") == "1"
+            ):
+                import hashlib
+
+                rank = paddle.distributed.get_rank()
+                pt_md5 = hashlib.md5(
+                    loss.cast("float32").reshape([-1]).numpy().tobytes()
+                ).hexdigest()
+                lm_md5 = hashlib.md5(lossmask.numpy().tobytes()).hexdigest()
+                valid_count = lossmask.sum().item()
+                loss_sum_val = paddle.sum(
+                    loss.cast("float32").reshape([-1]) * lossmask
+                ).item()
+                print(
+                    f"[LOSS_PATH_MD5] rank={rank} per_token_loss md5={pt_md5}",
+                    flush=True,
+                )
+                print(
+                    f"[LOSS_PATH_MD5] rank={rank} lossmask md5={lm_md5} valid_tokens={valid_count}",
+                    flush=True,
+                )
+                print(
+                    f"[LOSS_PATH_MD5] rank={rank} loss_sum={loss_sum_val} final_loss={loss_sum_val / valid_count}",
+                    flush=True,
+                )
+
+            # EC-compat: line-wise loss (per-sample mean then average across samples)
+            # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
+            # is present, which changes the value due to division by (count + 1e-6).
+            if os.environ.get("gpt_model_use_experimental_version", "") == "1":
+                loss_2d = loss.cast(paddle.float32) * lossmask.reshape(
+                    labels.shape
+                )
+                lossmask_2d = lossmask.reshape(labels.shape)
+                token_count_per_line = lossmask_2d.sum(-1)
+                is_invalid_line_float = (token_count_per_line == 0).astype(
+                    paddle.float32
+                )
+                loss_per_line = loss_2d.sum(-1) / (
+                    token_count_per_line + 1e-6 * is_invalid_line_float
+                )
+                loss_per_line = loss_per_line * (1 - is_invalid_line_float)
+                loss = loss_per_line.sum() / (
+                    (1 - is_invalid_line_float).sum() + 1e-6
+                )
+            else:
+                loss = paddle.sum(
+                    loss.cast(paddle.float32).reshape([-1]) * lossmask
+                )
+                loss = loss / lossmask.sum()
 
         return loss
 

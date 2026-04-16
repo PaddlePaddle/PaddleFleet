@@ -94,7 +94,7 @@ def _common_patches():
             return_value=_make_pg_collection(),
         ),
         patch(
-            "paddlefleet.transformer.multi_token_prediction.build_layer",
+            "paddlefleet.transformer.multi_token_prediction.build_spec_layer",
             side_effect=_mock_build_layer_side_effect,
         ),
         patch(

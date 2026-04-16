@@ -13,11 +13,17 @@
 # limitations under the License.
 
 import math
+import os
 from dataclasses import dataclass
 from typing import NoReturn
 
 import paddle
 from paddle import Tensor
+
+_ERNIECORE_ALIGNMENT = (
+    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
+)
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.models.common.embeddings import (
@@ -31,7 +37,6 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_mscale,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
     gather_from_tensor_model_parallel_region,
@@ -50,6 +55,81 @@ try:
 except:
     fused_apply_mla_rope_for_kv = None
     fused_apply_mla_rope_for_q = None
+
+
+def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
+    """Apply RoPE using EC's complex multiplication method (no YaRN, no mscale).
+
+    This exactly matches ErnieCore's compute_freqs_cis_mrope_and_apply_rotary_3d
+    when position_ids are sequential [0, 1, 2, ..., seq_len-1] (text-only case
+    where all 3 mRoPE axes have the same value).
+
+    Args:
+        q_pe: [B, S, H, D] query positional embedding portion
+        k_pe: [B, S, 1, D] key positional embedding portion
+        seq_len: sequence length
+        rope_base: base frequency (default 1e6)
+    """
+    head_dim = q_pe.shape[-1]
+    # inv_freq same as EC: 1 / (base^(arange(0, dim, 2) / dim))
+    freqs = 1.0 / (
+        rope_base
+        ** (paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim))
+    )
+    # position ids: [0, 1, ..., seq_len-1]
+    positions = paddle.arange(0, seq_len, dtype="float32")
+    # freqs_table: [S, D/2]
+    freqs_table = paddle.outer(positions, freqs)
+    # Expand for batch: [1, S, D/2]
+    freqs_expanded = freqs_table.unsqueeze(0)
+    # Expand to match q_pe batch size: [B, S, D/2]
+    freqs_expanded = freqs_expanded.expand(
+        [q_pe.shape[0], seq_len, head_dim // 2]
+    )
+    # freqs_cis: complex [B, S, D/2] -> [B, S, 1, D/2]
+    freqs_cis = paddle.polar(paddle.ones_like(freqs_expanded), freqs_expanded)
+    freqs_cis = freqs_cis.unsqueeze(2)  # [B, S, 1, D/2]
+
+    # MD5 debug
+    import hashlib as _hl
+
+    _log_md5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
+    if _log_md5:
+        import paddle.distributed as _dist
+
+        _r = _dist.get_rank() if _dist.is_initialized() else 0
+        _fc_real = paddle.as_real(freqs_cis)
+        _md5 = _hl.md5(_fc_real.cast("float32").numpy().tobytes()).hexdigest()
+        print(
+            f"[MD5 Probe PF] Rank={_r} freqs_cis MD5={_md5} shape={list(freqs_cis.shape)} q_dtype={q_pe.dtype}",
+            flush=True,
+        )
+
+    # Apply to q_pe via complex multiplication (EC style: interleaved pairs)
+    xq = paddle.reshape(
+        q_pe.cast("float32"), [*q_pe.shape[:-1], -1, 2]
+    )  # [B,S,H,D/2,2]
+    xk = paddle.reshape(
+        k_pe.cast("float32"), [*k_pe.shape[:-1], -1, 2]
+    )  # [B,S,1,D/2,2]
+    xq_ = paddle.as_complex(xq)  # [B,S,H,D/2]
+    xk_ = paddle.as_complex(xk)  # [B,S,1,D/2]
+
+    if _log_md5:
+        _xq_data = paddle.as_real(xq_).cast("float32").numpy().tobytes()
+        _xq_md5 = _hl.md5(_xq_data).hexdigest()
+        print(
+            f"[MD5 Probe PF] Rank={_r} xq_complex MD5={_xq_md5} shape={list(xq_.shape)}",
+            flush=True,
+        )
+
+    xq_out = paddle.as_real(xq_ * freqs_cis)  # [B,S,H,D/2,2]
+    xk_out = paddle.as_real(xk_ * freqs_cis)  # [B,S,1,D/2,2]
+
+    xq_out = paddle.flatten(xq_out, start_axis=3)  # [B,S,H,D]
+    xk_out = paddle.flatten(xk_out, start_axis=3)  # [B,S,1,D]
+
+    return xq_out.cast(q_pe.dtype), xk_out.cast(k_pe.dtype)
 
 
 @dataclass
@@ -131,7 +211,7 @@ class MultiLatentAttention(Attention):
                 "'rope' and 'yarn'"
             )
 
-        self.core_attention = build_layer(
+        self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
             config=self.config,
             layer_number=self.layer_number,
@@ -145,7 +225,7 @@ class MultiLatentAttention(Attention):
         )
 
         # Output.
-        self.o_proj = build_layer(
+        self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
             self.query_projection_size,
             self.config.hidden_size,
@@ -174,6 +254,10 @@ class MultiLatentAttention(Attention):
         position_ids=None,
     ):
         """Forward pass for multi-latent attention"""
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        _log = TransformerLayer._log_md5
+
         assert rotary_pos_emb is None, (
             "Rotary position embeddings should not be passed into MLA."
         )
@@ -195,6 +279,12 @@ class MultiLatentAttention(Attention):
             position_ids,
             packed_seq_params,
         )
+
+        layer_num = getattr(self, "layer_number", -1)
+        _log(query, "attn_query", layer_num)
+        _log(key, "attn_key", layer_num)
+        if value is not None:
+            _log(value, "attn_value", layer_num)
 
         attn_mask_type = self.attn_mask_type
         query = query.contiguous()
@@ -245,12 +335,16 @@ class MultiLatentAttention(Attention):
                 and in_recompute,
             )
 
+        _log(core_attn_out, "core_attn_out", layer_num)
+
         # =================
         # Output. [b, sq, h]
         # =================
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
         output, bias = self.o_proj(core_attn_out)
+
+        _log(output, "attn_o_proj_out", layer_num)
 
         return output, bias
 
@@ -286,7 +380,7 @@ class MLASelfAttention(MultiLatentAttention):
 
         if self.config.q_lora_rank is None:
             # Not projecting query
-            self.q_proj = build_layer(
+            self.q_proj = build_spec_layer(
                 sublayers_spec.q_proj,
                 self.config.hidden_size,
                 self.config.num_attention_heads * self.q_head_dim,
@@ -300,7 +394,7 @@ class MLASelfAttention(MultiLatentAttention):
             )
 
         else:
-            self.q_a_proj = build_layer(
+            self.q_a_proj = build_spec_layer(
                 sublayers_spec.q_a_proj,
                 self.config.hidden_size,
                 self.config.q_lora_rank,
@@ -314,7 +408,7 @@ class MLASelfAttention(MultiLatentAttention):
                 tp_group=pg_collection.tp,
             )
 
-            self.q_b_proj = build_layer(
+            self.q_b_proj = build_spec_layer(
                 sublayers_spec.q_b_proj,
                 self.config.q_lora_rank,
                 self.config.num_attention_heads * self.q_head_dim,
@@ -328,7 +422,7 @@ class MLASelfAttention(MultiLatentAttention):
                 tp_group=pg_collection.tp,
             )
 
-        self.kv_a_proj_with_mqa = build_layer(
+        self.kv_a_proj_with_mqa = build_spec_layer(
             sublayers_spec.kv_a_proj_with_mqa,
             self.config.hidden_size,
             self.config.kv_lora_rank + self.config.qk_rope_head_dim,
@@ -342,7 +436,7 @@ class MLASelfAttention(MultiLatentAttention):
             tp_group=pg_collection.tp,
         )
 
-        self.kv_b_proj = build_layer(
+        self.kv_b_proj = build_spec_layer(
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
             self.config.num_attention_heads
@@ -358,14 +452,14 @@ class MLASelfAttention(MultiLatentAttention):
         )
 
         if self.config.q_lora_rank is not None:
-            self.q_a_layernorm = build_layer(
+            self.q_a_layernorm = build_spec_layer(
                 sublayers_spec.q_a_layernorm,
                 hidden_size=self.config.q_lora_rank,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
             )
 
-        self.kv_a_layernorm = build_layer(
+        self.kv_a_layernorm = build_spec_layer(
             sublayers_spec.kv_a_layernorm,
             hidden_size=self.config.kv_lora_rank,
             config=self.config,
@@ -519,6 +613,14 @@ class MLASelfAttention(MultiLatentAttention):
 
         kv_compressed = self.kv_a_layernorm(kv_compressed)
 
+        # === MD5 probes for MLA intermediate values ===
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        _log = TransformerLayer._log_md5
+        _log(q_compressed, "mla_q_compressed_normed", self.layer_number)
+        _log(kv_compressed, "mla_kv_compressed_normed", self.layer_number)
+        _log(k_pos_emb, "mla_k_pos_emb_raw", self.layer_number)
+
         # =========================================
         # QKV up projection and RoPE apply
         # =========================================
@@ -633,28 +735,52 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
-                # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
-                q_pos_emb = apply_rotary_pos_emb(
-                    q_pos_emb,
-                    rotary_pos_emb,
-                    rotary_pos_cos,
-                    rotary_pos_sin,
-                    config=self.config,
-                    cu_seqlens=cu_seqlens_q,
-                    mscale=mscale,
-                    cp_group=self.pg_collection.cp,
-                )
-                # k_pos_emb:[num_tokens, 1, qk_rope_head_dim]
-                k_pos_emb = apply_rotary_pos_emb(
-                    k_pos_emb,
-                    rotary_pos_emb,
-                    rotary_pos_cos,
-                    rotary_pos_sin,
-                    config=self.config,
-                    cu_seqlens=cu_seqlens_kv,
-                    mscale=mscale,
-                    cp_group=self.pg_collection.cp,
-                )
+                if _ERNIECORE_ALIGNMENT:
+                    # EC-compatible RoPE: complex rotation, no YaRN, no mscale
+                    from paddlefleet.transformer.transformer_layer import (
+                        TransformerLayer,
+                    )
+
+                    _log = TransformerLayer._log_md5
+                    if not hasattr(self, "_ec_mla_rope_path_logged"):
+                        print(
+                            "[ALIGNMENT PATH HIT] multi_latent_attention: _ec_compatible_rope_apply called (MLA)",
+                            flush=True,
+                        )
+                        self._ec_mla_rope_path_logged = True
+                    _log(q_pos_emb, "mla_q_pe_before_rope", self.layer_number)
+                    _log(k_pos_emb, "mla_k_pe_before_rope", self.layer_number)
+                    q_pos_emb, k_pos_emb = _ec_compatible_rope_apply(
+                        q_pos_emb,
+                        k_pos_emb,
+                        q_len,
+                        rope_base=1000000.0,  # EC uses rope_theta=1000000 (from model_config.json)
+                    )
+                    _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
+                    _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)
+                else:
+                    # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
+                    q_pos_emb = apply_rotary_pos_emb(
+                        q_pos_emb,
+                        rotary_pos_emb,
+                        rotary_pos_cos,
+                        rotary_pos_sin,
+                        config=self.config,
+                        cu_seqlens=cu_seqlens_q,
+                        mscale=mscale,
+                        cp_group=self.pg_collection.cp,
+                    )
+                    # k_pos_emb:[num_tokens, 1, qk_rope_head_dim]
+                    k_pos_emb = apply_rotary_pos_emb(
+                        k_pos_emb,
+                        rotary_pos_emb,
+                        rotary_pos_cos,
+                        rotary_pos_sin,
+                        config=self.config,
+                        cu_seqlens=cu_seqlens_kv,
+                        mscale=mscale,
+                        cp_group=self.pg_collection.cp,
+                    )
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
                 query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)

@@ -27,12 +27,13 @@ sys.path.insert(
 import unittest
 from unittest.mock import MagicMock
 
+from paddle.distributed.fleet.meta_parallel import ScheduleChunk, ScheduleNode
+
 from paddlefleet.models.gpt.gpt_model import (
     GPTModel,
     GPTSublayersSpec,
     build_overlapped_nodes,
 )
-from paddlefleet.pipeline_parallel import ScheduleChunk, ScheduleNode
 
 
 class TestBuildOverlappedNodes(unittest.TestCase):

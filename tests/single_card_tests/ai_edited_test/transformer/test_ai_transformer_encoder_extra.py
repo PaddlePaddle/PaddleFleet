@@ -28,8 +28,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
-
-from paddlefleet.pipeline_parallel import ScheduleChunk
+from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
 
 class TestTransformerEncoderHelperMethods(unittest.TestCase):
@@ -157,7 +156,8 @@ class TestTransformerEncoderOverlappedForwardBackward(unittest.TestCase):
     """Tests for TransformerEncoder.overlapped_forward_backward."""
 
     def test_overlapped_forward_backward_no_loss(self):
-        from paddlefleet.pipeline_parallel import ScheduleChunk
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
+
         from paddlefleet.transformer.transformer_encoder import (
             TransformerEncoder,
         )

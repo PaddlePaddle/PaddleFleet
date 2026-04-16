@@ -15,6 +15,8 @@
 
 from functools import partial
 
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
+
 from paddlefleet.models.common.empty_layer import EmptyLayer
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 from paddlefleet.models.gpt.gpt_layer_specs import (
@@ -23,7 +25,6 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_layers_spec,
     get_gpt_spec,
 )
-from paddlefleet.spec_utils import LayerSpec, build_layer
 
 
 def gpt_builder(config, **kwargs):
@@ -100,7 +101,7 @@ def gpt_builder(config, **kwargs):
     if "loss_fn" in kwargs:
         loss_fn = kwargs.pop("loss_fn")
 
-    return build_layer(
+    return build_spec_layer(
         gpt_spec,
         loss_fn=LanguageLoss(config) if not loss_fn else loss_fn,
         **kwargs,

@@ -92,6 +92,33 @@ def _get_fp8_weight_and_scale(weight, transpose=False):
     return fp8_weight, fp8_scale
 
 
+def fused_stack_quant_without_cache(
+    expert_weight_list, transpose=False, use_ue8m0=False
+):
+    use_pow2_scale = False
+    if paddle.device.cuda.get_device_capability()[0] == 10:
+        # Blackwell GPUs require the use of pow2_scales quantization.
+        use_pow2_scale = True
+    if transpose:
+        w, scale = fuse_stack_transpose_fp8_quant(
+            expert_weight_list,
+            use_pow2_scale,
+            use_ue8m0,
+            use_ue8m0,
+        )
+    else:
+        w, scale = fuse_stack_fp8_quant(
+            expert_weight_list,
+            use_pow2_scale,
+            use_ue8m0,
+            use_ue8m0,
+        )
+
+    if use_ue8m0:
+        scale = scale.T
+    return w, scale
+
+
 def fused_stack_quant(expert_weight_list, transpose=False, use_ue8m0=False):
     if transpose is False and hasattr(
         expert_weight_list[0], "fp8_weight_stacked"
@@ -118,27 +145,9 @@ def fused_stack_quant(expert_weight_list, transpose=False, use_ue8m0=False):
             expert_weight_list[0], transpose=True
         )
     else:
-        use_pow2_scale = False
-        if paddle.device.cuda.get_device_capability()[0] == 10:
-            # Blackwell GPUs require the use of pow2_scales quantization.
-            use_pow2_scale = True
-        if transpose:
-            w, scale = fuse_stack_transpose_fp8_quant(
-                expert_weight_list,
-                use_pow2_scale,
-                use_ue8m0,
-                use_ue8m0,
-            )
-        else:
-            w, scale = fuse_stack_fp8_quant(
-                expert_weight_list,
-                use_pow2_scale,
-                use_ue8m0,
-                use_ue8m0,
-            )
-
-        if use_ue8m0:
-            scale = scale.T
+        w, scale = fused_stack_quant_without_cache(
+            expert_weight_list, transpose, use_ue8m0
+        )
     return w, scale
 
 

@@ -19,6 +19,7 @@ import math
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet.config_logger import (
     has_config_logger_enabled,
@@ -26,7 +27,6 @@ from paddlefleet.config_logger import (
 )
 from paddlefleet.models.common.vision_layer.vision_layer import VisionLayer
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.layers import ColumnParallelLinear
 from paddlefleet.transformer.enums import ModelType
 from paddlefleet.transformer.transformer_block import TransformerBlock
@@ -162,14 +162,14 @@ class RADIOViTModel(VisionLayer):
         self.pg_collection = pg_collection
         self.vp_stage = vp_stage
         if ln_pre_impl is not None:
-            self.ln_pre = build_layer(
+            self.ln_pre = build_spec_layer(
                 ln_pre_impl,
                 config=transformer_config,
                 hidden_size=self.visual_hidden_size,
                 eps=transformer_config.rms_norm_eps,
             )
         if ln_post_impl is not None:
-            self.ln_post = build_layer(
+            self.ln_post = build_spec_layer(
                 ln_post_impl,
                 config=transformer_config,
                 hidden_size=self.visual_hidden_size,

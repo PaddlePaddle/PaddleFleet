@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Literal
 
 import paddle
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 
 from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
 from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
@@ -40,7 +41,6 @@ from paddlefleet.models.gpt.lm_head import GPTLMHead
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
-from paddlefleet.spec_utils import LayerSpec
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
@@ -401,7 +401,20 @@ def get_gpt_mtp_layers_spec_for_backend(
     backend: BackendSpecProvider,
 ) -> list[LayerSpec]:
     assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
-    transformer_layer_spec = spec[-1]
+
+    if config.use_dense_mtp and config.n_routed_experts is not None:
+        # When use_dense_mtp is enabled, build a dense transformer layer spec
+        # (num_experts=None) for MTP layers instead of copying the MoE decoder layer.
+        transformer_layer_spec = get_gpt_layer_local_spec(
+            config=config,
+            num_experts=None,
+            moe_grouped_gemm=False,
+            use_qk_norm=config.use_qk_norm,
+            multi_latent_attention=config.multi_latent_attention,
+            normalization=config.normalization,
+        )
+    else:
+        transformer_layer_spec = spec[-1]
 
     mtp_layer_spec_func = partial(
         get_mtp_layer_spec_for_backend,

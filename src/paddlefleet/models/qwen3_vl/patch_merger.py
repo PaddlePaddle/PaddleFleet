@@ -14,9 +14,9 @@
 from dataclasses import dataclass
 
 from paddle import nn
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.nn import functional as F
 
-from ...spec_utils import LayerSpec, build_layer
 from ...tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from ...transformer.identity_op import IdentityOp
 from ...transformer.mlp import MLP, MLPSublayersSpec
@@ -44,11 +44,11 @@ class Qwen3VLVisionPathMerger(nn.Module):
 
         self.hidden_size = context_dim * (config.spatial_merge_size**2)
         norm_dim = self.hidden_size if use_postshuffle_norm else context_dim
-        self.norm = build_layer(
+        self.norm = build_spec_layer(
             sublayers_spec.norm, config=config, hidden_size=norm_dim
         )
         self.use_postshuffle_norm = use_postshuffle_norm
-        self.mlp = build_layer(
+        self.mlp = build_spec_layer(
             LayerSpec(
                 layer=MLP,
                 sublayers_spec=MLPSublayersSpec(
