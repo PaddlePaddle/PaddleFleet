@@ -30,18 +30,26 @@ from unittest.mock import MagicMock, patch
 class TestGetAction(unittest.TestCase):
     """Tests for get_action function."""
 
-    @patch("paddlefleet.pipeline_parallel.pipeline_parallel.HOOK_ACTION")
+    @patch(
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.HOOK_ACTION"
+    )
     def test_get_action_is_dp(self, mock_action):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import get_action
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
+            get_action,
+        )
 
         mock_action.ALL_REDUCE = "all_reduce"
         mock_action.REDUCE_SCATTER = "reduce_scatter"
         mock_action.REDUCE = "reduce"
         self.assertEqual(get_action(is_dp=True), "all_reduce")
 
-    @patch("paddlefleet.pipeline_parallel.pipeline_parallel.HOOK_ACTION")
+    @patch(
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.HOOK_ACTION"
+    )
     def test_get_action_shard_split(self, mock_action):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import get_action
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
+            get_action,
+        )
 
         mock_action.ALL_REDUCE = "all_reduce"
         mock_action.REDUCE_SCATTER = "reduce_scatter"
@@ -50,9 +58,13 @@ class TestGetAction(unittest.TestCase):
             get_action(is_dp=False, shard_split_param=True), "reduce_scatter"
         )
 
-    @patch("paddlefleet.pipeline_parallel.pipeline_parallel.HOOK_ACTION")
+    @patch(
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.HOOK_ACTION"
+    )
     def test_get_action_default(self, mock_action):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import get_action
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
+            get_action,
+        )
 
         mock_action.ALL_REDUCE = "all_reduce"
         mock_action.REDUCE_SCATTER = "reduce_scatter"
@@ -64,35 +76,29 @@ class TestNoPipelineParallelExtra(unittest.TestCase):
     """Additional NoPipelineParallel tests."""
 
     def test_no_pipeline_parallel_is_abstract_base(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel import (
+            MetaParallelBase,
             NoPipelineParallel,
-            ParallelBase,
         )
 
-        self.assertTrue(issubclass(NoPipelineParallel, ParallelBase))
+        self.assertTrue(issubclass(NoPipelineParallel, MetaParallelBase))
 
     def test_no_pipeline_is_last_stage_always_true(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         self.assertTrue(pp.is_pipeline_last_stage())
         self.assertTrue(pp.is_pipeline_last_stage(ignore_virtual=False))
 
     def test_no_pipeline_total_loss_initialized_none(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         pp.total_loss = None
         self.assertIsNone(pp.total_loss)
 
     def test_no_pipeline_loss_fn_idx_default(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         pp.loss_fn_idx = 0
@@ -104,8 +110,7 @@ class TestFakeMicroDatasetExtra(unittest.TestCase):
 
     def test_fake_micro_dataset_single_tensor_input(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -126,8 +131,7 @@ class TestFakeMicroDatasetExtra(unittest.TestCase):
 
     def test_fake_micro_dataset_none_in_list(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -153,7 +157,7 @@ class TestPipelineParallelMicroStepCallbackExtra(unittest.TestCase):
     """Additional PipelineParallelMicroStepCallback tests."""
 
     def test_register_at_all_four_locations(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -166,7 +170,7 @@ class TestPipelineParallelMicroStepCallbackExtra(unittest.TestCase):
         self.assertEqual(count, 4)
 
     def test_callback_kwargs_forward(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -191,7 +195,7 @@ class TestPipelineDatasetPreprocessor(unittest.TestCase):
     """Tests for PipelineDatasetPreprocessor."""
 
     def test_pipeline_dataset_preprocessor_call(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineDatasetPreprocessor,
         )
 

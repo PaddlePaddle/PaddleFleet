@@ -43,7 +43,7 @@ class TestQwen3VLVisionPatchMergerSpec(unittest.TestCase):
 class TestQwen3VLVisionPathMergerInit(unittest.TestCase):
     """Test Qwen3VLVisionPathMerger initialization."""
 
-    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_spec_layer")
     def test_basic_init(self, mock_build):
         from paddlefleet.models.qwen3_vl.patch_merger import (
             Qwen3VLVisionPathMerger,
@@ -64,7 +64,7 @@ class TestQwen3VLVisionPathMergerInit(unittest.TestCase):
         expected_hidden = 1024 * (2**2)  # context_dim * spatial_merge_size^2
         self.assertEqual(merger.hidden_size, expected_hidden)
 
-    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_spec_layer")
     def test_init_with_explicit_dims(self, mock_build):
         from paddlefleet.models.qwen3_vl.patch_merger import (
             Qwen3VLVisionPathMerger,
@@ -92,7 +92,7 @@ class TestQwen3VLVisionPathMergerInit(unittest.TestCase):
 class TestQwen3VLVisionPathMergerInitWithPostshuffleNorm(unittest.TestCase):
     """Test Qwen3VLVisionPathMerger with postshuffle norm."""
 
-    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_spec_layer")
     def test_postshuffle_norm(self, mock_build):
         from paddlefleet.models.qwen3_vl.patch_merger import (
             Qwen3VLVisionPathMerger,
@@ -118,7 +118,7 @@ class TestQwen3VLVisionPathMergerInitWithPostshuffleNorm(unittest.TestCase):
 class TestQwen3VLVisionPathMergerForwardDictInput(unittest.TestCase):
     """Test Qwen3VLVisionPathMerger forward with dict input."""
 
-    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_spec_layer")
     def test_forward_with_dict(self, mock_build):
         import paddle
 
@@ -152,7 +152,7 @@ class TestQwen3VLVisionPathMergerForwardDictInput(unittest.TestCase):
 class TestQwen3VLVisionPathMergerForwardTensorInput(unittest.TestCase):
     """Test Qwen3VLVisionPathMerger forward with tensor input."""
 
-    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_spec_layer")
     def test_forward_with_tensor(self, mock_build):
         import paddle
 
@@ -186,7 +186,7 @@ class TestQwen3VLVisionPathMergerForwardTensorInput(unittest.TestCase):
 class TestQwen3VLVisionPathMergerForwardWithBias(unittest.TestCase):
     """Test Qwen3VLVisionPathMerger forward when bias is not None."""
 
-    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_spec_layer")
     def test_forward_adds_bias(self, mock_build):
         import paddle
 
@@ -221,7 +221,7 @@ class TestQwen3VLVisionPathMergerForwardWithBias(unittest.TestCase):
 class TestQwen3VLVisionPathMergerPostshuffleNormForward(unittest.TestCase):
     """Test Qwen3VLVisionPathMerger forward with postshuffle norm."""
 
-    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.patch_merger.build_spec_layer")
     def test_forward_postshuffle(self, mock_build):
         import paddle
 

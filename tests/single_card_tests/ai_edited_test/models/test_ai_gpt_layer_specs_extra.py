@@ -365,10 +365,11 @@ class TestGetGPTMTPSpecs(unittest.TestCase):
     def test_get_gpt_mtp_layers_spec_empty(self, mock_mtp):
         from unittest.mock import MagicMock
 
+        from paddle.distributed.fleet.meta_parallel import LayerSpec
+
         from paddlefleet.models.gpt.gpt_layer_specs import (
             get_gpt_mtp_layers_spec,
         )
-        from paddlefleet.spec_utils import LayerSpec
 
         mock_mtp.return_value = []
         config = _make_mock_config(

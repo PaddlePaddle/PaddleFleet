@@ -109,8 +109,8 @@ class TestMLASelfAttentionConstruction(unittest.TestCase):
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
     @patch("paddlefleet.transformer.multi_latent_attention.YarnRotaryEmbedding")
-    @patch("paddlefleet.transformer.attention.build_layer")
-    @patch("paddlefleet.transformer.multi_latent_attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
+    @patch("paddlefleet.transformer.multi_latent_attention.build_spec_layer")
     def test_with_q_lora_rank(
         self, mock_build_mla, mock_build_attn, mock_rope, mock_pg
     ):
@@ -151,8 +151,8 @@ class TestMLASelfAttentionForward(unittest.TestCase):
     @patch(
         "paddlefleet.transformer.multi_latent_attention.apply_rotary_pos_emb"
     )
-    @patch("paddlefleet.transformer.attention.build_layer")
-    @patch("paddlefleet.transformer.multi_latent_attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
+    @patch("paddlefleet.transformer.multi_latent_attention.build_spec_layer")
     def test_forward_asserts_on_rotary_pos_emb(
         self,
         mock_build_mla,
@@ -199,8 +199,8 @@ class TestMLASelfAttentionBackwardDW(unittest.TestCase):
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
     @patch("paddlefleet.transformer.multi_latent_attention.YarnRotaryEmbedding")
-    @patch("paddlefleet.transformer.attention.build_layer")
-    @patch("paddlefleet.transformer.multi_latent_attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
+    @patch("paddlefleet.transformer.multi_latent_attention.build_spec_layer")
     def test_backward_dw(
         self, mock_build_mla, mock_build_attn, mock_rope, mock_pg
     ):

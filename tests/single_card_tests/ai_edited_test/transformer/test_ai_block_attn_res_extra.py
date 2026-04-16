@@ -68,7 +68,7 @@ def _make_config(**overrides):
 class TestBlockAttnResConstruction(unittest.TestCase):
     """Test BlockAttnRes construction."""
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_basic_construction(self, mock_build):
         mock_build.return_value = FakeNorm()
         config = _make_config()
@@ -78,7 +78,7 @@ class TestBlockAttnResConstruction(unittest.TestCase):
         self.assertIsNotNone(bar.proj_weight)
         self.assertIsNotNone(bar.norm)
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_proj_weight_shape(self, mock_build):
         mock_build.return_value = FakeNorm()
         config = _make_config(hidden_size=128)
@@ -86,7 +86,7 @@ class TestBlockAttnResConstruction(unittest.TestCase):
         bar = BlockAttnRes(config, spec)
         self.assertEqual(bar.proj_weight.shape, [128])
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     @patch(
         "paddlefleet.transformer.block_attn_res.mark_as_sequence_parallel_parameter"
     )
@@ -104,7 +104,7 @@ class TestBlockAttnResConstruction(unittest.TestCase):
 class TestBlockAttnResForward(unittest.TestCase):
     """Test BlockAttnRes forward."""
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_forward_single_block(self, mock_build):
         mock_build.return_value = FakeNorm()
         config = _make_config()
@@ -116,7 +116,7 @@ class TestBlockAttnResForward(unittest.TestCase):
         out = bar(partial, blocks)
         self.assertEqual(out.shape, [2, 4, 64])
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_forward_multiple_blocks(self, mock_build):
         mock_build.return_value = FakeNorm()
         config = _make_config()
@@ -132,7 +132,7 @@ class TestBlockAttnResForward(unittest.TestCase):
         out = bar(partial, blocks)
         self.assertEqual(out.shape, [2, 4, 64])
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_forward_empty_blocks_list(self, mock_build):
         mock_build.return_value = FakeNorm()
         config = _make_config()
@@ -144,7 +144,7 @@ class TestBlockAttnResForward(unittest.TestCase):
         out = bar(partial, blocks)
         self.assertEqual(out.shape, [2, 4, 64])
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_forward_output_not_nan(self, mock_build):
         mock_build.return_value = FakeNorm()
         config = _make_config()
@@ -157,7 +157,7 @@ class TestBlockAttnResForward(unittest.TestCase):
         out = bar(partial, blocks)
         self.assertFalse(paddle.isnan(out).any())
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_forward_dtype_preserved(self, mock_build):
         mock_build.return_value = FakeNorm()
         config = _make_config()
@@ -169,7 +169,7 @@ class TestBlockAttnResForward(unittest.TestCase):
         out = bar(partial, blocks)
         self.assertEqual(out.dtype, paddle.float32)
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_forward_different_batch_sizes(self, mock_build):
         mock_build.return_value = FakeNorm()
         config = _make_config()
@@ -181,7 +181,7 @@ class TestBlockAttnResForward(unittest.TestCase):
         out = bar(partial, blocks)
         self.assertEqual(out.shape, [1, 8, 64])
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_forward_small_hidden(self, mock_build):
         def build_side_effect(*a, **kw):
             hidden_size = kw.get("hidden_size", kw.get("normalized_shape", 64))
@@ -211,7 +211,7 @@ class TestBlockAttnResSublayersSpec(unittest.TestCase):
 class TestBlockAttnResGetNormExtraArgs(unittest.TestCase):
     """Test get_norm_extra_args integration."""
 
-    @patch("paddlefleet.transformer.block_attn_res.build_layer")
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_norm_extra_args_called(self, mock_build):
         mock_build.return_value = FakeNorm()
         config = _make_config()

@@ -35,7 +35,7 @@ class TestRADIOViTModelInit(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_basic_init(self, mock_cpl, mock_tb, mock_build, mock_log):
@@ -64,7 +64,7 @@ class TestRADIOViTModelInit(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_init_with_mask_token(
@@ -92,7 +92,7 @@ class TestRADIOViTModelInit(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_init_without_class_token(
@@ -120,7 +120,7 @@ class TestRADIOViTModelInit(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_init_with_ln_pre(self, mock_cpl, mock_tb, mock_build, mock_log):
@@ -149,7 +149,7 @@ class TestRADIOViTModelPosEnc(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_get_pos_enc_no_idxs(self, mock_cpl, mock_tb, mock_build, mock_log):
@@ -186,7 +186,7 @@ class TestRADIOViTModelPosEnc(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_get_pos_enc_with_input_size(
@@ -225,7 +225,7 @@ class TestRADIOViTModelApplyPosEnc(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_apply_pos_enc_eval_mode(
@@ -269,7 +269,7 @@ class TestRADIOViTModelSeqLength(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_seq_length_with_class_token(
@@ -301,7 +301,7 @@ class TestRADIOViTModelSeqLength(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_seq_length_without_class_token(
@@ -336,7 +336,7 @@ class TestRADIOViTModelMaxDims(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_max_num_patches(self, mock_cpl, mock_tb, mock_build, mock_log):
@@ -367,7 +367,7 @@ class TestRADIOViTModelMaxDims(unittest.TestCase):
         "paddlefleet.models.vision.radio.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.radio.build_layer")
+    @patch("paddlefleet.models.vision.radio.build_spec_layer")
     @patch("paddlefleet.models.vision.radio.TransformerBlock")
     @patch("paddlefleet.models.vision.radio.ColumnParallelLinear")
     def test_set_input_tensor(self, mock_cpl, mock_tb, mock_build, mock_log):

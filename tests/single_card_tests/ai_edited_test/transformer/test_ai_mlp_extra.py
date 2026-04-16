@@ -94,7 +94,7 @@ def _make_build_side_effect(in_f, inter_f, hidden_f, use_bias=False):
 class TestMLPConstruction(unittest.TestCase):
     """Test MLP construction paths."""
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_glu_doubles_intermediate(self, mock_build):
         mock_build.return_value = FakeColumnParallel(64, 512)
         config = _make_config(gated_linear_unit=True, intermediate_size=256)
@@ -104,7 +104,7 @@ class TestMLPConstruction(unittest.TestCase):
         self.assertIsNotNone(mlp.down_proj)
         self.assertIsNotNone(mlp.hidden_act)
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_expert_requires_intermediate_size(self, mock_build):
         mock_build.side_effect = lambda *a, **kw: FakeColumnParallel(64, 256)
         config = _make_config()
@@ -114,7 +114,7 @@ class TestMLPConstruction(unittest.TestCase):
         with self.assertRaises(ValueError):
             MLP(config, spec, is_expert=True)
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_no_intermediate_size_warns(self, mock_build):
         mock_build.side_effect = lambda *a, **kw: FakeColumnParallel(64, 256)
         config = _make_config(intermediate_size=256)
@@ -127,7 +127,7 @@ class TestMLPConstruction(unittest.TestCase):
 class TestMLPForwardBiasActivationFusion(unittest.TestCase):
     """Test bias_activation_fusion paths."""
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     @patch("paddlefleet.transformer.mlp.bias_gelu_impl")
     def test_gelu_fusion_without_glu(self, mock_gelu, mock_build):
         mock_gelu.return_value = paddle.zeros([2, 256])
@@ -146,7 +146,7 @@ class TestMLPForwardBiasActivationFusion(unittest.TestCase):
         self.assertEqual(out.shape, [2, 64])
         mock_gelu.assert_called()
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     @patch("paddlefleet.transformer.mlp.bias_swiglu_impl")
     def test_swiglu_fusion_with_glu(self, mock_swiglu, mock_build):
         mock_swiglu.return_value = paddle.zeros([2, 256])
@@ -167,7 +167,7 @@ class TestMLPForwardBiasActivationFusion(unittest.TestCase):
 class TestMLPForwardNonFusion(unittest.TestCase):
     """Test non-fusion forward paths."""
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_glu_activation(self, mock_build):
         mock_build.side_effect = _make_build_side_effect(64, 512, 64)
         config = _make_config(
@@ -182,7 +182,7 @@ class TestMLPForwardNonFusion(unittest.TestCase):
         out, bias = mlp(x)
         self.assertEqual(out.shape, [2, 64])
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_glu_activation_with_clamp(self, mock_build):
         mock_build.side_effect = _make_build_side_effect(64, 512, 64)
         config = _make_config(
@@ -198,7 +198,7 @@ class TestMLPForwardNonFusion(unittest.TestCase):
         out, bias = mlp(x)
         self.assertEqual(out.shape, [2, 64])
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_non_glu_activation(self, mock_build):
         mock_build.side_effect = _make_build_side_effect(64, 256, 64)
         config = _make_config(
@@ -216,7 +216,7 @@ class TestMLPForwardNonFusion(unittest.TestCase):
 class TestMLPForwardPerTokenScale(unittest.TestCase):
     """Test per_token_scale in forward."""
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     @patch("paddlefleet.transformer.mlp.weighted_bias_swiglu_impl")
     def test_fusion_with_per_token_scale(self, mock_wbs, mock_build):
         mock_wbs.return_value = paddle.zeros([2, 256])
@@ -234,7 +234,7 @@ class TestMLPForwardPerTokenScale(unittest.TestCase):
         out, bias = mlp(x, per_token_scale=scale)
         self.assertEqual(out.shape, [2, 64])
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_non_fusion_with_per_token_scale(self, mock_build):
         mock_build.side_effect = _make_build_side_effect(64, 256, 64)
         config = _make_config(
@@ -253,7 +253,7 @@ class TestMLPForwardPerTokenScale(unittest.TestCase):
 class TestMLPInputSize(unittest.TestCase):
     """Test custom input_size parameter."""
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_custom_input_size(self, mock_build):
         mock_build.side_effect = lambda *a, **kw: FakeColumnParallel(
             32, 128, skip_bias_add=True
@@ -263,7 +263,7 @@ class TestMLPInputSize(unittest.TestCase):
         mlp = MLP(config, spec, input_size=32)
         self.assertEqual(mlp.input_size, 32)
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_custom_hidden_size(self, mock_build):
         mock_build.side_effect = lambda *a, **kw: FakeColumnParallel(
             64, 128, input_is_parallel=True, skip_bias_add=True
@@ -277,7 +277,7 @@ class TestMLPInputSize(unittest.TestCase):
 class TestMLPBackwardDw(unittest.TestCase):
     """Test backward_dw method."""
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_backward_dw(self, mock_build):
         mock_down = MagicMock()
         mock_up = MagicMock()

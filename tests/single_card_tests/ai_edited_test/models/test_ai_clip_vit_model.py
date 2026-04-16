@@ -287,7 +287,7 @@ class TestCLIPViTModelInit(unittest.TestCase):
         "paddlefleet.models.vision.clip_vit_model.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.clip_vit_model.build_layer")
+    @patch("paddlefleet.models.vision.clip_vit_model.build_spec_layer")
     @patch("paddlefleet.models.vision.clip_vit_model.TransformerBlock")
     def test_init_clip(self, mock_tb, mock_build, mock_log):
         from paddlefleet.models.vision.clip_vit_model import CLIPViTModel
@@ -315,7 +315,7 @@ class TestCLIPViTModelInit(unittest.TestCase):
         "paddlefleet.models.vision.clip_vit_model.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.clip_vit_model.build_layer")
+    @patch("paddlefleet.models.vision.clip_vit_model.build_spec_layer")
     @patch("paddlefleet.models.vision.clip_vit_model.TransformerBlock")
     def test_init_siglip_no_class_token(self, mock_tb, mock_build, mock_log):
         from paddlefleet.models.vision.clip_vit_model import CLIPViTModel
@@ -344,7 +344,7 @@ class TestCLIPViTModelInit(unittest.TestCase):
         "paddlefleet.models.vision.clip_vit_model.has_config_logger_enabled",
         return_value=False,
     )
-    @patch("paddlefleet.models.vision.clip_vit_model.build_layer")
+    @patch("paddlefleet.models.vision.clip_vit_model.build_spec_layer")
     @patch("paddlefleet.models.vision.clip_vit_model.TransformerBlock")
     def test_unsupported_model_type_raises(self, mock_tb, mock_build, mock_log):
         from paddlefleet.models.vision.clip_vit_model import CLIPViTModel

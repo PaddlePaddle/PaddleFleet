@@ -31,7 +31,7 @@ class TestPipelineParallelMicroStepCallbackInit(unittest.TestCase):
     """Tests for PipelineParallelMicroStepCallback initialization."""
 
     def test_init_default(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -49,7 +49,7 @@ class TestPipelineParallelMicroStepCallbackInit(unittest.TestCase):
             self.assertEqual(len(cb.hooks[loc]), 0)
 
     def test_global_instance(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             pipeline_parallel_callbacks_,
         )
@@ -63,7 +63,7 @@ class TestPipelineParallelMicroStepCallbackRegister(unittest.TestCase):
     """Tests for PipelineParallelMicroStepCallback.register_hook."""
 
     def test_register_single_hook(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -76,7 +76,7 @@ class TestPipelineParallelMicroStepCallbackRegister(unittest.TestCase):
         )
 
     def test_register_multiple_hooks(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -91,7 +91,7 @@ class TestPipelineParallelMicroStepCallbackRegister(unittest.TestCase):
         )
 
     def test_register_invalid_location(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
         )
 
@@ -104,7 +104,7 @@ class TestPipelineParallelMicroStepCallbackOnLocation(unittest.TestCase):
     """Tests for PipelineParallelMicroStepCallback.on_location."""
 
     def test_on_location_forward_begin(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -119,7 +119,7 @@ class TestPipelineParallelMicroStepCallbackOnLocation(unittest.TestCase):
         hook.assert_called_once_with(input_tensor="fake_tensor")
 
     def test_on_location_backward_end(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -134,7 +134,7 @@ class TestPipelineParallelMicroStepCallbackOnLocation(unittest.TestCase):
         hook.assert_called_once_with(step_id=0)
 
     def test_on_location_no_hooks(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -144,7 +144,7 @@ class TestPipelineParallelMicroStepCallbackOnLocation(unittest.TestCase):
         cb.on_location(PipelineParallelMicroStepLocations.FORWARD_BEGIN)
 
     def test_on_location_invalid_location(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
         )
 
@@ -153,7 +153,7 @@ class TestPipelineParallelMicroStepCallbackOnLocation(unittest.TestCase):
             cb.on_location("invalid_location")
 
     def test_on_location_multiple_hooks(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -179,7 +179,7 @@ class TestPipelineParallelMicroStepLocations(unittest.TestCase):
     """Tests for PipelineParallelMicroStepLocations enum values."""
 
     def test_enum_members(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepLocations,
         )
 
@@ -207,7 +207,7 @@ class TestCallbackAllLocations(unittest.TestCase):
     """Integration tests registering hooks at all locations."""
 
     def test_all_locations_hooks(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -224,7 +224,7 @@ class TestCallbackAllLocations(unittest.TestCase):
             hooks[loc].assert_called_once_with(test_key="value")
 
     def test_callback_with_various_kwargs(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )

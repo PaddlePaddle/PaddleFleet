@@ -32,7 +32,7 @@ class TestOffloadQueueInit(unittest.TestCase):
     """Tests for OffloadQueue initialization."""
 
     def test_init_offload_false(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -40,7 +40,7 @@ class TestOffloadQueueInit(unittest.TestCase):
         self.assertFalse(q.offload)
 
     def test_init_offload_true(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -48,7 +48,7 @@ class TestOffloadQueueInit(unittest.TestCase):
         self.assertTrue(q.offload)
 
     def test_init_with_maxsize(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -57,7 +57,7 @@ class TestOffloadQueueInit(unittest.TestCase):
         self.assertEqual(q.maxsize, 5)
 
     def test_is_subclass_of_queue(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -68,7 +68,7 @@ class TestOffloadQueuePutGetNoOffload(unittest.TestCase):
     """Tests for OffloadQueue put/get without offload."""
 
     def test_put_get_value(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -77,7 +77,7 @@ class TestOffloadQueuePutGetNoOffload(unittest.TestCase):
         self.assertEqual(q.get(), "test_value")
 
     def test_put_get_int(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -86,7 +86,7 @@ class TestOffloadQueuePutGetNoOffload(unittest.TestCase):
         self.assertEqual(q.get(), 42)
 
     def test_put_get_none(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -95,7 +95,7 @@ class TestOffloadQueuePutGetNoOffload(unittest.TestCase):
         self.assertIsNone(q.get())
 
     def test_multiple_put_get(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -106,7 +106,7 @@ class TestOffloadQueuePutGetNoOffload(unittest.TestCase):
             self.assertEqual(q.get(), i)
 
     def test_qsize(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -118,7 +118,7 @@ class TestOffloadQueuePutGetNoOffload(unittest.TestCase):
         self.assertEqual(q.qsize(), 1)
 
     def test_empty(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -132,7 +132,7 @@ class TestOffloadQueuePutGetNonTensor(unittest.TestCase):
     """Tests for OffloadQueue with non-tensor values when offload=True."""
 
     def test_put_get_string_with_offload(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -141,7 +141,7 @@ class TestOffloadQueuePutGetNonTensor(unittest.TestCase):
         self.assertEqual(q.get(), "string_value")
 
     def test_put_get_int_with_offload(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -150,7 +150,7 @@ class TestOffloadQueuePutGetNonTensor(unittest.TestCase):
         self.assertEqual(q.get(), 123)
 
     def test_put_get_dict_with_offload(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -165,8 +165,7 @@ class TestOffloadQueuePutGetTensorOffload(unittest.TestCase):
 
     def test_put_get_tensor_offload(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -181,8 +180,7 @@ class TestOffloadQueuePutGetTensorOffload(unittest.TestCase):
 
     def test_put_get_tuple_of_tensors_offload(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -202,7 +200,7 @@ class TestOffloadQueuePutGetTensorOffload(unittest.TestCase):
             q.put((t1, t2))
 
     def test_put_non_tensor_tuple_offload(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -217,8 +215,7 @@ class TestOffloadQueueNoOffloadTensor(unittest.TestCase):
 
     def test_put_get_tensor_no_offload(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -230,8 +227,7 @@ class TestOffloadQueueNoOffloadTensor(unittest.TestCase):
 
     def test_put_get_tuple_tensor_no_offload(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -247,7 +243,7 @@ class TestVPPFhenBInBalancedMemorySchedulerName(unittest.TestCase):
     """Tests for VPPFhenBInBalancedMemory scheduler name."""
 
     def test_scheduler_name(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 

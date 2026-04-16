@@ -31,7 +31,7 @@ class TestSendRecvMetaInit(unittest.TestCase):
     """Tests for SendRecvMeta initialization (p2p_communication)."""
 
     def test_init_default(self):
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -45,7 +45,7 @@ class TestSendRecvMetaInit(unittest.TestCase):
         self.assertFalse(meta.has_recv_meta)
 
     def test_init_or_erase_meta(self):
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -63,7 +63,7 @@ class TestSendRecvMetaInitOrEraseMeta(unittest.TestCase):
     """Tests for SendRecvMeta.init_or_erase_meta."""
 
     def test_erase_resets_all_fields(self):
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -94,7 +94,7 @@ class TestSendRecvMetaRepr(unittest.TestCase):
     """Tests for SendRecvMeta.__repr__."""
 
     def test_repr_empty(self):
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -104,7 +104,7 @@ class TestSendRecvMetaRepr(unittest.TestCase):
         self.assertIn("recv_shape_message", r)
 
     def test_repr_with_values(self):
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -122,13 +122,12 @@ class TestIsValidSendRecvPartial(unittest.TestCase):
     """Tests for _is_valid_send_recv_partial."""
 
     @patch(
-        "paddlefleet.pipeline_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
+        "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
         False,
     )
     def test_disabled(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             _is_valid_send_recv_partial,
         )
 
@@ -136,13 +135,12 @@ class TestIsValidSendRecvPartial(unittest.TestCase):
         self.assertFalse(_is_valid_send_recv_partial(tensor, mp_degree=2))
 
     @patch(
-        "paddlefleet.pipeline_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
+        "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
         True,
     )
     def test_mp_degree_one(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             _is_valid_send_recv_partial,
         )
 
@@ -150,13 +148,12 @@ class TestIsValidSendRecvPartial(unittest.TestCase):
         self.assertFalse(_is_valid_send_recv_partial(tensor, mp_degree=1))
 
     @patch(
-        "paddlefleet.pipeline_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
+        "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
         True,
     )
     def test_valid_partial(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             _is_valid_send_recv_partial,
         )
 
@@ -164,13 +161,12 @@ class TestIsValidSendRecvPartial(unittest.TestCase):
         self.assertTrue(_is_valid_send_recv_partial(tensor, mp_degree=2))
 
     @patch(
-        "paddlefleet.pipeline_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
+        "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
         True,
     )
     def test_not_divisible(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             _is_valid_send_recv_partial,
         )
 
@@ -182,13 +178,12 @@ class TestAllgatherPartial(unittest.TestCase):
     """Tests for allgather_partial function."""
 
     @patch(
-        "paddlefleet.pipeline_parallel.pp_utils.p2p_communication._is_valid_send_recv_partial",
+        "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._is_valid_send_recv_partial",
         return_value=False,
     )
     def test_allgather_partial_invalid(self, mock_valid):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             allgather_partial,
         )
 
@@ -198,7 +193,7 @@ class TestAllgatherPartial(unittest.TestCase):
         self.assertIs(result, tensor)
 
     @patch(
-        "paddlefleet.pipeline_parallel.pp_utils.p2p_communication._is_valid_send_recv_partial",
+        "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._is_valid_send_recv_partial",
         return_value=False,
     )
     def test_allgather_partial_not_member(self, mock_valid):
@@ -212,7 +207,7 @@ class TestP2PonCalcStream(unittest.TestCase):
     """Tests for P2PonCalcStream."""
 
     def test_init_send(self):
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             P2PonCalcStream,
             _send_on_calc_stream,
         )
@@ -229,7 +224,7 @@ class TestP2PonCalcStream(unittest.TestCase):
         self.assertEqual(op.rank_id, 0)
 
     def test_init_recv(self):
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             P2PonCalcStream,
             _recv_on_calc_stream,
         )
@@ -241,7 +236,7 @@ class TestP2PonCalcStream(unittest.TestCase):
         self.assertEqual(op.peer, 0)
 
     def test_init_invalid_op(self):
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             P2PonCalcStream,
         )
 
@@ -254,8 +249,7 @@ class TestSendRecvMetaObtainSendMessage(unittest.TestCase):
 
     def test_obtain_single_tensor(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -266,8 +260,7 @@ class TestSendRecvMetaObtainSendMessage(unittest.TestCase):
 
     def test_obtain_tuple_tensor(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -282,8 +275,7 @@ class TestSendRecvMetaObtainSendMessage(unittest.TestCase):
 
     def test_obtain_tuple_skip_stop_gradient(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -301,8 +293,7 @@ class TestSendRecvMetaCheckSendMessage(unittest.TestCase):
 
     def test_check_none_messages(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -313,8 +304,7 @@ class TestSendRecvMetaCheckSendMessage(unittest.TestCase):
 
     def test_check_matching_messages(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 
@@ -326,8 +316,7 @@ class TestSendRecvMetaCheckSendMessage(unittest.TestCase):
 
     def test_check_mismatched_messages(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
         )
 

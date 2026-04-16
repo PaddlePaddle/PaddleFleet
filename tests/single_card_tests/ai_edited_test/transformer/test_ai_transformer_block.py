@@ -27,9 +27,9 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.spec_utils import LayerSpec
 from paddlefleet.transformer.paddle_norm import LayerNorm as LayerNormImpl
 from paddlefleet.transformer.transformer_block import (
     TransformerBlock,

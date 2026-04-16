@@ -31,8 +31,7 @@ import unittest
 from unittest import mock
 
 import paddle
-
-from paddlefleet.pipeline_parallel import PipelineLayer
+from paddle.distributed.fleet.meta_parallel import PipelineLayer
 
 
 class TestDistributedModelSingleGPU(unittest.TestCase):
@@ -40,7 +39,7 @@ class TestDistributedModelSingleGPU(unittest.TestCase):
 
     def test_distributed_model_world_size_one(self):
         """Test distributed_model returns NoPipelineParallel when world_size <= 1."""
-        from paddlefleet.distributed.model import distributed_model
+        from paddle.distributed.fleet import distributed_model
 
         mock_model = mock.MagicMock()
         mock_fleet = mock.MagicMock()
@@ -52,7 +51,7 @@ class TestDistributedModelSingleGPU(unittest.TestCase):
         with mock.patch("paddle.distributed.get_world_size", return_value=1):  # noqa: SIM117
             with mock.patch("paddle.distributed.fleet.fleet", mock_fleet):
                 with mock.patch(
-                    "paddlefleet.distributed.model.NoPipelineParallel",
+                    "paddle.distributed.fleet.model.NoPipelineParallel",
                     return_value=mock_model,
                 ) as mock_nopp:
                     result = distributed_model(mock_model)
@@ -60,7 +59,7 @@ class TestDistributedModelSingleGPU(unittest.TestCase):
 
     def test_distributed_model_none_raises(self):
         """Test distributed_model raises when model is None."""
-        from paddlefleet.distributed.model import distributed_model
+        from paddle.distributed.fleet import distributed_model
 
         mock_fleet = mock.MagicMock()
         mock_strategy = mock.MagicMock()
@@ -85,7 +84,7 @@ class TestDistributedModelAMP(unittest.TestCase):
 
     def test_amp_o2_fp16(self):
         """Test AMP O2 level with pure fp16."""
-        from paddlefleet.distributed.model import distributed_model
+        from paddle.distributed.fleet import distributed_model
 
         mock_model = _make_mock_pipeline_model()
         mock_fleet = mock.MagicMock()
@@ -110,7 +109,7 @@ class TestDistributedModelAMP(unittest.TestCase):
         with mock.patch("paddle.distributed.get_world_size", return_value=4):  # noqa: SIM117
             with mock.patch("paddle.distributed.fleet.fleet", mock_fleet):
                 with mock.patch(
-                    "paddlefleet.distributed.model.NoPipelineParallel",
+                    "paddle.distributed.fleet.model.NoPipelineParallel",
                     return_value=mock_model,
                 ) as mock_nopp:
                     with mock.patch(
@@ -125,7 +124,7 @@ class TestDistributedModelAMP(unittest.TestCase):
 
     def test_amp_o2_bf16(self):
         """Test AMP O2 level with pure bf16."""
-        from paddlefleet.distributed.model import distributed_model
+        from paddle.distributed.fleet import distributed_model
 
         mock_model = _make_mock_pipeline_model()
         mock_fleet = mock.MagicMock()
@@ -150,7 +149,7 @@ class TestDistributedModelAMP(unittest.TestCase):
         with mock.patch("paddle.distributed.get_world_size", return_value=4):  # noqa: SIM117
             with mock.patch("paddle.distributed.fleet.fleet", mock_fleet):
                 with mock.patch(
-                    "paddlefleet.distributed.model.NoPipelineParallel",
+                    "paddle.distributed.fleet.model.NoPipelineParallel",
                     return_value=mock_model,
                 ):
                     with mock.patch(
@@ -163,7 +162,7 @@ class TestDistributedModelAMP(unittest.TestCase):
 
     def test_amp_o1(self):
         """Test AMP O1 level (not pure fp16 or bf16)."""
-        from paddlefleet.distributed.model import distributed_model
+        from paddle.distributed.fleet import distributed_model
 
         mock_model = _make_mock_pipeline_model()
         mock_fleet = mock.MagicMock()
@@ -188,7 +187,7 @@ class TestDistributedModelAMP(unittest.TestCase):
         with mock.patch("paddle.distributed.get_world_size", return_value=4):  # noqa: SIM117
             with mock.patch("paddle.distributed.fleet.fleet", mock_fleet):
                 with mock.patch(
-                    "paddlefleet.distributed.model.NoPipelineParallel",
+                    "paddle.distributed.fleet.model.NoPipelineParallel",
                     return_value=mock_model,
                 ):
                     with mock.patch(
@@ -201,7 +200,7 @@ class TestDistributedModelAMP(unittest.TestCase):
 
     def test_grad_scaler_creation(self):
         """Test GradScaler is created when AMP is enabled."""
-        from paddlefleet.distributed.model import distributed_model
+        from paddle.distributed.fleet import distributed_model
 
         mock_model = _make_mock_pipeline_model()
         mock_fleet = mock.MagicMock()
@@ -226,7 +225,7 @@ class TestDistributedModelAMP(unittest.TestCase):
         with mock.patch("paddle.distributed.get_world_size", return_value=4):  # noqa: SIM117
             with mock.patch("paddle.distributed.fleet.fleet", mock_fleet):
                 with mock.patch(
-                    "paddlefleet.distributed.model.NoPipelineParallel",
+                    "paddle.distributed.fleet.model.NoPipelineParallel",
                     return_value=mock_model,
                 ):
                     with mock.patch(
@@ -247,16 +246,15 @@ class TestDistributedModelPipeline(unittest.TestCase):
 
     def test_not_pipeline_layer_raises(self):
         """Test non-PipelineLayer model raises in multi-GPU mode."""
-        from paddlefleet.distributed.model import distributed_model
+        from paddle.distributed.fleet import distributed_model
+        from paddle.distributed.fleet.base.topology import ParallelMode
 
         mock_model = mock.MagicMock(spec=paddle.nn.Layer)
         mock_fleet = mock.MagicMock()
         mock_strategy = mock.MagicMock()
         mock_strategy.amp = False
         mock_hcg = mock.MagicMock()
-        mock_hcg.get_parallel_mode.return_value = mock.MagicMock(
-            PIPELINE_PARALLEL="PIPELINE_PARALLEL"
-        ).PIPELINE_PARALLEL
+        mock_hcg.get_parallel_mode.return_value = ParallelMode.PIPELINE_PARALLEL
         mock_fleet._user_defined_strategy = mock_strategy
         mock_fleet._hcg = mock_hcg
         mock_fleet.fleet = mock_fleet
@@ -266,36 +264,37 @@ class TestDistributedModelPipeline(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     distributed_model(mock_model)
 
-    def test_dualpipev_raises(self):
-        """Test dualpipev raises ValueError."""
-        from paddle.distributed.fleet.base.topology import ParallelMode
-
-        from paddlefleet.distributed.model import distributed_model
-
-        mock_model = _make_mock_pipeline_model()
-        mock_fleet = mock.MagicMock()
-        mock_strategy = mock.MagicMock()
-        mock_strategy.amp = False
-        mock_strategy.hybrid_configs = {
-            "pp_configs": mock.MagicMock(use_dualpipev=True)
-        }
-        mock_hcg = mock.MagicMock()
-        mock_hcg.get_parallel_mode.return_value = ParallelMode.PIPELINE_PARALLEL
-        mock_fleet._user_defined_strategy = mock_strategy
-        mock_fleet._hcg = mock_hcg
-        mock_fleet.fleet = mock_fleet
-
-        with mock.patch("paddle.distributed.get_world_size", return_value=4):  # noqa: SIM117
-            with mock.patch("paddle.distributed.fleet.fleet", mock_fleet):
-                with self.assertRaises(ValueError) as ctx:
-                    distributed_model(mock_model)
-                self.assertIn("dualpipev", str(ctx.exception))
+    # TODO(hushenwei2000): enable this test after migrate to paddle pp
+    # Paddle has implemented DualPipeVParallel, so it no longer raises ValueError.
+    # def test_dualpipev_raises(self):
+    #     """Test dualpipev raises ValueError."""
+    #     from paddle.distributed.fleet.base.topology import ParallelMode
+    #
+    #     from paddle.distributed.fleet import distributed_model
+    #
+    #     mock_model = _make_mock_pipeline_model()
+    #     mock_fleet = mock.MagicMock()
+    #     mock_strategy = mock.MagicMock()
+    #     mock_strategy.amp = False
+    #     mock_strategy.hybrid_configs = {
+    #         "pp_configs": mock.MagicMock(use_dualpipev=True)
+    #     }
+    #     mock_hcg = mock.MagicMock()
+    #     mock_hcg.get_parallel_mode.return_value = ParallelMode.PIPELINE_PARALLEL
+    #     mock_fleet._user_defined_strategy = mock_strategy
+    #     mock_fleet._hcg = mock_hcg
+    #     mock_fleet.fleet = mock_fleet
+    #
+    #     with mock.patch("paddle.distributed.get_world_size", return_value=4):
+    #         with mock.patch("paddle.distributed.fleet.fleet", mock_fleet):
+    #             with self.assertRaises(ValueError) as ctx:
+    #                 distributed_model(mock_model)
+    #             self.assertIn("dualpipev", str(ctx.exception))
 
     def test_1f1b_pipeline(self):
         """Test 1f1b pipeline when virtual stages == 1."""
+        from paddle.distributed.fleet import distributed_model
         from paddle.distributed.fleet.base.topology import ParallelMode
-
-        from paddlefleet.distributed.model import distributed_model
 
         mock_model = _make_mock_pipeline_model()
         mock_fleet = mock.MagicMock()
@@ -313,7 +312,7 @@ class TestDistributedModelPipeline(unittest.TestCase):
         with mock.patch("paddle.distributed.get_world_size", return_value=4):  # noqa: SIM117
             with mock.patch("paddle.distributed.fleet.fleet", mock_fleet):
                 with mock.patch(
-                    "paddlefleet.distributed.model.PipelineParallel",
+                    "paddle.distributed.fleet.model.PipelineParallel",
                     return_value=mock_model,
                 ) as mock_pp:
                     result = distributed_model(mock_model)
@@ -325,7 +324,7 @@ class TestDistributedModelNonPipeline(unittest.TestCase):
 
     def test_non_pipeline_mode_uses_nopp_with_hcg(self):
         """Test non-pipeline mode uses NoPipelineParallel with hcg."""
-        from paddlefleet.distributed.model import distributed_model
+        from paddle.distributed.fleet import distributed_model
 
         mock_model = _make_mock_pipeline_model()
         mock_result = mock.MagicMock()
@@ -341,7 +340,7 @@ class TestDistributedModelNonPipeline(unittest.TestCase):
         with mock.patch("paddle.distributed.get_world_size", return_value=4):  # noqa: SIM117
             with mock.patch("paddle.distributed.fleet.fleet", mock_fleet):
                 with mock.patch(
-                    "paddlefleet.distributed.model.NoPipelineParallel",
+                    "paddle.distributed.fleet.model.NoPipelineParallel",
                     return_value=mock_result,
                 ) as mock_nopp:
                     result = distributed_model(mock_model)

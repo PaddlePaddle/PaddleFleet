@@ -52,7 +52,7 @@ class TestGPTEmbeddingSpec(unittest.TestCase):
 class TestGPTEmbeddingInit(unittest.TestCase):
     """Test GPTEmbedding initialization."""
 
-    @patch("paddlefleet.models.gpt.gpt_embedding.build_layer")
+    @patch("paddlefleet.models.gpt.gpt_embedding.build_spec_layer")
     def test_basic_init(self, mock_build):
         from paddlefleet.models.gpt.gpt_embedding import (
             GPTEmbedding,
@@ -81,7 +81,7 @@ class TestGPTEmbeddingInit(unittest.TestCase):
         self.assertFalse(emb.sequence_parallel)
         self.assertIsNone(emb.rotary_pos_emb)
 
-    @patch("paddlefleet.models.gpt.gpt_embedding.build_layer")
+    @patch("paddlefleet.models.gpt.gpt_embedding.build_spec_layer")
     def test_with_rope_embedding(self, mock_build):
         from paddlefleet.models.gpt.gpt_embedding import (
             GPTEmbedding,
@@ -115,7 +115,7 @@ class TestGPTEmbeddingInit(unittest.TestCase):
 class TestGPTEmbeddingEmbeddingWeight(unittest.TestCase):
     """Test GPTEmbedding.embedding_weight property."""
 
-    @patch("paddlefleet.models.gpt.gpt_embedding.build_layer")
+    @patch("paddlefleet.models.gpt.gpt_embedding.build_spec_layer")
     def test_embedding_weight_delegates(self, mock_build):
         from paddlefleet.models.gpt.gpt_embedding import (
             GPTEmbedding,
@@ -149,7 +149,7 @@ class TestGPTEmbeddingEmbeddingWeight(unittest.TestCase):
 class TestGPTEmbeddingBuildScheduleNode(unittest.TestCase):
     """Test GPTEmbedding.build_schedule_node method."""
 
-    @patch("paddlefleet.models.gpt.gpt_embedding.build_layer")
+    @patch("paddlefleet.models.gpt.gpt_embedding.build_spec_layer")
     def test_returns_schedule_node(self, mock_build):
         from paddlefleet.models.gpt.gpt_embedding import (
             GPTEmbedding,
@@ -182,7 +182,7 @@ class TestGPTEmbeddingBuildScheduleNode(unittest.TestCase):
 class TestGPTEmbeddingGetPlaceholderMask(unittest.TestCase):
     """Test GPTEmbedding.get_placeholder_mask method."""
 
-    @patch("paddlefleet.models.gpt.gpt_embedding.build_layer")
+    @patch("paddlefleet.models.gpt.gpt_embedding.build_spec_layer")
     def test_placeholder_mask_with_input_ids(self, mock_build):
         import paddle
 
@@ -218,7 +218,7 @@ class TestGPTEmbeddingGetPlaceholderMask(unittest.TestCase):
         self.assertEqual(image_mask.shape, inputs_embeds.shape)
         self.assertEqual(video_mask.shape, inputs_embeds.shape)
 
-    @patch("paddlefleet.models.gpt.gpt_embedding.build_layer")
+    @patch("paddlefleet.models.gpt.gpt_embedding.build_spec_layer")
     def test_placeholder_mask_image_size_mismatch_raises(self, mock_build):
         import paddle
 
@@ -252,7 +252,7 @@ class TestGPTEmbeddingGetPlaceholderMask(unittest.TestCase):
 class TestGPTEmbeddingSequenceParallelInit(unittest.TestCase):
     """Test GPTEmbedding initialization with sequence parallel."""
 
-    @patch("paddlefleet.models.gpt.gpt_embedding.build_layer")
+    @patch("paddlefleet.models.gpt.gpt_embedding.build_spec_layer")
     def test_sp_with_multimodal_disables_scatter(self, mock_build):
         from paddlefleet.models.gpt.gpt_embedding import (
             GPTEmbedding,
@@ -282,7 +282,7 @@ class TestGPTEmbeddingSequenceParallelInit(unittest.TestCase):
         self.assertTrue(emb.sequence_parallel)
         self.assertFalse(emb.embedding.reduce_scatter_embeddings)
 
-    @patch("paddlefleet.models.gpt.gpt_embedding.build_layer")
+    @patch("paddlefleet.models.gpt.gpt_embedding.build_spec_layer")
     def test_sp_with_mtp_disables_scatter(self, mock_build):
         from paddlefleet.models.gpt.gpt_embedding import (
             GPTEmbedding,

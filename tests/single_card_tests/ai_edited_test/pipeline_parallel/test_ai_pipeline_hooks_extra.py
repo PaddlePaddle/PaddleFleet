@@ -32,7 +32,9 @@ class TestPipelineHookInit(unittest.TestCase):
     """Tests for PipelineHook initialization."""
 
     def test_init_default(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         self.assertIsInstance(hook.hooks, dict)
@@ -41,7 +43,9 @@ class TestPipelineHookInit(unittest.TestCase):
         self.assertEqual(hook._hooks_capacity, 0)
 
     def test_init_hooks_empty(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         for key in hook.hooks:
@@ -52,7 +56,9 @@ class TestPipelineHookResetCurrentId(unittest.TestCase):
     """Tests for PipelineHook.reset_current_id."""
 
     def test_reset_after_running(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         hook._hooks_capacity = 2
@@ -61,7 +67,9 @@ class TestPipelineHookResetCurrentId(unittest.TestCase):
         self.assertEqual(hook._current_id, 0)
 
     def test_reset_multiple_times(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         hook._current_id = 5
@@ -74,14 +82,18 @@ class TestPipelineHookSetHooksCapacity(unittest.TestCase):
     """Tests for PipelineHook.set_hooks_capacity."""
 
     def test_set_capacity(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         hook.set_hooks_capacity(10)
         self.assertEqual(hook.hooks_capacity, 10)
 
     def test_set_capacity_multiple(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         hook.set_hooks_capacity(5)
@@ -94,7 +106,9 @@ class TestPipelineHookRegisterHook(unittest.TestCase):
     """Tests for PipelineHook.register_hook."""
 
     def test_register_single(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         fn = MagicMock()
@@ -104,7 +118,9 @@ class TestPipelineHookRegisterHook(unittest.TestCase):
         self.assertEqual(hook.hooks[2][0], fn)
 
     def test_register_multiple_same_id(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         fn1 = MagicMock()
@@ -115,7 +131,9 @@ class TestPipelineHookRegisterHook(unittest.TestCase):
         self.assertEqual(len(hook.hooks[1]), 2)
 
     def test_register_out_of_range(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         hook.set_hooks_capacity(3)
@@ -123,7 +141,9 @@ class TestPipelineHookRegisterHook(unittest.TestCase):
             hook.register_hook(5, MagicMock())
 
     def test_register_different_ids(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         fn1 = MagicMock()
@@ -139,7 +159,9 @@ class TestPipelineHookRunHook(unittest.TestCase):
     """Tests for PipelineHook.run_hook."""
 
     def test_run_hook_calls_function(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         fn = MagicMock()
@@ -149,7 +171,9 @@ class TestPipelineHookRunHook(unittest.TestCase):
         fn.assert_called_once_with(0)
 
     def test_run_hook_increments_id(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         hook.set_hooks_capacity(3)
@@ -158,7 +182,9 @@ class TestPipelineHookRunHook(unittest.TestCase):
         self.assertEqual(hook.current_id, 1)
 
     def test_run_hook_calls_all_at_id(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         fn1 = MagicMock()
@@ -173,7 +199,9 @@ class TestPipelineHookRunHook(unittest.TestCase):
         fn2.assert_called_once_with(1)
 
     def test_run_hook_out_of_range(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         hook.set_hooks_capacity(1)
@@ -187,13 +215,17 @@ class TestPipelineHookCurrentId(unittest.TestCase):
     """Tests for PipelineHook.current_id property."""
 
     def test_current_id_initial(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         self.assertEqual(hook.current_id, 0)
 
     def test_current_id_after_register(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         hook.set_hooks_capacity(5)
@@ -205,13 +237,17 @@ class TestPipelineHookHooksCapacity(unittest.TestCase):
     """Tests for PipelineHook.hooks_capacity property."""
 
     def test_hooks_capacity_default(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         self.assertEqual(hook.hooks_capacity, 0)
 
     def test_hooks_capacity_after_set(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         hook.set_hooks_capacity(7)
@@ -222,7 +258,9 @@ class TestPipelineHookFullCycle(unittest.TestCase):
     """Full cycle tests for PipelineHook."""
 
     def test_full_cycle_register_and_run(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         results = []
@@ -235,7 +273,9 @@ class TestPipelineHookFullCycle(unittest.TestCase):
         self.assertEqual(hook.current_id, 4)
 
     def test_full_cycle_reset_and_rerun(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         counter = {"val": 0}
@@ -254,7 +294,9 @@ class TestPipelineHookFullCycle(unittest.TestCase):
         self.assertEqual(counter["val"], 12)
 
     def test_hooks_defaultdict_behavior(self):
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         hook = PipelineHook()
         # Accessing a non-existent key should return empty list

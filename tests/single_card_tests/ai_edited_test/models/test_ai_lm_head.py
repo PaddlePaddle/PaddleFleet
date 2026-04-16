@@ -31,7 +31,7 @@ from unittest.mock import MagicMock, patch
 class TestGPTLMHeadInit(unittest.TestCase):
     """Test GPTLMHead initialization."""
 
-    @patch("paddlefleet.models.gpt.lm_head.build_layer")
+    @patch("paddlefleet.models.gpt.lm_head.build_spec_layer")
     @patch("paddlefleet.models.gpt.lm_head._initialize_affine_weight_cpu")
     @patch("paddlefleet.models.gpt.lm_head._initialize_affine_weight_gpu")
     @patch("paddlefleet.models.gpt.lm_head.ColumnParallelLinear")
@@ -70,7 +70,7 @@ class TestGPTLMHeadInit(unittest.TestCase):
         result = head._forward(MagicMock())
         self.assertIsNotNone(result)
 
-    @patch("paddlefleet.models.gpt.lm_head.build_layer")
+    @patch("paddlefleet.models.gpt.lm_head.build_spec_layer")
     def test_init_stores_config(self, mock_build):
         from paddlefleet.models.gpt.lm_head import GPTLMHead
 

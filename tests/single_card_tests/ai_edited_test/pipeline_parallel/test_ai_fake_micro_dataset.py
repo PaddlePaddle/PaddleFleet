@@ -31,8 +31,7 @@ class TestFakeMicroDatasetBasicIteration(unittest.TestCase):
 
     def test_iteration_first_stage(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -51,8 +50,7 @@ class TestFakeMicroDatasetBasicIteration(unittest.TestCase):
 
     def test_iteration_stop(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -72,8 +70,7 @@ class TestFakeMicroDatasetBasicIteration(unittest.TestCase):
 
     def test_iteration_only_last_stage(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -96,8 +93,7 @@ class TestFakeMicroDatasetTupleInputs(unittest.TestCase):
 
     def test_tuple_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -119,8 +115,7 @@ class TestFakeMicroDatasetTupleInputs(unittest.TestCase):
 
     def test_tuple_of_lists(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -144,8 +139,7 @@ class TestFakeMicroDatasetDictInputs(unittest.TestCase):
 
     def test_dict_inputs(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -164,8 +158,7 @@ class TestFakeMicroDatasetDictInputs(unittest.TestCase):
 
     def test_dict_list_values(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -188,8 +181,7 @@ class TestFakeMicroDatasetListInputs(unittest.TestCase):
 
     def test_list_inputs(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -209,8 +201,7 @@ class TestFakeMicroDatasetListInputs(unittest.TestCase):
 
     def test_list_of_list_inputs(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -236,8 +227,7 @@ class TestFakeMicroDatasetValidation(unittest.TestCase):
 
     def test_check_data_valid_success(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -250,8 +240,7 @@ class TestFakeMicroDatasetValidation(unittest.TestCase):
 
     def test_check_data_valid_failure(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -264,8 +253,7 @@ class TestFakeMicroDatasetValidation(unittest.TestCase):
 
     def test_assert_stage_condition(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -287,8 +275,7 @@ class TestFakeMicroDatasetNoneData(unittest.TestCase):
 
     def test_none_in_tuple(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 
@@ -307,8 +294,7 @@ class TestFakeMicroDatasetNoneData(unittest.TestCase):
 
     def test_none_single_tensor(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             FakeMicroDataset,
         )
 

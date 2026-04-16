@@ -78,7 +78,7 @@ class TestSelfAttentionGatedAttention(unittest.TestCase):
     """Test SelfAttention with gated_attention enabled."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_gated_attention_projection_size(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -95,7 +95,7 @@ class TestSelfAttentionGatedAttention(unittest.TestCase):
         self.assertTrue(attn.gated_attention)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_get_qkv_returns_four_tensors_when_gated(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -115,7 +115,7 @@ class TestSelfAttentionQKNorm(unittest.TestCase):
     """Test QK normalization paths."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_per_head_norm_with_tp(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -141,7 +141,7 @@ class TestSelfAttentionQKNorm(unittest.TestCase):
         self.assertIsNotNone(attn.k_norm)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_per_layer_norm_hidden_size(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -172,7 +172,7 @@ class TestCrossAttention(unittest.TestCase):
     """Test CrossAttention construction."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_construction(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -193,7 +193,7 @@ class TestCrossAttention(unittest.TestCase):
         self.assertIsNotNone(attn.linear_kv)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_gqa_raises(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -216,7 +216,7 @@ class TestAttentionRecomputeFlags(unittest.TestCase):
     """Test recompute configuration."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_selective_core_attn(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -236,7 +236,7 @@ class TestAttentionRecomputeFlags(unittest.TestCase):
         self.assertTrue(attn.recompute_core_attention)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_flash_attn_rr_flag(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -256,7 +256,7 @@ class TestAttentionRecomputeFlags(unittest.TestCase):
         self.assertTrue(attn.use_rr_flash_attention)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_no_recompute(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -278,7 +278,7 @@ class TestAttentionSetForRecompute(unittest.TestCase):
     """Test set_for_recompute_input_layernorm."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_raises_not_implemented(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -300,7 +300,7 @@ class TestSelfAttentionProjectionSizes(unittest.TestCase):
     """Test projection size calculations."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_query_projection_size(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -319,7 +319,7 @@ class TestSelfAttentionProjectionSizes(unittest.TestCase):
         self.assertEqual(attn.query_projection_size, 256)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.attention.build_layer")
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
     def test_kv_projection_size_gqa(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()

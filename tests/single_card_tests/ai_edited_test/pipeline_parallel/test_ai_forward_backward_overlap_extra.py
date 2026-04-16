@@ -30,15 +30,13 @@ class TestScheduleChunkInit(unittest.TestCase):
     """Tests for ScheduleChunk initialization."""
 
     def test_init_empty_nodes(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleChunk,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
         chunk = ScheduleChunk([])
         self.assertEqual(len(chunk.nodes), 0)
 
     def test_init_with_schedule_chunk_node(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleChunk,
             ScheduleNode,
         )
@@ -53,18 +51,14 @@ class TestScheduleChunkForward(unittest.TestCase):
     """Tests for ScheduleChunk.forward."""
 
     def test_forward_empty_chunk(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleChunk,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
         chunk = ScheduleChunk([])
         result = chunk.forward("input")
         self.assertEqual(result, "input")
 
     def test_forward_chain_empty(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleChunk,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
         chunk = ScheduleChunk([])
         result = chunk.forward((1, 2, 3))
@@ -75,18 +69,14 @@ class TestScheduleChunkBackward(unittest.TestCase):
     """Tests for ScheduleChunk.backward."""
 
     def test_backward_empty_chunk(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleChunk,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
         chunk = ScheduleChunk([])
         result = chunk.backward("grad")
         self.assertEqual(result, "grad")
 
     def test_backward_empty_chunk_tuple(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleChunk,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
         chunk = ScheduleChunk([])
         result = chunk.backward((1.0, 2.0))
@@ -97,7 +87,7 @@ class TestScheduleChunkCheckNodesValid(unittest.TestCase):
     """Tests for ScheduleChunk._check_nodes_valid."""
 
     def test_valid_schedule_node(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             ScheduleChunk,
             ScheduleNode,
         )
@@ -107,9 +97,7 @@ class TestScheduleChunkCheckNodesValid(unittest.TestCase):
         self.assertEqual(len(chunk.nodes), 1)
 
     def test_valid_schedule_chunk_nested(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleChunk,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
         inner = ScheduleChunk([])
         outer = ScheduleChunk([inner])
@@ -117,17 +105,13 @@ class TestScheduleChunkCheckNodesValid(unittest.TestCase):
         self.assertIsInstance(outer.nodes[0], ScheduleChunk)
 
     def test_invalid_node_type(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleChunk,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
         with self.assertRaises(AssertionError):
             ScheduleChunk(["not_a_node"])
 
     def test_invalid_node_type_int(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleChunk,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
         with self.assertRaises(AssertionError):
             ScheduleChunk([42])
@@ -138,8 +122,7 @@ class TestFakeCloneApply(unittest.TestCase):
 
     def test_forward_returns_empty_like(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             FakeClone,
         )
 
@@ -151,8 +134,7 @@ class TestFakeCloneApply(unittest.TestCase):
 
     def test_forward_preserves_shape(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             FakeClone,
         )
 
@@ -166,8 +148,7 @@ class TestDetachAndRequiresGrad(unittest.TestCase):
 
     def test_single_tensor(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -179,8 +160,7 @@ class TestDetachAndRequiresGrad(unittest.TestCase):
 
     def test_single_tensor_stop_gradient_true(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -191,8 +171,7 @@ class TestDetachAndRequiresGrad(unittest.TestCase):
 
     def test_tuple_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -204,8 +183,7 @@ class TestDetachAndRequiresGrad(unittest.TestCase):
 
     def test_list_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -217,8 +195,7 @@ class TestDetachAndRequiresGrad(unittest.TestCase):
 
     def test_dict_input(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -230,8 +207,7 @@ class TestDetachAndRequiresGrad(unittest.TestCase):
 
     def test_nested_tuple_with_none(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             detach_and_requires_grad,
         )
 
@@ -247,8 +223,7 @@ class TestCloneAndClearDataptr(unittest.TestCase):
 
     def test_single_tensor(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             clone_and_clear_dataptr,
         )
 
@@ -259,8 +234,7 @@ class TestCloneAndClearDataptr(unittest.TestCase):
 
     def test_tuple_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             clone_and_clear_dataptr,
         )
 
@@ -272,8 +246,7 @@ class TestCloneAndClearDataptr(unittest.TestCase):
 
     def test_tuple_with_none(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             clone_and_clear_dataptr,
         )
 
@@ -284,8 +257,7 @@ class TestCloneAndClearDataptr(unittest.TestCase):
 
     def test_dict_of_tensors(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             clone_and_clear_dataptr,
         )
 
@@ -296,8 +268,7 @@ class TestCloneAndClearDataptr(unittest.TestCase):
 
     def test_clear_dataptr_flag(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
             clone_and_clear_dataptr,
         )
 
@@ -310,9 +281,7 @@ class TestScheduleNodeInit(unittest.TestCase):
     """Tests for ScheduleNode initialization."""
 
     def test_init_defaults(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleNode,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleNode
 
         node = ScheduleNode(lambda x: x * 2, name="test_node")
         self.assertEqual(node.name, "test_node")
@@ -320,20 +289,15 @@ class TestScheduleNodeInit(unittest.TestCase):
         self.assertIsNone(node.outputs)
         self.assertIsNone(node.labels)
         self.assertIsNone(node.scale_loss_factor)
-        self.assertFalse(node.use_recompute)
 
     def test_init_with_name(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleNode,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleNode
 
         node = ScheduleNode(lambda x: x, name="my_node")
         self.assertEqual(node.name, "my_node")
 
     def test_init_default_name(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleNode,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleNode
 
         node = ScheduleNode(lambda x: x)
         self.assertEqual(node.name, "")
@@ -343,9 +307,7 @@ class TestScheduleNodeResetStates(unittest.TestCase):
     """Tests for ScheduleNode._reset_states."""
 
     def test_reset_clears_all(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleNode,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleNode
 
         node = ScheduleNode(lambda x: x)
         node.inputs = "some_input"
@@ -360,9 +322,7 @@ class TestScheduleNodeResetStates(unittest.TestCase):
         self.assertIsNone(node.scale_loss_factor)
 
     def test_reset_idempotent(self):
-        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-            ScheduleNode,
-        )
+        from paddle.distributed.fleet.meta_parallel import ScheduleNode
 
         node = ScheduleNode(lambda x: x)
         node._reset_states()

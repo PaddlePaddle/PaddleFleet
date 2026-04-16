@@ -58,7 +58,7 @@ class TestMultimodalProjectorInitMLP(unittest.TestCase):
 class TestMultimodalProjectorInitAffine(unittest.TestCase):
     """Test MultimodalProjector initialization with affine type."""
 
-    @patch("paddlefleet.models.vision.multimodal_projector.build_layer")
+    @patch("paddlefleet.models.vision.multimodal_projector.build_spec_layer")
     def test_init_affine_type(self, mock_build):
         from paddlefleet.models.vision.multimodal_projector import (
             MultimodalProjector,
@@ -188,7 +188,7 @@ class TestMultimodalProjectorForward(unittest.TestCase):
 class TestMultimodalProjectorAffineForward(unittest.TestCase):
     """Test MultimodalProjector forward with affine type."""
 
-    @patch("paddlefleet.models.vision.multimodal_projector.build_layer")
+    @patch("paddlefleet.models.vision.multimodal_projector.build_spec_layer")
     def test_affine_forward(self, mock_build):
         import paddle
 

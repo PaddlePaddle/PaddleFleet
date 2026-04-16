@@ -31,7 +31,7 @@ from unittest.mock import MagicMock, patch
 class TestVisionEmbeddingInit(unittest.TestCase):
     """Test VisionEmbedding initialization."""
 
-    @patch("paddlefleet.models.qwen3_vl.embedding.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.embedding.build_spec_layer")
     def test_basic_init(self, mock_build):
         from paddlefleet.models.qwen3_vl.embedding import VisionEmbedding
 
@@ -53,7 +53,7 @@ class TestVisionEmbeddingInit(unittest.TestCase):
         self.assertEqual(embed.embed_dim, 1024)
         self.assertEqual(embed.merge_hidden_size, 1024 * 4)
 
-    @patch("paddlefleet.models.qwen3_vl.embedding.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.embedding.build_spec_layer")
     def test_init_without_rope(self, mock_build):
         from paddlefleet.models.qwen3_vl.embedding import VisionEmbedding
 
@@ -72,7 +72,7 @@ class TestVisionEmbeddingInit(unittest.TestCase):
         embed = VisionEmbedding(config=mock_config, sublayers_spec=spec)
         self.assertIsNone(embed.rotary_pos_emb)
 
-    @patch("paddlefleet.models.qwen3_vl.embedding.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.embedding.build_spec_layer")
     def test_num_grid_per_side(self, mock_build):
         from paddlefleet.models.qwen3_vl.embedding import VisionEmbedding
 
@@ -99,7 +99,7 @@ class TestVisionEmbeddingForward(unittest.TestCase):
         "VisionEmbedding.forward requires real patch_embed and pos_embed tensors "
         "for broadcast addition; cannot mock internal sublayers of Paddle Layer"
     )
-    @patch("paddlefleet.models.qwen3_vl.embedding.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.embedding.build_spec_layer")
     def test_forward_returns_dict(self, mock_build):
         import paddle
 
@@ -158,7 +158,7 @@ class TestVisionEmbeddingForward(unittest.TestCase):
 class TestVisionEmbeddingGetPackedSeqParams(unittest.TestCase):
     """Test VisionEmbedding.get_packed_seq_params."""
 
-    @patch("paddlefleet.models.qwen3_vl.embedding.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.embedding.build_spec_layer")
     def test_get_packed_seq_params(self, mock_build):
         import paddle
 
@@ -187,7 +187,7 @@ class TestVisionEmbeddingGetPackedSeqParams(unittest.TestCase):
 class TestVisionEmbeddingRotPosEmb(unittest.TestCase):
     """Test VisionEmbedding.rot_pos_emb method."""
 
-    @patch("paddlefleet.models.qwen3_vl.embedding.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.embedding.build_spec_layer")
     def test_rot_pos_emb(self, mock_build):
         import paddle
 
@@ -222,7 +222,7 @@ class TestVisionEmbeddingRotPosEmb(unittest.TestCase):
 class TestVisionEmbeddingFastPosEmbedInterpolate(unittest.TestCase):
     """Test VisionEmbedding.fast_pos_embed_interpolate."""
 
-    @patch("paddlefleet.models.qwen3_vl.embedding.build_layer")
+    @patch("paddlefleet.models.qwen3_vl.embedding.build_spec_layer")
     def test_fast_pos_embed_interpolate(self, mock_build):
         import paddle
 

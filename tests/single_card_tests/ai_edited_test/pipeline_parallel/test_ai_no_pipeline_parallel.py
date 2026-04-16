@@ -31,27 +31,27 @@ class TestNoPipelineParallelInit(unittest.TestCase):
     """Tests for NoPipelineParallel initialization."""
 
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_mp_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_mp_parameters"
     )
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_dp_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_dp_parameters"
     )
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_sep_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_sep_parameters"
     )
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_sharding_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_sharding_parameters"
     )
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_moe_sharding_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_moe_sharding_parameters"
     )
     def test_init_with_hcg(
         self, mock_moe, mock_sharding, mock_sep, mock_mp, mock_dp
     ):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
+        from paddle.distributed.fleet.meta_parallel.parallel_layers.pp_layers import (
+            PipelineLayer,
         )
-        from paddlefleet.pipeline_parallel.pp_layers import PipelineLayer
 
         mock_layers = MagicMock(spec=PipelineLayer)
         mock_hcg = MagicMock()
@@ -93,16 +93,16 @@ class TestNoPipelineParallelInit(unittest.TestCase):
         self.assertIsNone(pp.total_loss)
 
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_mp_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_mp_parameters"
     )
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_dp_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_dp_parameters"
     )
     def test_init_without_hcg(self, mock_dp, mock_mp):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
+        from paddle.distributed.fleet.meta_parallel.parallel_layers.pp_layers import (
+            PipelineLayer,
         )
-        from paddlefleet.pipeline_parallel.pp_layers import PipelineLayer
 
         mock_layers = MagicMock(spec=PipelineLayer)
         mock_strategy = MagicMock()
@@ -130,18 +130,14 @@ class TestNoPipelineParallelMethods(unittest.TestCase):
     """Tests for NoPipelineParallel method behaviors."""
 
     def test_is_pipeline_last_stage(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         self.assertTrue(pp.is_pipeline_last_stage())
         self.assertTrue(pp.is_pipeline_last_stage(ignore_virtual=True))
 
     def test_check_micro_batch_data_valid_tuple(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         tensor = MagicMock(spec=["__class__"])
@@ -150,19 +146,14 @@ class TestNoPipelineParallelMethods(unittest.TestCase):
         pp._check_micro_batch_data_valid(None)
 
     def test_check_micro_batch_data_valid_dict(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         pp._check_micro_batch_data_valid({"key": None})
 
     def test_check_micro_batch_data_valid_single_tensor(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         tensor = paddle.zeros([2, 3])
@@ -174,9 +165,7 @@ class TestNoPipelineParallelOptimizerStep(unittest.TestCase):
 
     @patch("paddle.amp.auto_cast")
     def test_optimizer_step_no_scaler(self, mock_cast):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         mock_optimizer = MagicMock()
@@ -194,9 +183,7 @@ class TestNoPipelineParallelOptimizerStep(unittest.TestCase):
 
     @patch("paddle.amp.auto_cast")
     def test_optimizer_step_with_scaler(self, mock_cast):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         mock_scaler = MagicMock()
@@ -219,9 +206,7 @@ class TestNoPipelineParallelPrepareTraining(unittest.TestCase):
 
     @patch("paddle.amp.auto_cast")
     def test_prepare_training(self, mock_cast):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         mock_tracer = MagicMock()
@@ -247,18 +232,16 @@ class TestNoPipelineParallelSepParallel(unittest.TestCase):
     """Tests for NoPipelineParallel sep parallel behavior."""
 
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_sep_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_sep_parameters"
     )
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_mp_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_mp_parameters"
     )
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel.broadcast_dp_parameters"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.broadcast_dp_parameters"
     )
     def test_init_with_sep_parallel(self, mock_dp, mock_mp, mock_sep):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         mock_hcg = MagicMock()
         mock_hcg.get_data_parallel_world_size.return_value = 1
@@ -286,9 +269,7 @@ class TestNoPipelineParallelWithHcgAllParallel(unittest.TestCase):
     """Tests for NoPipelineParallel when all parallel modes are enabled."""
 
     def test_all_parallel_flags(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
-            NoPipelineParallel,
-        )
+        from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
         pp = NoPipelineParallel.__new__(NoPipelineParallel)
         pp.__dict__["use_data_parallel"] = True

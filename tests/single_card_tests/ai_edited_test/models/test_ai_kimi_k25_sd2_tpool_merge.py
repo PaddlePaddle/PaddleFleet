@@ -123,7 +123,7 @@ class TestKimiK25VisionPatchMergerSpec(unittest.TestCase):
 class TestKimiK25VisionPathMergerInit(unittest.TestCase):
     """Test KimiK25VisionPathMerger initialization."""
 
-    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_layer")
+    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_spec_layer")
     def test_basic_init(self, mock_build):
         from paddlefleet.models.kimi_k25.sd2_tpool_merge import (
             KimiK25VisionPathMerger,
@@ -144,7 +144,7 @@ class TestKimiK25VisionPathMergerInit(unittest.TestCase):
         expected_hidden = 1024 * 2 * 2  # mm_hidden_size * kernel_h * kernel_w
         self.assertEqual(merger.hidden_size, expected_hidden)
 
-    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_layer")
+    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_spec_layer")
     def test_kernel_size_computation(self, mock_build):
         from paddlefleet.models.kimi_k25.sd2_tpool_merge import (
             KimiK25VisionPathMerger,
@@ -169,7 +169,7 @@ class TestKimiK25VisionPathMergerInit(unittest.TestCase):
 class TestKimiK25VisionPathMergerForwardListInput(unittest.TestCase):
     """Test KimiK25VisionPathMerger forward with list input."""
 
-    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_layer")
+    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_spec_layer")
     def test_forward_with_list(self, mock_build):
         import paddle
 
@@ -205,7 +205,7 @@ class TestKimiK25VisionPathMergerForwardListInput(unittest.TestCase):
 class TestKimiK25VisionPathMergerForwardTensorInput(unittest.TestCase):
     """Test KimiK25VisionPathMerger forward with tensor input."""
 
-    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_layer")
+    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_spec_layer")
     def test_forward_with_tensor(self, mock_build):
         import paddle
 
@@ -241,7 +241,7 @@ class TestKimiK25VisionPathMergerForwardTensorInput(unittest.TestCase):
 class TestKimiK25VisionPathMergerForwardPreservesKeys(unittest.TestCase):
     """Test that merger preserves original dict keys."""
 
-    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_layer")
+    @patch("paddlefleet.models.kimi_k25.sd2_tpool_merge.build_spec_layer")
     def test_preserves_keys(self, mock_build):
         import paddle
 

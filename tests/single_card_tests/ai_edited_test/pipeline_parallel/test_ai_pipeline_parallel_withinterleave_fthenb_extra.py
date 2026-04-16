@@ -31,10 +31,10 @@ class TestFthenBGetSchedulerName(unittest.TestCase):
     """Tests for _get_scheduler_name in FthenB."""
 
     @patch(
-        "paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb.PipelineParallelWithInterleave.__init__"
+        "paddle.distributed.fleet.meta_parallel.pipeline_parallel.PipelineParallelWithInterleave.__init__"
     )
     def test_scheduler_name(self, mock_parent_init):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -50,7 +50,7 @@ class TestFthenBOverlapScheduleMode(unittest.TestCase):
     """Tests for overlap_schedule_mode in FthenB."""
 
     def test_overlap_schedule_mode_default(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -61,7 +61,7 @@ class TestFthenBOverlapScheduleMode(unittest.TestCase):
         self.assertFalse(pp.overlap_schedule_mode)
 
     def test_overlap_schedule_mode_set_true(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -76,7 +76,7 @@ class TestFthenBInitUserBubbleHooks(unittest.TestCase):
     """Tests for _init_user_bubble_hooks in FthenB."""
 
     def test_init_user_bubble_hooks(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -92,7 +92,7 @@ class TestFthenBCheckSanity(unittest.TestCase):
 
     @patch("paddle.framework.in_dynamic_mode", return_value=True)
     def test_check_sanity_valid(self, mock_dynamic):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -105,7 +105,7 @@ class TestFthenBCheckSanity(unittest.TestCase):
 
     @patch("paddle.framework.in_dynamic_mode", return_value=False)
     def test_check_sanity_not_dynamic(self, mock_dynamic):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -118,7 +118,7 @@ class TestFthenBCheckSanity(unittest.TestCase):
 
     @patch("paddle.framework.in_dynamic_mode", return_value=True)
     def test_check_sanity_not_enough_stages(self, mock_dynamic):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -134,7 +134,7 @@ class TestFthenBGetVirtualPPRank(unittest.TestCase):
     """Tests for _get_virtual_pp_rank in FthenB."""
 
     def test_virtual_pp_rank_forward_chunk_0(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -147,7 +147,7 @@ class TestFthenBGetVirtualPPRank(unittest.TestCase):
         self.assertEqual(pp._get_virtual_pp_rank(0, forward=True), 0)
 
     def test_virtual_pp_rank_forward_chunk_1(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -160,7 +160,7 @@ class TestFthenBGetVirtualPPRank(unittest.TestCase):
         self.assertEqual(pp._get_virtual_pp_rank(4, forward=True), 1)
 
     def test_virtual_pp_rank_backward(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -173,7 +173,7 @@ class TestFthenBGetVirtualPPRank(unittest.TestCase):
         self.assertEqual(pp._get_virtual_pp_rank(4, forward=False), 0)
 
     def test_virtual_pp_rank_backward_chunk_0(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -190,7 +190,7 @@ class TestFthenBOverlapCommGrads(unittest.TestCase):
     """Tests for _overlap_comm_grads in FthenB."""
 
     def test_overlap_comm_grads_disabled(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -204,7 +204,7 @@ class TestFthenBOverlapCommGrads(unittest.TestCase):
         self.assertEqual(pp._backward_step_count, 0)
 
     def test_overlap_comm_grads_stage_zero(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -228,7 +228,7 @@ class TestFthenBSyncOverlapGrads(unittest.TestCase):
     """Tests for _sync_overlap_grads in FthenB."""
 
     def test_sync_overlap_grads_disabled(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 
@@ -240,7 +240,7 @@ class TestFthenBSyncOverlapGrads(unittest.TestCase):
         pp._sync_overlap_grads()
 
     def test_sync_overlap_grads_assertion(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave_fthenb import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelWithInterleaveFthenB,
         )
 

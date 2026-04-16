@@ -179,7 +179,7 @@ class TestTransformerLayerConstruction(unittest.TestCase):
     """Test TransformerLayer construction paths."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.transformer_layer.build_layer")
+    @patch("paddlefleet.transformer.transformer_layer.build_spec_layer")
     def test_basic_construction(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -210,7 +210,7 @@ class TestTransformerLayerConstruction(unittest.TestCase):
         self.assertFalse(layer.full_recompute)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.transformer_layer.build_layer")
+    @patch("paddlefleet.transformer.transformer_layer.build_spec_layer")
     def test_full_recompute(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -247,7 +247,7 @@ class TestTransformerLayerConstruction(unittest.TestCase):
         self.assertFalse(layer.recompute_mlp)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.transformer_layer.build_layer")
+    @patch("paddlefleet.transformer.transformer_layer.build_spec_layer")
     def test_selective_recompute_mlp(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.tp = MagicMock()
@@ -280,7 +280,7 @@ class TestTransformerLayerConstruction(unittest.TestCase):
         self.assertTrue(layer.recompute_mlp)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.transformer_layer.build_layer")
+    @patch("paddlefleet.transformer.transformer_layer.build_spec_layer")
     def test_block_attention_residuals_asserts_full_recompute(
         self, mock_build, mock_pg
     ):

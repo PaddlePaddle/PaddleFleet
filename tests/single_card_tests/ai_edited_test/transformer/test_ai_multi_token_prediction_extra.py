@@ -166,7 +166,7 @@ class TestMultiTokenPredictionLayer(unittest.TestCase):
     """Test MultiTokenPredictionLayer."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.multi_token_prediction.build_layer")
+    @patch("paddlefleet.transformer.multi_token_prediction.build_spec_layer")
     def test_construction(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.cp = MagicMock()
@@ -200,7 +200,7 @@ class TestMultiTokenPredictionLayer(unittest.TestCase):
         self.assertIsNotNone(layer.eh_proj)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.multi_token_prediction.build_layer")
+    @patch("paddlefleet.transformer.multi_token_prediction.build_spec_layer")
     def test_build_schedule_node(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.cp = MagicMock()
@@ -232,7 +232,7 @@ class TestWeightOnlyMTPLayer(unittest.TestCase):
     """Test WeightOnlyMTPLayer."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.multi_token_prediction.build_layer")
+    @patch("paddlefleet.transformer.multi_token_prediction.build_spec_layer")
     def test_forward_returns_dict_unchanged(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.cp = MagicMock()
@@ -262,7 +262,7 @@ class TestWeightOnlyMTPLayer(unittest.TestCase):
         self.assertIs(result, dict_args)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.multi_token_prediction.build_layer")
+    @patch("paddlefleet.transformer.multi_token_prediction.build_spec_layer")
     def test_build_schedule_node(self, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
         mock_pg_obj.cp = MagicMock()
@@ -294,7 +294,7 @@ class TestMultiTokenPredictionLayerForward(unittest.TestCase):
     """Test MultiTokenPredictionLayer forward."""
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.multi_token_prediction.build_layer")
+    @patch("paddlefleet.transformer.multi_token_prediction.build_spec_layer")
     @patch("paddlefleet.transformer.multi_token_prediction.tensor_parallel")
     def test_forward_context_assertion(self, mock_tp, mock_build, mock_pg):
         mock_pg_obj = MagicMock()
@@ -339,7 +339,7 @@ class TestMultiTokenPredictionLayerForward(unittest.TestCase):
             layer(dict_args)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
-    @patch("paddlefleet.transformer.multi_token_prediction.build_layer")
+    @patch("paddlefleet.transformer.multi_token_prediction.build_spec_layer")
     @patch("paddlefleet.transformer.multi_token_prediction.tensor_parallel")
     def test_forward_packed_seq_assertion(self, mock_tp, mock_build, mock_pg):
         mock_pg_obj = MagicMock()

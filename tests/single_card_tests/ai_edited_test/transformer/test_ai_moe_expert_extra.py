@@ -310,7 +310,7 @@ class TestGroupedMLPExpertBackwardDw(unittest.TestCase):
 class TestStandardMLPExpert(unittest.TestCase):
     """Test StandardMLPExpert construction."""
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_construction_with_same_intermediate(self, mock_build):
         mock_build.return_value = MagicMock()
         config = _make_config(intermediate_size=128)
@@ -324,7 +324,7 @@ class TestStandardMLPExpert(unittest.TestCase):
         self.assertIsNotNone(expert.up_gate_proj)
         self.assertIsNotNone(expert.down_proj)
 
-    @patch("paddlefleet.transformer.mlp.build_layer")
+    @patch("paddlefleet.transformer.mlp.build_spec_layer")
     def test_construction_with_different_intermediate(self, mock_build):
         mock_build.return_value = MagicMock()
         config = _make_config(intermediate_size=256)

@@ -35,6 +35,13 @@ from unittest import mock
 class TestSetLogging(unittest.TestCase):
     """Tests for set_logging function."""
 
+    def tearDown(self):
+        # Remove any mock handlers added by set_logging to avoid test pollution.
+        logger = logging.getLogger("paddlefleet")
+        logger.handlers = [
+            h for h in logger.handlers if isinstance(h, logging.Handler)
+        ]
+
     def test_set_logging_default_level(self):
         """Test set_logging with default logging level."""
         from paddlefleet.training.initialize import set_logging

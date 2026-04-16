@@ -32,7 +32,7 @@ class TestP2PAsyncHandleInit(unittest.TestCase):
     """Tests for P2PAsyncHandle initialization."""
 
     def test_init_default_values(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -61,7 +61,7 @@ class TestP2PAsyncHandleInit(unittest.TestCase):
         self.assertIsNone(handle.recv_next)
 
     def test_init_with_all_fields(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -95,7 +95,7 @@ class TestP2PAsyncHandleDataclassFields(unittest.TestCase):
     """Tests for P2PAsyncHandle dataclass field inspection."""
 
     def test_field_names(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -109,7 +109,7 @@ class TestP2PAsyncHandleDataclassFields(unittest.TestCase):
         self.assertEqual(len(field_names), 4)
 
     def test_callable_fields(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -132,7 +132,7 @@ class TestP2PAsyncHandleAttributeAssignment(unittest.TestCase):
     """Tests for P2PAsyncHandle attribute assignment patterns."""
 
     def test_assign_forward_attributes(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -146,7 +146,7 @@ class TestP2PAsyncHandleAttributeAssignment(unittest.TestCase):
         self.assertIsNotNone(handle.input_tensor)
 
     def test_assign_backward_attributes(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -164,7 +164,7 @@ class TestP2PAsyncHandleMultipleInstances(unittest.TestCase):
     """Tests creating multiple P2PAsyncHandle instances."""
 
     def test_two_independent_handles(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -184,7 +184,7 @@ class TestP2PAsyncHandleMultipleInstances(unittest.TestCase):
         self.assertEqual(h2.input_tensor, "input_1")
 
     def test_handle_reassignment(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 
@@ -200,7 +200,7 @@ class TestP2PAsyncHandleCallableTypes(unittest.TestCase):
     """Tests for P2PAsyncHandle callable field types."""
 
     def test_lambda_callables(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel_withinterleave import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             P2PAsyncHandle,
         )
 

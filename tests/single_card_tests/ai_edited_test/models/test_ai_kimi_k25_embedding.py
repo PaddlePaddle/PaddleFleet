@@ -31,7 +31,7 @@ from unittest.mock import MagicMock, patch
 class TestMoonVision3dPatchEmbedInit(unittest.TestCase):
     """Test MoonVision3dPatchEmbed initialization."""
 
-    @patch("paddlefleet.models.kimi_k25.embedding.build_layer")
+    @patch("paddlefleet.models.kimi_k25.embedding.build_spec_layer")
     def test_basic_init(self, mock_build):
         from paddlefleet.models.kimi_k25.embedding import MoonVision3dPatchEmbed
 
@@ -52,7 +52,7 @@ class TestMoonVision3dPatchEmbedInit(unittest.TestCase):
         self.assertEqual(embed.out_dim, 1024)
         self.assertEqual(embed.patch_size, (14, 14))
 
-    @patch("paddlefleet.models.kimi_k25.embedding.build_layer")
+    @patch("paddlefleet.models.kimi_k25.embedding.build_spec_layer")
     def test_int_patch_size_converted_to_tuple(self, mock_build):
         from paddlefleet.models.kimi_k25.embedding import MoonVision3dPatchEmbed
 
@@ -139,7 +139,7 @@ class TestMoonVision3dPatchEmbedInit(unittest.TestCase):
 class TestMoonVision3dPatchEmbedForward(unittest.TestCase):
     """Test MoonVision3dPatchEmbed forward method."""
 
-    @patch("paddlefleet.models.kimi_k25.embedding.build_layer")
+    @patch("paddlefleet.models.kimi_k25.embedding.build_spec_layer")
     def test_forward_returns_dict(self, mock_build):
         from paddlefleet.models.kimi_k25.embedding import MoonVision3dPatchEmbed
 

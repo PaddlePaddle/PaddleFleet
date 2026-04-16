@@ -27,8 +27,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 
-from paddlefleet.spec_utils import LayerSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.transformer.transformer_encoder import TransformerEncoder
 
