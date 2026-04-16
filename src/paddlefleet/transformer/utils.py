@@ -16,9 +16,12 @@
 
 from __future__ import annotations
 
+import contextlib
 from functools import lru_cache
 
 import paddle
+
+from paddlefleet.training.global_vars import get_profile_timers
 
 
 @lru_cache(maxsize=32)
@@ -41,6 +44,21 @@ def get_sliding_window_causal_mask(sq, skv, sliding_window):
 def attention_mask_func(attention_scores, attention_mask):
     attention_scores.masked_fill_(attention_mask, -10000.0)
     return attention_scores
+
+
+@contextlib.contextmanager
+def profile(name, use_event=True):
+    """Record a timer scope when profile timers are available."""
+    if not name:
+        yield
+        return
+
+    timers = get_profile_timers()
+    if timers is not None:
+        timers(name, use_event=use_event).start()
+    yield
+    if timers is not None:
+        timers(name, use_event=use_event).stop()
 
 
 def is_layer_window_attention(
