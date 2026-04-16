@@ -23,6 +23,13 @@ import paddle.nn.functional as F
 from paddle import nn
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
+paddle.enable_compat(
+    scope={"sonicmoe", "quack", "triton"}
+)  # Enable torch proxy before importing sonicmoe
+from sonicmoe.functional import (
+    TC_Softmax_Topk_Router_Function,
+)
+
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -562,12 +569,19 @@ class TopKRouter(StandardMoERouter):
             )
 
         # top_gate: [B*S, K], top_idx: [B*S, K]
-        top_gate, top_idx = self._call_topk_method(
-            self.topk_method,
-            gates,
-            k=self.num_experts_per_tok,
-            n_group=self.n_group,
-            topk_group=self.topk_group,
+
+        ######## Option1: Origin Code
+        # top_gate, top_idx = self._call_topk_method(
+        #     self.topk_method,
+        #     gates,
+        #     k=self.num_experts_per_tok,
+        #     n_group=self.n_group,
+        #     topk_group=self.topk_group,
+        # )
+
+        ######## Option2: Sonic MoE
+        top_gate, top_idx = TC_Softmax_Topk_Router_Function.apply(
+            logits, self.weight.T.size(0), self.num_experts_per_tok
         )
 
         # z-loss
