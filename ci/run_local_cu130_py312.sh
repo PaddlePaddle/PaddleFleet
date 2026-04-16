@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +14,7 @@
 # limitations under the License.
 
 # 本地运行脚本 - CUDA 13.0 + Python 3.12
-# 可配置选择测试 case，每个 case 使用独立的 conda 环境
+# 使用 uv 管理虚拟环境
 # 基于 .github/workflows/ce_daily_dev.yml
 
 set -e
@@ -47,7 +46,6 @@ MULTI_MODEL_TESTS=()
 
 # 测试结果记录
 RESULT_FILE="test_results_${RUN_DATE}.txt"
-declare -A TEST_RESULTS
 TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
@@ -106,16 +104,16 @@ while [[ $# -gt 0 ]]; do
             echo "                     可选指定模型: --single-model glm45,qwen3,qwen3vl"
             echo "  --multi-model      运行多卡模型测试"
             echo "                     可选指定模型: --multi-model glm45_pt,qwen3_pt,qwen3vl_sft"
-            echo "  --clean-env        测试完成后删除创建的 conda 环境"
+            echo "  --clean-env        测试完成后删除创建的 uv 环境"
             echo "  --all              运行所有测试"
             echo "  --help             显示帮助信息"
             echo ""
-            echo "Conda 环境:"
-            echo "  每个测试 case 使用独立的 conda 环境，避免依赖冲突"
-            echo "  - 单卡测试 (单元测试 + Sonic MoE): pf_cu130_single_py312"
-            echo "  - 多卡单元测试: pf_cu130_multi_unit_py312"
-            echo "  - 单卡模型测试: pf_cu130_single_model_py312"
-            echo "  - 多卡模型测试: pf_cu130_multi_model_py312"
+            echo "UV 虚拟环境:"
+            echo "  每个测试 case 使用独立的 uv 虚拟环境，避免依赖冲突"
+            echo "  - 单卡测试 (单元测试 + Sonic MoE): .venv/single"
+            echo "  - 多卡单元测试: .venv/multi_unit"
+            echo "  - 单卡模型测试: .venv/single_model"
+            echo "  - 多卡模型测试: .venv/multi_model"
             echo ""
             echo "示例:"
             echo "  $0 --single-unit --single-sonic"
@@ -147,13 +145,13 @@ echo "========================================"
 echo "测试配置:"
 echo "========================================"
 if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
-    echo "  ✓ 单卡单元测试 (环境: pf_cu130_single_py312)"
+    echo "  ✓ 单卡测试 (环境: .venv/single)"
 fi
 [ "$RUN_SINGLE_UNIT" = true ] && echo "    - 单卡单元测试"
 [ "$RUN_SINGLE_SONIC" = true ] && echo "    - Sonic MoE 测试"
-[ "$RUN_MULTI_UNIT" = true ] && echo "  ✓ 多卡单元测试 (环境: pf_cu130_multi_unit_py312)"
-[ "$RUN_SINGLE_MODEL" = true ] && echo "  ✓ 单卡模型测试 (环境: pf_cu130_single_model_py312): ${SINGLE_MODEL_TESTS[*]:-全部}"
-[ "$RUN_MULTI_MODEL" = true ] && echo "  ✓ 多卡模型测试 (环境: pf_cu130_multi_model_py312): ${MULTI_MODEL_TESTS[*]:-全部}"
+[ "$RUN_MULTI_UNIT" = true ] && echo "  ✓ 多卡单元测试 (环境: .venv/multi_unit)"
+[ "$RUN_SINGLE_MODEL" = true ] && echo "  ✓ 单卡模型测试 (环境: .venv/single_model): ${SINGLE_MODEL_TESTS[*]:-全部}"
+[ "$RUN_MULTI_MODEL" = true ] && echo "  ✓ 多卡模型测试 (环境: .venv/multi_model): ${MULTI_MODEL_TESTS[*]:-全部}"
 [ "$CLEAN_ENV" = true ] && echo "  ✓ 测试后删除环境"
 echo "========================================"
 echo ""
@@ -228,49 +226,42 @@ upload_logs_to_bos() {
     fi
 }
 
-# 函数：准备 conda 环境
-prepare_conda_env() {
+# 函数：准备 uv 环境
+prepare_uv_env() {
     local env_name=$1
     local env_desc=$2
+    local venv_dir=".venv/$env_name"
 
     echo ""
-    echo "=== 准备环境: $env_name ($env_desc) ==="
+    echo "=== 准备环境: $venv_dir ($env_desc) ==="
 
     # 检查环境是否已存在
-    if conda env list | grep -q "^${env_name} "; then
-        echo "环境 $env_name 已存在，跳过创建"
+    if [ -d "$venv_dir" ]; then
+        echo "环境 $venv_dir 已存在，跳过创建"
     else
-        echo "创建 conda 环境: $env_name"
-        conda create -n $env_name python=${PYTHON_VERSION} -y
-        CREATED_ENVS+=($env_name)
+        echo "创建 uv 虚拟环境: $venv_dir"
+        uv venv $venv_dir --python ${PYTHON_VERSION}
+        CREATED_ENVS+=($venv_dir)
     fi
 
     # 激活环境
-    source "$(conda info --base)/etc/profile.d/conda.sh"
-    conda activate $env_name
-    echo "当前环境: $(conda info --envs | grep '*' | awk '{print $1}')"
-
-    # 设置 pip 缓存目录
-    export PIP_CACHE_DIR=$(pwd)/.cache/pip/$env_name
-    mkdir -p $PIP_CACHE_DIR
-
-    # 升级 pip
-    pip install --upgrade pip
+    source $venv_dir/bin/activate
+    echo "当前环境: $env_name"
 
     # 安装基础依赖
-    pip install colorlog>=6.10.1
+    uv pip install colorlog>=6.10.1
 
     # 安装 PaddleFleet (hack: 下载指定版本)
     echo "安装 PaddleFleet..."
     wget https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/c8f1462ace93a38025015aa6be7d901395a2823c/cu130/paddlefleet-0.3.0.dev20260416-cp312-cp312-linux_x86_64.whl -O paddlefleet_hack.whl
-    pip install paddlefleet_hack.whl
+    uv pip install paddlefleet_hack.whl
 
     # 安装 Paddle（会覆盖 PaddleFleet 自带的 Paddle）
     echo "安装指定版本的 Paddle..."
-    pip install ${PADDLE_URL} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+    uv pip install ${PADDLE_URL} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
 
     # 安装测试依赖
-    pip install uv bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+    uv pip install uv bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
 
     # 打印版本信息
     echo "=== 版本信息 ==="
@@ -282,8 +273,8 @@ prepare_conda_env() {
 
 # 运行单卡测试 (单元测试 + Sonic MoE)
 if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
-    ENV_NAME="pf_cu130_single_py312"
-    prepare_conda_env "$ENV_NAME" "单卡测试 (单元测试 + Sonic MoE)"
+    ENV_NAME="single"
+    prepare_uv_env "$ENV_NAME" "单卡测试 (单元测试 + Sonic MoE)"
 
     # 运行单卡单元测试
     if [ "$RUN_SINGLE_UNIT" = true ]; then
@@ -313,13 +304,13 @@ if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
         fi
     fi
 
-    conda deactivate
+    deactivate
 fi
 
 # 运行多卡单元测试
 if [ "$RUN_MULTI_UNIT" = true ]; then
-    ENV_NAME="pf_cu130_multi_unit_py312"
-    prepare_conda_env "$ENV_NAME" "多卡单元测试"
+    ENV_NAME="multi_unit"
+    prepare_uv_env "$ENV_NAME" "多卡单元测试"
 
     echo ""
     echo "=== 开始多卡单元测试 ==="
@@ -336,14 +327,14 @@ if [ "$RUN_MULTI_UNIT" = true ]; then
         echo "✗ 多卡测试脚本不存在，跳过"
     fi
 
-    conda deactivate
+    deactivate
 fi
 
 # 运行单卡模型测试
 if [ "$RUN_SINGLE_MODEL" = true ]; then
-    ENV_NAME="pf_cu130_single_model_py312"
+    ENV_NAME="single_model"
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-single"
-    prepare_conda_env "$ENV_NAME" "单卡模型测试"
+    prepare_uv_env "$ENV_NAME" "单卡模型测试"
 
     # 如果没有指定具体模型，运行所有单卡模型测试
     if [ ${#SINGLE_MODEL_TESTS[@]} -eq 0 ]; then
@@ -433,14 +424,14 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
     done
     echo "✓ 单卡模型测试完成"
 
-    conda deactivate
+    deactivate
 fi
 
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
-    ENV_NAME="pf_cu130_multi_model_py312"
+    ENV_NAME="multi_model"
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-multi"
-    prepare_conda_env "$ENV_NAME" "多卡模型测试"
+    prepare_uv_env "$ENV_NAME" "多卡模型测试"
 
     # 如果没有指定具体模型，运行所有多卡模型测试
     if [ ${#MULTI_MODEL_TESTS[@]} -eq 0 ]; then
@@ -686,7 +677,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
     done
     echo "✓ 多卡模型测试完成"
 
-    conda deactivate
+    deactivate
 fi
 
 # 打印测试结果汇总
@@ -698,7 +689,7 @@ if [ "$CLEAN_ENV" = true ] && [ ${#CREATED_ENVS[@]} -gt 0 ]; then
     echo "=== 清理环境 ==="
     for env in "${CREATED_ENVS[@]}"; do
         echo "删除环境: $env"
-        conda env remove -n $env -y
+        rm -rf .venv/$env
     done
     echo "✓ 环境清理完成"
 fi
@@ -718,6 +709,6 @@ if [ ${#CREATED_ENVS[@]} -gt 0 ]; then
     if [ "$CLEAN_ENV" = false ]; then
         echo ""
         echo "提示: 使用 --clean-env 选项可在测试后自动删除这些环境"
-        echo "      手动删除: conda env remove -n <环境名>"
+        echo "      手动删除: rm -rf .venv/<环境名>"
     fi
 fi
