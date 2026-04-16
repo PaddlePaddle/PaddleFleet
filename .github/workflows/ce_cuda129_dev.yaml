@@ -1,9 +1,6 @@
 name: CE-CUDA-CUDA-129-Dev
 
 on:
-  pull_request:
-    types: [opened, synchronize]
-    branches: [develop]
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
