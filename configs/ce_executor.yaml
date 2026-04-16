@@ -1,0 +1,87 @@
+# CE Executor Configuration File
+#
+# This file contains configuration for the CE (Continuous Evaluation) executor.
+# Default values are provided; override as needed.
+
+# Execution strategy settings
+executor:
+  strategy:
+    # Execution mode: sequential or parallel (sequential only for now)
+    execution_mode: sequential
+
+    # Retry failed cases
+    retry_on_failure: true
+
+    # Maximum retry attempts
+    max_retries: 1
+
+  # Docker configuration
+  docker:
+    # Base working directory inside container
+    base_work_dir: /workspace
+
+    # Shared memory size for container
+    shared_memory_size: 32g
+
+    # GPU device IDs to use (e.g., "0,1" or "all")
+    gpu_device_ids: all
+
+    # Remove containers after each run
+    cleanup_after_run: true
+
+  # BOS (Baidu Object Storage) configuration
+  bos:
+    # Base path for uploads
+    base_path: paddle-github-action/PaddleFleet/ce
+
+    # Enable BOS uploads (set to true to upload results)
+    enabled: false
+
+    # HTTP POST interface URL for uploads
+    upload_url: http://127.0.0.1:8000/shangchuan
+
+    # Access token (can also be set via BOS_TOKEN environment variable)
+    token: null
+
+  # Database configuration
+  database:
+    # Database type: mock (in-memory + JSON)
+    type: mock
+
+    # Persistence file for database (JSON format)
+    persistence_file: ./ce_data.json
+
+  # Logging configuration
+  logging:
+    # Log level: DEBUG, INFO, WARNING, ERROR
+    level: INFO
+
+    # Output to console
+    console_output: true
+
+    # Log directory
+    log_dir: ./logs
+
+    # Database persistence file
+    persistence_file: ./ce_data.json
+
+  # Temporary workspace directory
+  temp:
+    # Base directory for temporary files
+    base_dir: ./workspace
+
+    # Keep log files after execution
+    keep_logs: true
+
+# Global settings
+# Whether to use pre-built Paddle release packages
+use_release: true
+
+# Path to ce_daily_dev.yml for parsing case definitions
+# If null, uses predefined case configurations
+yaml_path: null
+
+# Precision checking settings
+precision:
+  # Tolerance for loss comparison (0.0 = exact match)
+  tolerance: 0.0
