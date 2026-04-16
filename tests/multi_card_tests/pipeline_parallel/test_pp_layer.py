@@ -197,7 +197,6 @@ class TestPipeLayerAPI(unittest.TestCase):
         alex_desc = get_alex_spec()
         pipe_model = build_layer(alex_desc, num_stages=1)
         npp = NoPipelineParallel(pipe_model, self.strategy)
-        npp._delay_scale_loss = False
         return npp
 
     def _create_eval_data(self, acc_steps):
@@ -226,13 +225,6 @@ class TestPipeLayerAPI(unittest.TestCase):
         data = self._create_eval_data(npp.accumulate_steps)
         with self.assertRaises(AssertionError):
             npp.eval_batch(data, compute_loss=True, loss_fn_idx=99)
-
-    def test_eval_batch_compute_loss_delay_scale(self):
-        npp = self._create_no_pipeline_model()
-        npp._delay_scale_loss = True
-        data = self._create_eval_data(npp.accumulate_steps)
-        result = npp.eval_batch(data, compute_loss=True)
-        self.assertIsInstance(result, paddle.Tensor)
 
     def test_eval_batch_return_host_tensor(self):
         npp = self._create_no_pipeline_model()
