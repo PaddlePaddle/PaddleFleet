@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
+import paddle.distributed as dist
 import paddle.nn.functional as F
 
 # (TODO): need adapt to flex_checkpoint
@@ -170,6 +171,23 @@ class MLP(FleetLayer):
             is_expert=is_expert,
             tp_group=tp_group,
         )
+
+    def redistribute_expert(self, mesh, placements):
+        self.up_gate_proj.weight = dist.shard_tensor(
+            self.up_gate_proj.weight, mesh, placements
+        )
+        if self.up_gate_proj.bias is not None:
+            self.up_gate_proj.bias = dist.shard_tensor(
+                self.up_gate_proj.bias, mesh, placements
+            )
+
+        self.down_proj.weight = dist.shard_tensor(
+            self.down_proj.weight, mesh, placements
+        )
+        if self.down_proj.bias is not None:
+            self.down_proj.bias = dist.shard_tensor(
+                self.down_proj.bias, mesh, placements
+            )
 
     def forward(self, hidden_states, per_token_scale=None):
         """Perform the forward pass through the MLP block."""
