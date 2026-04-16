@@ -78,6 +78,35 @@ __all__ = [
 FP8_ALIGN = 128
 
 
+def fused_stack_quant_without_cache(
+    expert_weight_list, transpose=False, use_ue8m0=False
+):
+    use_pow2_scale = False
+    current_device = paddle.device.get_device()
+    if paddle.is_compiled_with_cuda() and current_device.startswith("gpu"):
+        if paddle.device.cuda.get_device_capability()[0] == 10:
+            use_pow2_scale = True
+
+    if transpose:
+        w, scale = fuse_stack_transpose_fp8_quant(
+            expert_weight_list,
+            use_pow2_scale,
+            use_ue8m0,
+            use_ue8m0,
+        )
+    else:
+        w, scale = fuse_stack_fp8_quant(
+            expert_weight_list,
+            use_pow2_scale,
+            use_ue8m0,
+            use_ue8m0,
+        )
+
+    if use_ue8m0:
+        scale = scale.T
+    return w, scale
+
+
 def _get_fp8_weight_and_scale(weight, transpose=False):
     """_get_fp8_weight_and_scale"""
     if transpose:
@@ -358,11 +387,16 @@ class ExpertsGroupGemmContiguousNode:
         """
         generate m indices
         """
-        tokens = []
-        for i in range(len(tokens_per_expert)):
-            tokens.append(paddle.full([tokens_per_expert[i]], i, dtype="int32"))
-        out = paddle.concat(tokens, axis=0)
-        return out
+        if isinstance(tokens_per_expert, paddle.Tensor):
+            counts = tokens_per_expert.cast("int32")
+        else:
+            counts = paddle.to_tensor(tokens_per_expert, dtype="int32")
+        if counts.shape[0] == 0:
+            return paddle.empty([0], dtype="int32")
+        return paddle.repeat_interleave(
+            paddle.arange(counts.shape[0], dtype="int32"),
+            counts,
+        )
 
     def fwd_gate_up_bf16(self, x, expert_w1):
         """
@@ -422,10 +456,16 @@ class ExpertsGroupGemmContiguousNode:
     ):
         self.tokens_per_expert = tokens_per_expert
         if self.moe_deep_gemm:
+            if isinstance(self.tokens_per_expert, paddle.Tensor):
+                token_counts = self.tokens_per_expert.cast("int32")
+            else:
+                token_counts = paddle.to_tensor(
+                    self.tokens_per_expert, dtype="int32"
+                )
             self.tokens_per_expert_indices = paddle.repeat_interleave(
-                paddle.arange(len(self.tokens_per_expert)),
-                paddle.to_tensor(self.tokens_per_expert),
-            ).cast("int32")
+                paddle.arange(token_counts.shape[0], dtype="int32"),
+                token_counts,
+            )
         if not self.use_fp8_mlp:
             return self.fwd_gate_up_bf16(x, expert_w1)
         else:

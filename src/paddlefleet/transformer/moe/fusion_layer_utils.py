@@ -653,3 +653,92 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             output_grad
         )
         return hidden_states_grad, dispatched_probs_grad, None
+
+
+class HybridEPMoePyLayer(paddle.autograd.PyLayer):
+    """
+    Expert compute for HybridEP's permuted dispatch contract.
+
+    HybridEP dispatch_with_permute already produces expert-contiguous tokens, so
+    this layer intentionally skips FusionMoePyLayer's unzip/zip stages and only
+    reuses the grouped expert GEMM node for both bf16 and fp8.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        hidden_states,
+        dispatched_probs,
+        custom_map,
+        use_fp8_mlp=True,
+        moe_deep_gemm=True,
+        moe_grouped_gemm=False,
+        recompute_moe_gate_up=False,
+        use_bf16_gemm_weight_grad=False,
+        fp8_dispatched_handle=None,
+    ):
+        node = ExpertsGroupGemmContiguousNode(
+            custom_map,
+            recompute_moe_gate_up=recompute_moe_gate_up,
+            dequant_input=True,
+            use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
+            use_fp8_mlp=use_fp8_mlp,
+            moe_deep_gemm=moe_deep_gemm,
+            moe_grouped_gemm=moe_grouped_gemm,
+        )
+
+        tokens_per_expert = (
+            custom_map.token_dispatcher._comm_manager.tokens_per_expert
+        )
+        if isinstance(tokens_per_expert, list):
+            tokens_per_expert = paddle.to_tensor(
+                tokens_per_expert,
+                dtype="int64",
+                place=hidden_states.place,
+            )
+        else:
+            tokens_per_expert = tokens_per_expert.astype("int64")
+        padded_tokens_per_expert = (
+            (tokens_per_expert + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
+        )
+        num_permuted_tokens = paddle.sum(padded_tokens_per_expert)
+        hidden_states = hidden_states[:num_permuted_tokens]
+        dispatched_probs = dispatched_probs[:num_permuted_tokens]
+
+        scale = None
+        if fp8_dispatched_handle is not None:
+            assert hidden_states.dtype == paddle.float8_e4m3fn
+            if isinstance(fp8_dispatched_handle, dict):
+                scale = fp8_dispatched_handle["scale"]
+            else:
+                scale = fp8_dispatched_handle
+            scale = scale[:num_permuted_tokens]
+
+        out = node.forward(
+            hidden_states,
+            dispatched_probs,
+            padded_tokens_per_expert,
+            tokens_per_expert,
+            scale=scale,
+        )
+
+        ctx.node = node
+        ctx.dispatched_probs_shape = dispatched_probs.shape
+        ctx.save_for_backward(node.cached_tensors() + [dispatched_probs])
+        node.clear_cached_tensors()
+        return out
+
+    @staticmethod
+    def backward(ctx, output_grad):
+        (cached_tensors,) = ctx.saved_tensor()
+        dispatched_probs = cached_tensors[-1]
+        ctx.node.set_cached_tensors(cached_tensors[:-1])
+        hidden_states_grad, dispatched_probs_grad = ctx.node.backward(
+            output_grad, dispatched_probs
+        )
+        ctx.node.reset_state()
+        if dispatched_probs_grad.shape != ctx.dispatched_probs_shape:
+            dispatched_probs_grad = dispatched_probs_grad.reshape(
+                ctx.dispatched_probs_shape
+            )
+        return hidden_states_grad, dispatched_probs_grad, None
