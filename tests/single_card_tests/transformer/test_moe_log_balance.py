@@ -22,7 +22,7 @@ from paddlefleet.training.global_vars import (
     set_profile_timers,
     unset_global_variables,
 )
-import paddlefleet.transformer.moe.moe_utils as moe_utils
+from paddlefleet.transformer.moe import moe_utils
 from paddlefleet.transformer.moe.moe_utils import (
     _all_gather_local_tokens,
     global_moe_balance_training_logs_enabled,
@@ -65,9 +65,7 @@ class TestMoeBalanceLogging(unittest.TestCase):
             logs["tokens_per_expert_layer_0_max_mean_ratio"], 1.6
         )
         self.assertAlmostEqual(logs["tokens_per_expert_avg_layer_0_mean"], 0.5)
-        self.assertAlmostEqual(
-            logs["local_tokens_per_card_layer_0_mean"], 20.0
-        )
+        self.assertAlmostEqual(logs["local_tokens_per_card_layer_0_mean"], 20.0)
         self.assertAlmostEqual(
             logs["local_tokens_per_card_layer_0_max_mean_ratio"], 1.0
         )
@@ -79,7 +77,9 @@ class TestMoeBalanceLogging(unittest.TestCase):
         orig_all_gather_local_tokens = moe_utils._all_gather_local_tokens
 
         def wrapped_all_gather_local_tokens(local_tokens_per_expert, group):
-            captured["is_tensor"] = isinstance(local_tokens_per_expert, paddle.Tensor)
+            captured["is_tensor"] = isinstance(
+                local_tokens_per_expert, paddle.Tensor
+            )
             captured["is_cpu"] = local_tokens_per_expert.place.is_cpu_place()
             captured["dtype"] = local_tokens_per_expert.dtype
             captured["shape"] = list(local_tokens_per_expert.shape)
@@ -111,9 +111,7 @@ class TestMoeBalanceLogging(unittest.TestCase):
             logs["tokens_per_expert_layer_1_max_mean_ratio"], 1.75
         )
         self.assertAlmostEqual(logs["tokens_per_expert_avg_layer_1_mean"], 1.0)
-        self.assertAlmostEqual(
-            logs["local_tokens_per_card_layer_1_mean"], 16.0
-        )
+        self.assertAlmostEqual(logs["local_tokens_per_card_layer_1_mean"], 16.0)
         self.assertAlmostEqual(
             logs["local_tokens_per_card_layer_1_max_mean_ratio"], 1.0
         )
@@ -139,9 +137,8 @@ class TestMoeBalanceLogging(unittest.TestCase):
         unset_global_variables()
         set_profile_timers(DummyTimers())
 
-        with self.assertRaisesRegex(RuntimeError, "boom"):
-            with profile("attn"):
-                raise RuntimeError("boom")
+        with self.assertRaisesRegex(RuntimeError, "boom"), profile("attn"):
+            raise RuntimeError("boom")
 
         self.assertEqual(
             events,

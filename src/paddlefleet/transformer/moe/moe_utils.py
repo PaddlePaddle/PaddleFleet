@@ -30,6 +30,7 @@ except ImportError:
     scatter_add_ = None
 import paddle.distributed as dist
 from paddle.autograd.py_layer import PyLayer
+
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.utils import get_pg_size
 
@@ -256,11 +257,7 @@ def global_moe_balance_training_logs_enabled():
 
 def _all_gather_local_tokens(local_tokens_per_expert, group):
     local_tokens_per_expert = local_tokens_per_expert.reshape([-1])
-    if (
-        group is None
-        or get_pg_size(group) <= 1
-        or not group.is_member()
-    ):
+    if group is None or get_pg_size(group) <= 1 or not group.is_member():
         return local_tokens_per_expert.reshape([1, -1])
 
     if local_tokens_per_expert.place.is_cpu_place():
