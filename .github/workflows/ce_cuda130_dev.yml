@@ -105,7 +105,7 @@ jobs:
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda130-Cudnn913-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-GpuAll-LinuxCentos-Gcc11-Cuda130-Cudnn913-Trt1013-Py312-Compile/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.post20260415+bb09abe5726-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest
           echo "Paddle Commit"
@@ -184,7 +184,7 @@ jobs:
           python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda130-Cudnn913-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-GpuAll-LinuxCentos-Gcc11-Cuda130-Cudnn913-Trt1013-Py312-Compile/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.post20260415+bb09abe5726-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt pytest matplotlib==3.10.8
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -302,7 +302,7 @@ jobs:
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda130-Cudnn913-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-GpuAll-LinuxCentos-Gcc11-Cuda130-Cudnn913-Trt1013-Py312-Compile/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.post20260415+bb09abe5726-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
@@ -449,7 +449,7 @@ jobs:
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda130-Cudnn913-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-GpuAll-LinuxCentos-Gcc11-Cuda130-Cudnn913-Trt1013-Py312-Compile/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.post20260415+bb09abe5726-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
@@ -722,7 +722,7 @@ jobs:
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-Training-Linux-Gpu-Cuda130-Cudnn913-Mkl-Avx-Gcc11-Cp312-Incubate/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.dev20260415-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
+            pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-GpuAll-LinuxCentos-Gcc11-Cuda130-Cudnn913-Trt1013-Py312-Compile/bb09abe572684456a529e6838e05e857e1927e07/paddlepaddle_gpu-3.4.0.post20260415+bb09abe5726-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           pip install librosa==0.11.0
