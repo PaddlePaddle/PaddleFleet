@@ -41,6 +41,7 @@ from paddlefleet.recompute_utils import (
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
+from paddlefleet.transformer.utils import profile
 from paddlefleet.utils import log_single_rank
 
 if is_deep_ep_available():
@@ -581,7 +582,7 @@ class TransformerLayer(nn.Layer):
         packed_seq_params: PackedSeqParams | None = None,
         **kwargs,
     ):
-        # breakpoint()
+        timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
         if self.config.block_attention_residuals:
             blocks = kwargs.get("blocks", [])
             partial_block = hidden_states
@@ -597,20 +598,21 @@ class TransformerLayer(nn.Layer):
                 partial_block = None
 
             # Self-attention (skip internal bda residual)
-            hidden_states, context = self._forward_attention(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                context=context,
-                context_mask=context_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                position_ids=position_ids,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-                block_attention_residuals=True,
-            )
+            with profile("attn"):
+                hidden_states, context = self._forward_attention(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                    context=context,
+                    context_mask=context_mask,
+                    rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_cos=rotary_pos_cos,
+                    rotary_pos_sin=rotary_pos_sin,
+                    position_ids=position_ids,
+                    attention_bias=attention_bias,
+                    packed_seq_params=packed_seq_params,
+                    block_attention_residuals=True,
+                )
 
             # Accumulate attn output into partial_block
             if (
@@ -630,35 +632,37 @@ class TransformerLayer(nn.Layer):
             )
 
             # MLP (skip internal bda residual)
-            mlp_out = self._forward_mlp(
-                hidden_states,
-                block_attention_residuals=True,
-            )
+            with profile(timer_name):
+                mlp_out = self._forward_mlp(
+                    hidden_states,
+                    block_attention_residuals=True,
+                )
 
             # Accumulate mlp output into partial_block
             output = partial_block + mlp_out
         else:
             self._log_md5(hidden_states, "input", self.layer_number)
-            hidden_states, context = self._forward_attention(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                context=context,
-                context_mask=context_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                position_ids=position_ids,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-                in_recompute=self.full_recompute,
-            )
+            with profile("attn"):
+                hidden_states, context = self._forward_attention(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                    context=context,
+                    context_mask=context_mask,
+                    rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_cos=rotary_pos_cos,
+                    rotary_pos_sin=rotary_pos_sin,
+                    position_ids=position_ids,
+                    attention_bias=attention_bias,
+                    packed_seq_params=packed_seq_params,
+                    in_recompute=self.full_recompute,
+                )
             self._log_md5(
                 hidden_states, "post_attn_residual", self.layer_number
             )
-            output = self._forward_mlp(hidden_states)
+            with profile(timer_name):
+                output = self._forward_mlp(hidden_states)
             self._log_md5(output, "layer_output", self.layer_number)
-
         if context is not None:
             return output, context
         return output
@@ -917,10 +921,17 @@ class TransformerLayerWithOverlap(TransformerLayer):
             )
 
     def compute_attention(self, dict_args, is_first_fwd=False):
-        return self._forward_attention(**dict_args, is_first_fwd=is_first_fwd)
+        with profile("attn"):
+            return self._forward_attention(
+                **dict_args, is_first_fwd=is_first_fwd
+            )
 
     def compute_mlp(self, hidden_states, is_first_fwd=False):
-        return self._forward_mlp(hidden_states, is_first_fwd=is_first_fwd)
+        timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
+        with profile(timer_name):
+            return self._forward_mlp(
+                hidden_states, is_first_fwd=is_first_fwd
+            )
 
     def pre_process_compute(self, hidden_states):
         residual = hidden_states
