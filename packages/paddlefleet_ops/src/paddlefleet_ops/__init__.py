@@ -15,6 +15,8 @@
 import re
 import subprocess
 
+from paddlefleet_ops.version import __version__
+
 
 def _check_cuda_version_compatible():
     """Check that the runtime CUDA version matches the version this wheel was built for.
@@ -54,4 +56,3 @@ def _check_cuda_version_compatible():
 _check_cuda_version_compatible()
 
 from paddlefleet_ops import ops  # noqa: F401
-from paddlefleet_ops.version import __version__
