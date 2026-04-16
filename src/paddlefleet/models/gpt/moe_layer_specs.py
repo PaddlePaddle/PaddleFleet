@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from paddlefleet.models.backends import BackendSpecProvider
-from paddlefleet.spec_utils import LayerSpec
+from paddle.distributed.fleet.meta_parallel import LayerSpec
+
 from paddlefleet.transformer.mlp import MLPSublayersSpec
 from paddlefleet.transformer.moe.moe_layer import MoELayer, MoESublayers
 

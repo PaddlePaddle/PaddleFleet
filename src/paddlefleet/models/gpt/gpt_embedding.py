@@ -17,12 +17,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    ScheduleNode,
+    build_spec_layer,
+)
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
 )
 
-from paddlefleet.pipeline_parallel import ScheduleNode
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
@@ -57,7 +60,7 @@ class GPTEmbedding(FleetLayer):
         mrope_section: list[int] | None = None,
     ):
         super().__init__(config)
-        self.embedding = build_layer(
+        self.embedding = build_spec_layer(
             sublayers_spec.language_embedding,
             config=config,
             vocab_size=vocab_size,
@@ -83,7 +86,7 @@ class GPTEmbedding(FleetLayer):
         self.mrope_section = mrope_section
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
-            self.rotary_pos_emb = build_layer(
+            self.rotary_pos_emb = build_spec_layer(
                 sublayers_spec.rope_embedding,
                 head_dim=config.head_dim,
                 rotary_percent=rotary_percent,

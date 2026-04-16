@@ -24,17 +24,20 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor, nn
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    ScheduleNode,
+    build_spec_layer,
+)
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.ops import is_deep_ep_available
-from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     need_full_recompute,
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -195,7 +198,7 @@ class TransformerLayer(nn.Layer):
             and self.config.tensor_model_parallel_size > 1
         )
         # [Layer 1: Input Layernorm] Optional Layernorm on the input data
-        self.input_layernorm = build_layer(
+        self.input_layernorm = build_spec_layer(
             sublayers_spec.input_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
@@ -215,7 +218,7 @@ class TransformerLayer(nn.Layer):
         attention_optional_kwargs["pg_collection"] = pg_collection
 
         # [Layer 2: SelfAttention]
-        self.self_attn = build_layer(
+        self.self_attn = build_spec_layer(
             sublayers_spec.self_attn,
             config=self.config,
             layer_number=self.layer_number,
@@ -223,10 +226,10 @@ class TransformerLayer(nn.Layer):
         )
 
         # [Layer 3: BiasDropoutFusion]
-        self.self_attn_bda = build_layer(sublayers_spec.self_attn_bda)
+        self.self_attn_bda = build_spec_layer(sublayers_spec.self_attn_bda)
 
         # [Layer 4: Post SelfAttention] Optional Layernorm after self-attn
-        self.pre_cross_attn_layernorm = build_layer(
+        self.pre_cross_attn_layernorm = build_spec_layer(
             sublayers_spec.pre_cross_attn_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
@@ -235,7 +238,7 @@ class TransformerLayer(nn.Layer):
         )
 
         # [Layer 5: CrossAttention]
-        self.cross_attention = build_layer(
+        self.cross_attention = build_spec_layer(
             sublayers_spec.cross_attention,
             config=self.config,
             layer_number=self.layer_number,
@@ -243,12 +246,12 @@ class TransformerLayer(nn.Layer):
         )
 
         # [Layer 6: BiasDropoutFusion]
-        self.cross_attn_bda = build_layer(
+        self.cross_attn_bda = build_spec_layer(
             sublayers_spec.cross_attn_bda, config=self.config
         )
 
         # [Layer 7: Pre MLP] Optional Layernorm before MLP
-        self.post_attention_layernorm = build_layer(
+        self.post_attention_layernorm = build_spec_layer(
             sublayers_spec.post_attention_layernorm,
             config=self.config,
             hidden_size=self.config.hidden_size,
@@ -277,14 +280,14 @@ class TransformerLayer(nn.Layer):
                     f"Unknown MLP type: {type(sublayers_spec.mlp)}. Using default kwargs.",
                 )
 
-        self.mlp = build_layer(
+        self.mlp = build_spec_layer(
             sublayers_spec.mlp, config=self.config, **additional_mlp_kwargs
         )
         if hasattr(self.mlp, "set_layer_number"):
             self.mlp.set_layer_number(self.layer_number)
 
         # [Layer 9: BiasDropoutFusion]
-        self.mlp_bda = build_layer(sublayers_spec.mlp_bda)
+        self.mlp_bda = build_spec_layer(sublayers_spec.mlp_bda)
 
         self.full_recompute = False
         self.recompute_input_layernorm = False
@@ -391,10 +394,10 @@ class TransformerLayer(nn.Layer):
             assert self.recompute_mlp is False, (
                 "block_attention_residuals cannot use selective recompute mlp."
             )
-            self.block_attn_res_before_attention = build_layer(
+            self.block_attn_res_before_attention = build_spec_layer(
                 sublayers_spec.block_attn_res, config=self.config
             )
-            self.block_attn_res_before_mlp = build_layer(
+            self.block_attn_res_before_mlp = build_spec_layer(
                 sublayers_spec.block_attn_res, config=self.config
             )
             self.attn_res_block_size = self.config.attn_res_block_size

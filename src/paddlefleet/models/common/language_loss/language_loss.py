@@ -22,6 +22,7 @@ from paddle import Tensor, nn
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.distributed.fleet.layers.mpu import mp_ops
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
@@ -33,7 +34,6 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
 )
-from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig

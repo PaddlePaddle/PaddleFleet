@@ -13,8 +13,9 @@
 # limitations under the License.
 from functools import partial
 
+from paddle.distributed.fleet.meta_parallel import LayerSpec
+
 from ...fusions.fused_bias_dropout import get_bias_dropout_add
-from ...spec_utils import LayerSpec
 from ...transformer.attention import SelfAttention, SelfAttentionSublayersSpec
 from ...transformer.identity_op import IdentityOp
 from ...transformer.transformer_config import TransformerConfig

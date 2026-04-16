@@ -33,55 +33,64 @@ class TestPaddle2Number(unittest.TestCase):
 
     def test_float16(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import paddle_2_number
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            paddle_2_number,
+        )
 
         self.assertEqual(paddle_2_number(paddle.float16), 0)
 
     def test_float32(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import paddle_2_number
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            paddle_2_number,
+        )
 
         self.assertEqual(paddle_2_number(paddle.float32), 1)
 
     def test_float64(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import paddle_2_number
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            paddle_2_number,
+        )
 
         self.assertEqual(paddle_2_number(paddle.float64), 2)
 
     def test_int32(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import paddle_2_number
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            paddle_2_number,
+        )
 
         self.assertEqual(paddle_2_number(paddle.int32), 3)
 
     def test_int64(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import paddle_2_number
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            paddle_2_number,
+        )
 
         self.assertEqual(paddle_2_number(paddle.int64), 4)
 
     def test_bfloat16(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import paddle_2_number
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            paddle_2_number,
+        )
 
         self.assertEqual(paddle_2_number(paddle.bfloat16), 5)
 
     def test_bool(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import paddle_2_number
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            paddle_2_number,
+        )
 
         self.assertEqual(paddle_2_number(paddle.bool), 6)
 
     def test_invalid_dtype(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import paddle_2_number
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            paddle_2_number,
+        )
 
         with self.assertRaises(AssertionError):
             paddle_2_number("invalid")
@@ -91,42 +100,58 @@ class TestNumber2Dtype(unittest.TestCase):
     """Tests for number_2_dtype function."""
 
     def test_float16(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import number_2_dtype
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            number_2_dtype,
+        )
 
         self.assertEqual(number_2_dtype(0), "float16")
 
     def test_float32(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import number_2_dtype
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            number_2_dtype,
+        )
 
         self.assertEqual(number_2_dtype(1), "float32")
 
     def test_float64(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import number_2_dtype
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            number_2_dtype,
+        )
 
         self.assertEqual(number_2_dtype(2), "float64")
 
     def test_int32(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import number_2_dtype
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            number_2_dtype,
+        )
 
         self.assertEqual(number_2_dtype(3), "int32")
 
     def test_int64(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import number_2_dtype
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            number_2_dtype,
+        )
 
         self.assertEqual(number_2_dtype(4), "int64")
 
     def test_bfloat16(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import number_2_dtype
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            number_2_dtype,
+        )
 
         self.assertEqual(number_2_dtype(5), "bfloat16")
 
     def test_bool(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import number_2_dtype
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            number_2_dtype,
+        )
 
         self.assertEqual(number_2_dtype(6), "bool")
 
     def test_invalid_number(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import number_2_dtype
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
+            number_2_dtype,
+        )
 
         with self.assertRaises(AssertionError):
             number_2_dtype(99)
@@ -136,50 +161,49 @@ class TestProfilePipelineDetails(unittest.TestCase):
     """Tests for profile_pipeline_details function."""
 
     def test_profile_on_cpu(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             profile_pipeline_details,
         )
 
-        with patch(
-            "paddle.base.core.is_compiled_with_cuda", return_value=False
-        ):
-            mock_logger = MagicMock()
-            with patch(
-                "paddlefleet.pipeline_parallel.pp_utils.utils.get_sync_logger",
+        mock_logger = MagicMock()
+        with (
+            patch("paddle.device.cuda.memory_allocated", return_value=0),
+            patch("paddle.device.cuda.memory_reserved", return_value=0),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pipeline_parallel.get_sync_logger",
                 return_value=mock_logger,
-            ):
-                profile_pipeline_details("test_msg")
-                mock_logger.info.assert_called_once()
-                call_args = mock_logger.info.call_args[0][0]
-                self.assertIn("test_msg", call_args)
-                self.assertIn("0.00", call_args)
+            ),
+        ):
+            profile_pipeline_details("test_msg")
+            mock_logger.info.assert_called_once()
+            call_args = mock_logger.info.call_args[0][0]
+            self.assertIn("test_msg", call_args)
 
     def test_profile_on_gpu(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             profile_pipeline_details,
         )
 
+        mock_logger = MagicMock()
         with (
-            patch("paddle.base.core.is_compiled_with_cuda", return_value=True),
             patch("paddle.device.cuda.memory_allocated", return_value=1e9),
             patch("paddle.device.cuda.memory_reserved", return_value=2e9),
-        ):
-            mock_logger = MagicMock()
-            with patch(
-                "paddlefleet.pipeline_parallel.pp_utils.utils.get_sync_logger",
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pipeline_parallel.get_sync_logger",
                 return_value=mock_logger,
-            ):
-                profile_pipeline_details("test_msg")
-                mock_logger.info.assert_called_once()
-                call_args = mock_logger.info.call_args[0][0]
-                self.assertIn("test_msg", call_args)
+            ),
+        ):
+            profile_pipeline_details("test_msg")
+            mock_logger.info.assert_called_once()
+            call_args = mock_logger.info.call_args[0][0]
+            self.assertIn("test_msg", call_args)
 
 
 class TestDictTupleHelpers(unittest.TestCase):
     """Tests for dict/tuple helper functions."""
 
     def test_dict_to_tuple_passthrough(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import (
+        from paddle.distributed.fleet.meta_parallel import (
             dict_to_tuple_helper,
         )
 
@@ -187,7 +211,7 @@ class TestDictTupleHelpers(unittest.TestCase):
         self.assertEqual(result, "single_tensor")
 
     def test_dict_to_tuple_dict(self):
-        from paddlefleet.pipeline_parallel.pp_utils.utils import (
+        from paddle.distributed.fleet.meta_parallel import (
             dict_to_tuple_helper,
         )
 
@@ -195,7 +219,7 @@ class TestDictTupleHelpers(unittest.TestCase):
         mock_t2 = MagicMock()
         mock_dict = {"a": mock_t1, "b": mock_t2}
         with patch(
-            "paddlefleet.pipeline_parallel.pp_utils.utils.convert_tensor_dict_to_tuple",
+            "paddle.distributed.fleet.meta_parallel.pp_utils.utils.convert_tensor_dict_to_tuple",
             return_value=(mock_t1, mock_t2),
         ) as mock_fn:
             result = dict_to_tuple_helper(mock_dict)
@@ -203,15 +227,14 @@ class TestDictTupleHelpers(unittest.TestCase):
 
     def test_tuple_to_dict_with_key(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
             tuple_to_dict_helper,
         )
 
         t = paddle.randn([2, 3])
         t.key = "test_key"
         with patch(
-            "paddlefleet.pipeline_parallel.pp_utils.utils.convert_tensor_tuple_to_dict",
+            "paddle.distributed.fleet.meta_parallel.pp_utils.utils.convert_tensor_tuple_to_dict",
             return_value={"test_key": t},
         ) as mock_fn:
             result, use_dict = tuple_to_dict_helper(t)
@@ -220,8 +243,7 @@ class TestDictTupleHelpers(unittest.TestCase):
 
     def test_convert_tensor_dict_to_tuple_single(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
             convert_tensor_dict_to_tuple,
         )
 
@@ -234,8 +256,7 @@ class TestDictTupleHelpers(unittest.TestCase):
 
     def test_convert_tensor_dict_to_tuple_list(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
             convert_tensor_dict_to_tuple,
         )
 
@@ -250,8 +271,7 @@ class TestDictTupleHelpers(unittest.TestCase):
 
     def test_convert_tensor_tuple_to_dict_single(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
             convert_tensor_tuple_to_dict,
         )
 
@@ -263,8 +283,7 @@ class TestDictTupleHelpers(unittest.TestCase):
 
     def test_convert_tensor_tuple_to_dict_list(self):
         import paddle
-
-        from paddlefleet.pipeline_parallel.pp_utils.utils import (
+        from paddle.distributed.fleet.meta_parallel.pp_utils.utils import (
             convert_tensor_tuple_to_dict,
         )
 

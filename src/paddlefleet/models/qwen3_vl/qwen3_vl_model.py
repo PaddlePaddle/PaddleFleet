@@ -15,12 +15,15 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import (
+    LayerDesc,
+    LayerSpec,
+    build_spec_layer,
+)
 from paddle.distributed.fleet.utils import recompute
 
 from ...packed_seq_params import PackedSeqParams
-from ...pipeline_parallel import LayerDesc
 from ...process_groups_config import ProcessGroupCollection
-from ...spec_utils import LayerSpec, build_layer
 from ...transformer.transformer_config import TransformerConfig
 from ...transformer.transformer_encoder import TransformerEncoder
 from ...transformer.transformer_layer import (
@@ -87,7 +90,7 @@ class Qwen3VLVisionTransformerLayer(TransformerLayer):
         )
         self.deepstack_merger = None
         if sublayers_spec.deepstack_merger is not None:
-            self.deepstack_merger = build_layer(
+            self.deepstack_merger = build_spec_layer(
                 sublayers_spec.deepstack_merger,
             )
         self.modal = modal

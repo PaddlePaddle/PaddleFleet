@@ -20,6 +20,9 @@ import unittest
 import numpy as np
 import paddle
 from paddle.distributed import fleet
+
+# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
+from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     register_sequence_parallel_allreduce_hooks,
 )
@@ -30,9 +33,6 @@ import paddlefleet
 import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-
-# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.pipeline_parallel import NoPipelineParallel
 from paddlefleet.tensor_parallel.mappings import (
     _gather_along_first_dim,
     _gather_along_last_dim,

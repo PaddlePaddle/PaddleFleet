@@ -86,8 +86,9 @@ class TestBuildOverlappedNodes(unittest.TestCase):
     """Tests for build_overlapped_nodes function."""
 
     def test_build_overlapped_nodes_empty_chunks(self):
+        from paddle.distributed.fleet.meta_parallel import ScheduleChunk
+
         from paddlefleet.models.gpt.gpt_model import build_overlapped_nodes
-        from paddlefleet.pipeline_parallel import ScheduleChunk
 
         forward_chunk = ScheduleChunk([])
         backward_chunk = ScheduleChunk([])

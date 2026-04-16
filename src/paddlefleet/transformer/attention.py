@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 import paddle
 from paddle import Tensor
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet import tensor_parallel
@@ -44,7 +45,6 @@ from paddlefleet.recompute_utils import (
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_tensor_model_parallel_region,
@@ -253,7 +253,7 @@ class Attention(FleetLayer, ABC):
         self.key_hidden_size = self.hidden_size_per_attention_head
         self.val_hidden_size = self.hidden_size_per_attention_head
 
-        self.core_attention = build_layer(
+        self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
             config=self.config,
             layer_number=self.layer_number,
@@ -320,7 +320,7 @@ class Attention(FleetLayer, ABC):
                     self.config.recompute_modules["flash_attn"],
                 )
         # Output.
-        self.o_proj = build_layer(
+        self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
             self.query_projection_size,
             self.config.hidden_size,
@@ -667,7 +667,7 @@ class SelfAttention(Attention):
             self.query_projection_size if self.gated_attention else 0
         )
 
-        self.qkv_proj = build_layer(
+        self.qkv_proj = build_spec_layer(
             sublayers_spec.qkv_proj,
             self.config.hidden_size,
             self.query_projection_size
@@ -697,7 +697,7 @@ class SelfAttention(Attention):
                 )
             else:
                 q_norm_hidden_size = self.hidden_size_per_attention_head
-            self.q_norm = build_layer(
+            self.q_norm = build_spec_layer(
                 sublayers_spec.q_norm,
                 hidden_size=q_norm_hidden_size,
                 config=self.config,
@@ -715,7 +715,7 @@ class SelfAttention(Attention):
                 )
             else:
                 k_norm_hidden_size = self.hidden_size_per_attention_head
-            self.k_norm = build_layer(
+            self.k_norm = build_spec_layer(
                 sublayers_spec.k_norm,
                 hidden_size=k_norm_hidden_size,
                 config=self.config,
@@ -902,7 +902,7 @@ class CrossAttention(Attention):
             )
         assert self.query_projection_size == self.kv_projection_size
 
-        self.linear_q = build_layer(
+        self.linear_q = build_spec_layer(
             sublayers_spec.linear_q,
             self.config.hidden_size,
             self.query_projection_size,
@@ -914,7 +914,7 @@ class CrossAttention(Attention):
             is_expert=False,
         )
 
-        self.linear_kv = build_layer(
+        self.linear_kv = build_spec_layer(
             sublayers_spec.linear_kv,
             self.config.hidden_size,
             2 * self.kv_projection_size,

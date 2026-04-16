@@ -47,6 +47,7 @@ import numpy as np
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     register_sequence_parallel_allreduce_hooks,
 )
@@ -58,7 +59,6 @@ from paddlefleet.models.common.language_loss.language_loss import (
     subbatch,
 )
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.pipeline_parallel import NoPipelineParallel
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
 

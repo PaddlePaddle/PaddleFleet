@@ -17,23 +17,22 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from paddlefleet.pipeline_parallel import (
+from paddle.distributed.fleet.meta_parallel import (
     LayerDesc,
     PipelineLayer,
     SharedLayerDesc,
-)
-from paddlefleet.pipeline_parallel.pp_utils.utils import (
     dict_to_tuple_helper,
 )
 
 if TYPE_CHECKING:
-    from paddlefleet.spec_utils import LayerSpec
+    from paddle.distributed.fleet.meta_parallel import LayerSpec
+
 
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
-from paddlefleet.pipeline_parallel import ScheduleChunk
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
 )

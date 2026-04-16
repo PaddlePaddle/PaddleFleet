@@ -23,15 +23,15 @@ import paddle
 import paddle.distributed as dist
 from paddle import nn
 from paddle.distributed import fleet
-from paddle.nn import Layer
-
-from paddlefleet.distributed.model import distributed_model
-from paddlefleet.pipeline_parallel import (
+from paddle.distributed.fleet import distributed_model
+from paddle.distributed.fleet.meta_parallel import (
     LayerDesc,
+    LayerSpec,
     PipelineLayer,
     SharedLayerDesc,
+    build_spec_layer,
 )
-from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddle.nn import Layer
 
 
 def set_random_seed(seed, dp_id, rank_id):
@@ -214,7 +214,7 @@ class TestDistEmbeddingTraining(unittest.TestCase):
         )
 
         simple_net_spec = get_simple_net_spec()
-        model_b = build_layer(simple_net_spec, topology=hcg.topology())
+        model_b = build_spec_layer(simple_net_spec, topology=hcg.topology())
 
         scheduler_b = paddle.optimizer.lr.PiecewiseDecay(
             boundaries=[2, 3, 4], values=[0.01, 0.02, 0.03, 0.04], verbose=True

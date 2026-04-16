@@ -95,7 +95,7 @@ class TestGptBuilder(unittest.TestCase):
 
         with (
             patch("paddlefleet.gpt_builders.get_gpt_spec") as mock_get_spec,
-            patch("paddlefleet.gpt_builders.build_layer") as mock_build,
+            patch("paddlefleet.gpt_builders.build_spec_layer") as mock_build,
             patch(
                 "paddlefleet.gpt_builders.get_gpt_layer_local_spec"
             ) as mock_layer_spec,
@@ -130,7 +130,7 @@ class TestGptBuilder(unittest.TestCase):
 
         with (
             patch("paddlefleet.gpt_builders.get_gpt_spec") as mock_get_spec,
-            patch("paddlefleet.gpt_builders.build_layer") as mock_build,
+            patch("paddlefleet.gpt_builders.build_spec_layer") as mock_build,
             patch(
                 "paddlefleet.gpt_builders.get_gpt_decoder_layers_spec"
             ) as mock_decoder,
@@ -166,7 +166,7 @@ class TestGptBuilder(unittest.TestCase):
 
         with (
             patch("paddlefleet.gpt_builders.get_gpt_spec") as mock_get_spec,
-            patch("paddlefleet.gpt_builders.build_layer") as mock_build,
+            patch("paddlefleet.gpt_builders.build_spec_layer") as mock_build,
             patch(
                 "paddlefleet.gpt_builders.get_gpt_layer_local_spec"
             ) as mock_layer_spec,

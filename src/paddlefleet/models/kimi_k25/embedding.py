@@ -17,9 +17,12 @@ from dataclasses import dataclass
 
 import paddle
 from paddle import nn
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    build_spec_layer,
+)
 from paddle.nn import functional as F
 
-from ...spec_utils import LayerSpec, build_layer
 from ...transformer import TransformerConfig
 from ...transformer.layer import FleetLayer
 
@@ -208,7 +211,7 @@ class MoonVision3dPatchEmbed(FleetLayer):
         assert sublayers_spec.rope_embedding is not None, (
             "rotary_pos_emb must be specified"
         )
-        self.rotary_pos_emb = build_layer(
+        self.rotary_pos_emb = build_spec_layer(
             sublayers_spec.rope_embedding,
         )
 

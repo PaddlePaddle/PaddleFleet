@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 from paddle.nn.functional import layer_norm, rms_norm
 
 from ..spec_utils import LayerSpec
@@ -34,8 +35,9 @@ except ImportError:
         return parameter
 
 
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
+
 from paddlefleet.jit import jit_fuser
-from paddlefleet.pipeline_parallel import ScheduleNode
 
 if TYPE_CHECKING:
     from paddle import Tensor

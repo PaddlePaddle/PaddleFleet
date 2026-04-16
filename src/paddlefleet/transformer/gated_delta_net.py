@@ -25,10 +25,13 @@ from typing import TYPE_CHECKING
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    build_spec_layer,
+)
 
 from paddlefleet.jit import jit_fuser
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import get_pg_size, nvtx_range_pop, nvtx_range_push
@@ -148,7 +151,7 @@ class GatedDeltaNet(FleetLayer):
             self.qk_dim * 2 + self.v_dim * 2 + self.num_value_heads * 2
         )
 
-        self.in_proj = build_layer(
+        self.in_proj = build_spec_layer(
             sublayers_spec.in_proj,
             self.hidden_size,
             self.in_proj_dim,
@@ -213,12 +216,12 @@ class GatedDeltaNet(FleetLayer):
             self.config.rms_norm_eps,
             input_is_parallel,
         )
-        self.out_norm = build_layer(
+        self.out_norm = build_spec_layer(
             sublayers_spec.out_norm,
             **extra_args,
         )
 
-        self.out_proj = build_layer(
+        self.out_proj = build_spec_layer(
             sublayers_spec.out_proj,
             self.v_dim,
             self.hidden_size,

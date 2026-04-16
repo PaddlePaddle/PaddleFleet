@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import (
+    ScheduleNode,
+    build_spec_layer,
+)
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
 
-from paddlefleet.pipeline_parallel import ScheduleNode
-from paddlefleet.spec_utils import build_layer
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     _initialize_affine_weight_cpu,
@@ -89,7 +91,7 @@ class GPTLMHead(ColumnParallelLinear):
             self.weight.is_distributed = True if self.world_size > 1 else False
 
         # Final Block Attention Residual (applied before LM head projection)
-        self.block_attn_res = build_layer(
+        self.block_attn_res = build_spec_layer(
             block_attn_res_spec, config=self.config
         )
 
