@@ -397,9 +397,7 @@ class TestNoPipelineParallel(unittest.TestCase):
         with self.assertRaises(AssertionError):
             npp._check_micro_batch_data_valid("not_a_tensor")
 
-    def _create_npp_for_eval(
-        self, accumulate_steps=1, micro_batch_size=2, delay_scale_loss=False
-    ):
+    def _create_npp_for_eval(self, accumulate_steps=1, micro_batch_size=2):
         """Helper to create a NoPipelineParallel instance for eval_batch tests."""
         import paddle
 
@@ -422,7 +420,6 @@ class TestNoPipelineParallel(unittest.TestCase):
         npp._layers = mock_layers
         npp.accumulate_steps = accumulate_steps
         npp.micro_batch_size = micro_batch_size
-        npp._delay_scale_loss = delay_scale_loss
         npp.total_loss = None
         npp.loss_fn_idx = 0
 
@@ -442,17 +439,6 @@ class TestNoPipelineParallel(unittest.TestCase):
         import paddle
 
         npp = self._create_npp_for_eval(accumulate_steps=2, micro_batch_size=2)
-        data = (paddle.randn([4, 3]), paddle.randn([4, 1]))
-        result = npp.eval_batch(data, compute_loss=True)
-        self.assertIsInstance(result, paddle.Tensor)
-
-    def test_eval_batch_compute_loss_delay_scale(self):
-        """Test eval_batch with _delay_scale_loss=True."""
-        import paddle
-
-        npp = self._create_npp_for_eval(
-            accumulate_steps=2, micro_batch_size=2, delay_scale_loss=True
-        )
         data = (paddle.randn([4, 3]), paddle.randn([4, 1]))
         result = npp.eval_batch(data, compute_loss=True)
         self.assertIsInstance(result, paddle.Tensor)

@@ -541,12 +541,6 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
                     assert isinstance(loss_tensor, paddle.Tensor), (
                         "Currently, loss_fn should obtain Paddle.Tensor dtype"
                     )
-                    with paddle.amp.auto_cast(enable=False):
-                        if (
-                            self.accumulate_steps > 1
-                            and not self._delay_scale_loss
-                        ):
-                            loss_tensor = loss_tensor / self.accumulate_steps
                     if self.total_loss is None:
                         self.total_loss = []
                     # when self.total_loss length is less than idx, append a new tensor
@@ -576,10 +570,7 @@ class NoPipelineParallel(nn.Layer, ParallelBase):
                     tmp = paddle.zeros_like(self.total_loss[idx][0])
                     for loss in self.total_loss[idx]:
                         tmp += loss.detach()
-                    if not self._delay_scale_loss:
-                        losses.append(tmp)
-                    else:
-                        losses.append(tmp / self.accumulate_steps)
+                    losses.append(tmp / self.accumulate_steps)
                 else:
                     losses.append(self.total_loss[idx].detach())
             res = losses[0] if len(losses) == 1 else losses
