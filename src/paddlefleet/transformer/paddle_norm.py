@@ -22,8 +22,6 @@ import paddle
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 from paddle.nn.functional import layer_norm, rms_norm
 
-from ..spec_utils import LayerSpec
-
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
         mark_as_sequence_parallel_parameter,
