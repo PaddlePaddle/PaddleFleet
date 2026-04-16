@@ -311,6 +311,7 @@ class Attention(FleetLayer, ABC):
 
             if (
                 self.config.apply_rope_fusion
+                and not self.config.high_precision_rope
                 and q_pos_emb is not None
                 and k_pos_emb is not None
             ):
