@@ -22,25 +22,6 @@ import paddle
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 from paddle.nn.functional import layer_norm, rms_norm
 
-# Alignment switch: when enabled, use ErnieCore's fused_ln kernel for bit-level alignment
-_ERNIECORE_ALIGNMENT = (
-    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-)
-_fused_ln = None
-_ec_rmsnorm_path_logged = False
-if _ERNIECORE_ALIGNMENT:
-    try:
-        import fused_ln as _fused_ln
-
-        logging.info(
-            "[ERNIECORE_ALIGNMENT] Successfully imported fused_ln for RMSNorm alignment"
-        )
-    except ImportError:
-        logging.warning(
-            "[ERNIECORE_ALIGNMENT] fused_ln not available, falling back to manual RMSNorm"
-        )
-        _fused_ln = None
-
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
         mark_as_sequence_parallel_parameter,
@@ -92,40 +73,6 @@ class RMSNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
-        if _ERNIECORE_ALIGNMENT:
-            global _ec_rmsnorm_path_logged
-            if not _ec_rmsnorm_path_logged:
-                _kernel = (
-                    "fused_ln" if _fused_ln is not None else "manual_fallback"
-                )
-                print(
-                    f"[ALIGNMENT PATH HIT] paddle_norm: EC fused_rms_norm override used (kernel={_kernel})",
-                    flush=True,
-                )
-                _ec_rmsnorm_path_logged = True
-            if _fused_ln is not None:
-                # Use ErnieCore's fused_ln kernel for bit-level alignment
-                return _fused_ln.fused_rms_norm(
-                    hidden_states, self.weight, self.variance_epsilon
-                )[0]
-            else:
-                # Fallback: manual implementation matching ErnieCore's non-fused path
-                with paddle.amp.auto_cast(False):
-                    variance = (
-                        hidden_states.astype("float32")
-                        .pow(2)
-                        .mean(-1, keepdim=True)
-                    )
-                    hidden_states = (
-                        paddle.rsqrt(variance + self.variance_epsilon)
-                        * hidden_states
-                    )
-                if self.weight.dtype in [paddle.float16, paddle.bfloat16]:
-                    hidden_states = paddle.cast(
-                        hidden_states, self.weight.dtype
-                    )
-                return hidden_states * self.weight
-
         rms_norm_out = rms_norm(
             hidden_states,
             hidden_states.shape[-1:],
@@ -301,15 +248,6 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
                 f"[LOSS_PATH_MD5] rank={rank} final_layernorm_output shape={list(h.shape)} md5={md5}",
                 flush=True,
             )
-            # Save tensor for offline comparison
-            save_dir = "/root/paddlejob/share-storage/gpfs/system-public/wangxiangzhe/V2Precision/loss_debug_tensors/pf"
-            os.makedirs(save_dir, exist_ok=True)
-            _mb_counter = getattr(self, "_mb_counter", 0)
-            paddle.save(
-                h,
-                f"{save_dir}/rank{rank}_mb{_mb_counter}_final_layernorm_output.pd",
-            )
-            self._mb_counter = _mb_counter + 1
 
         return rst
 

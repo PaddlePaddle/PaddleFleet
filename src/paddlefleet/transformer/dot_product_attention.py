@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -45,10 +44,6 @@ from paddlefleet.transformer.utils import (
     is_layer_window_attention,
 )
 from paddlefleet.utils import divide
-
-_ERNIECORE_ALIGNMENT = (
-    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-)
 
 
 class DotProductAttention(FleetLayer):
@@ -192,12 +187,6 @@ class DotProductAttention(FleetLayer):
         Otherwise falls back to flash_attention with causal=True.
         Handles MLA value padding (q_head_dim != v_head_dim).
         """
-        if not hasattr(self, "_ec_attn_path_logged"):
-            print(
-                "[ALIGNMENT PATH HIT] dot_product_attention: _ec_compatible_flash_attention entered",
-                flush=True,
-            )
-            self._ec_attn_path_logged = True
         bsz, q_len, num_heads, q_head_dim = query.shape
         v_head_dim = value.shape[-1]
         need_value_padding = q_head_dim != v_head_dim
@@ -266,7 +255,7 @@ class DotProductAttention(FleetLayer):
         )
 
         # EC-compatible flash attention path for alignment mode
-        if _ERNIECORE_ALIGNMENT:
+        if self.config.gpt_model_use_experimental_version:
             return self._ec_compatible_flash_attention(
                 query, key, value, attn_mask_startend_row_indices
             )

@@ -183,5 +183,6 @@ __device__ __forceinline__ void try_vectorized_memcpy(
     PD_SWITCH_NUM_EXPERTS_IMPL(__num_expert, 16, __VA_ARGS__);                \
     PD_SWITCH_NUM_EXPERTS_IMPL(__num_expert, 32, __VA_ARGS__);                \
     PD_SWITCH_NUM_EXPERTS_IMPL(__num_expert, 64, __VA_ARGS__);                \
+    PD_SWITCH_NUM_EXPERTS_IMPL(__num_expert, 128, __VA_ARGS__);               \
     PD_THROW("Unsupported expert number %d", static_cast<int>(__num_expert)); \
   } while (0)

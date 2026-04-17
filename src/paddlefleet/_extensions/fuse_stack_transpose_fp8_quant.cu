@@ -512,6 +512,13 @@ std::vector<paddle::Tensor> fuse_stack_transpose_fp8_quant_fleet_custom(
           ptrs[i] = X[i].data<phi::bfloat16>();
         }
         const phi::bfloat16** dev_ptr = nullptr;
+        if constexpr (kArraySize ==
+                      funcs::SegmentedArraySize::kVariableLength) {
+          size_t num_bytes = ptrs.size() * sizeof(const phi::bfloat16*);
+          cudaMalloc(&dev_ptr, num_bytes);
+          cudaMemcpyAsync(dev_ptr, ptrs.data(), num_bytes,
+                          cudaMemcpyHostToDevice, X[0].stream());
+        }
         array.Set(ptrs, dev_ptr);
 
         if (using_pow2_scaling) {
@@ -542,6 +549,11 @@ std::vector<paddle::Tensor> fuse_stack_transpose_fp8_quant_fleet_custom(
               LAUNCH_KERN(float, false, false, false);
             }
           }
+        }
+        if constexpr (kArraySize ==
+                      funcs::SegmentedArraySize::kVariableLength) {
+          cudaStreamSynchronize(X[0].stream());
+          cudaFree(dev_ptr);
         }
       });
     }
