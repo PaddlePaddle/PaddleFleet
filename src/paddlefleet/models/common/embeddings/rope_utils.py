@@ -28,7 +28,8 @@ from paddle.incubate.nn.functional import (
     fused_rotary_position_embedding as fused_rope,
 )
 
-from paddlefleet.ops import fused_apply_rotary_pos_emb_vision
+if paddle.is_compiled_with_cuda():
+    from paddlefleet.ops import fused_apply_rotary_pos_emb_vision
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ def _apply_rotary_pos_emb_bshd(
     mscale = mscale if mscale is not None else 1.0
 
     if apply_rope_fusion:
-        if high_precision_rope:
+        if high_precision_rope and paddle.is_compiled_with_cuda():
             # Fused vision RoPE CUDA kernel path:
             # - internally computes cos/sin in fp32, equivalent to high_precision_rope
             # - only supports single Tensor input with explicit freqs
