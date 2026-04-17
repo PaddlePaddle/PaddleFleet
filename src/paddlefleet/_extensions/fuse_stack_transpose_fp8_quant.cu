@@ -512,6 +512,20 @@ std::vector<paddle::Tensor> fuse_stack_transpose_fp8_quant_fleet_custom(
           ptrs[i] = X[i].data<phi::bfloat16>();
         }
         const phi::bfloat16** dev_ptr = nullptr;
+        paddle::Tensor ptr_tensor;
+        if constexpr (kArraySize ==
+                      funcs::SegmentedArraySize::kVariableLength) {
+          size_t nbytes = ptrs.size() * sizeof(const phi::bfloat16*);
+          ptr_tensor = paddle::empty({static_cast<int64_t>(nbytes)},
+                                     paddle::DataType::UINT8,
+                                     X[0].place());
+          dev_ptr = reinterpret_cast<const phi::bfloat16**>(ptr_tensor.data());
+          cudaMemcpyAsync(dev_ptr,
+                          ptrs.data(),
+                          nbytes,
+                          cudaMemcpyHostToDevice,
+                          X[0].stream());
+        }
         array.Set(ptrs, dev_ptr);
 
         if (using_pow2_scaling) {

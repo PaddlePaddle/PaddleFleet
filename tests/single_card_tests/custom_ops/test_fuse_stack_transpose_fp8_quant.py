@@ -327,5 +327,215 @@ class TestFusedStackTransposeQuant(unittest.TestCase):
         np.testing.assert_allclose(scale_false_T, scale_true_np, atol=0, rtol=0)
 
 
+class TestFusedStackTransposeQuantVariableLength(unittest.TestCase):
+    """
+    Test the kVariableLength code path (N > 64) where device pointer
+    allocation via cudaMemcpyAsync is required. This exercises the
+    ptr_tensor + cudaMemcpyAsync logic added for large input lists.
+    """
+
+    # Use small tensor dimensions to avoid OOM with many inputs
+    SMALL_N = 128
+    SMALL_K = 128
+    # 65 inputs triggers kVariableLength (threshold is > 64)
+    NUM_INPUTS = 65
+
+    def _make_inputs(self, num=None):
+        num = num or self.NUM_INPUTS
+        return [
+            paddle.randn([self.SMALL_N, self.SMALL_K], dtype=DTYPE_PD)
+            for _ in range(num)
+        ]
+
+    def run_op(
+        self,
+        x_list,
+        transpose,
+        using_pow2_scaling,
+        use_ue8m0_scale,
+        output_scale_transpose,
+    ):
+        if transpose:
+            out, scale = fuse_stack_transpose_fp8_quant(
+                x_list,
+                using_pow2_scaling,
+                use_ue8m0_scale,
+                output_scale_transpose,
+            )
+        else:
+            out, scale = fuse_stack_fp8_quant(
+                x_list,
+                using_pow2_scaling,
+                use_ue8m0_scale,
+                output_scale_transpose,
+            )
+        return out, scale
+
+    def test_variable_length_nontranspose_basic(self):
+        """65 inputs (> 64) should run without error in non-transpose mode."""
+        if not core.is_compiled_with_cuda():
+            return
+
+        np.random.seed(0)
+        inputs = self._make_inputs()
+        out, scale = self.run_op(
+            inputs,
+            transpose=False,
+            using_pow2_scaling=False,
+            use_ue8m0_scale=False,
+            output_scale_transpose=False,
+        )
+
+        self.assertEqual(out.dtype, paddle.float8_e4m3fn)
+        self.assertEqual(out.shape[0], self.NUM_INPUTS * self.SMALL_N)
+        self.assertEqual(out.shape[1], self.SMALL_K)
+        self.assertEqual(scale.dtype, paddle.float32)
+
+    def test_variable_length_transpose_basic(self):
+        """65 inputs (> 64) should run without error in transpose mode."""
+        if not core.is_compiled_with_cuda():
+            return
+
+        np.random.seed(0)
+        inputs = self._make_inputs()
+        out, scale = self.run_op(
+            inputs,
+            transpose=True,
+            using_pow2_scaling=False,
+            use_ue8m0_scale=False,
+            output_scale_transpose=False,
+        )
+
+        self.assertEqual(out.dtype, paddle.float8_e4m3fn)
+        self.assertEqual(out.shape[0], self.NUM_INPUTS * self.SMALL_K)
+        self.assertEqual(out.shape[1], self.SMALL_N)
+        self.assertEqual(scale.dtype, paddle.float32)
+
+    def test_variable_length_output_consistency(self):
+        """
+        Non-transpose and transpose modes on the same data should produce
+        fp8 outputs with identical values (just transposed layout).
+        """
+        if not core.is_compiled_with_cuda():
+            return
+
+        np.random.seed(42)
+        inputs = self._make_inputs()
+
+        out_no_t, scale_no_t = self.run_op(
+            inputs,
+            transpose=False,
+            using_pow2_scaling=False,
+            use_ue8m0_scale=True,
+            output_scale_transpose=False,
+        )
+        out_t, scale_t = self.run_op(
+            inputs,
+            transpose=True,
+            using_pow2_scaling=False,
+            use_ue8m0_scale=True,
+            output_scale_transpose=False,
+        )
+
+        np.testing.assert_allclose(
+            out_no_t.numpy(), out_t.numpy(), atol=0, rtol=0
+        )
+
+    def test_variable_length_scale_transpose_flag(self):
+        """
+        output_scale_transpose=True vs False should yield transposed scales
+        in the kVariableLength path.
+        """
+        if not core.is_compiled_with_cuda():
+            return
+
+        np.random.seed(7)
+        inputs = self._make_inputs()
+
+        out_false, scale_false = self.run_op(
+            inputs,
+            transpose=True,
+            using_pow2_scaling=False,
+            use_ue8m0_scale=True,
+            output_scale_transpose=False,
+        )
+        out_true, scale_true = self.run_op(
+            inputs,
+            transpose=True,
+            using_pow2_scaling=False,
+            use_ue8m0_scale=True,
+            output_scale_transpose=True,
+        )
+
+        np.testing.assert_allclose(
+            out_false.numpy(), out_true.numpy(), atol=0, rtol=0
+        )
+
+        scale_false_np = scale_false.numpy()
+        scale_true_np = scale_true.numpy()
+        np.testing.assert_allclose(
+            scale_false_np.T, scale_true_np, atol=0, rtol=0
+        )
+
+    def test_variable_length_pow2_scaling(self):
+        """pow2 scaling path should also work with > 64 inputs."""
+        if not core.is_compiled_with_cuda():
+            return
+
+        np.random.seed(11)
+        inputs = self._make_inputs()
+
+        out, scale = self.run_op(
+            inputs,
+            transpose=False,
+            using_pow2_scaling=True,
+            use_ue8m0_scale=False,
+            output_scale_transpose=False,
+        )
+
+        self.assertEqual(out.dtype, paddle.float8_e4m3fn)
+        self.assertEqual(out.shape[0], self.NUM_INPUTS * self.SMALL_N)
+        self.assertEqual(scale.dtype, paddle.float32)
+
+    def test_variable_length_matches_fixed_length(self):
+        """
+        Results with 65 inputs should match a reference computed by
+        individually quantizing each tensor (using the fixed-length path
+        with small batches).
+        """
+        if not core.is_compiled_with_cuda():
+            return
+
+        np.random.seed(99)
+        inputs = self._make_inputs()
+
+        # Full variable-length call
+        out_var, scale_var = self.run_op(
+            inputs,
+            transpose=False,
+            using_pow2_scaling=False,
+            use_ue8m0_scale=False,
+            output_scale_transpose=False,
+        )
+
+        # Reference: use a small batch (fixed-length path) for the first 3
+        out_ref, scale_ref = self.run_op(
+            inputs[:3],
+            transpose=False,
+            using_pow2_scaling=False,
+            use_ue8m0_scale=False,
+            output_scale_transpose=False,
+        )
+
+        # The first 3*SMALL_N rows of variable-length output should match
+        # the fixed-length output for the same 3 inputs
+        np.testing.assert_allclose(
+            out_var.numpy()[: 3 * self.SMALL_N, :],
+            out_ref.numpy(),
+            atol=0,
+            rtol=0,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
