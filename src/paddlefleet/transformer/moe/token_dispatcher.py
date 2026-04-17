@@ -200,7 +200,9 @@ class _HybridEPManager(_DispatchManager):
         return self._buffer
 
     def _get_num_permuted_tokens_upper_bound(self, num_local_tokens: int) -> int:
-        total_routed_tokens = num_local_tokens * self.group.nranks * self.router_topk
+        total_routed_tokens = (
+            num_local_tokens * self.group.nranks * self.router_topk
+        )
         if HYBRID_EP_PAD_MULTIPLE > 1:
             total_routed_tokens += self.num_local_experts * (
                 HYBRID_EP_PAD_MULTIPLE - 1
@@ -282,10 +284,8 @@ class _HybridEPManager(_DispatchManager):
         routing_map, probs = self._get_dispatch_metadata(
             token_indices, token_weights
         )
-        num_permuted_tokens = (
-            self._get_num_permuted_tokens_upper_bound(hidden_states.shape[0])
-            if fp8_dispatch
-            else None
+        num_permuted_tokens = self._get_num_permuted_tokens_upper_bound(
+            hidden_states.shape[0]
         )
 
         (
@@ -303,7 +303,7 @@ class _HybridEPManager(_DispatchManager):
             scaling_factor=scaling_factor,
             pad_multiple=HYBRID_EP_PAD_MULTIPLE,
             num_permuted_tokens=num_permuted_tokens,
-            non_blocking=num_permuted_tokens is not None,
+            non_blocking=True,
         )
         self.tokens_per_expert = tokens_per_expert
         self.dispatched_indices = None
@@ -340,7 +340,6 @@ class _HybridEPManager(_DispatchManager):
             pad_multiple=HYBRID_EP_PAD_MULTIPLE,
         )
         self.dispatched_probs = None
-
         self.handle = None
         return hidden_states
 

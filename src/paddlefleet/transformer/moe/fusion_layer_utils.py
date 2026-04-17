@@ -691,17 +691,34 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             custom_map.token_dispatcher._comm_manager.tokens_per_expert
         )
         if isinstance(tokens_per_expert, list):
-            tokens_per_expert = paddle.to_tensor(
+            tokens_per_expert_list = tokens_per_expert
+            tokens_per_expert_tensor = paddle.to_tensor(
                 tokens_per_expert,
                 dtype="int64",
                 place=hidden_states.place,
             )
         else:
-            tokens_per_expert = tokens_per_expert.astype("int64")
-        padded_tokens_per_expert = (
-            (tokens_per_expert + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
-        )
-        num_permuted_tokens = paddle.sum(padded_tokens_per_expert)
+            tokens_per_expert_tensor = tokens_per_expert.astype("int64")
+            tokens_per_expert_list = None
+
+        # Paddle's bf16 batched_gemm still expects host-side batch sizes.
+        if moe_grouped_gemm and not use_fp8_mlp and not moe_deep_gemm:
+            if tokens_per_expert_list is None:
+                tokens_per_expert_list = tokens_per_expert_tensor.tolist()
+            padded_tokens_per_expert = [
+                (x + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
+                for x in tokens_per_expert_list
+            ]
+            origin_token_per_experts = tokens_per_expert_list
+            num_permuted_tokens = sum(padded_tokens_per_expert)
+        else:
+            padded_tokens_per_expert = (
+                (tokens_per_expert_tensor + FP8_ALIGN - 1)
+                // FP8_ALIGN
+                * FP8_ALIGN
+            )
+            origin_token_per_experts = tokens_per_expert_tensor
+            num_permuted_tokens = paddle.sum(padded_tokens_per_expert)
         hidden_states = hidden_states[:num_permuted_tokens]
         dispatched_probs = dispatched_probs[:num_permuted_tokens]
 
@@ -718,7 +735,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             hidden_states,
             dispatched_probs,
             padded_tokens_per_expert,
-            tokens_per_expert,
+            origin_token_per_experts,
             scale=scale,
         )
 
