@@ -295,18 +295,35 @@ class StandardMoERouter(nn.Layer):
 
         seq_axis = 1
         # Both cost_coeff and seq_aux_loss must be computed with the global sequence length visible to all workers.
-        # [B, E]
-        cost_coeff = routing_map.sum(
-            axis=seq_axis, dtype="float32"
-        ) / paddle.to_tensor(
-            max_seq_len * top_k / self.num_experts, dtype="float32"
-        )
-        # [B, E] -> [B] -> []
-        seq_aux_loss = (
-            (cost_coeff * all_probs.sum(axis=seq_axis) / max_seq_len)
-            .sum(axis=1)
-            .mean()
-        )
+        if True:
+            # Align with ernie: divide by S first, then multiply by E/K (two-step to match float order)
+            # [B, E]
+            cost_coeff = (
+                routing_map.sum(axis=seq_axis, dtype="float32")
+                / paddle.to_tensor(float(max_seq_len), dtype="float32")
+                * paddle.to_tensor(float(self.num_experts) / top_k, dtype="float32")
+            )
+            # Align with ernie: use mean instead of sum/S
+            # [B, E] -> [B] -> []
+            seq_aux_loss = (
+                (cost_coeff * all_probs.mean(axis=seq_axis))
+                .sum(axis=1)
+                .mean()
+            )
+        else:
+            # [B, E]
+            cost_coeff = routing_map.sum(
+                axis=seq_axis, dtype="float32"
+            ) / paddle.to_tensor(
+                max_seq_len * top_k / self.num_experts, dtype="float32"
+            )
+            # [B, E] -> [B] -> []
+            seq_aux_loss = (
+                (cost_coeff * all_probs.sum(axis=seq_axis) / max_seq_len)
+                .sum(axis=1)
+                .mean()
+            )
+            print("seq_aux_loss: ", seq_aux_loss._md5sum())
         return seq_aux_loss
 
     def _cal_z_loss(self, logits) -> paddle.Tensor:
