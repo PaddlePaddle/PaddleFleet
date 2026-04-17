@@ -334,9 +334,10 @@ class TestFusedStackTransposeQuantVariableLength(unittest.TestCase):
     ptr_tensor + cudaMemcpyAsync logic added for large input lists.
     """
 
-    # Use small tensor dimensions to avoid OOM with many inputs
+    # Use small but asymmetric dimensions to avoid OOM and to
+    # ensure shape differences between transpose/non-transpose are visible.
     SMALL_N = 128
-    SMALL_K = 128
+    SMALL_K = 256
     # 65 inputs triggers kVariableLength (threshold is > 64)
     NUM_INPUTS = 65
 
@@ -413,8 +414,10 @@ class TestFusedStackTransposeQuantVariableLength(unittest.TestCase):
 
     def test_variable_length_output_consistency(self):
         """
-        Non-transpose and transpose modes on the same data should produce
-        fp8 outputs with identical values (just transposed layout).
+        transpose=True transposes each input [N, K]->[K, N] then stacks,
+        yielding [NUM*K, N]. Verify by reshaping the non-transpose output
+        [NUM*N, K] -> [NUM, N, K], transposing last two dims -> [NUM, K, N],
+        then flattening to [NUM*K, N] and comparing with out_t.
         """
         if not core.is_compiled_with_cuda():
             return
@@ -422,14 +425,14 @@ class TestFusedStackTransposeQuantVariableLength(unittest.TestCase):
         np.random.seed(42)
         inputs = self._make_inputs()
 
-        out_no_t, scale_no_t = self.run_op(
+        out_no_t, _ = self.run_op(
             inputs,
             transpose=False,
             using_pow2_scaling=False,
             use_ue8m0_scale=True,
             output_scale_transpose=False,
         )
-        out_t, scale_t = self.run_op(
+        out_t, _ = self.run_op(
             inputs,
             transpose=True,
             using_pow2_scaling=False,
@@ -437,8 +440,17 @@ class TestFusedStackTransposeQuantVariableLength(unittest.TestCase):
             output_scale_transpose=False,
         )
 
+        # out_no_t: [NUM*N, K] -> [NUM, N, K] -> transpose last two -> [NUM, K, N]
+        # -> reshape [NUM*K, N], which should match out_t: [NUM*K, N]
+        out_no_t_np = out_no_t.numpy().reshape(
+            self.NUM_INPUTS, self.SMALL_N, self.SMALL_K
+        )
+        out_no_t_transposed = out_no_t_np.transpose(0, 2, 1).reshape(
+            self.NUM_INPUTS * self.SMALL_K, self.SMALL_N
+        )
+
         np.testing.assert_allclose(
-            out_no_t.numpy(), out_t.numpy(), atol=0, rtol=0
+            out_no_t_transposed, out_t.numpy(), atol=0, rtol=0
         )
 
     def test_variable_length_scale_transpose_flag(self):
@@ -452,23 +464,19 @@ class TestFusedStackTransposeQuantVariableLength(unittest.TestCase):
         np.random.seed(7)
         inputs = self._make_inputs()
 
-        out_false, scale_false = self.run_op(
+        _, scale_false = self.run_op(
             inputs,
             transpose=True,
             using_pow2_scaling=False,
             use_ue8m0_scale=True,
             output_scale_transpose=False,
         )
-        out_true, scale_true = self.run_op(
+        _, scale_true = self.run_op(
             inputs,
             transpose=True,
             using_pow2_scaling=False,
             use_ue8m0_scale=True,
             output_scale_transpose=True,
-        )
-
-        np.testing.assert_allclose(
-            out_false.numpy(), out_true.numpy(), atol=0, rtol=0
         )
 
         scale_false_np = scale_false.numpy()

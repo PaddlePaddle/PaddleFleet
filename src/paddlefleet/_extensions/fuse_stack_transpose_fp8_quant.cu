@@ -520,11 +520,14 @@ std::vector<paddle::Tensor> fuse_stack_transpose_fp8_quant_fleet_custom(
                                      paddle::DataType::UINT8,
                                      X[0].place());
           dev_ptr = reinterpret_cast<const phi::bfloat16**>(ptr_tensor.data());
-          cudaMemcpyAsync(dev_ptr,
-                          ptrs.data(),
-                          nbytes,
-                          cudaMemcpyHostToDevice,
-                          X[0].stream());
+          auto err = cudaMemcpyAsync(dev_ptr,
+                                     ptrs.data(),
+                                     nbytes,
+                                     cudaMemcpyHostToDevice,
+                                     X[0].stream());
+          PD_CHECK(err == cudaSuccess,
+                   "cudaMemcpyAsync error: ",
+                   cudaGetErrorString(err));
         }
         array.Set(ptrs, dev_ptr);
 
