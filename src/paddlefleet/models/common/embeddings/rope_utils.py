@@ -139,14 +139,15 @@ def _apply_rotary_pos_emb_bshd(
     mscale = mscale if mscale is not None else 1.0
 
     if apply_rope_fusion:
-        if high_precision_rope and paddle.is_compiled_with_cuda():
+        if high_precision_rope:
             # Fused vision RoPE CUDA kernel path:
             # - internally computes cos/sin in fp32, equivalent to high_precision_rope
             # - only supports single Tensor input with explicit freqs
             # - only supports non-interleaved mode and mscale=1.0
             # - freqs must be reshaped to [s, dim//2]
             if (
-                not rotary_interleaved
+                paddle.is_compiled_with_cuda()
+                and not rotary_interleaved
                 and mscale == 1.0
                 and freqs is not None
                 and not isinstance(t, tuple)
