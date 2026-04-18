@@ -20,11 +20,11 @@ import random
 import numpy as np
 import paddle
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
 import paddlefleet
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.pipeline_parallel import NoPipelineParallel
 from paddlefleet.training.initialize import initialize_fleet
 
 

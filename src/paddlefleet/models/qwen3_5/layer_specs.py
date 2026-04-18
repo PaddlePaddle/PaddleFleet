@@ -18,9 +18,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from paddle.distributed.fleet.meta_parallel import LayerSpec
+
 from paddlefleet.transformer.enums import AttnMaskType
 
-from ...spec_utils import LayerSpec
 from ..backends import LocalSpecProvider
 from ..common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,

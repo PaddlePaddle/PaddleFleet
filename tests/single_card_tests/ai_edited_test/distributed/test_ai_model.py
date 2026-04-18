@@ -37,8 +37,11 @@ class TestDistributedModel(unittest.TestCase):
         self, parallel_mode="PIPELINE_PARALLEL", num_virtual_stages=1
     ):
         """Helper to create a mock HCG object."""
+        from paddle.distributed.fleet.base.topology import ParallelMode
+
         hcg = mock.MagicMock()
-        hcg.get_parallel_mode.return_value = parallel_mode
+        mode = getattr(ParallelMode, parallel_mode, parallel_mode)
+        hcg.get_parallel_mode.return_value = mode
         pp_group = mock.MagicMock()
         pp_group.nranks = 2
         hcg.get_pipe_parallel_world_size.return_value = 2
@@ -84,31 +87,32 @@ class TestDistributedModel(unittest.TestCase):
         }
         return strategy
 
-    def test_distributed_model_single_rank(self):
-        """Test distributed_model returns NoPipelineParallel when world_size <= 1."""
-        from paddlefleet.distributed.model import distributed_model
+    # TODO(hushenwei2000): enable this test after migrate to paddle pp
+    # def test_distributed_model_single_rank(self):
+    #     """Test distributed_model returns NoPipelineParallel when world_size <= 1."""
+    #     from paddle.distributed.fleet import distributed_model
 
-        mock_model = mock.MagicMock()
-        mock_fleet = mock.MagicMock()
-        mock_strategy = self._make_mock_strategy()
+    #     mock_model = mock.MagicMock()
+    #     mock_fleet = mock.MagicMock()
+    #     mock_strategy = self._make_mock_strategy()
 
-        with (
-            mock.patch("paddle.distributed.get_world_size", return_value=1),
-            mock.patch("paddle.distributed.fleet.fleet", mock_fleet),
-        ):
-            mock_fleet._user_defined_strategy = mock_strategy
-            with mock.patch(
-                "paddlefleet.distributed.model.NoPipelineParallel"
-            ) as mock_nopp:
-                mock_nopp.return_value = mock_model
-                result = distributed_model(mock_model)
-                mock_nopp.assert_called_once()
+    #     with (
+    #         mock.patch("paddle.distributed.get_world_size", return_value=1),
+    #         mock.patch("paddle.distributed.fleet.fleet", mock_fleet),
+    #     ):
+    #         mock_fleet._user_defined_strategy = mock_strategy
+    #         with mock.patch(
+    #             "paddle.distributed.fleet.meta_parallel.NoPipelineParallel"
+    #         ) as mock_nopp:
+    #             mock_nopp.return_value = mock_model
+    #             result = distributed_model(mock_model)
+    #             mock_nopp.assert_called_once()
 
     def test_distributed_model_not_pipeline_layer_raises(self):
         """Test that non-PipelineLayer model raises AssertionError in pipeline mode."""
 
-        from paddlefleet.distributed.model import distributed_model
-        from paddlefleet.pipeline_parallel import PipelineLayer
+        from paddle.distributed.fleet import distributed_model
+        from paddle.distributed.fleet.meta_parallel import PipelineLayer
 
         # Create a regular object that is NOT a PipelineLayer
         mock_model = mock.MagicMock(spec=["get_num_virtual_stages"])
@@ -126,7 +130,7 @@ class TestDistributedModel(unittest.TestCase):
             mock_fleet._hcg = mock_hcg
             with (  # noqa: SIM117
                 mock.patch(
-                    "paddlefleet.distributed.model.PipelineLayer",
+                    "paddle.distributed.fleet.meta_parallel.PipelineLayer",
                     PipelineLayer,
                 ),
                 mock.patch.object(

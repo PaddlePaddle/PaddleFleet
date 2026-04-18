@@ -28,8 +28,8 @@ import unittest
 from unittest.mock import MagicMock
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
-from paddlefleet.pipeline_parallel import ScheduleChunk
 from paddlefleet.transformer.transformer_encoder import (
     TransformerEncoder,
     build_overlapped_nodes,

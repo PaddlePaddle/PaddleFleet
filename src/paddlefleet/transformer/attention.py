@@ -14,15 +14,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn
+
+_ENABLE_EC_ALIGNMENT = (
+    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
+)
+_LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
 if TYPE_CHECKING:
     from .transformer_config import TransformerConfig
 
 import paddle
 from paddle import Tensor
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet import tensor_parallel
@@ -37,7 +45,6 @@ from paddlefleet.recompute_utils import (
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_tensor_model_parallel_region,
@@ -47,6 +54,115 @@ from paddlefleet.utils import divide, get_pg_rank, get_pg_size
 
 from .dot_product_attention import CPDotProductAttention
 from .enums import AttnMaskType
+
+
+def _md5(t):
+    """Compute MD5 of tensor bytes (cast to fp32 via .numpy())."""
+    return hashlib.md5(t.detach().numpy().tobytes()).hexdigest()
+
+
+def _apply_ec_complex_3d_mrope(
+    query,
+    key,
+    position_ids,
+    head_dim,
+    rope_theta=1000000.0,
+    mrope_section=None,
+    layer_number=0,
+):
+    """Apply EC-style complex multiplication 3D MRoPE to query and key tensors."""
+    import logging
+
+    if mrope_section is None:
+        mrope_section = [16, 1, 1]
+
+    seq_len_q = query.shape[1]
+    seq_len_p = position_ids.shape[1]
+    # MTP processing trims position_ids by 1; pad back to match query length
+    if seq_len_p < seq_len_q:
+        last_pos = position_ids[:, -1:, :]  # [B, 1, 3]
+        pad_count = seq_len_q - seq_len_p
+        # Increment each axis by 1 for each padded position
+        pads = []
+        for i in range(pad_count):
+            pads.append(last_pos + (i + 1))
+        position_ids = paddle.concat([position_ids, *pads], axis=1)
+
+    # EC's using_position_axis construction (from ernie_core/models/ernie5/modeling.py:432-442):
+    # For mrope_section=[16,1,1], point_num=64:
+    #   1) Build [1]*1 + [2]*1 = [1, 2] from mrope_section[1:]
+    #   2) Repeat 24 times: [1,2]*24 = [1,2,1,2,...] (48 entries)
+    #   3) Append [0]*16 at end
+    #   Total: [1,2,1,2,...(48), 0,0,...,0(16)] = 64 entries
+    point_num = head_dim // 2
+    using_position_axis = []
+    for i, n in enumerate(mrope_section[1:]):
+        using_position_axis.extend([i + 1] * n)
+    repeat_count = (point_num - mrope_section[0]) // sum(mrope_section[1:])
+    using_position_axis = using_position_axis * repeat_count
+    using_position_axis.extend([0] * mrope_section[0])
+    using_position_axis = paddle.to_tensor(using_position_axis, dtype="int64")
+
+    expand_position_ids = paddle.index_select(
+        position_ids, using_position_axis, axis=-1
+    )
+
+    freqs = 1.0 / (
+        rope_theta
+        ** (paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim))
+    )
+    freqs = freqs.reshape([1, 1, head_dim // 2])
+    freqs = freqs.expand(
+        [
+            expand_position_ids.shape[0],
+            expand_position_ids.shape[1],
+            head_dim // 2,
+        ]
+    )
+
+    freqs = expand_position_ids.astype("float32") * freqs
+
+    freqs_cis = paddle.polar(paddle.ones_like(freqs), freqs)
+    freqs_cis = freqs_cis.unsqueeze(2)
+
+    if _LOG_LAYER_MD5:
+        logger = logging.getLogger(__name__)
+        rank = paddle.distributed.get_rank()
+        q_md5 = _md5(query)
+        k_md5 = _md5(key)
+        logger.info(
+            f"[MD5 Probe PF] Rank={rank} query_before_rope MD5={q_md5} shape={list(query.shape)}"
+        )
+        logger.info(
+            f"[MD5 Probe PF] Rank={rank} key_before_rope MD5={k_md5} shape={list(key.shape)}"
+        )
+        fc_md5 = _md5(paddle.as_real(freqs_cis))
+        logger.info(
+            f"[MD5 Probe PF] Rank={rank} freqs_cis MD5={fc_md5} shape={list(freqs_cis.shape)} q_dtype={query.dtype}"
+        )
+
+    orig_dtype = query.dtype
+    xq = query.reshape([*query.shape[:-1], -1, 2]).cast("float32")
+    xk = key.reshape([*key.shape[:-1], -1, 2]).cast("float32")
+
+    xq_ = paddle.as_complex(xq)
+    xk_ = paddle.as_complex(xk)
+
+    if _LOG_LAYER_MD5:
+        xq_md5 = _md5(paddle.as_real(xq_ * freqs_cis))
+        logger.info(
+            f"[MD5 Probe PF] Rank={rank} xq_complex MD5={xq_md5} shape={list(xq_.shape)}"
+        )
+
+    xq_out = xq_ * freqs_cis
+    xk_out = xk_ * freqs_cis
+
+    query = paddle.as_real(xq_out)
+    query = paddle.flatten(query, start_axis=3).cast(orig_dtype)
+    key = paddle.as_real(xk_out)
+    key = paddle.flatten(key, start_axis=3).cast(orig_dtype)
+
+    return query, key
 
 
 @dataclass
@@ -137,7 +253,7 @@ class Attention(FleetLayer, ABC):
         self.key_hidden_size = self.hidden_size_per_attention_head
         self.val_hidden_size = self.hidden_size_per_attention_head
 
-        self.core_attention = build_layer(
+        self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
             config=self.config,
             layer_number=self.layer_number,
@@ -204,7 +320,7 @@ class Attention(FleetLayer, ABC):
                     self.config.recompute_modules["flash_attn"],
                 )
         # Output.
-        self.o_proj = build_layer(
+        self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
             self.query_projection_size,
             self.config.hidden_size,
@@ -301,7 +417,38 @@ class Attention(FleetLayer, ABC):
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
-        if rope_freqs_cis is not None:
+        if (
+            _ENABLE_EC_ALIGNMENT
+            and position_ids is not None
+            and not self.config.multi_latent_attention
+        ):
+            # EC-compatible complex multiplication 3D MRoPE
+            # EC model config uses rope_theta=1000000.0 (from eb5_A13B_117B_moe/model_config.json)
+            # PF model config uses rope_theta=5000000.0 (from MiniMax-V2.5-bf16/config.json)
+            # For alignment, use EC's value
+            _ec_rope_theta = 1000000.0
+            if not hasattr(self, "_ec_rope_path_logged"):
+                print(
+                    "[ALIGNMENT PATH HIT] attention: _apply_ec_complex_3d_mrope called (non-MLA)",
+                    flush=True,
+                )
+                self._ec_rope_path_logged = True
+            if _LOG_LAYER_MD5:
+                import logging
+
+                logging.getLogger(__name__).info(
+                    f"[EC RoPE] Layer={self.layer_number} EC RoPE path taken, pos_ids shape={list(position_ids.shape)} rope_theta={_ec_rope_theta} head_dim={self.config.head_dim}"
+                )
+            query, key = _apply_ec_complex_3d_mrope(
+                query,
+                key,
+                position_ids,
+                head_dim=self.config.head_dim,
+                rope_theta=_ec_rope_theta,
+                mrope_section=getattr(self.config, "mrope_section", [16, 1, 1]),
+                layer_number=self.layer_number,
+            )
+        elif rope_freqs_cis is not None:
             rope_freqs_cis = rope_freqs_cis.unsqueeze(-2)  # ..., 1, head_dim/2
             # ..., num_heads, head_dim/2
             query_ = paddle.view_as_complex(
@@ -341,6 +488,7 @@ class Attention(FleetLayer, ABC):
 
             if (
                 self.config.apply_rope_fusion
+                and not self.config.high_precision_rope
                 and q_pos_emb is not None
                 and k_pos_emb is not None
             ):
@@ -462,7 +610,23 @@ class Attention(FleetLayer, ABC):
         if gate is not None:
             core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
 
+        if _ENABLE_EC_ALIGNMENT and _LOG_LAYER_MD5:
+            import logging
+
+            _rank = paddle.distributed.get_rank()
+            _ca_md5 = _md5(core_attn_out)
+            logging.getLogger(__name__).info(
+                f"[MD5 Probe PF] Rank={_rank} Layer={self.layer_number} core_attn_out MD5={_ca_md5} shape={list(core_attn_out.shape)}"
+            )
+
         output, bias = self.o_proj(core_attn_out)
+
+        if _ENABLE_EC_ALIGNMENT and _LOG_LAYER_MD5:
+            _out = output
+            _o_md5 = _md5(_out)
+            logging.getLogger(__name__).info(
+                f"[MD5 Probe PF] Rank={_rank} Layer={self.layer_number} attn_o_proj_out MD5={_o_md5} shape={list(_out.shape)}"
+            )
 
         return output, bias
 
@@ -504,7 +668,7 @@ class SelfAttention(Attention):
             self.query_projection_size if self.gated_attention else 0
         )
 
-        self.qkv_proj = build_layer(
+        self.qkv_proj = build_spec_layer(
             sublayers_spec.qkv_proj,
             self.config.hidden_size,
             self.query_projection_size
@@ -534,7 +698,7 @@ class SelfAttention(Attention):
                 )
             else:
                 q_norm_hidden_size = self.hidden_size_per_attention_head
-            self.q_norm = build_layer(
+            self.q_norm = build_spec_layer(
                 sublayers_spec.q_norm,
                 hidden_size=q_norm_hidden_size,
                 config=self.config,
@@ -552,7 +716,7 @@ class SelfAttention(Attention):
                 )
             else:
                 k_norm_hidden_size = self.hidden_size_per_attention_head
-            self.k_norm = build_layer(
+            self.k_norm = build_spec_layer(
                 sublayers_spec.k_norm,
                 hidden_size=k_norm_hidden_size,
                 config=self.config,
@@ -739,7 +903,7 @@ class CrossAttention(Attention):
             )
         assert self.query_projection_size == self.kv_projection_size
 
-        self.linear_q = build_layer(
+        self.linear_q = build_spec_layer(
             sublayers_spec.linear_q,
             self.config.hidden_size,
             self.query_projection_size,
@@ -751,7 +915,7 @@ class CrossAttention(Attention):
             is_expert=False,
         )
 
-        self.linear_kv = build_layer(
+        self.linear_kv = build_spec_layer(
             sublayers_spec.linear_kv,
             self.config.hidden_size,
             2 * self.kv_projection_size,

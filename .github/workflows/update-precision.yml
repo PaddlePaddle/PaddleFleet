@@ -57,7 +57,8 @@ jobs:
           mkdir bos
           tar xf bos_new.tar.gz -C bos
           export step="fleet"
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git .
+          git clone https://github.com/PaddlePaddle/PaddleFormers.git
+          cd PaddleFormers
           bash -x tests/integration_test/update_precision.sh
 
   # update-precision-formers:

@@ -16,6 +16,9 @@
 # limitations under the License.
 from __future__ import annotations
 
+import hashlib
+import logging
+import os
 from typing import TYPE_CHECKING
 
 import paddle
@@ -31,6 +34,48 @@ from paddle._C_ops import matmul_grad
 from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
+
+# Alignment switch: match ErnieCore's MoE router behavior for bit-level alignment
+_ERNIECORE_ALIGNMENT = (
+    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
+)
+_LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
+
+# Lazy-loaded EC FusedMoETopk Triton kernel for bit-exact alignment
+_FusedMoETopk = None
+
+
+def _get_fused_moe_topk():
+    global _FusedMoETopk
+    if _FusedMoETopk is None:
+        from ernie_core.ops.triton_ops.fused_moe_topk import FusedMoETopk
+
+        _FusedMoETopk = FusedMoETopk
+    return _FusedMoETopk
+
+
+_moe_router_logger = logging.getLogger(__name__)
+
+
+def _log_moe_md5(tensor, name, layer_idx=None):
+    """Log MD5 of a tensor for MoE precision alignment debugging."""
+    if _LOG_LAYER_MD5 and _ERNIECORE_ALIGNMENT:
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        if TransformerLayer._skip_mtp_probes:
+            return  # Skip MTP passes — EC has no MTP
+        data = tensor.detach().cast("float32").numpy().tobytes()
+        md5 = hashlib.md5(data).hexdigest()
+        rank = (
+            paddle.distributed.get_rank()
+            if paddle.distributed.is_initialized()
+            else 0
+        )
+        layer_str = f" Layer={layer_idx}" if layer_idx is not None else ""
+        print(
+            f"[MD5 MoE] Rank={rank}{layer_str} {name} MD5={md5} shape={list(tensor.shape)}",
+            flush=True,
+        )
 
 
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
@@ -533,6 +578,10 @@ class StandardMoERouter(nn.Layer):
 class TopKRouter(StandardMoERouter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._layer_number = None
+
+    def set_layer_number(self, layer_number):
+        self._layer_number = layer_number
 
     def forward(self, input):
         if len(input.shape) == 3:
@@ -554,21 +603,81 @@ class TopKRouter(StandardMoERouter):
                 self.config.moe_router_force_load_balancing,
             )
 
+        _log_moe_md5(logits, "gate_logits", self._layer_number)
+
         gates = self.gate_score_func(logits)
+
+        _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
+
         gates_ori = gates
         if self.scoring_func == "sigmoid":
             gates_ori = gates_ori / (
                 gates_ori.sum(axis=-1, keepdim=True) + 1e-20
             )
 
-        # top_gate: [B*S, K], top_idx: [B*S, K]
-        top_gate, top_idx = self._call_topk_method(
-            self.topk_method,
-            gates,
-            k=self.num_experts_per_tok,
-            n_group=self.n_group,
-            topk_group=self.topk_group,
-        )
+        if _ERNIECORE_ALIGNMENT:
+            # Use EC's FusedMoETopk Triton kernel for bit-exact alignment.
+            # This ensures the topk selection + normalization uses the exact same
+            # GPU kernel as ErnieCore, avoiding FP32 rounding differences between
+            # Triton's scalar loop and Paddle's tensor ops.
+            if not hasattr(self, "_ec_topk_path_logged"):
+                print(
+                    "[ALIGNMENT PATH HIT] moe_router: FusedMoETopk Triton kernel used",
+                    flush=True,
+                )
+                self._ec_topk_path_logged = True
+            FusedMoETopk = _get_fused_moe_topk()
+            use_node_limit = self.n_group > 1
+            probs_for_choice = (
+                gates + self.e_score_correction_bias.detach().unsqueeze(0)
+            )
+            if _LOG_LAYER_MD5 and self._layer_number == 0:
+                _log_moe_md5(
+                    self.e_score_correction_bias,
+                    "e_score_correction_bias",
+                    self._layer_number,
+                )
+                _log_moe_md5(
+                    probs_for_choice, "probs_for_choice", self._layer_number
+                )
+            top_gate, top_idx = FusedMoETopk.apply(
+                gates,  # gate_probs (original sigmoid scores)
+                probs_for_choice,  # probs_for_choice (with correction bias)
+                self.num_experts_per_tok,
+                use_node_limit,
+                self.n_group,
+                self.topk_group,
+                self.norm_topk_prob,  # norm_gate_logits
+            )
+            # top_gate is already normalized by the Triton kernel when norm_topk_prob=True
+
+            _log_moe_md5(
+                top_idx.cast("float32"), "topk_indices", self._layer_number
+            )
+            # Log raw weights and sum for alignment verification (re-computed from gate_probs)
+            if _LOG_LAYER_MD5:
+                raw_topk_weights = paddle.take_along_axis(
+                    gates, top_idx, axis=-1
+                )
+                _log_moe_md5(
+                    raw_topk_weights, "topk_weights_raw", self._layer_number
+                )
+                raw_sum = raw_topk_weights.sum(axis=-1, keepdim=True)
+                _log_moe_md5(raw_sum, "topk_raw_sum", self._layer_number)
+        else:
+            # top_gate: [B*S, K], top_idx: [B*S, K]
+            top_gate, top_idx = self._call_topk_method(
+                self.topk_method,
+                gates,
+                k=self.num_experts_per_tok,
+                n_group=self.n_group,
+                topk_group=self.topk_group,
+            )
+
+            _log_moe_md5(
+                top_idx.cast("float32"), "topk_indices", self._layer_number
+            )
+            _log_moe_md5(top_gate, "topk_weights_raw", self._layer_number)
 
         # z-loss
         if self.config.router_z_loss_coef:
@@ -583,19 +692,32 @@ class TopKRouter(StandardMoERouter):
         gates_masked = gates * mask
 
         # norm
-        if self.norm_topk_prob:
-            denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
-            top_gate = top_gate / denominator
-            if self.num_experts_per_tok > 1:
-                gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
-                denom_s = paddle.clip(
-                    gates_s, min=paddle.finfo(gates_masked.dtype).eps
-                )
-                gates_masked = gates_masked / denom_s
+        if not _ERNIECORE_ALIGNMENT:
+            # When _ERNIECORE_ALIGNMENT is True, top_gate is already normalized by FusedMoETopk
+            if self.norm_topk_prob:
+                denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+                top_gate = top_gate / denominator
+                if self.num_experts_per_tok > 1:
+                    gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
+                    denom_s = paddle.clip(
+                        gates_s, min=paddle.finfo(gates_masked.dtype).eps
+                    )
+                    gates_masked = gates_masked / denom_s
+        else:
+            # Reconstruct gates_masked from top_gate (Triton kernel output) to ensure
+            # bit-exact alignment. Instead of normalizing gates_masked independently
+            # (which uses different FP32 reduction over E=32 elements vs K=8),
+            # scatter the already-normalized top_gate values back to [S, E] layout.
+            gates_masked = paddle.zeros_like(gates).put_along_axis(
+                top_idx, top_gate, axis=1
+            )
 
         if abs(self.routed_scaling_factor - 1.0) > 1e-6:
             top_gate = top_gate * self.routed_scaling_factor
             gates_masked *= self.routed_scaling_factor
+
+        _log_moe_md5(gates_masked, "gates_masked", self._layer_number)
+        _log_moe_md5(top_gate, "topk_weights_normed", self._layer_number)
 
         if self.topk_method == "noaux_tc":
             exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)

@@ -16,14 +16,14 @@ from dataclasses import dataclass
 
 import paddle
 from paddle import nn
-from paddle.nn import Layer
-
-from paddlefleet.pipeline_parallel import (
+from paddle.distributed.fleet.meta_parallel import (
     LayerDesc,
+    LayerSpec,
     PipelineLayer,
     SharedLayerDesc,
 )
-from paddlefleet.spec_utils import LayerSpec
+from paddle.nn import Layer
+
 from paddlefleet.transformer.identity_op import IdentityOp
 
 

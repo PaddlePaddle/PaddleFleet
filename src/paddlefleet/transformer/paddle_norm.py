@@ -14,13 +14,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 from paddle.nn.functional import layer_norm, rms_norm
-
-from ..spec_utils import LayerSpec
 
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
@@ -33,8 +33,9 @@ except ImportError:
         return parameter
 
 
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
+
 from paddlefleet.jit import jit_fuser
-from paddlefleet.pipeline_parallel import ScheduleNode
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -232,6 +233,31 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             )
             rst["hidden_states"] = hidden_states_concat
         rst = {**dict_args, **rst}
+
+        # Loss-path MD5 probe: final_layernorm output
+        if (
+            os.environ.get("LOG_LAYER_MD5", "0") == "1"
+            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
+        ):
+            import hashlib
+
+            rank = paddle.distributed.get_rank()
+            h = rst["hidden_states"]
+            md5 = hashlib.md5(h.cast("float32").numpy().tobytes()).hexdigest()
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} final_layernorm_output shape={list(h.shape)} md5={md5}",
+                flush=True,
+            )
+            # Save tensor for offline comparison
+            save_dir = "/root/paddlejob/share-storage/gpfs/system-public/wangxiangzhe/V2Precision/loss_debug_tensors/pf"
+            os.makedirs(save_dir, exist_ok=True)
+            _mb_counter = getattr(self, "_mb_counter", 0)
+            paddle.save(
+                h,
+                f"{save_dir}/rank{rank}_mb{_mb_counter}_final_layernorm_output.pd",
+            )
+            self._mb_counter = _mb_counter + 1
+
         return rst
 
     def build_schedule_node(self):

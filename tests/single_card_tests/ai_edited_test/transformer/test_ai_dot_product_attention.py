@@ -247,6 +247,7 @@ class TestDotProductAttentionFP16(unittest.TestCase):
 
     @unittest.skipIf(not paddle.is_compiled_with_cuda(), "Requires CUDA")
     def test_forward_fp16(self):
+        self.addCleanup(paddle.device.set_device, "gpu:0")
         config = _make_config()
         attn = DotProductAttention(
             config=config,
@@ -269,6 +270,7 @@ class TestDotProductAttentionBF16(unittest.TestCase):
 
     @unittest.skipIf(not paddle.is_compiled_with_cuda(), "Requires CUDA")
     def test_forward_bf16(self):
+        self.addCleanup(paddle.device.set_device, "gpu:0")
         config = _make_config()
         attn = DotProductAttention(
             config=config,
