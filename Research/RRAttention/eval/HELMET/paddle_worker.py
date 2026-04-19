@@ -102,6 +102,36 @@ def set_common_config(config):
     return config
 
 
+def normalize_qwen_rope_scaling_dict(config_dict):
+    rope_scaling = config_dict.get("rope_scaling")
+    if not isinstance(rope_scaling, dict):
+        return config_dict
+
+    rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
+    if rope_type != "yarn":
+        return config_dict
+
+    rope_scaling["rope_type"] = rope_type
+    original_max_position_embeddings = rope_scaling.get("original_max_position_embeddings")
+    factor = rope_scaling.get("factor")
+    if original_max_position_embeddings is not None and factor is not None:
+        config_dict["max_position_embeddings"] = int(original_max_position_embeddings * factor)
+
+    return config_dict
+
+
+def load_qwen_config(model_name):
+    from paddleformers.transformers import Qwen2Config
+
+    config_dict, _ = Qwen2Config.get_config_dict(model_name)
+    if Qwen2Config.base_config_key and Qwen2Config.base_config_key in config_dict:
+        config_dict = config_dict[Qwen2Config.base_config_key]
+    normalize_qwen_rope_scaling_dict(config_dict)
+    config = Qwen2Config.from_dict(config_dict)
+    config.name_or_path = model_name
+    return config
+
+
 def cast_tiny_model(model, dtype):
     dtype = str(dtype).replace("paddle.", "")
     if dtype in ("float16", "bfloat16"):
@@ -190,7 +220,8 @@ def load_model(model_name, model_type, dtype, tiny_random):
     if model_type == "qwen":
         from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
 
-        return Qwen2ForCausalLMDeprecated.from_pretrained(model_name, dtype=dtype)
+        config = load_qwen_config(model_name)
+        return Qwen2ForCausalLMDeprecated.from_pretrained(model_name, config=config, dtype=dtype)
     if model_type == "ernie":
         if "a3b" in lower_name or "moe" in lower_name:
             from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeForCausalLM
@@ -266,6 +297,10 @@ def make_generation_config(payload):
     if do_sample:
         config_kwargs["temperature"] = float(payload.get("temperature", 1.0))
         config_kwargs["top_p"] = float(payload.get("top_p", 1.0))
+    else:
+        config_kwargs["temperature"] = 1.0
+        config_kwargs["top_p"] = 1.0
+        config_kwargs["top_k"] = 0
     return GenerationConfig(**config_kwargs)
 
 
@@ -391,7 +426,7 @@ def main():
     parser.add_argument("--model_type", default="auto", choices=["auto", "llama", "qwen", "ernie"])
     parser.add_argument("--method", default="full", choices=["rrattn", "full"])
     parser.add_argument("--threshold", type=float, default=0.9)
-    parser.add_argument("--stride", type=int, default=16)
+    parser.add_argument("--stride", type=int, default=8)
     parser.add_argument("--rrattn_version", default="v1")
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--device", default=None)
