@@ -279,15 +279,12 @@ class DotProductAttention(FleetLayer):
             from paddle.nn.functional.flash_attention import (
                 flashmask_attention as _flashmask_attention,
             )
-        use_eager = (
-            getattr(self.config, "_attn_implementation", "default") == "eager"
-        )
+        use_eager = self.config._attn_implementation == "eager"
 
         if use_eager and packed_seq_params is not None:
             raise ValueError(
                 "packed_seq_params is not supported when "
-                "_attn_implementation='eager'. Supported values: "
-                "'default', 'eager'."
+                "_attn_implementation='eager'."
             )
 
         if packed_seq_params is not None:
