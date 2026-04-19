@@ -612,7 +612,7 @@ class TopKRouter(StandardMoERouter):
                 gates_ori.sum(axis=-1, keepdim=True) + 1e-20
             )
 
-        if self.config.gpt_model_use_experimental_version:
+        if getattr(self.config, "gpt_model_use_experimental_version", False):
             # Use EC's FusedMoETopk Triton kernel for bit-exact alignment.
             # This ensures the topk selection + normalization uses the exact same
             # GPU kernel as ErnieCore, avoiding FP32 rounding differences between
@@ -683,7 +683,9 @@ class TopKRouter(StandardMoERouter):
         gates_masked = gates * mask
 
         # norm
-        if not self.config.gpt_model_use_experimental_version:
+        if not getattr(
+            self.config, "gpt_model_use_experimental_version", False
+        ):
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
             if self.norm_topk_prob:
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
