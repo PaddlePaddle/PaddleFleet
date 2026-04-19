@@ -4,7 +4,7 @@ import paddle.nn.functional as F
 
 enable_profile = False
 attn_time_ms = 0.0
-xattn_estimate_func_time_ms = 0.0
+estimate_func_time_ms = 0.0
 
 def set_profile(enable=True):
     global enable_profile
@@ -26,17 +26,13 @@ def add_attn_time(attn_time):
     global attn_time_ms
     attn_time_ms += attn_time
 
-def set_xattn_estimate_func_time(xattn_estimate_func_time=0.0):
-    global xattn_estimate_func_time_ms
-    xattn_estimate_func_time_ms = xattn_estimate_func_time
+def set_estimate_func_time(estimate_func_time=0.0):
+    global estimate_func_time_ms
+    estimate_func_time_ms = estimate_func_time
 
-def get_xattn_estimate_func_time():
-    global xattn_estimate_func_time_ms
-    return xattn_estimate_func_time_ms
-
-def add_xattn_estimate_func_time(xattn_estimate_func_time):
-    global xattn_estimate_func_time_ms
-    xattn_estimate_func_time_ms += xattn_estimate_func_time
+def get_estimate_func_time():
+    global estimate_func_time_ms
+    return estimate_func_time_ms
 
 def Full_prefill(
     query_states: paddle.Tensor,

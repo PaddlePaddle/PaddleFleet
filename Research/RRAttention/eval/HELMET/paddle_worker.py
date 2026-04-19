@@ -21,6 +21,24 @@ import paddle
 from paddleformers.generation import GenerationConfig
 
 
+def disable_unavailable_deep_ep():
+    try:
+        import paddlefleet.ops as fleet_ops
+    except Exception:
+        return
+
+    is_available = getattr(fleet_ops, "is_deep_ep_available", None)
+    if is_available is None or not is_available():
+        return
+
+    try:
+        from paddlefleet.ops import deep_ep  # noqa: F401
+    except Exception as exc:
+        print(f"[paddle_worker] disable unavailable DeepEP: {exc}", file=sys.stderr)
+        if hasattr(fleet_ops, "_DEEP_EP_AVAILABLE"):
+            fleet_ops._DEEP_EP_AVAILABLE = False
+
+
 def infer_model_type(model_name):
     lower_name = model_name.lower()
     if "qwen3" in lower_name:
@@ -60,21 +78,21 @@ def load_profile_fns(method):
             set_rrattn_estimate_func_time,
         )
 
-        get_xattn_estimate_func_time = get_rrattn_estimate_func_time
-        set_xattn_estimate_func_time = set_rrattn_estimate_func_time
+        get_estimate_func_time = get_rrattn_estimate_func_time
+        set_estimate_func_time = set_rrattn_estimate_func_time
     elif method == "full":
         from rrattn.full_prefill import (
             get_attn_time,
-            get_xattn_estimate_func_time,
+            get_estimate_func_time,
             set_attn_time,
+            set_estimate_func_time,
             set_profile,
-            set_xattn_estimate_func_time,
         )
     else:
         raise ValueError(f"Unsupported method={method!r}; supported methods are: rrattn, full")
 
     set_profile(False)
-    return set_profile, set_attn_time, get_attn_time, set_xattn_estimate_func_time, get_xattn_estimate_func_time
+    return set_profile, set_attn_time, get_attn_time, set_estimate_func_time, get_estimate_func_time
 
 
 def set_common_config(config):
@@ -288,12 +306,12 @@ def handle_request(model, payload, device, profile_fns, clear_cache_per_request=
     record_e2e_ms = bool(payload.get("record_e2e_ms", False))
     record_attn_ms = bool(payload.get("record_attn_ms", False))
 
-    set_profile, set_attn_time, get_attn_time, set_xattn_estimate_func_time, get_xattn_estimate_func_time = profile_fns
+    set_profile, set_attn_time, get_attn_time, set_estimate_func_time, get_estimate_func_time = profile_fns
     profile_enabled = record_attn_ms and device.startswith("gpu")
     set_profile(profile_enabled)
     if record_attn_ms:
         set_attn_time()
-        set_xattn_estimate_func_time()
+        set_estimate_func_time()
 
     synchronize(device)
     start = time.perf_counter()
@@ -355,7 +373,7 @@ def handle_request(model, payload, device, profile_fns, clear_cache_per_request=
         response["ttft_ms"] = first_token_timer.ttft_ms if first_token_timer.ttft_ms is not None else elapsed_ms
     if record_attn_ms:
         response["attn_ms"] = float(get_attn_time())
-        response["estimate_func_ms"] = float(get_xattn_estimate_func_time())
+        response["estimate_func_ms"] = float(get_estimate_func_time())
 
     if clear_cache_per_request:
         clear_cache(device)
@@ -375,7 +393,6 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--stride", type=int, default=16)
     parser.add_argument("--rrattn_version", default="v1")
-    parser.add_argument("--xattn_estimate_version", dest="rrattn_version", help=argparse.SUPPRESS)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--device", default=None)
     parser.add_argument("--tiny_random", action="store_true")
@@ -391,6 +408,7 @@ def main():
             raise ValueError("--model_type is required when --tiny_random is set")
         model_type = infer_model_type(args.model_name_or_path)
 
+    disable_unavailable_deep_ep()
     profile_fns = load_profile_fns(args.method)
     model = load_model(args.model_name_or_path, model_type, args.dtype, args.tiny_random)
     model.eval()

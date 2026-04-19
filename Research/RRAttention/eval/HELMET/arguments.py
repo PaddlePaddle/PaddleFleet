@@ -17,7 +17,6 @@ def parse_arguments():
     parser.add_argument("--method", type=str, default="full", help="sparse method used to eval")
     parser.add_argument("--threshold", type=float, default=0.95, help="topp threshold")
     parser.add_argument("--rrattn_version", type=str, default="v1", help="rrattn version, e.g. v1")
-    parser.add_argument("--xattn_estimate_version", dest="rrattn_version", help=argparse.SUPPRESS)
     parser.add_argument("--stride", type=int, default=8, help="rrattn stride")
     parser.add_argument("--record_ttft_ms", action="store_true", help="record ttft(ms)")
     parser.add_argument("--record_e2e_ms", action="store_true", help="record e2e time(ms)")
@@ -109,8 +108,6 @@ def parse_arguments():
 
     if args.method == 'rrattn' and args.stride != 8:
         args.output_dir = args.output_dir + f"_s{args.stride}"
-
-    args.xattn_estimate_version = args.rrattn_version
 
     if not args.do_sample and args.temperature != 0.0:
         args.temperature = 0.0

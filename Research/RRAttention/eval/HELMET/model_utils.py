@@ -995,8 +995,8 @@ class HFModel(LLM):
                     else:
                         import rrattn.full_prefill as prefill_mod
 
-                        reset_estimate_time = prefill_mod.set_xattn_estimate_func_time
-                        get_estimate_time = prefill_mod.get_xattn_estimate_func_time
+                        reset_estimate_time = prefill_mod.set_estimate_func_time
+                        get_estimate_time = prefill_mod.get_estimate_func_time
 
                 torch.cuda.synchronize()
                 prefill_mod.set_profile(True)
