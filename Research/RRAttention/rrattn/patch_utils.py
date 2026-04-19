@@ -4,6 +4,7 @@ from typing import Iterable, Optional, Tuple
 
 import paddle
 import paddle.nn.functional as F
+from paddle.nn.functional.flash_attention import flash_attention
 from paddleformers.nn.attention.eager_attention import repeat_kv
 from paddleformers.utils.masking_utils import _gen_from_sparse_attn_mask_indices
 
@@ -241,6 +242,28 @@ def dense_decode_attention(
             causal,
         )
 
+    default_scale = 1.0 / math.sqrt(query_states.shape[-1])
+    if (
+        q_len == 1
+        and causal
+        and attention_mask is None
+        and dropout == 0.0
+        and (scaling is None or scaling == default_scale)
+    ):
+        attn_output, _ = flash_attention(
+            query_states.transpose(1, 2),
+            key_states.transpose(1, 2),
+            value_states.transpose(1, 2),
+            dropout=0.0,
+            causal=False,
+        )
+        return attn_output
+
+    output_dtype = query_states.dtype
+    query_states = query_states.astype("float32")
+    key_states = key_states.astype("float32")
+    value_states = value_states.astype("float32")
+
     attn_weights = paddle.matmul(query_states, key_states.transpose(2, 3)) * scale
     if causal and q_len > 1:
         q_pos = paddle.arange(q_len, device=query_states.device) + key_len - q_len
@@ -253,9 +276,9 @@ def dense_decode_attention(
         )
 
     if attention_mask is not None:
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]].astype("float32")
         attn_weights = attn_weights + causal_mask
 
     attn_weights = F.softmax(attn_weights, axis=-1, dtype=paddle.float32).astype(query_states.dtype)
     attn_weights = F.dropout(attn_weights, p=dropout, training=training)
-    return paddle.matmul(attn_weights, value_states).transpose(1, 2)
+    return paddle.matmul(attn_weights, value_states).astype(output_dtype).transpose(1, 2)
