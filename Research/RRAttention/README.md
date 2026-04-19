@@ -6,9 +6,8 @@
 
 [![Paper](https://img.shields.io/badge/ACL%202026-Paper-red)](https://arxiv.org/abs/2602.05853)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../../LICENSE)
-[![Python](https://img.shields.io/badge/Python-%3E%3D3.8-yellow)](https://www.python.org/)
-[![PaddlePaddle](https://img.shields.io/badge/Paddle-%3E%3D3.3-orange)](https://www.paddlepaddle.org.cn/)
-![Code Coming Soon](https://img.shields.io/badge/Code-Coming%20Soon-yellow)
+[![Python](https://img.shields.io/badge/Python-%3E%3D3.10-yellow)](https://www.python.org/)
+[![PaddlePaddle](https://img.shields.io/badge/Paddle-nightly%203.4-orange)](https://www.paddlepaddle.org.cn/)
 
 </div>
 
@@ -22,14 +21,45 @@ The quadratic complexity of attention mechanisms poses a critical bottleneck for
 
 ## 🔔 News
 
-- **[2026.04.17]** ⏳ The code is being cleaned up and will be available shortly.
+- **[2026.04.19]** Paddle open-source code, HELMET evaluation entry, and release scripts are now available in this repository.
 - **[2026.04.06]** 🎉 Our paper has been accepted by **ACL 2026**!
 
 
 ## 📌 TODO
 
-- [ ] Release PaddlePaddle evaluation code
+- [x] Release PaddlePaddle evaluation code
 - [ ] Release PyTorch evaluation code
+
+## Quick Start
+
+### Build Environment
+
+```bash
+uv venv --python 3.10 --seed .venv
+source .venv/bin/activate
+bash ./scripts/build_env.sh
+```
+
+### Download HELMET Data
+
+```bash
+bash ./eval/HELMET/scripts/download_data.sh
+```
+
+This also downloads the local ALCE judge models to `eval/HELMET/models/roberta-large-squad` and `eval/HELMET/models/t5_xxl_true_nli_mixture`.
+
+### Run HELMET Evaluation
+
+```bash
+bash ./scripts/run_helmet.sh
+```
+
+### Repository Layout
+
+- `rrattn/`: Paddle RRAttention implementation and PaddleFormers patch entrypoints
+- `eval/HELMET/`: HELMET evaluation code, configs, prompts, data/cache/output layout
+- `scripts/`: environment setup and evaluation launch scripts
+- `tests/`: public API import checks
 
 ## Method
 
