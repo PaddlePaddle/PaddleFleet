@@ -3,7 +3,7 @@ import math
 import paddle
 import paddle.nn.functional as F
 
-from .kernels import flat_group_gemm_fuse_reshape_v14, softmax_fuse_block_sum
+from .kernels import flat_group_gemm_fuse_reshape, softmax_fuse_block_sum
 from .utils import find_blocks_chunked
 
 
@@ -172,7 +172,7 @@ def rrattn_estimate(
     for chunk_idx in range(q_chunk_num):
         if kdb != 1:
             raise ValueError("use_triton and kdb cannot be used together")
-        attn_weights_slice = flat_group_gemm_fuse_reshape_v14(
+        attn_weights_slice = flat_group_gemm_fuse_reshape(
             pad_query_states[
                 :,
                 :,

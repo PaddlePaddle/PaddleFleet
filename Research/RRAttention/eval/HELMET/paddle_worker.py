@@ -24,7 +24,7 @@ from paddleformers.generation import GenerationConfig
 def infer_model_type(model_name):
     lower_name = model_name.lower()
     if "qwen3" in lower_name:
-        return "qwen3"
+        raise ValueError("Qwen3 models are not supported in this release")
     if "qwen2" in lower_name or "qwen2.5" in lower_name or "qwen" in lower_name:
         return "qwen"
     if "ernie" in lower_name:
@@ -43,10 +43,6 @@ def load_patch(model_type):
         from rrattn.qwen_patch import patch_qwen_attention
 
         return patch_qwen_attention
-    if model_type == "qwen3":
-        from rrattn.qwen3_patch import patch_qwen3_attention
-
-        return patch_qwen3_attention
     if model_type == "ernie":
         from rrattn.ernie_patch import patch_ernie_attention
 
@@ -139,29 +135,6 @@ def build_tiny_model(model_type, dtype):
         config.fuse_rms_norm = False
         return cast_tiny_model(Qwen2ForCausalLMDeprecated(set_common_config(config)), dtype)
 
-    if model_type == "qwen3":
-        from paddleformers.transformers import Qwen3Config
-        from paddleformers.transformers.qwen3.modeling import Qwen3ForCausalLMDeprecated
-
-        config = Qwen3Config(
-            vocab_size=1024,
-            hidden_size=128,
-            intermediate_size=256,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            head_dim=32,
-            max_position_embeddings=4096,
-            bos_token_id=1,
-            eos_token_id=2,
-            pad_token_id=0,
-            attention_dropout=0.0,
-            attention_probs_dropout_prob=0.0,
-            hidden_dropout_prob=0.0,
-        )
-        config.fuse_rms_norm = False
-        return cast_tiny_model(Qwen3ForCausalLMDeprecated(set_common_config(config)), dtype)
-
     if model_type == "ernie":
         from paddleformers.transformers import Ernie4_5Config, Ernie4_5ForCausalLM
 
@@ -190,6 +163,8 @@ def load_model(model_name, model_type, dtype, tiny_random):
         return build_tiny_model(model_type, dtype)
 
     lower_name = model_name.lower()
+    if "qwen3" in lower_name:
+        raise ValueError("Qwen3 models are not supported in this release")
     if model_type == "llama":
         from paddleformers.transformers import LlamaForCausalLM
 
@@ -198,14 +173,6 @@ def load_model(model_name, model_type, dtype, tiny_random):
         from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
 
         return Qwen2ForCausalLMDeprecated.from_pretrained(model_name, dtype=dtype)
-    if model_type == "qwen3":
-        if "a3b" in lower_name or "moe" in lower_name:
-            from paddleformers.transformers.qwen3_moe.modeling import Qwen3MoeForCausalLMDeprecated
-
-            return Qwen3MoeForCausalLMDeprecated.from_pretrained(model_name, dtype=dtype)
-        from paddleformers.transformers.qwen3.modeling import Qwen3ForCausalLMDeprecated
-
-        return Qwen3ForCausalLMDeprecated.from_pretrained(model_name, dtype=dtype)
     if model_type == "ernie":
         if "a3b" in lower_name or "moe" in lower_name:
             from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeForCausalLM
@@ -403,7 +370,7 @@ def write_response(response):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name_or_path", required=True)
-    parser.add_argument("--model_type", default="auto", choices=["auto", "llama", "qwen", "qwen3", "ernie"])
+    parser.add_argument("--model_type", default="auto", choices=["auto", "llama", "qwen", "ernie"])
     parser.add_argument("--method", default="full", choices=["rrattn", "full"])
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--stride", type=int, default=16)

@@ -12,7 +12,6 @@ def test_public_api_imports():
     assert callable(rrattn.rrattn_prefill)
     assert callable(rrattn.patch_llama_attention)
     assert callable(rrattn.patch_qwen_attention)
-    assert callable(rrattn.patch_qwen3_attention)
     assert callable(rrattn.patch_ernie_attention)
 
 

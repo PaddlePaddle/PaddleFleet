@@ -234,7 +234,7 @@ def softmax_fuse_block_sum(
 
 
 @triton.jit
-def flat_group_gemm_fuse_reshape_kernel_v14(
+def flat_group_gemm_fuse_reshape_kernel(
     Q,
     K,
     Out,
@@ -289,7 +289,7 @@ def flat_group_gemm_fuse_reshape_kernel_v14(
 
 
 @use_torch_proxy_guard(silent=True)
-def flat_group_gemm_fuse_reshape_v14(query_states, key_states, stride, chunk_start, chunk_end, is_causal=True):
+def flat_group_gemm_fuse_reshape(query_states, key_states, stride, chunk_start, chunk_end, is_causal=True):
     batch_size, num_heads, q_len, head_dim = query_states.shape
     kv_len = key_states.shape[2]
 
@@ -308,7 +308,7 @@ def flat_group_gemm_fuse_reshape_v14(query_states, key_states, stride, chunk_sta
     assert kv_len % (stride * block_n) == 0
 
     grid = (q_len // stride // block_m, kv_len // stride // block_n, batch_size * num_heads)
-    flat_group_gemm_fuse_reshape_kernel_v14[grid](
+    flat_group_gemm_fuse_reshape_kernel[grid](
         query_states,
         key_states,
         output,
