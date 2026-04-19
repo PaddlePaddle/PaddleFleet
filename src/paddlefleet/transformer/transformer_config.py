@@ -640,6 +640,9 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_loss_coeff: float = 0.01
     """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
 
+    gpt_model_use_experimental_version: bool = False
+    """Enable experimental version code paths for precision alignment."""
+
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
         # DSA field mapping

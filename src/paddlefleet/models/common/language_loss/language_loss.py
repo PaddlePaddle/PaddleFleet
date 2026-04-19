@@ -223,19 +223,6 @@ class LanguageLoss(FleetLayer):
                 f"[LOSS_PATH_MD5] rank={rank} loss_input_labels shape={list(labels.shape)} md5={lb_md5}",
                 flush=True,
             )
-            # Save tensors for offline comparison
-            save_dir = "/root/paddlejob/share-storage/gpfs/system-public/wangxiangzhe/V2Precision/loss_debug_tensors/pf"
-            os.makedirs(save_dir, exist_ok=True)
-            _loss_counter = getattr(self, "_loss_counter", 0)
-            paddle.save(
-                logits,
-                f"{save_dir}/rank{rank}_mb{_loss_counter}_loss_logits.pd",
-            )
-            paddle.save(
-                labels,
-                f"{save_dir}/rank{rank}_mb{_loss_counter}_loss_labels.pd",
-            )
-            self._loss_counter = _loss_counter + 1
 
         if self.use_subbatch and seq_len > self.loss_subbatch_sequence_length:
 
@@ -291,11 +278,30 @@ class LanguageLoss(FleetLayer):
                     f"[LOSS_PATH_MD5] rank={rank} loss_sum={loss_sum_val} final_loss={loss_sum_val / valid_count}",
                     flush=True,
                 )
+                # Also compute line-wise loss (matches EC's _line_wise_loss) for exact comparison
+                if self.config.gpt_model_use_experimental_version:
+                    _probe_loss_2d = loss.cast(
+                        paddle.float32
+                    ) * lossmask.reshape(labels.shape)
+                    _probe_lm_2d = lossmask.reshape(labels.shape)
+                    _probe_tc = _probe_lm_2d.sum(-1)
+                    _probe_inv = (_probe_tc == 0).astype(paddle.float32)
+                    _probe_lpl = _probe_loss_2d.sum(-1) / (
+                        _probe_tc + 1e-6 * _probe_inv
+                    )
+                    _probe_lpl = _probe_lpl * (1 - _probe_inv)
+                    _probe_lw = _probe_lpl.sum() / (
+                        (1 - _probe_inv).sum() + 1e-6
+                    )
+                    print(
+                        f"[LOSS_PATH_MD5] rank={rank} line_wise_loss={_probe_lw.item():.20f}",
+                        flush=True,
+                    )
 
             # EC-compat: line-wise loss (per-sample mean then average across samples)
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
             # is present, which changes the value due to division by (count + 1e-6).
-            if os.environ.get("gpt_model_use_experimental_version", "") == "1":
+            if self.config.gpt_model_use_experimental_version:
                 loss_2d = loss.cast(paddle.float32) * lossmask.reshape(
                     labels.shape
                 )

@@ -146,20 +146,6 @@ class GPTLMHead(ColumnParallelLinear):
                 f"[LOSS_PATH_MD5] rank={rank} lm_head_logits shape={list(logits.shape)} md5={l_md5}",
                 flush=True,
             )
-            # Save tensors for offline comparison
-            save_dir = "/root/paddlejob/share-storage/gpfs/system-public/wangxiangzhe/V2Precision/loss_debug_tensors/pf"
-            os.makedirs(save_dir, exist_ok=True)
-            _lm_counter = getattr(self, "_lm_counter", 0)
-            paddle.save(
-                hidden_states,
-                f"{save_dir}/rank{rank}_mb{_lm_counter}_lm_head_input.pd",
-            )
-            paddle.save(
-                logits,
-                f"{save_dir}/rank{rank}_mb{_lm_counter}_lm_head_logits.pd",
-            )
-            paddle.save(self.weight, f"{save_dir}/rank{rank}_lm_head_weight.pd")
-            self._lm_counter = _lm_counter + 1
 
         return logits
 

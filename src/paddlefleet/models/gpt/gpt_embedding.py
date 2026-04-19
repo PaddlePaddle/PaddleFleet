@@ -123,11 +123,6 @@ class GPTEmbedding(FleetLayer):
             attn_mask_startend_row_indices = dict_args.get(
                 "startend_row_indices", None
             )
-            if attn_mask_startend_row_indices is not None:
-                print(
-                    "[ALIGNMENT PATH HIT] gpt_embedding: startend_row_indices fallback key used",
-                    flush=True,
-                )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None

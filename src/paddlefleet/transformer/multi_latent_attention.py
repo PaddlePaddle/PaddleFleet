@@ -19,10 +19,6 @@ from typing import NoReturn
 
 import paddle
 from paddle import Tensor
-
-_ERNIECORE_ALIGNMENT = (
-    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-)
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
@@ -735,26 +731,20 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
-                if _ERNIECORE_ALIGNMENT:
+                if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
                         TransformerLayer,
                     )
 
                     _log = TransformerLayer._log_md5
-                    if not hasattr(self, "_ec_mla_rope_path_logged"):
-                        print(
-                            "[ALIGNMENT PATH HIT] multi_latent_attention: _ec_compatible_rope_apply called (MLA)",
-                            flush=True,
-                        )
-                        self._ec_mla_rope_path_logged = True
                     _log(q_pos_emb, "mla_q_pe_before_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_before_rope", self.layer_number)
                     q_pos_emb, k_pos_emb = _ec_compatible_rope_apply(
                         q_pos_emb,
                         k_pos_emb,
                         q_len,
-                        rope_base=1000000.0,  # EC uses rope_theta=1000000 (from model_config.json)
+                        rope_base=self.config.rope_theta,  # Must match EC's config.rope_theta
                     )
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)

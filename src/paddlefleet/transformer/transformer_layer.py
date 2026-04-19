@@ -143,9 +143,7 @@ class TransformerLayer(nn.Layer):
     output of the same size.
     """
 
-    _ERNIECORE_ALIGNMENT = (
-        os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-    )
+    _gpt_model_use_experimental_version = False
     _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
     _skip_mtp_probes = (
         False  # Set True during MTP forward to suppress MD5 probes
@@ -156,7 +154,7 @@ class TransformerLayer(nn.Layer):
         """Log MD5 of a tensor for precision alignment debugging."""
         if (
             TransformerLayer._LOG_LAYER_MD5
-            and TransformerLayer._ERNIECORE_ALIGNMENT
+            and TransformerLayer._gpt_model_use_experimental_version
         ):
             if TransformerLayer._skip_mtp_probes:
                 return  # Skip MTP passes — EC has no MTP
@@ -186,6 +184,9 @@ class TransformerLayer(nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
         self.config = config
+        TransformerLayer._gpt_model_use_experimental_version = (
+            config.gpt_model_use_experimental_version
+        )
 
         self.layer_number = layer_number
         self.hidden_dropout_prob = (
@@ -859,7 +860,7 @@ class TransformerLayer(nn.Layer):
         # Log MLP raw output before BDA
         if (
             TransformerLayer._LOG_LAYER_MD5
-            and TransformerLayer._ERNIECORE_ALIGNMENT
+            and TransformerLayer._gpt_model_use_experimental_version
         ):
             _mlp_tensor = (
                 mlp_output_with_bias[0]
