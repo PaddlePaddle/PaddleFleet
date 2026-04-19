@@ -9,6 +9,18 @@ if [[ -z "$DISTRIBUTED_ARGS" ]]; then
     exit 0
 fi
 
+# NLTK 下载（cite eval 中需要）
+# python -c "import ssl; import nltk; ssl._create_default_https_context = ssl._create_unverified_context; nltk.download('punkt_tab')"
+
+unset PADDLE_ELASTIC_JOB_ID
+unset PADDLE_TRAINER_ENDPOINTS
+unset DISTRIBUTED_TRAINER_ENDPOINTS
+unset FLAGS_START_PORT
+unset PADDLE_ELASTIC_TIMEOUT
+unset PADDLE_TRAINERS_NUM
+export PADDLE_TRAINERS_NUM=1
+export FLAGS_flash_attn_version=3
+
 export PYTHONPATH="`pwd`:${PYTHONPATH:-}"
 
 cd "eval/HELMET"
