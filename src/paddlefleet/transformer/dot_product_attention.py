@@ -279,6 +279,13 @@ class DotProductAttention(FleetLayer):
             from paddle.nn.functional.flash_attention import (
                 flashmask_attention as _flashmask_attention,
             )
+        use_eager = getattr(self.config, '_attn_implementation', 'default') == 'eager'
+
+        if use_eager and packed_seq_params is not None:
+            raise ValueError(
+                "packed_seq_params is not supported when _attn_implementation='eager'. "
+            )
+
         if packed_seq_params is not None:
             assert (
                 query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
@@ -328,7 +335,11 @@ class DotProductAttention(FleetLayer):
             )
             attn_output = attn_output.reshape([0, 0, -1])
             return attn_output
-        use_eager = getattr(self.config, '_attn_implementation', 'default') == 'eager'
+        if use_eager and attn_mask_startend_row_indices is not None:
+            raise ValueError(
+                "attn_mask_startend_row_indices is not supported when _attn_implementation='eager'. "
+            )
+
         if (
             query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
         ) and attn_mask_startend_row_indices is None and not use_eager:
