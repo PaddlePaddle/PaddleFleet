@@ -285,7 +285,9 @@ class DotProductAttention(FleetLayer):
 
         if use_eager and packed_seq_params is not None:
             raise ValueError(
-                "packed_seq_params is not supported when _attn_implementation='eager'. "
+                "packed_seq_params is not supported when "
+                "_attn_implementation='eager'. Supported values: "
+                "'default', 'eager'."
             )
 
         if packed_seq_params is not None:
