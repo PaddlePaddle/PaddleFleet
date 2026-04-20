@@ -236,10 +236,13 @@ class RandomSTE(paddle.autograd.PyLayer):
     def forward(ctx, x):
         ctx.x_shape = x.shape
         ctx.x_dtype = x.dtype
-        with get_cuda_rng_tracker().fork(
-            get_expert_parallel_rng_tracker_name()
-        ):
+        if dist.get_world_size() <= 1:
             return paddle.randn(x.shape).cast(x.dtype)
+        else:
+            with get_cuda_rng_tracker().fork(
+                get_expert_parallel_rng_tracker_name()
+            ):
+                return paddle.randn(x.shape).cast(x.dtype)
 
     @staticmethod
     def backward(ctx, grad_output):
