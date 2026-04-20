@@ -241,17 +241,11 @@ install_dependencies() {
     # 安装测试依赖
     pip install bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
 
-    # 安装 PaddleFormers
-    cd PaddleFormers
-    pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
-    cd ..
-
     # 打印版本信息
     echo ""
     echo "=== 版本信息 ==="
     python -c "import paddle; print('paddle:', paddle.version.commit)" 2>/dev/null || echo "无法导入 paddle"
     python -c "import paddlefleet; print('paddlefleet:', paddlefleet.version.commit)" 2>/dev/null || echo "无法导入 paddlefleet"
-    python -c "import paddleformers; print('paddleformers:', paddleformers.version.commit)" 2>/dev/null || echo "无法导入 paddleformers"
 
     echo ""
     echo "✓ 依赖安装完成"
@@ -335,8 +329,6 @@ fi
 
 # 运行单卡模型测试
 if [ "$RUN_SINGLE_MODEL" = true ]; then
-    print_deps_version
-
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-single"
 
     # 如果没有指定具体模型，运行所有单卡模型测试
@@ -345,6 +337,10 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
     fi
 
     echo ""
+    cd PaddleFormers
+    pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+    cd ..
+    print_deps_version
     echo "=== 开始单卡模型测试 ==="
 
     for model in "${SINGLE_MODEL_TESTS[@]}"; do
@@ -417,6 +413,9 @@ fi
 
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
+    cd PaddleFormers
+    pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+    cd ..
     print_deps_version
 
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-multi"
