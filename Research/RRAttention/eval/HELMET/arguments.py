@@ -14,7 +14,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="evaluation on downstream tasks")
     parser.add_argument("--config", type=str, default=None, help="path to config file")
     parser.add_argument("--tag", type=str, default="eval", help="tag to add to the output file")
-    parser.add_argument("--method", type=str, default="full", help="sparse method used to eval")
+    parser.add_argument("--method", type=str, default="full", help="sparse method used to eval, e.g. xattn, rrattn, flex, full")
     parser.add_argument("--threshold", type=float, default=0.95, help="topp threshold")
     parser.add_argument("--rrattn_version", type=str, default="v1", help="rrattn version, e.g. v1")
     parser.add_argument("--stride", type=int, default=8, help="rrattn stride")
@@ -106,7 +106,7 @@ def parse_arguments():
     if args.method != 'full':
         args.output_dir = args.output_dir + f"_{args.threshold}"
 
-    if args.method == 'rrattn' and args.stride != 8:
+    if args.method in ("xattn", "rrattn") and args.stride != 8:
         args.output_dir = args.output_dir + f"_s{args.stride}"
 
     if not args.do_sample and args.temperature != 0.0:

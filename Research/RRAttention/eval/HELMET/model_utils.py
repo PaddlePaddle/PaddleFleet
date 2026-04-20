@@ -987,16 +987,17 @@ class HFModel(LLM):
             if record_ttft_ms:
                 if record_attn_ms:
                     method = kwargs.get("method", "full")
-                    if method == "rrattn":
+                    if method == "xattn":
+                        import rrattn.xattention as prefill_mod
+                    elif method == "rrattn":
                         import rrattn.rrattention as prefill_mod
-
-                        reset_estimate_time = prefill_mod.set_rrattn_estimate_func_time
-                        get_estimate_time = prefill_mod.get_rrattn_estimate_func_time
+                    elif method == "flex":
+                        import rrattn.flexprefill as prefill_mod
                     else:
                         import rrattn.full_prefill as prefill_mod
 
-                        reset_estimate_time = prefill_mod.set_estimate_func_time
-                        get_estimate_time = prefill_mod.get_estimate_func_time
+                    reset_estimate_time = prefill_mod.set_estimate_func_time
+                    get_estimate_time = prefill_mod.get_estimate_func_time
 
                 torch.cuda.synchronize()
                 prefill_mod.set_profile(True)

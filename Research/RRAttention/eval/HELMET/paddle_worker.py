@@ -69,17 +69,30 @@ def load_patch(model_type):
 
 
 def load_profile_fns(method):
-    if method == "rrattn":
+    if method == "xattn":
+        from rrattn.xattention import (
+            get_attn_time,
+            get_estimate_func_time,
+            set_attn_time,
+            set_estimate_func_time,
+            set_profile,
+        )
+    elif method == "rrattn":
         from rrattn.rrattention import (
             get_attn_time,
-            get_rrattn_estimate_func_time,
+            get_estimate_func_time,
             set_attn_time,
+            set_estimate_func_time,
             set_profile,
-            set_rrattn_estimate_func_time,
         )
-
-        get_estimate_func_time = get_rrattn_estimate_func_time
-        set_estimate_func_time = set_rrattn_estimate_func_time
+    elif method == "flex":
+        from rrattn.flexprefill import (
+            get_attn_time,
+            get_estimate_func_time,
+            set_attn_time,
+            set_estimate_func_time,
+            set_profile,
+        )
     elif method == "full":
         from rrattn.full_prefill import (
             get_attn_time,
@@ -89,7 +102,7 @@ def load_profile_fns(method):
             set_profile,
         )
     else:
-        raise ValueError(f"Unsupported method={method!r}; supported methods are: rrattn, full")
+        raise ValueError(f"Unsupported method={method!r}; supported methods are: xattn, rrattn, flex, full")
 
     set_profile(False)
     return set_profile, set_attn_time, get_attn_time, set_estimate_func_time, get_estimate_func_time
@@ -424,7 +437,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name_or_path", required=True)
     parser.add_argument("--model_type", default="auto", choices=["auto", "llama", "qwen", "ernie"])
-    parser.add_argument("--method", default="full", choices=["rrattn", "full"])
+    parser.add_argument("--method", default="full", choices=["xattn", "rrattn", "flex", "full"])
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--stride", type=int, default=8)
     parser.add_argument("--rrattn_version", default="v1")

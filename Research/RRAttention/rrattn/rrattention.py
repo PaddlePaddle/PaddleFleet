@@ -9,7 +9,7 @@ from .utils import find_blocks_chunked
 
 enable_profile = False
 attn_time_ms = 0.0
-rrattn_estimate_func_time_ms = 0.0
+estimate_func_time_ms = 0.0
 
 
 def set_profile(enable=True):
@@ -37,19 +37,19 @@ def add_attn_time(attn_time):
     attn_time_ms += attn_time
 
 
-def set_rrattn_estimate_func_time(time_ms=0.0):
-    global rrattn_estimate_func_time_ms
-    rrattn_estimate_func_time_ms = time_ms
+def set_estimate_func_time(time_ms=0.0):
+    global estimate_func_time_ms
+    estimate_func_time_ms = time_ms
 
 
-def get_rrattn_estimate_func_time():
-    global rrattn_estimate_func_time_ms
-    return rrattn_estimate_func_time_ms
+def get_estimate_func_time():
+    global estimate_func_time_ms
+    return estimate_func_time_ms
 
 
-def add_rrattn_estimate_func_time(time_ms):
-    global rrattn_estimate_func_time_ms
-    rrattn_estimate_func_time_ms += time_ms
+def add_estimate_func_time(time_ms):
+    global estimate_func_time_ms
+    estimate_func_time_ms += time_ms
 
 
 def can_use_triton_kernels():
@@ -77,23 +77,10 @@ def block_sparse_attention(
     if not causal:
         raise NotImplementedError("F.flashmask_attention block_mask path currently supports causal=True")
 
-    q_block_num = (q_len + block_size - 1) // block_size
-    k_block_num = (k_len + block_size - 1) // block_size
-    q_num_to_pad = q_block_num * block_size - q_len
-    k_num_to_pad = k_block_num * block_size - k_len
-
-    if q_num_to_pad > 0:
-        query_states = F.pad(query_states, (0, 0, 0, q_num_to_pad), value=0)
-    if k_num_to_pad > 0:
-        key_states = F.pad(key_states, (0, 0, 0, k_num_to_pad), value=0)
-        value_states = F.pad(value_states, (0, 0, 0, k_num_to_pad), value=0)
-
-    padded_q_len = q_len + q_num_to_pad
-    padded_k_len = k_len + k_num_to_pad
     block_mask = block_mask.astype(paddle.int32).contiguous()
     startend_row_indices = paddle.full(
-        (batch_size, num_heads, padded_k_len, 1),
-        padded_q_len,
+        (batch_size, num_heads, k_len, 1),
+        q_len,
         dtype=paddle.int32,
         device=query_states.device,
     ).contiguous()
@@ -107,7 +94,7 @@ def block_sparse_attention(
         causal=causal,
         block_mask=block_mask,
     )
-    return attn_output[:, :q_len].contiguous()
+    return attn_output.contiguous()
 
 
 def rrattn_estimate(
@@ -296,7 +283,7 @@ def rrattn_prefill(
     if is_enable_profile():
         end_event.record()
         paddle.cuda.synchronize()
-        add_rrattn_estimate_func_time(start_event.elapsed_time(end_event))
+        add_estimate_func_time(start_event.elapsed_time(end_event))
 
     if query_states.device != key_states.device:
         key_states = key_states.to(query_states.device)
@@ -347,7 +334,7 @@ __all__ = [
     "set_attn_time",
     "get_attn_time",
     "add_attn_time",
-    "set_rrattn_estimate_func_time",
-    "get_rrattn_estimate_func_time",
-    "add_rrattn_estimate_func_time",
+    "set_estimate_func_time",
+    "get_estimate_func_time",
+    "add_estimate_func_time",
 ]

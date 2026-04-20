@@ -34,7 +34,12 @@ def get_estimate_func_time():
     global estimate_func_time_ms
     return estimate_func_time_ms
 
-def Full_prefill(
+
+def add_estimate_func_time(estimate_func_time):
+    global estimate_func_time_ms
+    estimate_func_time_ms += estimate_func_time
+
+def full_prefill(
     query_states: paddle.Tensor,
     key_states: paddle.Tensor,
     value_states: paddle.Tensor,
@@ -71,7 +76,7 @@ def Full_prefill(
 
     return attn_output
 
-def FA_Full_prefill(
+def flash_full_prefill(
     query_states: paddle.Tensor,
     key_states: paddle.Tensor,
     value_states: paddle.Tensor,

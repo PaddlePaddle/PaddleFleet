@@ -8,16 +8,18 @@ from paddle.nn.functional.flash_attention import flash_attention
 from paddleformers.nn.attention.eager_attention import repeat_kv
 from paddleformers.utils.masking_utils import _gen_from_sparse_attn_mask_indices
 
-from .full_prefill import FA_Full_prefill
+from .flexprefill import flex_prefill
+from .full_prefill import flash_full_prefill
 from .rrattention import rrattn_prefill
+from .xattention import xattn_prefill
 
-SUPPORTED_METHODS = ("rrattn", "full")
+SUPPORTED_METHODS = ("xattn", "rrattn", "flex", "full")
 PATCHED_ATTN_IMPLEMENTATION = "sdpa"
 
 
 def validate_method(method: str):
     if method not in SUPPORTED_METHODS:
-        raise ValueError(f"Unsupported method={method!r}; supported methods are: rrattn, full")
+        raise ValueError(f"Unsupported method={method!r}; supported methods are: xattn, rrattn, flex, full")
 
 
 def select_layer_value(value, layer_idx: int):
@@ -161,13 +163,25 @@ def attention_branch(
 
     key_states = repeat_kv(key_states, module.num_key_value_groups)
     value_states = repeat_kv(value_states, module.num_key_value_groups)
-    module.rrattn_last_q_len = query_states.shape[2]
-    module.rrattn_last_k_len = key_states.shape[2]
 
     if key_states.shape[2] == query_states.shape[2]:
-        module.rrattn_seen_prefill = True
-        if method == "rrattn":
-            module.rrattn_last_attention_path = "prefill_rrattn"
+        if method == "xattn":
+            threshold = getattr(module, "threshold", 0.9)
+            attn_output, sparse_ratio = xattn_prefill(
+                query_states,
+                key_states,
+                value_states,
+                norm=1,
+                stride=getattr(module, "stride", 8),
+                threshold=threshold,
+                use_triton=getattr(module, "use_triton", True),
+                keep_sink=getattr(module, "keep_sink", True),
+                keep_recent=getattr(module, "keep_recent", True),
+                chunk_size=getattr(module, "chunk_size", 16384),
+                layer_idx=getattr(module, "layer_idx", None),
+            )
+            module.sparse_ratio = sparse_ratio
+        elif method == "rrattn":
             threshold = getattr(module, "threshold", 0.9)
             attn_output, sparse_ratio = rrattn_prefill(
                 query_states,
@@ -186,9 +200,27 @@ def attention_branch(
                 config=getattr(module, "rrattn_config", None),
             )
             module.sparse_ratio = sparse_ratio
+        elif method == "flex":
+            result = flex_prefill(
+                query_states.transpose(1, 2),
+                key_states.transpose(1, 2),
+                value_states.transpose(1, 2),
+                gamma=getattr(module, "threshold", 0.9),
+                tau=getattr(module, "tau", 0.1),
+                min_budget=getattr(module, "min_budget", None),
+                max_budget=getattr(module, "max_budget", None),
+                gqa_interleave=getattr(module, "gqa_interleave", False),
+                softmax_scale=scaling,
+                block_size=getattr(module, "block_size", 128),
+            )
+            if isinstance(result, tuple):
+                attn_output, sparse_ratio = result
+            else:
+                attn_output = result
+                sparse_ratio = 0.0
+            module.sparse_ratio = sparse_ratio
         else:
-            module.rrattn_last_attention_path = "prefill_full"
-            attn_output = FA_Full_prefill(
+            attn_output = flash_full_prefill(
                 query_states.transpose(1, 2),
                 key_states.transpose(1, 2),
                 value_states.transpose(1, 2),
@@ -196,8 +228,6 @@ def attention_branch(
             )
             module.sparse_ratio = 0.0
     else:
-        module.rrattn_seen_decode = True
-        module.rrattn_last_attention_path = "decode_dense"
         attn_output = dense_decode_attention(
             query_states,
             key_states,
