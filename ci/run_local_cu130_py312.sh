@@ -239,7 +239,8 @@ install_dependencies() {
     pip install ${PADDLE_URL} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
 
     # 安装测试依赖
-    pip install bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+    pip install bce-python-sdk==0.8.74 wrapt matplotlib pytest parameterized
+    pip install uv coverage==7.13.0
 
     # 打印版本信息
     echo ""
