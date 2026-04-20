@@ -346,7 +346,7 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
     cd ..
     print_deps_version
     echo "=== 开始单卡模型测试 ==="
-    find PaddleFormers/tests/integration_test -type f -exec sed -i '' 's/--no-proxy//g' {} +
+    find PaddleFormers/tests/integration_test -type f -exec sed -i 's/--no-proxy//g' {} +
 
     for model in "${SINGLE_MODEL_TESTS[@]}"; do
         echo "  运行 $model 单卡测试..."
@@ -438,7 +438,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
 
     echo ""
     echo "=== 开始多卡模型测试 ==="
-    find PaddleFormers/tests/integration_test -type f -exec sed -i '' 's/--no-proxy//g' {} +
+    find PaddleFormers/tests/integration_test -type f -exec sed -i 's/--no-proxy//g' {} +
 
 
     for model in "${MULTI_MODEL_TESTS[@]}"; do
