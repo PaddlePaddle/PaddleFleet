@@ -585,6 +585,69 @@ class HybridEPCombine(PyLayer):
         return grad_x
 
 
+class HybridEPCombineAsync(PyLayer):
+    """HybridEP combine bridge with shared-expert overlap support."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        manager,
+        *fn_args,
+        fn,
+        is_first_fwd=False,
+    ):
+        handle = manager.handle
+        combined_x, _ = manager._buffer.combine_with_unpermute(
+            hidden=x,
+            handle=handle,
+            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+        )
+        combined_x.stop_gradient = False
+
+        assert fn is not None, "use HybridEPCombineAsync, but fn is None."
+        ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
+
+        ctx.buffer = manager._buffer
+        ctx.handle = handle
+        ctx.group = manager.group
+        ctx.use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
+        ctx.num_permuted_tokens = x.shape[0]
+
+        wait_for_deepep(manager.group.id)
+
+        return (combined_x,) + fn_out
+
+    @staticmethod
+    def backward(ctx, grad_output, *fn_out_grads):
+        replay_handle = ctx.handle
+        if ctx.use_fp8_dispatch:
+            replay_config = ctx.buffer.update_template_config(
+                hidden_dim=grad_output.shape[-1],
+                num_of_tokens_per_rank=ctx.handle[6],
+                num_local_experts=ctx.handle[7].num_of_experts_per_rank,
+                use_fp8=False,
+            )
+            replay_handle = (
+                *ctx.handle[:7],
+                replay_config,
+                ctx.handle[8],
+            )
+        grad_x, _, _, _, _ = ctx.buffer.dispatch_with_permute(
+            hidden=grad_output.contiguous(),
+            handle=replay_handle,
+            num_permuted_tokens=ctx.num_permuted_tokens,
+            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+            non_blocking=False,
+        )
+        grad_x = grad_x[: ctx.num_permuted_tokens]
+
+        wait_for_deepep(ctx.group.id)
+        fn_args_grads = ctx.bwf(*fn_out_grads)
+        wait_for_deepep(ctx.group.id)
+        return (grad_x,) + fn_args_grads  # noqa: RUF005
+
+
 def hybrid_ep_dispatch(
     x,
     token_indices,
@@ -602,12 +665,27 @@ def hybrid_ep_dispatch(
     )
 
 
-def hybrid_ep_combine(x, manager):
+def hybrid_ep_combine(x, manager, combine_overlap_handle=None):
     """Perform HybridEP combine_with_unpermute with explicit Paddle autograd."""
-    return HybridEPCombine.apply(
+    if combine_overlap_handle is None:
+        return HybridEPCombine.apply(
+            x,
+            manager,
+        )
+
+    assert isinstance(combine_overlap_handle, dict)
+    assert "fn" in combine_overlap_handle
+    assert "fn_args" in combine_overlap_handle
+    assert isinstance(combine_overlap_handle["fn_args"], tuple)
+    combined_x, *fn_out = HybridEPCombineAsync.apply(
         x,
         manager,
+        *(combine_overlap_handle["fn_args"]),
+        fn=combine_overlap_handle["fn"],
+        is_first_fwd=not framework._dygraph_tracer()._has_grad,
     )
+    combine_overlap_handle["fn_out"] = fn_out
+    return combined_x
 
 
 class DispatchNode:

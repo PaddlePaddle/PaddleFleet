@@ -240,12 +240,6 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
                 self.moe_use_fusion_node = config.moe_use_fusion_node
-                if is_hybrid_ep_backend_selected() and self.fp8:
-                    if self.moe_shared_expert_overlap:
-                        logger.info(
-                            "HybridEP fp8 path does not support moe_shared_expert_overlap; disabling it."
-                        )
-                        self.moe_shared_expert_overlap = False
             else:
                 if self.moe_grouped_gemm:
                     raise ValueError(
@@ -499,9 +493,6 @@ class MoELayer(nn.Layer):
         dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
             hidden_states, probs, routing_map
         )
-        dispatched_indices = (
-            self.token_dispatcher._comm_manager.dispatched_indices
-        )
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
 
         if self._use_hybrid_ep_fusion():
@@ -511,6 +502,9 @@ class MoELayer(nn.Layer):
                 fp8_dispatched_handle=fp8_dispatched_handle,
             )
         elif self.using_sonic_moe:
+            dispatched_indices = (
+                self.token_dispatcher._comm_manager.dispatched_indices
+            )
             T = dispatched_hidden_states.shape[0]
             K = self.num_experts_per_tok
             stream_id = paddle.device.cuda.current_stream().cuda_stream
@@ -574,6 +568,9 @@ class MoELayer(nn.Layer):
                 activation_type,
             )
         else:
+            dispatched_indices = (
+                self.token_dispatcher._comm_manager.dispatched_indices
+            )
             hidden_states = FusionMoePyLayer.apply(
                 dispatched_hidden_states,
                 dispatched_probs,
@@ -653,9 +650,6 @@ class MoELayer(nn.Layer):
                     async_finish=async_finish,
                 )
             )
-            dispatched_indices = (
-                self.token_dispatcher._comm_manager.dispatched_indices
-            )
             dispatched_probs = (
                 self.token_dispatcher._comm_manager.dispatched_probs
             )
@@ -668,6 +662,11 @@ class MoELayer(nn.Layer):
                 dispatched_hidden_states, hidden_states.dtype
             )
             guard_status["x"].stop_gradient = True
+            dispatched_indices = None
+            if not self._use_hybrid_ep_fusion():
+                dispatched_indices = (
+                    self.token_dispatcher._comm_manager.dispatched_indices
+                )
             return (
                 dispatched_hidden_states,
                 dispatched_indices,
