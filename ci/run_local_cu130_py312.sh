@@ -14,8 +14,7 @@
 # limitations under the License.
 
 # 本地运行脚本 - CUDA 13.0 + Python 3.12
-# 使用 uv 管理虚拟环境
-# 基于 .github/workflows/ce_daily_dev.yml
+# 使用镜像中的 Python，所有依赖只安装一次
 
 set -e
 
@@ -37,13 +36,6 @@ RUN_MULTI_UNIT=false
 RUN_SINGLE_MODEL=false
 RUN_MULTI_MODEL=false
 
-# 是否复用环境
-REUSE_ENV=false
-REUSE_ENV_NAME=""
-
-# 是否在测试后删除环境 (默认保留)
-CLEAN_ENV=false
-
 # 默认模型测试
 SINGLE_MODEL_TESTS=()
 MULTI_MODEL_TESTS=()
@@ -53,6 +45,9 @@ RESULT_FILE="test_results_${RUN_DATE}.txt"
 TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
+
+# 标记是否已安装依赖
+DEPS_INSTALLED=false
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -85,15 +80,6 @@ while [[ $# -gt 0 ]]; do
                 shift
             fi
             ;;
-        --clean-env)
-            CLEAN_ENV=true
-            shift
-            ;;
-        --reuse-env)
-            REUSE_ENV=true
-            REUSE_ENV_NAME="$2"
-            shift 2
-            ;;
         --all)
             RUN_SINGLE_UNIT=true
             RUN_SINGLE_SONIC=true
@@ -113,27 +99,18 @@ while [[ $# -gt 0 ]]; do
             echo "                     可选指定模型: --single-model glm45,qwen3,qwen3vl"
             echo "  --multi-model      运行多卡模型测试"
             echo "                     可选指定模型: --multi-model glm45_pt,qwen3_pt,qwen3vl_sft"
-            echo "  --reuse-env NAME   复用指定的 uv 环境，所有测试共用同一个环境"
-            echo "                     示例: --reuse-env single"
-            echo "  --clean-env        测试完成后删除创建的 uv 环境"
             echo "  --all              运行所有测试"
             echo "  --help             显示帮助信息"
             echo ""
-            echo "UV 虚拟环境:"
-            echo "  默认每个测试使用独立的 uv 虚拟环境，避免依赖冲突"
-            echo "  - 单卡测试 (单元测试 + Sonic MoE): .venv/single"
-            echo "  - 多卡单元测试: .venv/multi_unit"
-            echo "  - 单卡模型测试: .venv/single_model"
-            echo "  - 多卡模型测试: .venv/multi_model"
-            echo ""
-            echo "  使用 --reuse-env 时，所有测试共用指定环境"
+            echo "依赖安装:"
+            echo "  所有依赖（包括 PaddleFormers）只在第一次运行时安装一次"
+            echo "  直接使用镜像中的 Python，无需虚拟环境"
             echo ""
             echo "示例:"
             echo "  $0 --single-unit --single-sonic"
             echo "  $0 --single-model glm45,qwen3"
             echo "  $0 --multi-model glm45_pt,qwen3vl_sft"
-            echo "  $0 --all --clean-env"
-            echo "  $0 --reuse-env single --single-unit --single-model glm45"
+            echo "  $0 --all"
             exit 0
             ;;
         *)
@@ -158,22 +135,13 @@ fi
 echo "========================================"
 echo "测试配置:"
 echo "========================================"
-if [ "$REUSE_ENV" = true ]; then
-    echo "  ✓ 复用环境: .venv/$REUSE_ENV_NAME"
-else
-    if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
-        echo "  ✓ 单卡测试 (环境: .venv/single)"
-    fi
-    [ "$RUN_MULTI_UNIT" = true ] && echo "  ✓ 多卡单元测试 (环境: .venv/multi_unit)"
-    [ "$RUN_SINGLE_MODEL" = true ] && echo "  ✓ 单卡模型测试 (环境: .venv/single_model): ${SINGLE_MODEL_TESTS[*]:-全部}"
-    [ "$RUN_MULTI_MODEL" = true ] && echo "  ✓ 多卡模型测试 (环境: .venv/multi_model): ${MULTI_MODEL_TESTS[*]:-全部}"
-fi
-[ "$CLEAN_ENV" = true ] && echo "  ✓ 测试后删除环境"
+[ "$RUN_SINGLE_UNIT" = true ] && echo "  ✓ 单卡单元测试"
+[ "$RUN_SINGLE_SONIC" = true ] && echo "  ✓ Sonic MoE 单卡测试"
+[ "$RUN_MULTI_UNIT" = true ] && echo "  ✓ 多卡单元测试"
+[ "$RUN_SINGLE_MODEL" = true ] && echo "  ✓ 单卡模型测试: ${SINGLE_MODEL_TESTS[*]:-全部}"
+[ "$RUN_MULTI_MODEL" = true ] && echo "  ✓ 多卡模型测试: ${MULTI_MODEL_TESTS[*]:-全部}"
 echo "========================================"
 echo ""
-
-# 存储创建的环境名称
-CREATED_ENVS=()
 
 # 记录测试结果
 record_result() {
@@ -242,69 +210,56 @@ upload_logs_to_bos() {
     fi
 }
 
-# 函数：准备 uv 环境
-prepare_uv_env() {
-    pip install uv
-    local env_name=$1
-    local env_desc=$2
-
-    # 如果启用了复用环境，使用指定的环境名
-    if [ "$REUSE_ENV" = true ]; then
-        env_name="$REUSE_ENV_NAME"
-        env_desc="复用环境: $REUSE_ENV_NAME"
+# 安装所有依赖（只执行一次）
+install_dependencies() {
+    if [ "$DEPS_INSTALLED" = true ]; then
+        echo "✓ 依赖已安装，跳过"
+        return 0
     fi
-
-    local venv_dir=".venv/$env_name"
 
     echo ""
-    echo "=== 准备环境: $venv_dir ($env_desc) ==="
-
-    # 检查环境是否已存在
-    if [ -d "$venv_dir" ]; then
-        echo "环境 $venv_dir 已存在，跳过创建"
-        # 激活环境
-        source $venv_dir/bin/activate
-        echo "当前环境: $env_name"
-        echo "✓ 环境准备完成: $env_name (复用已有环境)"
-        return 0
-    else
-        echo "创建 uv 虚拟环境: $venv_dir"
-        uv venv $venv_dir --python ${PYTHON_VERSION}
-        CREATED_ENVS+=($venv_dir)
-    fi
-
-    # 激活环境
-    source $venv_dir/bin/activate
-    echo "当前环境: $env_name"
+    echo "=== 安装依赖（仅执行一次） ==="
 
     # 安装基础依赖
-    uv pip install colorlog>=6.10.1
+    echo "安装基础依赖..."
+    pip install colorlog>=6.10.1
 
-    # 安装 PaddleFleet (hack: 下载指定版本)
+    # 安装 PaddleFleet
     echo "安装 PaddleFleet..."
-    uv pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    pip install --pre paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
-    uv pip uninstall paddlepaddle -y || true
+    pip uninstall paddlepaddle -y || true
 
     # 安装 Paddle（会覆盖 PaddleFleet 自带的 Paddle）
     echo "安装指定版本的 Paddle..."
-    uv pip install ${PADDLE_URL} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+    pip install ${PADDLE_URL} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
 
     # 安装测试依赖
-    uv pip install uv bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+    pip install bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+
+    # 安装 PaddleFormers
+    echo "安装 PaddleFormers..."
+    if [ ! -d "PaddleFormers" ]; then
+        echo "克隆 PaddleFormers..."
+        git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
+    fi
+    cd PaddleFormers
+    pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+    cd ..
 
     # 打印版本信息
+    echo ""
     echo "=== 版本信息 ==="
     python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo "无法导入 paddle"
     python -c "import paddlefleet; print(paddlefleet.version.commit)"
 
-    echo "✓ 环境准备完成: $env_name"
+    DEPS_INSTALLED=true
+    echo "✓ 依赖安装完成"
 }
 
 # 运行单卡测试 (单元测试 + Sonic MoE)
 if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
-    ENV_NAME="single"
-    prepare_uv_env "$ENV_NAME" "单卡测试 (单元测试 + Sonic MoE)"
+    install_dependencies
 
     # 运行单卡单元测试
     if [ "$RUN_SINGLE_UNIT" = true ]; then
@@ -333,14 +288,11 @@ if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
             exit 1
         fi
     fi
-
-    [ "$REUSE_ENV" = false ] && deactivate
 fi
 
 # 运行多卡单元测试
 if [ "$RUN_MULTI_UNIT" = true ]; then
-    ENV_NAME="multi_unit"
-    prepare_uv_env "$ENV_NAME" "多卡单元测试"
+    install_dependencies
 
     echo ""
     echo "=== 开始多卡单元测试 ==="
@@ -356,15 +308,13 @@ if [ "$RUN_MULTI_UNIT" = true ]; then
     else
         echo "✗ 多卡测试脚本不存在，跳过"
     fi
-
-    [ "$REUSE_ENV" = false ] && deactivate
 fi
 
 # 运行单卡模型测试
 if [ "$RUN_SINGLE_MODEL" = true ]; then
-    ENV_NAME="single_model"
+    install_dependencies
+
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-single"
-    prepare_uv_env "$ENV_NAME" "单卡模型测试"
 
     # 如果没有指定具体模型，运行所有单卡模型测试
     if [ ${#SINGLE_MODEL_TESTS[@]} -eq 0 ]; then
@@ -373,19 +323,6 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
 
     echo ""
     echo "=== 开始单卡模型测试 ==="
-
-    # 检查 PaddleFormers
-    if [ ! -d "PaddleFormers" ]; then
-        echo "克隆 PaddleFormers..."
-        git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
-        cd PaddleFormers
-        uv pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
-        cd ..
-    else
-        cd PaddleFormers
-        uv pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ || true
-        cd ..
-    fi
 
     for model in "${SINGLE_MODEL_TESTS[@]}"; do
         echo "  运行 $model 单卡测试..."
@@ -453,15 +390,13 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
         esac
     done
     echo "✓ 单卡模型测试完成"
-
-    [ "$REUSE_ENV" = false ] && deactivate
 fi
 
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
-    ENV_NAME="multi_model"
+    install_dependencies
+
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-multi"
-    prepare_uv_env "$ENV_NAME" "多卡模型测试"
 
     # 如果没有指定具体模型，运行所有多卡模型测试
     if [ ${#MULTI_MODEL_TESTS[@]} -eq 0 ]; then
@@ -474,19 +409,6 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
 
     echo ""
     echo "=== 开始多卡模型测试 ==="
-
-    # 检查 PaddleFormers
-    if [ ! -d "PaddleFormers" ]; then
-        echo "克隆 PaddleFormers..."
-        git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
-        cd PaddleFormers
-        uv pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
-        cd ..
-    else
-        cd PaddleFormers
-        uv pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ || true
-        cd ..
-    fi
 
     for model in "${MULTI_MODEL_TESTS[@]}"; do
         echo "  运行 $model 多卡测试..."
@@ -706,45 +628,12 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
         esac
     done
     echo "✓ 多卡模型测试完成"
-
-    [ "$REUSE_ENV" = false ] && deactivate
 fi
 
 # 打印测试结果汇总
 print_summary
 
-# 如果是复用模式，在这里 deactivate
-if [ "$REUSE_ENV" = true ]; then
-    deactivate
-    echo "✓ 已关闭复用环境"
-fi
-
-# 清理创建的环境
-if [ "$CLEAN_ENV" = true ] && [ ${#CREATED_ENVS[@]} -gt 0 ]; then
-    echo ""
-    echo "=== 清理环境 ==="
-    for env in "${CREATED_ENVS[@]}"; do
-        echo "删除环境: $env"
-        rm -rf .venv/$env
-    done
-    echo "✓ 环境清理完成"
-fi
-
 echo ""
 echo "========================================"
 echo "=== 所有测试完成 ==="
 echo "========================================"
-
-# 显示创建的环境信息
-if [ ${#CREATED_ENVS[@]} -gt 0 ]; then
-    echo ""
-    echo "本次运行创建的环境:"
-    for env in "${CREATED_ENVS[@]}"; do
-        echo "  - $env"
-    done
-    if [ "$CLEAN_ENV" = false ]; then
-        echo ""
-        echo "提示: 使用 --clean-env 选项可在测试后自动删除这些环境"
-        echo "      手动删除: rm -rf .venv/<环境名>"
-    fi
-fi
