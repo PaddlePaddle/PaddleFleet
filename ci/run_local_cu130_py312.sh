@@ -37,6 +37,10 @@ RUN_MULTI_UNIT=false
 RUN_SINGLE_MODEL=false
 RUN_MULTI_MODEL=false
 
+# 是否复用环境
+REUSE_ENV=false
+REUSE_ENV_NAME=""
+
 # 是否在测试后删除环境 (默认保留)
 CLEAN_ENV=false
 
@@ -85,6 +89,11 @@ while [[ $# -gt 0 ]]; do
             CLEAN_ENV=true
             shift
             ;;
+        --reuse-env)
+            REUSE_ENV=true
+            REUSE_ENV_NAME="$2"
+            shift 2
+            ;;
         --all)
             RUN_SINGLE_UNIT=true
             RUN_SINGLE_SONIC=true
@@ -104,22 +113,27 @@ while [[ $# -gt 0 ]]; do
             echo "                     可选指定模型: --single-model glm45,qwen3,qwen3vl"
             echo "  --multi-model      运行多卡模型测试"
             echo "                     可选指定模型: --multi-model glm45_pt,qwen3_pt,qwen3vl_sft"
+            echo "  --reuse-env NAME   复用指定的 uv 环境，所有测试共用同一个环境"
+            echo "                     示例: --reuse-env single"
             echo "  --clean-env        测试完成后删除创建的 uv 环境"
             echo "  --all              运行所有测试"
             echo "  --help             显示帮助信息"
             echo ""
             echo "UV 虚拟环境:"
-            echo "  每个测试 case 使用独立的 uv 虚拟环境，避免依赖冲突"
+            echo "  默认每个测试使用独立的 uv 虚拟环境，避免依赖冲突"
             echo "  - 单卡测试 (单元测试 + Sonic MoE): .venv/single"
             echo "  - 多卡单元测试: .venv/multi_unit"
             echo "  - 单卡模型测试: .venv/single_model"
             echo "  - 多卡模型测试: .venv/multi_model"
+            echo ""
+            echo "  使用 --reuse-env 时，所有测试共用指定环境"
             echo ""
             echo "示例:"
             echo "  $0 --single-unit --single-sonic"
             echo "  $0 --single-model glm45,qwen3"
             echo "  $0 --multi-model glm45_pt,qwen3vl_sft"
             echo "  $0 --all --clean-env"
+            echo "  $0 --reuse-env single --single-unit --single-model glm45"
             exit 0
             ;;
         *)
@@ -144,14 +158,16 @@ fi
 echo "========================================"
 echo "测试配置:"
 echo "========================================"
-if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
-    echo "  ✓ 单卡测试 (环境: .venv/single)"
+if [ "$REUSE_ENV" = true ]; then
+    echo "  ✓ 复用环境: .venv/$REUSE_ENV_NAME"
+else
+    if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
+        echo "  ✓ 单卡测试 (环境: .venv/single)"
+    fi
+    [ "$RUN_MULTI_UNIT" = true ] && echo "  ✓ 多卡单元测试 (环境: .venv/multi_unit)"
+    [ "$RUN_SINGLE_MODEL" = true ] && echo "  ✓ 单卡模型测试 (环境: .venv/single_model): ${SINGLE_MODEL_TESTS[*]:-全部}"
+    [ "$RUN_MULTI_MODEL" = true ] && echo "  ✓ 多卡模型测试 (环境: .venv/multi_model): ${MULTI_MODEL_TESTS[*]:-全部}"
 fi
-[ "$RUN_SINGLE_UNIT" = true ] && echo "    - 单卡单元测试"
-[ "$RUN_SINGLE_SONIC" = true ] && echo "    - Sonic MoE 测试"
-[ "$RUN_MULTI_UNIT" = true ] && echo "  ✓ 多卡单元测试 (环境: .venv/multi_unit)"
-[ "$RUN_SINGLE_MODEL" = true ] && echo "  ✓ 单卡模型测试 (环境: .venv/single_model): ${SINGLE_MODEL_TESTS[*]:-全部}"
-[ "$RUN_MULTI_MODEL" = true ] && echo "  ✓ 多卡模型测试 (环境: .venv/multi_model): ${MULTI_MODEL_TESTS[*]:-全部}"
 [ "$CLEAN_ENV" = true ] && echo "  ✓ 测试后删除环境"
 echo "========================================"
 echo ""
@@ -231,6 +247,13 @@ prepare_uv_env() {
     pip install uv
     local env_name=$1
     local env_desc=$2
+
+    # 如果启用了复用环境，使用指定的环境名
+    if [ "$REUSE_ENV" = true ]; then
+        env_name="$REUSE_ENV_NAME"
+        env_desc="复用环境: $REUSE_ENV_NAME"
+    fi
+
     local venv_dir=".venv/$env_name"
 
     echo ""
@@ -239,6 +262,11 @@ prepare_uv_env() {
     # 检查环境是否已存在
     if [ -d "$venv_dir" ]; then
         echo "环境 $venv_dir 已存在，跳过创建"
+        # 激活环境
+        source $venv_dir/bin/activate
+        echo "当前环境: $env_name"
+        echo "✓ 环境准备完成: $env_name (复用已有环境)"
+        return 0
     else
         echo "创建 uv 虚拟环境: $venv_dir"
         uv venv $venv_dir --python ${PYTHON_VERSION}
@@ -255,6 +283,8 @@ prepare_uv_env() {
     # 安装 PaddleFleet (hack: 下载指定版本)
     echo "安装 PaddleFleet..."
     uv pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
+    uv pip uninstall paddlepaddle -y || true
 
     # 安装 Paddle（会覆盖 PaddleFleet 自带的 Paddle）
     echo "安装指定版本的 Paddle..."
@@ -304,7 +334,7 @@ if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
         fi
     fi
 
-    deactivate
+    [ "$REUSE_ENV" = false ] && deactivate
 fi
 
 # 运行多卡单元测试
@@ -327,7 +357,7 @@ if [ "$RUN_MULTI_UNIT" = true ]; then
         echo "✗ 多卡测试脚本不存在，跳过"
     fi
 
-    deactivate
+    [ "$REUSE_ENV" = false ] && deactivate
 fi
 
 # 运行单卡模型测试
@@ -349,11 +379,11 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
         echo "克隆 PaddleFormers..."
         git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
         cd PaddleFormers
-        pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+        uv pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
         cd ..
     else
         cd PaddleFormers
-        pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ || true
+        uv pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ || true
         cd ..
     fi
 
@@ -424,7 +454,7 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
     done
     echo "✓ 单卡模型测试完成"
 
-    deactivate
+    [ "$REUSE_ENV" = false ] && deactivate
 fi
 
 # 运行多卡模型测试
@@ -450,11 +480,11 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
         echo "克隆 PaddleFormers..."
         git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
         cd PaddleFormers
-        pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+        uv pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
         cd ..
     else
         cd PaddleFormers
-        pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ || true
+        uv pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ || true
         cd ..
     fi
 
@@ -677,11 +707,17 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
     done
     echo "✓ 多卡模型测试完成"
 
-    deactivate
+    [ "$REUSE_ENV" = false ] && deactivate
 fi
 
 # 打印测试结果汇总
 print_summary
+
+# 如果是复用模式，在这里 deactivate
+if [ "$REUSE_ENV" = true ]; then
+    deactivate
+    echo "✓ 已关闭复用环境"
+fi
 
 # 清理创建的环境
 if [ "$CLEAN_ENV" = true ] && [ ${#CREATED_ENVS[@]} -gt 0 ]; then
