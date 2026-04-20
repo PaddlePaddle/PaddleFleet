@@ -660,26 +660,12 @@ def _hybrid_ep_prepare_expert_counts(
     use_fp8_mlp,
     moe_grouped_gemm,
 ):
-    actual_tokens_per_expert = (
-        custom_map.token_dispatcher._comm_manager.tokens_per_expert
+    manager = custom_map.token_dispatcher._comm_manager
+    padded_tokens_per_expert = manager.padded_tokens_per_expert
+    assert padded_tokens_per_expert is not None, (
+        "HybridEP manager must populate padded_tokens_per_expert before "
+        "HybridEPMoePyLayer runs."
     )
-    padded_tokens_per_expert = getattr(
-        custom_map.token_dispatcher._comm_manager,
-        "padded_tokens_per_expert",
-        actual_tokens_per_expert,
-    )
-    if isinstance(actual_tokens_per_expert, list):
-        actual_tokens_per_expert_list = actual_tokens_per_expert
-        actual_tokens_per_expert_tensor = paddle.to_tensor(
-            actual_tokens_per_expert,
-            dtype="int64",
-            place=place,
-        )
-    else:
-        actual_tokens_per_expert_list = None
-        actual_tokens_per_expert_tensor = actual_tokens_per_expert.astype(
-            "int64"
-        )
     if isinstance(padded_tokens_per_expert, list):
         padded_tokens_per_expert_list = padded_tokens_per_expert
         padded_tokens_per_expert_tensor = paddle.to_tensor(
@@ -699,10 +685,6 @@ def _hybrid_ep_prepare_expert_counts(
     # - fp8 non-grouped split_group_gemm expert loops
     needs_host_counts = (not use_fp8_mlp) or (not moe_grouped_gemm)
     if needs_host_counts:
-        if actual_tokens_per_expert_list is None:
-            actual_tokens_per_expert_list = (
-                actual_tokens_per_expert_tensor.tolist()
-            )
         if padded_tokens_per_expert_list is None:
             padded_tokens_per_expert_list = (
                 padded_tokens_per_expert_tensor.tolist()
