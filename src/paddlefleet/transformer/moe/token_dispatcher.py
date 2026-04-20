@@ -62,16 +62,6 @@ try:
 except ImportError:
     deep_ep = None
 
-def _hybrid_ep_num_ranks_per_node(world_size: int) -> int:
-    local_size = os.getenv("PADDLE_LOCAL_SIZE")
-    if local_size is not None:
-        return int(local_size)
-    visible_devices = os.getenv("CUDA_VISIBLE_DEVICES")
-    if visible_devices:
-        return len([d for d in visible_devices.split(",") if d.strip()])
-    return world_size
-
-
 def _resolve_deep_ep_backend_name(backend_name: str | None = None) -> str:
     selected_backend = (
         _DEEP_EP_BACKEND if backend_name is None else backend_name
@@ -198,7 +188,6 @@ class _HybridEPManager(_DispatchManager):
         self._buffer_hidden_dim = None
         self._buffer_max_num_of_tokens_per_rank = 0
         self._needs_host_counts = needs_host_counts
-        self.num_ranks_per_node = _hybrid_ep_num_ranks_per_node(self.group.nranks)
 
     def _get_buffer(
         self,
@@ -717,7 +706,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         manager_cls = (
             _HybridEPManager if selected_backend == "hybrid" else _DeepepManager
         )
-        manager_kwargs = dict(
+        self._comm_manager = manager_cls(
             group=self.ep_group,
             router_topk=num_experts_per_tok,
             num_experts=n_routed_experts,
@@ -725,7 +714,6 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             moe_ep_barrier=moe_ep_barrier,
             needs_host_counts=needs_host_counts,
         )
-        self._comm_manager = manager_cls(**manager_kwargs)
 
     def dispatch_preprocess(
         self,

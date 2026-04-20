@@ -732,19 +732,25 @@ def _pad_front_rows(tensor, target_shape):
     return padded_tensor
 
 
-def _restore_hybrid_ep_probs_grad_shape(dispatched_probs_grad, original_probs_shape):
+def _restore_hybrid_ep_prob_grad_shape(
+    dispatched_probs_grad,
+    original_probs_shape,
+):
+    assert len(original_probs_shape) == 1, (
+        "HybridEP dispatched_probs is expected to stay 1D on the public "
+        f"contract, got original shape {original_probs_shape}"
+    )
+
     if (
-        len(original_probs_shape) == 1
-        and len(dispatched_probs_grad.shape) == 2
+        len(dispatched_probs_grad.shape) == 2
         and dispatched_probs_grad.shape[-1] == 1
     ):
         dispatched_probs_grad = dispatched_probs_grad.squeeze(-1)
-    elif (
-        len(original_probs_shape) == 2
-        and original_probs_shape[-1] == 1
-        and len(dispatched_probs_grad.shape) == 1
-    ):
-        dispatched_probs_grad = dispatched_probs_grad.unsqueeze(-1)
+    assert len(dispatched_probs_grad.shape) == 1, (
+        "HybridEP probs grad must normalize back to 1D, "
+        f"got shape {tuple(dispatched_probs_grad.shape)}"
+    )
+
     return _pad_front_rows(dispatched_probs_grad, original_probs_shape)
 
 
@@ -827,7 +833,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         hidden_states_grad = _pad_front_rows(
             hidden_states_grad, ctx.original_hidden_shape
         )
-        dispatched_probs_grad = _restore_hybrid_ep_probs_grad_shape(
+        dispatched_probs_grad = _restore_hybrid_ep_prob_grad_shape(
             dispatched_probs_grad,
             ctx.original_probs_shape,
         )
