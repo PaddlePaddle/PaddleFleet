@@ -281,6 +281,11 @@ class DotProductAttention(FleetLayer):
             )
         use_eager = self.config._attn_implementation == "eager"
 
+        if use_eager and packed_seq_params is not None:
+            raise ValueError(
+                'packed_seq_params does not support _attn_implementation="eager"; '
+                "please disable packed sequence inputs or use a fused attention implementation."
+            )
         if packed_seq_params is not None:
             assert (
                 query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
