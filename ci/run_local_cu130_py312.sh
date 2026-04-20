@@ -242,11 +242,6 @@ install_dependencies() {
     pip install bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
 
     # 安装 PaddleFormers
-    echo "安装 PaddleFormers..."
-    if [ ! -d "PaddleFormers" ]; then
-        echo "克隆 PaddleFormers..."
-        git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
-    fi
     cd PaddleFormers
     pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     cd ..
