@@ -162,15 +162,19 @@ def load_model(model_name, model_type, dtype):
     if model_type == "llama":
         from paddleformers.transformers import LlamaForCausalLM
 
-        return LlamaForCausalLM.from_pretrained(model_name, dtype=dtype)
+        return LlamaForCausalLM.from_pretrained(model_name, dtype=dtype, load_checkpoint_format="sharding_io")
     if model_type == "qwen":
         from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
 
-        return Qwen2ForCausalLMDeprecated.from_pretrained(model_name, dtype=dtype)
+        return Qwen2ForCausalLMDeprecated.from_pretrained(
+            model_name,
+            dtype=dtype,
+            load_checkpoint_format="sharding_io",
+        )
     if model_type == "ernie":
         from paddleformers.transformers import Ernie4_5ForCausalLM
 
-        return Ernie4_5ForCausalLM.from_pretrained(model_name, dtype=dtype)
+        return Ernie4_5ForCausalLM.from_pretrained(model_name, dtype=dtype, load_checkpoint_format="sharding_io")
     raise ValueError(f"Unsupported model_type={model_type!r}")
 
 
@@ -413,7 +417,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name", default="meta-llama/Llama-3.1-8B-Instruct")
     parser.add_argument("--model-type", default="auto", choices=["auto", "llama", "qwen", "ernie"])
-    parser.add_argument("--method", default="xattn", choices=["xattn", "rrattn", "flex", "full"])
+    parser.add_argument("--method", default="rrattn", choices=["xattn", "rrattn", "flex", "full"])
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--stride", type=int, default=8)
     parser.add_argument("--seq-lens", default=DEFAULT_SEQ_LENS)
