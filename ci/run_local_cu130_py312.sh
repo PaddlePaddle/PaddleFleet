@@ -149,19 +149,6 @@ echo "========================================"
 echo "========================================"
 echo ""
 
-# 如果是仅安装模式，安装依赖后退出
-if [ "$INSTALL_ONLY" = true ]; then
-    install_dependencies
-    echo ""
-    echo "========================================"
-    echo "=== 依赖安装完成 ==="
-    echo "========================================"
-    echo "现在可以运行测试，依赖已准备好，不会再重新安装"
-    echo "示例: $0 --single-unit"
-    echo "========================================"
-    exit 0
-fi
-
 # 记录测试结果
 record_result() {
     local test_name=$1
@@ -284,6 +271,19 @@ print_deps_version() {
     python -c "import paddleformers; print('paddleformers:', paddleformers.version.commit)" 2>/dev/null || echo "无法导入 paddleformers"
     echo ""
 }
+
+# 如果是仅安装模式，安装依赖后退出
+if [ "$INSTALL_ONLY" = true ]; then
+    install_dependencies
+    echo ""
+    echo "========================================"
+    echo "=== 依赖安装完成 ==="
+    echo "========================================"
+    echo "现在可以运行测试，依赖已准备好，不会再重新安装"
+    echo "示例: $0 --single-unit"
+    echo "========================================"
+    exit 0
+fi
 
 # 运行单卡测试 (单元测试 + Sonic MoE)
 if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
