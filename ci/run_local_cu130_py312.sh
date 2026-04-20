@@ -224,7 +224,7 @@ install_dependencies() {
     echo "安装基础依赖..."
     pip install colorlog>=6.10.1
 
-    pip uninstall paddlepaddle -y || true
+    pip uninstall paddlefleet -y || true
     pip uninstall paddlepaddle-gpu -y || true
     pip uninstall paddleformers -y || true
 
