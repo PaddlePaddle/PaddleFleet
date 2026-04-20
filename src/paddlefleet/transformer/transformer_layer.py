@@ -36,6 +36,7 @@ from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
+from paddlefleet.transformer.utils import profile
 from paddlefleet.utils import log_single_rank
 
 if is_deep_ep_available():
@@ -504,21 +505,24 @@ class TransformerLayer(nn.Layer):
         packed_seq_params: PackedSeqParams | None = None,
         **kwargs,
     ):
-        hidden_states, context = self._forward_attention(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-            context=context,
-            context_mask=context_mask,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            position_ids=position_ids,
-            attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            in_recompute=self.full_recompute,
-        )
-        output = self._forward_mlp(hidden_states)
+        timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
+        with profile("attn"):
+            hidden_states, context = self._forward_attention(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                context=context,
+                context_mask=context_mask,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=self.full_recompute,
+            )
+        with profile(timer_name):
+            output = self._forward_mlp(hidden_states)
         if context is not None:
             return output, context
         return output
@@ -709,10 +713,17 @@ class TransformerLayerWithOverlap(TransformerLayer):
             )
 
     def compute_attention(self, dict_args, is_first_fwd=False):
-        return self._forward_attention(**dict_args, is_first_fwd=is_first_fwd)
+        with profile("attn"):
+            return self._forward_attention(
+                **dict_args, is_first_fwd=is_first_fwd
+            )
 
     def compute_mlp(self, hidden_states, is_first_fwd=False):
-        return self._forward_mlp(hidden_states, is_first_fwd=is_first_fwd)
+        timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
+        with profile(timer_name):
+            return self._forward_mlp(
+                hidden_states, is_first_fwd=is_first_fwd
+            )
 
     def pre_process_compute(self, hidden_states):
         residual = hidden_states

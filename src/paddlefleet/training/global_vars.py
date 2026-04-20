@@ -18,6 +18,8 @@ from paddlefleet.timers import Timers
 
 _GLOBAL_ARGS = None
 _GLOBAL_TIMERS = None
+_GLOBAL_PROFILE_TIMERS = None
+_GLOBAL_TRAINING_LOGS = None
 
 
 def get_args():
@@ -32,9 +34,31 @@ def get_timers() -> Timers:
     return _GLOBAL_TIMERS
 
 
+def get_profile_timers():
+    """Return the active profile timers object if available."""
+    return _GLOBAL_PROFILE_TIMERS
+
+
+def get_global_training_logs():
+    """Return the active training logs object if one has been registered."""
+    return _GLOBAL_TRAINING_LOGS
+
+
 def set_args(args):
     global _GLOBAL_ARGS
     _GLOBAL_ARGS = args
+
+
+def set_global_training_logs(logs):
+    """Set the active training logs object."""
+    global _GLOBAL_TRAINING_LOGS
+    _GLOBAL_TRAINING_LOGS = logs
+
+
+def set_profile_timers(timers):
+    """Set the active timers object used by transformer profile scopes."""
+    global _GLOBAL_PROFILE_TIMERS
+    _GLOBAL_PROFILE_TIMERS = timers
 
 
 def _set_timers():
@@ -61,6 +85,12 @@ def destroy_global_vars():
     global _GLOBAL_TIMERS
     _GLOBAL_TIMERS = None
 
+    global _GLOBAL_PROFILE_TIMERS
+    _GLOBAL_PROFILE_TIMERS = None
+
+    global _GLOBAL_TRAINING_LOGS
+    _GLOBAL_TRAINING_LOGS = None
+
 
 def set_global_variables(args):
     """Set args, timers etc."""
@@ -75,5 +105,9 @@ def set_global_variables(args):
 def unset_global_variables():
     global _GLOBAL_ARGS
     global _GLOBAL_TIMERS
+    global _GLOBAL_PROFILE_TIMERS
+    global _GLOBAL_TRAINING_LOGS
     _GLOBAL_ARGS = None
     _GLOBAL_TIMERS = None
+    _GLOBAL_PROFILE_TIMERS = None
+    _GLOBAL_TRAINING_LOGS = None
