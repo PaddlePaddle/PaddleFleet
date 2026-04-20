@@ -279,6 +279,8 @@ class DotProductAttention(FleetLayer):
             from paddle.nn.functional.flash_attention import (
                 flashmask_attention as _flashmask_attention,
             )
+        use_eager = self.config._attn_implementation == "eager"
+
         if packed_seq_params is not None:
             assert (
                 query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
@@ -329,8 +331,10 @@ class DotProductAttention(FleetLayer):
             attn_output = attn_output.reshape([0, 0, -1])
             return attn_output
         if (
-            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
-        ) and attn_mask_startend_row_indices is None:
+            (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
+            and attn_mask_startend_row_indices is None
+            and not use_eager
+        ):
             # Note:
             # attention_mask is None in default
             # is_causal is True in default
@@ -354,8 +358,10 @@ class DotProductAttention(FleetLayer):
             return attn_output
 
         elif (
-            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
-        ) and attn_mask_startend_row_indices is not None:
+            (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
+            and attn_mask_startend_row_indices is not None
+            and not use_eager
+        ):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             flashmask_attention_func = (
