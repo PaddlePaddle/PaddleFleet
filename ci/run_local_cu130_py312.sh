@@ -228,6 +228,7 @@ upload_logs_to_bos() {
 
 # 函数：准备 uv 环境
 prepare_uv_env() {
+    pip install uv
     local env_name=$1
     local env_desc=$2
     local venv_dir=".venv/$env_name"
