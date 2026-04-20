@@ -97,35 +97,6 @@ def _ensure_zero_weight_grad(weight):
         weight._apply_backward_hook()
 
 
-def fused_stack_quant_without_cache(
-    expert_weight_list, transpose=False, use_ue8m0=False
-):
-    use_pow2_scale = False
-    current_device = paddle.device.get_device()
-    if paddle.is_compiled_with_cuda() and current_device.startswith("gpu"):
-        if paddle.device.cuda.get_device_capability()[0] == 10:
-            use_pow2_scale = True
-
-    if transpose:
-        w, scale = fuse_stack_transpose_fp8_quant(
-            expert_weight_list,
-            use_pow2_scale,
-            use_ue8m0,
-            use_ue8m0,
-        )
-    else:
-        w, scale = fuse_stack_fp8_quant(
-            expert_weight_list,
-            use_pow2_scale,
-            use_ue8m0,
-            use_ue8m0,
-        )
-
-    if use_ue8m0:
-        scale = scale.T
-    return w, scale
-
-
 def _get_fp8_weight_and_scale(weight, transpose=False):
     """_get_fp8_weight_and_scale"""
     if transpose:
