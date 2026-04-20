@@ -1558,7 +1558,6 @@ class ExpertsGroupGemmContiguousNode:
                     grad_attr = weights[i].grad
 
                 if n > 0:
-                    n = (n + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
                     end_idx = start_idx + n
                     paddle._C_ops.fused_linear_param_grad_add(
                         x._slice(start_idx, end_idx),

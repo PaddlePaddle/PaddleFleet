@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
@@ -23,6 +21,7 @@ from paddle.distributed.communication.group import Group
 
 from paddlefleet.ops import is_deep_ep_available
 
+from .fp8_utils import FP8_ALIGN
 from .moe_utils import manual_backward
 
 if is_deep_ep_available():
@@ -36,7 +35,6 @@ else:
     HAVE_DEEP_EP = False
 
 _buffer = None
-HYBRID_EP_PAD_MULTIPLE = int(os.getenv("HYBRID_EP_PAD_MULTIPLE", "128"))
 
 
 def barrier_ep(ep_group):
@@ -515,6 +513,7 @@ class HybridEPDispatch(PyLayer):
         ctx.handle = manager.handle
         ctx.token_indices = token_indices
         ctx.hidden_dtype = x.dtype
+        ctx.use_fp8_dispatch = fp8_dispatch
         ctx.set_grad_in_dtype_consistent(False)
         return recv_x, recv_token_probs, scale
 
@@ -529,7 +528,7 @@ class HybridEPDispatch(PyLayer):
             if grad_token_probs is None
             else grad_token_probs.astype("float32"),
             handle=ctx.handle,
-            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+            pad_multiple=FP8_ALIGN if ctx.use_fp8_dispatch else None,
         )
         grad_probs = None
         if grad_dense_probs is not None:
@@ -565,7 +564,7 @@ def _replay_hybrid_ep_dispatch_backward(
         hidden=grad_output.contiguous(),
         handle=replay_handle,
         num_permuted_tokens=num_permuted_tokens,
-        pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+        pad_multiple=FP8_ALIGN if use_fp8_dispatch else None,
         non_blocking=False,
     )
     return grad_x[:num_permuted_tokens]
@@ -577,15 +576,16 @@ class HybridEPCombine(PyLayer):
     @staticmethod
     def forward(ctx, x, manager):
         handle = manager.handle
+        use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
         combined_x, _ = manager._buffer.combine_with_unpermute(
             hidden=x,
             handle=handle,
-            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+            pad_multiple=FP8_ALIGN if use_fp8_dispatch else None,
         )
         combined_x.stop_gradient = False
         ctx.buffer = manager._buffer
         ctx.handle = handle
-        ctx.use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
+        ctx.use_fp8_dispatch = use_fp8_dispatch
         ctx.num_permuted_tokens = x.shape[0]
         return combined_x
 
@@ -614,10 +614,11 @@ class HybridEPCombineAsync(PyLayer):
         is_first_fwd=False,
     ):
         handle = manager.handle
+        use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
         combined_x, _ = manager._buffer.combine_with_unpermute(
             hidden=x,
             handle=handle,
-            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+            pad_multiple=FP8_ALIGN if use_fp8_dispatch else None,
         )
         combined_x.stop_gradient = False
 
@@ -627,7 +628,7 @@ class HybridEPCombineAsync(PyLayer):
         ctx.buffer = manager._buffer
         ctx.handle = handle
         ctx.group = manager.group
-        ctx.use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
+        ctx.use_fp8_dispatch = use_fp8_dispatch
         ctx.num_permuted_tokens = x.shape[0]
 
         wait_for_deepep(manager.group.id)

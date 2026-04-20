@@ -708,13 +708,7 @@ def _hybrid_ep_prepare_expert_counts(
                 padded_tokens_per_expert_tensor.tolist()
             )
 
-    if not use_fp8_mlp:
-        padded_tokens_per_expert = [
-            (x + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
-            for x in actual_tokens_per_expert_list
-        ]
-        num_permuted_tokens = sum(padded_tokens_per_expert)
-    elif not moe_grouped_gemm:
+    if not use_fp8_mlp or not moe_grouped_gemm:
         padded_tokens_per_expert = padded_tokens_per_expert_list
         num_permuted_tokens = sum(padded_tokens_per_expert)
     else:

@@ -32,6 +32,7 @@ from .fused_a2a import (
     hybrid_ep_combine,
     hybrid_ep_dispatch,
 )
+from .fp8_utils import FP8_ALIGN
 from .moe_utils import (
     AllGatherGroupOp,
     _AllToAll,
@@ -41,7 +42,6 @@ from .moe_utils import (
 )
 
 HAVE_HYBRID_EP = False
-HYBRID_EP_PAD_MULTIPLE = int(os.getenv("HYBRID_EP_PAD_MULTIPLE", "128"))
 HYBRID_EP_LOAD_CACHED_KERNELS = bool(
     int(os.getenv("HYBRID_EP_LOAD_CACHED_KERNELS", "0"))
 )
@@ -210,9 +210,9 @@ class _HybridEPManager(_DispatchManager):
         total_routed_tokens = (
             num_local_tokens * self.group.nranks * self.router_topk
         )
-        if HYBRID_EP_PAD_MULTIPLE > 1:
+        if FP8_ALIGN > 1:
             total_routed_tokens += self.num_local_experts * (
-                HYBRID_EP_PAD_MULTIPLE - 1
+                FP8_ALIGN - 1
             )
         return total_routed_tokens
 
@@ -339,7 +339,7 @@ class _HybridEPManager(_DispatchManager):
             num_of_experts_per_rank=self.num_local_experts,
             use_fp8=use_fp8,
             scaling_factor=scaling_factor,
-            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+            pad_multiple=FP8_ALIGN if use_fp8 else None,
             num_permuted_tokens=num_permuted_tokens,
             non_blocking=not self._needs_host_counts,
         )
