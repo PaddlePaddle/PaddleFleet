@@ -410,8 +410,7 @@ class _HybridEPManager(_DispatchManager):
             raise NotImplementedError(
                 "HybridEP backend does not support combine overlap in PaddleFleet."
             )
-        handle = self.handle
-        hidden_states = hybrid_ep_combine(hidden_states, self, handle)
+        hidden_states = hybrid_ep_combine(hidden_states, self)
         self.dispatched_probs = None
         self.handle = None
         return hidden_states

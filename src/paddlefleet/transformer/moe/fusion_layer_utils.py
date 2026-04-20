@@ -654,22 +654,6 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         return hidden_states_grad, dispatched_probs_grad, None
 
 
-def _hybrid_ep_count_views(tokens_per_expert, place):
-    if isinstance(tokens_per_expert, list):
-        return tokens_per_expert, paddle.to_tensor(
-            tokens_per_expert,
-            dtype="int64",
-            place=place,
-        )
-    return None, tokens_per_expert.astype("int64")
-
-
-def _hybrid_ep_to_host_counts(tokens_per_expert_list, tokens_per_expert_tensor):
-    if tokens_per_expert_list is not None:
-        return tokens_per_expert_list
-    return tokens_per_expert_tensor.tolist()
-
-
 def _hybrid_ep_prepare_expert_counts(
     custom_map,
     place,
@@ -684,12 +668,30 @@ def _hybrid_ep_prepare_expert_counts(
         "padded_tokens_per_expert",
         actual_tokens_per_expert,
     )
-    actual_tokens_per_expert_list, actual_tokens_per_expert_tensor = (
-        _hybrid_ep_count_views(actual_tokens_per_expert, place)
-    )
-    padded_tokens_per_expert_list, padded_tokens_per_expert_tensor = (
-        _hybrid_ep_count_views(padded_tokens_per_expert, place)
-    )
+    if isinstance(actual_tokens_per_expert, list):
+        actual_tokens_per_expert_list = actual_tokens_per_expert
+        actual_tokens_per_expert_tensor = paddle.to_tensor(
+            actual_tokens_per_expert,
+            dtype="int64",
+            place=place,
+        )
+    else:
+        actual_tokens_per_expert_list = None
+        actual_tokens_per_expert_tensor = actual_tokens_per_expert.astype(
+            "int64"
+        )
+    if isinstance(padded_tokens_per_expert, list):
+        padded_tokens_per_expert_list = padded_tokens_per_expert
+        padded_tokens_per_expert_tensor = paddle.to_tensor(
+            padded_tokens_per_expert,
+            dtype="int64",
+            place=place,
+        )
+    else:
+        padded_tokens_per_expert_list = None
+        padded_tokens_per_expert_tensor = padded_tokens_per_expert.astype(
+            "int64"
+        )
 
     # Python expert loops consume host-side per-expert sizes. That includes:
     # - bf16 grouped_gemm via batched_gemm(batch_sizes)
@@ -697,14 +699,14 @@ def _hybrid_ep_prepare_expert_counts(
     # - fp8 non-grouped split_group_gemm expert loops
     needs_host_counts = (not use_fp8_mlp) or (not moe_grouped_gemm)
     if needs_host_counts:
-        actual_tokens_per_expert_list = _hybrid_ep_to_host_counts(
-            actual_tokens_per_expert_list,
-            actual_tokens_per_expert_tensor,
-        )
-        padded_tokens_per_expert_list = _hybrid_ep_to_host_counts(
-            padded_tokens_per_expert_list,
-            padded_tokens_per_expert_tensor,
-        )
+        if actual_tokens_per_expert_list is None:
+            actual_tokens_per_expert_list = (
+                actual_tokens_per_expert_tensor.tolist()
+            )
+        if padded_tokens_per_expert_list is None:
+            padded_tokens_per_expert_list = (
+                padded_tokens_per_expert_tensor.tolist()
+            )
 
     if not use_fp8_mlp:
         padded_tokens_per_expert = [

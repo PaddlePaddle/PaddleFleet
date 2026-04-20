@@ -511,7 +511,6 @@ class HybridEPDispatch(PyLayer):
         recv_x, recv_token_probs, scale = manager._dispatch_with_permute_impl(
             x, token_indices, token_probs, use_fp8=fp8_dispatch
         )
-        ctx.manager = manager
         ctx.buffer = manager._buffer
         ctx.handle = manager.handle
         ctx.token_indices = token_indices
@@ -603,10 +602,8 @@ def hybrid_ep_dispatch(
     )
 
 
-def hybrid_ep_combine(x, manager, handle):
+def hybrid_ep_combine(x, manager):
     """Perform HybridEP combine_with_unpermute with explicit Paddle autograd."""
-    if handle is not manager.handle:
-        manager.handle = handle
     return HybridEPCombine.apply(
         x,
         manager,
