@@ -476,6 +476,25 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                     echo -e "\033[32m✓ $model 测试成功\033[0m"
                 fi
                 ;;
+            glm45_sft_cp)
+                case_name="glm45_sft_cp"
+                bash PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+                exit_code=$?
+                if [ "$exit_code" != "0" ]; then
+                    bash ci/check_ce_precision.sh $case_name $BASE_NAME
+                    precision_exit_code=$?
+                    if [ "$precision_exit_code" != "0" ]; then
+                        download_bos_tools
+                        upload_logs_to_bos $case_name $BASE_NAME
+                        record_result "glm45_sft 多卡模型" "FAIL" "测试失败且精度检查失败"
+                    else
+                        record_result "glm45_sft 多卡模型" "PASS"
+                    fi
+                else
+                    record_result "glm45_sft 多卡模型" "PASS"
+                    echo -e "\033[32m✓ $model 测试成功\033[0m"
+                fi
+                ;;
             glm45_lora)
                 case_name="glm45_lora"
                 bash PaddleFormers/tests/integration_test/glm45_lora.sh
