@@ -721,9 +721,7 @@ class TransformerLayerWithOverlap(TransformerLayer):
     def compute_mlp(self, hidden_states, is_first_fwd=False):
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
         with profile(timer_name):
-            return self._forward_mlp(
-                hidden_states, is_first_fwd=is_first_fwd
-            )
+            return self._forward_mlp(hidden_states, is_first_fwd=is_first_fwd)
 
     def pre_process_compute(self, hidden_states):
         residual = hidden_states
