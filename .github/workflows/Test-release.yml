@@ -67,7 +67,7 @@ jobs:
           for file in $changed_files; do
             all_count=$((all_count+1))
             echo $file
-            if [[ $file == *.md ]] || [[ $file == *.png ]]; then
+            if [[ $file == *.md ]] || [[ $file == *.png ]] || [[ $file == *.yml ]]; then
               echo "Markdown document: $file has been changed."
               md_count=$((md_count+1))
             fi
@@ -1209,7 +1209,7 @@ jobs:
   coverage_check:
     name: Coverage Upload And Check
     needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, check-bypass]
-    if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' }}
+    if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' && needs.single_card_test.result != 'skipped' }}
     runs-on: ubuntu-latest
     env:
       GITHUB_REPO_NAME: ${{ github.repository }}
