@@ -288,6 +288,26 @@ class TestDotProductAttentionBF16(unittest.TestCase):
         paddle.device.set_device("cpu")
 
 
+class TestDotProductAttentionEager(unittest.TestCase):
+    """Tests for DotProductAttention with _attn_implementation='eager'."""
+
+    def test_eager_forward_fp32(self):
+        config = _make_config()
+        config._attn_implementation = "eager"
+        attn = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+        )
+        attn.eval()
+        q = paddle.randn([2, 4, 4, 32], dtype=paddle.float32)
+        k = paddle.randn([2, 4, 4, 32], dtype=paddle.float32)
+        v = paddle.randn([2, 4, 4, 32], dtype=paddle.float32)
+        out = attn(q, k, v, None)
+        self.assertEqual(out.shape, [2, 4, 128])
+
+
 class TestCPDotProductAttention(unittest.TestCase):
     """Tests for CPDotProductAttention."""
 
