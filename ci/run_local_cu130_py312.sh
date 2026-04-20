@@ -40,14 +40,14 @@ RUN_MULTI_MODEL=false
 SINGLE_MODEL_TESTS=()
 MULTI_MODEL_TESTS=()
 
+# 是否仅安装依赖
+INSTALL_ONLY=false
+
 # 测试结果记录
 RESULT_FILE="test_results_${RUN_DATE}.txt"
 TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
-
-# 标记是否已安装依赖
-DEPS_INSTALLED=false
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -88,6 +88,10 @@ while [[ $# -gt 0 ]]; do
             RUN_MULTI_MODEL=true
             shift
             ;;
+        --install-only)
+            INSTALL_ONLY=true
+            shift
+            ;;
         --help)
             echo "用法: $0 [选项]"
             echo ""
@@ -100,6 +104,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --multi-model      运行多卡模型测试"
             echo "                     可选指定模型: --multi-model glm45_pt,qwen3_pt,qwen3vl_sft"
             echo "  --all              运行所有测试"
+            echo "  --install-only     仅安装依赖，不运行测试"
             echo "  --help             显示帮助信息"
             echo ""
             echo "依赖安装:"
@@ -142,6 +147,19 @@ echo "========================================"
 [ "$RUN_MULTI_MODEL" = true ] && echo "  ✓ 多卡模型测试: ${MULTI_MODEL_TESTS[*]:-全部}"
 echo "========================================"
 echo ""
+
+# 如果是仅安装模式，安装依赖后退出
+if [ "$INSTALL_ONLY" = true ]; then
+    install_dependencies
+    echo ""
+    echo "========================================"
+    echo "=== 依赖安装完成 ==="
+    echo "========================================"
+    echo "现在可以运行测试，依赖已准备好，不会再重新安装"
+    echo "示例: $0 --single-unit"
+    echo "========================================"
+    exit 0
+fi
 
 # 记录测试结果
 record_result() {
@@ -210,15 +228,10 @@ upload_logs_to_bos() {
     fi
 }
 
-# 安装所有依赖（只执行一次）
+# 安装所有依赖
 install_dependencies() {
-    if [ "$DEPS_INSTALLED" = true ]; then
-        echo "✓ 依赖已安装，跳过"
-        return 0
-    fi
-
     echo ""
-    echo "=== 安装依赖（仅执行一次） ==="
+    echo "=== 安装依赖 ==="
 
     # 安装基础依赖
     echo "安装基础依赖..."
@@ -253,17 +266,27 @@ install_dependencies() {
     # 打印版本信息
     echo ""
     echo "=== 版本信息 ==="
-    python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo "无法导入 paddle"
-    python -c "import paddlefleet; print(paddlefleet.version.commit)"
-    python -c "import paddleformers; print(paddleformers.version.commit)"
+    python -c "import paddle; print('paddle:', paddle.version.commit)" 2>/dev/null || echo "无法导入 paddle"
+    python -c "import paddlefleet; print('paddlefleet:', paddlefleet.version.commit)" 2>/dev/null || echo "无法导入 paddlefleet"
+    python -c "import paddleformers; print('paddleformers:', paddleformers.version.commit)" 2>/dev/null || echo "无法导入 paddleformers"
 
-    DEPS_INSTALLED=true
+    echo ""
     echo "✓ 依赖安装完成"
+}
+
+# 打印依赖版本信息
+print_deps_version() {
+    echo ""
+    echo "=== 依赖版本信息 ==="
+    python -c "import paddle; print('paddle:', paddle.version.commit)" 2>/dev/null || echo "无法导入 paddle"
+    python -c "import paddlefleet; print('paddlefleet:', paddlefleet.version.commit)" 2>/dev/null || echo "无法导入 paddlefleet"
+    python -c "import paddleformers; print('paddleformers:', paddleformers.version.commit)" 2>/dev/null || echo "无法导入 paddleformers"
+    echo ""
 }
 
 # 运行单卡测试 (单元测试 + Sonic MoE)
 if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
-    install_dependencies
+    print_deps_version
 
     # 运行单卡单元测试
     if [ "$RUN_SINGLE_UNIT" = true ]; then
@@ -296,7 +319,7 @@ fi
 
 # 运行多卡单元测试
 if [ "$RUN_MULTI_UNIT" = true ]; then
-    install_dependencies
+    print_deps_version
 
     echo ""
     echo "=== 开始多卡单元测试 ==="
@@ -316,7 +339,7 @@ fi
 
 # 运行单卡模型测试
 if [ "$RUN_SINGLE_MODEL" = true ]; then
-    install_dependencies
+    print_deps_version
 
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-single"
 
@@ -398,7 +421,7 @@ fi
 
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
-    install_dependencies
+    print_deps_version
 
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-multi"
 
