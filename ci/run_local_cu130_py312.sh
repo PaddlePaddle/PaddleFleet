@@ -332,6 +332,7 @@ fi
 
 # 运行单卡模型测试
 if [ "$RUN_SINGLE_MODEL" = true ]; then
+    export CACHE_DIR=/root/paddlejob/workspace/env_run/fleet-model-cache
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-single"
 
     # 如果没有指定具体模型，运行所有单卡模型测试
@@ -351,6 +352,7 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
         case $model in
             glm45)
                 case_name="glm45_pt_single_card"
+                sed -i "s|/home/.cache|${CACHE_DIR}|g" PaddleFormers/tests/config/ci/glm45_single_pt-test.yaml
                 bash PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
@@ -416,6 +418,7 @@ fi
 
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
+    export CACHE_DIR=/root/paddlejob/workspace/env_run/fleet-model-cache
     cd PaddleFormers
     pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     cd ..
@@ -440,6 +443,8 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
         case $model in
             glm45_pt)
                 case_name="glm45_pt"
+                wget --tries=5 https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12-18.tar --no-check-certificate
+                tar -xf glm45_fleet.12-18.tar # glm45_fleet
                 bash PaddleFormers/tests/integration_test/glm45_pt.sh
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
