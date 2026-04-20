@@ -615,9 +615,9 @@ class TopKRouter(StandardMoERouter):
                     gates_ori.sum(axis=-1, keepdim=True) + 1e-20
                 )
             else:
-                # Using the clone to ensure that the execution order of the  gradnodes is consistent with EC
+                # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
                 gates_ori = gates_ori.clone()
-                # Using Clip for ensure the compute logic is consistent with EC, it maybe useful when grad is very small
+                # Use clip() to ensure the computation logic is consistent with EC; it may be useful when gradients are very small.
                 gates_ori = gates_ori / paddle.clip(
                     gates_ori.sum(-1, keepdim=True), min=1e-12
                 )
