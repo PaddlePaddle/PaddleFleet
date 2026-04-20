@@ -608,9 +608,19 @@ class TopKRouter(StandardMoERouter):
 
         gates_ori = gates
         if self.scoring_func == "sigmoid":
-            gates_ori = gates_ori / (
-                gates_ori.sum(axis=-1, keepdim=True) + 1e-20
-            )
+            if not getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
+                gates_ori = gates_ori / (
+                    gates_ori.sum(axis=-1, keepdim=True) + 1e-20
+                )
+            else:
+                # Using the clone to ensure that the execution order of the  gradnodes is consistent with EC
+                gates_ori = gates_ori.clone()
+                # Using Clip for ensure the compute logic is consistent with EC, it maybe useful when grad is very small
+                gates_ori = gates_ori / paddle.clip(
+                    gates_ori.sum(-1, keepdim=True), min=1e-12
+                )
 
         if getattr(self.config, "gpt_model_use_experimental_version", False):
             # Use EC's FusedMoETopk Triton kernel for bit-exact alignment.
