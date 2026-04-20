@@ -457,7 +457,6 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
         case $model in
             glm45_pt)
                 case_name="glm45_pt"
-                tests/integration_test/glm45_pt.sh
                 bash PaddleFormers/tests/integration_test/glm45_pt.sh
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
