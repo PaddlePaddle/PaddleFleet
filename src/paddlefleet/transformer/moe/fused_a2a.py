@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 
 import paddle
 from paddle import framework
@@ -35,6 +36,7 @@ else:
     HAVE_DEEP_EP = False
 
 _buffer = None
+HYBRID_EP_PAD_MULTIPLE = int(os.getenv("HYBRID_EP_PAD_MULTIPLE", "128"))
 
 
 def barrier_ep(ep_group):
@@ -499,6 +501,116 @@ if HAVE_DEEP_EP:
 else:
     fused_dispatch = None
     fused_combine = None
+
+
+class HybridEPDispatch(PyLayer):
+    """Fused HybridEP dispatch bridge for Paddle autograd."""
+
+    @staticmethod
+    def forward(ctx, x, token_indices, token_probs, manager, fp8_dispatch=False):
+        recv_x, recv_token_probs, scale = manager._dispatch_with_permute_impl(
+            x, token_indices, token_probs, use_fp8=fp8_dispatch
+        )
+        ctx.manager = manager
+        ctx.buffer = manager._buffer
+        ctx.handle = manager.handle
+        ctx.token_indices = token_indices
+        ctx.hidden_dtype = x.dtype
+        ctx.set_grad_in_dtype_consistent(False)
+        return recv_x, recv_token_probs, scale
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_token_probs, grad_scale=None):
+        del grad_scale
+        if grad_output.dtype != ctx.hidden_dtype:
+            grad_output = grad_output.astype(ctx.hidden_dtype)
+        grad_x, grad_dense_probs = ctx.buffer.combine_with_unpermute(
+            hidden=grad_output.contiguous(),
+            probs=None
+            if grad_token_probs is None
+            else grad_token_probs.astype("float32"),
+            handle=ctx.handle,
+            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+        )
+        grad_probs = None
+        if grad_dense_probs is not None:
+            grad_probs = paddle.take_along_axis(
+                grad_dense_probs,
+                ctx.token_indices,
+                axis=-1,
+            )
+        return grad_x, None, grad_probs
+
+
+class HybridEPCombine(PyLayer):
+    """Fused HybridEP combine bridge for Paddle autograd."""
+
+    @staticmethod
+    def forward(ctx, x, manager):
+        handle = manager.handle
+        combined_x, _ = manager._buffer.combine_with_unpermute(
+            hidden=x,
+            handle=handle,
+            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+        )
+        combined_x.stop_gradient = False
+        ctx.buffer = manager._buffer
+        ctx.handle = handle
+        ctx.use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
+        ctx.num_permuted_tokens = x.shape[0]
+        return combined_x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        replay_handle = ctx.handle
+        if ctx.use_fp8_dispatch:
+            replay_config = ctx.buffer.update_template_config(
+                hidden_dim=grad_output.shape[-1],
+                num_of_tokens_per_rank=ctx.handle[6],
+                num_local_experts=ctx.handle[7].num_of_experts_per_rank,
+                use_fp8=False,
+            )
+            replay_handle = (
+                *ctx.handle[:7],
+                replay_config,
+                ctx.handle[8],
+            )
+        grad_x, _, _, _, _ = ctx.buffer.dispatch_with_permute(
+            hidden=grad_output.contiguous(),
+            handle=replay_handle,
+            num_permuted_tokens=ctx.num_permuted_tokens,
+            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+            non_blocking=False,
+        )
+        grad_x = grad_x[: ctx.num_permuted_tokens]
+        return grad_x
+
+
+def hybrid_ep_dispatch(
+    x,
+    token_indices,
+    token_probs,
+    manager,
+    fp8_dispatch: bool = False,
+):
+    """Perform HybridEP dispatch_with_permute with explicit Paddle autograd."""
+    return HybridEPDispatch.apply(
+        x.contiguous(),
+        token_indices,
+        token_probs,
+        manager,
+        fp8_dispatch,
+    )
+
+
+def hybrid_ep_combine(x, manager, handle):
+    """Perform HybridEP combine_with_unpermute with explicit Paddle autograd."""
+    if handle is not manager.handle:
+        manager.handle = handle
+    return HybridEPCombine.apply(
+        x,
+        manager,
+    )
 
 
 class DispatchNode:

@@ -58,8 +58,6 @@ _ERNIECORE_ALIGNMENT = (
     os.environ.get("gpt_model_use_experimental_version", "0") == "1"
 )
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
-
-
 def _log_moe_md5(tensor, name, layer_idx=None):
     """Log MD5 of a tensor for MoE precision alignment debugging."""
     if _LOG_LAYER_MD5 and _ERNIECORE_ALIGNMENT:
@@ -306,6 +304,7 @@ class MoELayer(nn.Layer):
                     self.num_experts,
                     self.moe_group,
                     self.moe_ep_barrier,
+                    needs_host_counts=self._needs_hybrid_ep_host_counts(),
                 )
             elif self.moe_token_dispatcher_type == "alltoall":
                 local_expert_indices = list(
@@ -506,16 +505,10 @@ class MoELayer(nn.Layer):
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
 
         if self._use_hybrid_ep_fusion():
-            hidden_states = HybridEPMoePyLayer.apply(
+            hidden_states = self._run_hybrid_ep_fusion(
                 dispatched_hidden_states,
                 dispatched_probs,
-                self,
-                use_fp8_mlp=self.fp8,
-                moe_deep_gemm=self.moe_deep_gemm,
-                moe_grouped_gemm=self.moe_grouped_gemm,
-                recompute_moe_gate_up=self.recompute_moe_gate_up,
                 fp8_dispatched_handle=fp8_dispatched_handle,
-                use_bf16_gemm_weight_grad=not self.fp8_wgrad,
             )
         elif self.using_sonic_moe:
             T = dispatched_hidden_states.shape[0]
@@ -610,6 +603,34 @@ class MoELayer(nn.Layer):
     def _use_hybrid_ep_fusion(self):
         return self.moe_use_fusion_node and is_hybrid_ep_backend_selected()
 
+    def _needs_hybrid_ep_host_counts(self):
+        return (
+            self.moe_use_fusion_node
+            and ((not self.fp8) or (not self.moe_grouped_gemm))
+        )
+
+    def _run_hybrid_ep_fusion(
+        self,
+        dispatched_hidden_states,
+        dispatched_probs,
+        fp8_dispatched_handle=None,
+        is_first_fwd=False,
+    ):
+        dispatched_hidden_states.stop_gradient = False
+        dispatched_probs.stop_gradient = False
+        return HybridEPMoePyLayer.apply(
+            dispatched_hidden_states,
+            dispatched_probs,
+            self,
+            use_fp8_mlp=self.fp8,
+            moe_deep_gemm=self.moe_deep_gemm,
+            moe_grouped_gemm=self.moe_grouped_gemm,
+            recompute_moe_gate_up=self.recompute_moe_gate_up,
+            use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+            fp8_dispatched_handle=fp8_dispatched_handle,
+            is_first_fwd=is_first_fwd,
+        )
+
     def dispatch_preprocess(self, args):
         hidden_states, token_probs, token_indices = args
         assert isinstance(self.token_dispatcher, MoEFlexTokenDispatcher)
@@ -673,16 +694,11 @@ class MoELayer(nn.Layer):
                 dispatched_hidden_states, guard_status
             )
             if self._use_hybrid_ep_fusion():
-                hidden_states = HybridEPMoePyLayer.apply(
+                hidden_states = self._run_hybrid_ep_fusion(
                     dispatched_hidden_states,
                     dispatched_probs,
-                    self,
-                    use_fp8_mlp=self.fp8,
-                    moe_deep_gemm=self.moe_deep_gemm,
-                    moe_grouped_gemm=self.moe_grouped_gemm,
-                    recompute_moe_gate_up=self.recompute_moe_gate_up,
                     fp8_dispatched_handle=fp8_dispatched_handle,
-                    use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+                    is_first_fwd=is_first_fwd,
                 )
             else:
                 hidden_states = FusionMoePyLayer.apply(

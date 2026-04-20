@@ -491,7 +491,6 @@ class MlpNode:
                 unzipped_tokens,
                 unzipped_probs,
                 self.padding_token_per_experts,
-                self.tokens_per_expert,
                 output=unzipped_tokens,
                 scale=unzipped_scale,  # maybe None
             )
@@ -655,6 +654,98 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         return hidden_states_grad, dispatched_probs_grad, None
 
 
+def _hybrid_ep_count_views(tokens_per_expert, place):
+    if isinstance(tokens_per_expert, list):
+        return tokens_per_expert, paddle.to_tensor(
+            tokens_per_expert,
+            dtype="int64",
+            place=place,
+        )
+    return None, tokens_per_expert.astype("int64")
+
+
+def _hybrid_ep_to_host_counts(tokens_per_expert_list, tokens_per_expert_tensor):
+    if tokens_per_expert_list is not None:
+        return tokens_per_expert_list
+    return tokens_per_expert_tensor.tolist()
+
+
+def _hybrid_ep_prepare_expert_counts(
+    custom_map,
+    place,
+    use_fp8_mlp,
+    moe_grouped_gemm,
+):
+    actual_tokens_per_expert = (
+        custom_map.token_dispatcher._comm_manager.tokens_per_expert
+    )
+    padded_tokens_per_expert = getattr(
+        custom_map.token_dispatcher._comm_manager,
+        "padded_tokens_per_expert",
+        actual_tokens_per_expert,
+    )
+    actual_tokens_per_expert_list, actual_tokens_per_expert_tensor = (
+        _hybrid_ep_count_views(actual_tokens_per_expert, place)
+    )
+    padded_tokens_per_expert_list, padded_tokens_per_expert_tensor = (
+        _hybrid_ep_count_views(padded_tokens_per_expert, place)
+    )
+
+    # Python expert loops consume host-side per-expert sizes. That includes:
+    # - bf16 grouped_gemm via batched_gemm(batch_sizes)
+    # - bf16 non-grouped expert loops
+    # - fp8 non-grouped split_group_gemm expert loops
+    needs_host_counts = (not use_fp8_mlp) or (not moe_grouped_gemm)
+    if needs_host_counts:
+        actual_tokens_per_expert_list = _hybrid_ep_to_host_counts(
+            actual_tokens_per_expert_list,
+            actual_tokens_per_expert_tensor,
+        )
+        padded_tokens_per_expert_list = _hybrid_ep_to_host_counts(
+            padded_tokens_per_expert_list,
+            padded_tokens_per_expert_tensor,
+        )
+
+    if not use_fp8_mlp:
+        padded_tokens_per_expert = [
+            (x + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
+            for x in actual_tokens_per_expert_list
+        ]
+        num_permuted_tokens = sum(padded_tokens_per_expert)
+    elif not moe_grouped_gemm:
+        padded_tokens_per_expert = padded_tokens_per_expert_list
+        num_permuted_tokens = sum(padded_tokens_per_expert)
+    else:
+        padded_tokens_per_expert = padded_tokens_per_expert_tensor
+        num_permuted_tokens = paddle.sum(padded_tokens_per_expert)
+
+    return padded_tokens_per_expert, num_permuted_tokens
+
+
+def _pad_front_rows(tensor, target_shape):
+    if tensor.shape == target_shape:
+        return tensor
+    padded_tensor = paddle.zeros(target_shape, dtype=tensor.dtype)
+    padded_tensor[: tensor.shape[0]] = tensor
+    return padded_tensor
+
+
+def _restore_hybrid_ep_probs_grad_shape(dispatched_probs_grad, original_probs_shape):
+    if (
+        len(original_probs_shape) == 1
+        and len(dispatched_probs_grad.shape) == 2
+        and dispatched_probs_grad.shape[-1] == 1
+    ):
+        dispatched_probs_grad = dispatched_probs_grad.squeeze(-1)
+    elif (
+        len(original_probs_shape) == 2
+        and original_probs_shape[-1] == 1
+        and len(dispatched_probs_grad.shape) == 1
+    ):
+        dispatched_probs_grad = dispatched_probs_grad.unsqueeze(-1)
+    return _pad_front_rows(dispatched_probs_grad, original_probs_shape)
+
+
 class HybridEPMoePyLayer(paddle.autograd.PyLayer):
     """
     Expert compute for HybridEP's permuted dispatch contract.
@@ -676,6 +767,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         recompute_moe_gate_up=False,
         use_bf16_gemm_weight_grad=False,
         fp8_dispatched_handle=None,
+        is_first_fwd=False,
     ):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
@@ -686,61 +778,37 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             moe_deep_gemm=moe_deep_gemm,
             moe_grouped_gemm=moe_grouped_gemm,
         )
-
-        tokens_per_expert = (
-            custom_map.token_dispatcher._comm_manager.tokens_per_expert
+        original_hidden_shape = tuple(hidden_states.shape)
+        original_probs_shape = tuple(dispatched_probs.shape)
+        (
+            padded_tokens_per_expert,
+            num_permuted_tokens,
+        ) = _hybrid_ep_prepare_expert_counts(
+            custom_map,
+            hidden_states.place,
+            use_fp8_mlp,
+            moe_grouped_gemm,
         )
-        if isinstance(tokens_per_expert, list):
-            tokens_per_expert_list = tokens_per_expert
-            tokens_per_expert_tensor = paddle.to_tensor(
-                tokens_per_expert,
-                dtype="int64",
-                place=hidden_states.place,
-            )
-        else:
-            tokens_per_expert_tensor = tokens_per_expert.astype("int64")
-            tokens_per_expert_list = None
-
-        # Paddle's bf16 batched_gemm still expects host-side batch sizes.
-        if moe_grouped_gemm and not use_fp8_mlp and not moe_deep_gemm:
-            if tokens_per_expert_list is None:
-                tokens_per_expert_list = tokens_per_expert_tensor.tolist()
-            padded_tokens_per_expert = [
-                (x + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
-                for x in tokens_per_expert_list
-            ]
-            origin_token_per_experts = tokens_per_expert_list
-            num_permuted_tokens = sum(padded_tokens_per_expert)
-        else:
-            padded_tokens_per_expert = (
-                (tokens_per_expert_tensor + FP8_ALIGN - 1)
-                // FP8_ALIGN
-                * FP8_ALIGN
-            )
-            origin_token_per_experts = tokens_per_expert_tensor
-            num_permuted_tokens = paddle.sum(padded_tokens_per_expert)
         hidden_states = hidden_states[:num_permuted_tokens]
         dispatched_probs = dispatched_probs[:num_permuted_tokens]
-
         scale = None
         if fp8_dispatched_handle is not None:
             assert hidden_states.dtype == paddle.float8_e4m3fn
-            if isinstance(fp8_dispatched_handle, dict):
-                scale = fp8_dispatched_handle["scale"]
-            else:
-                scale = fp8_dispatched_handle
-            scale = scale[:num_permuted_tokens]
+            scale = fp8_dispatched_handle["scale"][:num_permuted_tokens]
 
         out = node.forward(
             hidden_states,
             dispatched_probs,
             padded_tokens_per_expert,
-            origin_token_per_experts,
             scale=scale,
         )
+        out.stop_gradient = False
 
         ctx.node = node
-        ctx.dispatched_probs_shape = dispatched_probs.shape
+        ctx.original_hidden_shape = original_hidden_shape
+        ctx.original_probs_shape = original_probs_shape
+        if is_first_fwd:
+            node.clear_cached_tensors()
         ctx.save_for_backward(node.cached_tensors() + [dispatched_probs])
         node.clear_cached_tensors()
         return out
@@ -754,8 +822,11 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             output_grad, dispatched_probs
         )
         ctx.node.reset_state()
-        if dispatched_probs_grad.shape != ctx.dispatched_probs_shape:
-            dispatched_probs_grad = dispatched_probs_grad.reshape(
-                ctx.dispatched_probs_shape
-            )
-        return hidden_states_grad, dispatched_probs_grad, None
+        hidden_states_grad = _pad_front_rows(
+            hidden_states_grad, ctx.original_hidden_shape
+        )
+        dispatched_probs_grad = _restore_hybrid_ep_probs_grad_shape(
+            dispatched_probs_grad,
+            ctx.original_probs_shape,
+        )
+        return hidden_states_grad, dispatched_probs_grad

@@ -78,6 +78,25 @@ __all__ = [
 FP8_ALIGN = 128
 
 
+def _ensure_zero_weight_grad(weight):
+    if hasattr(weight, "main_grad"):
+        if weight.main_grad is None:
+            weight.main_grad = paddle.zeros(
+                shape=weight.shape, dtype=paddle.float32
+            )
+        else:
+            weight.main_grad.zero_()
+    else:
+        if weight.grad is None:
+            weight.grad = paddle.zeros(
+                shape=weight.shape, dtype=paddle.float32
+            )
+        else:
+            weight.grad.zero_()
+    if hasattr(weight, "_apply_backward_hook") and not weight.stop_gradient:
+        weight._apply_backward_hook()
+
+
 def fused_stack_quant_without_cache(
     expert_weight_list, transpose=False, use_ue8m0=False
 ):
@@ -787,7 +806,6 @@ class ExpertsGroupGemmContiguousNode:
                     o1, do2_s, unzipped_probs
                 )
             )
-
         return do1, o2_s, probs_grad
 
     def bwd_swiglu(self, o1, do2):
@@ -918,7 +936,15 @@ class ExpertsGroupGemmContiguousNode:
             do3, None, self.tokens_per_expert, True
         )
 
-        for i in range(len(expert_w2)):
+        token_counts = (
+            self.tokens_per_expert
+            if isinstance(self.tokens_per_expert, (list, tuple))
+            else self.tokens_per_expert.tolist()
+        )
+        for i, token_count in enumerate(token_counts):
+            if int(token_count) == 0:
+                _ensure_zero_weight_grad(expert_w2[i])
+                continue
             if hasattr(expert_w2[i], "main_grad"):
                 if expert_w2[i].main_grad is None:
                     expert_w2[i].main_grad = paddle.zeros(
@@ -954,7 +980,6 @@ class ExpertsGroupGemmContiguousNode:
                 and not expert_w2[i].stop_gradient
             ):
                 expert_w2[i]._apply_backward_hook()
-
     def bwd_gate_up_weight(self, do1, input_x, expert_w1, clear_input=False):
         """
         dw1 = dx_t * do1
@@ -991,7 +1016,15 @@ class ExpertsGroupGemmContiguousNode:
             do1, None, self.tokens_per_expert, True
         )
 
-        for i in range(len(expert_w1)):
+        token_counts = (
+            self.tokens_per_expert
+            if isinstance(self.tokens_per_expert, (list, tuple))
+            else self.tokens_per_expert.tolist()
+        )
+        for i, token_count in enumerate(token_counts):
+            if int(token_count) == 0:
+                _ensure_zero_weight_grad(expert_w1[i])
+                continue
             if hasattr(expert_w1[i], "main_grad"):
                 if expert_w1[i].main_grad is None:
                     expert_w1[i].main_grad = paddle.zeros(
@@ -1027,19 +1060,16 @@ class ExpertsGroupGemmContiguousNode:
                 and not expert_w1[i].stop_gradient
             ):
                 expert_w1[i]._apply_backward_hook()
-
     @paddle.no_grad()
     def forward(
         self,
         hs_out,
         unzipped_probs,
         tokens_per_expert,
-        origin_token_per_experts,
         output=None,
         scale=None,
     ):
         """如果传入了scale, 说明在a2a之前就做了quant, 这里的hs_out就是fp8。否则, hs_out是bf16"""
-        self.origin_token_per_experts = origin_token_per_experts
         if hs_out is None:
             assert self.input_fp8 is not None
             assert self.input_scale is not None
@@ -1535,11 +1565,11 @@ class ExpertsGroupGemmContiguousNode:
                         trans_lhs=True,
                     )
                     weights.grad.add_(weights_res.cast(weights.grad.dtype))
-            if (
-                hasattr(weights, "_apply_backward_hook")
-                and not weights.stop_gradient
-            ):
-                weights._apply_backward_hook()
+                if (
+                    hasattr(weights, "_apply_backward_hook")
+                    and not weights.stop_gradient
+                ):
+                    weights._apply_backward_hook()
         else:
             start_idx = 0
             for i, n in enumerate(self.tokens_per_expert):
