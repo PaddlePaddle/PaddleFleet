@@ -127,7 +127,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 如果没有指定任何选项，显示帮助
-if [ "$RUN_SINGLE_UNIT" = false ] && [ "$RUN_SINGLE_SONIC" = false ] && \
+if [ "$INSTALL_ONLY" = false ] && \
+   [ "$RUN_SINGLE_UNIT" = false ] && [ "$RUN_SINGLE_SONIC" = false ] && \
    [ "$RUN_MULTI_UNIT" = false ] && [ "$RUN_SINGLE_MODEL" = false ] && \
    [ "$RUN_MULTI_MODEL" = false ]; then
     echo "错误: 请指定至少一个测试选项"
