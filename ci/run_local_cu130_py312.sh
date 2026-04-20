@@ -255,6 +255,7 @@ install_dependencies() {
     echo "=== 版本信息 ==="
     python -c "import paddle; print(paddle.version.commit)" 2>/dev/null || echo "无法导入 paddle"
     python -c "import paddlefleet; print(paddlefleet.version.commit)"
+    python -c "import paddleformers; print(paddleformers.version.commit)"
 
     DEPS_INSTALLED=true
     echo "✓ 依赖安装完成"
