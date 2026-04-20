@@ -333,6 +333,7 @@ fi
 # 运行单卡模型测试
 if [ "$RUN_SINGLE_MODEL" = true ]; then
     export CACHE_DIR=/root/paddlejob/workspace/env_run/fleet-model-cache
+    export REPO_NAME="PaddleFleet"
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-single"
 
     # 如果没有指定具体模型，运行所有单卡模型测试
@@ -346,7 +347,12 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
     cd ..
     print_deps_version
     echo "=== 开始单卡模型测试 ==="
+    find PaddleFormers/tests/integration_test -name "*.sh" -exec sh -c 'sed -i "/wget --no-proxy --no-check-certificate https:\/\/xly-devops.cdn.bcebos.com\/PaddleFleet\/precision/i\
+    export http_proxy=agent.baidu.com:8188;\
+    export https_proxy=agent.baidu.com:8188;\
+    export no_proxy=baidu.com,baidubce.com,localhost,127.0.0.1,bj.bcebos.com,paddle-whl.bj.bcebos.com,baidu-int.com" "$1"' _ {} \;
     find PaddleFormers/tests/integration_test -type f -exec sed -i 's/--no-proxy//g' {} +
+
 
     for model in "${SINGLE_MODEL_TESTS[@]}"; do
         echo "  运行 $model 单卡测试..."
@@ -420,6 +426,7 @@ fi
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
     export CACHE_DIR=/root/paddlejob/workspace/env_run/fleet-model-cache
+    export REPO_NAME="PaddleFleet"
     cd PaddleFormers
     pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     cd ..
@@ -438,7 +445,12 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
 
     echo ""
     echo "=== 开始多卡模型测试 ==="
+    find PaddleFormers/tests/integration_test -name "*.sh" -exec sh -c 'sed -i "/wget --no-proxy --no-check-certificate https:\/\/xly-devops.cdn.bcebos.com\/PaddleFleet\/precision/i\
+    export http_proxy=agent.baidu.com:8188;\
+    export https_proxy=agent.baidu.com:8188;\
+    export no_proxy=baidu.com,baidubce.com,localhost,127.0.0.1,bj.bcebos.com,paddle-whl.bj.bcebos.com,baidu-int.com" "$1"' _ {} \;
     find PaddleFormers/tests/integration_test -type f -exec sed -i 's/--no-proxy//g' {} +
+
 
 
     for model in "${MULTI_MODEL_TESTS[@]}"; do
