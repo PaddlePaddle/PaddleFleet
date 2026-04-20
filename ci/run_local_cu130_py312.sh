@@ -346,6 +346,7 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
     cd ..
     print_deps_version
     echo "=== 开始单卡模型测试 ==="
+    find PaddleFormers/tests/integration_test -type f -exec sed -i '' 's/--no-proxy//g' {} +
 
     for model in "${SINGLE_MODEL_TESTS[@]}"; do
         echo "  运行 $model 单卡测试..."
@@ -429,22 +430,23 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
     # 如果没有指定具体模型，运行所有多卡模型测试
     if [ ${#MULTI_MODEL_TESTS[@]} -eq 0 ]; then
         MULTI_MODEL_TESTS=(
-            "glm45_pt" "glm45_sft" "glm45_lora" "glm45_dpo" "glm45_dpo_lora"
-            "qwen_pt" "qwen_sft" "qwen_lora"
+            "glm45_pt" "glm45_sft" "glm45_sft_cp" "glm45_lora" "glm45_dpo" "glm45_dpo_lora"
+            "glm45_pt_ep4" "glm45_pt_fp8" "glm45_pt_grouped_gemm" "qwen_pt" "qwen_sft" "qwen_lora"
             "qwen3vl_sft" "qwen3vl_lora" "qwen3vl_moe"
         )
     fi
 
     echo ""
     echo "=== 开始多卡模型测试 ==="
+    find PaddleFormers/tests/integration_test -type f -exec sed -i '' 's/--no-proxy//g' {} +
+
 
     for model in "${MULTI_MODEL_TESTS[@]}"; do
         echo "  运行 $model 多卡测试..."
         case $model in
             glm45_pt)
                 case_name="glm45_pt"
-                wget --tries=5 https://xly-devops.cdn.bcebos.com/PaddleFleet/glm45/glm45_fleet.12-18.tar --no-check-certificate
-                tar -xf glm45_fleet.12-18.tar # glm45_fleet
+                tests/integration_test/glm45_pt.sh
                 bash PaddleFormers/tests/integration_test/glm45_pt.sh
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
@@ -554,6 +556,63 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                     fi
                 else
                     record_result "glm45_dpo_lora 多卡模型" "PASS"
+                    echo -e "\033[32m✓ $model 测试成功\033[0m"
+                fi
+                ;;
+            glm45_pt_ep4)
+                case_name="glm45_pt_ep4"
+                timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+                exit_code=$?
+                if [ "$exit_code" != "0" ]; then
+                    bash ci/check_ce_precision.sh $case_name $BASE_NAME
+                    precision_exit_code=$?
+                    if [ "$precision_exit_code" != "0" ]; then
+                        download_bos_tools
+                        upload_logs_to_bos $case_name $BASE_NAME
+                        record_result "glm45_pt_ep4 多卡模型" "FAIL" "测试失败且精度检查失败"
+                    else
+                        record_result "glm45_pt_ep4 多卡模型" "PASS"
+                    fi
+                else
+                    record_result "glm45_pt_ep4 多卡模型" "PASS"
+                    echo -e "\033[32m✓ $model 测试成功\033[0m"
+                fi
+                ;;
+            glm45_pt_fp8)
+                case_name="glm45_pt_fp8"
+                timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+                exit_code=$?
+                if [ "$exit_code" != "0" ]; then
+                    bash ci/check_ce_precision.sh $case_name $BASE_NAME
+                    precision_exit_code=$?
+                    if [ "$precision_exit_code" != "0" ]; then
+                        download_bos_tools
+                        upload_logs_to_bos $case_name $BASE_NAME
+                        record_result "glm45_pt_fp8 多卡模型" "FAIL" "测试失败且精度检查失败"
+                    else
+                        record_result "glm45_pt_fp8 多卡模型" "PASS"
+                    fi
+                else
+                    record_result "glm45_pt_fp8 多卡模型" "PASS"
+                    echo -e "\033[32m✓ $model 测试成功\033[0m"
+                fi
+                ;;
+            glm45_pt_grouped_gemm)
+                case_name="glm45_pt_grouped_gemm"
+                timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
+                exit_code=$?
+                if [ "$exit_code" != "0" ]; then
+                    bash ci/check_ce_precision.sh $case_name $BASE_NAME
+                    precision_exit_code=$?
+                    if [ "$precision_exit_code" != "0" ]; then
+                        download_bos_tools
+                        upload_logs_to_bos $case_name $BASE_NAME
+                        record_result "glm45_pt_grouped_gemm 多卡模型" "FAIL" "测试失败且精度检查失败"
+                    else
+                        record_result "glm45_pt_grouped_gemm 多卡模型" "PASS"
+                    fi
+                else
+                    record_result "glm45_pt_grouped_gemm 多卡模型" "PASS"
                     echo -e "\033[32m✓ $model 测试成功\033[0m"
                 fi
                 ;;
