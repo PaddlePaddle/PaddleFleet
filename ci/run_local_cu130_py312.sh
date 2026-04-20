@@ -253,8 +253,7 @@ prepare_uv_env() {
 
     # 安装 PaddleFleet (hack: 下载指定版本)
     echo "安装 PaddleFleet..."
-    wget https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/c8f1462ace93a38025015aa6be7d901395a2823c/cu130/paddlefleet-0.3.0.dev20260416-cp312-cp312-linux_x86_64.whl -O paddlefleet_hack.whl
-    uv pip install paddlefleet_hack.whl
+    uv pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
     # 安装 Paddle（会覆盖 PaddleFleet 自带的 Paddle）
     echo "安装指定版本的 Paddle..."
