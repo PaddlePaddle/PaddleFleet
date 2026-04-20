@@ -290,7 +290,6 @@ if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
         else
             record_result "单卡单元测试" "FAIL" "测试执行失败"
             echo -e "\033[31m✗ 单卡单元测试失败\033[0m"
-            exit 1
         fi
     fi
 
