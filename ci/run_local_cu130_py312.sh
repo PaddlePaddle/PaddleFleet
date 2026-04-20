@@ -360,6 +360,8 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
     export REPO_NAME="PaddleFleet" \
     export no_proxy=baidu.com,baidubce.com,localhost,127.0.0.1,bj.bcebos.com,paddle-whl.bj.bcebos.com,baidu-int.com" "$1"' _ {} \;
     find PaddleFormers/tests/integration_test -type f -exec sed -i 's/--no-proxy//g' {} +
+    sed -i 's/--no-proxy//g' ci/check_ce_precision.sh
+
 
 
     for model in "${SINGLE_MODEL_TESTS[@]}"; do
@@ -458,6 +460,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
     export https_proxy=agent.baidu.com:8188;\
     export no_proxy=baidu.com,baidubce.com,localhost,127.0.0.1,bj.bcebos.com,paddle-whl.bj.bcebos.com,baidu-int.com" "$1"' _ {} \;
     find PaddleFormers/tests/integration_test -type f -exec sed -i 's/--no-proxy//g' {} +
+    sed -i 's/--no-proxy//g' ci/check_ce_precision.sh
 
 
 
