@@ -224,11 +224,14 @@ install_dependencies() {
     echo "安装基础依赖..."
     pip install colorlog>=6.10.1
 
+    pip uninstall paddlepaddle -y || true
+    pip uninstall paddlepaddle-gpu -y || true
+    pip uninstall paddleformers -y || true
+
     # 安装 PaddleFleet
     echo "安装 PaddleFleet..."
-    pip install --pre paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    pip install --pre paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/
 
-    pip uninstall paddlepaddle -y || true
 
     # 安装 Paddle（会覆盖 PaddleFleet 自带的 Paddle）
     echo "安装指定版本的 Paddle..."
