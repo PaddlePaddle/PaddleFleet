@@ -332,7 +332,6 @@ fi
 # 运行单卡模型测试
 if [ "$RUN_SINGLE_MODEL" = true ]; then
     export CACHE_DIR=/root/paddlejob/workspace/env_run/fleet-model-cache
-    export REPO_NAME="PaddleFleet"
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-single"
 
     # 如果没有指定具体模型，运行所有单卡模型测试
@@ -349,6 +348,7 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
     find PaddleFormers/tests/integration_test -name "*.sh" -exec sh -c 'sed -i "/wget --no-proxy --no-check-certificate https:\/\/xly-devops.cdn.bcebos.com\/PaddleFleet\/precision/i\
     export http_proxy=agent.baidu.com:8188;\
     export https_proxy=agent.baidu.com:8188;\
+    export REPO_NAME="PaddleFleet" \
     export no_proxy=baidu.com,baidubce.com,localhost,127.0.0.1,bj.bcebos.com,paddle-whl.bj.bcebos.com,baidu-int.com" "$1"' _ {} \;
     find PaddleFormers/tests/integration_test -type f -exec sed -i 's/--no-proxy//g' {} +
 
@@ -359,7 +359,7 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
             glm45)
                 case_name="glm45_pt_single_card"
                 sed -i "s|/home/.cache|${CACHE_DIR}|g" PaddleFormers/tests/config/ci/glm45_single_pt-test.yaml
-                bash PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
+                (bash PaddleFormers/tests/integration_test/glm45_pt_single_card.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -378,7 +378,7 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
                 ;;
             qwen3)
                 case_name="qwen3_single_card"
-                bash PaddleFormers/tests/integration_test/qwen3_single_card.sh
+                (bash PaddleFormers/tests/integration_test/qwen3_single_card.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -397,7 +397,7 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
                 ;;
             qwen3vl)
                 case_name="qwen3vl_sft_single_card"
-                timeout 5m bash PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
+                (timeout 5m bash PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -425,7 +425,6 @@ fi
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
     export CACHE_DIR=/root/paddlejob/workspace/env_run/fleet-model-cache
-    export REPO_NAME="PaddleFleet"
     cd PaddleFormers
     pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     cd ..
@@ -445,6 +444,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
     echo ""
     echo "=== 开始多卡模型测试 ==="
     find PaddleFormers/tests/integration_test -name "*.sh" -exec sh -c 'sed -i "/wget --no-proxy --no-check-certificate https:\/\/xly-devops.cdn.bcebos.com\/PaddleFleet\/precision/i\
+    export REPO_NAME="PaddleFleet" \
     export http_proxy=agent.baidu.com:8188;\
     export https_proxy=agent.baidu.com:8188;\
     export no_proxy=baidu.com,baidubce.com,localhost,127.0.0.1,bj.bcebos.com,paddle-whl.bj.bcebos.com,baidu-int.com" "$1"' _ {} \;
@@ -457,7 +457,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
         case $model in
             glm45_pt)
                 case_name="glm45_pt"
-                bash PaddleFormers/tests/integration_test/glm45_pt.sh
+                (bash PaddleFormers/tests/integration_test/glm45_pt.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -476,7 +476,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             glm45_sft)
                 case_name="glm45_sft"
-                bash PaddleFormers/tests/integration_test/glm45_sft.sh
+                (bash PaddleFormers/tests/integration_test/glm45_sft.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -495,7 +495,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             glm45_sft_cp)
                 case_name="glm45_sft_cp"
-                bash PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+                (bash PaddleFormers/tests/integration_test/glm45_sft_cp.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -514,7 +514,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             glm45_lora)
                 case_name="glm45_lora"
-                bash PaddleFormers/tests/integration_test/glm45_lora.sh
+                (bash PaddleFormers/tests/integration_test/glm45_lora.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -533,7 +533,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             glm45_dpo)
                 case_name="glm45_dpo"
-                bash PaddleFormers/tests/integration_test/glm45_dpo.sh
+                (bash PaddleFormers/tests/integration_test/glm45_dpo.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -552,7 +552,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             glm45_dpo_lora)
                 case_name="glm45_dpo_lora"
-                timeout 5m bash PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+                (timeout 5m bash PaddleFormers/tests/integration_test/glm45_dpo_lora.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -571,7 +571,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             glm45_pt_ep4)
                 case_name="glm45_pt_ep4"
-                timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+                (timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_ep4.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -590,7 +590,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             glm45_pt_fp8)
                 case_name="glm45_pt_fp8"
-                timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+                (timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_fp8.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -609,7 +609,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             glm45_pt_grouped_gemm)
                 case_name="glm45_pt_grouped_gemm"
-                timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
+                (timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -628,7 +628,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             qwen_pt)
                 case_name="qwen_pt"
-                bash PaddleFormers/tests/integration_test/qwen.sh pt
+                (bash PaddleFormers/tests/integration_test/qwen.sh pt)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -647,7 +647,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             qwen_sft)
                 case_name="qwen_sft"
-                bash PaddleFormers/tests/integration_test/qwen.sh sft
+                (bash PaddleFormers/tests/integration_test/qwen.sh sft)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -666,7 +666,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             qwen_lora)
                 case_name="qwen_lora"
-                bash PaddleFormers/tests/integration_test/qwen.sh lora
+                (bash PaddleFormers/tests/integration_test/qwen.sh lora)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -685,7 +685,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             qwen3vl_sft)
                 case_name="qwen3vl_sft"
-                timeout 5m bash PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+                (timeout 5m bash PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -704,7 +704,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             qwen3vl_lora)
                 case_name="qwen3vl_lora"
-                timeout 5m bash PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+                (timeout 5m bash PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
@@ -723,7 +723,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             qwen3vl_moe)
                 case_name="qwen3vl_moe"
-                timeout 10m bash PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+                (timeout 10m bash PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20)
                 exit_code=$?
                 if [ "$exit_code" != "0" ]; then
                     bash ci/check_ce_precision.sh $case_name $BASE_NAME
