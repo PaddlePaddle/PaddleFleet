@@ -62,7 +62,12 @@ try:
 except ImportError:
     deep_ep = None
 
-def _resolve_deep_ep_backend_name(backend_name: str | None = None) -> str:
+
+def is_hybrid_ep_backend_selected() -> bool:
+    return get_selected_deep_ep_backend_name() == "hybrid"
+
+
+def get_selected_deep_ep_backend_name(backend_name: str | None = None) -> str:
     selected_backend = (
         _DEEP_EP_BACKEND if backend_name is None else backend_name
     ).lower()
@@ -79,20 +84,6 @@ def _resolve_deep_ep_backend_name(backend_name: str | None = None) -> str:
     if selected_backend == "deepep":
         return "deepep"
     return "hybrid" if HAVE_HYBRID_EP else "deepep"
-
-
-def is_hybrid_ep_backend_selected() -> bool:
-    return get_selected_deep_ep_backend_name() == "hybrid"
-
-
-def get_selected_deep_ep_backend_name(backend_name: str | None = None) -> str:
-    return _resolve_deep_ep_backend_name(backend_name)
-
-
-def is_hybrid_ep_backend_available() -> bool:
-    # Backward-compatible alias. The actual semantics are "selected backend is
-    # HybridEP", not merely "HybridEP runtime is installed".
-    return is_hybrid_ep_backend_selected()
 
 
 class _DispatchManager(ABC):
@@ -275,17 +266,6 @@ class _HybridEPManager(_DispatchManager):
             self.routing_probs, self.router_topk, axis=-1
         )
 
-    def _cache_dispatch_handle_views(self, handle):
-        (
-            _sparse_to_dense_map,
-            _rdma_to_attn_map,
-            _attn_to_rdma_map,
-            num_dispatched_tokens_tensor,
-            local_expert_routing_map,
-            *_,
-        ) = handle
-        return int(num_dispatched_tokens_tensor.item()), local_expert_routing_map
-
     def _extract_tokens_per_expert(
         self,
         num_dispatched_tokens: int,
@@ -364,9 +344,15 @@ class _HybridEPManager(_DispatchManager):
             non_blocking=not self._needs_host_counts,
         )
         self.padded_tokens_per_expert = tokens_per_expert
-        num_dispatched_tokens, local_expert_routing_map = (
-            self._cache_dispatch_handle_views(self.handle)
-        )
+        (
+            _sparse_to_dense_map,
+            _rdma_to_attn_map,
+            _attn_to_rdma_map,
+            num_dispatched_tokens_tensor,
+            local_expert_routing_map,
+            *_,
+        ) = self.handle
+        num_dispatched_tokens = int(num_dispatched_tokens_tensor.item())
         self.tokens_per_expert = self._extract_tokens_per_expert(
             num_dispatched_tokens,
             local_expert_routing_map,

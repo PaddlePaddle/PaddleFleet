@@ -541,6 +541,36 @@ class HybridEPDispatch(PyLayer):
         return grad_x, None, grad_probs
 
 
+def _replay_hybrid_ep_dispatch_backward(
+    buffer,
+    handle,
+    grad_output,
+    num_permuted_tokens,
+    use_fp8_dispatch,
+):
+    replay_handle = handle
+    if use_fp8_dispatch:
+        replay_config = buffer.update_template_config(
+            hidden_dim=grad_output.shape[-1],
+            num_of_tokens_per_rank=handle[6],
+            num_local_experts=handle[7].num_of_experts_per_rank,
+            use_fp8=False,
+        )
+        replay_handle = (
+            *handle[:7],
+            replay_config,
+            handle[8],
+        )
+    grad_x, _, _, _, _ = buffer.dispatch_with_permute(
+        hidden=grad_output.contiguous(),
+        handle=replay_handle,
+        num_permuted_tokens=num_permuted_tokens,
+        pad_multiple=HYBRID_EP_PAD_MULTIPLE,
+        non_blocking=False,
+    )
+    return grad_x[:num_permuted_tokens]
+
+
 class HybridEPCombine(PyLayer):
     """Fused HybridEP combine bridge for Paddle autograd."""
 
@@ -561,27 +591,13 @@ class HybridEPCombine(PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output):
-        replay_handle = ctx.handle
-        if ctx.use_fp8_dispatch:
-            replay_config = ctx.buffer.update_template_config(
-                hidden_dim=grad_output.shape[-1],
-                num_of_tokens_per_rank=ctx.handle[6],
-                num_local_experts=ctx.handle[7].num_of_experts_per_rank,
-                use_fp8=False,
-            )
-            replay_handle = (
-                *ctx.handle[:7],
-                replay_config,
-                ctx.handle[8],
-            )
-        grad_x, _, _, _, _ = ctx.buffer.dispatch_with_permute(
-            hidden=grad_output.contiguous(),
-            handle=replay_handle,
-            num_permuted_tokens=ctx.num_permuted_tokens,
-            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
-            non_blocking=False,
+        grad_x = _replay_hybrid_ep_dispatch_backward(
+            ctx.buffer,
+            ctx.handle,
+            grad_output,
+            ctx.num_permuted_tokens,
+            ctx.use_fp8_dispatch,
         )
-        grad_x = grad_x[: ctx.num_permuted_tokens]
         return grad_x
 
 
@@ -620,27 +636,13 @@ class HybridEPCombineAsync(PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output, *fn_out_grads):
-        replay_handle = ctx.handle
-        if ctx.use_fp8_dispatch:
-            replay_config = ctx.buffer.update_template_config(
-                hidden_dim=grad_output.shape[-1],
-                num_of_tokens_per_rank=ctx.handle[6],
-                num_local_experts=ctx.handle[7].num_of_experts_per_rank,
-                use_fp8=False,
-            )
-            replay_handle = (
-                *ctx.handle[:7],
-                replay_config,
-                ctx.handle[8],
-            )
-        grad_x, _, _, _, _ = ctx.buffer.dispatch_with_permute(
-            hidden=grad_output.contiguous(),
-            handle=replay_handle,
-            num_permuted_tokens=ctx.num_permuted_tokens,
-            pad_multiple=HYBRID_EP_PAD_MULTIPLE,
-            non_blocking=False,
+        grad_x = _replay_hybrid_ep_dispatch_backward(
+            ctx.buffer,
+            ctx.handle,
+            grad_output,
+            ctx.num_permuted_tokens,
+            ctx.use_fp8_dispatch,
         )
-        grad_x = grad_x[: ctx.num_permuted_tokens]
 
         wait_for_deepep(ctx.group.id)
         fn_args_grads = ctx.bwf(*fn_out_grads)
