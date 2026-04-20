@@ -279,6 +279,7 @@ if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
     print_deps_version
 
     # 运行单卡单元测试
+    export work_dir=$(pwd)
     if [ "$RUN_SINGLE_UNIT" = true ]; then
         echo ""
         echo "=== 开始单卡单元测试 ==="
@@ -313,6 +314,7 @@ if [ "$RUN_MULTI_UNIT" = true ]; then
 
     echo ""
     echo "=== 开始多卡单元测试 ==="
+    export work_dir=$(pwd)
     if [ -f "ci/multi-card_test.sh" ]; then
         if bash ci/multi-card_test.sh; then
             record_result "多卡单元测试" "PASS"
