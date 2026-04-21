@@ -471,3 +471,112 @@ class LanguageLoss(FleetLayer):
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="LanguageLoss")
+
+
+class MainLanguageLoss(LanguageLoss):
+    # Class-level tracker for MTP loss, read by trainer for logging.
+    mtp_loss_tracker: dict[str, float] = {}
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        pg_collection=None,
+    ) -> None:
+        super().__init__(config=config, pg_collection=pg_collection)
+
+    def forward(self, dict_args: dict | list, labels: Tensor) -> Tensor:
+        assert (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+        )
+        labels_ori = labels
+        lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+        seq_length = lm_labels.shape[1]
+
+        mtp_loss = dict_args["mtp_loss"]
+        logits = dict_args["logits"]
+
+        assert not self.config.mtp_distillation_loss, (
+            "separate mtp head & loss don't support mtp_distillation_loss"
+        )
+
+        if self.config.train_mtp_only:
+            lm_loss = 0.0
+        else:
+            lm_loss = self._forward(logits, lm_labels)
+
+        # Store detached MTP loss tensors into class-level tracker.
+        # Use .detach() instead of .item() to avoid GPU synchronization on every
+        # micro-batch. The trainer will call .item() only at logging steps.
+        for i, loss_val in enumerate(mtp_loss):
+            MainLanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
+                loss_val.detach()
+            )
+
+        def add_loss(main_loss, loss):
+            if self.config.add_mtp_loss:
+                return main_loss + loss - loss.detach()
+            else:
+                return main_loss
+
+        loss = add_loss(
+            lm_loss,
+            self.config.mtp_loss_scaling_factor * sum(mtp_loss) / len(mtp_loss),
+        )
+
+        return loss
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="MainLanguageLoss")
+
+
+class MTPLanguageLoss(LanguageLoss):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        pg_collection=None,
+    ) -> None:
+        super().__init__(config=config, pg_collection=pg_collection)
+
+    def forward(self, dict_args: dict):
+        mtp_logits = dict_args.get("mtp_logits")
+        labels = dict_args.get("labels")
+        assert mtp_logits is not None, (
+            "separate mtp loss must provide mtp_logits"
+        )
+        assert labels is not None, "separate mtp loss must provide labels"
+        assert (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+        )
+        labels_ori = labels
+        lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+        seq_length = lm_labels.shape[1]
+
+        mtp_loss = []
+
+        assert not self.config.mtp_distillation_loss, (
+            "separate mtp head & loss don't support mtp_distillation_loss"
+        )
+
+        for depth in range(self.config.num_nextn_predict_layers):
+            logits_cur_depth = mtp_logits[depth]
+            labels_cur_depth = labels_ori[
+                :, (depth + 1) : (depth + 1 + seq_length)
+            ]
+            loss_cur_depth = self._forward(
+                logits_cur_depth,
+                labels_cur_depth,
+            )
+            mtp_loss.append(loss_cur_depth)
+            paddle.device.cuda.empty_cache()
+
+        dict_args.pop("mtp_logits")
+        dict_args["mtp_loss"] = mtp_loss
+
+        return dict_args
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="MTPLanguageLoss")

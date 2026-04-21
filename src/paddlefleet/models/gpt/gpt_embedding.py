@@ -109,6 +109,9 @@ class GPTEmbedding(FleetLayer):
         packed_seq_params: PackedSeqParams = None,
     ):
         input_ids = dict_args["input_ids"]
+        labels = dict_args.get("labels", None)
+        if labels is not None:
+            labels = labels.cuda()
         position_ids = dict_args.get("position_ids", None)
         device = paddle.device.get_device().split(":")[0].lower()
         position_ids = (
@@ -365,6 +368,7 @@ class GPTEmbedding(FleetLayer):
             "position_ids": position_ids,
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,
+            "labels": labels,
         }
         if mtp_emb_res is not None:
             assert (

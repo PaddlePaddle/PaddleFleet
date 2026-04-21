@@ -34,10 +34,17 @@ from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
+from paddlefleet.models.common.language_loss.language_loss import (
+    MTPLanguageLoss,
+)
 from paddlefleet.models.gpt import GPTModel
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding, GPTEmbeddingSpec
 from paddlefleet.models.gpt.gpt_model import GPTSublayersSpec
-from paddlefleet.models.gpt.lm_head import GPTLMHead
+from paddlefleet.models.gpt.lm_head import (
+    GPTLMHead,
+    GPTMainLMHead,
+    GPTMTPLMHead,
+)
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
@@ -529,6 +536,67 @@ def get_gpt_spec(
             ),
         )
 
+    # separate mtp head & loss
+    mtp_lm_head_spec = None
+    mtp_loss_spec = None
+    if config.separate_mtp_headloss:
+        assert (
+            config.num_nextn_predict_layers is not None
+            and config.num_nextn_predict_layers > 0
+        ), (
+            "If you set separate_mtp_headloss to True, mtp layer num must be greater than 0."
+        )
+
+        mtp_lm_head_spec = LayerSpec(
+            layer=GPTMTPLMHead,
+            extra_kwargs={
+                "input_size": config.hidden_size,
+                "output_size": vocab_size,
+                "config": config,
+                "init_method": config.init_method,
+                "bias": False,
+                "skip_bias_add": False,
+                "gather_output": not parallel_output,
+                "skip_weight_param_allocation": skip_weight_param_allocation,
+                "block_attn_res": lm_head_block_attn_res,
+            },
+        )
+        mtp_loss_spec = LayerSpec(
+            layer=MTPLanguageLoss,
+            extra_kwargs={
+                "config": config,
+            },
+        )
+        lm_head_spec = LayerSpec(
+            layer=GPTMainLMHead,
+            extra_kwargs={
+                "input_size": config.hidden_size,
+                "output_size": vocab_size,
+                "config": config,
+                "init_method": config.init_method,
+                "bias": False,
+                "skip_bias_add": False,
+                "gather_output": not parallel_output,
+                "skip_weight_param_allocation": skip_weight_param_allocation,
+                "block_attn_res": lm_head_block_attn_res,
+            },
+        )
+    else:
+        lm_head_spec = LayerSpec(
+            layer=GPTLMHead,
+            extra_kwargs={
+                "input_size": config.hidden_size,
+                "output_size": vocab_size,
+                "config": config,
+                "init_method": config.init_method,
+                "bias": False,
+                "skip_bias_add": False,
+                "gather_output": not parallel_output,
+                "skip_weight_param_allocation": skip_weight_param_allocation,
+                "block_attn_res": lm_head_block_attn_res,
+            },
+        )
+
     norm_input_parallel = (
         config.sequence_parallel and config.tensor_model_parallel_size > 1
     )
@@ -548,6 +616,8 @@ def get_gpt_spec(
             transformer_layers=transformer_layers_spec,
             tail_empty_layers=tail_empty_layers_spec,
             mtp=mtp_layers_spec,
+            mtp_lm_head=mtp_lm_head_spec,
+            mtp_loss=mtp_loss_spec,
             layer_norm=LayerSpec(
                 layer=WrappedPaddleNormPipe,
                 extra_kwargs={
@@ -557,19 +627,6 @@ def get_gpt_spec(
                     "input_is_parallel": norm_input_parallel,
                 },
             ),
-            lm_head=LayerSpec(
-                layer=GPTLMHead,
-                extra_kwargs={
-                    "input_size": config.hidden_size,
-                    "output_size": vocab_size,
-                    "config": config,
-                    "init_method": config.init_method,
-                    "bias": False,
-                    "skip_bias_add": False,
-                    "gather_output": not parallel_output,
-                    "skip_weight_param_allocation": skip_weight_param_allocation,
-                    "block_attn_res": lm_head_block_attn_res,
-                },
-            ),
+            lm_head=lm_head_spec,
         ),
     )
