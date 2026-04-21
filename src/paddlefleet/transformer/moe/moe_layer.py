@@ -86,9 +86,9 @@ from .moe_utils import (
     count_cumsum,
     filter_scores,
     fused_expert_parallel_TC_topk_router_metadata,
-    log_moe_losses,
     global_moe_balance_training_logs_enabled,
     log_moe_balance,
+    log_moe_losses,
     permute,
     unpermute,
 )
