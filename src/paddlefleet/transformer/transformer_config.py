@@ -146,6 +146,9 @@ class TransformerConfig(ModelParallelConfig):
     attention_dropout: float = 0.0
     """Post attention dropout probability."""
 
+    _attn_implementation: str = "default"
+    """Attention implementation to use."""
+
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""

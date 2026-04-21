@@ -31,6 +31,10 @@ except ImportError:
 import paddle.distributed as dist
 from paddle.autograd.py_layer import PyLayer
 
+from paddlefleet.tensor_parallel.random import (
+    get_cuda_rng_tracker,
+    get_expert_parallel_rng_tracker_name,
+)
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.utils import get_pg_size
 
@@ -232,7 +236,13 @@ class RandomSTE(paddle.autograd.PyLayer):
     def forward(ctx, x):
         ctx.x_shape = x.shape
         ctx.x_dtype = x.dtype
-        return paddle.randn(x.shape).cast(x.dtype)
+        if dist.get_world_size() <= 1:
+            return paddle.randn(x.shape).cast(x.dtype)
+        else:
+            with get_cuda_rng_tracker().fork(
+                get_expert_parallel_rng_tracker_name()
+            ):
+                return paddle.randn(x.shape).cast(x.dtype)
 
     @staticmethod
     def backward(ctx, grad_output):
