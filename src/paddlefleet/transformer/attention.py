@@ -473,17 +473,21 @@ class Attention(FleetLayer, ABC):
                 and q_pos_emb is not None
                 and k_pos_emb is not None
             ):
-                query, key, _ = apply_rotary_pos_emb(
-                    (query, key),
-                    None,
-                    rotary_pos_cos,
-                    rotary_pos_sin,
-                    config=self.config,
-                    cu_seqlens=cu_seqlens_q,
-                    position_ids=position_ids,
-                    mscale=None,
-                    cp_group=self.pg_collection.cp,
-                )
+                origin_dtype = query.dtype
+                with paddle.amp.auto_cast(False):
+                    query, key, _ = apply_rotary_pos_emb(
+                        (query.astype("float32"), key.astype("float32")),
+                        None,
+                        rotary_pos_cos,
+                        rotary_pos_sin,
+                        config=self.config,
+                        cu_seqlens=cu_seqlens_q,
+                        position_ids=position_ids,
+                        mscale=None,
+                        cp_group=self.pg_collection.cp,
+                    )
+                query = query.astype(origin_dtype)
+                key = key.astype(origin_dtype)
             # elif self.config.apply_vision_rope:
             #     query, key = apply_rotary_pos_emb_vision(query,key,rotary_pos_cos,rotary_pos_sin)
             else:
