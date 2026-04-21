@@ -73,17 +73,16 @@ def gpt_builder(config, **kwargs):
         )
 
     head_empty_layers_spec = []
-    num_empty_layers_add_in_tail = config.num_empty_layers_add_in_tail
-    if config.separate_mtp_headloss:
-        num_empty_layers_add_in_tail -= 1
-
-    for i in range(num_empty_layers_add_in_tail):
+    for i in range(config.num_empty_layers_add_in_head):
         head_empty_layers_spec.append(
             LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
         )
 
     tail_empty_layers_spec = []
-    for i in range(config.num_empty_layers_add_in_tail):
+    num_empty_layers_add_in_tail = config.num_empty_layers_add_in_tail
+    if config.separate_mtp_headloss:
+        num_empty_layers_add_in_tail -= 1
+    for i in range(num_empty_layers_add_in_tail):
         tail_empty_layers_spec.append(
             LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
         )
