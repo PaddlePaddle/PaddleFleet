@@ -693,20 +693,21 @@ class TopKRouter(StandardMoERouter):
         gates_masked = gates * mask
 
         # norm
-        if not getattr(
-            self.config, "gpt_model_use_experimental_version", False
-        ):
-            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
-            if self.norm_topk_prob:
+
+        if self.norm_topk_prob:
+            if not getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
-        # Reconstruct gates_masked from top_gate  to ensure
-        # bit-exact alignment. Instead of normalizing gates_masked independently
-        # (which uses different FP32 reduction over E=32 elements vs K=8),
-        # scatter the already-normalized top_gate values back to [S, E] layout.
-        gates_masked = paddle.zeros_like(gates).put_along_axis(
-            top_idx, top_gate, axis=1
-        )
+            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
+            # Reconstruct gates_masked from top_gate  to ensure
+            # bit-exact alignment. Instead of normalizing gates_masked independently
+            # (which uses different FP32 reduction over E=32 elements vs K=8),
+            # scatter the already-normalized top_gate values back to [S, E] layout.
+            gates_masked = paddle.zeros_like(gates).put_along_axis(
+                top_idx, top_gate, axis=1
+            )
 
         if abs(self.routed_scaling_factor - 1.0) > 1e-6:
             top_gate = top_gate * self.routed_scaling_factor
