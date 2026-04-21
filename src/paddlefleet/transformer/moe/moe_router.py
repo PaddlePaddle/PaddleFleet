@@ -700,20 +700,13 @@ class TopKRouter(StandardMoERouter):
             if self.norm_topk_prob:
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
-                if self.num_experts_per_tok > 1:
-                    gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
-                    denom_s = paddle.clip(
-                        gates_s, min=paddle.finfo(gates_masked.dtype).eps
-                    )
-                    gates_masked = gates_masked / denom_s
-        else:
-            # Reconstruct gates_masked from top_gate (Triton kernel output) to ensure
-            # bit-exact alignment. Instead of normalizing gates_masked independently
-            # (which uses different FP32 reduction over E=32 elements vs K=8),
-            # scatter the already-normalized top_gate values back to [S, E] layout.
-            gates_masked = paddle.zeros_like(gates).put_along_axis(
-                top_idx, top_gate, axis=1
-            )
+        # Reconstruct gates_masked from top_gate  to ensure
+        # bit-exact alignment. Instead of normalizing gates_masked independently
+        # (which uses different FP32 reduction over E=32 elements vs K=8),
+        # scatter the already-normalized top_gate values back to [S, E] layout.
+        gates_masked = paddle.zeros_like(gates).put_along_axis(
+            top_idx, top_gate, axis=1
+        )
 
         if abs(self.routed_scaling_factor - 1.0) > 1e-6:
             top_gate = top_gate * self.routed_scaling_factor
