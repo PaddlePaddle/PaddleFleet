@@ -48,6 +48,8 @@ RESULT_FILE="test_results_${RUN_DATE}.txt"
 TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
+export AK=paddle
+export SK=paddle
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
