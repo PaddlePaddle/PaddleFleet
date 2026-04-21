@@ -255,6 +255,29 @@ def global_moe_balance_training_logs_enabled():
     return callable(is_enabled) and is_enabled()
 
 
+def log_moe_losses(layer_number, aux_loss=None, z_loss=None):
+    if not global_moe_balance_training_logs_enabled():
+        return
+    logs = get_global_training_logs()
+    if logs is None or not hasattr(logs, "update"):
+        return
+
+    log = {}
+    if aux_loss is not None:
+        aux_loss = aux_loss.detach()
+        log["aux_loss"] = aux_loss
+        if layer_number is not None:
+            log[f"aux_loss_layer_{layer_number}"] = aux_loss
+
+    if z_loss is not None:
+        z_loss = z_loss.detach()
+        log["zloss"] = z_loss
+        if layer_number is not None:
+            log[f"zloss_layer_{layer_number}"] = z_loss
+
+    logs.update(**log)
+
+
 def _all_gather_local_tokens(local_tokens_per_expert, group):
     local_tokens_per_expert = local_tokens_per_expert.reshape([-1])
     if group is None or get_pg_size(group) <= 1 or not group.is_member():
