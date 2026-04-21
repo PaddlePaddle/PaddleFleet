@@ -65,6 +65,9 @@ class TransformerConfig(ModelParallelConfig):
     use_dense_mtp: bool = False
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
 
+    separate_mtp_headloss: bool = False
+    """Separate MTP LMHead & Loss calculate for pipeline balance."""
+
     num_empty_layers_add_in_head: int = 0
     """Number of EmptyLayer before the Decoder Layer.
     num_empty_layers_add_in_head=2 Example:
