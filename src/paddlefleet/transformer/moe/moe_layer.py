@@ -395,15 +395,6 @@ class MoELayer(nn.Layer):
         dispatched_input,
         tokens_per_expert,
     ):
-        if self.moe_grouped_gemm and not self.fp8:
-            if isinstance(tokens_per_expert, list):
-                tokens_per_expert = paddle.to_tensor(
-                    tokens_per_expert, dtype="int64"
-                )
-            return self.grouped_gemm_experts(
-                dispatched_input, tokens_per_expert
-            )[0]
-
         outputs = []
         tokens_per_expert = (
             tokens_per_expert.tolist()
