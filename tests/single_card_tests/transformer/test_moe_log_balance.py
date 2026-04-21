@@ -148,6 +148,18 @@ class TestMoeBalanceLogging(unittest.TestCase):
         self.assertAlmostEqual(logs["zloss"].item(), 3.5)
         self.assertAlmostEqual(logs["zloss_layer_5"].item(), 3.5)
 
+    def test_log_moe_losses_without_layer_number_only_logs_global_keys(self):
+        aux_loss = paddle.to_tensor(1.0, dtype="float32")
+        z_loss = paddle.to_tensor(2.0, dtype="float32")
+
+        log_moe_losses(layer_number=None, aux_loss=aux_loss, z_loss=z_loss)
+        logs = get_global_training_logs()
+
+        self.assertAlmostEqual(logs["aux_loss"].item(), 1.0)
+        self.assertAlmostEqual(logs["zloss"].item(), 2.0)
+        self.assertNotIn("aux_loss_layer_None", logs)
+        self.assertNotIn("zloss_layer_None", logs)
+
     def test_log_moe_losses_respects_balance_gate(self):
         unset_global_variables()
         set_global_training_logs(DummyDisabledLogs())
