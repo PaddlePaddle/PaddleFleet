@@ -274,7 +274,7 @@ class ExpertsGroupGemmContiguousNode:
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
         """
-        if not moe_grouped_gemm:
+        if not moe_grouped_gemm or (use_fp8_mlp and not moe_deep_gemm):
             if expert_id is None:
                 self.experts = custom_map.experts
             else:
@@ -1084,7 +1084,9 @@ class ExpertsGroupGemmContiguousNode:
             o3 = paddle.zeros(shape, dtype=dtype)
             return o3
         # get w1/w2
-        if self.moe_grouped_gemm:
+        if self.moe_grouped_gemm and (
+            not self.use_fp8_mlp or self.moe_deep_gemm
+        ):
             expert_w1 = self.grouped_gemm_experts.weight1
             expert_w2 = self.grouped_gemm_experts.weight2
         else:
@@ -1529,7 +1531,9 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 x = self.input
 
-        if self.moe_grouped_gemm:
+        if self.moe_grouped_gemm and (
+            not self.use_fp8_mlp or self.moe_deep_gemm
+        ):
             if hasattr(weights, "main_grad"):
                 if weights.main_grad is None:
                     weights.main_grad = paddle.zeros(

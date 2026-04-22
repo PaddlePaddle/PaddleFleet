@@ -262,7 +262,7 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
 
-        if self.moe_grouped_gemm:
+        if self.moe_grouped_gemm and (not self.fp8 or self.moe_deep_gemm):
             self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
@@ -326,7 +326,7 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            if self.moe_grouped_gemm:
+            if self.moe_grouped_gemm and (not self.fp8 or self.moe_deep_gemm):
                 for p in self.grouped_gemm_experts.parameters():
                     p.is_moe_param = True
                     p.color = {
