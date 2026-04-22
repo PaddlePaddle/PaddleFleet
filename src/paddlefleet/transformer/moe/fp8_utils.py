@@ -1217,6 +1217,9 @@ class ExpertsGroupGemmContiguousNode:
         rows, _ = out_grad.shape
         nparts = (rows + subbatch_rows - 1) // subbatch_rows
         if nparts <= 1:
+            self.tokens_per_expert_tensor = paddle.to_tensor(
+                self.tokens_per_expert, dtype="int32"
+            )
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
             )

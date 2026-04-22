@@ -177,8 +177,6 @@ class MoELayer(nn.Layer):
             incompatible_reasons = []
             if not self.moe_grouped_gemm:
                 incompatible_reasons.append("moe_grouped_gemm must be True")
-            if self.fp8:
-                incompatible_reasons.append("fp8 must be disabled")
             if incompatible_reasons:
                 logging.warning(
                     "moe_deep_gemm=True is ignored because %s; "
@@ -218,7 +216,6 @@ class MoELayer(nn.Layer):
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
-        self.moe_deep_gemm = config.moe_deep_gemm
         if (
             paddle.is_compiled_with_cuda()
             and paddle.device.get_device_capability()[0] < 9
