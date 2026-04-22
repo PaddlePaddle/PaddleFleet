@@ -16,6 +16,12 @@ def rrattn_estimate(*args, **kwargs):
     return impl(*args, **kwargs)
 
 
+def rrattn_estimate_legacy(*args, **kwargs):
+    from .rrattention import rrattn_estimate_legacy as impl
+
+    return impl(*args, **kwargs)
+
+
 def rrattn_prefill(*args, **kwargs):
     from .rrattention import rrattn_prefill as impl
 
@@ -50,6 +56,7 @@ __all__ = [
     "xattn_estimate",
     "xattn_prefill",
     "rrattn_estimate",
+    "rrattn_estimate_legacy",
     "rrattn_prefill",
     "flex_prefill",
     "patch_llama_attention",

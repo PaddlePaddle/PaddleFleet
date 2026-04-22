@@ -4,6 +4,8 @@ import paddle
 import paddle.nn.functional as F
 
 from .kernels import flat_group_gemm_fuse_reshape, softmax_fuse_block_sum
+from .kernels_rrattn import rr_attn_estimate_triton_func
+from .config_rrattn import RRAttnConfig
 from .utils import find_blocks_chunked
 
 
@@ -61,35 +63,89 @@ def can_use_triton_kernels():
         return False
 
 
+def _compute_sparse_ratio(
+    block_mask: paddle.Tensor,
+    *,
+    q_block_num: int,
+    k_block_num: int,
+    num_heads: int,
+    causal: bool,
+):
+    if causal:
+        offset = k_block_num - q_block_num
+        visible_blocks = 0
+        for q_idx in range(q_block_num):
+            visible_blocks += min(k_block_num, max(0, q_idx + offset + 1))
+        num_to_compute = visible_blocks * num_heads
+    else:
+        num_to_compute = q_block_num * k_block_num * num_heads
+    sparse_ratio = 1.0 - (block_mask.astype(paddle.float32).sum() / max(float(num_to_compute), 1.0))
+    return paddle.clip(sparse_ratio, min=0.0, max=1.0)
+
+
+def _build_nomask_startend(
+    *,
+    batch_size: int,
+    q_len: int,
+    k_len: int,
+    causal: bool,
+    device,
+) -> paddle.Tensor:
+    if causal:
+        return paddle.full(
+            (batch_size, 1, k_len, 1),
+            q_len,
+            dtype=paddle.int32,
+            device=device,
+        )
+
+    start = paddle.full(
+        (batch_size, 1, k_len, 1),
+        q_len,
+        dtype=paddle.int32,
+        device=device,
+    )
+    end = paddle.zeros((batch_size, 1, k_len, 1), dtype=paddle.int32, device=device)
+    return paddle.concat([start, end], axis=-1)
+
+
 def block_sparse_attention(
     query_states: paddle.Tensor,
     key_states: paddle.Tensor,
     value_states: paddle.Tensor,
     block_mask: paddle.Tensor,
+    startend_row_indices: paddle.Tensor | None = None,
     block_size: int = 128,
     causal: bool = True,
 ):
-    batch_size, num_heads, q_len, head_dim = query_states.shape
+    batch_size, num_q_heads, q_len, head_dim = query_states.shape
     _, _, k_len, _ = key_states.shape
 
     assert block_size == 128, "F.flashmask_attention block_mask only supports block_size=128"
     assert head_dim == 128, "F.flashmask_attention block_mask only supports head_dim=128"
-    if not causal:
-        raise NotImplementedError("F.flashmask_attention block_mask path currently supports causal=True")
 
     block_mask = block_mask.astype(paddle.int32).contiguous()
-    startend_row_indices = paddle.full(
-        (batch_size, num_heads, k_len, 1),
-        q_len,
-        dtype=paddle.int32,
-        device=query_states.device,
-    ).contiguous()
+    if startend_row_indices is None:
+        startend_row_indices = _build_nomask_startend(
+            batch_size=batch_size,
+            q_len=q_len,
+            k_len=k_len,
+            causal=causal,
+            device=query_states.device,
+        )
+    if startend_row_indices.shape[1] != block_mask.shape[1]:
+        num_indices_heads = int(startend_row_indices.shape[1])
+        assert block_mask.shape[1] % num_indices_heads == 0, "block_mask heads must be divisible by startend heads"
+        startend_row_indices = startend_row_indices.repeat_interleave(
+            block_mask.shape[1] // num_indices_heads,
+            axis=1,
+        )
 
     attn_output = F.flashmask_attention(
         query_states.transpose(1, 2).contiguous(),
         key_states.transpose(1, 2).contiguous(),
         value_states.transpose(1, 2).contiguous(),
-        startend_row_indices,
+        startend_row_indices=startend_row_indices,
         dropout=0.0,
         causal=causal,
         block_mask=block_mask,
@@ -97,7 +153,7 @@ def block_sparse_attention(
     return attn_output.contiguous()
 
 
-def rrattn_estimate(
+def rrattn_estimate_legacy(
     query_states: paddle.Tensor,
     key_states: paddle.Tensor,
     block_size=128,
@@ -212,8 +268,150 @@ def rrattn_estimate(
     if keep_recent:
         simple_masks[:, :, (q_len + block_size - 1) // block_size - 1, :(k_len + block_size - 1) // block_size] = True
 
-    simple_masks[:, :, (q_len + block_size - 1) // block_size - 1, :(k_len + block_size - 1) // block_size] = True
+    # simple_masks[:, :, (q_len + block_size - 1) // block_size - 1, :(k_len + block_size - 1) // block_size] = True
     return attn_sums, simple_masks
+
+
+def _rrattn_estimate_v2(
+    query_states: paddle.Tensor,
+    key_states: paddle.Tensor,
+    block_size=128,
+    stride=8,
+    norm=1,
+    softmax=True,
+    threshold=0.9,
+    chunk_size=16384,
+    select_mode="inverse",
+    use_triton=True,
+    causal=True,
+    kdb: int = 1,
+    keep_sink=False,
+    keep_recent=False,
+    rrattn_version="v1",
+    layer_idx=None,
+    startend_row_indices=None,
+    config: RRAttnConfig | None = None,
+    **kwargs,
+):
+    del norm, softmax, select_mode, rrattn_version, layer_idx, kwargs
+
+    if not use_triton:
+        raise NotImplementedError("rrattn v2 currently requires use_triton=True")
+    if not can_use_triton_kernels():
+        raise RuntimeError("rrattn v2 Triton kernels require a CUDA gpu device")
+    if kdb != 1:
+        raise ValueError("rrattn v2 Triton kernels require kdb=1")
+    assert block_size == 128, "RRAttention currently requires block_size=128"
+    assert stride > 0, "stride must be positive"
+    assert block_size % stride == 0, "stride must divide block_size=128"
+    assert chunk_size is not None and chunk_size > 0, "chunk_size must be positive"
+
+    batch_size, num_q_heads, q_len, _ = query_states.shape
+    _, num_kv_heads, k_len, _ = key_states.shape
+    assert num_q_heads % num_kv_heads == 0, "MHA/GQA requires num_q_heads % num_kv_heads == 0"
+
+    if key_states.device != query_states.device:
+        key_states = key_states.to(query_states.device)
+
+    if startend_row_indices is None:
+        startend_row_indices = _build_nomask_startend(
+            batch_size=batch_size,
+            q_len=q_len,
+            k_len=k_len,
+            causal=causal,
+            device=query_states.device,
+        )
+
+    attn_sums, _, selected_blocks = rr_attn_estimate_triton_func(
+        query_states.transpose(1, 2).contiguous(),
+        key_states.transpose(1, 2).contiguous(),
+        startend_row_indices,
+        stride=stride,
+        causal=causal,
+        threshold=threshold,
+        chunk_size=chunk_size,
+        config=config,
+    )
+
+    q_block_num = (q_len + block_size - 1) // block_size
+    k_block_num = (k_len + block_size - 1) // block_size
+    attn_sums = attn_sums[:, :, :q_block_num, :k_block_num].contiguous()
+    block_mask = selected_blocks[:, :, :q_block_num, :k_block_num].contiguous()
+
+    if keep_sink and k_block_num > 0:
+        block_mask[:, :, :, 0] = True
+    if keep_recent and q_block_num > 0:
+        block_mask[:, :, -1, :k_block_num] = True
+
+    return attn_sums, block_mask
+
+
+def rrattn_estimate(
+    query_states: paddle.Tensor,
+    key_states: paddle.Tensor,
+    block_size=128,
+    stride=8,
+    norm=1,
+    softmax=True,
+    threshold=0.9,
+    chunk_size=16384,
+    select_mode="inverse",
+    use_triton=True,
+    causal=True,
+    kdb: int = 1,
+    keep_sink=False,
+    keep_recent=False,
+    rrattn_version="v1",
+    layer_idx=None,
+    startend_row_indices=None,
+    config: RRAttnConfig | None = None,
+    **kwargs,
+):
+    if rrattn_version == "v1":
+        return rrattn_estimate_legacy(
+            query_states,
+            key_states,
+            block_size=block_size,
+            stride=stride,
+            norm=norm,
+            softmax=softmax,
+            threshold=threshold,
+            chunk_size=chunk_size,
+            select_mode=select_mode,
+            use_triton=use_triton,
+            causal=causal,
+            kdb=kdb,
+            keep_sink=keep_sink,
+            keep_recent=keep_recent,
+            rrattn_version=rrattn_version,
+            layer_idx=layer_idx,
+            startend_row_indices=None,
+            config=config,
+            **kwargs,
+        )
+    if rrattn_version == "v2":
+        return _rrattn_estimate_v2(
+            query_states,
+            key_states,
+            block_size=block_size,
+            stride=stride,
+            norm=norm,
+            softmax=softmax,
+            threshold=threshold,
+            chunk_size=chunk_size,
+            select_mode=select_mode,
+            use_triton=use_triton,
+            causal=causal,
+            kdb=kdb,
+            keep_sink=keep_sink,
+            keep_recent=keep_recent,
+            rrattn_version=rrattn_version,
+            layer_idx=layer_idx,
+            startend_row_indices=startend_row_indices,
+            config=config,
+            **kwargs,
+        )
+    raise ValueError(f"Unsupported rrattn_version={rrattn_version!r}; expected 'v1' or 'v2'")
 
 
 def rrattn_prefill(
@@ -235,8 +433,11 @@ def rrattn_prefill(
     startend_row_indices=None,
     config=None,
 ):
-    batch_size, num_heads, k_len, head_dim = key_states.shape
-    _, _, q_len, _ = query_states.shape
+    batch_size, num_q_heads, q_len, _ = query_states.shape
+    _, num_kv_heads, k_len, _ = key_states.shape
+    assert num_q_heads % num_kv_heads == 0, "MHA/GQA requires num_q_heads % num_kv_heads == 0"
+    assert value_states.shape[1] == num_kv_heads, "key/value head count mismatch"
+    assert value_states.shape[2] == k_len, "key/value sequence length mismatch"
 
     q_block_num = (q_len + block_size - 1) // block_size
     k_block_num = (k_len + block_size - 1) // block_size
@@ -254,6 +455,7 @@ def rrattn_prefill(
         (q_len + (block_size * stride) - 1) // (block_size * stride) * (block_size * stride),
         chunk_size,
     )
+    rrattn_startend_row_indices = startend_row_indices if rrattn_version == "v2" else None
 
     if is_enable_profile():
         paddle.cuda.synchronize()
@@ -277,7 +479,7 @@ def rrattn_prefill(
         keep_recent=keep_recent,
         rrattn_version=rrattn_version,
         layer_idx=layer_idx,
-        startend_row_indices=startend_row_indices,
+        startend_row_indices=rrattn_startend_row_indices,
         config=config,
     )
     if is_enable_profile():
@@ -293,14 +495,13 @@ def rrattn_prefill(
         approx_simple_mask = approx_simple_mask.to(query_states.device)
 
     approx_simple_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num].contiguous()
-    if causal and q_block_num == k_block_num:
-        num_to_compute = (k_block_num + 1) * k_block_num / 2 * num_heads
-    else:
-        num_to_compute = q_block_num * k_block_num * num_heads
-    sparse_ratio = 1.0 - (
-        approx_simple_mask.astype(paddle.float32).sum() / max(float(num_to_compute), 1.0)
+    sparse_ratio = _compute_sparse_ratio(
+        approx_simple_mask,
+        q_block_num=q_block_num,
+        k_block_num=k_block_num,
+        num_heads=num_q_heads,
+        causal=causal,
     )
-    sparse_ratio = paddle.clip(sparse_ratio, min=0.0, max=1.0)
 
     if is_enable_profile():
         paddle.cuda.synchronize()
@@ -312,6 +513,7 @@ def rrattn_prefill(
         key_states,
         value_states,
         approx_simple_mask,
+        startend_row_indices=rrattn_startend_row_indices,
         block_size=block_size,
         causal=causal,
     )
@@ -327,6 +529,7 @@ def rrattn_prefill(
 
 __all__ = [
     "rrattn_estimate",
+    "rrattn_estimate_legacy",
     "rrattn_prefill",
     "can_use_triton_kernels",
     "set_profile",
