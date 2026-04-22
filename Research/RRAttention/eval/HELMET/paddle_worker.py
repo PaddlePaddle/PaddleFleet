@@ -229,20 +229,29 @@ def load_model(model_name, model_type, dtype, tiny_random):
     if model_type == "llama":
         from paddleformers.transformers import LlamaForCausalLM
 
-        return LlamaForCausalLM.from_pretrained(model_name, dtype=dtype)
+        return LlamaForCausalLM.from_pretrained(model_name, dtype=dtype, load_checkpoint_format="sharding_io")
     if model_type == "qwen":
         from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
 
         config = load_qwen_config(model_name)
-        return Qwen2ForCausalLMDeprecated.from_pretrained(model_name, config=config, dtype=dtype)
+        return Qwen2ForCausalLMDeprecated.from_pretrained(
+            model_name,
+            config=config,
+            dtype=dtype,
+            load_checkpoint_format="sharding_io",
+        )
     if model_type == "ernie":
         if "a3b" in lower_name or "moe" in lower_name:
             from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeForCausalLM
 
-            return Ernie4_5_MoeForCausalLM.from_pretrained(model_name, dtype=dtype)
+            return Ernie4_5_MoeForCausalLM.from_pretrained(
+                model_name,
+                dtype=dtype,
+                load_checkpoint_format="sharding_io",
+            )
         from paddleformers.transformers import Ernie4_5ForCausalLM
 
-        return Ernie4_5ForCausalLM.from_pretrained(model_name, dtype=dtype)
+        return Ernie4_5ForCausalLM.from_pretrained(model_name, dtype=dtype, load_checkpoint_format="sharding_io")
     raise ValueError(f"Unsupported model_type={model_type!r}")
 
 

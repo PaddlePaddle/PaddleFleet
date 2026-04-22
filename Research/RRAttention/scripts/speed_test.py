@@ -301,6 +301,7 @@ def main(
     random.seed(seed)
     np.random.seed(seed)
     paddle.seed(seed)
+    paddle.set_flags({"FLAGS_flash_attn_version": 3})
 
     if device is None:
         device = "gpu:0" if paddle.device.cuda.device_count() > 0 else "cpu"
