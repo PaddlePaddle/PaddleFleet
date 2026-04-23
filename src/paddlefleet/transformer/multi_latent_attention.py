@@ -142,6 +142,7 @@ class MLASelfAttentionSublayersSpec:
     kv_b_proj: LayerSpec | type = None
     core_attention: LayerSpec | type = None
     o_proj: LayerSpec | type = None
+    gate_proj: LayerSpec | type = None
 
 
 class MultiLatentAttention(Attention):
@@ -234,6 +235,26 @@ class MultiLatentAttention(Attention):
             tp_comm_buffer_name="proj",
             tp_group=self.pg_collection.tp,
         )
+
+        # Gated attention
+        self.gated_attention = getattr(self.config, "gated_attention", False)
+        if self.gated_attention and sublayers_spec.gate_proj is not None:
+            self.gate_proj = build_spec_layer(
+                sublayers_spec.gate_proj,
+                self.config.hidden_size,
+                self.query_projection_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=self.config.use_bias,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="mla_gate",
+                tp_group=self.pg_collection.tp,
+            )
+        else:
+            self.gated_attention = False
+            self.gate_proj = None
 
     def forward(
         self,
@@ -338,6 +359,12 @@ class MultiLatentAttention(Attention):
         # =================
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
+
+        # Apply gated attention
+        if self.gated_attention:
+            gate, _ = self.gate_proj(hidden_states)
+            core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
+
         output, bias = self.o_proj(core_attn_out)
 
         _log(output, "attn_o_proj_out", layer_num)
@@ -804,6 +831,7 @@ class MLASelfAttention(MultiLatentAttention):
         self._backward_kv_proj()
         self._backward_q_proj()
         self._backward_output_proj()
+        # GATE backward?
 
     def _backward_kv_proj(self):
         """Computes weight gradients of KV projection layers"""

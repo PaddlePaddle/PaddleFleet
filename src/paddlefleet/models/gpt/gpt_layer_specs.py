@@ -166,6 +166,8 @@ def get_attention_spec(
             and getattr(config, "index_n_heads", None) is not None
         )
         attn_cls = MLASelfAttentionWithDSA if use_dsa else MLASelfAttention
+        # Gated attention
+        gated_attention = getattr(config, "gated_attention", False)
         return LayerSpec(
             layer=attn_cls,
             extra_kwargs={"attn_mask_type": attn_mask_type},
@@ -179,6 +181,9 @@ def get_attention_spec(
                 o_proj=backend.row_parallel_linear(),
                 q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
                 kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+                gate_proj=backend.column_parallel_linear()
+                if gated_attention
+                else None,
             ),
         )
     else:
