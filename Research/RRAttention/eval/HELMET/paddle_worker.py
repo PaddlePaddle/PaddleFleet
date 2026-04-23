@@ -40,11 +40,30 @@ def disable_unavailable_deep_ep():
 
 
 def infer_model_type(model_name):
+    config_path = Path(model_name) / "config.json"
+    if config_path.is_file():
+        try:
+            model_type = str(json.loads(config_path.read_text(encoding="utf-8")).get("model_type", "")).lower()
+            if "qwen3" in model_type:
+                raise ValueError("Qwen3 models are not supported in this release")
+            if "qwen" in model_type:
+                return "qwen"
+            if "ernie" in model_type and "moe" in model_type:
+                return "ernie_moe"
+            if "ernie" in model_type:
+                return "ernie"
+            if "llama" in model_type:
+                return "llama"
+        except (OSError, json.JSONDecodeError):
+            pass
+
     lower_name = model_name.lower()
     if "qwen3" in lower_name:
         raise ValueError("Qwen3 models are not supported in this release")
     if "qwen2" in lower_name or "qwen2.5" in lower_name or "qwen" in lower_name:
         return "qwen"
+    if "ernie" in lower_name and ("a3b" in lower_name or "moe" in lower_name):
+        return "ernie_moe"
     if "ernie" in lower_name:
         return "ernie"
     if "llama" in lower_name:
@@ -61,7 +80,7 @@ def load_patch(model_type):
         from rrattn.qwen_patch import patch_qwen_attention
 
         return patch_qwen_attention
-    if model_type == "ernie":
+    if model_type in ("ernie", "ernie_moe"):
         from rrattn.ernie_patch import patch_ernie_attention
 
         return patch_ernie_attention
@@ -112,36 +131,6 @@ def set_common_config(config):
     config.sequence_parallel = False
     config.use_cache = True
     config.tie_word_embeddings = False
-    return config
-
-
-def normalize_qwen_rope_scaling_dict(config_dict):
-    rope_scaling = config_dict.get("rope_scaling")
-    if not isinstance(rope_scaling, dict):
-        return config_dict
-
-    rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
-    if rope_type != "yarn":
-        return config_dict
-
-    rope_scaling["rope_type"] = rope_type
-    original_max_position_embeddings = rope_scaling.get("original_max_position_embeddings")
-    factor = rope_scaling.get("factor")
-    if original_max_position_embeddings is not None and factor is not None:
-        config_dict["max_position_embeddings"] = int(original_max_position_embeddings * factor)
-
-    return config_dict
-
-
-def load_qwen_config(model_name):
-    from paddleformers.transformers import Qwen2Config
-
-    config_dict, _ = Qwen2Config.get_config_dict(model_name)
-    if Qwen2Config.base_config_key and Qwen2Config.base_config_key in config_dict:
-        config_dict = config_dict[Qwen2Config.base_config_key]
-    normalize_qwen_rope_scaling_dict(config_dict)
-    config = Qwen2Config.from_dict(config_dict)
-    config.name_or_path = model_name
     return config
 
 
@@ -226,32 +215,24 @@ def load_model(model_name, model_type, dtype, tiny_random):
     lower_name = model_name.lower()
     if "qwen3" in lower_name:
         raise ValueError("Qwen3 models are not supported in this release")
+    from rrattn.checkpoint_utils import load_pretrained_checkpoint
+
     if model_type == "llama":
         from paddleformers.transformers import LlamaForCausalLM
 
-        return LlamaForCausalLM.from_pretrained(model_name, dtype=dtype, load_checkpoint_format="sharding_io")
+        return load_pretrained_checkpoint(LlamaForCausalLM, model_name, dtype=dtype)
     if model_type == "qwen":
         from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
 
-        config = load_qwen_config(model_name)
-        return Qwen2ForCausalLMDeprecated.from_pretrained(
-            model_name,
-            config=config,
-            dtype=dtype,
-            load_checkpoint_format="sharding_io",
-        )
-    if model_type == "ernie":
-        if "a3b" in lower_name or "moe" in lower_name:
-            from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeForCausalLM
+        return load_pretrained_checkpoint(Qwen2ForCausalLMDeprecated, model_name, dtype=dtype)
+    if model_type == "ernie_moe":
+        from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeForCausalLM
 
-            return Ernie4_5_MoeForCausalLM.from_pretrained(
-                model_name,
-                dtype=dtype,
-                load_checkpoint_format="sharding_io",
-            )
+        return load_pretrained_checkpoint(Ernie4_5_MoeForCausalLM, model_name, dtype=dtype)
+    if model_type == "ernie":
         from paddleformers.transformers import Ernie4_5ForCausalLM
 
-        return Ernie4_5ForCausalLM.from_pretrained(model_name, dtype=dtype, load_checkpoint_format="sharding_io")
+        return load_pretrained_checkpoint(Ernie4_5ForCausalLM, model_name, dtype=dtype)
     raise ValueError(f"Unsupported model_type={model_type!r}")
 
 
@@ -445,7 +426,7 @@ def write_response(response):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name_or_path", required=True)
-    parser.add_argument("--model_type", default="auto", choices=["auto", "llama", "qwen", "ernie"])
+    parser.add_argument("--model_type", default="auto", choices=["auto", "llama", "qwen", "ernie", "ernie_moe"])
     parser.add_argument("--method", default="full", choices=["xattn", "rrattn", "flex", "full"])
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--stride", type=int, default=8)

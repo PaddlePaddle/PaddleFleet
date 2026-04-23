@@ -2,6 +2,7 @@
 import argparse
 import csv
 import gc
+import json
 import random
 import sys
 import time
@@ -92,9 +93,26 @@ def parse_seq_lens(seq_lens):
 
 
 def infer_model_type(model_name):
+    config_path = Path(model_name) / "config.json"
+    if config_path.is_file():
+        try:
+            model_type = str(json.loads(config_path.read_text(encoding="utf-8")).get("model_type", "")).lower()
+            if "qwen" in model_type:
+                return "qwen"
+            if "ernie" in model_type and "moe" in model_type:
+                return "ernie_moe"
+            if "ernie" in model_type:
+                return "ernie"
+            if "llama" in model_type:
+                return "llama"
+        except (OSError, json.JSONDecodeError):
+            pass
+
     lower_name = model_name.lower()
     if "qwen2" in lower_name or "qwen2.5" in lower_name or "qwen" in lower_name:
         return "qwen"
+    if "ernie" in lower_name and ("a3b" in lower_name or "moe" in lower_name):
+        return "ernie_moe"
     if "ernie" in lower_name:
         return "ernie"
     if "llama" in lower_name:
@@ -111,7 +129,7 @@ def load_patch(model_type):
         from rrattn.qwen_patch import patch_qwen_attention
 
         return patch_qwen_attention
-    if model_type == "ernie":
+    if model_type in ("ernie", "ernie_moe"):
         from rrattn.ernie_patch import patch_ernie_attention
 
         return patch_ernie_attention
@@ -159,22 +177,24 @@ def load_profile_fns(method, enable_profile):
 
 
 def load_model(model_name, model_type, dtype):
+    from rrattn.checkpoint_utils import load_pretrained_checkpoint
+
     if model_type == "llama":
         from paddleformers.transformers import LlamaForCausalLM
 
-        return LlamaForCausalLM.from_pretrained(model_name, dtype=dtype, load_checkpoint_format="sharding_io")
+        return load_pretrained_checkpoint(LlamaForCausalLM, model_name, dtype=dtype)
     if model_type == "qwen":
         from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
 
-        return Qwen2ForCausalLMDeprecated.from_pretrained(
-            model_name,
-            dtype=dtype,
-            load_checkpoint_format="sharding_io",
-        )
+        return load_pretrained_checkpoint(Qwen2ForCausalLMDeprecated, model_name, dtype=dtype)
     if model_type == "ernie":
         from paddleformers.transformers import Ernie4_5ForCausalLM
 
-        return Ernie4_5ForCausalLM.from_pretrained(model_name, dtype=dtype, load_checkpoint_format="sharding_io")
+        return load_pretrained_checkpoint(Ernie4_5ForCausalLM, model_name, dtype=dtype)
+    if model_type == "ernie_moe":
+        from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeForCausalLM
+
+        return load_pretrained_checkpoint(Ernie4_5_MoeForCausalLM, model_name, dtype=dtype)
     raise ValueError(f"Unsupported model_type={model_type!r}")
 
 
@@ -417,7 +437,7 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name", default="meta-llama/Llama-3.1-8B-Instruct")
-    parser.add_argument("--model-type", default="auto", choices=["auto", "llama", "qwen", "ernie"])
+    parser.add_argument("--model-type", default="auto", choices=["auto", "llama", "qwen", "ernie", "ernie_moe"])
     parser.add_argument("--method", default="rrattn", choices=["xattn", "rrattn", "flex", "full"])
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--stride", type=int, default=8)

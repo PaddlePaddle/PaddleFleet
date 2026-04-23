@@ -24,7 +24,7 @@ def parse_arguments():
 
     # model setting
     parser.add_argument("--model_name_or_path", type=str, default=None)
-    parser.add_argument("--model_type", type=str, default="auto", choices=["auto", "llama", "qwen", "ernie"], help="PaddleFormers model family used by the Paddle worker")
+    parser.add_argument("--model_type", type=str, default="auto", choices=["auto", "llama", "qwen", "ernie", "ernie_moe"], help="PaddleFormers model family used by the Paddle worker")
     parser.add_argument("--paddle_worker_python", type=str, default=None, help="Python executable used to launch the Paddle worker")
     parser.add_argument("--paddle_worker_device", type=str, default=None, help="Paddle worker device, e.g. gpu:0 or cpu")
     parser.add_argument("--paddle_worker_tiny_random", action="store_true", help="debug only: launch a tiny random Paddle model instead of from_pretrained")

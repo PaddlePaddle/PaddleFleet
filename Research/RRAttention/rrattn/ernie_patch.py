@@ -10,6 +10,17 @@ from paddleformers.transformers.ernie4_5.modeling import (
 from .patch_utils import attention_branch, patch_attention_layers
 
 
+def get_ernie_attention_classes():
+    attention_classes = [Ernie4_5Attention]
+    try:
+        from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeAttention
+    except ImportError:
+        pass
+    else:
+        attention_classes.append(Ernie4_5_MoeAttention)
+    return tuple(attention_classes)
+
+
 @paddle.no_grad()
 def new_attention_forward(
     self,
@@ -89,7 +100,7 @@ def patch_ernie_attention(
 ):
     return patch_attention_layers(
         model,
-        Ernie4_5Attention,
+        get_ernie_attention_classes(),
         new_attention_forward,
         method=method,
         threshold=threshold,

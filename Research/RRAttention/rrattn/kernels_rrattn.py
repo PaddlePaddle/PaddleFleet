@@ -1088,7 +1088,7 @@ def _launch_qchunk_two_kernel(
     }
     block_m = config.block_m
     block_n = config.block_n
-    gqa_heads_per_cta = min(config.gqa_heads_per_cta, gqa_groups)
+    gqa_heads_per_cta = gqa_groups
     groups_per_kv = triton.cdiv(gqa_groups, gqa_heads_per_cta)
 
     for chunk_q_start in range(0, n_q_strides, max_chunk_q_strides):

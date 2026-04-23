@@ -16,17 +16,12 @@ class RRAttnConfig:
     num_stages: int = 1
     # K-stride segment size used by the softmax/reduce kernel.
     segment_size: int = 128
-    # Number of GQA query heads fused into one CTA.
-    gqa_heads_per_cta: int = 4
-
-
 TUNABLE_FIELDS = (
     "block_m",
     "block_n",
     "num_warps",
     "num_stages",
     "segment_size",
-    "gqa_heads_per_cta",
 )
 
 
@@ -61,9 +56,9 @@ def get_rrattn_config(head_dim: int, gpu_name: str | None = None) -> RRAttnConfi
         return RRAttnConfig(num_warps=8, num_stages=2)
 
     if head_dim <= 64:
-        return RRAttnConfig(num_warps=4, num_stages=3)
+        return RRAttnConfig(block_m=128, block_n=16, num_warps=4, num_stages=1, segment_size=256)
     if head_dim <= 128:
-        return RRAttnConfig(num_warps=8, num_stages=2)
+        return RRAttnConfig(block_m=128, block_n=32, num_warps=4, num_stages=2, segment_size=256)
     return RRAttnConfig(num_warps=8, num_stages=2)
 
 

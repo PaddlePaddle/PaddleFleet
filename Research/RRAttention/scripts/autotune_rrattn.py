@@ -23,6 +23,12 @@ from rrattn.kernels_rrattn import rr_attn_estimate_triton_func
 DEFAULT_SEQ_LENS = "32768"
 DEFAULT_MODES = "nomask"
 DEFAULT_HEAD_DIMS = "64,128"
+FIXED_BLOCK_SIZE = 128
+TUNE_BLOCK_M = (64, 128)
+TUNE_BLOCK_N = (16, 32, 64)
+TUNE_NUM_WARPS = (4, 8)
+TUNE_NUM_STAGES = (1, 2, 3)
+TUNE_SEGMENT_SIZE = (64, 128, 256)
 
 
 @dataclass
@@ -33,6 +39,7 @@ class CaseResult:
     mode: str
     ms: float | None
     error: str | None = None
+    skipped: bool = False
 
 
 def parse_csv_ints(value: str) -> list[int]:
@@ -79,30 +86,36 @@ def require_cuda(device: str) -> None:
 def make_candidates(
     *,
     head_dim: int,
+    stride: int,
     gpu_name: str | None,
 ) -> list[RRAttnConfig]:
     base = get_rrattn_config(head_dim, gpu_name=gpu_name)
+    ratio = FIXED_BLOCK_SIZE // stride
+    segment_sizes = tuple(
+        segment_size
+        for segment_size in TUNE_SEGMENT_SIZE
+        if segment_size >= ratio and segment_size % ratio == 0
+    )
 
     def cfg(**kwargs) -> RRAttnConfig:
         return replace(base, **kwargs)
 
     candidates = [cfg()]
 
-    for block_m in (64, 128):
-        for num_warps in (4, 8):
-            for num_stages in (1, 2, 3):
-                candidates.append(
-                    cfg(
-                        block_m=block_m,
-                        block_n=32,
-                        num_warps=num_warps,
-                        num_stages=num_stages,
-                        segment_size=128,
-                    )
-                )
-
-    for gqa_heads_per_cta in (1, 2, 4):
-        candidates.append(cfg(gqa_heads_per_cta=gqa_heads_per_cta))
+    for block_m in TUNE_BLOCK_M:
+        for block_n in TUNE_BLOCK_N:
+            for num_warps in TUNE_NUM_WARPS:
+                for num_stages in TUNE_NUM_STAGES:
+                    for segment_size in segment_sizes:
+                        candidates.append(
+                            cfg(
+                                block_m=block_m,
+                                block_n=block_n,
+                                num_warps=num_warps,
+                                num_stages=num_stages,
+                                segment_size=segment_size,
+                            )
+                        )
 
     unique = []
     seen = set()
@@ -177,19 +190,40 @@ def benchmark_case(
     *,
     args,
     config: RRAttnConfig,
-) -> float:
+    current_best_ms: float | None = None,
+) -> tuple[float | None, str | None]:
     for _ in range(args.warmup):
         run_estimate(q, k, startend, args=args, config=config)
         sync_cuda()
 
     times = []
+    check_iters = min(args.skip_check_iters, args.iters)
+    enable_skip = (
+        current_best_ms is not None
+        and args.skip_slowdown > 0
+        and check_iters > 0
+        and check_iters < args.iters
+    )
     for _ in range(args.iters):
         sync_cuda()
         start = time.perf_counter()
         run_estimate(q, k, startend, args=args, config=config)
         sync_cuda()
         times.append((time.perf_counter() - start) * 1000.0)
-    return statistics.mean(times)
+
+        if enable_skip and len(times) == check_iters:
+            prelim_ms = statistics.mean(times)
+            best_ms = float(current_best_ms)
+            lower_bound_ms = sum(times) / args.iters
+            if prelim_ms > best_ms * args.skip_slowdown and lower_bound_ms > best_ms:
+                return (
+                    None,
+                    "early skip: "
+                    f"{check_iters}-iter mean {prelim_ms:.4f} ms > "
+                    f"{args.skip_slowdown:.1f}x current best {best_ms:.4f} ms; "
+                    f"full-mean lower bound {lower_bound_ms:.4f} ms",
+                )
+    return statistics.mean(times), None
 
 
 def format_config(config: RRAttnConfig) -> str:
@@ -223,7 +257,7 @@ def write_csv(path: Path, results: list[CaseResult], configs_by_head_dim: dict[i
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["head_dim", "config_id", "seq_len", "mode", "ms", "error", *TUNABLE_FIELDS])
+        writer.writerow(["head_dim", "config_id", "seq_len", "mode", "ms", "error", "skipped", *TUNABLE_FIELDS])
         for item in results:
             config = configs_by_head_dim[item.head_dim][item.config_id]
             writer.writerow(
@@ -234,6 +268,7 @@ def write_csv(path: Path, results: list[CaseResult], configs_by_head_dim: dict[i
                     item.mode,
                     "" if item.ms is None else f"{item.ms:.4f}",
                     item.error or "",
+                    int(item.skipped),
                     *(getattr(config, field) for field in TUNABLE_FIELDS),
                 ]
             )
@@ -247,6 +282,7 @@ def print_summary(
     seq_lens: list[int],
     modes: list[str],
     topk: int,
+    early_skip_enabled: bool,
 ) -> None:
     total_cases = len(seq_lens) * len(modes)
 
@@ -254,6 +290,11 @@ def print_summary(
     print("  primary score: per-head_dim mean estimate latency in ms across selected seq_lens and modes")
     print("  default seq_len is 32k; pass --seq-lens for broader sweeps")
     print("  chunk_size is not tuned here; set it through --chunk-size or the rrattn wrapper")
+    if early_skip_enabled:
+        print("  early skip uses a full-mean lower bound, so skipped configs cannot beat the current best")
+    print(f"  candidate axes: block_m={TUNE_BLOCK_M}, block_n={TUNE_BLOCK_N}")
+    print(f"  candidate axes: num_warps={TUNE_NUM_WARPS}, num_stages={TUNE_NUM_STAGES}")
+    print(f"  candidate axes: segment_size={TUNE_SEGMENT_SIZE}")
 
     best_by_head_dim = {}
     for head_dim in head_dims:
@@ -287,7 +328,11 @@ def print_summary(
             print(f"      if head_dim == {head_dim}:")
             print(f"          return {format_config(best_config)}  # config #{best_config_id}, score_ms={best_score:.4f}")
 
-    failures = [item for item in results if item.error]
+    skipped = [item for item in results if item.skipped]
+    if skipped:
+        print(f"\nSkipped {len(skipped)} slow candidates with early-skip lower-bound checks")
+
+    failures = [item for item in results if item.error and not item.skipped]
     if failures:
         print("\nFailures:")
         for item in failures[:10]:
@@ -320,6 +365,8 @@ def main() -> None:
     parser.add_argument("--flashmask-window", type=int, default=4096)
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument("--iters", type=int, default=1000)
+    parser.add_argument("--skip-check-iters", type=int, default=100)
+    parser.add_argument("--skip-slowdown", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N candidate configs.")
     parser.add_argument("--topk", type=int, default=5)
@@ -331,14 +378,18 @@ def main() -> None:
     assert args.num_q_heads % args.num_kv_heads == 0, "num_q_heads must be divisible by num_kv_heads"
     assert 128 % args.stride == 0, "stride must divide fixed block size 128"
     assert args.chunk_size > 0, "chunk_size must be positive"
+    assert args.skip_check_iters >= 0, "skip_check_iters must be non-negative"
+    assert args.skip_slowdown >= 0, "skip_slowdown must be non-negative"
 
     seq_lens = parse_csv_ints(args.seq_lens)
     modes = parse_modes(args.modes)
+    early_skip_enabled = len(seq_lens) * len(modes) == 1 and args.skip_check_iters > 0 and args.skip_slowdown > 0
     head_dims = parse_csv_ints(args.head_dims) if args.head_dims else [args.head_dim]
     configs_by_head_dim = {}
     for head_dim in head_dims:
         configs = make_candidates(
             head_dim=head_dim,
+            stride=args.stride,
             gpu_name=args.gpu_name,
         )
         if args.limit is not None:
@@ -356,9 +407,17 @@ def main() -> None:
             for mode in modes:
                 print(f"\nCase head_dim={head_dim} seq_len={seq_len} mode={mode}")
                 q, k, startend = make_inputs(args, seq_len, mode, head_dim)
+                best_case_ms = None
                 for config_id, config in enumerate(configs):
                     try:
-                        ms = benchmark_case(q, k, startend, args=args, config=config)
+                        ms, skip_reason = benchmark_case(
+                            q,
+                            k,
+                            startend,
+                            args=args,
+                            config=config,
+                            current_best_ms=best_case_ms if early_skip_enabled else None,
+                        )
                         results.append(
                             CaseResult(
                                 head_dim=head_dim,
@@ -366,9 +425,15 @@ def main() -> None:
                                 seq_len=seq_len,
                                 mode=mode,
                                 ms=ms,
+                                error=skip_reason,
+                                skipped=skip_reason is not None,
                             )
                         )
-                        print(f"  #{config_id}: {ms:.4f} ms")
+                        if skip_reason is not None:
+                            print(f"  #{config_id}: skipped: {skip_reason}")
+                        else:
+                            best_case_ms = ms if best_case_ms is None else min(best_case_ms, ms)
+                            print(f"  #{config_id}: {ms:.4f} ms")
                     except Exception as exc:
                         error = f"{type(exc).__name__}: {exc}"
                         results.append(
@@ -398,6 +463,7 @@ def main() -> None:
         seq_lens=seq_lens,
         modes=modes,
         topk=args.topk,
+        early_skip_enabled=early_skip_enabled,
     )
 
 

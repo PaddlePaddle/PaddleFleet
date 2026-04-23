@@ -48,6 +48,17 @@ bash ./eval/HELMET/scripts/download_data.sh
 
 This also downloads the local ALCE judge models to `eval/HELMET/models/roberta-large-squad` and `eval/HELMET/models/t5_xxl_true_nli_mixture`.
 
+### Prepare Checkpoints
+
+Hugging Face safetensors checkpoints are supported, but for repeated HELMET or speed benchmarks we recommend converting them once to Paddle checkpoints for better loading efficiency and reproducibility.
+
+```bash
+python scripts/convert_hf_to_paddle.py \
+  --input /path/to/hf-checkpoint \
+  --output /path/to/paddle-checkpoint
+```
+
+
 ### Run HELMET Evaluation
 
 ```bash
