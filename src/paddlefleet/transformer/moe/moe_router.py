@@ -250,7 +250,9 @@ class StandardMoERouter(nn.Layer):
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
         return aux_loss
 
-    def _cal_seq_aux_loss(self, probs, top_k, routing_map, seq_len, batch_size):
+    def _cal_seq_aux_loss(
+        self, probs, top_k, routing_map, seq_len, batch_size, input_ids=None
+    ):
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
             self.tensor_model_parallel_size > 1
@@ -294,19 +296,49 @@ class StandardMoERouter(nn.Layer):
             max_seq_len = local_seq_len
 
         seq_axis = 1
-        # Both cost_coeff and seq_aux_loss must be computed with the global sequence length visible to all workers.
-        # [B, E]
-        cost_coeff = routing_map.sum(
-            axis=seq_axis, dtype="float32"
-        ) / paddle.to_tensor(
-            max_seq_len * top_k / self.num_experts, dtype="float32"
-        )
-        # [B, E] -> [B] -> []
-        seq_aux_loss = (
-            (cost_coeff * all_probs.sum(axis=seq_axis) / max_seq_len)
-            .sum(axis=1)
-            .mean()
-        )
+        # Align with EC: use per-line valid token count as denominator instead of
+        # fixed max_seq_len. PF's input_ids plays the role of EC's origin_input_ids.
+        # [B, 1]
+        if input_ids is not None:
+            _ids = input_ids
+            if _ids.ndim == 1:
+                _ids = _ids.unsqueeze(axis=0)
+            origin_valid_mask = (_ids != 0).astype(paddle.float32)
+            token_count_per_line = origin_valid_mask.sum(axis=-1, keepdim=True)
+            is_invalid_line_float = (token_count_per_line == 0).astype(
+                paddle.float32
+            )
+            denom = token_count_per_line + 1e-6 * is_invalid_line_float
+        else:
+            denom = paddle.to_tensor(float(max_seq_len), dtype="float32")
+
+        if _ERNIECORE_ALIGNMENT:
+            # Align with ernie: divide by S first, then multiply by E/K (two-step to match float order)
+            # [B, E]
+            cost_coeff = (
+                routing_map.sum(axis=seq_axis, dtype="float32")
+                / denom
+                * paddle.to_tensor(
+                    float(self.num_experts) / top_k, dtype="float32"
+                )
+            )
+            # Align with ernie: use mean instead of sum/S
+            # [B, E] -> [B] -> []
+            seq_aux_loss = (
+                (cost_coeff * all_probs.mean(axis=seq_axis)).sum(axis=1).mean()
+            )
+        else:
+            # [B, E]
+            cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
+                denom
+                * paddle.to_tensor(top_k / self.num_experts, dtype="float32")
+            )
+            # [B, E] -> [B] -> []
+            seq_aux_loss = (
+                (cost_coeff * all_probs.sum(axis=seq_axis) / denom)
+                .sum(axis=1)
+                .mean()
+            )
         return seq_aux_loss
 
     def _cal_z_loss(self, logits) -> paddle.Tensor:
@@ -583,7 +615,7 @@ class TopKRouter(StandardMoERouter):
     def set_layer_number(self, layer_number):
         self._layer_number = layer_number
 
-    def forward(self, input):
+    def forward(self, input, input_ids_none_zero_mask=None, input_ids=None):
         if len(input.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape
@@ -607,9 +639,18 @@ class TopKRouter(StandardMoERouter):
 
         gates = self.gate_score_func(logits)
 
+        if input_ids_none_zero_mask is not None:
+            # input_ids_none_zero_mask shape: [b,s,1]
+            valid_mask = input_ids_none_zero_mask.astype(paddle.float32)
+            assert valid_mask.shape[0] == logits.shape[0], (
+                f"check valid_mask shape {valid_mask.shape}"
+            )
+            logits = logits * valid_mask
+            gates = gates * valid_mask
+
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
 
-        gates_ori = gates
+        gates_ori = gates.clone()
         if self.scoring_func == "sigmoid":
             gates_ori = gates_ori / (
                 gates_ori.sum(axis=-1, keepdim=True) + 1e-20
@@ -688,6 +729,11 @@ class TopKRouter(StandardMoERouter):
         mask = paddle.zeros_like(gates).put_along_axis(
             top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
         )
+        if input_ids_none_zero_mask is not None:
+            valid_mask = input_ids_none_zero_mask
+            mask = mask * valid_mask.cast(mask.dtype)
+            # -1 means neither participates in routing nor expert calculation
+            top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
 
         gates_masked = gates * mask
 
@@ -733,6 +779,7 @@ class TopKRouter(StandardMoERouter):
                     mask,
                     seq_len,
                     batch_size,
+                    input_ids=input_ids,
                 )
             else:
                 l_aux = self._cal_aux_loss(gates, mask)
