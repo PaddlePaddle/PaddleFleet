@@ -28,7 +28,12 @@ class _FP8Gemm(paddle.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, inp, weight, inp_quant_func, weight_quant_func, use_pow2_scale
+        ctx,
+        inp,
+        weight,
+        inp_quant_func,
+        weight_quant_func,
+        use_pow2_scale=False,
     ):
         """
         Forward pass for FP8 GEMM.
