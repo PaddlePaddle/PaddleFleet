@@ -342,8 +342,20 @@ class LanguageLoss(FleetLayer):
             )
             assert len(logits) == self.config.num_nextn_predict_layers + 1
             labels_ori = labels
-            lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
-            seq_length = lm_labels.shape[1]
+            if self.config.context_parallel_size > 1:
+                label_list = paddle.split(labels, self.config.num_nextn_predict_layers + 1)
+                lm_labels = label_list[0]
+                mtp_labels = label_list[1:]
+                seq_length = lm_labels.shape[1]
+            else:
+                lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+                mtp_labels = []
+                seq_length = lm_labels.shape[1]
+                for depth in range(self.config.num_nextn_predict_layers):
+                    labels_cur_depth = labels_ori[
+                        :, (depth + 1) : (depth + 1 + seq_length)
+                    ]
+                    mtp_labels.append(labels_cur_depth)
 
             mtp_loss = []
             mtp_logits = logits[1:]
@@ -356,9 +368,7 @@ class LanguageLoss(FleetLayer):
 
                 for depth in range(self.config.num_nextn_predict_layers):
                     logits_cur_depth = mtp_logits[depth]
-                    labels_cur_depth = labels_ori[
-                        :, (depth + 1) : (depth + 1 + seq_length)
-                    ]
+                    labels_cur_depth = mtp_labels[depth]
                     loss_cur_depth = self._forward(
                         logits_cur_depth,
                         labels_cur_depth,
@@ -392,9 +402,7 @@ class LanguageLoss(FleetLayer):
                 ):
                     for depth in range(len(mtp_logits)):
                         prediction_scores_cur_depth = mtp_logits[depth]
-                        labels_cur_depth = labels_ori[
-                            :, (depth + 1) : (depth + 1 + seq_length)
-                        ]
+                        labels_cur_depth = mtp_labels[depth]
                         lossmask = (
                             labels_cur_depth != self.ignored_index
                         ).cast(paddle.float32)
