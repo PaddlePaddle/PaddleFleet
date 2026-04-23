@@ -48,8 +48,19 @@ class _DispatchManager(ABC):
     """
 
     @abstractmethod
-    def setup_metadata(self, routing_map: paddle.Tensor, probs: paddle.Tensor):
-        """Set up metadata of routing_map and probs."""
+    def setup_metadata(
+        self,
+        routing_map: paddle.Tensor,
+        probs: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
+    ):
+        """Set up metadata of routing_map and probs.
+
+        If ``topk_weights`` and ``topk_indices`` are provided (e.g. produced by
+        the router), they will be used directly and the internal ``paddle.topk``
+        call will be skipped.
+        """
         pass
 
     @abstractmethod
@@ -136,8 +147,25 @@ class _DeepepManager(_DispatchManager):
                 "DeepEP is not supported in your paddlepaddle whl package."
             )
 
-    def setup_metadata(self, routing_map: paddle.Tensor, probs: paddle.Tensor):
+    def setup_metadata(
+        self,
+        routing_map: paddle.Tensor,
+        probs: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
+    ):
         num_tokens = routing_map.shape[0]
+
+        if topk_weights is not None and topk_indices is not None:
+            # Reuse router's topk results, skip recomputing topk.
+            self.token_probs = topk_weights.reshape(
+                [num_tokens, self.router_topk]
+            )
+            self.token_indices = topk_indices.reshape(
+                [num_tokens, self.router_topk]
+            )
+            self.token_indices.stop_gradient = True
+            return
 
         routing_map = routing_map.reshape([num_tokens, self.num_experts])
         probs = probs.reshape([num_tokens, self.num_experts])
@@ -371,10 +399,14 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
     ):
         self.hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
-        self._comm_manager.setup_metadata(routing_map, probs)
+        self._comm_manager.setup_metadata(
+            routing_map, probs, topk_weights, topk_indices
+        )
         return hidden_states
 
     def dispatch_preprocess_overlap(
@@ -446,11 +478,15 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
     ) -> tuple[paddle.Tensor, paddle.Tensor]:
         self.hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
 
-        self._comm_manager.setup_metadata(routing_map, probs)
+        self._comm_manager.setup_metadata(
+            routing_map, probs, topk_weights, topk_indices
+        )
         hidden_states, scale = self._comm_manager.dispatch(hidden_states)
         global_input_tokens = (
             self._comm_manager.get_permuted_hidden_states_by_experts(
@@ -500,6 +536,8 @@ class AllToAllTokenDispatcher(nn.Layer):
         hidden_states: paddle.Tensor,
         gates_masked: paddle.Tensor,  # probs
         mask: paddle.Tensor,  # routing_map
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
     ) -> tuple[paddle.Tensor, paddle.Tensor]:
         self.routing_map = mask
         self.gates_masked = gates_masked

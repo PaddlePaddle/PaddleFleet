@@ -420,10 +420,12 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
         async_finish: bool = False,
     ):
         hidden_states = self.token_dispatcher.dispatch_preprocess(
-            hidden_states, probs, routing_map
+            hidden_states, probs, routing_map, topk_weights, topk_indices
         )
         hidden_states, fp8_dispatched_handle = (
             self.token_dispatcher.token_dispatch(
@@ -466,10 +468,14 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
     ):
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
-            hidden_states, _ = self.dispatch(hidden_states, probs, routing_map)
+            hidden_states, _ = self.dispatch(
+                hidden_states, probs, routing_map, topk_weights, topk_indices
+            )
         if should_log_balance and global_moe_balance_training_logs_enabled():
             log_moe_balance(
                 self.layer_number,
@@ -489,12 +495,14 @@ class MoELayer(nn.Layer):
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
         combine_overlap_handle: dict,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
     ):
         # TODO(deepllz): add fp8 dispatch config && implementation
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
             dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
-                hidden_states, probs, routing_map
+                hidden_states, probs, routing_map, topk_weights, topk_indices
             )
         if should_log_balance and global_moe_balance_training_logs_enabled():
             log_moe_balance(
@@ -597,10 +605,10 @@ class MoELayer(nn.Layer):
 
         return hidden_states
 
-    def compute_gate(self, hidden_states):
+    def compute_gate(self, hidden_states, input_ids=None):
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             hidden_states = GatherOp.apply(hidden_states)
-        return self.gate(hidden_states)
+        return self.gate(hidden_states, input_ids=input_ids)
 
     def dispatch_preprocess(self, args):
         hidden_states, token_probs, token_indices = args
@@ -713,10 +721,15 @@ class MoELayer(nn.Layer):
             output = ScatterOp.apply(output)
         return output
 
-    def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
+    def forward(
+        self,
+        hidden_states: paddle.Tensor,
+        input_ids: paddle.Tensor | None = None,
+    ) -> paddle.Tensor:
         """
         Args:
             hidden_states: Shape: [batch_size, seq_len, hidden_size]
+            input_ids: Shape: [batch_size, seq_len], optional token ids from embedding input.
 
         Returns:
             output: Shape: [batch_size, seq_len, hidden_size]
@@ -728,7 +741,12 @@ class MoELayer(nn.Layer):
 
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
-
+        # [b,s,1]
+        # input_ids = None
+        if input_ids is not None:
+            input_ids_none_zero_mask = (input_ids != 0).squeeze(0).unsqueeze(-1)
+        else:
+            input_ids_none_zero_mask = None
         (
             capacity,
             topk_weights,
@@ -738,7 +756,11 @@ class MoELayer(nn.Layer):
             priorities,
             aux_loss,
             z_loss,
-        ) = self.gate(hidden_states)
+        ) = self.gate(
+            hidden_states,
+            input_ids_none_zero_mask=input_ids_none_zero_mask,
+            input_ids=input_ids,
+        )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
         # gates_masked, mask: Shape is [seq_len, num_experts], sometimes their names are "probs" and "routing_map"
         # capacity, priorities are used for dropping tokens, currently they are not used
@@ -763,10 +785,21 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
-                    hidden_states, gates_masked, mask, combine_overlap_handle
+                    hidden_states,
+                    gates_masked,
+                    mask,
+                    combine_overlap_handle,
+                    topk_weights=topk_weights,
+                    topk_indices=topk_indices,
                 )
             else:
-                output = self.custom_forward(hidden_states, gates_masked, mask)
+                output = self.custom_forward(
+                    hidden_states,
+                    gates_masked,
+                    mask,
+                    topk_weights=topk_weights,
+                    topk_indices=topk_indices,
+                )
         else:
             if len(hidden_states.shape) == 3:
                 batch_size, seq_len, d_model = hidden_states.shape
