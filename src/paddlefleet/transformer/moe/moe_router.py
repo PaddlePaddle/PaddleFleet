@@ -38,14 +38,14 @@ from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 # MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
-# Lazy-loaded EC FusedMoETopk Triton kernel for bit-exact alignment
+# Lazy-loaded FusedMoETopk Triton kernel for bit-exact alignment
 _FusedMoETopk = None
 
 
 def _get_fused_moe_topk():
     global _FusedMoETopk
     if _FusedMoETopk is None:
-        from ernie_core.ops.triton_ops.fused_moe_topk import FusedMoETopk
+        from paddlefleet.ops.triton_ops.fused_moe_topk import FusedMoETopk
 
         _FusedMoETopk = FusedMoETopk
     return _FusedMoETopk
@@ -612,12 +612,18 @@ class TopKRouter(StandardMoERouter):
                 gates_ori.sum(axis=-1, keepdim=True) + 1e-20
             )
 
-        if getattr(self.config, "gpt_model_use_experimental_version", False):
-            # Use EC's FusedMoETopk Triton kernel for bit-exact alignment.
+        if getattr(
+            self.config, "gpt_model_use_experimental_version", False
+        ) or getattr(self.config, "fused_moe_topk", False):
+            # Use FusedMoETopk Triton kernel for bit-exact alignment.
             # This ensures the topk selection + normalization uses the exact same
-            # GPU kernel as ErnieCore, avoiding FP32 rounding differences between
+            # GPU kernel, avoiding FP32 rounding differences between
             # Triton's scalar loop and Paddle's tensor ops.
             FusedMoETopk = _get_fused_moe_topk()
+            if self._layer_number == 0:
+                print(
+                    f"[DEBUG] Using FusedMoETopk Triton kernel, layer={self._layer_number}, n_group={self.n_group}, topk_group={self.topk_group}, num_experts_per_tok={self.num_experts_per_tok}"
+                )
             use_node_limit = self.n_group > 1
             probs_for_choice = (
                 gates + self.e_score_correction_bias.detach().unsqueeze(0)
@@ -683,10 +689,11 @@ class TopKRouter(StandardMoERouter):
         gates_masked = gates * mask
 
         # norm
-        if not getattr(
+        use_fused_topk = getattr(
             self.config, "gpt_model_use_experimental_version", False
-        ):
-            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
+        ) or getattr(self.config, "fused_moe_topk", False)
+        if not use_fused_topk:
+            # When FusedMoETopk is used, top_gate is already normalized by the Triton kernel
             if self.norm_topk_prob:
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator

@@ -1,0 +1,131 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Triton 操作工具函数模块。
+
+该模块提供了 Triton kernel 的辅助工具函数，用于支持 PaddlePaddle 与 Triton 的集成。
+
+主要功能：
+- Torch 兼容性检查：检测 PaddlePaddle 是否支持 torch 兼容模式
+- 条件分发装饰器：根据条件选择高性能 Triton 实现或后备实现
+- Triton kernel 兼容性包装器：自动处理 Paddle/Triton 驱动切换
+
+"""
+
+from functools import cache
+from importlib.metadata import PackageNotFoundError, distribution
+
+import paddle
+
+
+def is_torch_compat_available() -> bool:
+    """
+    判断是否支持 Torch 兼容性
+    Returns:
+        bool: 如果存在 enable_compat 方法，则返回 True；否则返回 False。
+    """
+    return hasattr(paddle, "enable_compat")
+
+
+def dispatch_to(dispatch_fn, *, cond=None):
+    """
+    创建条件分发装饰器，根据 cond 条件选择高性能内核或后备实现
+
+    Args:
+        dispatch_fn: 高性能实现函数，当启用高性能内核时调用
+        cond: 条件函数，返回布尔值，决定是否使用高性能实现
+
+    Returns:
+        decorator: 装饰器函数，用于包装目标函数
+    """
+    if cond is None:
+        cond = lambda self, *args, **kwargs: True
+
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            if cond(*args, **kwargs) and is_torch_compat_available():
+                return dispatch_fn(*args, **kwargs)
+            return fn(*args, **kwargs)
+
+        wrapper.__original_fn__ = fn
+        return wrapper
+
+    return decorator
+
+
+@cache
+def _is_package_installed(dist_name: str) -> bool:
+    """检查包是否已安装"""
+    try:
+        distribution(dist_name)
+        return True
+    except PackageNotFoundError:
+        return False
+
+
+# 初始化 Paddle Triton 驱动（仅在支持时）
+_paddle_driver = None
+if _is_package_installed("torch") and paddle.is_compiled_with_cuda():
+    try:
+        with paddle.use_compat_guard(enable=True, silent=True):
+            from triton.runtime.driver import _create_driver
+
+            _paddle_driver = _create_driver()
+    except Exception:
+        pass
+
+
+def swap_driver_guard(fn):
+    """
+    驱动切换守卫，确保 Triton kernel 使用正确的 Paddle 驱动
+    """
+    from triton.runtime.driver import driver
+
+    def wrapped_fn(*args, **kwargs):
+        if _paddle_driver is not None:
+            driver.set_active(_paddle_driver)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if _paddle_driver is not None:
+                driver.reset_active()
+
+    return wrapped_fn
+
+
+def enable_compat_on_triton_kernel(triton_kernel):
+    """
+    Triton kernel 兼容性装饰器。
+
+    自动处理 Paddle 与 Triton 的驱动切换，使 Triton kernel 能够
+    正确地在 PaddlePaddle 环境中运行。
+
+    Args:
+        triton_kernel: Triton JIT 编译的 kernel
+
+    Returns:
+        包装后的 kernel，支持驱动自动切换
+    """
+    if not paddle.is_compiled_with_cuda():
+        return triton_kernel
+
+    class WrappedTritonKernel:
+        def __init__(self, kernel):
+            self.kernel = kernel
+
+        def __getitem__(self, index):
+            return swap_driver_guard(self.kernel[index])
+
+    return WrappedTritonKernel(triton_kernel)
