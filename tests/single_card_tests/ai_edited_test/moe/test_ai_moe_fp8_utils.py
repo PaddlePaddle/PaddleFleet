@@ -77,10 +77,21 @@ class TestFP8Utils(unittest.TestCase):
         self.assertIsNotNone(scale)
 
     def test_fused_stack_quant_precomputed_transpose(self):
-        """Test fused_stack_quant with precomputed fp8_weight_stacked_transpose."""
+        """Test fused_stack_quant cache-hit with precomputed transpose.
+
+        fused_stack_quant enters cache path via hasattr(w[0], 'fp8_weight_stacked'),
+        then _get_fp8_weight_and_scale checks fp8_weight_stacked_transpose for
+        transpose=True. So both attributes must be set.
+        """
         from paddlefleet.transformer.moe.fp8_utils import fused_stack_quant
 
         w1 = paddle.randn([64, 128], dtype=paddle.bfloat16)
+        # fp8_weight_stacked is required to enter cache path
+        w1.fp8_weight_stacked = paddle.zeros(
+            [128, 64], dtype=paddle.float8_e4m3fn
+        )
+        w1.fp8_scale_stacked = paddle.ones([1, 8], dtype=paddle.float32)
+        # fp8_weight_stacked_transpose is the actual transpose cache
         w1.fp8_weight_stacked_transpose = paddle.zeros(
             [128, 64], dtype=paddle.float8_e4m3fn
         )
@@ -90,8 +101,9 @@ class TestFP8Utils(unittest.TestCase):
         w2 = paddle.randn([64, 128], dtype=paddle.bfloat16)
         weight_list = [w1, w2]
         w, scale = fused_stack_quant(weight_list, transpose=True)
-        self.assertIsNotNone(w)
-        self.assertIsNotNone(scale)
+        # Should return the precomputed transpose cache directly
+        self.assertIs(w, w1.fp8_weight_stacked_transpose)
+        self.assertIs(scale, w1.fp8_scale_stacked_transpose)
 
     def test_get_fp8_weight_and_scale(self):
         """Test _get_fp8_weight_and_scale helper."""
@@ -353,3 +365,7 @@ class TestFP8Utils(unittest.TestCase):
         y = paddle.randn([4, 4], dtype=paddle.float32)
         result = swiglu(x, y=y)
         self.assertEqual(result.shape, [4, 4])
+
+
+if __name__ == "__main__":
+    unittest.main()

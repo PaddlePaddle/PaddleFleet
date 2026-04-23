@@ -107,7 +107,9 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
                 paddle.float32,
             )
 
-    def test_quant_transpose_false_stores_only_nontranspose_layout(self):
+    def test_quant_transpose_false_stores_nontranspose_and_nulls_transpose(
+        self,
+    ):
         layer = self._make_layer()
         layer.fp8_quant_weight(batch_mode=False, quant_transpose=False)
 
@@ -116,16 +118,19 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
                 weight.fp8_weight_stacked.dtype, paddle.float8_e4m3fn
             )
             self.assertEqual(weight.fp8_scale_stacked.dtype, paddle.float32)
-            self.assertFalse(hasattr(weight, "fp8_weight_stacked_transpose"))
-            self.assertFalse(hasattr(weight, "fp8_scale_stacked_transpose"))
+            # fp8_weight_stacked_transpose is explicitly set to None
+            self.assertIsNone(weight.fp8_weight_stacked_transpose)
+            self.assertIsNone(weight.fp8_scale_stacked_transpose)
 
-    def test_quant_transpose_true_stores_only_transpose_layout(self):
+    def test_quant_transpose_true_stores_both_layouts(self):
         layer = self._make_layer()
         layer.fp8_quant_weight(batch_mode=False, quant_transpose=True)
 
         for weight in self._expert_weights(layer):
-            self.assertFalse(hasattr(weight, "fp8_weight_stacked"))
-            self.assertFalse(hasattr(weight, "fp8_scale_stacked"))
+            self.assertEqual(
+                weight.fp8_weight_stacked.dtype, paddle.float8_e4m3fn
+            )
+            self.assertEqual(weight.fp8_scale_stacked.dtype, paddle.float32)
             self.assertEqual(
                 weight.fp8_weight_stacked_transpose.dtype,
                 paddle.float8_e4m3fn,

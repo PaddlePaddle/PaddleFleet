@@ -111,23 +111,35 @@ class TestFusedStackQuant(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
     @patch("paddlefleet.transformer.moe.fp8_utils._get_fp8_weight_and_scale")
-    def test_fallback_to_non_transpose_cache(self, mock_get):
-        mock_get.return_value = (paddle.randn([4, 4]), paddle.randn([4]))
+    @patch(
+        "paddlefleet.transformer.moe.fp8_utils.fused_stack_quant_without_cache"
+    )
+    def test_fallback_to_non_transpose_cache(
+        self, mock_without_cache, mock_get
+    ):
+        """Only fp8_weight_stacked_transpose set (no fp8_weight_stacked):
+        cache path is NOT entered, falls through to fused_stack_quant_without_cache."""
+        mock_without_cache.return_value = (
+            paddle.randn([4, 4]),
+            paddle.randn([4]),
+        )
         weight = MagicMock()
         del weight.fp8_weight_stacked
         weight.fp8_weight_stacked_transpose = True
         result = fused_stack_quant([weight], transpose=False)
-        mock_get.assert_called_once_with(weight, transpose=True)
+        mock_get.assert_not_called()
+        mock_without_cache.assert_called_once()
 
     @patch("paddlefleet.transformer.moe.fp8_utils._get_fp8_weight_and_scale")
     def test_fallback_to_transpose_cache(self, mock_get):
+        """fp8_weight_stacked set but no fp8_weight_stacked_transpose,
+        transpose=True: enters cache path, _get_fp8_weight_and_scale handles
+        on-the-fly transpose internally."""
         mock_get.return_value = (paddle.randn([4, 4]), paddle.randn([4]))
         weight = MagicMock(spec=["fp8_weight_stacked"])
-        # When transpose=True and fp8_weight_stacked_transpose is not available
-        # but fp8_weight_stacked IS available, it falls back to transpose=False
         weight.fp8_weight_stacked = True
         result = fused_stack_quant([weight], transpose=True)
-        mock_get.assert_called_once_with(weight, transpose=False)
+        mock_get.assert_called_once_with(weight, transpose=True)
 
 
 class TestExpertsGroupGemmContiguousNode(unittest.TestCase):
