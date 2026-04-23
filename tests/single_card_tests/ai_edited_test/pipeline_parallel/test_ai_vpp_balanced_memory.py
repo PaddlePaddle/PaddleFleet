@@ -32,7 +32,7 @@ class TestOffloadQueue(unittest.TestCase):
     """Tests for OffloadQueue."""
 
     def test_put_and_get_no_offload(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -42,7 +42,7 @@ class TestOffloadQueue(unittest.TestCase):
         self.assertEqual(result, "test_value")
 
     def test_put_and_get_with_offload(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -56,7 +56,7 @@ class TestOffloadQueue(unittest.TestCase):
         self.assertEqual(result, "string_value")
 
     def test_qsize(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -66,7 +66,7 @@ class TestOffloadQueue(unittest.TestCase):
         self.assertEqual(q.qsize(), 2)
 
     def test_empty(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             OffloadQueue,
         )
 
@@ -78,7 +78,7 @@ class TestVPPFhenBInBalancedMemoryInit(unittest.TestCase):
     """Tests for VPPFhenBInBalancedMemory initialization."""
 
     def test_get_scheduler_name(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
@@ -87,7 +87,7 @@ class TestVPPFhenBInBalancedMemoryInit(unittest.TestCase):
         self.assertEqual(name, "VPPFhenBInBalancedMemory")
 
     def test_overlap_schedule_mode(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
@@ -96,14 +96,16 @@ class TestVPPFhenBInBalancedMemoryInit(unittest.TestCase):
         self.assertFalse(pp.overlap_schedule_mode)
 
     def test_init_user_bubble_hooks(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
         pp = VPPFhenBInBalancedMemory.__new__(VPPFhenBInBalancedMemory)
         pp.num_stages = 4
         pp._init_user_bubble_hooks()
-        from paddlefleet.pipeline_parallel.pipeline_hooks import PipelineHook
+        from paddle.distributed.fleet.meta_parallel.pipeline_hooks import (
+            PipelineHook,
+        )
 
         self.assertIsInstance(pp.bubble_hooks, PipelineHook)
 
@@ -112,7 +114,7 @@ class TestVPPFhenBForwardOnly(unittest.TestCase):
     """Tests for forward_only path in VPPFhenBInBalancedMemory."""
 
     def test_forward_only_compute_loss_true(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
@@ -131,7 +133,7 @@ class TestVPPFhenBForwardOnly(unittest.TestCase):
             pass
 
     def test_compute_loss_false_assertion(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
@@ -146,7 +148,7 @@ class TestVPPFhenBStartupSteadyCooldown(unittest.TestCase):
     """Tests for startup/steady/cooldown step calculations."""
 
     def test_startup_steps_calculation(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
@@ -165,7 +167,7 @@ class TestVPPFhenBStartupSteadyCooldown(unittest.TestCase):
         self.assertEqual(startup_steps, 11)
 
     def test_steady_1f1b_steps(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
@@ -180,7 +182,7 @@ class TestVPPFhenBStartupSteadyCooldown(unittest.TestCase):
         self.assertEqual(steady_1f1b_steps, 5)
 
     def test_cooldown_steps(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
@@ -199,7 +201,7 @@ class TestVPPFhenBStartupSteadyCooldown(unittest.TestCase):
         self.assertEqual(startup_steps, startup_steps)  # cooldown = startup
 
     def test_skip_steps(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
@@ -215,7 +217,7 @@ class TestVPPFhenBBubbleHooks(unittest.TestCase):
     """Tests for bubble hooks in VPPFhenBInBalancedMemory."""
 
     def test_bubble_hooks_before_startup(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 
@@ -235,7 +237,7 @@ class TestVPPFhenBBubbleHooks(unittest.TestCase):
         self.assertEqual(mock_hook.call_count, pp.stage_id)
 
     def test_bubble_hooks_disabled(self):
-        from paddlefleet.pipeline_parallel.vpp_balanced_memory import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             VPPFhenBInBalancedMemory,
         )
 

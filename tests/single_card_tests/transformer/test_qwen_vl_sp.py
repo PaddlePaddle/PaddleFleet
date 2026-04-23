@@ -68,12 +68,13 @@ def _emb_config(**kw):
 
 
 def _make_emb(config, rope=None):
+    from paddle.distributed.fleet.meta_parallel import LayerSpec
+
     from paddlefleet.models.common.embeddings import LanguageModelEmbedding
     from paddlefleet.models.gpt.gpt_embedding import (
         GPTEmbedding,
         GPTEmbeddingSpec,
     )
-    from paddlefleet.spec_utils import LayerSpec
 
     rope_spec, pos_type, msec = None, "none", None
     if rope == "rope":
@@ -227,12 +228,13 @@ class TestMRoPEFreqsReshape(unittest.TestCase):
 
 class TestGPTEmbeddingMultimodalSPConfig(unittest.TestCase):
     def test_sp_disables_internal_scatter_for_multimodal(self):
+        from paddle.distributed.fleet.meta_parallel import LayerSpec
+
         from paddlefleet.models.common.embeddings import LanguageModelEmbedding
         from paddlefleet.models.gpt.gpt_embedding import (
             GPTEmbedding,
             GPTEmbeddingSpec,
         )
-        from paddlefleet.spec_utils import LayerSpec
 
         config = _emb_config(sequence_parallel=True, multimodal_embedding=True)
         gpt_emb = GPTEmbedding(

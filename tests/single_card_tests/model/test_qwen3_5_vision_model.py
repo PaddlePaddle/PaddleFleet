@@ -23,6 +23,11 @@ import numpy as np
 import paddle
 from paddle import Tensor
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    NoPipelineParallel,
+    build_spec_layer,
+)
 from paddle.nn import functional as F
 
 import paddlefleet.parallel_state as ps
@@ -35,8 +40,6 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
 )
 from paddlefleet.models.gpt.lm_head import GPTLMHead
 from paddlefleet.models.qwen3_5.layer_specs import get_qwen3_5_vision_spec
-from paddlefleet.pipeline_parallel import NoPipelineParallel
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
@@ -85,7 +88,7 @@ class Qwen3_5VisionProvider(TransformerConfig):
 
     def provide(self):
         spec = get_qwen3_5_vision_spec(self)
-        return build_layer(
+        return build_spec_layer(
             spec,
             seg_method="layer:TransformerLayer|EmptyLayer",
             num_stages=self.pipeline_model_parallel_size,
@@ -714,7 +717,7 @@ class TestQwen3_5Model(unittest.TestCase):
         language_spec = get_qwen3_5_language_spec(
             config=language_config,
         )
-        language_model = build_layer(
+        language_model = build_spec_layer(
             language_spec,
             seg_method="layer:TransformerLayer|EmptyLayer",
             num_stages=1,

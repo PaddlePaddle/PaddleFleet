@@ -28,7 +28,19 @@ from paddle.incubate.nn.functional import (
     fused_rotary_position_embedding as fused_rope,
 )
 
-from paddlefleet.ops import fused_apply_rotary_pos_emb_vision
+if paddle.is_compiled_with_cuda():
+    try:
+        from paddlefleet.ops import fused_apply_rotary_pos_emb_vision
+    except ImportError:
+        logging.getLogger(__name__).warning(
+            "Failed to import optional CUDA op "
+            "'fused_apply_rotary_pos_emb_vision'; falling back to the "
+            "non-fused rotary position embedding path."
+        )
+        fused_apply_rotary_pos_emb_vision = None
+else:
+    fused_apply_rotary_pos_emb_vision = None
+
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
 logger = logging.getLogger(__name__)
@@ -145,7 +157,8 @@ def _apply_rotary_pos_emb_bshd(
             # - only supports non-interleaved mode and mscale=1.0
             # - freqs must be reshaped to [s, dim//2]
             if (
-                not rotary_interleaved
+                fused_apply_rotary_pos_emb_vision is not None
+                and not rotary_interleaved
                 and mscale == 1.0
                 and freqs is not None
                 and not isinstance(t, tuple)

@@ -17,13 +17,13 @@
 import logging
 
 from paddle.distributed import fleet
-
-from ..pipeline_parallel import (
+from paddle.distributed.fleet.meta_parallel import (
     LayerDesc,
     PipelineLayer,
     ScheduleChunk,
     SharedLayerDesc,
 )
+
 from ..pipeline_parallel.pp_utils.utils import dict_to_tuple_helper
 from .transformer_layer import (
     TransformerLayer,

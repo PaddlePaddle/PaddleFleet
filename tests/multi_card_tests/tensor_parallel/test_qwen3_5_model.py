@@ -53,14 +53,16 @@ sys.path.insert(
         "model",
     ),
 )
+from paddle.distributed.fleet.meta_parallel import (
+    NoPipelineParallel,
+    build_spec_layer,
+)
 from test_qwen3_5_vision_model import (
     Qwen3_5Model,
     Qwen3_5VisionProvider,
     get_qwen3_5_language_spec,
 )
 
-from paddlefleet.pipeline_parallel import NoPipelineParallel
-from paddlefleet.spec_utils import build_layer
 from paddlefleet.tensor_parallel.mappings import (
     _gather_along_first_dim,
     _gather_along_last_dim,
@@ -294,7 +296,7 @@ def _build_qwen3_5_model(language_config, strategy):
     vision_model = vision_config.provide()
 
     language_spec = get_qwen3_5_language_spec(config=language_config)
-    language_model = build_layer(
+    language_model = build_spec_layer(
         language_spec,
         seg_method="layer:TransformerLayer|EmptyLayer",
         num_stages=1,

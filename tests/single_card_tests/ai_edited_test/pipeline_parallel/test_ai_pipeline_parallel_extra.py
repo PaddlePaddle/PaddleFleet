@@ -33,7 +33,7 @@ class TestGetAlignModeScale(unittest.TestCase):
 
     @patch("paddle.distributed.fleet.get_hybrid_communicate_group")
     def test_align_mode_scale(self, mock_get_hcg):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             _get_align_mode_scale,
         )
 
@@ -47,7 +47,7 @@ class TestGetAlignModeScale(unittest.TestCase):
 
     @patch("paddle.distributed.fleet.get_hybrid_communicate_group")
     def test_align_mode_scale_zero(self, mock_get_hcg):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             _get_align_mode_scale,
         )
 
@@ -64,7 +64,7 @@ class TestPipelineParallelMicroStepLocations(unittest.TestCase):
     """Tests for PipelineParallelMicroStepLocations enum."""
 
     def test_enum_values(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepLocations,
         )
 
@@ -85,7 +85,7 @@ class TestPipelineParallelMicroStepLocations(unittest.TestCase):
         )
 
     def test_enum_members(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepLocations,
         )
 
@@ -97,7 +97,7 @@ class TestPipelineParallelMicroStepCallback(unittest.TestCase):
     """Tests for PipelineParallelMicroStepCallback."""
 
     def test_register_and_trigger_hook(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -119,7 +119,7 @@ class TestPipelineParallelMicroStepCallback(unittest.TestCase):
         self.assertEqual(hook_calls[0]["step_id"], 0)
 
     def test_register_invalid_location(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
         )
 
@@ -128,7 +128,7 @@ class TestPipelineParallelMicroStepCallback(unittest.TestCase):
             callback.register_hook("invalid_location", lambda: None)
 
     def test_on_invalid_location(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
         )
 
@@ -137,7 +137,7 @@ class TestPipelineParallelMicroStepCallback(unittest.TestCase):
             callback.on_location("invalid_location")
 
     def test_multiple_hooks(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -157,7 +157,7 @@ class TestPipelineParallelMicroStepCallback(unittest.TestCase):
         self.assertEqual(results, [1, 2])
 
     def test_hooks_per_location_separate(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepCallback,
             PipelineParallelMicroStepLocations,
         )
@@ -189,14 +189,14 @@ class TestPipelineParallelCallbacksGlobal(unittest.TestCase):
     """Tests for the global pipeline_parallel_callbacks_ instance."""
 
     def test_global_callbacks_exist(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             pipeline_parallel_callbacks_,
         )
 
         self.assertIsNotNone(pipeline_parallel_callbacks_)
 
     def test_global_callbacks_has_all_locations(self):
-        from paddlefleet.pipeline_parallel.pipeline_parallel import (
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
             PipelineParallelMicroStepLocations,
             pipeline_parallel_callbacks_,
         )

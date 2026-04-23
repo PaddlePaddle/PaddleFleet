@@ -136,6 +136,7 @@ jobs:
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
+          git rev-parse HEAD > commitid
           if [[ "${{ github.event_name }}" != "push" ]]; then
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
             export AK=paddle
@@ -145,6 +146,7 @@ jobs:
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
             python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet
           else
@@ -156,6 +158,7 @@ jobs:
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
             python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '

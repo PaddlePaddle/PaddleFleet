@@ -17,12 +17,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    ScheduleNode,
+    build_spec_layer,
+)
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
 )
 
-from paddlefleet.pipeline_parallel import ScheduleNode
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
@@ -57,7 +60,7 @@ class GPTEmbedding(FleetLayer):
         mrope_section: list[int] | None = None,
     ):
         super().__init__(config)
-        self.embedding = build_layer(
+        self.embedding = build_spec_layer(
             sublayers_spec.language_embedding,
             config=config,
             vocab_size=vocab_size,
@@ -83,7 +86,7 @@ class GPTEmbedding(FleetLayer):
         self.mrope_section = mrope_section
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
-            self.rotary_pos_emb = build_layer(
+            self.rotary_pos_emb = build_spec_layer(
                 sublayers_spec.rope_embedding,
                 head_dim=config.head_dim,
                 rotary_percent=rotary_percent,
@@ -106,6 +109,9 @@ class GPTEmbedding(FleetLayer):
         packed_seq_params: PackedSeqParams = None,
     ):
         input_ids = dict_args["input_ids"]
+        labels = dict_args.get("labels", None)
+        if labels is not None:
+            labels = labels.cuda()
         position_ids = dict_args.get("position_ids", None)
         device = paddle.device.get_device().split(":")[0].lower()
         position_ids = (
@@ -115,6 +121,11 @@ class GPTEmbedding(FleetLayer):
         attn_mask_startend_row_indices = dict_args.get(
             "attn_mask_startend_row_indices", None
         )
+        # Fallback: ernie5 trainer uses "startend_row_indices" key name
+        if attn_mask_startend_row_indices is None:
+            attn_mask_startend_row_indices = dict_args.get(
+                "startend_row_indices", None
+            )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None
@@ -371,6 +382,7 @@ class GPTEmbedding(FleetLayer):
             "position_ids": position_ids,
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,
+            "labels": labels,
         }
         if mtp_emb_res is not None:
             assert (

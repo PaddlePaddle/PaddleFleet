@@ -177,6 +177,66 @@ class DotProductAttention(FleetLayer):
             raise ValueError("Softmax type not supported")
         self.rr_flashmask_attention_func = rr_flashmask_attention()
 
+    def _ec_compatible_flash_attention(
+        self, query, key, value, attn_mask_startend_row_indices=None
+    ):
+        """EC-compatible flash attention path for alignment mode.
+
+        When startend_row_indices is provided (multi-doc packing), uses
+        flashmask_attention with causal=True (matching EC behavior).
+        Otherwise falls back to flash_attention with causal=True.
+        Handles MLA value padding (q_head_dim != v_head_dim).
+        """
+        bsz, q_len, num_heads, q_head_dim = query.shape
+        v_head_dim = value.shape[-1]
+        need_value_padding = q_head_dim != v_head_dim
+
+        if need_value_padding:
+            value_padding = paddle.zeros(
+                [bsz, q_len, value.shape[2], q_head_dim - v_head_dim],
+                dtype=value.dtype,
+            )
+            value = paddle.concat([value, value_padding], axis=-1)
+
+        if attn_mask_startend_row_indices is not None:
+            # flashmask path — matches EC's scaled_dot_product_attention
+            try:
+                from flash_mask.cute.interface import flashmask_attention
+            except (ImportError, ModuleNotFoundError):
+                from paddle.nn.functional.flash_attention import (
+                    flashmask_attention,
+                )
+
+            attn_output = flashmask_attention(
+                query.astype(value.dtype),
+                key.astype(value.dtype),
+                value,
+                startend_row_indices=attn_mask_startend_row_indices,
+                dropout=0.0,
+                causal=False,  # EC uses causal=False with 2-col startend_row_indices
+            )
+        else:
+            # simple causal path — no document boundaries
+            try:
+                from flash_mask.cute.interface import flash_attention
+            except (ImportError, ModuleNotFoundError):
+                from paddle.nn.functional.flash_attention import flash_attention
+
+            attn_output, _ = flash_attention(
+                query.astype(value.dtype),
+                key.astype(value.dtype),
+                value,
+                dropout=0.0,
+                causal=True,
+                return_softmax=False,
+            )
+
+        if need_value_padding:
+            attn_output = attn_output[..., :v_head_dim]
+
+        attn_output = attn_output.reshape([bsz, q_len, -1])
+        return attn_output
+
     def forward(
         self,
         query: Tensor,
@@ -193,6 +253,13 @@ class DotProductAttention(FleetLayer):
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
+
+        # EC-compatible flash attention path for alignment mode
+        if self.config.gpt_model_use_experimental_version:
+            return self._ec_compatible_flash_attention(
+                query, key, value, attn_mask_startend_row_indices
+            )
+
         if self.config.fa_version == 4:
             from paddlefleet.ops.flash_mask.cute.interface import (
                 flashmask_attention as _flashmask_attention,
@@ -200,6 +267,13 @@ class DotProductAttention(FleetLayer):
         else:
             from paddle.nn.functional.flash_attention import (
                 flashmask_attention as _flashmask_attention,
+            )
+        use_eager = self.config._attn_implementation == "eager"
+
+        if use_eager and packed_seq_params is not None:
+            raise ValueError(
+                'packed_seq_params does not support _attn_implementation="eager"; '
+                "please disable packed sequence inputs or use a fused attention implementation."
             )
         if packed_seq_params is not None:
             assert (
@@ -251,8 +325,10 @@ class DotProductAttention(FleetLayer):
             attn_output = attn_output.reshape([0, 0, -1])
             return attn_output
         if (
-            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
-        ) and attn_mask_startend_row_indices is None:
+            (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
+            and attn_mask_startend_row_indices is None
+            and not use_eager
+        ):
             # Note:
             # attention_mask is None in default
             # is_causal is True in default
@@ -276,8 +352,10 @@ class DotProductAttention(FleetLayer):
             return attn_output
 
         elif (
-            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
-        ) and attn_mask_startend_row_indices is not None:
+            (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
+            and attn_mask_startend_row_indices is not None
+            and not use_eager
+        ):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             flashmask_attention_func = (

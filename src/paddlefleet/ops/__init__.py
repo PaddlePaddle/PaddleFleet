@@ -132,7 +132,7 @@ def _sonic_moe_requirement(
         reasons.append(f"CUDA >= 12.9 required (current {_cuda_version_str})")
     if not cuda_capability or cuda_capability[0] < 9:
         reasons.append(
-            f"GPU compute capability equal to 9.x required (current {_capability_str})"
+            f"GPU compute capability >= 9.0 required (current {_capability_str})"
         )
     reason = "; ".join(reasons) if reasons else "Runtime requirements not met."
     return _build_notice(lib_module, reason, hint_for_error=hint)
@@ -151,7 +151,7 @@ if paddle.is_compiled_with_cuda():
         _FLASH_MASK_AVAILABLE = True
     if (
         sys.version_info >= (3, 12)
-        and paddle.cuda.get_device_capability()[0] == 9
+        and paddle.cuda.get_device_capability()[0] >= 9
         and _cuda_version >= (12, 9)
     ):
         _SONIC_MOE_AVAILABLE = True

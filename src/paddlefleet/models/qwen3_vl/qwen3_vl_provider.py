@@ -17,9 +17,9 @@ from dataclasses import dataclass
 from functools import partial
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 from paddle.nn import functional as F
 
-from ...spec_utils import LayerSpec
 from ...transformer import TransformerConfig
 from .qwen3_vl_builders import qwen3_vl_vision_builder
 from .qwen3_vl_model import Qwen3VLVisionModel, Qwen3VLVisionTransformerLayer

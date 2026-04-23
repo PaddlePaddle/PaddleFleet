@@ -30,12 +30,12 @@ import unittest
 import numpy as np
 import paddle
 from paddle.distributed import fleet
-
-from paddlefleet.distributed.model import distributed_model
-from paddlefleet.pipeline_parallel import (
+from paddle.distributed.fleet import distributed_model
+from paddle.distributed.fleet.meta_parallel import (
     NoPipelineParallel,
+    build_spec_layer,
 )
-from paddlefleet.spec_utils import build_layer
+
 from tests.multi_card_tests.pipeline_parallel.test_distribute_model import (
     get_simple_spec,
 )
@@ -92,7 +92,7 @@ class TestDistVppTraining(unittest.TestCase):
 
         set_random_seed(1024)
         simple_spec = get_simple_spec()
-        nopp_model = build_layer(simple_spec, num_stages=1)
+        nopp_model = build_spec_layer(simple_spec, num_stages=1)
         nopp_model = NoPipelineParallel(nopp_model, self.strategy)
         nopp_scheduler = paddle.optimizer.lr.PiecewiseDecay(
             boundaries=[2, 3, 4], values=[0.01, 0.02, 0.03, 0.04], verbose=True
@@ -103,7 +103,7 @@ class TestDistVppTraining(unittest.TestCase):
         )
 
         seg_method = "layer:Linear"
-        vpp_model = build_layer(
+        vpp_model = build_spec_layer(
             simple_spec,
             topology=hcg.topology(),
             seg_method=seg_method,

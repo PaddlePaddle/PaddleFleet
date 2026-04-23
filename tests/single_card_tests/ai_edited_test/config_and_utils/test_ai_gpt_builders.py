@@ -90,12 +90,13 @@ class TestGptBuilder(unittest.TestCase):
         mock_config.use_qk_norm = False
         mock_config.multi_latent_attention = False
         mock_config.normalization = "RMSNorm"
+        mock_config.separate_mtp_headloss = False
 
         mock_loss = MagicMock()
 
         with (
             patch("paddlefleet.gpt_builders.get_gpt_spec") as mock_get_spec,
-            patch("paddlefleet.gpt_builders.build_layer") as mock_build,
+            patch("paddlefleet.gpt_builders.build_spec_layer") as mock_build,
             patch(
                 "paddlefleet.gpt_builders.get_gpt_layer_local_spec"
             ) as mock_layer_spec,
@@ -125,12 +126,13 @@ class TestGptBuilder(unittest.TestCase):
         mock_config.rope_theta = 10000.0
         mock_config.rope_scaling = None
         mock_config.parallel_output = True
+        mock_config.separate_mtp_headloss = False
 
         mock_loss = MagicMock()
 
         with (
             patch("paddlefleet.gpt_builders.get_gpt_spec") as mock_get_spec,
-            patch("paddlefleet.gpt_builders.build_layer") as mock_build,
+            patch("paddlefleet.gpt_builders.build_spec_layer") as mock_build,
             patch(
                 "paddlefleet.gpt_builders.get_gpt_decoder_layers_spec"
             ) as mock_decoder,
@@ -163,10 +165,11 @@ class TestGptBuilder(unittest.TestCase):
         mock_config.use_qk_norm = False
         mock_config.multi_latent_attention = False
         mock_config.normalization = "RMSNorm"
+        mock_config.separate_mtp_headloss = False
 
         with (
             patch("paddlefleet.gpt_builders.get_gpt_spec") as mock_get_spec,
-            patch("paddlefleet.gpt_builders.build_layer") as mock_build,
+            patch("paddlefleet.gpt_builders.build_spec_layer") as mock_build,
             patch(
                 "paddlefleet.gpt_builders.get_gpt_layer_local_spec"
             ) as mock_layer_spec,

@@ -70,7 +70,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
@@ -238,7 +238,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           if [ "${cuda}" == "12.9" ]; then
@@ -383,7 +383,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
@@ -769,6 +769,25 @@ jobs:
             bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+          fi
+          '
+
+      - name: GLM4.5 sft cp
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_sft_cp"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 sft cp.\033[0m"
           fi
           '
 

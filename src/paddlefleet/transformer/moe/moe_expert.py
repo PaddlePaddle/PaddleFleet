@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+from contextlib import nullcontext
 from copy import deepcopy
 
 import paddle
@@ -24,6 +25,10 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 
 from paddlefleet import utils
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.tensor_parallel.random import (
+    get_cuda_rng_tracker,
+    get_expert_parallel_rng_tracker_name,
+)
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -206,16 +211,23 @@ class GroupedMLPExpert(FleetLayer):
                 self.config.hidden_size,
             ]
 
-        self.weight1 = paddle.create_parameter(
-            shape=w1_shape,
-            dtype=dtype,
-            default_initializer=initializer,
+        rng_ctx = (
+            get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name())
+            if paddle.distributed.get_world_size() > 1 and self.expert_parallel
+            else nullcontext()
         )
-        self.weight2 = paddle.create_parameter(
-            shape=w2_shape,
-            dtype=dtype,
-            default_initializer=initializer,
-        )
+
+        with rng_ctx:
+            self.weight1 = paddle.create_parameter(
+                shape=w1_shape,
+                dtype=dtype,
+                default_initializer=initializer,
+            )
+            self.weight2 = paddle.create_parameter(
+                shape=w2_shape,
+                dtype=dtype,
+                default_initializer=initializer,
+            )
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 

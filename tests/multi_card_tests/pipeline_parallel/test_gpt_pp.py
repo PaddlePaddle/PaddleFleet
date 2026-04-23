@@ -22,9 +22,9 @@ import unittest
 import numpy as np
 import paddle
 from paddle.distributed import fleet
+from paddle.distributed.fleet import distributed_model
 
 import paddlefleet
-from paddlefleet.distributed.model import distributed_model
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.training.initialize import initialize_fleet
@@ -142,6 +142,12 @@ def run_pp(
     return loss, gpt_pipe_model
 
 
+# NOTE(Pan Zhaowu): Temporary disable this test case due to PaddlePaddle PR78746
+# RE-enable this test case when PR78746 and related cherry-picks is merged
+@unittest.skipIf(
+    SKIP_TESTS,
+    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')",
+)
 class TestPP(unittest.TestCase):
     def setUp(self):
         self.seed = 46

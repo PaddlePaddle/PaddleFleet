@@ -674,7 +674,25 @@ def cp_flashmask_allgatherkv_balance_backward(
             )
         )
     elif fa_version == 3:
-        if "block_mask" in inspect.signature(flashmask_attention).parameters:
+        sig_params = inspect.signature(flashmask_attention).parameters
+        if "group" in sig_params:
+            query_grad, key_grad_gathered, value_grad_gathered = (
+                paddle._C_ops.flashmask_attention_v2_grad(
+                    query,
+                    key_gathered,
+                    value_gathered,
+                    output,
+                    log_sum_exp,
+                    startend_row_indices,
+                    None,  # block_mask
+                    output_grad,
+                    query.shape[-1] ** (-0.5),
+                    False,
+                    0,  # rank
+                    1,  # nranks
+                )
+            )
+        elif "block_mask" in sig_params:
             query_grad, key_grad_gathered, value_grad_gathered = (
                 paddle._C_ops.flashmask_attention_v2_grad(
                     query,

@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import (
+    ScheduleNode,
+    build_spec_layer,
+)
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
 
-from paddlefleet.pipeline_parallel import ScheduleNode
-from paddlefleet.spec_utils import build_layer
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     _initialize_affine_weight_cpu,
@@ -89,7 +91,7 @@ class GPTLMHead(ColumnParallelLinear):
             self.weight.is_distributed = True if self.world_size > 1 else False
 
         # Final Block Attention Residual (applied before LM head projection)
-        self.block_attn_res = build_layer(
+        self.block_attn_res = build_spec_layer(
             block_attn_res_spec, config=self.config
         )
 
@@ -112,6 +114,39 @@ class GPTLMHead(ColumnParallelLinear):
             logits, _ = super().forward(hidden_states, self.weight.T)
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
+
+        # Loss-path MD5 probe: lm_head weight and logits
+        import os
+
+        if (
+            os.environ.get("LOG_LAYER_MD5", "0") == "1"
+            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
+        ):
+            import hashlib
+
+            rank = paddle.distributed.get_rank()
+            w_md5 = hashlib.md5(
+                self.weight.cast("float32").numpy().tobytes()
+            ).hexdigest()
+            h_md5 = hashlib.md5(
+                hidden_states.cast("float32").numpy().tobytes()
+            ).hexdigest()
+            l_md5 = hashlib.md5(
+                logits.cast("float32").numpy().tobytes()
+            ).hexdigest()
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} lm_head_weight shape={list(self.weight.shape)} md5={w_md5}",
+                flush=True,
+            )
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} lm_head_input shape={list(hidden_states.shape)} md5={h_md5}",
+                flush=True,
+            )
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} lm_head_logits shape={list(logits.shape)} md5={l_md5}",
+                flush=True,
+            )
+
         return logits
 
     def forward(self, dict_args: dict):
@@ -152,3 +187,67 @@ class GPTLMHead(ColumnParallelLinear):
         return build_sharded_state_dict(
             state_dict, shard_rules, structured_name_prefix
         )
+
+
+class GPTMainLMHead(GPTLMHead):
+    """主干网 LM Head: 含 block_attn_res, 只做单次预测。"""
+
+    def __init__(self, **kwargs):
+        block_attn_res_spec = kwargs.pop("block_attn_res", IdentityOp)
+        super().__init__(**kwargs)
+        self.block_attn_res = build_spec_layer(
+            block_attn_res_spec, config=self.config
+        )
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="GPTMainLMHead")
+
+    def forward(self, dict_args: dict):
+        hidden_states = dict_args["hidden_states"]
+        mtp_loss = dict_args.get("mtp_loss", None)
+        if self.config.block_attention_residuals:
+            blocks = dict_args.get("blocks", [])
+            hidden_states = self.block_attn_res(hidden_states, blocks)
+
+        tensor_list = paddle.split(
+            hidden_states,
+            self.config.num_nextn_predict_layers + 1,
+        )
+        logits = self._forward(tensor_list[0])
+        ret = {
+            "logits": logits,
+            "mtp_loss": mtp_loss,
+        }
+        return ret
+
+    @property
+    def embedding_weight(self):
+        return self.weight
+
+
+class GPTMTPLMHead(GPTLMHead):
+    """MTP LM Head: 将拼接的 hidden_states 拆分后逐MTP计算。"""
+
+    def __init__(self, **kwargs):
+        # MTP head 不需要 block_attn_res
+        kwargs.pop("block_attn_res", None)
+        super().__init__(**kwargs)
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="GPTMTPLMHead")
+
+    def forward(self, dict_args: dict):
+        hidden_states = dict_args["hidden_states"]
+        num_mtp = self.config.num_nextn_predict_layers
+        tensor_list = paddle.split(hidden_states, num_mtp + 1)
+
+        mtp_logits = []
+        for i in range(num_mtp):
+            mtp_logits.append(self._forward(tensor_list[i + 1]))
+
+        dict_args["mtp_logits"] = mtp_logits
+        return dict_args
+
+    @property
+    def embedding_weight(self):
+        return self.weight
