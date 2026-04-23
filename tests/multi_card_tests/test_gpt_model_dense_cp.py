@@ -121,7 +121,14 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
         loss.backward()
 
     print(f"actual loss: {loss.item()}")
+    
+    cap = paddle.cuda.get_device_capability()
+    is_hopper    = cap[0] == 9   # H100/H800/H200
+    is_blackwell = cap[0] == 10  # B200/B300/GB200/GB300
+
     loss_baseline = 7.227203369140625
+    if is_blackwell:
+        loss_baseline = 7.283153057098389
     np.testing.assert_allclose(
         np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
     )
