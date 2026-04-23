@@ -142,6 +142,12 @@ def run_pp(
     return loss, gpt_pipe_model
 
 
+# NOTE(Pan Zhaowu): Temporary disable this test case due to PaddlePaddle PR78746
+# RE-enable this test case when PR78746 and related cherry-picks is merged
+@unittest.skipIf(
+    SKIP_TESTS,
+    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')",
+)
 class TestPP(unittest.TestCase):
     def setUp(self):
         self.seed = 46
@@ -197,9 +203,6 @@ class TestPP(unittest.TestCase):
         pp = pprint.PrettyPrinter(depth=None, width=200, compact=False)
         pp.pprint(rst)
 
-        # NOTE(Pan Zhaowu): Temporary disable this test case due to PaddlePaddle PR78746
-        # RE-enable this test case when PR78746 and related cherry-picks is merged
-        """
         assert overlap_loss._md5sum() == "bdd8b8660e976d3c1dde170aabeb3a6c"
 
         if paddle.distributed.get_rank() == 0:
@@ -225,7 +228,6 @@ class TestPP(unittest.TestCase):
 
             for name, p in overlap_gpt_model.named_parameters():
                 assert p.grad._md5sum() == baseline[name]
-        """
 
 
 if __name__ == "__main__":
