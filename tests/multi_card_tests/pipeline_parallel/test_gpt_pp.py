@@ -142,6 +142,12 @@ def run_pp(
     return loss, gpt_pipe_model
 
 
+# NOTE(Pan Zhaowu): Temporary disable this test case due to PaddlePaddle PR78746
+# RE-enable this test case when PR78746 and related cherry-picks is merged
+@unittest.skipIf(
+    SKIP_TESTS,
+    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')",
+)
 class TestPP(unittest.TestCase):
     def setUp(self):
         self.seed = 46
