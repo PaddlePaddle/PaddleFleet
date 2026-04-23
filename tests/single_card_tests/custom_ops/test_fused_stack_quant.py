@@ -37,7 +37,9 @@ from paddlefleet.transformer.moe.fp8_utils import (
 )
 
 NUM_EXPERTS = 4
-N, K = 512, 256  # small dims for fast tests
+# ue8m0 scale shape in the CUDA kernel requires dim/128 to be a multiple of 4,
+# so both N and K must be at least 512 (512/128=4).
+N, K = 512, 512
 
 
 def _make_weight_list(
@@ -302,7 +304,7 @@ class TestFusedStackQuantOutputConsistency(unittest.TestCase):
             self.skipTest("CUDA required")
         np.random.seed(42)
         paddle.seed(42)
-        self.weights = _make_weight_list(num_experts=2, shape=(256, 128))
+        self.weights = _make_weight_list(num_experts=2)
 
     def test_nontranspose_fp8_dtype(self):
         w, scale = fused_stack_quant(
@@ -332,7 +334,7 @@ class TestFusedStackQuantOutputConsistency(unittest.TestCase):
             self.skipTest("use_ue8m0=True is only safe on SM10+ (Blackwell)")
         try:
             _, scale = fused_stack_quant(
-                _make_weight_list(num_experts=2, shape=(256, 128)),
+                _make_weight_list(num_experts=2),
                 transpose=False,
                 use_ue8m0=True,
             )
@@ -352,7 +354,7 @@ class TestFusedStackQuantPow2ScaleBlackwell(unittest.TestCase):
     def setUp(self):
         if not core.is_compiled_with_cuda():
             self.skipTest("CUDA required")
-        self.weights = _make_weight_list(num_experts=2, shape=(256, 128))
+        self.weights = _make_weight_list(num_experts=2)
 
     def test_no_exception_nontranspose(self):
         # Should not raise on any GPU architecture
@@ -420,7 +422,7 @@ class TestFusedStackQuantReplacedOps(unittest.TestCase):
             self.skipTest("paddlefleet.ops not available")
         np.random.seed(7)
         paddle.seed(7)
-        self.weights = _make_weight_list(num_experts=2, shape=(256, 128))
+        self.weights = _make_weight_list(num_experts=2)
         # Keep a copy with same data for direct op call
         self.weights_copy = [w.clone() for w in self.weights]
 
@@ -537,7 +539,7 @@ class TestFusedStackQuantWithoutCache(unittest.TestCase):
     def test_nontranspose_matches_direct_op(self):
         arch = paddle.device.cuda.get_device_capability()[0]
         use_pow2 = arch == 10
-        weights = _make_weight_list(num_experts=2, shape=(256, 128))
+        weights = _make_weight_list(num_experts=2)
         weights_copy = [w.clone() for w in weights]
 
         w_direct, s_direct = self.fuse_stack_fp8_quant(
@@ -555,7 +557,7 @@ class TestFusedStackQuantWithoutCache(unittest.TestCase):
     def test_transpose_matches_direct_op(self):
         arch = paddle.device.cuda.get_device_capability()[0]
         use_pow2 = arch == 10
-        weights = _make_weight_list(num_experts=2, shape=(256, 128))
+        weights = _make_weight_list(num_experts=2)
         weights_copy = [w.clone() for w in weights]
 
         w_direct, s_direct = self.fuse_stack_transpose_fp8_quant(
@@ -574,7 +576,7 @@ class TestFusedStackQuantWithoutCache(unittest.TestCase):
         arch = paddle.device.cuda.get_device_capability()[0]
         if arch < 10:
             self.skipTest("ue8m0 only supported on SM10+ (Blackwell)")
-        weights = _make_weight_list(num_experts=2, shape=(256, 128))
+        weights = _make_weight_list(num_experts=2)
         weights_copy = [w.clone() for w in weights]
 
         _, s_direct = self.fuse_stack_fp8_quant(weights_copy, True, True, True)
