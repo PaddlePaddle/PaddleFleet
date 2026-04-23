@@ -18,16 +18,11 @@ import paddle
 from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
-from paddle.nn.functional.flash_attention import flashmask_attention
 
-if paddle.cuda.get_device_capability()[0] == 10:
-    from paddlefleet.ops.flash_mask.cute.flashmask_utils import (
-        FlashMaskInfoPaddle,
-    )
-    from paddlefleet.ops.flash_mask.cute.interface import (
-        _flash_attn_bwd,
-        _flash_attn_fwd,
-    )
+from paddlefleet.ops.flash_mask_facade import (
+    flashmask_attention_fwd,
+    flashmask_attention_bwd,
+)
 
 
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
@@ -581,29 +576,15 @@ def cp_flashmask_allgatherkv_balance_forward(
     )
 
     # Perform flashmask attention with startend_row_indices
-    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-        "FLAGS_flash_attn_version"
-    ]
-    if fa_version == 4:
-        output, log_sum_exp = _flash_attn_fwd(
-            query,
-            key_gathered,
-            value_gathered,
-            causal=causal,
-            return_lse=True,
-            startend_row_indices=startend_row_indices,
-            pack_gqa=False,
-        )
-    else:
-        output, log_sum_exp = flashmask_attention(
-            query,
-            key_gathered,
-            value_gathered,
-            startend_row_indices=startend_row_indices,
-            causal=causal,
-            return_softmax_lse=True,
-            training=is_training,
-        )
+    output, log_sum_exp = flashmask_attention_fwd(
+        query,
+        key_gathered,
+        value_gathered,
+        startend_row_indices=startend_row_indices,
+        causal=causal,
+        return_softmax_lse=True,
+        training=is_training,
+    )
 
     paddle.base.core.nvprof_nvtx_pop()
     return output, log_sum_exp, startend_row_indices
@@ -646,106 +627,20 @@ def cp_flashmask_allgatherkv_balance_backward(
     key_gathered = all_gather_balance(key, axis=1, group=group)
     value_gathered = all_gather_balance(value, axis=1, group=group)
 
-    fa_version = config.fa_version
-    if "block_mask" in inspect.signature(flashmask_attention).parameters:
-        if config.deterministic_mode and query.shape[-1] > 128:
-            fa_version = 2
-    elif config.deterministic_mode:
-        fa_version = 2
-    if fa_version == 2:
-        # Create seed offset tensor (required for gradient computation)
-        seed_offset = paddle.zeros(
-            shape=[query.shape[1], query.shape[2]], dtype=paddle.int64
-        )
-
-        # Compute gradients using flashmask attention backward pass
-        query_grad, key_grad_gathered, value_grad_gathered = (
-            paddle._C_ops.flashmask_attention_grad(
-                query,
-                key_gathered,
-                value_gathered,
-                startend_row_indices,
-                output,
-                log_sum_exp,
-                seed_offset,
-                output_grad,
-                0.0,  # dropout probability
-                causal,
-            )
-        )
-    elif fa_version == 3:
-        sig_params = inspect.signature(flashmask_attention).parameters
-        if "group" in sig_params:
-            query_grad, key_grad_gathered, value_grad_gathered = (
-                paddle._C_ops.flashmask_attention_v2_grad(
-                    query,
-                    key_gathered,
-                    value_gathered,
-                    output,
-                    log_sum_exp,
-                    startend_row_indices,
-                    None,  # block_mask
-                    output_grad,
-                    query.shape[-1] ** (-0.5),
-                    False,
-                    0,  # rank
-                    1,  # nranks
-                )
-            )
-        elif "block_mask" in sig_params:
-            query_grad, key_grad_gathered, value_grad_gathered = (
-                paddle._C_ops.flashmask_attention_v2_grad(
-                    query,
-                    key_gathered,
-                    value_gathered,
-                    output,
-                    log_sum_exp,
-                    startend_row_indices,
-                    None,  # block_mask
-                    output_grad,
-                    query.shape[-1] ** (-0.5),
-                    False,
-                )
-            )
-        else:
-            query_grad, key_grad_gathered, value_grad_gathered = (
-                paddle._C_ops.flashmask_attention_v2_grad(
-                    query,
-                    key_gathered,
-                    value_gathered,
-                    output,
-                    log_sum_exp,
-                    startend_row_indices,
-                    output_grad,
-                    query.shape[-1] ** (-0.5),
-                    False,
-                )
-            )
-    elif fa_version == 4:
-        if startend_row_indices is not None:
-            flashmask_info = FlashMaskInfoPaddle(
-                startend_row_indices=startend_row_indices,
-                is_causal=causal,
-            )
-        else:
-            flashmask_info = None
-        query_grad, key_grad_gathered, value_grad_gathered = _flash_attn_bwd(
+    query_grad, key_grad_gathered, value_grad_gathered = (
+        flashmask_attention_bwd(
             query,
             key_gathered,
             value_gathered,
+            startend_row_indices,
             output,
-            output_grad,
             log_sum_exp,
-            flashmask_info,
-            causal=causal,
-            deterministic=paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-                "FLAGS_cudnn_deterministic"
-            ],
+            seed_offset,
+            output_grad,
+            0.0,  # dropout probability
+            causal,
         )
-    else:
-        raise ValueError(
-            f"FlashAttention version {fa_version} is not supported."
-        )
+    )
 
     # Reduce-scatter key and value gradients
     key_grad = reduce_scatter_any_axis_balance(
