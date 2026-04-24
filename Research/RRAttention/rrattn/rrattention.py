@@ -109,7 +109,7 @@ def _build_nomask_startend(
     return paddle.concat([start, end], axis=-1)
 
 
-def block_sparse_attention(
+def _block_sparse_attention_blsd(
     query_states: paddle.Tensor,
     key_states: paddle.Tensor,
     value_states: paddle.Tensor,
@@ -118,11 +118,15 @@ def block_sparse_attention(
     block_size: int = 128,
     causal: bool = True,
 ):
-    batch_size, num_q_heads, q_len, head_dim = query_states.shape
-    _, _, k_len, _ = key_states.shape
+    batch_size, q_len, num_q_heads, head_dim = query_states.shape
+    _, k_len, num_kv_heads, _ = key_states.shape
 
     assert block_size == 128, "F.flashmask_attention block_mask only supports block_size=128"
     assert head_dim == 128, "F.flashmask_attention block_mask only supports head_dim=128"
+    assert num_q_heads % num_kv_heads == 0, "MHA/GQA requires num_q_heads % num_kv_heads == 0"
+    assert value_states.shape[1] == k_len, "key/value sequence length mismatch"
+    assert value_states.shape[2] == num_kv_heads, "key/value head count mismatch"
+    assert block_mask.shape[1] == num_q_heads, "block_mask head count must match query heads"
 
     block_mask = block_mask.astype(paddle.int32).contiguous()
     if startend_row_indices is None:
@@ -140,17 +144,38 @@ def block_sparse_attention(
             block_mask.shape[1] // num_indices_heads,
             axis=1,
         )
+    startend_row_indices = startend_row_indices.contiguous()
 
     attn_output = F.flashmask_attention(
-        query_states.transpose(1, 2).contiguous(),
-        key_states.transpose(1, 2).contiguous(),
-        value_states.transpose(1, 2).contiguous(),
+        query_states,
+        key_states,
+        value_states,
         startend_row_indices=startend_row_indices,
         dropout=0.0,
         causal=causal,
         block_mask=block_mask,
     )
     return attn_output.contiguous()
+
+
+def block_sparse_attention(
+    query_states: paddle.Tensor,
+    key_states: paddle.Tensor,
+    value_states: paddle.Tensor,
+    block_mask: paddle.Tensor,
+    startend_row_indices: paddle.Tensor | None = None,
+    block_size: int = 128,
+    causal: bool = True,
+):
+    return _block_sparse_attention_blsd(
+        query_states.transpose(1, 2).contiguous(),
+        key_states.transpose(1, 2).contiguous(),
+        value_states.transpose(1, 2).contiguous(),
+        block_mask,
+        startend_row_indices=startend_row_indices,
+        block_size=block_size,
+        causal=causal,
+    )
 
 
 def rrattn_estimate_legacy(
@@ -272,7 +297,7 @@ def rrattn_estimate_legacy(
     return attn_sums, simple_masks
 
 
-def _rrattn_estimate_v2(
+def _rrattn_estimate_v2_blsd(
     query_states: paddle.Tensor,
     key_states: paddle.Tensor,
     block_size=128,
@@ -306,8 +331,8 @@ def _rrattn_estimate_v2(
     assert block_size % stride == 0, "stride must divide block_size=128"
     assert chunk_size is not None and chunk_size > 0, "chunk_size must be positive"
 
-    batch_size, num_q_heads, q_len, _ = query_states.shape
-    _, num_kv_heads, k_len, _ = key_states.shape
+    batch_size, q_len, num_q_heads, _ = query_states.shape
+    _, k_len, num_kv_heads, _ = key_states.shape
     assert num_q_heads % num_kv_heads == 0, "MHA/GQA requires num_q_heads % num_kv_heads == 0"
 
     if key_states.device != query_states.device:
@@ -323,8 +348,8 @@ def _rrattn_estimate_v2(
         )
 
     attn_sums, _, selected_blocks = rr_attn_estimate_triton_func(
-        query_states.transpose(1, 2).contiguous(),
-        key_states.transpose(1, 2).contiguous(),
+        query_states,
+        key_states,
         startend_row_indices,
         stride=stride,
         causal=causal,
@@ -335,8 +360,9 @@ def _rrattn_estimate_v2(
 
     q_block_num = (q_len + block_size - 1) // block_size
     k_block_num = (k_len + block_size - 1) // block_size
-    attn_sums = attn_sums[:, :, :q_block_num, :k_block_num].contiguous()
-    block_mask = selected_blocks[:, :, :q_block_num, :k_block_num].contiguous()
+    assert attn_sums.shape[2] == q_block_num, "estimate q-block count mismatch"
+    assert attn_sums.shape[3] == k_block_num, "estimate k-block count mismatch"
+    block_mask = selected_blocks
 
     if keep_sink and k_block_num > 0:
         block_mask[:, :, :, 0] = True
@@ -344,6 +370,50 @@ def _rrattn_estimate_v2(
         block_mask[:, :, -1, :k_block_num] = True
 
     return attn_sums, block_mask
+
+
+def _rrattn_estimate_v2(
+    query_states: paddle.Tensor,
+    key_states: paddle.Tensor,
+    block_size=128,
+    stride=8,
+    norm=1,
+    softmax=True,
+    threshold=0.9,
+    chunk_size=16384,
+    select_mode="inverse",
+    use_triton=True,
+    causal=True,
+    kdb: int = 1,
+    keep_sink=False,
+    keep_recent=False,
+    rrattn_version="v1",
+    layer_idx=None,
+    startend_row_indices=None,
+    config: RRAttnConfig | None = None,
+    **kwargs,
+):
+    return _rrattn_estimate_v2_blsd(
+        query_states.transpose(1, 2).contiguous(),
+        key_states.transpose(1, 2).contiguous(),
+        block_size=block_size,
+        stride=stride,
+        norm=norm,
+        softmax=softmax,
+        threshold=threshold,
+        chunk_size=chunk_size,
+        select_mode=select_mode,
+        use_triton=use_triton,
+        causal=causal,
+        kdb=kdb,
+        keep_sink=keep_sink,
+        keep_recent=keep_recent,
+        rrattn_version=rrattn_version,
+        layer_idx=layer_idx,
+        startend_row_indices=startend_row_indices,
+        config=config,
+        **kwargs,
+    )
 
 
 def rrattn_estimate(
@@ -455,7 +525,25 @@ def rrattn_prefill(
         (q_len + (block_size * stride) - 1) // (block_size * stride) * (block_size * stride),
         chunk_size,
     )
-    rrattn_startend_row_indices = startend_row_indices if rrattn_version == "v2" else None
+    rrattn_startend_row_indices = None
+    if rrattn_version == "v2":
+        if key_states.device != query_states.device:
+            key_states = key_states.to(query_states.device)
+        if value_states.device != query_states.device:
+            value_states = value_states.to(query_states.device)
+        if startend_row_indices is None:
+            rrattn_startend_row_indices = _build_nomask_startend(
+                batch_size=batch_size,
+                q_len=q_len,
+                k_len=k_len,
+                causal=causal,
+                device=query_states.device,
+            )
+        else:
+            rrattn_startend_row_indices = startend_row_indices
+        query_states_blsd = query_states.transpose(1, 2).contiguous()
+        key_states_blsd = key_states.transpose(1, 2).contiguous()
+        value_states_blsd = value_states.transpose(1, 2).contiguous()
 
     if is_enable_profile():
         paddle.cuda.synchronize()
@@ -463,38 +551,60 @@ def rrattn_prefill(
         end_event = paddle.cuda.Event(enable_timing=True)
         start_event.record()
 
-    attn_sums, approx_simple_mask = rrattn_estimate(
-        query_states,
-        key_states,
-        block_size=block_size,
-        stride=stride,
-        norm=norm,
-        threshold=threshold,
-        select_mode="inverse",
-        use_triton=use_triton,
-        causal=causal,
-        chunk_size=chunk_size,
-        kdb=kdb,
-        keep_sink=keep_sink,
-        keep_recent=keep_recent,
-        rrattn_version=rrattn_version,
-        layer_idx=layer_idx,
-        startend_row_indices=rrattn_startend_row_indices,
-        config=config,
-    )
+    if rrattn_version == "v2":
+        attn_sums, approx_simple_mask = _rrattn_estimate_v2_blsd(
+            query_states_blsd,
+            key_states_blsd,
+            block_size=block_size,
+            stride=stride,
+            norm=norm,
+            threshold=threshold,
+            select_mode="inverse",
+            use_triton=use_triton,
+            causal=causal,
+            chunk_size=chunk_size,
+            kdb=kdb,
+            keep_sink=keep_sink,
+            keep_recent=keep_recent,
+            rrattn_version=rrattn_version,
+            layer_idx=layer_idx,
+            startend_row_indices=rrattn_startend_row_indices,
+            config=config,
+        )
+    else:
+        attn_sums, approx_simple_mask = rrattn_estimate(
+            query_states,
+            key_states,
+            block_size=block_size,
+            stride=stride,
+            norm=norm,
+            threshold=threshold,
+            select_mode="inverse",
+            use_triton=use_triton,
+            causal=causal,
+            chunk_size=chunk_size,
+            kdb=kdb,
+            keep_sink=keep_sink,
+            keep_recent=keep_recent,
+            rrattn_version=rrattn_version,
+            layer_idx=layer_idx,
+            startend_row_indices=rrattn_startend_row_indices,
+            config=config,
+        )
     if is_enable_profile():
         end_event.record()
         paddle.cuda.synchronize()
         add_estimate_func_time(start_event.elapsed_time(end_event))
 
-    if query_states.device != key_states.device:
+    if rrattn_version != "v2" and query_states.device != key_states.device:
         key_states = key_states.to(query_states.device)
-    if query_states.device != value_states.device:
+    if rrattn_version != "v2" and query_states.device != value_states.device:
         value_states = value_states.to(query_states.device)
     if approx_simple_mask.device != query_states.device:
         approx_simple_mask = approx_simple_mask.to(query_states.device)
 
-    approx_simple_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num].contiguous()
+    if approx_simple_mask.shape[2] != q_block_num or approx_simple_mask.shape[3] != k_block_num:
+        approx_simple_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num].contiguous()
     sparse_ratio = _compute_sparse_ratio(
         approx_simple_mask,
         q_block_num=q_block_num,
@@ -508,15 +618,26 @@ def rrattn_prefill(
         start_event = paddle.cuda.Event(enable_timing=True)
         end_event = paddle.cuda.Event(enable_timing=True)
         start_event.record()
-    attn_output = block_sparse_attention(
-        query_states,
-        key_states,
-        value_states,
-        approx_simple_mask,
-        startend_row_indices=rrattn_startend_row_indices,
-        block_size=block_size,
-        causal=causal,
-    )
+    if rrattn_version == "v2":
+        attn_output = _block_sparse_attention_blsd(
+            query_states_blsd,
+            key_states_blsd,
+            value_states_blsd,
+            approx_simple_mask,
+            startend_row_indices=rrattn_startend_row_indices,
+            block_size=block_size,
+            causal=causal,
+        )
+    else:
+        attn_output = block_sparse_attention(
+            query_states,
+            key_states,
+            value_states,
+            approx_simple_mask,
+            startend_row_indices=rrattn_startend_row_indices,
+            block_size=block_size,
+            causal=causal,
+        )
     if is_enable_profile():
         end_event.record()
         paddle.cuda.synchronize()

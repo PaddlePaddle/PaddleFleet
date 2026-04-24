@@ -296,10 +296,12 @@ def measure_forward(model, input_ids, attention_mask, device):
     return elapsed_wall_ms
 
 
-def output_name(model_name, method, threshold, stride, output_dir):
+def output_name(model_name, method, threshold, stride, rrattn_version, output_dir):
     saved_method = method if method != "full" else f"{method}_{1.00:.2f}"
     if method != "full":
         saved_method = f"{saved_method}_{threshold:.2f}"
+    if method == "rrattn":
+        saved_method = f"{saved_method}_{rrattn_version}"
     return Path(output_dir) / f"speed_test_{Path(model_name).name}_result_{saved_method}_s{stride}.csv"
 
 
@@ -309,6 +311,7 @@ def main(
     method="xattn",
     threshold=0.9,
     stride=8,
+    rrattn_version="v1",
     seq_lens=DEFAULT_SEQ_LENS,
     n_times=3,
     n_kv_num=6000,
@@ -345,6 +348,7 @@ def main(
         method=method,
         threshold=threshold,
         stride=stride,
+        rrattn_version=rrattn_version,
     )
     tokenizer = load_tokenizer(model_name)
 
@@ -367,7 +371,10 @@ def main(
             "Increase --n-kv-num or lower --seq-lens."
         )
 
-    print(f"model={model_name} method={method} device={device}")
+    print(
+        f"model={model_name} method={method} rrattn_version={rrattn_version} "
+        f"device={device}"
+    )
     print("---------------------------")
 
     for seq_len in seq_len_list:
@@ -405,6 +412,7 @@ def main(
         row = {
             "model": Path(model_name).name,
             "method": method,
+            "rrattn_version": rrattn_version,
             "stride": 1 if method == "full" else stride,
             "seq_len": seq_len,
             "total_time": float(np.mean(total_times)),
@@ -422,12 +430,21 @@ def main(
         )
         print("---------------------------")
 
-    output_path = output_name(model_name, method, threshold, stride, output_dir)
+    output_path = output_name(model_name, method, threshold, stride, rrattn_version, output_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["model", "method", "stride", "seq_len", "total_time", "attn_time", "estimate_func_time"],
+            fieldnames=[
+                "model",
+                "method",
+                "rrattn_version",
+                "stride",
+                "seq_len",
+                "total_time",
+                "attn_time",
+                "estimate_func_time",
+            ],
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -441,6 +458,7 @@ if __name__ == "__main__":
     parser.add_argument("--method", default="rrattn", choices=["xattn", "rrattn", "flex", "full"])
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--stride", type=int, default=8)
+    parser.add_argument("--rrattn-version", default="v1", choices=["v1", "v2"])
     parser.add_argument("--seq-lens", default=DEFAULT_SEQ_LENS)
     parser.add_argument("--n-times", type=int, default=3)
     parser.add_argument("--n-kv-num", type=int, default=6000)

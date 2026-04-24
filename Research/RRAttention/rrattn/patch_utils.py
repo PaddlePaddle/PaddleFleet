@@ -1,12 +1,9 @@
-import math
 import types
 from typing import Iterable, Optional, Tuple
 
 import paddle
-import paddle.nn.functional as F
 from paddle.nn.functional.flash_attention import flash_attention
 from paddleformers.nn.attention.eager_attention import repeat_kv
-from paddleformers.utils.masking_utils import _gen_from_sparse_attn_mask_indices
 
 from .flexprefill import flex_prefill
 from .full_prefill import flash_full_prefill
@@ -160,9 +157,11 @@ def attention_branch(
 ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor]]:
     method = getattr(module, "method", "rrattn")
     validate_method(method)
-
-    key_states = repeat_kv(key_states, module.num_key_value_groups)
-    value_states = repeat_kv(value_states, module.num_key_value_groups)
+    rrattn_version = getattr(module, "rrattn_version", "v1")
+    should_repeat_kv = method != "rrattn" or rrattn_version != "v2"
+    if should_repeat_kv:
+        key_states = repeat_kv(key_states, module.num_key_value_groups)
+        value_states = repeat_kv(value_states, module.num_key_value_groups)
 
     if key_states.shape[2] == query_states.shape[2]:
         if method == "xattn":
@@ -194,7 +193,7 @@ def attention_branch(
                 keep_sink=getattr(module, "keep_sink", True),
                 keep_recent=getattr(module, "keep_recent", True),
                 chunk_size=getattr(module, "chunk_size", 16384),
-                rrattn_version=getattr(module, "rrattn_version", "v1"),
+                rrattn_version=rrattn_version,
                 layer_idx=getattr(module, "layer_idx", None),
                 startend_row_indices=attn_mask_startend_row_indices,
                 config=getattr(module, "rrattn_config", None),
@@ -228,87 +227,18 @@ def attention_branch(
             )
             module.sparse_ratio = 0.0
     else:
-        attn_output = dense_decode_attention(
-            query_states,
-            key_states,
-            value_states,
-            attention_mask=attention_mask,
-            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-            dropout=dropout,
-            causal=causal,
-            scaling=scaling,
-            training=module.training,
-        )
-
-    attn_output = attn_output.reshape([attn_output.shape[0], attn_output.shape[1], -1]).contiguous()
-    return attn_output, None
-
-
-def dense_decode_attention(
-    query_states: paddle.Tensor,
-    key_states: paddle.Tensor,
-    value_states: paddle.Tensor,
-    attention_mask: Optional[paddle.Tensor] = None,
-    attn_mask_startend_row_indices: Optional[paddle.Tensor] = None,
-    dropout: float = 0.0,
-    causal: bool = True,
-    scaling: Optional[float] = None,
-    training: bool = False,
-) -> paddle.Tensor:
-    q_len = query_states.shape[-2]
-    key_len = key_states.shape[-2]
-    scale = scaling if scaling is not None else 1.0 / math.sqrt(query_states.shape[-1])
-
-    if attention_mask is None and attn_mask_startend_row_indices is not None:
-        if attn_mask_startend_row_indices.ndim == 3:
-            attn_mask_startend_row_indices = attn_mask_startend_row_indices.unsqueeze(-1)
-        if attn_mask_startend_row_indices.shape[-1] == 1:
-            causal = True
-        elif attn_mask_startend_row_indices.shape[-1] == 4:
-            causal = False
-        attention_mask = _gen_from_sparse_attn_mask_indices(
-            attn_mask_startend_row_indices,
-            query_states.dtype,
-            causal,
-        )
-
-    default_scale = 1.0 / math.sqrt(query_states.shape[-1])
-    if (
-        q_len == 1
-        and causal
-        and attention_mask is None
-        and dropout == 0.0
-        and (scaling is None or scaling == default_scale)
-    ):
+        q_len = query_states.shape[-2]
+        if causal and q_len != 1:
+            raise NotImplementedError("flash decode attention only supports q_len=1 for cached causal decode")
+        # use full attention for decoding
         attn_output, _ = flash_attention(
             query_states.transpose(1, 2),
             key_states.transpose(1, 2),
             value_states.transpose(1, 2),
-            dropout=0.0,
+            dropout=dropout,
             causal=False,
-        )
-        return attn_output
-
-    output_dtype = query_states.dtype
-    query_states = query_states.astype("float32")
-    key_states = key_states.astype("float32")
-    value_states = value_states.astype("float32")
-
-    attn_weights = paddle.matmul(query_states, key_states.transpose(2, 3)) * scale
-    if causal and q_len > 1:
-        q_pos = paddle.arange(q_len, device=query_states.device) + key_len - q_len
-        k_pos = paddle.arange(key_len, device=query_states.device)
-        causal_mask = q_pos[:, None] < k_pos[None, :]
-        attn_weights = paddle.where(
-            causal_mask.unsqueeze(0).unsqueeze(0),
-            paddle.full(attn_weights.shape, float("-inf"), dtype=attn_weights.dtype, device=attn_weights.device),
-            attn_weights,
+            softmax_scale=scaling,
         )
 
-    if attention_mask is not None:
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]].astype("float32")
-        attn_weights = attn_weights + causal_mask
-
-    attn_weights = F.softmax(attn_weights, axis=-1, dtype=paddle.float32).astype(query_states.dtype)
-    attn_weights = F.dropout(attn_weights, p=dropout, training=training)
-    return paddle.matmul(attn_weights, value_states).astype(output_dtype).transpose(1, 2)
+    attn_output = attn_output.reshape([attn_output.shape[0], attn_output.shape[1], -1]).contiguous()
+    return attn_output, None
