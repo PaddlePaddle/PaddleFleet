@@ -34,7 +34,10 @@ The quadratic complexity of attention mechanisms poses a critical bottleneck for
 
 ### Build Environment
 
+RRAttention currently requires the latest PaddlePaddle GPU nightly. The helper script below installs the tested environment.
+
 ```bash
+cd Research/RRAttention
 uv venv --python 3.10 --seed .venv
 source .venv/bin/activate
 bash ./scripts/build_env.sh
@@ -58,12 +61,92 @@ python scripts/convert_hf_to_paddle.py \
   --output /path/to/paddle-checkpoint
 ```
 
+### Python API
+
+`rrattn_prefill` expects query/key/value tensors in `[batch, heads, seq_len, head_dim]` layout:
+
+```python
+from rrattn import rrattn_prefill
+
+attn_output, sparse_ratio = rrattn_prefill(
+    query_states,
+    key_states,
+    value_states,
+    threshold=0.95,
+    stride=8,
+    block_size=128,
+    use_triton=True,
+)
+```
+
+For model-level use, patch a supported PaddleFormers model before generation:
+
+```python
+from rrattn import patch_llama_attention
+
+model = patch_llama_attention(
+    model,
+    method="rrattn",
+    threshold=0.95,
+    stride=8,
+    use_triton=True,
+    keep_sink=True,
+    keep_recent=True,
+)
+```
 
 ### Run HELMET Evaluation
+
+The release script runs the default HELMET sweep for `rrattn` and full attention on the short configs and the 128k configs:
 
 ```bash
 bash ./scripts/run_helmet.sh
 ```
+
+Common environment overrides:
+
+```bash
+model_name_or_paths=model-name-or-path \
+data_root_dir=eval/HELMET \
+qa_model_name_or_path=eval/HELMET/models/roberta-large-squad \
+autoais_model_name_or_path=eval/HELMET/models/t5_xxl_true_nli_mixture \
+bash ./scripts/run_helmet.sh
+```
+
+`model_name_or_path` can be a Hugging Face model name, a local Hugging Face checkpoint path, or a converted Paddle checkpoint path.
+
+For a single task/config, run HELMET directly:
+
+```bash
+cd eval/HELMET
+python eval.py \
+  --model_name_or_path model-name-or-path \
+  --data_root_dir . \
+  --qa_model_name_or_path ./models/roberta-large-squad \
+  --autoais_model_name_or_path ./models/t5_xxl_true_nli_mixture \
+  --config configs/recall_short.yaml \
+  --method rrattn \
+  --threshold 0.95 \
+  --stride 8 \
+  --tag rrattn_0.95
+```
+
+### Run Speed Test
+
+`scripts/speed_test.py` benchmarks the model prefill path on synthetic key-value retrieval prompts and records total, attention, and estimate time.
+
+```bash
+python scripts/speed_test.py \
+  --model-name model-name-or-path \
+  --method rrattn \
+  --threshold 0.95 \
+  --stride 8 \
+  --seq-lens 8000,32000,64000,128000 \
+  --n-times 3 \
+  --output-dir speed_results
+```
+
+`--model-name` can be a Hugging Face model name, a local Hugging Face checkpoint path, or a converted Paddle checkpoint path. Supported methods are `rrattn`, `full`, `xattn`, and `flex`. If model auto-detection is not sufficient, pass `--model-type llama`, `--model-type qwen`, or `--model-type ernie`.
 
 ### Repository Layout
 
@@ -122,10 +205,10 @@ RRAttention recovers **over 99%** of full attention performance while computing 
 | Parameter | Default | Description |
 |---|:---:|---|
 | `block_size` (*B*) | 128 | Block size for sparse attention computation |
-| `stride_size` (*S*) | 8 | Stride size for query sampling and importance estimation |
+| `stride` (*S*) | 8 | Stride size for query sampling and importance estimation |
 | `tau` (*τ*) | 0.95 | Cumulative importance threshold for Top-τ block selection |
 
-> **Recommended:**  Conservative `tau=0.95` recovers 99%+ accuracy (~48% sparsity). Aggressive `tau=0.90` gives stronger speedup (~61% sparsity) with minor accuracy trade-off.
+> **Recommended:** Conservative `tau=0.95` recovers 99%+ accuracy (~48% sparsity). Aggressive `tau=0.90` gives stronger speedup (~61% sparsity) with minor accuracy trade-off.
 
 ---
 

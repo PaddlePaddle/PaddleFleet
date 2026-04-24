@@ -1,4 +1,19 @@
 #!/usr/bin/env python
+
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import argparse
@@ -16,8 +31,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rrattn.rrattention import RRAttnConfig, TUNABLE_FIELDS, get_rrattn_config, rr_attn_estimate_triton_func
-
+from rrattn.rrattention import (
+    TUNABLE_FIELDS,
+    RRAttnConfig,
+    get_rrattn_config,
+    rr_attn_estimate_triton_func,
+)
 
 DEFAULT_SEQ_LENS = "32768"
 DEFAULT_MODES = "nomask"
@@ -134,7 +153,9 @@ def make_startend(
     flashmask_window: int,
 ) -> paddle.Tensor:
     if mode == "nomask":
-        return paddle.full([batch_size, 1, seq_len, 1], seq_len, dtype=paddle.int32)
+        return paddle.full(
+            [batch_size, 1, seq_len, 1], seq_len, dtype=paddle.int32
+        )
 
     pos = paddle.arange(seq_len, dtype=paddle.int32).reshape([1, 1, seq_len, 1])
     q_end = paddle.full([1, 1, seq_len, 1], seq_len, dtype=paddle.int32)
@@ -142,7 +163,9 @@ def make_startend(
     return paddle.minimum(window_end, q_end).tile([batch_size, 1, 1, 1])
 
 
-def make_inputs(args, seq_len: int, mode: str, head_dim: int) -> tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
+def make_inputs(
+    args, seq_len: int, mode: str, head_dim: int
+) -> tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     paddle.seed(args.seed + seq_len + head_dim)
     q = paddle.randn(
         [args.batch_size, seq_len, args.num_q_heads, head_dim],
@@ -214,7 +237,10 @@ def benchmark_case(
             prelim_ms = statistics.mean(times)
             best_ms = float(current_best_ms)
             lower_bound_ms = sum(times) / args.iters
-            if prelim_ms > best_ms * args.skip_slowdown and lower_bound_ms > best_ms:
+            if (
+                prelim_ms > best_ms * args.skip_slowdown
+                and lower_bound_ms > best_ms
+            ):
                 return (
                     None,
                     "early skip: "
@@ -226,7 +252,9 @@ def benchmark_case(
 
 
 def format_config(config: RRAttnConfig) -> str:
-    fields = ", ".join(f"{field}={getattr(config, field)!r}" for field in TUNABLE_FIELDS)
+    fields = ", ".join(
+        f"{field}={getattr(config, field)!r}" for field in TUNABLE_FIELDS
+    )
     return f"RRAttnConfig({fields})"
 
 
@@ -242,7 +270,9 @@ def summarize(
         vals = [
             item.ms
             for item in results
-            if item.head_dim == head_dim and item.config_id == config_id and item.ms is not None
+            if item.head_dim == head_dim
+            and item.config_id == config_id
+            and item.ms is not None
         ]
         if len(vals) != total_cases:
             score = float("inf")
@@ -252,11 +282,26 @@ def summarize(
     return sorted(rows, key=lambda item: item[0])
 
 
-def write_csv(path: Path, results: list[CaseResult], configs_by_head_dim: dict[int, list[RRAttnConfig]]) -> None:
+def write_csv(
+    path: Path,
+    results: list[CaseResult],
+    configs_by_head_dim: dict[int, list[RRAttnConfig]],
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["head_dim", "config_id", "seq_len", "mode", "ms", "error", "skipped", *TUNABLE_FIELDS])
+        writer.writerow(
+            [
+                "head_dim",
+                "config_id",
+                "seq_len",
+                "mode",
+                "ms",
+                "error",
+                "skipped",
+                *TUNABLE_FIELDS,
+            ]
+        )
         for item in results:
             config = configs_by_head_dim[item.head_dim][item.config_id]
             writer.writerow(
@@ -286,19 +331,29 @@ def print_summary(
     total_cases = len(seq_lens) * len(modes)
 
     print("\nTuned metrics:")
-    print("  primary score: per-head_dim mean estimate latency in ms across selected seq_lens and modes")
+    print(
+        "  primary score: per-head_dim mean estimate latency in ms across selected seq_lens and modes"
+    )
     print("  default seq_len is 32k; pass --seq-lens for broader sweeps")
-    print("  chunk_size is not tuned here; set it through --chunk-size or the rrattn wrapper")
+    print(
+        "  chunk_size is not tuned here; set it through --chunk-size or the rrattn wrapper"
+    )
     if early_skip_enabled:
-        print("  early skip uses a full-mean lower bound, so skipped configs cannot beat the current best")
+        print(
+            "  early skip uses a full-mean lower bound, so skipped configs cannot beat the current best"
+        )
     print(f"  candidate axes: block_m={TUNE_BLOCK_M}, block_n={TUNE_BLOCK_N}")
-    print(f"  candidate axes: num_warps={TUNE_NUM_WARPS}, num_stages={TUNE_NUM_STAGES}")
+    print(
+        f"  candidate axes: num_warps={TUNE_NUM_WARPS}, num_stages={TUNE_NUM_STAGES}"
+    )
     print(f"  candidate axes: segment_size={TUNE_SEGMENT_SIZE}")
 
     best_by_head_dim = {}
     for head_dim in head_dims:
         configs = configs_by_head_dim[head_dim]
-        ranked = summarize(results, configs, head_dim=head_dim, total_cases=total_cases)
+        ranked = summarize(
+            results, configs, head_dim=head_dim, total_cases=total_cases
+        )
 
         print(f"\nTop configs for head_dim={head_dim}:")
         printed = 0
@@ -307,7 +362,9 @@ def print_summary(
                 break
             if score == float("inf"):
                 continue
-            print(f"  #{config_id}: score_ms={score:.4f} {format_config(configs[config_id])}")
+            print(
+                f"  #{config_id}: score_ms={score:.4f} {format_config(configs[config_id])}"
+            )
             printed += 1
 
         if printed == 0:
@@ -315,21 +372,31 @@ def print_summary(
             continue
 
         best_score, best_config_id = ranked[0]
-        best_by_head_dim[head_dim] = (best_score, best_config_id, configs[best_config_id])
+        best_by_head_dim[head_dim] = (
+            best_score,
+            best_config_id,
+            configs[best_config_id],
+        )
 
     if best_by_head_dim:
         print("\nManual apply:")
-        print("  Edit rrattn/rrattention.py get_rrattn_config; for tuned head_dim values, use:")
+        print(
+            "  Edit rrattn/rrattention.py get_rrattn_config; for tuned head_dim values, use:"
+        )
         for head_dim in head_dims:
             if head_dim not in best_by_head_dim:
                 continue
             best_score, best_config_id, best_config = best_by_head_dim[head_dim]
             print(f"      if head_dim == {head_dim}:")
-            print(f"          return {format_config(best_config)}  # config #{best_config_id}, score_ms={best_score:.4f}")
+            print(
+                f"          return {format_config(best_config)}  # config #{best_config_id}, score_ms={best_score:.4f}"
+            )
 
     skipped = [item for item in results if item.skipped]
     if skipped:
-        print(f"\nSkipped {len(skipped)} slow candidates with early-skip lower-bound checks")
+        print(
+            f"\nSkipped {len(skipped)} slow candidates with early-skip lower-bound checks"
+        )
 
     failures = [item for item in results if item.error and not item.skipped]
     if failures:
@@ -344,15 +411,24 @@ def print_summary(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Autotune RRAttention estimate kernel configs.")
+    parser = argparse.ArgumentParser(
+        description="Autotune RRAttention estimate kernel configs."
+    )
     parser.add_argument("--seq-lens", default=DEFAULT_SEQ_LENS)
     parser.add_argument("--modes", default=DEFAULT_MODES)
     parser.add_argument("--device", default="gpu:0")
-    parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
+    parser.add_argument(
+        "--dtype", default="float16", choices=["float16", "bfloat16"]
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-q-heads", type=int, default=32)
     parser.add_argument("--num-kv-heads", type=int, default=8)
-    parser.add_argument("--head-dim", type=int, default=128, help="Single head_dim used when --head-dims is empty.")
+    parser.add_argument(
+        "--head-dim",
+        type=int,
+        default=128,
+        help="Single head_dim used when --head-dims is empty.",
+    )
     parser.add_argument(
         "--head-dims",
         default=DEFAULT_HEAD_DIMS,
@@ -367,14 +443,30 @@ def main() -> None:
     parser.add_argument("--skip-check-iters", type=int, default=100)
     parser.add_argument("--skip-slowdown", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--limit", type=int, default=None, help="Only run the first N candidate configs.")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Only run the first N candidate configs.",
+    )
     parser.add_argument("--topk", type=int, default=5)
-    parser.add_argument("--csv", type=Path, default=None, help="Optional path to save per-case results.")
-    parser.add_argument("--gpu-name", default=None, help="Override GPU name used by get_rrattn_config.")
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        help="Optional path to save per-case results.",
+    )
+    parser.add_argument(
+        "--gpu-name",
+        default=None,
+        help="Override GPU name used by get_rrattn_config.",
+    )
     args = parser.parse_args()
 
     require_cuda(args.device)
-    assert args.num_q_heads % args.num_kv_heads == 0, "num_q_heads must be divisible by num_kv_heads"
+    assert args.num_q_heads % args.num_kv_heads == 0, (
+        "num_q_heads must be divisible by num_kv_heads"
+    )
     assert 128 % args.stride == 0, "stride must divide fixed block size 128"
     assert args.chunk_size > 0, "chunk_size must be positive"
     assert args.skip_check_iters >= 0, "skip_check_iters must be non-negative"
@@ -382,8 +474,14 @@ def main() -> None:
 
     seq_lens = parse_csv_ints(args.seq_lens)
     modes = parse_modes(args.modes)
-    early_skip_enabled = len(seq_lens) * len(modes) == 1 and args.skip_check_iters > 0 and args.skip_slowdown > 0
-    head_dims = parse_csv_ints(args.head_dims) if args.head_dims else [args.head_dim]
+    early_skip_enabled = (
+        len(seq_lens) * len(modes) == 1
+        and args.skip_check_iters > 0
+        and args.skip_slowdown > 0
+    )
+    head_dims = (
+        parse_csv_ints(args.head_dims) if args.head_dims else [args.head_dim]
+    )
     configs_by_head_dim = {}
     for head_dim in head_dims:
         configs = make_candidates(
@@ -395,7 +493,9 @@ def main() -> None:
             configs = configs[: args.limit]
         configs_by_head_dim[head_dim] = configs
 
-    print(f"Running head_dims={head_dims} over seq_lens={seq_lens}, modes={modes}")
+    print(
+        f"Running head_dims={head_dims} over seq_lens={seq_lens}, modes={modes}"
+    )
     print(f"Tunable fields: {', '.join(TUNABLE_FIELDS)}")
 
     results = []
@@ -404,7 +504,9 @@ def main() -> None:
         print(f"\nHead dim {head_dim}: {len(configs)} configs")
         for seq_len in seq_lens:
             for mode in modes:
-                print(f"\nCase head_dim={head_dim} seq_len={seq_len} mode={mode}")
+                print(
+                    f"\nCase head_dim={head_dim} seq_len={seq_len} mode={mode}"
+                )
                 q, k, startend = make_inputs(args, seq_len, mode, head_dim)
                 best_case_ms = None
                 for config_id, config in enumerate(configs):
@@ -415,7 +517,9 @@ def main() -> None:
                             startend,
                             args=args,
                             config=config,
-                            current_best_ms=best_case_ms if early_skip_enabled else None,
+                            current_best_ms=best_case_ms
+                            if early_skip_enabled
+                            else None,
                         )
                         results.append(
                             CaseResult(
@@ -431,7 +535,11 @@ def main() -> None:
                         if skip_reason is not None:
                             print(f"  #{config_id}: skipped: {skip_reason}")
                         else:
-                            best_case_ms = ms if best_case_ms is None else min(best_case_ms, ms)
+                            best_case_ms = (
+                                ms
+                                if best_case_ms is None
+                                else min(best_case_ms, ms)
+                            )
                             print(f"  #{config_id}: {ms:.4f} ms")
                     except Exception as exc:
                         error = f"{type(exc).__name__}: {exc}"

@@ -1,4 +1,19 @@
 #!/usr/bin/env python
+
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import argparse
 import csv
 import gc
@@ -41,7 +56,7 @@ Data:
 Extract the value corresponding to this key:
 key: {key}
 
-Please directly output the corresponding value without outputing anything else. [/INST]  Sure! The value corresponding to the key "{key}" is:
+Please directly output the corresponding value without outputting anything else. [/INST]  Sure! The value corresponding to the key "{key}" is:
 """.strip()
     + "\n\nvalue: "
 )
@@ -58,7 +73,7 @@ Data:
 Extract the value corresponding to this key:
 key: {key}
 
-Please directly output the corresponding value without outputing anything else.
+Please directly output the corresponding value without outputting anything else.
 value:<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 """.strip()
     + "\n\n"
@@ -77,7 +92,7 @@ Data:
 Extract the value corresponding to this key:
 key: {key}
 
-Please directly output the corresponding value without outputing anything else.<|im_end|>
+Please directly output the corresponding value without outputting anything else.<|im_end|>
 <|im_start|>assistant
 """.strip()
     + "\n"
@@ -96,7 +111,11 @@ def infer_model_type(model_name):
     config_path = Path(model_name) / "config.json"
     if config_path.is_file():
         try:
-            model_type = str(json.loads(config_path.read_text(encoding="utf-8")).get("model_type", "")).lower()
+            model_type = str(
+                json.loads(config_path.read_text(encoding="utf-8")).get(
+                    "model_type", ""
+                )
+            ).lower()
             if "qwen" in model_type:
                 return "qwen"
             if "ernie" in model_type and "moe" in model_type:
@@ -117,7 +136,9 @@ def infer_model_type(model_name):
         return "ernie"
     if "llama" in lower_name:
         return "llama"
-    raise ValueError("Cannot infer model_type from model_name; pass --model-type explicitly")
+    raise ValueError(
+        "Cannot infer model_type from model_name; pass --model-type explicitly"
+    )
 
 
 def load_patch(model_type):
@@ -142,24 +163,24 @@ def load_profile_fns(method, enable_profile):
             get_attn_time,
             get_estimate_func_time,
             set_attn_time,
-            set_profile,
             set_estimate_func_time,
+            set_profile,
         )
     elif method == "rrattn":
         from rrattn.rrattention import (
             get_attn_time,
             get_estimate_func_time,
             set_attn_time,
-            set_profile,
             set_estimate_func_time,
+            set_profile,
         )
     elif method == "flex":
         from rrattn.flexprefill import (
             get_attn_time,
             get_estimate_func_time,
             set_attn_time,
-            set_profile,
             set_estimate_func_time,
+            set_profile,
         )
     elif method == "full":
         from rrattn.full_prefill import (
@@ -170,10 +191,17 @@ def load_profile_fns(method, enable_profile):
             set_profile,
         )
     else:
-        raise ValueError(f"Unsupported method={method!r}; supported methods are: xattn, rrattn, flex, full")
+        raise ValueError(
+            f"Unsupported method={method!r}; supported methods are: xattn, rrattn, flex, full"
+        )
 
     set_profile(enable_profile)
-    return set_attn_time, get_attn_time, set_estimate_func_time, get_estimate_func_time
+    return (
+        set_attn_time,
+        get_attn_time,
+        set_estimate_func_time,
+        get_estimate_func_time,
+    )
 
 
 def load_model(model_name, model_type, dtype):
@@ -182,19 +210,31 @@ def load_model(model_name, model_type, dtype):
     if model_type == "llama":
         from paddleformers.transformers import LlamaForCausalLM
 
-        return load_pretrained_checkpoint(LlamaForCausalLM, model_name, dtype=dtype)
+        return load_pretrained_checkpoint(
+            LlamaForCausalLM, model_name, dtype=dtype
+        )
     if model_type == "qwen":
-        from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
+        from paddleformers.transformers.qwen2.modeling import (
+            Qwen2ForCausalLMDeprecated,
+        )
 
-        return load_pretrained_checkpoint(Qwen2ForCausalLMDeprecated, model_name, dtype=dtype)
+        return load_pretrained_checkpoint(
+            Qwen2ForCausalLMDeprecated, model_name, dtype=dtype
+        )
     if model_type == "ernie":
         from paddleformers.transformers import Ernie4_5ForCausalLM
 
-        return load_pretrained_checkpoint(Ernie4_5ForCausalLM, model_name, dtype=dtype)
+        return load_pretrained_checkpoint(
+            Ernie4_5ForCausalLM, model_name, dtype=dtype
+        )
     if model_type == "ernie_moe":
-        from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeForCausalLM
+        from paddleformers.transformers.ernie4_5_moe.modeling import (
+            Ernie4_5_MoeForCausalLM,
+        )
 
-        return load_pretrained_checkpoint(Ernie4_5_MoeForCausalLM, model_name, dtype=dtype)
+        return load_pretrained_checkpoint(
+            Ernie4_5_MoeForCausalLM, model_name, dtype=dtype
+        )
     raise ValueError(f"Unsupported model_type={model_type!r}")
 
 
@@ -218,14 +258,19 @@ def get_kv_retrieval_prompt(data, key, model_name):
         or "Llama-3.1-8B-Instruct" in model_name
     ):
         prompt_template = kv_retrieval_prompt_template_llama3_instruct
-    elif model_name in {"meta-llama/Llama-2-7b-hf", "meta-llama/Meta-Llama-3-8B"}:
+    elif model_name in {
+        "meta-llama/Llama-2-7b-hf",
+        "meta-llama/Meta-Llama-3-8B",
+    }:
         prompt_template = kv_retrieval_prompt_template
     elif "Qwen2.5-7B-Instruct" in model_name or "Qwen" in model_name:
         prompt_template = kv_retrieval_prompt_template_qwen_instruct
     else:
         prompt_template = kv_retrieval_prompt_template
 
-    return prompt_template.format(formatted_kv_records=formatted_kv_records, key=key)
+    return prompt_template.format(
+        formatted_kv_records=formatted_kv_records, key=key
+    )
 
 
 def move_tensor(value, device):
@@ -236,10 +281,14 @@ def move_tensor(value, device):
     return value
 
 
-def quick_get_random_kv_samples(model_name, tokenizer, gold_index, n_kv_num, n_sample, device):
+def quick_get_random_kv_samples(
+    model_name, tokenizer, gold_index, n_kv_num, n_sample, device
+):
     samples = []
     for _ in range(n_sample):
-        ordered_kv_records = [[str(uuid.uuid4()), str(uuid.uuid4())] for _ in range(n_kv_num)]
+        ordered_kv_records = [
+            [str(uuid.uuid4()), str(uuid.uuid4())] for _ in range(n_kv_num)
+        ]
         key = str(uuid.uuid4())
         value = str(uuid.uuid4())
         ordered_kv_records.insert(gold_index, [key, value])
@@ -248,14 +297,18 @@ def quick_get_random_kv_samples(model_name, tokenizer, gold_index, n_kv_num, n_s
             key=key,
             model_name=model_name,
         )
-        inputs = tokenizer(kv_prompt, return_tensors="pd", add_special_tokens=False)
+        inputs = tokenizer(
+            kv_prompt, return_tensors="pd", add_special_tokens=False
+        )
         sample = {
             "input_ids": move_tensor(inputs["input_ids"], device),
             "key": key,
             "value": value,
         }
         if "attention_mask" in inputs:
-            sample["attention_mask"] = move_tensor(inputs["attention_mask"], device)
+            sample["attention_mask"] = move_tensor(
+                inputs["attention_mask"], device
+            )
         else:
             sample["attention_mask"] = None
         samples.append(sample)
@@ -300,7 +353,10 @@ def output_name(model_name, method, threshold, stride, output_dir):
     saved_method = method if method != "full" else f"{method}_{1.00:.2f}"
     if method != "full":
         saved_method = f"{saved_method}_{threshold:.2f}"
-    return Path(output_dir) / f"speed_test_{Path(model_name).name}_result_{saved_method}_s{stride}.csv"
+    return (
+        Path(output_dir)
+        / f"speed_test_{Path(model_name).name}_result_{saved_method}_s{stride}.csv"
+    )
 
 
 def main(
@@ -332,7 +388,12 @@ def main(
 
     seq_len_list = parse_seq_lens(seq_lens)
     enable_profile = device.startswith("gpu")
-    set_attn_time, get_attn_time, set_estimate_func_time, get_estimate_func_time = load_profile_fns(
+    (
+        set_attn_time,
+        get_attn_time,
+        set_estimate_func_time,
+        get_estimate_func_time,
+    ) = load_profile_fns(
         method,
         enable_profile,
     )
@@ -367,9 +428,7 @@ def main(
             "Increase --n-kv-num or lower --seq-lens."
         )
 
-    print(
-        f"model={model_name} method={method} device={device}"
-    )
+    print(f"model={model_name} method={method} device={device}")
     print("---------------------------")
 
     for seq_len in seq_len_list:
@@ -398,7 +457,9 @@ def main(
 
             set_attn_time()
             set_estimate_func_time()
-            elapsed_ms = measure_forward(model, input_ids, attention_mask, device)
+            elapsed_ms = measure_forward(
+                model, input_ids, attention_mask, device
+            )
             total_times.append(elapsed_ms)
             attn_times.append(float(get_attn_time()))
             estimate_times.append(float(get_estimate_func_time()))
@@ -446,9 +507,19 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-name", default="meta-llama/Llama-3.1-8B-Instruct")
-    parser.add_argument("--model-type", default="auto", choices=["auto", "llama", "qwen", "ernie", "ernie_moe"])
-    parser.add_argument("--method", default="rrattn", choices=["xattn", "rrattn", "flex", "full"])
+    parser.add_argument(
+        "--model-name", default="meta-llama/Llama-3.1-8B-Instruct"
+    )
+    parser.add_argument(
+        "--model-type",
+        default="auto",
+        choices=["auto", "llama", "qwen", "ernie", "ernie_moe"],
+    )
+    parser.add_argument(
+        "--method",
+        default="rrattn",
+        choices=["xattn", "rrattn", "flex", "full"],
+    )
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--stride", type=int, default=8)
     parser.add_argument("--seq-lens", default=DEFAULT_SEQ_LENS)

@@ -1,3 +1,17 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import math
@@ -8,6 +22,7 @@ import paddle.nn.functional as F
 import triton
 import triton.language as tl
 from paddle.compat import use_torch_proxy_guard
+
 
 @dataclass(frozen=True)
 class RRAttnConfig:
@@ -20,6 +35,8 @@ class RRAttnConfig:
     num_stages: int = 1
     # K-stride segment size used by the softmax/reduce kernel.
     segment_size: int = 128
+
+
 TUNABLE_FIELDS = (
     "block_m",
     "block_n",
@@ -43,7 +60,9 @@ def gpu_info() -> tuple[str, int | None]:
 GPU_NAME, GPU_MAJOR = gpu_info()
 
 
-def get_rrattn_config(head_dim: int, gpu_name: str | None = None) -> RRAttnConfig:
+def get_rrattn_config(
+    head_dim: int, gpu_name: str | None = None
+) -> RRAttnConfig:
     """Return the default estimate-kernel config.
 
     RRAttention currently fixes the public block size at 128, so block size is
@@ -54,22 +73,45 @@ def get_rrattn_config(head_dim: int, gpu_name: str | None = None) -> RRAttnConfi
 
     if "h100" in gpu_name or "h800" in gpu_name:
         if head_dim <= 64:
-            return RRAttnConfig(block_m=128, block_n=64, num_warps=4, num_stages=1, segment_size=256)
+            return RRAttnConfig(
+                block_m=128,
+                block_n=64,
+                num_warps=4,
+                num_stages=1,
+                segment_size=256,
+            )
         elif head_dim <= 128:
-            return RRAttnConfig(block_m=128, block_n=64, num_warps=4, num_stages=3, segment_size=256)
+            return RRAttnConfig(
+                block_m=128,
+                block_n=64,
+                num_warps=4,
+                num_stages=3,
+                segment_size=256,
+            )
         else:
-            return RRAttnConfig(block_m=128, block_n=64, num_warps=8, num_stages=1, segment_size=256)
+            return RRAttnConfig(
+                block_m=128,
+                block_n=64,
+                num_warps=8,
+                num_stages=1,
+                segment_size=256,
+            )
 
     if head_dim <= 64:
-        return RRAttnConfig(block_m=128, block_n=16, num_warps=4, num_stages=1, segment_size=256)
+        return RRAttnConfig(
+            block_m=128, block_n=16, num_warps=4, num_stages=1, segment_size=256
+        )
     elif head_dim <= 128:
-        return RRAttnConfig(block_m=128, block_n=32, num_warps=4, num_stages=2, segment_size=256)
+        return RRAttnConfig(
+            block_m=128, block_n=32, num_warps=4, num_stages=2, segment_size=256
+        )
     else:
         return RRAttnConfig(num_warps=4, num_stages=1)
 
 
 LOG2E = 1.4426950408889634  # 1 / ln(2)
 BLOCK_SIZE = 128
+
 
 @dataclass
 class RawPtrs:
@@ -104,7 +146,9 @@ def _require(cond: bool, msg: str) -> None:
         raise ValueError(msg)
 
 
-def _normalize_config(config: RRAttnConfig | None, *, head_dim: int) -> RRAttnConfig:
+def _normalize_config(
+    config: RRAttnConfig | None, *, head_dim: int
+) -> RRAttnConfig:
     if config is not None:
         return config
     return get_rrattn_config(head_dim)
@@ -142,8 +186,12 @@ def scan_maxmin_chunked(
 
     offs_out = tl.arange(0, BN // chunk_size) + i_tile * (BN // chunk_size)
     mask_out = offs_out < num_chunks
-    tl.store(output_max_ptr + i_bh * num_chunks + offs_out, b_omax, mask=mask_out)
-    tl.store(output_min_ptr + i_bh * num_chunks + offs_out, b_omin, mask=mask_out)
+    tl.store(
+        output_max_ptr + i_bh * num_chunks + offs_out, b_omax, mask=mask_out
+    )
+    tl.store(
+        output_min_ptr + i_bh * num_chunks + offs_out, b_omin, mask=mask_out
+    )
 
 
 def prepare_maxmin(
@@ -154,10 +202,14 @@ def prepare_maxmin(
     num_chunks = (seq_len + chunk_size - 1) // chunk_size
 
     output_max = paddle.empty(
-        [bsz, num_heads, num_chunks], dtype=paddle.int32, device=input_tensor.device
+        [bsz, num_heads, num_chunks],
+        dtype=paddle.int32,
+        device=input_tensor.device,
     )
     output_min = paddle.empty(
-        [bsz, num_heads, num_chunks], dtype=paddle.int32, device=input_tensor.device
+        [bsz, num_heads, num_chunks],
+        dtype=paddle.int32,
+        device=input_tensor.device,
     )
 
     bn = 512
@@ -196,7 +248,9 @@ def _load_bounds(
         ptr_start_lt + base_offset + k_offsets, mask=load_mask, other=pad_lt
     )
 
-    need_lte: tl.constexpr = (causal and mode == 2) or (not causal and mode == 4)
+    need_lte: tl.constexpr = (causal and mode == 2) or (
+        not causal and mode == 4
+    )
     if need_lte:
         b_lte = tl.load(
             ptr_end_lt + base_offset + k_offsets, mask=load_mask, other=pad_lt
@@ -209,7 +263,9 @@ def _load_bounds(
     else:
         if mode == 4:
             b_uts = tl.load(
-                ptr_start_ut + base_offset + k_offsets, mask=load_mask, other=pad_ut
+                ptr_start_ut + base_offset + k_offsets,
+                mask=load_mask,
+                other=pad_ut,
             )
         else:
             b_uts = tl.full(b_lts.shape, pad_ut, dtype=tl.int32)
@@ -309,12 +365,12 @@ def _compare_and_swap(x, ids, flip, i: tl.constexpr, n_dims: tl.constexpr):
     y = tl.reshape(x, shape)
 
     mask = tl.arange(0, 2)[None, :, None]
-    left = tl.broadcast_to(tl.sum(tl.where(mask == 0, y, 0), 1)[:, None, :], shape).to(
-        y.dtype
-    )
-    right = tl.broadcast_to(tl.sum(tl.where(mask == 1, y, 0), 1)[:, None, :], shape).to(
-        y.dtype
-    )
+    left = tl.broadcast_to(
+        tl.sum(tl.where(mask == 0, y, 0), 1)[:, None, :], shape
+    ).to(y.dtype)
+    right = tl.broadcast_to(
+        tl.sum(tl.where(mask == 1, y, 0), 1)[:, None, :], shape
+    ).to(y.dtype)
     left = tl.reshape(left, x.shape)
     right = tl.reshape(right, x.shape)
 
@@ -324,7 +380,9 @@ def _compare_and_swap(x, ids, flip, i: tl.constexpr, n_dims: tl.constexpr):
     left_idx = tl.reshape(left_idx, x.shape).to(y_idx.dtype)
     right_idx = tl.reshape(right_idx, x.shape).to(y_idx.dtype)
 
-    idtype = tl.core.get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
+    idtype = tl.core.get_int_dtype(
+        bitwidth=x.dtype.primitive_bitwidth, signed=True
+    )
     ileft = left.to(idtype, bitcast=True)
     iright = right.to(idtype, bitcast=True)
     ix = x.to(idtype, bitcast=True)
@@ -336,7 +394,9 @@ def _compare_and_swap(x, ids, flip, i: tl.constexpr, n_dims: tl.constexpr):
 
 
 @triton.jit
-def _bitonic_merge(x, ids, stage: tl.constexpr, order: tl.constexpr, n_dims: tl.constexpr):
+def _bitonic_merge(
+    x, ids, stage: tl.constexpr, order: tl.constexpr, n_dims: tl.constexpr
+):
     n_outer: tl.constexpr = x.numel >> n_dims
     tl.static_assert(stage <= n_dims)
 
@@ -358,7 +418,9 @@ def bitonic_argsort_device(
     x, ids, n_dims: tl.constexpr, descending: tl.constexpr = tl.core.CONSTEXPR_0
 ):
     for i in tl.static_range(1, n_dims + 1):
-        x, ids = _bitonic_merge(x, ids, i, 2 if i < n_dims else descending, n_dims)
+        x, ids = _bitonic_merge(
+            x, ids, i, 2 if i < n_dims else descending, n_dims
+        )
     return x, ids
 
 
@@ -378,7 +440,9 @@ def top_p_kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
     mask_load = offsets < N_COLS
 
-    x_raw = tl.load(row_start_ptr + offsets, mask=mask_load, other=0.0).to(tl.float32)
+    x_raw = tl.load(row_start_ptr + offsets, mask=mask_load, other=0.0).to(
+        tl.float32
+    )
     row_sum = tl.sum(x_raw, axis=0)
 
     out_row_ptr = Out_ptr + pid * stride_row
@@ -418,7 +482,9 @@ def find_blocks_topp(x: paddle.Tensor, p: float) -> paddle.Tensor:
         block_size = 1
     num_dims = int(math.log2(block_size))
 
-    output_mask = paddle.empty(x_reshaped.shape, dtype=paddle.int8, device=x.device)
+    output_mask = paddle.empty(
+        x_reshaped.shape, dtype=paddle.int8, device=x.device
+    )
     top_p_kernel[(rows,)](
         x_reshaped,
         output_mask,
@@ -437,12 +503,24 @@ def _build_fa3_causal_block_visible_mask(
     kv_len: int,
 ) -> paddle.Tensor:
     batch_size, head_num, chunk_num, block_num = input_tensor.shape
-    q_ids = paddle.arange(chunk_num, dtype=paddle.int32, device=input_tensor.device).reshape([1, 1, chunk_num, 1])
-    k_ids = paddle.arange(block_num, dtype=paddle.int32, device=input_tensor.device).reshape([1, 1, 1, block_num])
-    q_block_end = paddle.minimum(
-        (q_ids + 1) * BLOCK_SIZE,
-        paddle.full([1, 1, chunk_num, 1], q_len, dtype=paddle.int32, device=input_tensor.device),
-    ) - 1
+    q_ids = paddle.arange(
+        chunk_num, dtype=paddle.int32, device=input_tensor.device
+    ).reshape([1, 1, chunk_num, 1])
+    k_ids = paddle.arange(
+        block_num, dtype=paddle.int32, device=input_tensor.device
+    ).reshape([1, 1, 1, block_num])
+    q_block_end = (
+        paddle.minimum(
+            (q_ids + 1) * BLOCK_SIZE,
+            paddle.full(
+                [1, 1, chunk_num, 1],
+                q_len,
+                dtype=paddle.int32,
+                device=input_tensor.device,
+            ),
+        )
+        - 1
+    )
     k_block_start = k_ids * BLOCK_SIZE
     return k_block_start <= q_block_end + (kv_len - q_len)
 
@@ -453,14 +531,28 @@ def _build_causal_prefill_mandatory_mask(
     kv_len: int,
 ) -> paddle.Tensor:
     batch_size, head_num, chunk_num, block_num = input_tensor.shape
-    mask = paddle.zeros([batch_size, head_num, chunk_num, block_num], dtype=paddle.bool, device=input_tensor.device)
+    mask = paddle.zeros(
+        [batch_size, head_num, chunk_num, block_num],
+        dtype=paddle.bool,
+        device=input_tensor.device,
+    )
     mask[:, :, :, 0] = True
 
-    q_ids = paddle.arange(chunk_num, dtype=paddle.int32, device=input_tensor.device)
-    q_block_end = paddle.minimum(
-        (q_ids + 1) * BLOCK_SIZE,
-        paddle.full([chunk_num], q_len, dtype=paddle.int32, device=input_tensor.device),
-    ) - 1
+    q_ids = paddle.arange(
+        chunk_num, dtype=paddle.int32, device=input_tensor.device
+    )
+    q_block_end = (
+        paddle.minimum(
+            (q_ids + 1) * BLOCK_SIZE,
+            paddle.full(
+                [chunk_num],
+                q_len,
+                dtype=paddle.int32,
+                device=input_tensor.device,
+            ),
+        )
+        - 1
+    )
     diag_k_ids = (q_block_end + (kv_len - q_len)) // BLOCK_SIZE
     q_valid = q_block_end >= 0
     diag_valid = q_valid & (diag_k_ids >= 0) & (diag_k_ids < block_num)
@@ -501,7 +593,9 @@ def rrattn_gemm_qchunk_gqa_kernel(
     i_bhg = tl.program_id(2).to(tl.int64)
 
     G: tl.constexpr = HQ // H
-    GROUPS_PER_KV: tl.constexpr = (G + GQA_HEADS_PER_CTA - 1) // GQA_HEADS_PER_CTA
+    GROUPS_PER_KV: tl.constexpr = (
+        G + GQA_HEADS_PER_CTA - 1
+    ) // GQA_HEADS_PER_CTA
 
     i_b = i_bhg // (H * GROUPS_PER_KV)
     rem = i_bhg % (H * GROUPS_PER_KV)
@@ -606,7 +700,9 @@ def rrattn_nomask_softmax_reduce_kernel(
     q_stride_base_local = i_qblock_local * ratio
     q_stride_base_global = chunk_q_start + q_stride_base_local
     q_block_id = q_stride_base_global // ratio
-    q_block_valid = (q_stride_base_local < chunk_q_strides) & (q_block_id < num_q_blocks)
+    q_block_valid = (q_stride_base_local < chunk_q_strides) & (
+        q_block_id < num_q_blocks
+    )
 
     offs_q = tl.arange(0, ratio)
     q_rows_local = q_stride_base_local + offs_q
@@ -641,7 +737,11 @@ def rrattn_nomask_softmax_reduce_kernel(
     num_segments = (n_k_strides + SEGMENT_SIZE - 1) // SEGMENT_SIZE
     num_active_segments = num_segments
     if is_causal:
-        last_q_token = (q_stride_base_global + ratio - 1) * STRIDE + head_offset + shift_tokens
+        last_q_token = (
+            (q_stride_base_global + ratio - 1) * STRIDE
+            + head_offset
+            + shift_tokens
+        )
         last_q_stride = last_q_token // STRIDE
         active_k_strides = tl.minimum(
             n_k_strides,
@@ -660,11 +760,15 @@ def rrattn_nomask_softmax_reduce_kernel(
             + offs_q[:, None] * in_stride_q
             + (seg_start + offs_k)[None, :]
         )
-        load_mask = q_valid[:, None] & ((seg_start + offs_k)[None, :] < n_k_strides)
+        load_mask = q_valid[:, None] & (
+            (seg_start + offs_k)[None, :] < n_k_strides
+        )
         X = tl.load(p_in, mask=load_mask, other=-1.0e6).to(tl.float32) * scale
         if is_causal and seg_idx == diag_segment_idx:
             k_token_base = (seg_start + offs_k) * STRIDE
-            causal_mask = k_token_base[None, :] <= (q_token_ids + shift_tokens)[:, None]
+            causal_mask = (
+                k_token_base[None, :] <= (q_token_ids + shift_tokens)[:, None]
+            )
             X = tl.where(causal_mask, X, -1.0e6)
 
         m_local = tl.max(X, 1)
@@ -688,11 +792,15 @@ def rrattn_nomask_softmax_reduce_kernel(
             + offs_q[:, None] * in_stride_q
             + (seg_start + offs_k)[None, :]
         )
-        load_mask = q_valid[:, None] & ((seg_start + offs_k)[None, :] < n_k_strides)
+        load_mask = q_valid[:, None] & (
+            (seg_start + offs_k)[None, :] < n_k_strides
+        )
         X = tl.load(p_in, mask=load_mask, other=-1.0e6).to(tl.float32) * scale
         if is_causal and seg_idx == diag_segment_idx:
             k_token_base = (seg_start + offs_k) * STRIDE
-            causal_mask = k_token_base[None, :] <= (q_token_ids + shift_tokens)[:, None]
+            causal_mask = (
+                k_token_base[None, :] <= (q_token_ids + shift_tokens)[:, None]
+            )
             X = tl.where(causal_mask, X, -1.0e6)
         X = tl.exp2(X - m_i[:, None]) * l_i_inv[:, None]
         X = tl.where(m_i[:, None] < -1.0e5, 0.0, X)
@@ -779,7 +887,9 @@ def rrattn_flashmask_softmax_reduce_qchunk_kernel(
     q_stride_base_local = i_qblock_local * ratio
     q_stride_base_global = chunk_q_start + q_stride_base_local
     q_block_id = q_stride_base_global // ratio
-    q_block_valid = (q_stride_base_local < chunk_q_strides) & (q_block_id < num_q_blocks)
+    q_block_valid = (q_stride_base_local < chunk_q_strides) & (
+        q_block_id < num_q_blocks
+    )
 
     offs_q = tl.arange(0, ratio)
     q_rows_local = q_stride_base_local + offs_q
@@ -815,7 +925,11 @@ def rrattn_flashmask_softmax_reduce_qchunk_kernel(
     num_segments = (n_k_strides + SEGMENT_SIZE - 1) // SEGMENT_SIZE
     num_active_segments = num_segments
     if is_causal:
-        last_q_token = (q_stride_base_global + ratio - 1) * STRIDE + head_offset + shift_tokens
+        last_q_token = (
+            (q_stride_base_global + ratio - 1) * STRIDE
+            + head_offset
+            + shift_tokens
+        )
         last_q_stride = last_q_token // STRIDE
         active_k_strides = tl.minimum(
             n_k_strides,
@@ -833,17 +947,19 @@ def rrattn_flashmask_softmax_reduce_qchunk_kernel(
             + offs_q[:, None] * in_stride_q
             + (seg_start + offs_k)[None, :]
         )
-        load_mask = q_valid[:, None] & ((seg_start + offs_k)[None, :] < n_k_strides)
+        load_mask = q_valid[:, None] & (
+            (seg_start + offs_k)[None, :] < n_k_strides
+        )
         X = tl.load(p_in, mask=load_mask, other=-1.0e6).to(tl.float32) * scale
         if is_causal:
             k_token_base = (seg_start + offs_k) * STRIDE
-            causal_mask = k_token_base[None, :] <= (q_token_ids + shift_tokens)[:, None]
+            causal_mask = (
+                k_token_base[None, :] <= (q_token_ids + shift_tokens)[:, None]
+            )
             X = tl.where(causal_mask, X, -1.0e6)
 
         curr_stride_offset = (
-            i_b * n_k_strides * HIDS
-            + i_hid * n_k_strides
-            + seg_start
+            i_b * n_k_strides * HIDS + i_hid * n_k_strides + seg_start
         )
         curr_load_mask = (seg_start + offs_k) < n_k_strides
         fully_masked_stride_mask = check_fully_masked_state(
@@ -881,19 +997,21 @@ def rrattn_flashmask_softmax_reduce_qchunk_kernel(
             + offs_q[:, None] * in_stride_q
             + (seg_start + offs_k)[None, :]
         )
-        load_mask = q_valid[:, None] & ((seg_start + offs_k)[None, :] < n_k_strides)
+        load_mask = q_valid[:, None] & (
+            (seg_start + offs_k)[None, :] < n_k_strides
+        )
         X = tl.load(p_in, mask=load_mask, other=-1.0e6).to(tl.float32) * scale
 
         causal_visible = tl.full([ratio, SEGMENT_SIZE], True, dtype=tl.int1)
         if is_causal:
             k_token_base = (seg_start + offs_k) * STRIDE
-            causal_visible = k_token_base[None, :] <= (q_token_ids + shift_tokens)[:, None]
+            causal_visible = (
+                k_token_base[None, :] <= (q_token_ids + shift_tokens)[:, None]
+            )
             X = tl.where(causal_visible, X, -1.0e6)
 
         curr_stride_offset = (
-            i_b * n_k_strides * HIDS
-            + i_hid * n_k_strides
-            + seg_start
+            i_b * n_k_strides * HIDS + i_hid * n_k_strides + seg_start
         )
         curr_load_mask = (seg_start + offs_k) < n_k_strides
         fully_masked_stride_mask = check_fully_masked_state(
@@ -929,7 +1047,9 @@ def rrattn_flashmask_softmax_reduce_qchunk_kernel(
             causal=is_causal,
             mode=mode,
         )
-        real_partial = (~fully_masked_stride_mask) & partially_masked_stride_mask
+        real_partial = (
+            ~fully_masked_stride_mask
+        ) & partially_masked_stride_mask
         if is_causal:
             real_partial = real_partial & causal_visible
         partial_blocks = real_partial.to(tl.int32).reshape(
@@ -1277,9 +1397,18 @@ def rr_attn_estimate_triton_func(
     bsz2, kv_len, num_kv_heads, head_dim_k = k.shape
     _require(bsz2 == bsz, "q/k batch size mismatch")
     _require(head_dim_k == head_dim, "q/k head_dim mismatch")
-    _require(startend_row_indices.shape[0] == bsz, "startend_row_indices batch mismatch")
-    _require(startend_row_indices.shape[2] == kv_len, "startend_row_indices seqlen_k mismatch")
-    _require(num_q_heads % num_kv_heads == 0, "MHA/GQA requires num_q_heads % num_kv_heads == 0")
+    _require(
+        startend_row_indices.shape[0] == bsz,
+        "startend_row_indices batch mismatch",
+    )
+    _require(
+        startend_row_indices.shape[2] == kv_len,
+        "startend_row_indices seqlen_k mismatch",
+    )
+    _require(
+        num_q_heads % num_kv_heads == 0,
+        "MHA/GQA requires num_q_heads % num_kv_heads == 0",
+    )
     config = _normalize_config(config, head_dim=head_dim)
 
     num_indices_heads = int(startend_row_indices.shape[1])
@@ -1332,14 +1461,22 @@ def rr_attn_estimate_triton_func(
             mask_ctx=mask_ctx,
         )
 
-        selected_blocks = find_blocks_topp(attn_sums.astype(paddle.float32), float(threshold))
+        selected_blocks = find_blocks_topp(
+            attn_sums.astype(paddle.float32), float(threshold)
+        )
     if causal:
-        visible_mask = _build_fa3_causal_block_visible_mask(attn_sums, q_len, kv_len)
+        visible_mask = _build_fa3_causal_block_visible_mask(
+            attn_sums, q_len, kv_len
+        )
         selected_blocks = paddle.logical_and(selected_blocks, visible_mask)
-        mandatory_mask = _build_causal_prefill_mandatory_mask(attn_sums, q_len, kv_len)
+        mandatory_mask = _build_causal_prefill_mandatory_mask(
+            attn_sums, q_len, kv_len
+        )
         selected_blocks = paddle.logical_or(selected_blocks, mandatory_mask)
     boundary_protection_mask = boundary_protection_mask.astype(paddle.bool)
-    selected_blocks = paddle.logical_or(selected_blocks, boundary_protection_mask)
+    selected_blocks = paddle.logical_or(
+        selected_blocks, boundary_protection_mask
+    )
     return attn_sums, boundary_protection_mask, selected_blocks
 
 
@@ -1413,7 +1550,10 @@ def _compute_sparse_ratio(
         num_to_compute = visible_blocks * num_heads
     else:
         num_to_compute = q_block_num * k_block_num * num_heads
-    sparse_ratio = 1.0 - (block_mask.astype(paddle.float32).sum() / max(float(num_to_compute), 1.0))
+    sparse_ratio = 1.0 - (
+        block_mask.astype(paddle.float32).sum()
+        / max(float(num_to_compute), 1.0)
+    )
     return paddle.clip(sparse_ratio, min=0.0, max=1.0)
 
 
@@ -1439,7 +1579,9 @@ def _build_nomask_startend(
         dtype=paddle.int32,
         device=device,
     )
-    end = paddle.zeros((batch_size, 1, k_len, 1), dtype=paddle.int32, device=device)
+    end = paddle.zeros(
+        (batch_size, 1, k_len, 1), dtype=paddle.int32, device=device
+    )
     return paddle.concat([start, end], axis=-1)
 
 
@@ -1455,12 +1597,22 @@ def _block_sparse_attention_blsd(
     batch_size, q_len, num_q_heads, head_dim = query_states.shape
     _, k_len, num_kv_heads, _ = key_states.shape
 
-    assert block_size == 128, "F.flashmask_attention block_mask only supports block_size=128"
-    assert head_dim == 128, "F.flashmask_attention block_mask only supports head_dim=128"
-    assert num_q_heads % num_kv_heads == 0, "MHA/GQA requires num_q_heads % num_kv_heads == 0"
+    assert block_size == 128, (
+        "F.flashmask_attention block_mask only supports block_size=128"
+    )
+    assert head_dim == 128, (
+        "F.flashmask_attention block_mask only supports head_dim=128"
+    )
+    assert num_q_heads % num_kv_heads == 0, (
+        "MHA/GQA requires num_q_heads % num_kv_heads == 0"
+    )
     assert value_states.shape[1] == k_len, "key/value sequence length mismatch"
-    assert value_states.shape[2] == num_kv_heads, "key/value head count mismatch"
-    assert block_mask.shape[1] == num_q_heads, "block_mask head count must match query heads"
+    assert value_states.shape[2] == num_kv_heads, (
+        "key/value head count mismatch"
+    )
+    assert block_mask.shape[1] == num_q_heads, (
+        "block_mask head count must match query heads"
+    )
 
     block_mask = block_mask.astype(paddle.int32).contiguous()
     if startend_row_indices is None:
@@ -1473,7 +1625,9 @@ def _block_sparse_attention_blsd(
         )
     if startend_row_indices.shape[1] != block_mask.shape[1]:
         num_indices_heads = int(startend_row_indices.shape[1])
-        assert block_mask.shape[1] % num_indices_heads == 0, "block_mask heads must be divisible by startend heads"
+        assert block_mask.shape[1] % num_indices_heads == 0, (
+            "block_mask heads must be divisible by startend heads"
+        )
         startend_row_indices = startend_row_indices.repeat_interleave(
             block_mask.shape[1] // num_indices_heads,
             axis=1,
@@ -1543,11 +1697,15 @@ def _rrattn_estimate_blsd(
     assert block_size == 128, "RRAttention currently requires block_size=128"
     assert stride > 0, "stride must be positive"
     assert block_size % stride == 0, "stride must divide block_size=128"
-    assert chunk_size is not None and chunk_size > 0, "chunk_size must be positive"
+    assert chunk_size is not None and chunk_size > 0, (
+        "chunk_size must be positive"
+    )
 
     batch_size, q_len, num_q_heads, _ = query_states.shape
     _, k_len, num_kv_heads, _ = key_states.shape
-    assert num_q_heads % num_kv_heads == 0, "MHA/GQA requires num_q_heads % num_kv_heads == 0"
+    assert num_q_heads % num_kv_heads == 0, (
+        "MHA/GQA requires num_q_heads % num_kv_heads == 0"
+    )
 
     if key_states.device != query_states.device:
         key_states = key_states.to(query_states.device)
@@ -1650,8 +1808,12 @@ def rrattn_prefill(
 ):
     batch_size, num_q_heads, q_len, _ = query_states.shape
     _, num_kv_heads, k_len, _ = key_states.shape
-    assert num_q_heads % num_kv_heads == 0, "MHA/GQA requires num_q_heads % num_kv_heads == 0"
-    assert value_states.shape[1] == num_kv_heads, "key/value head count mismatch"
+    assert num_q_heads % num_kv_heads == 0, (
+        "MHA/GQA requires num_q_heads % num_kv_heads == 0"
+    )
+    assert value_states.shape[1] == num_kv_heads, (
+        "key/value head count mismatch"
+    )
     assert value_states.shape[2] == k_len, "key/value sequence length mismatch"
 
     q_block_num = (q_len + block_size - 1) // block_size
@@ -1667,7 +1829,9 @@ def rrattn_prefill(
             )
         )
     chunk_size = min(
-        (q_len + (block_size * stride) - 1) // (block_size * stride) * (block_size * stride),
+        (q_len + (block_size * stride) - 1)
+        // (block_size * stride)
+        * (block_size * stride),
         chunk_size,
     )
     if key_states.device != query_states.device:
@@ -1720,8 +1884,13 @@ def rrattn_prefill(
     if approx_simple_mask.device != query_states.device:
         approx_simple_mask = approx_simple_mask.to(query_states.device)
 
-    if approx_simple_mask.shape[2] != q_block_num or approx_simple_mask.shape[3] != k_block_num:
-        approx_simple_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num].contiguous()
+    if (
+        approx_simple_mask.shape[2] != q_block_num
+        or approx_simple_mask.shape[3] != k_block_num
+    ):
+        approx_simple_mask = approx_simple_mask[
+            :, :, :q_block_num, :k_block_num
+        ].contiguous()
     sparse_ratio = _compute_sparse_ratio(
         approx_simple_mask,
         q_block_num=q_block_num,

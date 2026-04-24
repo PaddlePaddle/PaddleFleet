@@ -1,3 +1,17 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
 from contextlib import nullcontext
 
@@ -8,6 +22,7 @@ import triton.language as tl
 from paddle.compat import use_torch_proxy_guard
 
 from .utils import find_blocks_chunked
+
 
 @triton.jit
 def softmax_fuse_block_sum_kernel_causal(
@@ -35,15 +50,31 @@ def softmax_fuse_block_sum_kernel_causal(
     offs_k = tl.arange(0, segment_size)
 
     num_iters = k_len // segment_size
-    num_iters_before_causal = (chunk_start + (block_id + 1) * block_size - 1) // segment_size
+    num_iters_before_causal = (
+        chunk_start + (block_id + 1) * block_size - 1
+    ) // segment_size
 
     m_i = tl.zeros([block_size], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([block_size], dtype=tl.float32) + 1.0
 
-    input_ptr = In + batch_id * input_stride_0 + head_id * input_stride_1 + block_id * block_size * input_stride_2
-    input_ptr = input_ptr + tl.arange(0, segment_size) + tl.arange(0, block_size)[:, None] * input_stride_2
+    input_ptr = (
+        In
+        + batch_id * input_stride_0
+        + head_id * input_stride_1
+        + block_id * block_size * input_stride_2
+    )
+    input_ptr = (
+        input_ptr
+        + tl.arange(0, segment_size)
+        + tl.arange(0, block_size)[:, None] * input_stride_2
+    )
 
-    output_ptr = Out + batch_id * output_stride_0 + head_id * output_stride_1 + block_id * output_stride_2
+    output_ptr = (
+        Out
+        + batch_id * output_stride_0
+        + head_id * output_stride_1
+        + block_id * output_stride_2
+    )
     output_ptr = output_ptr + tl.arange(0, segment_size // block_size)
 
     for iter in range(0, num_iters_before_causal):
@@ -80,7 +111,10 @@ def softmax_fuse_block_sum_kernel_causal(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size,
+            X.to(Out.type.element_ty),
+        )
 
     for iter in range(num_iters_before_causal, num_iters_before_causal + 1):
         X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
@@ -91,11 +125,17 @@ def softmax_fuse_block_sum_kernel_causal(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size,
+            X.to(Out.type.element_ty),
+        )
 
     for iter in range(num_iters_before_causal + 1, num_iters):
         X = tl.zeros([segment_size // block_size], dtype=tl.float32)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size,
+            X.to(Out.type.element_ty),
+        )
 
 
 @triton.jit
@@ -127,10 +167,24 @@ def softmax_fuse_block_sum_kernel_non_causal(
     m_i = tl.zeros([block_size], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([block_size], dtype=tl.float32) + 1.0
 
-    input_ptr = In + batch_id * input_stride_0 + head_id * input_stride_1 + block_id * block_size * input_stride_2
-    input_ptr = input_ptr + tl.arange(0, segment_size) + tl.arange(0, block_size)[:, None] * input_stride_2
+    input_ptr = (
+        In
+        + batch_id * input_stride_0
+        + head_id * input_stride_1
+        + block_id * block_size * input_stride_2
+    )
+    input_ptr = (
+        input_ptr
+        + tl.arange(0, segment_size)
+        + tl.arange(0, block_size)[:, None] * input_stride_2
+    )
 
-    output_ptr = Out + batch_id * output_stride_0 + head_id * output_stride_1 + block_id * output_stride_2
+    output_ptr = (
+        Out
+        + batch_id * output_stride_0
+        + head_id * output_stride_1
+        + block_id * output_stride_2
+    )
     output_ptr = output_ptr + tl.arange(0, segment_size // block_size)
 
     for iter in range(0, num_iters):
@@ -154,7 +208,10 @@ def softmax_fuse_block_sum_kernel_non_causal(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size,
+            X.to(Out.type.element_ty),
+        )
 
 
 @triton.jit
@@ -189,8 +246,18 @@ def flat_group_gemm_fuse_reshape_kernel(
         if chunk_start + (block_m + 1) * BLOCK_M <= block_n * BLOCK_N:
             return
 
-    Q_ptrs = Q + batch_id * stride_qz + head_id * stride_qh + block_m * BLOCK_M * STRIDE * stride_qn
-    K_ptrs = K + batch_id * stride_kz + head_id * stride_kh + block_n * BLOCK_N * STRIDE * stride_kn
+    Q_ptrs = (
+        Q
+        + batch_id * stride_qz
+        + head_id * stride_qh
+        + block_m * BLOCK_M * STRIDE * stride_qn
+    )
+    K_ptrs = (
+        K
+        + batch_id * stride_kz
+        + head_id * stride_kh
+        + block_n * BLOCK_N * STRIDE * stride_kn
+    )
 
     Q_ptrs = (
         Q_ptrs
@@ -198,7 +265,11 @@ def flat_group_gemm_fuse_reshape_kernel(
         + tl.arange(0, HEAD_DIM)[None, :]
         + stride_qn * (STRIDE - 1)
     )
-    K_ptrs = K_ptrs + tl.arange(0, BLOCK_N)[None, :] * (stride_kn * STRIDE) + tl.arange(0, HEAD_DIM)[:, None]
+    K_ptrs = (
+        K_ptrs
+        + tl.arange(0, BLOCK_N)[None, :] * (stride_kn * STRIDE)
+        + tl.arange(0, HEAD_DIM)[:, None]
+    )
 
     o = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
     for iter in range(STRIDE):
@@ -206,8 +277,18 @@ def flat_group_gemm_fuse_reshape_kernel(
         k = tl.load(K_ptrs + iter * stride_kn)
         o += tl.dot(q, k)
 
-    O_ptrs = Out + batch_id * stride_oz + head_id * stride_oh + block_m * BLOCK_M * stride_on + block_n * BLOCK_N
-    O_ptrs = O_ptrs + tl.arange(0, BLOCK_M)[:, None] * stride_on + tl.arange(0, BLOCK_N)[None, :]
+    O_ptrs = (
+        Out
+        + batch_id * stride_oz
+        + head_id * stride_oh
+        + block_m * BLOCK_M * stride_on
+        + block_n * BLOCK_N
+    )
+    O_ptrs = (
+        O_ptrs
+        + tl.arange(0, BLOCK_M)[:, None] * stride_on
+        + tl.arange(0, BLOCK_N)[None, :]
+    )
     tl.store(O_ptrs, o.to(Out.type.element_ty))
 
 
@@ -228,7 +309,12 @@ def softmax_fuse_block_sum(
     assert attn_weights_slice.stride(-1) == 1
 
     output = paddle.empty(
-        (batch_size, num_heads, q_len // reshaped_block_size, k_len // reshaped_block_size),
+        (
+            batch_size,
+            num_heads,
+            q_len // reshaped_block_size,
+            k_len // reshaped_block_size,
+        ),
         dtype=attn_weights_slice.dtype,
         device=attn_weights_slice.device,
     )
@@ -299,7 +385,11 @@ def flat_group_gemm_fuse_reshape(
     assert q_len % (stride * block_m) == 0
     assert kv_len % (stride * block_n) == 0
 
-    grid = (q_len // stride // block_m, kv_len // stride // block_n, batch_size * num_heads)
+    grid = (
+        q_len // stride // block_m,
+        kv_len // stride // block_n,
+        batch_size * num_heads,
+    )
     flat_group_gemm_fuse_reshape_kernel[grid](
         query_states,
         key_states,
@@ -394,10 +484,16 @@ def block_sparse_attention(
     batch_size, num_heads, q_len, head_dim = query_states.shape
     _, _, k_len, _ = key_states.shape
 
-    assert block_size == 128, "F.flashmask_attention block_mask only supports block_size=128"
-    assert head_dim == 128, "F.flashmask_attention block_mask only supports head_dim=128"
+    assert block_size == 128, (
+        "F.flashmask_attention block_mask only supports block_size=128"
+    )
+    assert head_dim == 128, (
+        "F.flashmask_attention block_mask only supports head_dim=128"
+    )
     if not causal:
-        raise NotImplementedError("F.flashmask_attention block_mask path currently supports causal=True")
+        raise NotImplementedError(
+            "F.flashmask_attention block_mask path currently supports causal=True"
+        )
 
     block_mask = block_mask.astype(paddle.int32).contiguous()
     startend_row_indices = paddle.full(
@@ -458,11 +554,15 @@ def xattn_estimate(
     offset_token_chunk_num = k_chunk_num - q_chunk_num
 
     if k_num_to_pad > 0:
-        pad_key_states = F.pad(key_states, (0, 0, 0, k_num_to_pad), value=0).to(key_states.device)
+        pad_key_states = F.pad(key_states, (0, 0, 0, k_num_to_pad), value=0).to(
+            key_states.device
+        )
     else:
         pad_key_states = key_states
     if q_num_to_pad > 0:
-        pad_query_states = F.pad(query_states, (0, 0, 0, q_num_to_pad), value=0).to(query_states.device)
+        pad_query_states = F.pad(
+            query_states, (0, 0, 0, q_num_to_pad), value=0
+        ).to(query_states.device)
     else:
         pad_query_states = query_states
 
@@ -478,49 +578,96 @@ def xattn_estimate(
     if not use_triton:
         if select_mode == "random":
             perm_idx = paddle.randperm(stride).tolist()
-            reshaped_key = paddle.concat([(pad_key_states[:, :, k::stride, :]) for k in range(stride)], dim=-1)
+            reshaped_key = paddle.concat(
+                [(pad_key_states[:, :, k::stride, :]) for k in range(stride)],
+                dim=-1,
+            )
             reshaped_query = paddle.concat(
-                [pad_query_states[:, :, perm_idx[i] :: stride, :] for i in range(stride)],
+                [
+                    pad_query_states[:, :, perm_idx[i] :: stride, :]
+                    for i in range(stride)
+                ],
                 dim=-1,
             )
         elif select_mode == "inverse" or select_mode == "":
-            reshaped_key = paddle.concat([(pad_key_states[:, :, k::stride, :]) for k in range(stride)], dim=-1)
+            reshaped_key = paddle.concat(
+                [(pad_key_states[:, :, k::stride, :]) for k in range(stride)],
+                dim=-1,
+            )
             reshaped_query = paddle.concat(
-                [(pad_query_states[:, :, (stride - 1 - q) :: (stride * kdb), :]) for q in range(stride)],
+                [
+                    (
+                        pad_query_states[
+                            :, :, (stride - 1 - q) :: (stride * kdb), :
+                        ]
+                    )
+                    for q in range(stride)
+                ],
                 dim=-1,
             )
         elif select_mode == "slash":
-            reshaped_key = paddle.concat([(pad_key_states[:, :, k::stride, :]) for k in range(stride)], dim=-1)
-            reshaped_query = paddle.concat([(pad_query_states[:, :, q::stride, :]) for q in range(stride)], dim=-1)
-        elif select_mode == "double":
-            reshaped_key = paddle.concat([(pad_key_states[:, :, k::stride, :]) for k in range(stride)], dim=-1)
-            reshaped_key = reshaped_key + paddle.concat(
-                [reshaped_key[:, :, :, head_dim:], reshaped_key[:, :, :, :head_dim]],
+            reshaped_key = paddle.concat(
+                [(pad_key_states[:, :, k::stride, :]) for k in range(stride)],
                 dim=-1,
             )
             reshaped_query = paddle.concat(
-                [(pad_query_states[:, :, (stride - 1 - q) :: stride, :]) for q in range(stride)],
+                [(pad_query_states[:, :, q::stride, :]) for q in range(stride)],
+                dim=-1,
+            )
+        elif select_mode == "double":
+            reshaped_key = paddle.concat(
+                [(pad_key_states[:, :, k::stride, :]) for k in range(stride)],
+                dim=-1,
+            )
+            reshaped_key = reshaped_key + paddle.concat(
+                [
+                    reshaped_key[:, :, :, head_dim:],
+                    reshaped_key[:, :, :, :head_dim],
+                ],
+                dim=-1,
+            )
+            reshaped_query = paddle.concat(
+                [
+                    (pad_query_states[:, :, (stride - 1 - q) :: stride, :])
+                    for q in range(stride)
+                ],
                 dim=-1,
             )
         elif select_mode == "triple":
-            reshaped_key = paddle.concat([(pad_key_states[:, :, k::stride, :]) for k in range(stride)], dim=-1)
-            reshaped_key = reshaped_key + paddle.concat(
-                [reshaped_key[:, :, :, head_dim:], reshaped_key[:, :, :, :head_dim]],
+            reshaped_key = paddle.concat(
+                [(pad_key_states[:, :, k::stride, :]) for k in range(stride)],
                 dim=-1,
             )
             reshaped_key = reshaped_key + paddle.concat(
-                [reshaped_key[:, :, :, -head_dim:], reshaped_key[:, :, :, :-head_dim]],
+                [
+                    reshaped_key[:, :, :, head_dim:],
+                    reshaped_key[:, :, :, :head_dim],
+                ],
+                dim=-1,
+            )
+            reshaped_key = reshaped_key + paddle.concat(
+                [
+                    reshaped_key[:, :, :, -head_dim:],
+                    reshaped_key[:, :, :, :-head_dim],
+                ],
                 dim=-1,
             )
             reshaped_query = paddle.concat(
-                [(pad_query_states[:, :, (stride - 1 - q) :: stride, :]) for q in range(stride)],
+                [
+                    (pad_query_states[:, :, (stride - 1 - q) :: stride, :])
+                    for q in range(stride)
+                ],
                 dim=-1,
             )
         else:
-            raise NotImplementedError(f"Unsupported select_mode={select_mode!r}")
+            raise NotImplementedError(
+                f"Unsupported select_mode={select_mode!r}"
+            )
         assert reshaped_key.shape[-2] == k_reshaped_seq_len
 
-    proxy_guard = use_torch_proxy_guard(silent=True) if use_triton else nullcontext()
+    proxy_guard = (
+        use_torch_proxy_guard(silent=True) if use_triton else nullcontext()
+    )
     with proxy_guard:
         for chunk_idx in range(q_chunk_num):
             if use_triton:
@@ -528,15 +675,19 @@ def xattn_estimate(
                     pad_query_states[
                         :,
                         :,
-                        (chunk_idx * reshaped_chunk_size)
-                        * stride : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size)
+                        (chunk_idx * reshaped_chunk_size) * stride : (
+                            chunk_idx * reshaped_chunk_size
+                            + reshaped_chunk_size
+                        )
                         * stride,
                         :,
                     ],
                     pad_key_states,
                     stride,
-                    (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size,
-                    (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size
+                    (k_block_num - q_block_num) * reshaped_block_size
+                    + chunk_idx * reshaped_chunk_size,
+                    (k_block_num - q_block_num) * reshaped_block_size
+                    + chunk_idx * reshaped_chunk_size
                     + reshaped_chunk_size,
                     is_causal=causal,
                 )
@@ -544,8 +695,10 @@ def xattn_estimate(
                     attn_weights_slice,
                     reshaped_block_size,
                     min(4096, reshaped_block_size),
-                    (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size,
-                    (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size
+                    (k_block_num - q_block_num) * reshaped_block_size
+                    + chunk_idx * reshaped_chunk_size,
+                    (k_block_num - q_block_num) * reshaped_block_size
+                    + chunk_idx * reshaped_chunk_size
                     + reshaped_chunk_size,
                     k_reshaped_seq_len - k_reshaped_num_to_pad,
                     1.4426950408889634 / math.sqrt(head_dim) / stride / norm,
@@ -555,7 +708,9 @@ def xattn_estimate(
                 chunked_query = reshaped_query[
                     :,
                     :,
-                    (chunk_idx * reshaped_chunk_size) // kdb : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size)
+                    (chunk_idx * reshaped_chunk_size) // kdb : (
+                        chunk_idx * reshaped_chunk_size + reshaped_chunk_size
+                    )
                     // kdb,
                     :,
                 ]
@@ -563,16 +718,27 @@ def xattn_estimate(
                     chunked_query,
                     reshaped_key.transpose(2, 3),
                 ).to(chunked_query.device)
-                attn_weights_slice = attn_weights_slice / math.sqrt(head_dim) / stride / norm
+                attn_weights_slice = (
+                    attn_weights_slice / math.sqrt(head_dim) / stride / norm
+                )
 
                 if causal:
                     causal_mask = paddle.zeros(
-                        (batch_size, num_q_head, reshaped_chunk_size, reshaped_chunk_size * k_chunk_num),
+                        (
+                            batch_size,
+                            num_q_head,
+                            reshaped_chunk_size,
+                            reshaped_chunk_size * k_chunk_num,
+                        ),
                         device=key_states.device,
                     )
                     if k_reshaped_num_to_pad > 0:
-                        causal_mask[:, :, :, -k_reshaped_num_to_pad:] = float("-inf")
-                    chunk_start = (chunk_idx + offset_token_chunk_num) * reshaped_chunk_size
+                        causal_mask[:, :, :, -k_reshaped_num_to_pad:] = float(
+                            "-inf"
+                        )
+                    chunk_start = (
+                        chunk_idx + offset_token_chunk_num
+                    ) * reshaped_chunk_size
                     chunk_end = chunk_start + reshaped_chunk_size
                     causal_mask[:, :, :, chunk_start:chunk_end] = paddle.triu(
                         paddle.ones(
@@ -585,22 +751,35 @@ def xattn_estimate(
                         * float("-inf"),
                         diagonal=1,
                     )
-                    if chunk_idx == q_chunk_num - 1 and q_reshaped_num_to_pad != 0:
-                        causal_mask[:, :, -(q_reshaped_num_to_pad // kdb) :, :] = float("-inf")
+                    if (
+                        chunk_idx == q_chunk_num - 1
+                        and q_reshaped_num_to_pad != 0
+                    ):
+                        causal_mask[
+                            :, :, -(q_reshaped_num_to_pad // kdb) :, :
+                        ] = float("-inf")
                     causal_mask[:, :, :, chunk_end:] = float("-inf")
                     causal_mask = causal_mask[:, :, kdb - 1 :: kdb, :]
-                    attn_weights_slice = attn_weights_slice + causal_mask.to(attn_weights_slice.device)
+                    attn_weights_slice = attn_weights_slice + causal_mask.to(
+                        attn_weights_slice.device
+                    )
 
                 if softmax:
-                    attn_weights_slice = F.softmax(attn_weights_slice, dim=-1, dtype=paddle.float32).to(
+                    attn_weights_slice = F.softmax(
+                        attn_weights_slice, dim=-1, dtype=paddle.float32
+                    ).to(pad_query_states.dtype)
+                else:
+                    attn_weights_slice = paddle.exp(attn_weights_slice).to(
                         pad_query_states.dtype
                     )
-                else:
-                    attn_weights_slice = paddle.exp(attn_weights_slice).to(pad_query_states.dtype)
-                attn_weights_slice = F.dropout(attn_weights_slice, p=0, training=False)
+                attn_weights_slice = F.dropout(
+                    attn_weights_slice, p=0, training=False
+                )
 
                 if chunk_idx == q_chunk_num - 1 and q_reshaped_num_to_pad != 0:
-                    attn_weights_slice[:, :, -(q_reshaped_num_to_pad // kdb) :, :] = 0
+                    attn_weights_slice[
+                        :, :, -(q_reshaped_num_to_pad // kdb) :, :
+                    ] = 0
 
                 attn_sum = (
                     attn_weights_slice.view(
@@ -639,7 +818,12 @@ def xattn_estimate(
     if causal:
         simple_masks[:, :, -q_block_num:, -q_block_num:] = paddle.where(
             paddle.tril(
-                paddle.ones(q_block_num, q_block_num, dtype=paddle.bool, device=key_states.device),
+                paddle.ones(
+                    q_block_num,
+                    q_block_num,
+                    dtype=paddle.bool,
+                    device=key_states.device,
+                ),
                 diagonal=0,
             ),
             simple_masks[:, :, -q_block_num:, -q_block_num:],
@@ -648,8 +832,14 @@ def xattn_estimate(
     if keep_sink:
         simple_masks[:, :, :, 0] = True
     if keep_recent:
-        eye_matrix = paddle.eye(q_block_num, device=simple_masks.device, dtype=paddle.int32).astype(paddle.bool)
-        eye_matrix_expanded = eye_matrix.unsqueeze(0).unsqueeze(0).expand(1, num_kv_head, q_block_num, q_block_num)
+        eye_matrix = paddle.eye(
+            q_block_num, device=simple_masks.device, dtype=paddle.int32
+        ).astype(paddle.bool)
+        eye_matrix_expanded = (
+            eye_matrix.unsqueeze(0)
+            .unsqueeze(0)
+            .expand(1, num_kv_head, q_block_num, q_block_num)
+        )
         simple_masks[:, :, -q_block_num:, -q_block_num:] = paddle.where(
             eye_matrix_expanded,
             True,
@@ -691,7 +881,9 @@ def xattn_prefill(
             )
         )
     chunk_size = min(
-        (q_len + (block_size * stride) - 1) // (block_size * stride) * (block_size * stride),
+        (q_len + (block_size * stride) - 1)
+        // (block_size * stride)
+        * (block_size * stride),
         chunk_size,
     )
 
@@ -729,12 +921,17 @@ def xattn_prefill(
     if approx_simple_mask.device != query_states.device:
         approx_simple_mask = approx_simple_mask.to(query_states.device)
 
-    approx_simple_mask = approx_simple_mask[:, :, :q_block_num, :k_block_num].contiguous()
+    approx_simple_mask = approx_simple_mask[
+        :, :, :q_block_num, :k_block_num
+    ].contiguous()
     if causal and q_block_num == k_block_num:
         num_to_compute = (k_block_num + 1) * k_block_num / 2 * num_heads
     else:
         num_to_compute = q_block_num * k_block_num * num_heads
-    sparse_ratio = 1.0 - (approx_simple_mask.astype(paddle.float32).sum() / max(float(num_to_compute), 1.0))
+    sparse_ratio = 1.0 - (
+        approx_simple_mask.astype(paddle.float32).sum()
+        / max(float(num_to_compute), 1.0)
+    )
     sparse_ratio = paddle.clip(sparse_ratio, min=0.0, max=1.0)
 
     if is_enable_profile():

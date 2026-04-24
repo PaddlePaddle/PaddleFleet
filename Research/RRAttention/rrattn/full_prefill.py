@@ -1,34 +1,56 @@
-import paddle
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
+
+import paddle
 import paddle.nn.functional as F
 
 enable_profile = False
 attn_time_ms = 0.0
 estimate_func_time_ms = 0.0
 
+
 def set_profile(enable=True):
     global enable_profile
     enable_profile = enable
+
 
 def is_enable_profile():
     global enable_profile
     return enable_profile
 
+
 def set_attn_time(attn_time=0.0):
     global attn_time_ms
     attn_time_ms = attn_time
+
 
 def get_attn_time():
     global attn_time_ms
     return attn_time_ms
 
+
 def add_attn_time(attn_time):
     global attn_time_ms
     attn_time_ms += attn_time
 
+
 def set_estimate_func_time(estimate_func_time=0.0):
     global estimate_func_time_ms
     estimate_func_time_ms = estimate_func_time
+
 
 def get_estimate_func_time():
     global estimate_func_time_ms
@@ -39,12 +61,13 @@ def add_estimate_func_time(estimate_func_time):
     global estimate_func_time_ms
     estimate_func_time_ms += estimate_func_time
 
+
 def full_prefill(
     query_states: paddle.Tensor,
     key_states: paddle.Tensor,
     value_states: paddle.Tensor,
     causal: bool = True,
-    attention_mask = None,
+    attention_mask=None,
 ):
     attn_weights = paddle.matmul(
         query_states, key_states.transpose(2, 3)
@@ -58,7 +81,12 @@ def full_prefill(
         causal_mask = q_pos[:, None] < k_pos[None, :]
         attn_weights = paddle.where(
             causal_mask.unsqueeze(0).unsqueeze(0),
-            paddle.full(attn_weights.shape, float("-inf"), dtype=attn_weights.dtype, device=attn_weights.device),
+            paddle.full(
+                attn_weights.shape,
+                float("-inf"),
+                dtype=attn_weights.dtype,
+                device=attn_weights.device,
+            ),
             attn_weights,
         )
 
@@ -67,14 +95,22 @@ def full_prefill(
             attention_mask = paddle.where(attention_mask == 0, True, False)
         attn_weights = paddle.where(
             attention_mask,
-            paddle.full(attn_weights.shape, float("-inf"), dtype=attn_weights.dtype, device=attn_weights.device),
+            paddle.full(
+                attn_weights.shape,
+                float("-inf"),
+                dtype=attn_weights.dtype,
+                device=attn_weights.device,
+            ),
             attn_weights,
         )
 
-    attn_weights = F.softmax(attn_weights, dim=-1, dtype=paddle.float32).to(query_states.dtype)
+    attn_weights = F.softmax(attn_weights, dim=-1, dtype=paddle.float32).to(
+        query_states.dtype
+    )
     attn_output = paddle.matmul(attn_weights, value_states)
 
     return attn_output
+
 
 def flash_full_prefill(
     query_states: paddle.Tensor,

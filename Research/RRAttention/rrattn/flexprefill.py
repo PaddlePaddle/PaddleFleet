@@ -1,49 +1,70 @@
-      
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
-from typing import List, Optional, Tuple, Union
 
 import paddle
 import paddle.nn.functional as F
 import triton
 import triton.language as tl
-from paddle.compat import use_torch_proxy_guard
 from einops import rearrange
+from paddle.compat import use_torch_proxy_guard
 
 enable_profile = False
 attn_time_ms = 0.0
 estimate_func_time_ms = 0.0
 
+
 def set_profile(enable=True):
     global enable_profile
     enable_profile = enable
+
 
 def is_enable_profile():
     global enable_profile
     return enable_profile
 
+
 def set_attn_time(attn_time=0.0):
     global attn_time_ms
     attn_time_ms = attn_time
+
 
 def get_attn_time():
     global attn_time_ms
     return attn_time_ms
 
+
 def add_attn_time(attn_time):
     global attn_time_ms
     attn_time_ms += attn_time
+
 
 def set_estimate_func_time(estimate_func_time=0.0):
     global estimate_func_time_ms
     estimate_func_time_ms = estimate_func_time
 
+
 def get_estimate_func_time():
     global estimate_func_time_ms
     return estimate_func_time_ms
 
+
 def add_estimate_func_time(estimate_func_time):
     global estimate_func_time_ms
     estimate_func_time_ms += estimate_func_time
+
 
 def block_wise_attention(
     q: paddle.Tensor,
@@ -53,7 +74,6 @@ def block_wise_attention(
     block_size: int,
     grid_offset: int = 0,
 ):
-
     b, n, h, d = q.shape
     assert k.shape == q.shape
     assert v.shape == k.shape
@@ -61,7 +81,9 @@ def block_wise_attention(
         (n - grid_offset) / block_size
     )
     # get topk block idx and build mask
-    mask = paddle.zeros(b, h, num_block, num_block, dtype=paddle.bool, device=q.device)
+    mask = paddle.zeros(
+        b, h, num_block, num_block, dtype=paddle.bool, device=q.device
+    )
     mask[
         paddle.arange(b).view(b, 1, 1).expand(b, h, block_idx.shape[-1]),
         paddle.arange(h).view(1, h, 1).expand(b, h, block_idx.shape[-1]),
@@ -69,8 +91,12 @@ def block_wise_attention(
         block_idx % num_block,
     ] = 1
     act_blocks_per_row = paddle.tril(mask).sum(-1)
-    mask = mask.repeat_interleave(block_size, -2).repeat_interleave(block_size, -1)
-    mask = mask[..., grid_offset : grid_offset + n, grid_offset : grid_offset + n]
+    mask = mask.repeat_interleave(block_size, -2).repeat_interleave(
+        block_size, -1
+    )
+    mask = mask[
+        ..., grid_offset : grid_offset + n, grid_offset : grid_offset + n
+    ]
     mask = paddle.tril(mask)
     attn_weight = paddle.einsum("bihd,bjhd->bhij", q, k) / math.sqrt(d)
     attn_weight.masked_fill_(~mask, float("-inf"))
@@ -170,7 +196,9 @@ def block_wise_decode_attention_kernel(
         block_idx_ptr = block_idx_ptr + stride_bt
         # load k
         k = tl.load(
-            tl.advance(k_ptrs, (0, c)), boundary_check=(1,), padding_option="zero"
+            tl.advance(k_ptrs, (0, c)),
+            boundary_check=(1,),
+            padding_option="zero",
         )
         # compute qk
         qk = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_K), dtype=tl.float32)
@@ -185,7 +213,9 @@ def block_wise_decode_attention_kernel(
         acc_o = acc_o * acc_o_scale[:, None]
         # load v and update acc_o
         v = tl.load(
-            tl.advance(v_ptrs, (c, 0)), boundary_check=(0,), padding_option="zero"
+            tl.advance(v_ptrs, (c, 0)),
+            boundary_check=(0,),
+            padding_option="zero",
         )
         p = p.to(v.dtype)
         acc_o += tl.dot(p, v)
@@ -213,7 +243,7 @@ def triton_block_wise_decode_attention(
     v: paddle.Tensor,
     block_idx: paddle.Tensor,
     block_size: int,
-    softmax_scale: Optional[float] = None,
+    softmax_scale: float | None = None,
     gqa_interleave: bool = False,
 ) -> paddle.Tensor:
     """Block wise sparse attention (causal attention) implemented by openai triton (ver 3.0.0).
@@ -235,7 +265,9 @@ def triton_block_wise_decode_attention(
     batch_size, k_len, num_kv_heads, head_dim = k.shape
     batch_size, num_q_heads, num_blocks = block_idx.shape
     assert q.dtype == paddle.bfloat16
-    assert head_dim in {16, 32, 64, 128}, "only support head_dim in {16, 32, 64, 128}"
+    assert head_dim in {16, 32, 64, 128}, (
+        "only support head_dim in {16, 32, 64, 128}"
+    )
     assert block_size in {
         16,
         32,
@@ -340,12 +372,14 @@ def count_kernel(
 
 
 @use_torch_proxy_guard(silent=True)
-def triton_column_count_cumsum(x: paddle.Tensor, num_columns: int) -> paddle.Tensor:
+def triton_column_count_cumsum(
+    x: paddle.Tensor, num_columns: int
+) -> paddle.Tensor:
     """count columns of each row for a given index tensor, then do cumsum
 
     Args:
         x (paddle.Tensor): block index in a flatten 2d grid, shape [batch_size, num_heads, activated_block_num]
-        num_colums (int): number of columns in the grid
+        num_columns (int): number of columns in the grid
 
     Returns:
         paddle.Tensor: cumsum of columns num in each row, shape [batch_size, num_heads, num_rows + 1 ]
@@ -444,7 +478,10 @@ def block_wise_prefill_attention_kernel(
     num_active_block = bin_end - bin_start
     # get column block index ptr
     block_idx_ptr = (
-        block_idx_ptr + pid_b * stride_bb + pid_h * stride_bh + bin_start * stride_bt
+        block_idx_ptr
+        + pid_b * stride_bb
+        + pid_h * stride_bh
+        + bin_start * stride_bt
     )
     # init qkv ptrs
     q_ptrs = tl.make_block_ptr(
@@ -482,11 +519,16 @@ def block_wise_prefill_attention_kernel(
     # flash attention
     for i in tl.range(0, num_active_block):
         # get current block start index
-        c = tl.load(block_idx_ptr).to(tl.int32) % NUM_BLOCK * BLOCK_SIZE_K - grid_offset
+        c = (
+            tl.load(block_idx_ptr).to(tl.int32) % NUM_BLOCK * BLOCK_SIZE_K
+            - grid_offset
+        )
         block_idx_ptr = block_idx_ptr + stride_bt
         # load k
         k = tl.load(
-            tl.advance(k_ptrs, (0, c)), boundary_check=(1,), padding_option="zero"
+            tl.advance(k_ptrs, (0, c)),
+            boundary_check=(1,),
+            padding_option="zero",
         )
         # compute qk
         qk = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_K), dtype=tl.float32)
@@ -502,7 +544,9 @@ def block_wise_prefill_attention_kernel(
         acc_o = acc_o * acc_o_scale[:, None]
         # load v and update acc_o
         v = tl.load(
-            tl.advance(v_ptrs, (c, 0)), boundary_check=(0,), padding_option="zero"
+            tl.advance(v_ptrs, (c, 0)),
+            boundary_check=(0,),
+            padding_option="zero",
         )
         p = p.to(v.dtype)
         acc_o += tl.dot(p, v)
@@ -528,10 +572,10 @@ def triton_block_wise_prefill_attention(
     q: paddle.Tensor,
     k: paddle.Tensor,
     v: paddle.Tensor,
-    block_idx: Union[paddle.Tensor, List[List[paddle.Tensor]]],
+    block_idx: paddle.Tensor | list[list[paddle.Tensor]],
     block_size: int,
     grid_offset: int = 0,
-    softmax_scale: Optional[float] = None,
+    softmax_scale: float | None = None,
     gqa_interleave: bool = False,
 ) -> paddle.Tensor:
     """Block wise sparse attention (causal attention) implemented by openai triton (ver 3.0.0).
@@ -554,7 +598,9 @@ def triton_block_wise_prefill_attention(
     batch_size, k_len, num_kv_heads, head_dim = k.shape
     assert q.dtype == paddle.bfloat16
     assert q_len == k_len
-    assert head_dim in {16, 32, 64, 128}, "only support head_dim in {16, 32, 64, 128}"
+    assert head_dim in {16, 32, 64, 128}, (
+        "only support head_dim in {16, 32, 64, 128}"
+    )
     assert block_size in {
         32,
         64,
@@ -574,7 +620,9 @@ def triton_block_wise_prefill_attention(
             and isinstance(block_idx[0][0], paddle.Tensor)
         )
         assert len(block_idx) == batch_size and len(block_idx[0]) == num_q_heads
-        block_idx = [item.view(-1, 1) for sublist in block_idx for item in sublist]
+        block_idx = [
+            item.view(-1, 1) for sublist in block_idx for item in sublist
+        ]
         block_idx = paddle.nn.utils.rnn.pad_sequence(
             block_idx,
             batch_first=True,
@@ -599,7 +647,9 @@ def triton_block_wise_prefill_attention(
     o = paddle.empty_like(q)
     num_warps = 8
     num_stages = 3 if block_size >= 128 else 5
-    block_wise_prefill_attention_kernel[(batch_size, num_q_heads, total_q_blocks)](
+    block_wise_prefill_attention_kernel[
+        (batch_size, num_q_heads, total_q_blocks)
+    ](
         q,
         k,
         v,
@@ -655,7 +705,7 @@ def triton_block_wise_attention(
     block_idx: paddle.Tensor,
     block_size: int,
     grid_offset: int = 0,
-    softmax_scale: Optional[float] = None,
+    softmax_scale: float | None = None,
     gqa_interleave: bool = False,
 ) -> paddle.Tensor:
     """Block wise sparse attention (causal attention) implemented by openai triton (ver 3.0.0).
@@ -759,18 +809,25 @@ def bnhd_pool_kernel(
     else:
         y = tl.sum(x, axis=0) / cur_block_size_n
     y_ptr = (
-        y_ptr + pid_b * stride_yb + pid_n * stride_yn + pid_h * BLOCK_SIZE_H * stride_yh
+        y_ptr
+        + pid_b * stride_yb
+        + pid_n * stride_yn
+        + pid_h * BLOCK_SIZE_H * stride_yh
     )
-    y_mask = (off_h < num_heads - pid_h * BLOCK_SIZE_H)[:, None] & (off_d < head_dim)[
-        None, :
-    ]
+    y_mask = (off_h < num_heads - pid_h * BLOCK_SIZE_H)[:, None] & (
+        off_d < head_dim
+    )[None, :]
     tl.store(
-        y_ptr + off_h[:, None] * stride_yh + off_d[None, :] * stride_yd, y, mask=y_mask
+        y_ptr + off_h[:, None] * stride_yh + off_d[None, :] * stride_yd,
+        y,
+        mask=y_mask,
     )
 
 
 @use_torch_proxy_guard(silent=True)
-def triton_bnhd_pool(x: paddle.Tensor, kernel_size: int, pool_type: str = "avg"):
+def triton_bnhd_pool(
+    x: paddle.Tensor, kernel_size: int, pool_type: str = "avg"
+):
     b, n, h, d = x.shape
     assert d in {16, 32, 64, 128}
     assert kernel_size in {16, 32, 64, 128, 256, 512}
@@ -782,7 +839,8 @@ def triton_bnhd_pool(x: paddle.Tensor, kernel_size: int, pool_type: str = "avg")
             return x[:, kernel_size - 1 :: kernel_size, ...]
         else:
             return paddle.concat(
-                (x[:, kernel_size - 1 :: kernel_size, ...], x[:, -1:, ...]), dim=1
+                (x[:, kernel_size - 1 :: kernel_size, ...], x[:, -1:, ...]),
+                dim=1,
             )
 
     block_size_h = triton.next_power_of_2(h)
@@ -861,7 +919,10 @@ def bhn_sumpool_kernel(
     )
     y = tl.sum(x, axis=1)
     y_ptr = (
-        y_ptr + pid_b * stride_yb + pid_h * BLOCK_SIZE_H * stride_yh + pid_n * stride_yn
+        y_ptr
+        + pid_b * stride_yb
+        + pid_h * BLOCK_SIZE_H * stride_yh
+        + pid_n * stride_yn
     )
     y_mask = off_h < num_heads - pid_h * BLOCK_SIZE_H
     tl.store(y_ptr + off_h * stride_yh, y, mask=y_mask)
@@ -912,7 +973,9 @@ def bhn_sumpool(x: paddle.Tensor, kernel_size: int):
 
 
 def score_cover_topk(x: paddle.Tensor, score: float):
-    cumsum_x = paddle.cumsum(paddle.compat.sort(x, dim=-1, descending=True).values, dim=-1)
+    cumsum_x = paddle.cumsum(
+        paddle.compat.sort(x, dim=-1, descending=True).values, dim=-1
+    )
     topk = paddle.sum(cumsum_x <= score, dim=-1) + 1
     return topk
 
@@ -934,9 +997,11 @@ def sum_all_diagonal_matrix(mat: paddle.Tensor):
     return sum_diags
 
 
-def transform_veritcal_slash_idx(v_idx, s_idx, num_blocks):
+def transform_vertical_slash_idx(v_idx, s_idx, num_blocks):
     batch_size, num_heads, _ = v_idx.shape
-    range_blocks = paddle.arange(num_blocks, device=s_idx.device)[None, None, :, None]
+    range_blocks = paddle.arange(num_blocks, device=s_idx.device)[
+        None, None, :, None
+    ]
     # vertical
     v_idx = (
         paddle.arange(0, num_blocks, device=v_idx.device)[None, None, :, None]
@@ -946,7 +1011,9 @@ def transform_veritcal_slash_idx(v_idx, s_idx, num_blocks):
     v_idx[v_idx // num_blocks < v_idx % num_blocks] = 0
     # slash
     s_idx = (
-        range_blocks * num_blocks + range_blocks + s_idx[:, :, None, :] * num_blocks
+        range_blocks * num_blocks
+        + range_blocks
+        + s_idx[:, :, None, :] * num_blocks
     ).view(batch_size, num_heads, -1)
     s_idx[s_idx >= num_blocks * num_blocks] = 0
     # union
@@ -980,7 +1047,8 @@ def get_block_vertical_slash_from_qk(
 def square_root_js_divergence(p: paddle.Tensor, q: paddle.Tensor):
     m = (p + q) / 2
     return paddle.sqrt(
-        0.5 * (p * paddle.log(p / m)).sum(-1) + 0.5 * (q * paddle.log(q / m)).sum(-1)
+        0.5 * (p * paddle.log(p / m)).sum(-1)
+        + 0.5 * (q * paddle.log(q / m)).sum(-1)
     )
 
 
@@ -1004,13 +1072,17 @@ def get_active_blocks(
     if not gqa_interleave:
         qk = paddle.einsum(
             "bihgd, bjhgd -> bhgij",
-            last_q.view(last_q.shape[0], last_q.shape[1], -1, gqa_groups, head_dim),
+            last_q.view(
+                last_q.shape[0], last_q.shape[1], -1, gqa_groups, head_dim
+            ),
             k.view(k.shape[0], k.shape[1], -1, 1, head_dim),
         )
     else:
         qk = paddle.einsum(
             "bihgd, bjhgd -> bhgij",
-            last_q.view(last_q.shape[0], last_q.shape[1], gqa_groups, -1, head_dim),
+            last_q.view(
+                last_q.shape[0], last_q.shape[1], gqa_groups, -1, head_dim
+            ),
             k.view(k.shape[0], k.shape[1], 1, -1, head_dim),
         )
     global causal_mask
@@ -1059,7 +1131,9 @@ def get_active_blocks(
         min(num_slash_blocks.max().item(), num_blocks), -1
     ).indices
     slash_topk[
-        paddle.arange(slash_topk.shape[-1], device=num_slash_blocks.device)[None, :]
+        paddle.arange(slash_topk.shape[-1], device=num_slash_blocks.device)[
+            None, :
+        ]
         >= num_slash_blocks[:, None]
     ] = 0
     slash_topk = slash_topk.view(batch_size, num_heads, -1)
@@ -1070,20 +1144,24 @@ def get_active_blocks(
         min(num_vertical_blocks.max().item(), num_blocks), -1
     ).indices
     vertical_topk[
-        paddle.arange(vertical_topk.shape[-1], device=num_vertical_blocks.device)[
-            None, :
-        ]
+        paddle.arange(
+            vertical_topk.shape[-1], device=num_vertical_blocks.device
+        )[None, :]
         >= num_vertical_blocks[:, None]
     ] = 0
     vertical_topk = vertical_topk.view(batch_size, num_heads, -1)
     # transform vertical slash index
-    block_idx = transform_veritcal_slash_idx(vertical_topk, slash_topk, num_blocks)
+    block_idx = transform_vertical_slash_idx(
+        vertical_topk, slash_topk, num_blocks
+    )
     # get block sparse topk
     block_causal_mask = None
     for b, h in block_sparse_mask.nonzero():
         if block_causal_mask is None:
             block_causal_mask = paddle.tril(
-                paddle.ones(num_blocks, num_blocks, device=q.device, dtype=paddle.bool)
+                paddle.ones(
+                    num_blocks, num_blocks, device=q.device, dtype=paddle.bool
+                )
             )
         pad_q = math.ceil(seq_len / block_size) * block_size - seq_len
         avg_q = (
@@ -1097,7 +1175,9 @@ def get_active_blocks(
         ).masked_fill_(~block_causal_mask, float("-inf"))
         attn = F.softmax(attn, dim=-1, dtype=paddle.float32).view(-1)
         block_topk = score_cover_idx(attn, gamma * num_blocks)
-        block_idx[b][h] = paddle.unique(paddle.concat((block_idx[b][h], block_topk), dim=-1))
+        block_idx[b][h] = paddle.unique(
+            paddle.concat((block_idx[b][h], block_topk), dim=-1)
+        )
     return block_idx
 
 
@@ -1108,7 +1188,7 @@ def calculate_average_sparsity(block_idx, batch_size, num_heads, num_blocks):
     total_causal_blocks = num_blocks * (num_blocks + 1) // 2
     total_sparsity = 0.0
     total_samples = batch_size * num_heads
-    
+
     for b in range(batch_size):
         for h in range(num_heads):
             selected_blocks = block_idx[b][h]
@@ -1116,10 +1196,10 @@ def calculate_average_sparsity(block_idx, batch_size, num_heads, num_blocks):
                 num_selected = selected_blocks.numel()
             else:
                 num_selected = len(selected_blocks)
-            
+
             sparsity_ratio = 1.0 - num_selected / total_causal_blocks
             total_sparsity += sparsity_ratio
-    
+
     average_sparsity = total_sparsity / total_samples
     return average_sparsity
 
@@ -1130,13 +1210,12 @@ def flex_prefill(
     v: paddle.Tensor,
     gamma: float = 0.9,
     tau: float = 0,
-    min_budget: int = None,
-    max_budget: int = None,
+    min_budget: int | None = None,
+    max_budget: int | None = None,
     gqa_interleave: bool = False,
-    softmax_scale: Optional[float] = None,
+    softmax_scale: float | None = None,
     block_size: int = 128,
 ):
-
     batch_size, seq_len, num_heads, head_dim = q.shape
     assert q.shape[1] == k.shape[1]
     assert head_dim in {16, 32, 64, 128}
@@ -1144,7 +1223,9 @@ def flex_prefill(
     num_blocks = math.ceil(seq_len / block_size)
     min_budget = 1 if min_budget is None else min_budget
     max_budget = 2147483647 if max_budget is None else max_budget
-    if seq_len <= max(2 * block_size, math.ceil(min_budget / block_size) * block_size):
+    if seq_len <= max(
+        2 * block_size, math.ceil(min_budget / block_size) * block_size
+    ):
         return F.scaled_dot_product_attention(
             q,
             k,
@@ -1199,8 +1280,10 @@ def flex_prefill(
         paddle.cuda.synchronize()
         elapsed_time_ms = start_event.elapsed_time(end_event)
         add_attn_time(elapsed_time_ms)
-    
-    sparsity_ratios = calculate_average_sparsity(block_idx, batch_size, num_heads, num_blocks)
+
+    sparsity_ratios = calculate_average_sparsity(
+        block_idx, batch_size, num_heads, num_blocks
+    )
     return attn_out, sparsity_ratios
 
 

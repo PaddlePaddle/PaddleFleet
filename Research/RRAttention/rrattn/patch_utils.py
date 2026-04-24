@@ -1,5 +1,19 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import types
-from typing import Iterable, Optional, Tuple
+from collections.abc import Iterable
 
 import paddle
 from paddle.nn.functional.flash_attention import flash_attention
@@ -16,7 +30,9 @@ PATCHED_ATTN_IMPLEMENTATION = "sdpa"
 
 def validate_method(method: str):
     if method not in SUPPORTED_METHODS:
-        raise ValueError(f"Unsupported method={method!r}; supported methods are: xattn, rrattn, flex, full")
+        raise ValueError(
+            f"Unsupported method={method!r}; supported methods are: xattn, rrattn, flex, full"
+        )
 
 
 def select_layer_value(value, layer_idx: int):
@@ -33,7 +49,9 @@ def get_decoder_layers(model) -> Iterable:
     return []
 
 
-def configure_model_attn_implementation(model, attn_implementation: str = PATCHED_ATTN_IMPLEMENTATION):
+def configure_model_attn_implementation(
+    model, attn_implementation: str = PATCHED_ATTN_IMPLEMENTATION
+):
     modules = [model]
     if hasattr(model, "model"):
         modules.append(model.model)
@@ -43,15 +61,21 @@ def configure_model_attn_implementation(model, attn_implementation: str = PATCHE
             continue
         config = module.config
         if not hasattr(config, "_rrattn_original_attn_implementation"):
-            config._rrattn_original_attn_implementation = getattr(config, "_attn_implementation", None)
+            config._rrattn_original_attn_implementation = getattr(
+                config, "_attn_implementation", None
+            )
         config._attn_implementation = attn_implementation
 
-    for _, attn in model.named_sublayers() if hasattr(model, "named_sublayers") else []:
+    for _, attn in (
+        model.named_sublayers() if hasattr(model, "named_sublayers") else []
+    ):
         if not hasattr(attn, "config"):
             continue
         config = attn.config
         if not hasattr(config, "_rrattn_original_attn_implementation"):
-            config._rrattn_original_attn_implementation = getattr(config, "_attn_implementation", None)
+            config._rrattn_original_attn_implementation = getattr(
+                config, "_attn_implementation", None
+            )
         config._attn_implementation = attn_implementation
 
 
@@ -92,7 +116,9 @@ def patch_attention_layers(
         for _, attn in model.named_sublayers():
             if id(attn) in seen:
                 continue
-            if attention_cls is not None and not isinstance(attn, attention_cls):
+            if attention_cls is not None and not isinstance(
+                attn, attention_cls
+            ):
                 continue
             layer_idx = getattr(attn, "layer_idx", patched)
             configure_attention_layer(
@@ -149,12 +175,12 @@ def attention_branch(
     query_states: paddle.Tensor,
     key_states: paddle.Tensor,
     value_states: paddle.Tensor,
-    attention_mask: Optional[paddle.Tensor] = None,
-    attn_mask_startend_row_indices: Optional[paddle.Tensor] = None,
+    attention_mask: paddle.Tensor | None = None,
+    attn_mask_startend_row_indices: paddle.Tensor | None = None,
     dropout: float = 0.0,
     causal: bool = True,
-    scaling: Optional[float] = None,
-) -> Tuple[paddle.Tensor, Optional[paddle.Tensor]]:
+    scaling: float | None = None,
+) -> tuple[paddle.Tensor, paddle.Tensor | None]:
     method = getattr(module, "method", "rrattn")
     validate_method(method)
     should_repeat_kv = method != "rrattn"
@@ -227,7 +253,9 @@ def attention_branch(
     else:
         q_len = query_states.shape[-2]
         if causal and q_len != 1:
-            raise NotImplementedError("flash decode attention only supports q_len=1 for cached causal decode")
+            raise NotImplementedError(
+                "flash decode attention only supports q_len=1 for cached causal decode"
+            )
         # use full attention for decoding
         attn_output, _ = flash_attention(
             query_states.transpose(1, 2),
@@ -238,5 +266,7 @@ def attention_branch(
             softmax_scale=scaling,
         )
 
-    attn_output = attn_output.reshape([attn_output.shape[0], attn_output.shape[1], -1]).contiguous()
+    attn_output = attn_output.reshape(
+        [attn_output.shape[0], attn_output.shape[1], -1]
+    ).contiguous()
     return attn_output, None

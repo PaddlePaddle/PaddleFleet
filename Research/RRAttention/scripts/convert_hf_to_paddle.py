@@ -1,4 +1,19 @@
 #!/usr/bin/env python
+
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import argparse
@@ -18,7 +33,6 @@ from rrattn.checkpoint_utils import (
     is_hf_safetensors_checkpoint,
     load_config_for_model,
 )
-
 
 TOKENIZER_FILES = (
     "tokenizer.json",
@@ -46,7 +60,9 @@ def infer_model_type(input_dir: Path) -> str:
         return "ernie_moe"
     if "ernie" in model_type:
         return "ernie"
-    raise ValueError(f"Cannot infer model type from config.json model_type={model_type!r}; pass --model-type")
+    raise ValueError(
+        f"Cannot infer model type from config.json model_type={model_type!r}; pass --model-type"
+    )
 
 
 def get_model_class(model_type: str):
@@ -55,7 +71,9 @@ def get_model_class(model_type: str):
 
         return LlamaForCausalLM
     if model_type == "qwen":
-        from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
+        from paddleformers.transformers.qwen2.modeling import (
+            Qwen2ForCausalLMDeprecated,
+        )
 
         return Qwen2ForCausalLMDeprecated
     if model_type == "ernie":
@@ -63,7 +81,9 @@ def get_model_class(model_type: str):
 
         return Ernie4_5ForCausalLM
     if model_type == "ernie_moe":
-        from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeForCausalLM
+        from paddleformers.transformers.ernie4_5_moe.modeling import (
+            Ernie4_5_MoeForCausalLM,
+        )
 
         return Ernie4_5_MoeForCausalLM
     raise ValueError(f"Unsupported model_type={model_type!r}")
@@ -79,7 +99,9 @@ def copy_runtime_files(src: Path, dst: Path) -> None:
 def prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
     if output_dir.exists() and any(output_dir.iterdir()):
         if not overwrite:
-            raise FileExistsError(f"{output_dir} is not empty; pass --overwrite to replace it")
+            raise FileExistsError(
+                f"{output_dir} is not empty; pass --overwrite to replace it"
+            )
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -89,14 +111,36 @@ def default_device() -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert a Hugging Face safetensors checkpoint to Paddle weights.")
-    parser.add_argument("--input", required=True, help="HF safetensors checkpoint directory")
-    parser.add_argument("--output", required=True, help="Output Paddle checkpoint directory")
-    parser.add_argument("--model-type", default="auto", choices=["auto", "llama", "qwen", "ernie", "ernie_moe"])
-    parser.add_argument("--dtype", default="bfloat16", help="Model dtype used during conversion")
-    parser.add_argument("--device", default=None, help="Paddle device, e.g. gpu:0 or cpu")
-    parser.add_argument("--max-shard-size", default="10GB", help="Max shard size for save_pretrained")
-    parser.add_argument("--overwrite", action="store_true", help="Replace a non-empty output directory")
+    parser = argparse.ArgumentParser(
+        description="Convert a Hugging Face safetensors checkpoint to Paddle weights."
+    )
+    parser.add_argument(
+        "--input", required=True, help="HF safetensors checkpoint directory"
+    )
+    parser.add_argument(
+        "--output", required=True, help="Output Paddle checkpoint directory"
+    )
+    parser.add_argument(
+        "--model-type",
+        default="auto",
+        choices=["auto", "llama", "qwen", "ernie", "ernie_moe"],
+    )
+    parser.add_argument(
+        "--dtype", default="bfloat16", help="Model dtype used during conversion"
+    )
+    parser.add_argument(
+        "--device", default=None, help="Paddle device, e.g. gpu:0 or cpu"
+    )
+    parser.add_argument(
+        "--max-shard-size",
+        default="10GB",
+        help="Max shard size for save_pretrained",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace a non-empty output directory",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input).resolve()
@@ -106,12 +150,20 @@ def main() -> None:
     if not input_dir.is_dir():
         raise FileNotFoundError(f"{input_dir} is not a directory")
     if not is_hf_safetensors_checkpoint(input_dir):
-        raise ValueError(f"{input_dir} does not look like a Hugging Face safetensors checkpoint directory")
+        raise ValueError(
+            f"{input_dir} does not look like a Hugging Face safetensors checkpoint directory"
+        )
 
-    model_type = infer_model_type(input_dir) if args.model_type == "auto" else args.model_type
+    model_type = (
+        infer_model_type(input_dir)
+        if args.model_type == "auto"
+        else args.model_type
+    )
     if model_type == "qwen":
         with (input_dir / "config.json").open("r", encoding="utf-8") as handle:
-            config_model_type = str(json.load(handle).get("model_type", "")).lower()
+            config_model_type = str(
+                json.load(handle).get("model_type", "")
+            ).lower()
         if "qwen3" in config_model_type:
             raise ValueError("Qwen3 models are not supported in this release")
     model_cls = get_model_class(model_type)

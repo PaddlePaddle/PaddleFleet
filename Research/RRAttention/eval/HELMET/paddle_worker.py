@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+
 import argparse
 import gc
 import json
@@ -7,7 +8,6 @@ import sys
 import time
 import traceback
 from pathlib import Path
-
 
 PROTOCOL_STDOUT = sys.stdout
 sys.stdout = sys.stderr
@@ -34,7 +34,10 @@ def disable_unavailable_deep_ep():
     try:
         from paddlefleet.ops import deep_ep  # noqa: F401
     except Exception as exc:
-        print(f"[paddle_worker] disable unavailable DeepEP: {exc}", file=sys.stderr)
+        print(
+            f"[paddle_worker] disable unavailable DeepEP: {exc}",
+            file=sys.stderr,
+        )
         if hasattr(fleet_ops, "_DEEP_EP_AVAILABLE"):
             fleet_ops._DEEP_EP_AVAILABLE = False
 
@@ -43,9 +46,15 @@ def infer_model_type(model_name):
     config_path = Path(model_name) / "config.json"
     if config_path.is_file():
         try:
-            model_type = str(json.loads(config_path.read_text(encoding="utf-8")).get("model_type", "")).lower()
+            model_type = str(
+                json.loads(config_path.read_text(encoding="utf-8")).get(
+                    "model_type", ""
+                )
+            ).lower()
             if "qwen3" in model_type:
-                raise ValueError("Qwen3 models are not supported in this release")
+                raise ValueError(
+                    "Qwen3 models are not supported in this release"
+                )
             if "qwen" in model_type:
                 return "qwen"
             if "ernie" in model_type and "moe" in model_type:
@@ -68,7 +77,9 @@ def infer_model_type(model_name):
         return "ernie"
     if "llama" in lower_name:
         return "llama"
-    raise ValueError("Cannot infer model_type from model_name; pass --model_type explicitly")
+    raise ValueError(
+        "Cannot infer model_type from model_name; pass --model_type explicitly"
+    )
 
 
 def load_patch(model_type):
@@ -121,10 +132,18 @@ def load_profile_fns(method):
             set_profile,
         )
     else:
-        raise ValueError(f"Unsupported method={method!r}; supported methods are: xattn, rrattn, flex, full")
+        raise ValueError(
+            f"Unsupported method={method!r}; supported methods are: xattn, rrattn, flex, full"
+        )
 
     set_profile(False)
-    return set_profile, set_attn_time, get_attn_time, set_estimate_func_time, get_estimate_func_time
+    return (
+        set_profile,
+        set_attn_time,
+        get_attn_time,
+        set_estimate_func_time,
+        get_estimate_func_time,
+    )
 
 
 def set_common_config(config):
@@ -160,11 +179,15 @@ def build_tiny_model(model_type, dtype):
             hidden_dropout=0.0,
             dtype=dtype,
         )
-        return cast_tiny_model(LlamaForCausalLM(set_common_config(config)), dtype)
+        return cast_tiny_model(
+            LlamaForCausalLM(set_common_config(config)), dtype
+        )
 
     if model_type == "qwen":
         from paddleformers.transformers import Qwen2Config
-        from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
+        from paddleformers.transformers.qwen2.modeling import (
+            Qwen2ForCausalLMDeprecated,
+        )
 
         config = Qwen2Config(
             vocab_size=1024,
@@ -183,10 +206,15 @@ def build_tiny_model(model_type, dtype):
             hidden_dropout_prob=0.0,
         )
         config.fuse_rms_norm = False
-        return cast_tiny_model(Qwen2ForCausalLMDeprecated(set_common_config(config)), dtype)
+        return cast_tiny_model(
+            Qwen2ForCausalLMDeprecated(set_common_config(config)), dtype
+        )
 
     if model_type == "ernie":
-        from paddleformers.transformers import Ernie4_5Config, Ernie4_5ForCausalLM
+        from paddleformers.transformers import (
+            Ernie4_5Config,
+            Ernie4_5ForCausalLM,
+        )
 
         config = Ernie4_5Config(
             vocab_size=1024,
@@ -203,7 +231,9 @@ def build_tiny_model(model_type, dtype):
         )
         config.apply_rope_fusion = False
         config.fuse_rms_norm = False
-        return cast_tiny_model(Ernie4_5ForCausalLM(set_common_config(config)), dtype)
+        return cast_tiny_model(
+            Ernie4_5ForCausalLM(set_common_config(config)), dtype
+        )
 
     raise ValueError(f"Unsupported model_type={model_type!r}")
 
@@ -220,19 +250,31 @@ def load_model(model_name, model_type, dtype, tiny_random):
     if model_type == "llama":
         from paddleformers.transformers import LlamaForCausalLM
 
-        return load_pretrained_checkpoint(LlamaForCausalLM, model_name, dtype=dtype)
+        return load_pretrained_checkpoint(
+            LlamaForCausalLM, model_name, dtype=dtype
+        )
     if model_type == "qwen":
-        from paddleformers.transformers.qwen2.modeling import Qwen2ForCausalLMDeprecated
+        from paddleformers.transformers.qwen2.modeling import (
+            Qwen2ForCausalLMDeprecated,
+        )
 
-        return load_pretrained_checkpoint(Qwen2ForCausalLMDeprecated, model_name, dtype=dtype)
+        return load_pretrained_checkpoint(
+            Qwen2ForCausalLMDeprecated, model_name, dtype=dtype
+        )
     if model_type == "ernie_moe":
-        from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeForCausalLM
+        from paddleformers.transformers.ernie4_5_moe.modeling import (
+            Ernie4_5_MoeForCausalLM,
+        )
 
-        return load_pretrained_checkpoint(Ernie4_5_MoeForCausalLM, model_name, dtype=dtype)
+        return load_pretrained_checkpoint(
+            Ernie4_5_MoeForCausalLM, model_name, dtype=dtype
+        )
     if model_type == "ernie":
         from paddleformers.transformers import Ernie4_5ForCausalLM
 
-        return load_pretrained_checkpoint(Ernie4_5ForCausalLM, model_name, dtype=dtype)
+        return load_pretrained_checkpoint(
+            Ernie4_5ForCausalLM, model_name, dtype=dtype
+        )
     raise ValueError(f"Unsupported model_type={model_type!r}")
 
 
@@ -265,7 +307,9 @@ def collect_sparse_ratio(model):
     ratios = []
     if hasattr(model, "named_sublayers"):
         for name, layer in model.named_sublayers():
-            if name.split(".")[-1] == "self_attn" and hasattr(layer, "sparse_ratio"):
+            if name.split(".")[-1] == "self_attn" and hasattr(
+                layer, "sparse_ratio"
+            ):
                 sparse_ratio = getattr(layer, "sparse_ratio", None)
                 if sparse_ratio is None:
                     continue
@@ -333,18 +377,28 @@ class FirstTokenTimer:
         pass
 
 
-def handle_request(model, payload, device, profile_fns, clear_cache_per_request=False):
+def handle_request(
+    model, payload, device, profile_fns, clear_cache_per_request=False
+):
     input_ids = paddle.to_tensor(payload["input_ids"], dtype="int64")
     attention_mask = payload.get("attention_mask")
     model_kwargs = {}
     if attention_mask is not None:
-        model_kwargs["attention_mask"] = paddle.to_tensor(attention_mask, dtype=paddle.get_default_dtype())
+        model_kwargs["attention_mask"] = paddle.to_tensor(
+            attention_mask, dtype=paddle.get_default_dtype()
+        )
 
     record_ttft_ms = bool(payload.get("record_ttft_ms", False))
     record_e2e_ms = bool(payload.get("record_e2e_ms", False))
     record_attn_ms = bool(payload.get("record_attn_ms", False))
 
-    set_profile, set_attn_time, get_attn_time, set_estimate_func_time, get_estimate_func_time = profile_fns
+    (
+        set_profile,
+        set_attn_time,
+        get_attn_time,
+        set_estimate_func_time,
+        get_estimate_func_time,
+    ) = profile_fns
     profile_enabled = record_attn_ms and device.startswith("gpu")
     set_profile(profile_enabled)
     if record_attn_ms:
@@ -359,13 +413,17 @@ def handle_request(model, payload, device, profile_fns, clear_cache_per_request=
         end_event = paddle.cuda.Event(enable_timing=True)
         start_event.record()
 
-    first_token_timer = FirstTokenTimer(device, start, start_event) if record_ttft_ms else None
+    first_token_timer = (
+        FirstTokenTimer(device, start, start_event) if record_ttft_ms else None
+    )
     try:
         with paddle.no_grad():
             if hasattr(model, "model") and input_ids.shape[1] > 1:
                 prefill_kwargs = {}
                 if "attention_mask" in model_kwargs:
-                    prefill_kwargs["attention_mask"] = model_kwargs["attention_mask"][:, :-1]
+                    prefill_kwargs["attention_mask"] = model_kwargs[
+                        "attention_mask"
+                    ][:, :-1]
                 prefill = model.model(
                     input_ids=input_ids[:, :-1],
                     use_cache=True,
@@ -408,7 +466,11 @@ def handle_request(model, payload, device, profile_fns, clear_cache_per_request=
     if record_e2e_ms:
         response["e2e_ms"] = elapsed_ms
     if record_ttft_ms:
-        response["ttft_ms"] = first_token_timer.ttft_ms if first_token_timer.ttft_ms is not None else elapsed_ms
+        response["ttft_ms"] = (
+            first_token_timer.ttft_ms
+            if first_token_timer.ttft_ms is not None
+            else elapsed_ms
+        )
     if record_attn_ms:
         response["attn_ms"] = float(get_attn_time())
         response["estimate_func_ms"] = float(get_estimate_func_time())
@@ -426,8 +488,14 @@ def write_response(response):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name_or_path", required=True)
-    parser.add_argument("--model_type", default="auto", choices=["auto", "llama", "qwen", "ernie", "ernie_moe"])
-    parser.add_argument("--method", default="full", choices=["xattn", "rrattn", "flex", "full"])
+    parser.add_argument(
+        "--model_type",
+        default="auto",
+        choices=["auto", "llama", "qwen", "ernie", "ernie_moe"],
+    )
+    parser.add_argument(
+        "--method", default="full", choices=["xattn", "rrattn", "flex", "full"]
+    )
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--stride", type=int, default=8)
     parser.add_argument("--rrattn_version", default="v1")
@@ -443,12 +511,16 @@ def main():
     model_type = args.model_type
     if model_type == "auto":
         if args.tiny_random:
-            raise ValueError("--model_type is required when --tiny_random is set")
+            raise ValueError(
+                "--model_type is required when --tiny_random is set"
+            )
         model_type = infer_model_type(args.model_name_or_path)
 
     disable_unavailable_deep_ep()
     profile_fns = load_profile_fns(args.method)
-    model = load_model(args.model_name_or_path, model_type, args.dtype, args.tiny_random)
+    model = load_model(
+        args.model_name_or_path, model_type, args.dtype, args.tiny_random
+    )
     model.eval()
     patch_fn = load_patch(model_type)
     patch_fn(
@@ -476,11 +548,19 @@ def main():
                 }
                 write_response(response)
                 continue
-            response = handle_request(model, payload, device, profile_fns, args.clear_cache_per_request)
+            response = handle_request(
+                model,
+                payload,
+                device,
+                profile_fns,
+                args.clear_cache_per_request,
+            )
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             response = {
-                "id": payload.get("id") if "payload" in locals() and isinstance(payload, dict) else None,
+                "id": payload.get("id")
+                if "payload" in locals() and isinstance(payload, dict)
+                else None,
                 "ok": False,
                 "error": repr(exc),
             }
