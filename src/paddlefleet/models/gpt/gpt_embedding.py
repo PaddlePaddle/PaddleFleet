@@ -151,7 +151,10 @@ class GPTEmbedding(FleetLayer):
                 else position_ids,
             )
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
-            if getattr(self.config, "expert_model_parallel_size", 1) > 1:
+            if (
+                self.config.tensor_model_parallel_size > 1
+                and self.config.tensor_model_parallel_size < 2
+            ):
                 text_padding_indices = input_ids == 0
                 decoder_input = fill_feature(
                     decoder_input, text_padding_indices, 0
