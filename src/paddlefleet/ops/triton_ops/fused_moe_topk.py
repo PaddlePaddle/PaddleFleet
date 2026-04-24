@@ -13,16 +13,18 @@
 # limitations under the License.
 
 """
-Fused MoE TopK 操作的 Triton Kernel 实现。
+Triton kernel implementation of the fused MoE TopK operation.
 
-该模块实现了 MoE (Mixture of Experts) 模型中的 TopK 专家选择操作，使用 Triton 进行 GPU 加速。
+This module implements the TopK expert selection used in MoE (Mixture of
+Experts) models, accelerated on GPU via Triton.
 
-主要功能：
-- TopK 专家选择：从所有专家中选择得分最高的 k 个专家
-- 节点限制 (Node Limit)：支持将专家分组，从每组中选择 topk_group 个组
-- 概率归一化：对选中的专家概率进行归一化处理
-- Routing Map 生成：根据选中的专家索引生成路由映射和分发掩码
-- 支持 padding mask 和纯文本 mask
+Main features:
+- TopK expert selection: pick the k experts with the highest scores.
+- Node Limit: group experts and select `topk_group` groups from all groups.
+- Probability normalization: normalize the selected experts' probabilities.
+- Routing map generation: build routing map and dispatch mask from the
+  selected expert indices.
+- Support for padding mask and pure-text mask.
 
 """
 
@@ -56,9 +58,10 @@ def _fwd_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """
-    Fused MoE TopK 前向计算 kernel。
+    Forward kernel for fused MoE TopK.
 
-    对每个序列位置，从专家中选择 topk 个专家，支持节点限制和归一化。
+    For each sequence position, select the topk experts. Supports node limit
+    and normalization.
     """
     pid = tl.program_id(0)
 
@@ -195,9 +198,10 @@ def _bwd_kernel(
     K_BLOCK_SIZE: tl.constexpr,
 ):
     """
-    Fused MoE TopK 反向计算 kernel。
+    Backward kernel for fused MoE TopK.
 
-    计算对 gate_probs 的梯度，支持归一化梯度。
+    Computes the gradient with respect to `gate_probs`, supporting the
+    normalized-gradient path.
     """
     pid = tl.program_id(0)
 
@@ -206,7 +210,7 @@ def _bwd_kernel(
     row_normed = normed_probs_ptr + pid * stride_normed_s
     row_grad_gate_base = grad_gate_ptr + pid * stride_grad_gate_s
 
-    # 优化1: 使用 mask 方式一次性加载所有 k 个值
+    # Optimization 1: load all k values at once via a mask.
     offs_k = tl.arange(0, K_BLOCK_SIZE)
     mask_k = offs_k < moe_k
 
@@ -215,24 +219,24 @@ def _bwd_kernel(
     )
     indices = tl.load(row_ind + offs_k * stride_ind_k, mask=mask_k)
 
-    # 优化2: 根据 norm_gate_logits 分支优化 - 避免冗余计算
+    # Optimization 2: branch on `norm_gate_logits` to avoid redundant work.
     if norm_gate_logits:
-        # norm_gate_logits=True 路径：需要归一化
+        # norm_gate_logits=True path: normalization is required.
         normed_vals = tl.load(
             row_normed + offs_k * stride_normed_k, mask=mask_k
         )
         sigma = tl.load(sum_ptr + pid)
 
-        # 预计算 inv_denom_masked = inv_denom * grad_sigma_mask
+        # Precompute inv_denom_masked = inv_denom * grad_sigma_mask.
         denom = tl.maximum(sigma, 1e-12)
         inv_denom = 1.0 / denom
         inv_denom_masked = tl.where(sigma > 1e-12, inv_denom, 0.0)
 
-        # 向量化计算 dot_prod 和梯度
+        # Vectorized computation of dot_prod and gradient.
         dot_prod = tl.sum(grad_out_vals * normed_vals)
         grad_vals = grad_out_vals * inv_denom - dot_prod * inv_denom_masked
     else:
-        # norm_gate_logits=False 路径：直接使用 grad_out_vals，无需额外计算
+        # norm_gate_logits=False path: use grad_out_vals directly, no extra work.
         grad_vals = grad_out_vals
 
     tl.store(
@@ -244,9 +248,9 @@ def _bwd_kernel(
 
 class FusedMoETopk(paddle.autograd.PyLayer):
     """
-    Fused MoE TopK 操作，使用 Triton 加速。
+    Fused MoE TopK operation accelerated with Triton.
 
-    支持节点限制、分组选择和概率归一化。
+    Supports node limit, grouped selection and probability normalization.
     """
 
     @staticmethod
@@ -261,20 +265,21 @@ class FusedMoETopk(paddle.autograd.PyLayer):
         norm_gate_logits,
     ):
         """
-        前向计算：选择 topk 专家。
+        Forward pass: select topk experts.
 
         Args:
-            gate_probs: 原始 gate 概率，shape [seq_len, n_experts]
-            probs_for_choice: 用于选择专家的概率（可能包含 correction bias），shape [seq_len, n_experts]
-            moe_k: 每个 token 选择的专家数量
-            use_node_limit: 是否使用节点限制
-            n_group: 专家分组数量
-            topk_group: 选择的 topk 分组数量
-            norm_gate_logits: 是否对 gate logits 进行归一化
+            gate_probs: raw gate probabilities, shape [seq_len, n_experts].
+            probs_for_choice: probabilities used for expert selection (may
+                include correction bias), shape [seq_len, n_experts].
+            moe_k: number of experts selected per token.
+            use_node_limit: whether to apply the node limit.
+            n_group: number of expert groups.
+            topk_group: number of selected topk groups.
+            norm_gate_logits: whether to normalize gate logits.
 
         Returns:
-            topk_probs: 归一化后的 topk 概率，shape [seq_len, moe_k]
-            topk_indices: topk 专家索引，shape [seq_len, moe_k]
+            topk_probs: normalized topk probabilities, shape [seq_len, moe_k].
+            topk_indices: topk expert indices, shape [seq_len, moe_k].
         """
         seq_len, n_experts = gate_probs.shape
 
@@ -325,7 +330,7 @@ class FusedMoETopk(paddle.autograd.PyLayer):
     @staticmethod
     def backward(ctx, grad_output_probs, grad_output_indices):
         """
-        反向计算：计算 gate_probs 的梯度。
+        Backward: compute the gradient with respect to gate_probs.
         """
         topk_indices, topk_normed_probs, topk_sum = ctx.saved_tensor()
 
@@ -374,51 +379,52 @@ def _routing_map_fwd_kernel(
     stride_routing_s,
     stride_routing_e,
     n_experts,
-    seq_len,  # 新增：显式传入 seq_len 以便在 Block 处理时做边界检查
-    moe_k,  # 运行时参数：实际的 moe_k 值
+    seq_len,  # explicit seq_len for boundary checks during block processing
+    moe_k,  # runtime parameter: the actual moe_k value
     has_input_ids: tl.constexpr,
     has_pure_text_mask: tl.constexpr,
-    BLOCK_M: tl.constexpr,  # Sequence 维度的分块大小 (e.g., 32, 64)
-    BLOCK_N: tl.constexpr,  # Expert 维度的分块大小 (e.g., 64, 128)
-    BLOCK_K: tl.constexpr,  # MoE_K 维度的分块大小 (必须是 2 的幂次方)
+    BLOCK_M: tl.constexpr,  # block size along the sequence dim (e.g., 32, 64)
+    BLOCK_N: tl.constexpr,  # block size along the expert dim (e.g., 64, 128)
+    BLOCK_K: tl.constexpr,  # block size along the moe_k dim (must be a power of 2)
 ):
     """
-    Routing Map 前向计算 kernel。
+    Forward kernel for routing map generation.
 
-    根据 topk 索引生成路由映射和分发掩码，支持 padding mask 和纯文本 mask。
+    Builds the routing map and dispatch mask from topk indices, supporting
+    padding mask and pure-text mask.
     """
     # -----------------------------------------------------------
-    # 1. 坐标与 Mask 设置
+    # 1. Coordinate and mask setup
     # -----------------------------------------------------------
-    # pid_m 处理 Sequence 维度，pid_n 处理 Expert 维度
+    # pid_m handles the sequence dim, pid_n handles the expert dim.
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    # Sequence 维度的偏移
+    # Offsets along the sequence dim.
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    # 边界 Mask：防止处理超过 seq_len 的数据
+    # Boundary mask: avoid processing rows beyond seq_len.
     mask_m = offs_m < seq_len
 
     # -----------------------------------------------------------
-    # 2. 加载数据 (利用合并访问)
+    # 2. Load data (take advantage of coalesced access)
     # -----------------------------------------------------------
-    # 加载 TopK Indices: [BLOCK_M, BLOCK_K]
-    # 使用 BLOCK_K 作为编译时常量，通过 mask 处理实际的 moe_k
+    # Load TopK indices: [BLOCK_M, BLOCK_K].
+    # Use BLOCK_K as a compile-time constant; handle the real moe_k via mask.
     offs_k = tl.arange(0, BLOCK_K)
-    # moe_k 维度的 mask：只处理有效的 k 值
+    # moe_k-dim mask: only process valid k values.
     mask_k = offs_k < moe_k
-    # 计算加载地址：基址 + 行偏移 + 列偏移
+    # Compute load addresses: base + row offset + column offset.
     indices_ptrs = (
         topk_indices_ptr
         + (offs_m[:, None] * stride_topk_s)
         + (offs_k[None, :] * stride_topk_k)
     )
-    # 加载索引，越界处填充 -1，同时考虑 moe_k 边界
+    # Load indices; fill out-of-bounds with -1, honoring the moe_k boundary.
     indices = tl.load(
         indices_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=-1
     )
 
-    # 计算有效性 Mask (is_valid): [BLOCK_M]
+    # Compute the validity mask (is_valid): [BLOCK_M].
     is_valid = tl.full((BLOCK_M,), 1, dtype=tl.int1)
 
     if has_input_ids:
@@ -430,18 +436,19 @@ def _routing_map_fwd_kernel(
         is_valid = is_valid & (p_mask > 0)
 
     # -----------------------------------------------------------
-    # 3. 输出 TopK Indices (带 Mask 处理)
+    # 3. Store topk indices (with mask handling)
     # -----------------------------------------------------------
-    # 只需要在 Expert 维度的第一个 Block (pid_n == 0) 进行写入，避免重复写入
+    # Only the first block along the expert dim (pid_n == 0) performs the
+    # write, to avoid duplicated stores.
     if pid_n == 0:
-        # 将无效行的索引置为 -1
+        # Set indices of invalid rows to -1.
         masked_indices = tl.where(is_valid[:, None], indices, -1)
         out_indices_ptrs = (
             topk_indices_out_ptr
             + (offs_m[:, None] * stride_topk_s)
             + (offs_k[None, :] * stride_topk_k)
         )
-        # 写入时需要同时考虑 seq_len 和 moe_k 的边界
+        # The store must honor both seq_len and moe_k boundaries.
         tl.store(
             out_indices_ptrs,
             masked_indices,
@@ -449,61 +456,62 @@ def _routing_map_fwd_kernel(
         )
 
     # -----------------------------------------------------------
-    # 4. 生成 Routing Map (核心优化点)
+    # 4. Build the routing map (core optimization)
     # -----------------------------------------------------------
-    # Expert 维度的偏移 [BLOCK_N]
+    # Offsets along the expert dim [BLOCK_N].
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     mask_n = offs_n < n_experts
 
-    # 利用 Broadcasting 进行并行比对，消除内部循环
+    # Use broadcasting for a parallel comparison, eliminating the inner loop.
     # indices: [BLOCK_M, moe_k] -> [BLOCK_M, moe_k, 1]
     # offs_n : [BLOCK_N]        -> [1,       1,     BLOCK_N]
-    # 结果    : [BLOCK_M, moe_k, BLOCK_N] (Boolean)
+    # result : [BLOCK_M, moe_k, BLOCK_N] (boolean)
 
-    # 判断当前 Block 内的 Experts 是否被选中
+    # Check whether experts in the current block are selected.
     matches = indices[:, :, None] == offs_n[None, None, :]
 
-    # 聚合 moe_k 维度：只要任意一个 k 选中了该 expert，则置为 1
-    # 使用 max 实现 "any" 逻辑 (max of [0,0,0,1] = 1, max of [0,0,0,0] = 0)
+    # Reduce along the moe_k dim: set to 1 if any k picked this expert.
+    # Use max to implement an "any" reduction
+    # (max of [0,0,0,1] = 1, max of [0,0,0,0] = 0).
     routing_block = tl.max(matches.to(tl.float32), axis=1)
 
-    # 应用有效性 Mask：无效行的 Routing Map 全为 0
+    # Apply the validity mask: rows marked invalid have routing map all zeros.
     routing_block = tl.where(is_valid[:, None], routing_block, 0.0)
 
     # -----------------------------------------------------------
-    # 5. 写入 Routing Map
+    # 5. Write the routing map
     # -----------------------------------------------------------
-    # 计算写入地址：[BLOCK_M, BLOCK_N]
+    # Compute write addresses: [BLOCK_M, BLOCK_N].
     routing_out_ptrs = (
         routing_map_ptr
         + (offs_m[:, None] * stride_routing_s)
         + (offs_n[None, :] * stride_routing_e)
     )
 
-    # 组合 Mask：同时考虑 Sequence 边界和 Expert 边界
+    # Combined mask: honor both the sequence and expert boundaries.
     full_store_mask = mask_m[:, None] & mask_n[None, :]
 
     tl.store(routing_out_ptrs, routing_block, mask=full_store_mask)
 
     # -----------------------------------------------------------
-    # 6. 计算 Dispatch Mask (沿 sequence 维度求和)
+    # 6. Compute the dispatch mask (sum along the sequence dim)
     # -----------------------------------------------------------
-    # 对当前 block 处理的 expert 维度，累加 routing_block 的值
-    # 使用原子加法来处理多个 block 同时写入同一个 expert 的情况
+    # Accumulate routing_block values along the expert dim of the current
+    # block. Use atomic add to handle multiple blocks writing the same expert.
     dispatch_block = tl.sum(routing_block, axis=0)  # [BLOCK_N]
-    # 使用 tl.where 将越界的 dispatch_block 值置为 0
+    # Zero out dispatch_block entries that fall outside bounds.
     dispatch_block = tl.where(mask_n, dispatch_block, 0.0)
-    # 转换为 int64 类型
+    # Cast to int64.
     dispatch_block = dispatch_block.to(tl.int64)
-    # 计算目标地址
+    # Compute target addresses.
     dispatch_ptrs = dispatch_mask_ptr + pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    # 使用 tl.atomic_add 进行向量化的原子加法
-    # 注意：tl.atomic_add 支持向量化的指针和值
+    # Perform a vectorized atomic add.
+    # Note: tl.atomic_add supports vectorized pointers and values.
     tl.atomic_add(dispatch_ptrs, dispatch_block, mask=mask_n)
 
 
 # -----------------------------------------------------------
-# Python Wrapper 示例
+# Python wrapper
 # -----------------------------------------------------------
 
 
@@ -527,31 +535,33 @@ def routing_map_forward(
     seq_len, moe_k = topk_indices.shape
     n_experts = gate_probs.shape[1]
 
-    # 准备输出 Tensor
+    # Prepare output tensors.
     routing_map = paddle.zeros((seq_len, n_experts), dtype=paddle.float32)
     topk_indices_out = paddle.empty_like(topk_indices)
-    # 初始化 dispatch_mask 为 0，kernel 会使用 atomic_add 累加
+    # Initialize dispatch_mask to 0; the kernel accumulates via atomic_add.
     dispatch_mask = paddle.zeros((n_experts,), dtype=paddle.int64)
 
-    # 调优的 Block Size
-    # BLOCK_M: 一次处理多少行。推荐 32 或 64，越大显存带宽利用越好，但寄存器压力也大。
-    # BLOCK_N: 一次处理多少 Expert。推荐 64 或 128。
-    # BLOCK_K: 一次处理多少 MoE_K。必须是 2 的幂次方，使用 next_power_of_2 向上取整
+    # Tuned block sizes.
+    # BLOCK_M: number of rows processed per block. 32 or 64 is recommended;
+    # larger values improve memory bandwidth but increase register pressure.
+    # BLOCK_N: number of experts processed per block. 64 or 128 is recommended.
+    # BLOCK_K: number of moe_k entries processed per block. Must be a power
+    # of 2; use next_power_of_2 to round up.
     BLOCK_M = 64
     BLOCK_N = 128
     BLOCK_K = triton.next_power_of_2(moe_k)
 
     grid = (triton.cdiv(seq_len, BLOCK_M), triton.cdiv(n_experts, BLOCK_N))
 
-    # 准备指针参数 - Paddle Tensor 可以直接传递给 Triton
+    # Prepare pointer args: Paddle tensors can be passed directly to Triton.
     _routing_map_fwd_kernel[grid](
         topk_indices_ptr=topk_indices,
         input_ids_ptr=input_ids
         if input_ids is not None
-        else topk_indices,  # 占位
+        else topk_indices,  # placeholder
         is_pure_text_line_ptr=is_pure_text_line
         if is_pure_text_line is not None
-        else topk_indices,  # 占位
+        else topk_indices,  # placeholder
         routing_map_ptr=routing_map,
         topk_indices_out_ptr=topk_indices_out,
         dispatch_mask_ptr=dispatch_mask,

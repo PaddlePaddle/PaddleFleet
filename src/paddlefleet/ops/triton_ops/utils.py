@@ -12,17 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Triton 操作工具函数模块。
-
-该模块提供了 Triton kernel 的辅助工具函数，用于支持 PaddlePaddle 与 Triton 的集成。
-
-主要功能：
-- Torch 兼容性检查：检测 PaddlePaddle 是否支持 torch 兼容模式
-- 条件分发装饰器：根据条件选择高性能 Triton 实现或后备实现
-- Triton kernel 兼容性包装器：自动处理 Paddle/Triton 驱动切换
-
-"""
+"""Utilities for Triton ops: torch compat check and conditional dispatch."""
 
 from functools import cache
 from importlib.metadata import PackageNotFoundError, distribution
@@ -31,24 +21,16 @@ import paddle
 
 
 def is_torch_compat_available() -> bool:
-    """
-    判断是否支持 Torch 兼容性
-    Returns:
-        bool: 如果存在 enable_compat 方法，则返回 True；否则返回 False。
-    """
+    """Return True if paddle provides torch-compat mode."""
     return hasattr(paddle, "enable_compat")
 
 
 def dispatch_to(dispatch_fn, *, cond=None):
-    """
-    创建条件分发装饰器，根据 cond 条件选择高性能内核或后备实现
+    """Decorator: call dispatch_fn when cond is True, else fall back to fn.
 
     Args:
-        dispatch_fn: 高性能实现函数，当启用高性能内核时调用
-        cond: 条件函数，返回布尔值，决定是否使用高性能实现
-
-    Returns:
-        decorator: 装饰器函数，用于包装目标函数
+        dispatch_fn: high-performance implementation.
+        cond: predicate deciding whether to use dispatch_fn.
     """
     if cond is None:
         cond = lambda self, *args, **kwargs: True
@@ -67,7 +49,7 @@ def dispatch_to(dispatch_fn, *, cond=None):
 
 @cache
 def _is_package_installed(dist_name: str) -> bool:
-    """检查包是否已安装"""
+    """Check whether a package is installed."""
     try:
         distribution(dist_name)
         return True
@@ -75,7 +57,7 @@ def _is_package_installed(dist_name: str) -> bool:
         return False
 
 
-# 初始化 Paddle Triton 驱动（仅在支持时）
+# Initialize the Paddle Triton driver (only when supported).
 _paddle_driver = None
 if _is_package_installed("torch") and paddle.is_compiled_with_cuda():
     try:
@@ -89,7 +71,8 @@ if _is_package_installed("torch") and paddle.is_compiled_with_cuda():
 
 def swap_driver_guard(fn):
     """
-    驱动切换守卫，确保 Triton kernel 使用正确的 Paddle 驱动
+    Driver-switch guard: ensure the Triton kernel uses the correct Paddle
+    driver.
     """
     from triton.runtime.driver import driver
 
@@ -107,16 +90,9 @@ def swap_driver_guard(fn):
 
 def enable_compat_on_triton_kernel(triton_kernel):
     """
-    Triton kernel 兼容性装饰器。
-
-    自动处理 Paddle 与 Triton 的驱动切换，使 Triton kernel 能够
-    正确地在 PaddlePaddle 环境中运行。
-
-    Args:
-        triton_kernel: Triton JIT 编译的 kernel
-
-    Returns:
-        包装后的 kernel，支持驱动自动切换
+    Triton kernel compatibility decorator.
+    Automatically handles the driver switch between Paddle and Triton so the
+    Triton kernel runs correctly within a PaddlePaddle environment.
     """
     if not paddle.is_compiled_with_cuda():
         return triton_kernel
