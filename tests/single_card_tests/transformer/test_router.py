@@ -294,6 +294,102 @@ class TestTopKRouter(unittest.TestCase):
         # Double check that the attribute still does not exist
         self.assertFalse(hasattr(router, "expert_usage"))
 
+    def test_forward_with_input_ids(self):
+        """Cover input_ids masking branches: mask zeroing and top_idx fill -1."""
+        self.config.topk_method = "noaux_tc"
+        router = TopKRouter(self.config)
+
+        batch_size, seq_len = 2, 4
+        paddle.seed(42)
+        hidden_states = paddle.randn(
+            [batch_size, seq_len, self.config.hidden_size]
+        )
+        # positions where input_ids==0 are padding tokens
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+
+        _, top_gate, top_idx, gates_masked, mask, _, l_aux, _ = router(
+            hidden_states, input_ids=input_ids
+        )
+
+        total = batch_size * seq_len
+        k = self.config.num_experts_per_tok
+        self.assertEqual(top_idx.shape, [total, k])
+
+        # Padding positions (flat idx 2,3,7) must have top_idx==-1 and zero mask
+        for p in [2, 3, 7]:
+            self.assertTrue((top_idx[p] == -1).all().item())
+            self.assertAlmostEqual(mask[p].sum().item(), 0.0)
+            self.assertAlmostEqual(gates_masked[p].sum().item(), 0.0)
+
+        # Valid positions must have non-negative expert indices
+        for p in [0, 1, 4, 5, 6]:
+            self.assertTrue((top_idx[p] >= 0).all().item())
+
+    def test_forward_with_input_ids_seq_aux_loss(self):
+        """Cover _cal_seq_aux_loss with input_ids (per-line valid token denom)."""
+        self.config.topk_method = "noaux_tc"
+        self.config.moe_router_load_balancing_type = "seq_aux_loss"
+        router = TopKRouter(self.config)
+
+        paddle.seed(42)
+        hidden_states = paddle.randn([2, 4, self.config.hidden_size])
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+
+        _, _, _, _, _, _, l_aux, _ = router(hidden_states, input_ids=input_ids)
+        self.assertIsNotNone(l_aux)
+        self.assertEqual(l_aux.shape, [])
+
+    def test_cal_seq_aux_loss_1d_input_ids(self):
+        """Cover _cal_seq_aux_loss ndim==1 unsqueeze branch."""
+        self.config.topk_method = "greedy"
+        router = TopKRouter(self.config)
+
+        seq_len = 4
+        n_e = self.config.n_routed_experts
+        k = self.config.num_experts_per_tok
+        probs = paddle.rand([seq_len, n_e])
+        routing_map = paddle.zeros([seq_len, n_e])
+        for i in range(seq_len):
+            for j in range(k):
+                routing_map[i, j] = 1.0
+
+        loss = router._cal_seq_aux_loss(
+            probs,
+            k,
+            routing_map,
+            seq_len,
+            batch_size=1,
+            input_ids=paddle.to_tensor([1, 2, 0, 0]),
+        )
+        self.assertEqual(loss.shape, [])
+
+    def test_cal_seq_aux_loss_experimental_version(self):
+        """Cover gpt_model_use_experimental_version=True branch in _cal_seq_aux_loss."""
+        self.config.topk_method = "greedy"
+        self.config.gpt_model_use_experimental_version = True
+        router = TopKRouter(self.config)
+
+        batch_size, seq_len = 2, 4
+        n_e = self.config.n_routed_experts
+        k = self.config.num_experts_per_tok
+        paddle.seed(42)
+        probs = paddle.rand([batch_size, seq_len, n_e])
+        routing_map = paddle.zeros([batch_size * seq_len, n_e])
+        for i in range(batch_size * seq_len):
+            for j in range(k):
+                routing_map[i, j] = 1.0
+
+        loss = router._cal_seq_aux_loss(
+            probs,
+            k,
+            routing_map,
+            seq_len,
+            batch_size=batch_size,
+            input_ids=paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]]),
+        )
+        self.assertEqual(loss.shape, [])
+        self.assertGreater(loss.item(), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
