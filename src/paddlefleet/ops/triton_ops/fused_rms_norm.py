@@ -13,12 +13,12 @@
 # limitations under the License.
 
 """
-Triton RMSNorm 前向 + 反向 kernel 实现.
+Triton RMSNorm forward + backward kernels.
 
-设计特点：
-- 针对 dim 较小的情况设计 (dim <= 1024), 适用于 QK Norm 等.
-- 支持 strided 输入: 可直接处理 split/slice 后的 tensor, 无需 contiguous 拷贝.
-- 反向确定性 reduce: 反向的高维 reduce 拆成 2 个 kernel 执行, 无 atomic 且高效.
+Features:
+- Tuned for small dim (<= 1024), e.g. QK Norm.
+- Supports strided input: works directly on split/slice tensors, no contiguous copy.
+- Deterministic backward reduce: split into 2 kernels, atomic-free and efficient.
 """
 
 import paddle
@@ -40,11 +40,11 @@ def rms_norm_fwd_kernel(
     Invvar_ptr,
     stride_x_row: tl.constexpr,
     N1: tl.constexpr,
-    actual_n2: tl.constexpr,  # 实际 normalize 维度大小
-    BLOCK_N2: tl.constexpr,  # >= actual_n2 的 2 的幂
+    actual_n2: tl.constexpr,  # actual normalize dim size
+    BLOCK_N2: tl.constexpr,  # power of 2, >= actual_n2
     eps: tl.constexpr,
 ):
-    """前向kernel"""
+    """Forward kernel."""
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     cols = tl.arange(0, BLOCK_N2)
@@ -71,11 +71,11 @@ def rms_norm_fwd_kernel(
 
 @triton.jit
 def rms_norm_bwd_dx_kernel(
-    DY_ptr,  # 上游梯度 [n1, n2]
-    X_ptr,  # 前向输入 [n1, n2]
+    DY_ptr,  # grad [n1, n2]
+    X_ptr,  # forward input [n1, n2]
     W_ptr,  # weight [n2]
     Invvar_ptr,  # 1/rms [n1]
-    DX_ptr,  # dx 输出 [n1, n2]
+    DX_ptr,  # dx output [n1, n2]
     PartDW_ptr,  # dγ partial sum [NUM_PROGRAMS, BLOCK_N2]
     stride_x_row: tl.constexpr,
     N1: tl.constexpr,
@@ -83,10 +83,10 @@ def rms_norm_bwd_dx_kernel(
     BLOCK_N2: tl.constexpr,
 ):
     """
-    反向 Kernel 1: 计算 dx，同时累积 dγ 的 partial sum。
+    Backward kernel 1: compute dx and accumulate dγ partial sum.
 
     dx_ij = invvar_i * (dy_ij * w_j - x_ij * invvar_i^2 * dot_i / N2)
-      其中 dot_i = sum_j(dy_ij * w_j * x_ij)
+      where dot_i = sum_j(dy_ij * w_j * x_ij)
 
     part_dw[pid, j] = sum_{rows owned by pid}(dy_ij * x_ij * invvar_i)
     """
@@ -97,7 +97,7 @@ def rms_norm_bwd_dx_kernel(
 
     w = tl.load(W_ptr + cols, mask=mask, other=0.0).to(tl.float32)
 
-    # dγ partial sum accumulator，全寄存器
+    # dγ partial sum accumulator, in registers
     part_dw = tl.zeros([BLOCK_N2], dtype=tl.float32)
 
     for row_idx in range(pid, N1, num_programs):
@@ -122,24 +122,24 @@ def rms_norm_bwd_dx_kernel(
 
         tl.store(DX_ptr + dx_offset + cols, dx, mask=mask)
 
-        # 累积 dγ 的局部和: dy_ij * x_ij * invvar_i
+        # accumulate dγ local sum: dy_ij * x_ij * invvar_i
         part_dw += dy * x * invvar
 
-    # 写出 partial sum，每个 program 写自己独占的行
+    # output partial sum; each program outputs its own row
     tl.store(PartDW_ptr + pid * BLOCK_N2 + cols, part_dw, mask=mask)
 
 
 @triton.jit
 def rms_norm_bwd_dw_partial_kernel(
-    PartDW_ptr,  # [NUM_PARTS, BLOCK_N2] 输入
-    TmpDW_ptr,  # [grid, BLOCK_N2] 输出（每个 program 一行）
+    PartDW_ptr,  # [NUM_PARTS, BLOCK_N2] input
+    TmpDW_ptr,  # [grid, BLOCK_N2] output (one row per program)
     NUM_PARTS: tl.constexpr,
     actual_n2: tl.constexpr,
     BLOCK_N2: tl.constexpr,
 ):
     """
-    反向 Kernel 2a: 多 program 并行 reduce partial sums。
-    每个 program 以 stride 方式遍历 part_dw 的行，累加到寄存器，写出一行。
+    Backward kernel 2a: parallel reduce partial sums across programs.
+    Each program strides through part_dw rows, accumulates in registers, outputs one row.
     """
     pid = tl.program_id(0)
     num_progs = tl.num_programs(0)
@@ -155,15 +155,15 @@ def rms_norm_bwd_dw_partial_kernel(
 
 @triton.jit
 def rms_norm_bwd_dw_final_kernel(
-    TmpDW_ptr,  # [NUM_REDUCE, BLOCK_N2] 输入
-    DW_ptr,  # [n2] 最终输出
+    TmpDW_ptr,  # [NUM_REDUCE, BLOCK_N2] input
+    DW_ptr,  # [n2] final output
     NUM_REDUCE,
     actual_n2: tl.constexpr,
     BLOCK_N2: tl.constexpr,
 ):
     """
-    反向 Kernel 2b: 单 program 做最终 reduce。
-    NUM_REDUCE 很小（~64），trivial。
+    Backward kernel 2b: single-program final reduce.
+    NUM_REDUCE is small (~64), trivial.
     """
     cols = tl.arange(0, BLOCK_N2)
     mask = cols < actual_n2
@@ -252,7 +252,7 @@ class FusedRMSNormTriton(paddle.autograd.PyLayer):
             num_warps=1 if block_n2 <= 256 else 4,
         )
 
-        # Kernel 2a: 多 program 并行 reduce partial sums
+        # Kernel 2a: parallel reduce of partial sums
         NUM_REDUCE = 64
         tmp_dw = paddle.empty([NUM_REDUCE, block_n2], dtype=paddle.float32)
         rms_norm_bwd_dw_partial_kernel[(NUM_REDUCE,)](
@@ -263,7 +263,7 @@ class FusedRMSNormTriton(paddle.autograd.PyLayer):
             BLOCK_N2=block_n2,
         )
 
-        # Kernel 2b: 单 program 做最终 reduce（只有 64 行，trivial）
+        # Kernel 2b: single-program final reduce
         dw = paddle.empty([n2], dtype=weight.dtype)
         rms_norm_bwd_dw_final_kernel[(1,)](
             tmp_dw,
