@@ -151,9 +151,11 @@ class GPTEmbedding(FleetLayer):
                 else position_ids,
             )
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
-            if getattr(self.config, "gpt_model_use_experimental_version", False):
+            if getattr(self.config, "expert_model_parallel_size", 1) > 1:
                 text_padding_indices = input_ids == 0
-                decoder_input = fill_feature(decoder_input, text_padding_indices, 0)
+                decoder_input = fill_feature(
+                    decoder_input, text_padding_indices, 0
+                )
                 input_ids_for_moe_mask = input_ids
             if (
                 self.config.num_nextn_predict_layers is not None

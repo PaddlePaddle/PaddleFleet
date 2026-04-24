@@ -857,7 +857,9 @@ class TransformerLayer(nn.Layer):
                 input_ids if isinstance(self.mlp, MoELayer) else None
             )
 
-            def recompute_handler(post_attention_layernorm_output):
+            def recompute_handler(
+                post_attention_layernorm_output, _mlp_input_ids=None
+            ):
                 if _mlp_input_ids is not None:
                     mlp_output, bias = self.mlp(
                         post_attention_layernorm_output,
@@ -870,7 +872,9 @@ class TransformerLayer(nn.Layer):
                 return mlp_output, bias
 
             mlp_output_with_bias = recompute(
-                recompute_handler, post_attention_layernorm_output
+                recompute_handler,
+                post_attention_layernorm_output,
+                _mlp_input_ids,
             )
             if not isinstance(mlp_output_with_bias, tuple):
                 mlp_output_with_bias = (
