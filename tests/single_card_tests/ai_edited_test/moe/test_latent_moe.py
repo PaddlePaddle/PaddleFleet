@@ -467,5 +467,133 @@ class TestForwardLatent(unittest.TestCase):
         self.assertEqual(output.shape, [bs, seq, 64])
 
 
+# ---------------------------------------------------------------------------
+# 6. custom_forward – latent projections in the non-overlap multi-EP path
+# ---------------------------------------------------------------------------
+
+
+class TestCustomForwardLatent(unittest.TestCase):
+    """Test the use_latent_moe branches in custom_forward."""
+
+    def _make_stub(self, use_latent_moe, hidden_size=64, latent_size=32):
+        bs_seq = 8
+        expert_out_size = latent_size if use_latent_moe else hidden_size
+        stub = MagicMock()
+        stub.use_latent_moe = use_latent_moe
+        if use_latent_moe:
+            stub.fc1_latent_proj = nn.Linear(hidden_size, latent_size)
+            stub.fc2_latent_proj = nn.Linear(latent_size, hidden_size)
+        stub.dispatch.return_value = (
+            paddle.randn([bs_seq, expert_out_size]),
+            None,
+        )
+        stub.routed_experts_compute.return_value = paddle.randn(
+            [bs_seq, expert_out_size]
+        )
+        stub.combine.return_value = paddle.randn([bs_seq, expert_out_size])
+        return stub, bs_seq
+
+    def test_custom_forward_applies_fc1_fc2_when_latent(self):
+        """fc1 compresses input before dispatch; fc2 expands output after combine."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        stub, bs_seq = self._make_stub(use_latent_moe=True)
+        hidden = paddle.randn([bs_seq, 64])
+        output = MoELayer.custom_forward(stub, hidden, MagicMock(), MagicMock())
+        dispatch_input = stub.dispatch.call_args[0][0]
+        self.assertEqual(
+            dispatch_input.shape[-1], 32, "dispatch must receive latent_size=32"
+        )
+        self.assertEqual(
+            output.shape[-1], 64, "output must be restored to hidden_size=64"
+        )
+
+    def test_custom_forward_skips_projections_when_not_latent(self):
+        """Without latent MoE, hidden_states flow unchanged at full hidden_size."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        stub, bs_seq = self._make_stub(use_latent_moe=False)
+        hidden = paddle.randn([bs_seq, 64])
+        output = MoELayer.custom_forward(stub, hidden, MagicMock(), MagicMock())
+        dispatch_input = stub.dispatch.call_args[0][0]
+        self.assertEqual(dispatch_input.shape[-1], 64)
+        self.assertEqual(output.shape[-1], 64)
+
+
+# ---------------------------------------------------------------------------
+# 7. fusion_moe_forward – latent projections in the fusion multi-EP path
+# ---------------------------------------------------------------------------
+
+
+class TestFusionMoeForwardLatent(unittest.TestCase):
+    """Test the use_latent_moe branches in fusion_moe_forward."""
+
+    def _make_stub(self, use_latent_moe, hidden_size=64, latent_size=32):
+        bs_seq = 8
+        expert_out_size = latent_size if use_latent_moe else hidden_size
+        stub = MagicMock()
+        stub.use_latent_moe = use_latent_moe
+        if use_latent_moe:
+            stub.fc1_latent_proj = nn.Linear(hidden_size, latent_size)
+            stub.fc2_latent_proj = nn.Linear(latent_size, hidden_size)
+        stub.using_sonic_moe = False
+        stub.fp8 = False
+        stub.moe_deep_gemm = False
+        stub.moe_grouped_gemm = False
+        stub.recompute_moe_gate_up = False
+        stub.recompute_moe_premute = False
+        stub.fp8_wgrad = True
+        stub.dispatch.return_value = (
+            paddle.randn([bs_seq, expert_out_size]),
+            None,
+        )
+        stub.token_dispatcher._comm_manager.combine.return_value = paddle.randn(
+            [bs_seq, expert_out_size]
+        )
+        return stub, bs_seq
+
+    def test_fusion_moe_forward_applies_fc1_fc2_when_latent(self):
+        """fc1 compresses input before dispatch; fc2 expands output after combine."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            FusionMoePyLayer,
+            MoELayer,
+        )
+
+        stub, bs_seq = self._make_stub(use_latent_moe=True)
+        hidden = paddle.randn([bs_seq, 64])
+        with patch.object(
+            FusionMoePyLayer, "apply", return_value=paddle.randn([bs_seq, 32])
+        ):
+            output = MoELayer.fusion_moe_forward(
+                stub, hidden, MagicMock(), MagicMock(), None
+            )
+        dispatch_input = stub.dispatch.call_args[0][0]
+        self.assertEqual(
+            dispatch_input.shape[-1], 32, "dispatch must receive latent_size=32"
+        )
+        self.assertEqual(
+            output.shape[-1], 64, "output must be restored to hidden_size=64"
+        )
+
+    def test_fusion_moe_forward_skips_projections_when_not_latent(self):
+        """Without latent MoE, hidden_states flow unchanged at full hidden_size."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            FusionMoePyLayer,
+            MoELayer,
+        )
+
+        stub, bs_seq = self._make_stub(use_latent_moe=False)
+        hidden = paddle.randn([bs_seq, 64])
+        with patch.object(
+            FusionMoePyLayer, "apply", return_value=paddle.randn([bs_seq, 64])
+        ):
+            output = MoELayer.fusion_moe_forward(
+                stub, hidden, MagicMock(), MagicMock(), None
+            )
+        dispatch_input = stub.dispatch.call_args[0][0]
+        self.assertEqual(dispatch_input.shape[-1], 64)
+        self.assertEqual(output.shape[-1], 64)
+
+
 if __name__ == "__main__":
     unittest.main()

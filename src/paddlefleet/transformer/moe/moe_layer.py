@@ -187,6 +187,28 @@ class MoELayer(nn.Layer):
                 )
                 self.moe_deep_gemm = False
         self.moe_ep_barrier = config.moe_ep_barrier
+
+        # Latent MoE initialization
+        self.use_latent_moe = (
+            self.config.use_latent_moe
+            and self.config.moe_latent_size is not None
+        )
+        if self.use_latent_moe:
+            logging.info(
+                f"Latent MoE enabled: hidden_size={self.config.hidden_size} -> moe_latent_size={self.config.moe_latent_size}"
+            )
+            self.fc1_latent_proj = nn.Linear(
+                self.config.hidden_size,
+                self.config.moe_latent_size,
+                bias_attr=self.config.use_bias,
+            )
+            self.fc2_latent_proj = nn.Linear(
+                self.config.moe_latent_size,
+                self.config.hidden_size,
+                bias_attr=self.config.use_bias,
+            )
+            # Update expert config to use latent size
+            routed_expert_config.hidden_size = self.config.moe_latent_size
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -257,26 +279,6 @@ class MoELayer(nn.Layer):
             assert not self.using_sonic_moe, (
                 "fp8 and sonic_moe cannot be used at the same time."
             )
-
-        self.use_latent_moe = (
-            self.config.use_latent_moe
-            and self.config.moe_latent_size is not None
-        )
-        if self.use_latent_moe:
-            logger.info(
-                f"Latent MoE enabled: hidden_size={self.config.hidden_size} -> moe_latent_size={self.config.moe_latent_size}"
-            )
-            self.fc1_latent_proj = nn.Linear(
-                self.config.hidden_size,
-                self.config.moe_latent_size,
-                bias_attr=self.config.use_bias,
-            )
-            self.fc2_latent_proj = nn.Linear(
-                self.config.moe_latent_size,
-                self.config.hidden_size,
-                bias_attr=self.config.use_bias,
-            )
-            routed_expert_config.hidden_size = self.config.moe_latent_size
 
         expert_args = {}
         expert_args["config"] = routed_expert_config
@@ -487,6 +489,10 @@ class MoELayer(nn.Layer):
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
     ):
+        # Latent MoE: project hidden_states to latent space before dispatch
+        if self.use_latent_moe:
+            hidden_states = self.fc1_latent_proj(hidden_states)
+
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
             hidden_states, _ = self.dispatch(hidden_states, probs, routing_map)
@@ -501,6 +507,11 @@ class MoELayer(nn.Layer):
             hidden_states = self.routed_experts_compute(hidden_states)
         with profile("combine"):
             hidden_states = self.combine(hidden_states)
+
+        # Latent MoE: project back from latent space to hidden_size
+        if self.use_latent_moe:
+            hidden_states = self.fc2_latent_proj(hidden_states)
+
         return hidden_states
 
     def fusion_moe_forward(
@@ -511,6 +522,10 @@ class MoELayer(nn.Layer):
         combine_overlap_handle: dict,
     ):
         # TODO(deepllz): add fp8 dispatch config && implementation
+        # Latent MoE: project hidden_states to latent space before dispatch
+        if self.use_latent_moe:
+            hidden_states = self.fc1_latent_proj(hidden_states)
+
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
             dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
@@ -614,6 +629,10 @@ class MoELayer(nn.Layer):
             hidden_states = self.token_dispatcher._comm_manager.combine(
                 hidden_states, combine_overlap_handle
             )
+
+        # Latent MoE: project back from latent space to hidden_size
+        if self.use_latent_moe:
+            hidden_states = self.fc2_latent_proj(hidden_states)
 
         return hidden_states
 
@@ -772,9 +791,6 @@ class MoELayer(nn.Layer):
         if framework._dygraph_tracer()._has_grad:
             log_moe_losses(layer_idx, aux_loss=aux_loss, z_loss=z_loss)
 
-        if self.use_latent_moe:
-            hidden_states = self.fc1_latent_proj(hidden_states)
-
         if (
             self.shared_experts is not None
             and self.moe_shared_expert_overlap
@@ -800,6 +816,9 @@ class MoELayer(nn.Layer):
                 reshaped_input = hidden_states.reshape([-1, d_model])
             else:
                 reshaped_input = hidden_states
+            # Latent MoE: project to latent space before single-card MoE
+            if self.use_latent_moe:
+                reshaped_input = self.fc1_latent_proj(reshaped_input)
             if self.moe_grouped_gemm:
                 output = self._forward_single_card_grouped_gemm_moe(
                     reshaped_input, mask, gates_masked
@@ -808,11 +827,11 @@ class MoELayer(nn.Layer):
                 output = self._forward_single_card_moe(
                     reshaped_input, topk_indices, topk_weights
                 )
+            # Latent MoE: project back from latent space
+            if self.use_latent_moe:
+                output = self.fc2_latent_proj(output)
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
-
-        if self.use_latent_moe:
-            output = self.fc2_latent_proj(output)
 
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
