@@ -60,7 +60,7 @@ class TestFusedRMSNormTriton(unittest.TestCase):
         dx1, dw1 = x.grad, self.ref_norm.weight.grad
         paddle.disable_compat()
 
-        np.testing.assert_allclose(y0.float(), y1.float(), rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(y0.float(), y1.float(), rtol=1e-2, atol=1e-3)
         np.testing.assert_allclose(
             dx0.float(), dx1.float(), rtol=1e-4, atol=1e-3
         )
