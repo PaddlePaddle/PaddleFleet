@@ -13,9 +13,9 @@
 # limitations under the License.
 
 
+import copy
 import functools
 import random
-import subprocess
 import unittest
 
 import numpy as np
@@ -29,31 +29,6 @@ import paddlefleet.parallel_state as ps
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-
-
-def get_gpu_models_via_nvidia_smi():
-    try:
-        output = subprocess.check_output(
-            "nvidia-smi --query-gpu=name --format=csv,noheader", shell=True
-        )
-        models = output.decode().strip().split("\n")
-        return models
-    except Exception as e:
-        return ["Unknown"]
-
-
-def judge_machine_type():
-    if not paddle.is_compiled_with_cuda():
-        return "No CUDA GPU"
-    models = get_gpu_models_via_nvidia_smi()
-    if paddle.device.get_device_capability()[0] == 9:
-        return "H"
-    else:
-        return "V"
-
-
-result = judge_machine_type()
-print("Your machine type is:", result)
 
 
 class TestGPTModel(unittest.TestCase):
@@ -98,11 +73,9 @@ class TestGPTModel(unittest.TestCase):
         fleet_env = fleet.fleet
         self.strategy = fleet_env._user_defined_strategy
 
-    def _create_transformer_configs(self):
-        """Create multiple different transformer configurations for testing"""
-        configs = []
-
-        config1 = GPTConfig(
+    def _create_base_config(self):
+        """Create base transformer configuration for testing"""
+        config = GPTConfig(
             num_hidden_layers=2,
             hidden_size=512,
             vocab_size=100,
@@ -129,147 +102,133 @@ class TestGPTModel(unittest.TestCase):
             ),
             tie_word_embeddings=True,
             use_qk_norm=True,
-            recompute_granularity="selective",
-            recompute_modules=[
-                "core_attn",
-                "norm",
-                "mlp",
-                "lm_head",
-                "embedding",
-                "loss_fn",
-            ],
+            recompute_granularity=None,
+            recompute_modules=[],
         )
-        config1.name = "config_1"
-        configs.append(config1)
+        return config
 
-        return configs
+    def _create_recompute_config(self, base_config):
+        """Create recompute-enabled configuration based on base config"""
+        config = copy.deepcopy(base_config)
+        config.recompute_granularity = "selective"
+        config.recompute_modules = [
+            "core_attn",
+            "norm",
+            "mlp",
+            "lm_head",
+            "embedding",
+            "loss_fn",
+        ]
+        return config
 
     def _create_gpt_model(self, config):
         """Create GPT model based on given configuration"""
-        self.gpt_model = gpt_builder(config, num_stages=1)
-        return self.gpt_model
+        return gpt_builder(config, num_stages=1)
 
-    def _get_expected_values(self, config_name, machine_type):
-        """Return expected values based on configuration name and machine type"""
-        # Define expected values for different configurations on different machines
-        expectations = {
-            "config_1": {
-                "H": {
-                    "loss": 5.3251447677612305,
-                    "grad_norm": 5.3691630363464355,
-                },
-                "V": {
-                    "loss": 5.3251447677612305,
-                    "grad_norm": 5.3691630363464355,
-                },
+    def _prepare_input_data(self, config):
+        """Prepare input data for model forward/backward"""
+        sequence_length = config.max_sequence_length
+        micro_batch_size = 1
+
+        data = list(range(sequence_length))
+        input_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
+            (micro_batch_size, 1)
+        )
+        position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
+            (micro_batch_size, 1)
+        )
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length),
+            dtype=bool,
+        )
+        labels = paddle.to_tensor(
+            list(range(1, sequence_length + 1)), dtype=paddle.int64
+        ).repeat((micro_batch_size, 1))
+
+        return (
+            {
+                "input_ids": [input_ids],
+                "position_ids": [position_ids],
+                "attention_mask": [attention_mask],
             },
-        }
+            [labels],
+        )
 
-        return expectations.get(config_name, {}).get(machine_type, {})
+    def _run_model_and_get_results(self, config):
+        """Run model forward/backward and return loss and gradients"""
+        gpt_model = self._create_gpt_model(config)
+        data = self._prepare_input_data(config)
 
-    def test_multiple_configurations(self):
-        """Test multiple transformer configurations"""
-        configs = self._create_transformer_configs()
-        machine_type = judge_machine_type()
+        gpt_pipe_model = NoPipelineParallel(gpt_model, self.strategy)
+        loss = gpt_pipe_model.forward_backward_pipeline(data)
 
-        for config in configs:
-            with self.subTest(config_name=config.name):
-                # Explicitly call setUp to ensure initialization for each config
-                self.setUp()
+        grad_dict = {}
+        for name, param in gpt_model.named_parameters():
+            if param.grad is not None:
+                grad_dict[name] = param.grad.detach().clone()
 
-                print(f"\nTesting configuration: {config.name}")
+        return loss.item(), grad_dict
+
+    def test_recompute_precision_alignment(self):
+        """Test that recompute on/off produces aligned precision results"""
+        # Create base config (recompute disabled)
+        base_config = self._create_base_config()
+
+        # Create recompute config (recompute enabled)
+        recompute_config = self._create_recompute_config(base_config)
+
+        # Run model without recompute
+        print("\n=== Running model WITHOUT recompute ===")
+        self.setUp()
+        loss_no_recompute, grads_no_recompute = self._run_model_and_get_results(
+            base_config
+        )
+        print(f"Loss (no recompute): {loss_no_recompute}")
+
+        # Run model with recompute
+        print("\n=== Running model WITH recompute ===")
+        self.setUp()
+        loss_with_recompute, grads_with_recompute = (
+            self._run_model_and_get_results(recompute_config)
+        )
+        print(f"Loss (with recompute): {loss_with_recompute}")
+
+        # Compare loss
+        print("\n=== Comparing results ===")
+        print(f"Loss diff: {abs(loss_no_recompute - loss_with_recompute)}")
+
+        self.assertAlmostEqual(
+            loss_no_recompute,
+            loss_with_recompute,
+            places=5,
+            msg=f"Loss mismatch: no_recompute={loss_no_recompute}, with_recompute={loss_with_recompute}",
+        )
+
+        # Compare gradients
+        for name in grads_no_recompute:
+            if name in grads_with_recompute:
+                grad_no_recompute = grads_no_recompute[name]
+                grad_with_recompute = grads_with_recompute[name]
+
+                grad_norm_no_recompute = grad_no_recompute.norm().item()
+                grad_norm_with_recompute = grad_with_recompute.norm().item()
+
+                max_diff = (
+                    (grad_no_recompute - grad_with_recompute).abs().max().item()
+                )
+
                 print(
-                    f"hidden_size: {config.hidden_size}, num_layers: {config.num_hidden_layers}"
+                    f"{name}: norm_diff={abs(grad_norm_no_recompute - grad_norm_with_recompute):.8f}, max_diff={max_diff:.8f}"
                 )
 
-                # Create and test model
-                gpt_model = self._create_gpt_model(config)
-
-                # Run forward and backward propagation
-                sequence_length = config.max_sequence_length
-                micro_batch_size = 1
-
-                data = list(range(sequence_length))
-                input_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
-                    (micro_batch_size, 1)
-                )
-                position_ids = paddle.to_tensor(
-                    data, dtype=paddle.int64
-                ).repeat((micro_batch_size, 1))
-                attention_mask = paddle.ones(
-                    (micro_batch_size, 1, sequence_length, sequence_length),
-                    dtype=bool,
-                )
-                labels = paddle.to_tensor(
-                    list(range(1, sequence_length + 1)), dtype=paddle.int64
-                ).repeat((micro_batch_size, 1))
-
-                data = (
-                    {
-                        "input_ids": [input_ids],
-                        "position_ids": [position_ids],
-                        "attention_mask": [attention_mask],
-                    },
-                    [labels],
+                self.assertAlmostEqual(
+                    grad_norm_no_recompute,
+                    grad_norm_with_recompute,
+                    places=5,
+                    msg=f"Gradient norm mismatch for {name}: no_recompute={grad_norm_no_recompute}, with_recompute={grad_norm_with_recompute}",
                 )
 
-                gpt_pipe_model = NoPipelineParallel(
-                    self.gpt_model, self.strategy
-                )
-                loss = gpt_pipe_model.forward_backward_pipeline(data)
-
-                for name, param in self.gpt_model.named_parameters():
-                    # 计算 L2 范数
-                    if param.grad is None:
-                        print(f"{name}: 0.000000, 0.000000")
-                        continue
-                    grad_norm = param.grad.detach().norm().item()
-                    grad_abssum = param.grad.detach().abs().sum().item()
-                    print(f"{name}: {grad_norm:.6f}, {grad_abssum:.6f}")
-                    if name == "0.embedding.embed_tokens.weight":
-                        embed_tokens_grad_norm = grad_norm
-
-                print(f"{config.name} loss: {loss.item()}")
-
-                # Get expected values
-                print("machine_type: ", machine_type)
-                expected_values = self._get_expected_values(
-                    config.name, machine_type
-                )
-
-                # If expected values exist, verify them
-                if expected_values.get("loss") is not None:
-                    self.assertAlmostEqual(
-                        loss.item(),
-                        expected_values["loss"],
-                        places=5,
-                        msg=f"{config.name} loss not equal ({loss.item()} != {expected_values['loss']})",
-                    )
-                else:
-                    print(
-                        f"Note: Expected loss value for {config.name} is not set, current loss: {loss.item()}"
-                    )
-
-                if embed_tokens_grad_norm is not None:
-                    print(
-                        f"{config.name} embed_tokens_grad_norm: {embed_tokens_grad_norm}"
-                    )
-
-                    if expected_values.get("grad_norm") is not None:
-                        self.assertAlmostEqual(
-                            embed_tokens_grad_norm,
-                            expected_values["grad_norm"],
-                            places=5,
-                            msg=f"{config.name} grad norm not equal ({embed_tokens_grad_norm} != {expected_values['grad_norm']})",
-                        )
-                    else:
-                        print(
-                            f"Note: Expected grad_norm value for {config.name} is not set, current grad_norm: {embed_tokens_grad_norm}"
-                        )
-                else:
-                    print(
-                        f"Warning: Failed to get word_embeddings gradient for {config.name}"
-                    )
+        print("\n=== Recompute precision alignment test PASSED ===")
 
 
 if __name__ == "__main__":
