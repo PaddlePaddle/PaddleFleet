@@ -603,14 +603,21 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(logits, "gate_logits", self._layer_number)
 
         gates = self.gate_score_func(logits)
-
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
-
-        gates_ori = gates
+        # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
+        gates_ori = gates.clone()
         if self.scoring_func == "sigmoid":
-            gates_ori = gates_ori / (
-                gates_ori.sum(axis=-1, keepdim=True) + 1e-20
-            )
+            if not getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
+                gates_ori = gates_ori / (
+                    gates_ori.sum(axis=-1, keepdim=True) + 1e-20
+                )
+            else:
+                # Use clip() to ensure the computation logic is consistent with EC; it may be useful when gradients are very small.
+                gates_ori = gates_ori / paddle.clip(
+                    gates_ori.sum(-1, keepdim=True), min=1e-12
+                )
 
         if getattr(self.config, "gpt_model_use_experimental_version", False):
             # Use EC's FusedMoETopk Triton kernel for bit-exact alignment.
@@ -683,21 +690,15 @@ class TopKRouter(StandardMoERouter):
         gates_masked = gates * mask
 
         # norm
-        if not getattr(
-            self.config, "gpt_model_use_experimental_version", False
-        ):
-            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
-            if self.norm_topk_prob:
+
+        if self.norm_topk_prob:
+            if not getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
-                if self.num_experts_per_tok > 1:
-                    gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
-                    denom_s = paddle.clip(
-                        gates_s, min=paddle.finfo(gates_masked.dtype).eps
-                    )
-                    gates_masked = gates_masked / denom_s
-        else:
-            # Reconstruct gates_masked from top_gate (Triton kernel output) to ensure
+            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
+            # Reconstruct gates_masked from top_gate  to ensure
             # bit-exact alignment. Instead of normalizing gates_masked independently
             # (which uses different FP32 reduction over E=32 elements vs K=8),
             # scatter the already-normalized top_gate values back to [S, E] layout.

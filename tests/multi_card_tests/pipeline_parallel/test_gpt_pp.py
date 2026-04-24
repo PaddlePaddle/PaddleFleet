@@ -17,6 +17,7 @@ import functools
 import os
 import pprint
 import random
+import subprocess
 import unittest
 
 import numpy as np
@@ -32,6 +33,31 @@ from paddlefleet.training.initialize import initialize_fleet
 PP_DEGREE = 4
 REPO_FLAG = os.getenv("repo_flag")
 SKIP_TESTS = REPO_FLAG != "paddlefleet"
+
+
+def get_gpu_models_via_nvidia_smi():
+    try:
+        output = subprocess.check_output(
+            "nvidia-smi --query-gpu=name --format=csv,noheader", shell=True
+        )
+        models = output.decode().strip().replace("NVIDIA", "")
+        return models
+    except Exception as e:
+        return ["Unknown"]
+
+
+def judge_machine_type():
+    if not paddle.is_compiled_with_cuda():
+        return "No CUDA GPU"
+    models = get_gpu_models_via_nvidia_smi()
+    for model in models:
+        name = model.upper()
+        if "V" in name:
+            return "V"
+        elif "H" in name:
+            return "H"
+        elif "B" in name:
+            return "B"
 
 
 def _set_random_seed(
@@ -203,31 +229,58 @@ class TestPP(unittest.TestCase):
         pp = pprint.PrettyPrinter(depth=None, width=200, compact=False)
         pp.pprint(rst)
 
-        assert overlap_loss._md5sum() == "bdd8b8660e976d3c1dde170aabeb3a6c"
-
-        if paddle.distributed.get_rank() == 0:
-            baseline = {
-                "_layers.9.0.input_layernorm.weight": "9658e5354bb59e784086b8c1be08ca04",
-                "_layers.9.0.mlp.down_proj.weight": "cc5014fd095ce9a464de32cfe5b90848",
-                "_layers.9.0.mlp.up_gate_proj.weight": "ac1348bfc82d1be66c07c5858727cf77",
-                "_layers.9.0.post_attention_layernorm.weight": "a1d8b456b27485f5a0591c4c051078a8",
-                "_layers.9.0.self_attn.k_norm.weight": "d6a54a647a86f3527a7347f9e2feaaee",
-                "_layers.9.0.self_attn.o_proj.weight": "add86b72cf4fce187b9fcfecc2d5eea2",
-                "_layers.9.0.self_attn.q_norm.weight": "fad9fdd2b5c499565a12663baf1f5c51",
-                "_layers.9.0.self_attn.qkv_proj.weight": "f4029f4c980a46002dc1e316ddcab7d3",
-                "_layers.9.1.input_layernorm.weight": "2a2689c90d0dcb936e7ce3c0c6b18f5f",
-                "_layers.9.1.mlp.down_proj.weight": "85ec9eec9ac40f41eeb40fb559f16cd2",
-                "_layers.9.1.mlp.up_gate_proj.weight": "d52a62446cc35abe7548492bd17dd4ee",
-                "_layers.9.1.post_attention_layernorm.weight": "520f79414d605e1d3ef2b7d18fcba8cb",
-                "_layers.9.1.self_attn.k_norm.weight": "fb600ebbae4ff5467844d3dbc68fdda6",
-                "_layers.9.1.self_attn.o_proj.weight": "89256abd1e6fbd8d9966dbaed4968df4",
-                "_layers.9.1.self_attn.q_norm.weight": "4f431eeaf17d1342563fcb6f95e7a298",
-                "_layers.9.1.self_attn.qkv_proj.weight": "54db9155da3a148a3edffb0face5d249",
-                "_layers.shared_layers.embed.embedding.embed_tokens.weight": "e4234572645381519a4d36874f2c2a04",
-            }
-
-            for name, p in overlap_gpt_model.named_parameters():
-                assert p.grad._md5sum() == baseline[name]
+        if judge_machine_type() == "H":
+            assert overlap_loss._md5sum() == "bdd8b8660e976d3c1dde170aabeb3a6c"
+            if paddle.distributed.get_rank() == 0:
+                baseline = {
+                    "_layers.9.0.input_layernorm.weight": "9658e5354bb59e784086b8c1be08ca04",
+                    "_layers.9.0.mlp.down_proj.weight": "cc5014fd095ce9a464de32cfe5b90848",
+                    "_layers.9.0.mlp.up_gate_proj.weight": "ac1348bfc82d1be66c07c5858727cf77",
+                    "_layers.9.0.post_attention_layernorm.weight": "a1d8b456b27485f5a0591c4c051078a8",
+                    "_layers.9.0.self_attn.k_norm.weight": "d6a54a647a86f3527a7347f9e2feaaee",
+                    "_layers.9.0.self_attn.o_proj.weight": "add86b72cf4fce187b9fcfecc2d5eea2",
+                    "_layers.9.0.self_attn.q_norm.weight": "fad9fdd2b5c499565a12663baf1f5c51",
+                    "_layers.9.0.self_attn.qkv_proj.weight": "f4029f4c980a46002dc1e316ddcab7d3",
+                    "_layers.9.1.input_layernorm.weight": "2a2689c90d0dcb936e7ce3c0c6b18f5f",
+                    "_layers.9.1.mlp.down_proj.weight": "85ec9eec9ac40f41eeb40fb559f16cd2",
+                    "_layers.9.1.mlp.up_gate_proj.weight": "d52a62446cc35abe7548492bd17dd4ee",
+                    "_layers.9.1.post_attention_layernorm.weight": "520f79414d605e1d3ef2b7d18fcba8cb",
+                    "_layers.9.1.self_attn.k_norm.weight": "fb600ebbae4ff5467844d3dbc68fdda6",
+                    "_layers.9.1.self_attn.o_proj.weight": "89256abd1e6fbd8d9966dbaed4968df4",
+                    "_layers.9.1.self_attn.q_norm.weight": "4f431eeaf17d1342563fcb6f95e7a298",
+                    "_layers.9.1.self_attn.qkv_proj.weight": "54db9155da3a148a3edffb0face5d249",
+                    "_layers.shared_layers.embed.embedding.embed_tokens.weight": "e4234572645381519a4d36874f2c2a04",
+                }
+                for name, p in overlap_gpt_model.named_parameters():
+                    assert p.grad._md5sum() == baseline[name], (
+                        f"{name}'s grad has diff"
+                    )
+        elif judge_machine_type() == "B":
+            assert overlap_loss._md5sum() == "53ef9369cbb96bb140b11987554f4954"
+            if paddle.distributed.get_rank() == 0:
+                baseline = {
+                    "_layers.9.0.input_layernorm.weight": "b09749cbbdf3b8da21b7dc6c23e4d88a",
+                    "_layers.9.0.mlp.down_proj.weight": "923676c6fbad6fc604763d42f85d7a85",
+                    "_layers.9.0.mlp.up_gate_proj.weight": "3c2c005ceaf4d5280870f67b79c0698a",
+                    "_layers.9.0.post_attention_layernorm.weight": "b5a58f295ae06a2b274f3526ae75014a",
+                    "_layers.9.0.self_attn.k_norm.weight": "0f4bdc5650529d2f4a662ea41d453151",
+                    "_layers.9.0.self_attn.o_proj.weight": "8117ecb1e205076ed8905a075803de4f",
+                    "_layers.9.0.self_attn.q_norm.weight": "ab957c763bcd2c70f2c2a0c7932344ff",
+                    "_layers.9.0.self_attn.qkv_proj.weight": "64a59fc8b3fae48c01bf1a88ee58fa68",
+                    "_layers.9.1.input_layernorm.weight": "9ec2735a522837c23b5a79d7a9835253",
+                    "_layers.9.1.mlp.down_proj.weight": "249b7248d00cf4afc0cf1126f0fcec66",
+                    "_layers.9.1.mlp.up_gate_proj.weight": "b8d542554dbd8dee1a7a640bfd658658",
+                    "_layers.9.1.post_attention_layernorm.weight": "fed9d29a15a2f906b1511e2f9c36c5da",
+                    "_layers.9.1.self_attn.k_norm.weight": "5ce1d0b2a5f12780140542d2c6fa1229",
+                    "_layers.9.1.self_attn.o_proj.weight": "cdc43b05a7e408a69137cebbeed0eeae",
+                    "_layers.9.1.self_attn.q_norm.weight": "64b2cdca7ab9e0e51089af57d6cb8713",
+                    "_layers.9.1.self_attn.qkv_proj.weight": "52f0b8248da51aa6235893d75c7bc2fe",
+                    "_layers.shared_layers.embed.embedding.embed_tokens.weight": "278c4be9af06472930c63fdd62229c26",
+                }
+                for name, p in overlap_gpt_model.named_parameters():
+                    assert p.grad._md5sum() == baseline[name], (
+                        f"{name}'s grad has diff"
+                    )
 
 
 if __name__ == "__main__":
