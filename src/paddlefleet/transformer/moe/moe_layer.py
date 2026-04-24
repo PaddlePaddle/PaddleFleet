@@ -218,6 +218,7 @@ class MoELayer(nn.Layer):
         ):
             routed_expert_config.tensor_model_parallel_size = 1
 
+        self.moe_deep_gemm = config.moe_deep_gemm
         if (
             paddle.is_compiled_with_cuda()
             and paddle.device.get_device_capability()[0] < 9
@@ -264,7 +265,7 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
 
-        if self.moe_grouped_gemm and not self.fp8:
+        if self.moe_grouped_gemm:
             self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
@@ -328,7 +329,7 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            if self.moe_grouped_gemm and not self.fp8:
+            if self.moe_grouped_gemm:
                 for p in self.grouped_gemm_experts.parameters():
                     p.is_moe_param = True
                     p.color = {
@@ -1004,6 +1005,39 @@ class MoELayer(nn.Layer):
                 weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
             else:
                 raise ValueError("Invalid value for `quant_transpose`.")
+
+        if hasattr(self, "grouped_gemm_experts"):
+            if batch_mode:
+                expert_w1 = self.grouped_gemm_experts.weight1
+                expert_w2 = self.grouped_gemm_experts.weight2
+                local_expert_num = expert_w1.shape[0]
+                expert_w1_list = [
+                    expert_w1[i, :, :] for i in range(local_expert_num)
+                ]
+                expert_w2_list = [
+                    expert_w2[i, :, :] for i in range(local_expert_num)
+                ]
+
+                # Batch mode: process all experts' weights together
+                if expert_w1_list:
+                    quantize_weights(
+                        expert_w1_list,
+                        self.grouped_gemm_experts.weight1,
+                        quant_transpose,
+                    )
+                if expert_w2_list:
+                    quantize_weights(
+                        expert_w2_list,
+                        self.grouped_gemm_experts.weight2,
+                        quant_transpose,
+                    )
+
+            else:
+                raise NotImplementedError(
+                    "Not support individual mode for fuse_expert_fp8_weight_quant yet."
+                )
+
+            return
 
         if batch_mode:
             # Batch mode: process all experts' weights together
