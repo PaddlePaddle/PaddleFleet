@@ -258,6 +258,15 @@ class MoELayer(nn.Layer):
                 "fp8 and sonic_moe cannot be used at the same time."
             )
 
+        self.use_latent_moe = self.config.use_latent_moe and self.config.moe_latent_size is not None
+        if self.use_latent_moe:
+            logger.info(
+                f"Latent MoE enabled: hidden_size={self.config.hidden_size} -> moe_latent_size={self.config.moe_latent_size}"
+            )
+            self.fc1_latent_proj = nn.Linear(self.config.hidden_size, self.config.moe_latent_size, bias_attr=self.config.use_bias)
+            self.fc2_latent_proj = nn.Linear(self.config.moe_latent_size, self.config.hidden_size, bias_attr=self.config.use_bias)
+            routed_expert_config.hidden_size = self.config.moe_latent_size
+
         expert_args = {}
         expert_args["config"] = routed_expert_config
         expert_args["moe_intermediate_size"] = self.moe_intermediate_size
@@ -604,6 +613,8 @@ class MoELayer(nn.Layer):
 
     def dispatch_preprocess(self, args):
         hidden_states, token_probs, token_indices = args
+        if self.use_latent_moe:
+            hidden_states = self.fc1_latent_proj(hidden_states)
         assert isinstance(self.token_dispatcher, MoEFlexTokenDispatcher)
         hidden_states = self.token_dispatcher.dispatch_preprocess_overlap(
             hidden_states, token_probs, token_indices
@@ -699,6 +710,8 @@ class MoELayer(nn.Layer):
 
     def aux_loss_compute(self, args):
         hidden_states, aux_loss, residuals = args
+        if self.use_latent_moe:
+            hidden_states = self.fc2_latent_proj(hidden_states)
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
@@ -748,6 +761,9 @@ class MoELayer(nn.Layer):
         if framework._dygraph_tracer()._has_grad:
             log_moe_losses(layer_idx, aux_loss=aux_loss, z_loss=z_loss)
 
+        if self.use_latent_moe:
+            hidden_states = self.fc1_latent_proj(hidden_states)
+
         if (
             self.shared_experts is not None
             and self.moe_shared_expert_overlap
@@ -783,6 +799,9 @@ class MoELayer(nn.Layer):
                 )
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
+
+        if self.use_latent_moe:
+            output = self.fc2_latent_proj(output)
 
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
