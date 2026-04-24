@@ -151,11 +151,6 @@ class GPTEmbedding(FleetLayer):
             )
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
             text_padding_indices = input_ids == 0
-
-            # Padding (if any) lies at the tail of the sequence. Only when every
-            # row's last token is 0 do we consider padding present; otherwise skip.
-            if not bool((input_ids[..., -1] == 0).all()):
-                input_ids_for_moe_mask = input_ids
             decoder_input = fill_feature(decoder_input, text_padding_indices, 0)
             if (
                 self.config.num_nextn_predict_layers is not None

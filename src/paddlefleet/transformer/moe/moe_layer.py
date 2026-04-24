@@ -714,12 +714,6 @@ class MoELayer(nn.Layer):
 
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
-        # [b,s,1]
-        # input_ids = None
-        if input_ids is not None:
-            input_ids_none_zero_mask = (input_ids != 0).squeeze(0).unsqueeze(-1)
-        else:
-            input_ids_none_zero_mask = None
         (
             capacity,
             topk_weights,
@@ -731,7 +725,6 @@ class MoELayer(nn.Layer):
             z_loss,
         ) = self.gate(
             hidden_states,
-            input_ids_none_zero_mask=input_ids_none_zero_mask,
             input_ids=input_ids,
         )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
