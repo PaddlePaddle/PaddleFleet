@@ -603,17 +603,19 @@ class MoELayer(nn.Layer):
         return self.gate(hidden_states)
 
     def dispatch_preprocess(self, args):
-        hidden_states, token_probs, token_indices = args
+        hidden_states, token_indices, token_weights, gates_masked, mask = args
         assert isinstance(self.token_dispatcher, MoEFlexTokenDispatcher)
-        hidden_states = self.token_dispatcher.dispatch_preprocess_overlap(
-            hidden_states, token_probs, token_indices
+        hidden_states, token_indices, token_weights, gates_masked, mask = (
+            self.token_dispatcher.dispatch_preprocess_overlap(
+                hidden_states, token_indices, token_weights, gates_masked, mask
+            )
         )
         token_probs = self.token_dispatcher._comm_manager.token_probs
         token_indices = self.token_dispatcher._comm_manager.token_indices
-        return hidden_states, token_indices, token_probs
+        return hidden_states, token_indices, token_probs, gates_masked, mask
 
     def compute_dispatch(self, args, async_finish=False):
-        hidden_states, token_indices, token_weights = args
+        hidden_states, token_indices, token_weights, gates_masked, mask = args
         if self.moe_use_fusion_node:
             dispatched_hidden_states, fp8_dispatched_handle = (
                 self.token_dispatcher.token_dispatch_overlap(

@@ -380,14 +380,15 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
     def dispatch_preprocess_overlap(
         self,
         hidden_states: paddle.Tensor,
-        token_probs: paddle.Tensor,
         token_indices: paddle.Tensor,
+        token_weights: paddle.Tensor,
+        probs: paddle.Tensor,
+        routing_map: paddle.Tensor,
     ):
         self.hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
-        self._comm_manager.token_probs = token_probs
-        self._comm_manager.token_indices = token_indices
-        return hidden_states
+        self._comm_manager.setup_metadata(routing_map, probs)
+        return hidden_states, token_indices, token_weights, probs, routing_map
 
     def token_dispatch_overlap(
         self,
