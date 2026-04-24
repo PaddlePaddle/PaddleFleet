@@ -1,9 +1,6 @@
 from typing import Optional, Tuple
 
 import paddle
-from paddleformers.transformers.qwen2.modeling import Qwen2Attention, apply_rotary_pos_emb
-
-from .patch_utils import attention_branch, patch_attention_layers
 
 
 @paddle.no_grad()
@@ -18,6 +15,8 @@ def new_attention_forward(
     batch_size: Optional[int] = None,
     **kwargs,
 ):
+    from .patch_utils import attention_branch
+
     """Input shape: Batch x Time x Channel"""
     mix_layer = self.qkv_proj(hidden_states)
     if self.sequence_parallel:
@@ -45,6 +44,8 @@ def new_attention_forward(
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
+
+    from paddleformers.transformers.qwen2.modeling import apply_rotary_pos_emb
 
     cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -82,6 +83,10 @@ def patch_qwen_attention(
     rrattn_version: str = "v1",
     **kwargs,
 ):
+    from paddleformers.transformers.qwen2.modeling import Qwen2Attention
+
+    from .patch_utils import patch_attention_layers
+
     return patch_attention_layers(
         model,
         Qwen2Attention,

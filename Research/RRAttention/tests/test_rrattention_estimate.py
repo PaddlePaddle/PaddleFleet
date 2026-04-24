@@ -39,23 +39,13 @@ def _causal_window_startend(batch_size, k_len, q_len, window):
 
 
 @pytest.mark.parametrize("seq_len", [1024, 2048])
-def test_rrattn_estimate_nomask_matches_legacy(seq_len):
+def test_rrattn_estimate_nomask_smoke(seq_len):
     import rrattn.rrattention as rrattention
 
     _set_device()
     query_states = _random_bhsd(1, 2, seq_len, seed=101)
     key_states = _random_bhsd(1, 2, seq_len, seed=202)
 
-    legacy_attn_sums, legacy_block_mask = rrattention.rrattn_estimate_legacy(
-        query_states,
-        key_states,
-        stride=8,
-        threshold=0.95,
-        causal=True,
-        keep_sink=False,
-        keep_recent=False,
-        chunk_size=seq_len,
-    )
     attn_sums, block_mask = rrattention.rrattn_estimate(
         query_states,
         key_states,
@@ -65,27 +55,18 @@ def test_rrattn_estimate_nomask_matches_legacy(seq_len):
         keep_sink=False,
         keep_recent=False,
         chunk_size=seq_len,
-        rrattn_version="v2",
+        rrattn_version="bad",
     )
 
-    assert attn_sums.shape == legacy_attn_sums.shape
+    expected_shape = [1, 2, (seq_len + 127) // 128, (seq_len + 127) // 128]
+    assert attn_sums.shape == expected_shape
+    assert block_mask.shape == expected_shape
+    assert block_mask.dtype == paddle.bool
     assert bool(paddle.all(paddle.isfinite(attn_sums.astype(paddle.float32))))
-    assert paddle.allclose(
-        attn_sums.astype(paddle.float32),
-        legacy_attn_sums.astype(paddle.float32),
-        atol=1e-2,
-        rtol=1e-2,
-    )
-    assert bool(paddle.equal_all(block_mask, legacy_block_mask))
 
 
-def test_rrattn_estimate_flashmask_smoke_does_not_use_legacy(monkeypatch):
+def test_rrattn_estimate_flashmask_smoke_uses_startend():
     import rrattn.rrattention as rrattention
-
-    def fail_legacy(*args, **kwargs):
-        raise AssertionError("rrattn_estimate unexpectedly called legacy path")
-
-    monkeypatch.setattr(rrattention, "rrattn_estimate_legacy", fail_legacy)
 
     _set_device()
     query_states = _random_bhsd(1, 4, 257, seed=303)
@@ -98,7 +79,7 @@ def test_rrattn_estimate_flashmask_smoke_does_not_use_legacy(monkeypatch):
         stride=8,
         threshold=0.95,
         causal=True,
-        rrattn_version="v2",
+        rrattn_version="bad",
         startend_row_indices=startend_row_indices,
     )
 
@@ -109,12 +90,12 @@ def test_rrattn_estimate_flashmask_smoke_does_not_use_legacy(monkeypatch):
 
 
 def test_fa3_causal_block_masks_are_bottom_right_aligned():
-    import rrattn.kernels_rrattn as kernels_rrattn
+    import rrattn.rrattention as rrattention
 
     input_tensor = paddle.zeros([1, 1, 2, 4], dtype=paddle.float32)
 
-    visible_mask = kernels_rrattn._build_fa3_causal_block_visible_mask(input_tensor, 256, 512)
-    mandatory_mask = kernels_rrattn._build_causal_prefill_mandatory_mask(input_tensor, 256, 512)
+    visible_mask = rrattention._build_fa3_causal_block_visible_mask(input_tensor, 256, 512)
+    mandatory_mask = rrattention._build_causal_prefill_mandatory_mask(input_tensor, 256, 512)
 
     expected_visible = paddle.to_tensor(
         [[[[True, True, True, False], [True, True, True, True]]]],
@@ -130,12 +111,12 @@ def test_fa3_causal_block_masks_are_bottom_right_aligned():
 
 
 def test_fa3_causal_block_masks_use_token_offset():
-    import rrattn.kernels_rrattn as kernels_rrattn
+    import rrattn.rrattention as rrattention
 
     input_tensor = paddle.zeros([1, 1, 3, 3], dtype=paddle.float32)
 
-    visible_mask = kernels_rrattn._build_fa3_causal_block_visible_mask(input_tensor, 257, 384)
-    mandatory_mask = kernels_rrattn._build_causal_prefill_mandatory_mask(input_tensor, 257, 384)
+    visible_mask = rrattention._build_fa3_causal_block_visible_mask(input_tensor, 257, 384)
+    mandatory_mask = rrattention._build_causal_prefill_mandatory_mask(input_tensor, 257, 384)
 
     expected_visible = paddle.to_tensor(
         [[[[True, True, False], [True, True, True], [True, True, True]]]],
@@ -163,7 +144,7 @@ def test_rrattn_estimate_causal_suffix_uses_token_offset():
         stride=8,
         threshold=0.95,
         causal=True,
-        rrattn_version="v2",
+        rrattn_version="bad",
         keep_sink=False,
         keep_recent=False,
         chunk_size=512,

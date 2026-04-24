@@ -456,7 +456,6 @@ def main():
         method=args.method,
         threshold=args.threshold,
         stride=args.stride,
-        rrattn_version=args.rrattn_version,
     )
     clear_cache(device)
     print(

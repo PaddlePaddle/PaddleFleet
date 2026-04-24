@@ -1168,7 +1168,6 @@ class PaddleWorkerModel(LLM):
         self.method = kwargs.get("method", "full")
         self.threshold = kwargs.get("threshold", 0.95)
         self.stride = kwargs.get("stride", 8)
-        self.rrattn_version = kwargs.get("rrattn_version", "v1")
         self.dtype = kwargs.get("dtype", "bfloat16")
         self.worker_python = kwargs.get("paddle_worker_python") or os.environ.get("PADDLE_WORKER_PYTHON") or sys.executable
         self.worker_device = kwargs.get("paddle_worker_device") or os.environ.get("PADDLE_WORKER_DEVICE")
@@ -1215,8 +1214,6 @@ class PaddleWorkerModel(LLM):
             str(self.threshold),
             "--stride",
             str(self.stride),
-            "--rrattn_version",
-            self.rrattn_version,
             "--dtype",
             self.dtype,
         ]
@@ -1670,7 +1667,6 @@ def load_LLM(args):
         kwargs["method"] = args.method
         kwargs["threshold"] = args.threshold
         kwargs["stride"] = args.stride
-        kwargs["rrattn_version"] = args.rrattn_version
         kwargs["dtype"] = "float32" if args.no_bf16 else "bfloat16"
         kwargs["paddle_worker_python"] = args.paddle_worker_python
         kwargs["paddle_worker_device"] = args.paddle_worker_device

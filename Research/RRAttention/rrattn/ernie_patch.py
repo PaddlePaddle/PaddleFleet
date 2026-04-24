@@ -1,16 +1,11 @@
 from typing import Optional, Tuple
 
 import paddle
-from paddleformers.transformers.ernie4_5.modeling import (
-    Ernie4_5Attention,
-    apply_fused_rope,
-    apply_rotary_pos_emb,
-)
-
-from .patch_utils import attention_branch, patch_attention_layers
 
 
 def get_ernie_attention_classes():
+    from paddleformers.transformers.ernie4_5.modeling import Ernie4_5Attention
+
     attention_classes = [Ernie4_5Attention]
     try:
         from paddleformers.transformers.ernie4_5_moe.modeling import Ernie4_5_MoeAttention
@@ -32,6 +27,8 @@ def new_attention_forward(
     output_attentions: bool = False,
     use_cache: bool = False,
 ):
+    from .patch_utils import attention_branch
+
     """Compute attention outputs."""
     mix_layer = self.qkv_proj(hidden_states)
     if self.config.sequence_parallel:
@@ -61,8 +58,12 @@ def new_attention_forward(
     value_states = value_states.transpose(1, 2)
 
     if self.config.apply_rope_fusion:
+        from paddleformers.transformers.ernie4_5.modeling import apply_fused_rope
+
         query_states, key_states = apply_fused_rope(query_states, key_states, self.config.rope_theta)
     else:
+        from paddleformers.transformers.ernie4_5.modeling import apply_rotary_pos_emb
+
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
@@ -98,6 +99,8 @@ def patch_ernie_attention(
     rrattn_version: str = "v1",
     **kwargs,
 ):
+    from .patch_utils import patch_attention_layers
+
     return patch_attention_layers(
         model,
         get_ernie_attention_classes(),

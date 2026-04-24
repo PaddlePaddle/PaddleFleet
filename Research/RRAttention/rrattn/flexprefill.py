@@ -206,7 +206,7 @@ def block_wise_decode_attention_kernel(
     tl.store(o_ptrs, acc_o.to(tl.bfloat16), boundary_check=(0,))
 
 
-@use_torch_proxy_guard()
+@use_torch_proxy_guard(silent=True)
 def triton_block_wise_decode_attention(
     q: paddle.Tensor,
     k: paddle.Tensor,
@@ -339,7 +339,7 @@ def count_kernel(
     tl.store(y_ptr + off_r * stride_yr, y, off_r < r)
 
 
-@use_torch_proxy_guard()
+@use_torch_proxy_guard(silent=True)
 def triton_column_count_cumsum(x: paddle.Tensor, num_columns: int) -> paddle.Tensor:
     """count columns of each row for a given index tensor, then do cumsum
 
@@ -523,7 +523,7 @@ def block_wise_prefill_attention_kernel(
     tl.store(o_ptrs, acc_o.to(tl.bfloat16), boundary_check=(0,))
 
 
-@use_torch_proxy_guard()
+@use_torch_proxy_guard(silent=True)
 def triton_block_wise_prefill_attention(
     q: paddle.Tensor,
     k: paddle.Tensor,
@@ -647,7 +647,7 @@ def triton_block_wise_prefill_attention(
     return o
 
 
-@use_torch_proxy_guard()
+@use_torch_proxy_guard(silent=True)
 def triton_block_wise_attention(
     q: paddle.Tensor,
     k: paddle.Tensor,
@@ -769,7 +769,7 @@ def bnhd_pool_kernel(
     )
 
 
-@use_torch_proxy_guard()
+@use_torch_proxy_guard(silent=True)
 def triton_bnhd_pool(x: paddle.Tensor, kernel_size: int, pool_type: str = "avg"):
     b, n, h, d = x.shape
     assert d in {16, 32, 64, 128}
@@ -867,7 +867,7 @@ def bhn_sumpool_kernel(
     tl.store(y_ptr + off_h * stride_yh, y, mask=y_mask)
 
 
-@use_torch_proxy_guard()
+@use_torch_proxy_guard(silent=True)
 def triton_bhn_sumpool(x: paddle.Tensor, kernel_size: int):
     b, h, n = x.shape
     assert kernel_size in {16, 32, 64, 128, 256, 512}

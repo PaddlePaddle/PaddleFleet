@@ -1,9 +1,6 @@
 from typing import Optional, Tuple
 
 import paddle
-from paddleformers.transformers.llama.modeling import LLamaAttention, apply_rotary_pos_emb
-
-from .patch_utils import attention_branch, patch_attention_layers
 
 
 @paddle.no_grad()
@@ -16,6 +13,8 @@ def new_attention_forward(
     position_embeddings: Optional[Tuple[paddle.Tensor, paddle.Tensor]] = None,
     use_cache: bool = False,
 ):
+    from .patch_utils import attention_branch
+
     if self.config.sequence_parallel:
         seq_len = self.config.max_sequence_length
         batch_size = hidden_states.shape[0] * self.config.tensor_model_parallel_size // seq_len
@@ -28,6 +27,8 @@ def new_attention_forward(
     query_states = self.q_proj(hidden_states).reshape(q_shape).transpose(1, 2)
     key_states = self.k_proj(hidden_states).reshape(kv_shape).transpose(1, 2)
     value_states = self.v_proj(hidden_states).reshape(kv_shape).transpose(1, 2)
+
+    from paddleformers.transformers.llama.modeling import apply_rotary_pos_emb
 
     cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -60,6 +61,10 @@ def patch_llama_attention(
     rrattn_version: str = "v1",
     **kwargs,
 ):
+    from paddleformers.transformers.llama.modeling import LLamaAttention
+
+    from .patch_utils import patch_attention_layers
+
     return patch_attention_layers(
         model,
         LLamaAttention,

@@ -16,8 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rrattn.config_rrattn import RRAttnConfig, TUNABLE_FIELDS, get_rrattn_config
-from rrattn.kernels_rrattn import rr_attn_estimate_triton_func
+from rrattn.rrattention import RRAttnConfig, TUNABLE_FIELDS, get_rrattn_config, rr_attn_estimate_triton_func
 
 
 DEFAULT_SEQ_LENS = "32768"
@@ -320,7 +319,7 @@ def print_summary(
 
     if best_by_head_dim:
         print("\nManual apply:")
-        print("  Edit rrattn/config_rrattn.py get_rrattn_config; for tuned head_dim values, use:")
+        print("  Edit rrattn/rrattention.py get_rrattn_config; for tuned head_dim values, use:")
         for head_dim in head_dims:
             if head_dim not in best_by_head_dim:
                 continue

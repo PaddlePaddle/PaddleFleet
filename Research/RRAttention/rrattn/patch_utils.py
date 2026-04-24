@@ -157,8 +157,7 @@ def attention_branch(
 ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor]]:
     method = getattr(module, "method", "rrattn")
     validate_method(method)
-    rrattn_version = getattr(module, "rrattn_version", "v1")
-    should_repeat_kv = method != "rrattn" or rrattn_version != "v2"
+    should_repeat_kv = method != "rrattn"
     if should_repeat_kv:
         key_states = repeat_kv(key_states, module.num_key_value_groups)
         value_states = repeat_kv(value_states, module.num_key_value_groups)
@@ -193,7 +192,6 @@ def attention_branch(
                 keep_sink=getattr(module, "keep_sink", True),
                 keep_recent=getattr(module, "keep_recent", True),
                 chunk_size=getattr(module, "chunk_size", 16384),
-                rrattn_version=rrattn_version,
                 layer_idx=getattr(module, "layer_idx", None),
                 startend_row_indices=attn_mask_startend_row_indices,
                 config=getattr(module, "rrattn_config", None),
