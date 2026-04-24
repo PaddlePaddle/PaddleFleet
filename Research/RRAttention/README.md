@@ -97,30 +97,24 @@ model = patch_llama_attention(
 
 ### Run HELMET Evaluation
 
-The release script runs the default HELMET sweep for `rrattn` and full attention on the short configs and the 128k configs:
+The release script runs the default HELMET sweep for `rrattn` and full attention on the short configs and the 128k configs. Set `model_name_or_paths` to one or more local checkpoint paths before running it:
 
 ```bash
-bash ./scripts/run_helmet.sh
-```
-
-Common environment overrides:
-
-```bash
-model_name_or_paths=model-name-or-path \
+model_name_or_paths=/path/to/local-model-or-paddle-checkpoint \
 data_root_dir=eval/HELMET \
 qa_model_name_or_path=eval/HELMET/models/roberta-large-squad \
 autoais_model_name_or_path=eval/HELMET/models/t5_xxl_true_nli_mixture \
 bash ./scripts/run_helmet.sh
 ```
 
-`model_name_or_path` can be a Hugging Face model name, a local Hugging Face checkpoint path, or a converted Paddle checkpoint path.
+`model_name_or_path` must be a local checkpoint path: either a local Hugging Face safetensors directory or a converted Paddle checkpoint path. Remote Hugging Face repo IDs are not loaded directly; download or convert the model first.
 
 For a single task/config, run HELMET directly:
 
 ```bash
 cd eval/HELMET
 python eval.py \
-  --model_name_or_path model-name-or-path \
+  --model_name_or_path /path/to/local-model-or-paddle-checkpoint \
   --data_root_dir . \
   --qa_model_name_or_path ./models/roberta-large-squad \
   --autoais_model_name_or_path ./models/t5_xxl_true_nli_mixture \
@@ -137,7 +131,7 @@ python eval.py \
 
 ```bash
 python scripts/speed_test.py \
-  --model-name model-name-or-path \
+  --model-name /path/to/local-model-or-paddle-checkpoint \
   --method rrattn \
   --threshold 0.95 \
   --stride 8 \
@@ -146,7 +140,7 @@ python scripts/speed_test.py \
   --output-dir speed_results
 ```
 
-`--model-name` can be a Hugging Face model name, a local Hugging Face checkpoint path, or a converted Paddle checkpoint path. Supported methods are `rrattn`, `full`, `xattn`, and `flex`. If model auto-detection is not sufficient, pass `--model-type llama`, `--model-type qwen`, or `--model-type ernie`.
+`--model-name` must be a local checkpoint path: either a local Hugging Face safetensors directory or a converted Paddle checkpoint path. Remote Hugging Face repo IDs are not loaded directly; download or convert the model first. Supported methods are `rrattn`, `full`, `xattn`, and `flex`. If model auto-detection is not sufficient, pass `--model-type llama`, `--model-type qwen`, or `--model-type ernie`.
 
 ### Repository Layout
 

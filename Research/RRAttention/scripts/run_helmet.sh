@@ -40,7 +40,12 @@ export PYTHONPATH="`pwd`:${PYTHONPATH:-}"
 
 cd "eval/HELMET"
 
-model_name_or_paths=${model_name_or_paths:-"meta-llama/Llama-3.1-8B-Instruct"}
+model_name_or_paths=${model_name_or_paths:-}
+if [[ -z "$model_name_or_paths" ]]; then
+    echo "Please set model_name_or_paths to one or more local checkpoint paths."
+    echo "Example: model_name_or_paths=/path/to/local-model-or-paddle-checkpoint bash ./scripts/run_helmet.sh"
+    exit 1
+fi
 data_root_dir=${data_root_dir:-"."}
 qa_model_name_or_path=${qa_model_name_or_path:-"./models/roberta-large-squad"}
 autoais_model_name_or_path=${autoais_model_name_or_path:-"./models/t5_xxl_true_nli_mixture"}
