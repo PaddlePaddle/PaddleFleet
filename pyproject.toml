@@ -263,7 +263,7 @@ known-first-party = ["paddlefleet"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "packages"]
-pythonpath = ["src", "packages/paddlefleet_ops/src"]
+pythonpath = ["src"]
 addopts = "-v"
 # Ignore third_party and build directories
 norecursedirs = [

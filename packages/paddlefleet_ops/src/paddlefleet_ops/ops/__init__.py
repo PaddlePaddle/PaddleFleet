@@ -258,6 +258,17 @@ if paddle.is_compiled_with_cuda():
             scope={"sonicmoe", "quack", "triton"}, silent=True
         )
         _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
+        # Also register sonicmoe sub-modules under the "paddlefleet.ops.sonicmoe.*"
+        # namespace so that imports like `from paddlefleet.ops.sonicmoe.functional
+        # import ...` (used in moe_layer.py) find the already-loaded modules in
+        # sys.modules instead of re-executing the sub-package files without the
+        # torch proxy active.
+        import sys as _sys
+        for _key in list(_sys.modules.keys()):
+            if _key == "paddlefleet_ops.ops.sonicmoe" or _key.startswith("paddlefleet_ops.ops.sonicmoe."):
+                _alias = _key.replace("paddlefleet_ops.ops.", "paddlefleet.ops.", 1)
+                if _alias not in _sys.modules:
+                    _sys.modules[_alias] = _sys.modules[_key]
     else:
         warning, error = _sonic_moe_requirement(
             "paddlefleet_ops.ops.sonicmoe", hint=SONIC_MOE_HINT
