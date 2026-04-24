@@ -50,16 +50,18 @@ def get_rrattn_config(head_dim: int, gpu_name: str | None = None) -> RRAttnConfi
 
     if "h100" in gpu_name or "h800" in gpu_name:
         if head_dim <= 64:
-            return RRAttnConfig(num_warps=4, num_stages=3)
-        if head_dim <= 128:
-            return RRAttnConfig(num_warps=8, num_stages=3)
-        return RRAttnConfig(num_warps=8, num_stages=2)
+            return RRAttnConfig(block_m=128, block_n=64, num_warps=4, num_stages=1, segment_size=256)
+        elif head_dim <= 128:
+            return RRAttnConfig(block_m=128, block_n=64, num_warps=4, num_stages=3, segment_size=256)
+        else:
+            return RRAttnConfig(block_m=128, block_n=64, num_warps=8, num_stages=1, segment_size=256)
 
     if head_dim <= 64:
         return RRAttnConfig(block_m=128, block_n=16, num_warps=4, num_stages=1, segment_size=256)
-    if head_dim <= 128:
+    elif head_dim <= 128:
         return RRAttnConfig(block_m=128, block_n=32, num_warps=4, num_stages=2, segment_size=256)
-    return RRAttnConfig(num_warps=8, num_stages=2)
+    else:
+        return RRAttnConfig(num_warps=4, num_stages=1)
 
 
 __all__ = [
