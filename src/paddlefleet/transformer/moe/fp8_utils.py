@@ -1136,7 +1136,10 @@ class ExpertsGroupGemmContiguousNode:
             dx = paddle.zeros_like(out_grad)
             probs_grad = paddle.zeros_like(unzipped_probs)
 
-            if not self.moe_grouped_gemm or self.use_fp8_mlp:
+            if not (
+                self.moe_grouped_gemm
+                and (not self.use_fp8_mlp or self.moe_deep_gemm)
+            ):
                 for expert in self.experts:
                     if expert is None:
                         continue
@@ -1205,7 +1208,7 @@ class ExpertsGroupGemmContiguousNode:
         subbatch_rows = self.moe_subbatch_token_num_after_dispatch
         if subbatch_rows is None:
             self.tokens_per_expert_tensor = paddle.to_tensor(
-                self.tokens_per_expert, dtype="int32"
+                self.tokens_per_expert, dtype="int64"
             )
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
@@ -1220,7 +1223,7 @@ class ExpertsGroupGemmContiguousNode:
         nparts = (rows + subbatch_rows - 1) // subbatch_rows
         if nparts <= 1:
             self.tokens_per_expert_tensor = paddle.to_tensor(
-                self.tokens_per_expert, dtype="int32"
+                self.tokens_per_expert, dtype="int64"
             )
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
@@ -1247,7 +1250,7 @@ class ExpertsGroupGemmContiguousNode:
                 self.o1 = o1._slice(s_idx, e_idx)
             self.tokens_per_expert = [e_idx - s_idx]
             self.tokens_per_expert_tensor = paddle.to_tensor(
-                self.tokens_per_expert, dtype="int32"
+                self.tokens_per_expert, dtype="int64"
             )
             if self.moe_deep_gemm:
                 self.tokens_per_expert_indices = paddle.repeat_interleave(
