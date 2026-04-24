@@ -35,10 +35,7 @@ from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 
-# Alignment switch: match ErnieCore's MoE router behavior for bit-level alignment
-_ERNIECORE_ALIGNMENT = (
-    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-)
+# MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
 # Lazy-loaded EC FusedMoETopk Triton kernel for bit-exact alignment
@@ -59,9 +56,9 @@ _moe_router_logger = logging.getLogger(__name__)
 
 def _log_moe_md5(tensor, name, layer_idx=None):
     """Log MD5 of a tensor for MoE precision alignment debugging."""
-    if _LOG_LAYER_MD5 and _ERNIECORE_ALIGNMENT:
-        from paddlefleet.transformer.transformer_layer import TransformerLayer
+    from paddlefleet.transformer.transformer_layer import TransformerLayer
 
+    if _LOG_LAYER_MD5 and TransformerLayer._gpt_model_use_experimental_version:
         if TransformerLayer._skip_mtp_probes:
             return  # Skip MTP passes — EC has no MTP
         data = tensor.detach().cast("float32").numpy().tobytes()
@@ -615,17 +612,11 @@ class TopKRouter(StandardMoERouter):
                 gates_ori.sum(axis=-1, keepdim=True) + 1e-20
             )
 
-        if _ERNIECORE_ALIGNMENT:
+        if getattr(self.config, "gpt_model_use_experimental_version", False):
             # Use EC's FusedMoETopk Triton kernel for bit-exact alignment.
             # This ensures the topk selection + normalization uses the exact same
             # GPU kernel as ErnieCore, avoiding FP32 rounding differences between
             # Triton's scalar loop and Paddle's tensor ops.
-            if not hasattr(self, "_ec_topk_path_logged"):
-                print(
-                    "[ALIGNMENT PATH HIT] moe_router: FusedMoETopk Triton kernel used",
-                    flush=True,
-                )
-                self._ec_topk_path_logged = True
             FusedMoETopk = _get_fused_moe_topk()
             use_node_limit = self.n_group > 1
             probs_for_choice = (
@@ -692,8 +683,10 @@ class TopKRouter(StandardMoERouter):
         gates_masked = gates * mask
 
         # norm
-        if not _ERNIECORE_ALIGNMENT:
-            # When _ERNIECORE_ALIGNMENT is True, top_gate is already normalized by FusedMoETopk
+        if not getattr(
+            self.config, "gpt_model_use_experimental_version", False
+        ):
+            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
             if self.norm_topk_prob:
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator

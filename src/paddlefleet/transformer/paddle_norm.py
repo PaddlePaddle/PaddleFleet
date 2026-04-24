@@ -248,15 +248,6 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
                 f"[LOSS_PATH_MD5] rank={rank} final_layernorm_output shape={list(h.shape)} md5={md5}",
                 flush=True,
             )
-            # Save tensor for offline comparison
-            save_dir = "/root/paddlejob/share-storage/gpfs/system-public/wangxiangzhe/V2Precision/loss_debug_tensors/pf"
-            os.makedirs(save_dir, exist_ok=True)
-            _mb_counter = getattr(self, "_mb_counter", 0)
-            paddle.save(
-                h,
-                f"{save_dir}/rank{rank}_mb{_mb_counter}_final_layernorm_output.pd",
-            )
-            self._mb_counter = _mb_counter + 1
 
         return rst
 

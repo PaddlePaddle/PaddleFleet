@@ -223,19 +223,6 @@ class LanguageLoss(FleetLayer):
                 f"[LOSS_PATH_MD5] rank={rank} loss_input_labels shape={list(labels.shape)} md5={lb_md5}",
                 flush=True,
             )
-            # Save tensors for offline comparison
-            save_dir = "/root/paddlejob/share-storage/gpfs/system-public/wangxiangzhe/V2Precision/loss_debug_tensors/pf"
-            os.makedirs(save_dir, exist_ok=True)
-            _loss_counter = getattr(self, "_loss_counter", 0)
-            paddle.save(
-                logits,
-                f"{save_dir}/rank{rank}_mb{_loss_counter}_loss_logits.pd",
-            )
-            paddle.save(
-                labels,
-                f"{save_dir}/rank{rank}_mb{_loss_counter}_loss_labels.pd",
-            )
-            self._loss_counter = _loss_counter + 1
 
         if self.use_subbatch and seq_len > self.loss_subbatch_sequence_length:
 
@@ -291,11 +278,30 @@ class LanguageLoss(FleetLayer):
                     f"[LOSS_PATH_MD5] rank={rank} loss_sum={loss_sum_val} final_loss={loss_sum_val / valid_count}",
                     flush=True,
                 )
+                # Also compute line-wise loss (matches EC's _line_wise_loss) for exact comparison
+                if self.config.gpt_model_use_experimental_version:
+                    _probe_loss_2d = loss.cast(
+                        paddle.float32
+                    ) * lossmask.reshape(labels.shape)
+                    _probe_lm_2d = lossmask.reshape(labels.shape)
+                    _probe_tc = _probe_lm_2d.sum(-1)
+                    _probe_inv = (_probe_tc == 0).astype(paddle.float32)
+                    _probe_lpl = _probe_loss_2d.sum(-1) / (
+                        _probe_tc + 1e-6 * _probe_inv
+                    )
+                    _probe_lpl = _probe_lpl * (1 - _probe_inv)
+                    _probe_lw = _probe_lpl.sum() / (
+                        (1 - _probe_inv).sum() + 1e-6
+                    )
+                    print(
+                        f"[LOSS_PATH_MD5] rank={rank} line_wise_loss={_probe_lw.item():.20f}",
+                        flush=True,
+                    )
 
             # EC-compat: line-wise loss (per-sample mean then average across samples)
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
             # is present, which changes the value due to division by (count + 1e-6).
-            if os.environ.get("gpt_model_use_experimental_version", "") == "1":
+            if self.config.gpt_model_use_experimental_version:
                 loss_2d = loss.cast(paddle.float32) * lossmask.reshape(
                     labels.shape
                 )
@@ -353,10 +359,31 @@ class LanguageLoss(FleetLayer):
                     labels_cur_depth = labels_ori[
                         :, (depth + 1) : (depth + 1 + seq_length)
                     ]
-                    loss_cur_depth = self._forward(
-                        logits_cur_depth,
-                        labels_cur_depth,
-                    )
+                    if self.config.gpt_model_use_experimental_version:
+                        # Align with EB: compute per-token loss matrix and reduce
+                        # with global sum/count instead of going through forward_impl
+                        # which applies line-wise loss.
+                        loss_matrix_cur_depth = self.loss_func(
+                            logits_cur_depth.cast("float32"), labels_cur_depth
+                        )
+                        lossmask_cur_depth = (
+                            labels_cur_depth != self.ignored_index
+                        ).cast(paddle.float32)
+                        loss_matrix_cur_depth = loss_matrix_cur_depth.cast(
+                            paddle.float32
+                        ).reshape([-1]) * lossmask_cur_depth.reshape([-1])
+                        if lossmask_cur_depth.sum().item() > 0:
+                            loss_cur_depth = (
+                                loss_matrix_cur_depth.sum()
+                                / lossmask_cur_depth.sum()
+                            )
+                        else:
+                            loss_cur_depth = loss_matrix_cur_depth.sum() * 0.0
+                    else:
+                        loss_cur_depth = self._forward(
+                            logits_cur_depth,
+                            labels_cur_depth,
+                        )
                     mtp_loss.append(loss_cur_depth)
                     paddle.device.cuda.empty_cache()
             else:
@@ -452,12 +479,26 @@ class LanguageLoss(FleetLayer):
                 else:
                     return main_loss
 
-            loss = add_loss(
-                lm_loss,
-                self.config.mtp_loss_scaling_factor
-                * sum(mtp_loss)
-                / len(mtp_loss),
-            )
+            if self.config.gpt_model_use_experimental_version:
+                # Align with EB: accumulate inside loop to match float32
+                # arithmetic order: loss += scaling * loss_i / N
+                loss = lm_loss
+                if self.config.add_mtp_loss:
+                    num_mtp = len(mtp_loss)
+                    for mtp_l in mtp_loss:
+                        loss = (
+                            loss
+                            + self.config.mtp_loss_scaling_factor
+                            * mtp_l
+                            / num_mtp
+                        )
+            else:
+                loss = add_loss(
+                    lm_loss,
+                    self.config.mtp_loss_scaling_factor
+                    * sum(mtp_loss)
+                    / len(mtp_loss),
+                )
 
             return loss
         else:
@@ -465,3 +506,112 @@ class LanguageLoss(FleetLayer):
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="LanguageLoss")
+
+
+class MainLanguageLoss(LanguageLoss):
+    # Class-level tracker for MTP loss, read by trainer for logging.
+    mtp_loss_tracker: dict[str, float] = {}
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        pg_collection=None,
+    ) -> None:
+        super().__init__(config=config, pg_collection=pg_collection)
+
+    def forward(self, dict_args: dict | list, labels: Tensor) -> Tensor:
+        assert (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+        )
+        labels_ori = labels
+        lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+        seq_length = lm_labels.shape[1]
+
+        mtp_loss = dict_args["mtp_loss"]
+        logits = dict_args["logits"]
+
+        assert not self.config.mtp_distillation_loss, (
+            "separate mtp head & loss don't support mtp_distillation_loss"
+        )
+
+        if self.config.train_mtp_only:
+            lm_loss = 0.0
+        else:
+            lm_loss = self._forward(logits, lm_labels)
+
+        # Store detached MTP loss tensors into class-level tracker.
+        # Use .detach() instead of .item() to avoid GPU synchronization on every
+        # micro-batch. The trainer will call .item() only at logging steps.
+        for i, loss_val in enumerate(mtp_loss):
+            MainLanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
+                loss_val.detach()
+            )
+
+        def add_loss(main_loss, loss):
+            if self.config.add_mtp_loss:
+                return main_loss + loss - loss.detach()
+            else:
+                return main_loss
+
+        loss = add_loss(
+            lm_loss,
+            self.config.mtp_loss_scaling_factor * sum(mtp_loss) / len(mtp_loss),
+        )
+
+        return loss
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="MainLanguageLoss")
+
+
+class MTPLanguageLoss(LanguageLoss):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        pg_collection=None,
+    ) -> None:
+        super().__init__(config=config, pg_collection=pg_collection)
+
+    def forward(self, dict_args: dict):
+        mtp_logits = dict_args.get("mtp_logits")
+        labels = dict_args.get("labels")
+        assert mtp_logits is not None, (
+            "separate mtp loss must provide mtp_logits"
+        )
+        assert labels is not None, "separate mtp loss must provide labels"
+        assert (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+        )
+        labels_ori = labels
+        lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+        seq_length = lm_labels.shape[1]
+
+        mtp_loss = []
+
+        assert not self.config.mtp_distillation_loss, (
+            "separate mtp head & loss don't support mtp_distillation_loss"
+        )
+
+        for depth in range(self.config.num_nextn_predict_layers):
+            logits_cur_depth = mtp_logits[depth]
+            labels_cur_depth = labels_ori[
+                :, (depth + 1) : (depth + 1 + seq_length)
+            ]
+            loss_cur_depth = self._forward(
+                logits_cur_depth,
+                labels_cur_depth,
+            )
+            mtp_loss.append(loss_cur_depth)
+            paddle.device.cuda.empty_cache()
+
+        dict_args.pop("mtp_logits")
+        dict_args["mtp_loss"] = mtp_loss
+
+        return dict_args
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="MTPLanguageLoss")

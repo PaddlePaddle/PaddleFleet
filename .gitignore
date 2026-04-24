@@ -15,6 +15,9 @@ runs/
 **/dist/
 .idea
 log
+ducc_storage/
+paddlefleet-*.whl
+test_log
 
 # Ignore files generated from `uv sync` for custom ops
 packages/paddlefleet_ops/src/paddlefleet_ops/_extensions/ops_pd_.so
@@ -29,6 +32,8 @@ src/paddlefleet/ops/deep_ep
 src/paddlefleet/ops/deep_ep_cpp.so
 src/paddlefleet/ops/sonicmoe
 src/paddlefleet/ops/quack
+src/paddlefleet/ops/flash_mask
+
 # packages/paddlefleet_ops (new path after refactor)
 packages/paddlefleet_ops/src/_third_party_install_temp
 packages/paddlefleet_ops/src/paddlefleet_ops/ops/deep_gemm

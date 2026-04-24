@@ -27,6 +27,7 @@ from paddlefleet.transformer.moe.moe_utils import (
     _all_gather_local_tokens,
     global_moe_balance_training_logs_enabled,
     log_moe_balance,
+    log_moe_losses,
 )
 from paddlefleet.transformer.utils import profile
 
@@ -34,6 +35,11 @@ from paddlefleet.transformer.utils import profile
 class DummyLogs(dict):
     def is_moe_balance_logs_enabled(self):
         return True
+
+
+class DummyDisabledLogs(dict):
+    def is_moe_balance_logs_enabled(self):
+        return False
 
 
 class TestMoeBalanceLogging(unittest.TestCase):
@@ -118,6 +124,53 @@ class TestMoeBalanceLogging(unittest.TestCase):
 
     def test_logs_object_enable_balance_gate(self):
         self.assertTrue(global_moe_balance_training_logs_enabled())
+
+    def test_log_moe_losses_logs_non_none_values(self):
+        aux_loss = paddle.to_tensor(1.25, dtype="float32")
+        z_loss = paddle.to_tensor(2.5, dtype="float32")
+
+        log_moe_losses(layer_number=3, aux_loss=aux_loss, z_loss=z_loss)
+        logs = get_global_training_logs()
+
+        self.assertAlmostEqual(logs["aux_loss"].item(), 1.25)
+        self.assertAlmostEqual(logs["aux_loss_layer_3"].item(), 1.25)
+        self.assertAlmostEqual(logs["zloss"].item(), 2.5)
+        self.assertAlmostEqual(logs["zloss_layer_3"].item(), 2.5)
+
+    def test_log_moe_losses_skips_none_values(self):
+        z_loss = paddle.to_tensor(3.5, dtype="float32")
+
+        log_moe_losses(layer_number=5, aux_loss=None, z_loss=z_loss)
+        logs = get_global_training_logs()
+
+        self.assertNotIn("aux_loss", logs)
+        self.assertNotIn("aux_loss_layer_5", logs)
+        self.assertAlmostEqual(logs["zloss"].item(), 3.5)
+        self.assertAlmostEqual(logs["zloss_layer_5"].item(), 3.5)
+
+    def test_log_moe_losses_without_layer_number_only_logs_global_keys(self):
+        aux_loss = paddle.to_tensor(1.0, dtype="float32")
+        z_loss = paddle.to_tensor(2.0, dtype="float32")
+
+        log_moe_losses(layer_number=None, aux_loss=aux_loss, z_loss=z_loss)
+        logs = get_global_training_logs()
+
+        self.assertAlmostEqual(logs["aux_loss"].item(), 1.0)
+        self.assertAlmostEqual(logs["zloss"].item(), 2.0)
+        self.assertNotIn("aux_loss_layer_None", logs)
+        self.assertNotIn("zloss_layer_None", logs)
+
+    def test_log_moe_losses_respects_balance_gate(self):
+        unset_global_variables()
+        set_global_training_logs(DummyDisabledLogs())
+
+        log_moe_losses(
+            layer_number=1,
+            aux_loss=paddle.to_tensor(1.0, dtype="float32"),
+            z_loss=paddle.to_tensor(2.0, dtype="float32"),
+        )
+
+        self.assertEqual(get_global_training_logs(), {})
 
     def test_profile_stops_timer_on_exception(self):
         events = []

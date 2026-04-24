@@ -31,6 +31,10 @@ except ImportError:
 import paddle.distributed as dist
 from paddle.autograd.py_layer import PyLayer
 
+from paddlefleet.tensor_parallel.random import (
+    get_cuda_rng_tracker,
+    get_expert_parallel_rng_tracker_name,
+)
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.utils import get_pg_size
 
@@ -232,7 +236,13 @@ class RandomSTE(paddle.autograd.PyLayer):
     def forward(ctx, x):
         ctx.x_shape = x.shape
         ctx.x_dtype = x.dtype
-        return paddle.randn(x.shape).cast(x.dtype)
+        if dist.get_world_size() <= 1:
+            return paddle.randn(x.shape).cast(x.dtype)
+        else:
+            with get_cuda_rng_tracker().fork(
+                get_expert_parallel_rng_tracker_name()
+            ):
+                return paddle.randn(x.shape).cast(x.dtype)
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -253,6 +263,29 @@ def global_moe_balance_training_logs_enabled():
 
     is_enabled = getattr(logs, "is_moe_balance_logs_enabled", None)
     return callable(is_enabled) and is_enabled()
+
+
+def log_moe_losses(layer_number, aux_loss=None, z_loss=None):
+    if not global_moe_balance_training_logs_enabled():
+        return
+    logs = get_global_training_logs()
+    if logs is None or not hasattr(logs, "update"):
+        return
+
+    log = {}
+    if aux_loss is not None:
+        aux_loss = aux_loss.detach()
+        log["aux_loss"] = aux_loss
+        if layer_number is not None:
+            log[f"aux_loss_layer_{layer_number}"] = aux_loss
+
+    if z_loss is not None:
+        z_loss = z_loss.detach()
+        log["zloss"] = z_loss
+        if layer_number is not None:
+            log[f"zloss_layer_{layer_number}"] = z_loss
+
+    logs.update(**log)
 
 
 def _all_gather_local_tokens(local_tokens_per_expert, group):

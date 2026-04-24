@@ -109,6 +109,9 @@ class GPTEmbedding(FleetLayer):
         packed_seq_params: PackedSeqParams = None,
     ):
         input_ids = dict_args["input_ids"]
+        labels = dict_args.get("labels", None)
+        if labels is not None:
+            labels = labels.cuda()
         position_ids = dict_args.get("position_ids", None)
         device = paddle.device.get_device().split(":")[0].lower()
         position_ids = (
@@ -123,11 +126,6 @@ class GPTEmbedding(FleetLayer):
             attn_mask_startend_row_indices = dict_args.get(
                 "startend_row_indices", None
             )
-            if attn_mask_startend_row_indices is not None:
-                print(
-                    "[ALIGNMENT PATH HIT] gpt_embedding: startend_row_indices fallback key used",
-                    flush=True,
-                )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None
@@ -370,7 +368,38 @@ class GPTEmbedding(FleetLayer):
             "position_ids": position_ids,
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,
+            "labels": labels,
         }
+        # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all
+        # through dict_args to MTP layer. They must both be present or both be absent.
+        mtp_startend_row_indices_all = dict_args.get(
+            "mtp_startend_row_indices_all", None
+        )
+        mtp_hidden_inputs_mask_all = dict_args.get(
+            "mtp_hidden_inputs_mask_all", None
+        )
+        assert (mtp_startend_row_indices_all is None) == (
+            mtp_hidden_inputs_mask_all is None
+        ), (
+            "mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all must both be None or both be not None, "
+            f"got mtp_startend_row_indices_all={'None' if mtp_startend_row_indices_all is None else 'not None'}, "
+            f"mtp_hidden_inputs_mask_all={'None' if mtp_hidden_inputs_mask_all is None else 'not None'}"
+        )
+        if mtp_startend_row_indices_all is not None:
+            # Ensure tensor is on GPU (dataloader may deliver it as pinned CPU memory).
+            # PP P2P communication (NCCL) cannot send pinned tensors directly.
+            if not mtp_startend_row_indices_all.place.is_gpu_place():
+                mtp_startend_row_indices_all = (
+                    mtp_startend_row_indices_all.cuda()
+                )
+            preproc_output["mtp_startend_row_indices_all"] = (
+                mtp_startend_row_indices_all
+            )
+            if not mtp_hidden_inputs_mask_all.place.is_gpu_place():
+                mtp_hidden_inputs_mask_all = mtp_hidden_inputs_mask_all.cuda()
+            preproc_output["mtp_hidden_inputs_mask_all"] = (
+                mtp_hidden_inputs_mask_all
+            )
         if mtp_emb_res is not None:
             assert (
                 self.config.num_nextn_predict_layers is not None

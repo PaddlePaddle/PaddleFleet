@@ -19,10 +19,6 @@ from typing import NoReturn
 
 import paddle
 from paddle import Tensor
-
-_ERNIECORE_ALIGNMENT = (
-    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-)
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
@@ -46,6 +42,13 @@ from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_size
+
+try:
+    from paddlefleet.transformer.dot_product_attention import (
+        CPDotProductAttention,
+    )
+except Exception:
+    CPDotProductAttention = None
 
 try:
     from paddlefleet.fusions.fused_mla_yarn_rope_apply import (
@@ -146,6 +149,7 @@ class MLASelfAttentionSublayersSpec:
     kv_b_proj: LayerSpec | type = None
     core_attention: LayerSpec | type = None
     o_proj: LayerSpec | type = None
+    gate_proj: LayerSpec | type = None
 
 
 class MultiLatentAttention(Attention):
@@ -238,6 +242,26 @@ class MultiLatentAttention(Attention):
             tp_comm_buffer_name="proj",
             tp_group=self.pg_collection.tp,
         )
+
+        # Gated attention
+        self.gated_attention = getattr(self.config, "gated_attention", False)
+        if self.gated_attention and sublayers_spec.gate_proj is not None:
+            self.gate_proj = build_spec_layer(
+                sublayers_spec.gate_proj,
+                self.config.hidden_size,
+                self.query_projection_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=self.config.use_bias,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="mla_gate",
+                tp_group=self.pg_collection.tp,
+            )
+        else:
+            self.gated_attention = False
+            self.gate_proj = None
 
     def forward(
         self,
@@ -342,6 +366,12 @@ class MultiLatentAttention(Attention):
         # =================
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
+
+        # Apply gated attention
+        if self.gated_attention:
+            gate, _ = self.gate_proj(hidden_states)
+            core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
+
         output, bias = self.o_proj(core_attn_out)
 
         _log(output, "attn_o_proj_out", layer_num)
@@ -735,26 +765,20 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
-                if _ERNIECORE_ALIGNMENT:
+                if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
                         TransformerLayer,
                     )
 
                     _log = TransformerLayer._log_md5
-                    if not hasattr(self, "_ec_mla_rope_path_logged"):
-                        print(
-                            "[ALIGNMENT PATH HIT] multi_latent_attention: _ec_compatible_rope_apply called (MLA)",
-                            flush=True,
-                        )
-                        self._ec_mla_rope_path_logged = True
                     _log(q_pos_emb, "mla_q_pe_before_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_before_rope", self.layer_number)
                     q_pos_emb, k_pos_emb = _ec_compatible_rope_apply(
                         q_pos_emb,
                         k_pos_emb,
                         q_len,
-                        rope_base=1000000.0,  # EC uses rope_theta=1000000 (from model_config.json)
+                        rope_base=self.config.rope_theta,  # Must match EC's config.rope_theta
                     )
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)
@@ -814,6 +838,7 @@ class MLASelfAttention(MultiLatentAttention):
         self._backward_kv_proj()
         self._backward_q_proj()
         self._backward_output_proj()
+        # GATE backward?
 
     def _backward_kv_proj(self):
         """Computes weight gradients of KV projection layers"""

@@ -288,6 +288,72 @@ class TestDotProductAttentionBF16(unittest.TestCase):
         paddle.device.set_device("cpu")
 
 
+class TestDotProductAttentionEager(unittest.TestCase):
+    """Tests for DotProductAttention with _attn_implementation='eager'."""
+
+    def _make_eager_config(self, **overrides):
+        config = _make_config(**overrides)
+        config._attn_implementation = "eager"
+        return config
+
+    def test_eager_forward_fp32(self):
+        config = self._make_eager_config()
+        attn = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+        )
+        attn.eval()
+        q = paddle.randn([2, 4, 4, 32], dtype=paddle.float32)
+        k = paddle.randn([2, 4, 4, 32], dtype=paddle.float32)
+        v = paddle.randn([2, 4, 4, 32], dtype=paddle.float32)
+        out = attn(q, k, v, None)
+        self.assertEqual(out.shape, [2, 4, 128])
+
+    @unittest.skipIf(not paddle.is_compiled_with_cuda(), "Requires CUDA")
+    def test_eager_fp16_skips_sdpa(self):
+        """fp16 + eager should bypass scaled_dot_product_attention."""
+        config = self._make_eager_config()
+        attn = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+        )
+        attn.eval()
+        paddle.device.set_device("gpu:0")
+        q = paddle.randn([2, 4, 4, 32], dtype=paddle.float16)
+        k = paddle.randn([2, 4, 4, 32], dtype=paddle.float16)
+        v = paddle.randn([2, 4, 4, 32], dtype=paddle.float16)
+        with patch(
+            "paddle.nn.functional.scaled_dot_product_attention",
+            side_effect=AssertionError(
+                "SDPA should not be called in eager mode"
+            ),
+        ) as mock_sdpa:
+            out = attn(q, k, v, None)
+            mock_sdpa.assert_not_called()
+        self.assertEqual(out.shape, [2, 4, 128])
+        paddle.device.set_device("cpu")
+
+    def test_eager_packed_seq_raises(self):
+        """eager + packed_seq_params should raise ValueError."""
+        config = self._make_eager_config()
+        attn = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+        )
+        q = paddle.randn([2, 4, 4, 32])
+        k = paddle.randn([2, 4, 4, 32])
+        v = paddle.randn([2, 4, 4, 32])
+        with self.assertRaises(ValueError) as ctx:
+            attn(q, k, v, None, packed_seq_params=MagicMock())
+        self.assertIn("packed_seq_params", str(ctx.exception))
+
+
 class TestCPDotProductAttention(unittest.TestCase):
     """Tests for CPDotProductAttention."""
 

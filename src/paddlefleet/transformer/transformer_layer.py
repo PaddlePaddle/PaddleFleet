@@ -143,9 +143,7 @@ class TransformerLayer(nn.Layer):
     output of the same size.
     """
 
-    _ERNIECORE_ALIGNMENT = (
-        os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-    )
+    _gpt_model_use_experimental_version = False
     _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
     _skip_mtp_probes = (
         False  # Set True during MTP forward to suppress MD5 probes
@@ -156,7 +154,7 @@ class TransformerLayer(nn.Layer):
         """Log MD5 of a tensor for precision alignment debugging."""
         if (
             TransformerLayer._LOG_LAYER_MD5
-            and TransformerLayer._ERNIECORE_ALIGNMENT
+            and TransformerLayer._gpt_model_use_experimental_version
         ):
             if TransformerLayer._skip_mtp_probes:
                 return  # Skip MTP passes — EC has no MTP
@@ -186,6 +184,9 @@ class TransformerLayer(nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
         self.config = config
+        TransformerLayer._gpt_model_use_experimental_version = (
+            config.gpt_model_use_experimental_version
+        )
 
         self.layer_number = layer_number
         self.hidden_dropout_prob = (
@@ -459,9 +460,11 @@ class TransformerLayer(nn.Layer):
                     :, -self.config.num_nextn_predict_layers :
                 ]
                 dict_args["position_ids"] = decoder_ids
-
-            # #process attn_mask_startend_row_indices
-            if "attn_mask_startend_row_indices" in dict_args.keys():
+            if (
+                not self.config.experimental_dataflow
+                and "attn_mask_startend_row_indices" in dict_args.keys()
+            ):
+                # Old dataflow: main mask contains mtp parts appended along seq dim, need to split
                 attn_mask_startend_row_indices = dict_args[
                     "attn_mask_startend_row_indices"
                 ]
@@ -478,6 +481,10 @@ class TransformerLayer(nn.Layer):
                 dict_args["attn_mask_startend_row_indices"] = (
                     attn_mask_startend_row_indices_decoder
                 )
+            else:
+                # New dataflow (experimental_dataflow=True): main mask is already main-seq only,
+                # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly
+                attn_mask_startend_row_indices_mtp = None
 
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
@@ -545,7 +552,10 @@ class TransformerLayer(nn.Layer):
                 )
                 dict_args["position_ids"] = position_ids
 
-            if "attn_mask_startend_row_indices" in dict_args.keys():
+            if (
+                not self.config.experimental_dataflow
+                and "attn_mask_startend_row_indices" in dict_args.keys()
+            ):
                 if attn_mask_startend_row_indices_mtp is not None:
                     attn_mask_startend_row_indices = paddle.concat(
                         [
@@ -559,9 +569,9 @@ class TransformerLayer(nn.Layer):
                     attn_mask_startend_row_indices = dict_args[
                         "attn_mask_startend_row_indices"
                     ]
-                rst["attn_mask_startend_row_indices"] = (
-                    attn_mask_startend_row_indices
-                )
+
+            # New dataflow (experimental_dataflow=True): mtp_startend_row_indices_all passes through
+            # dict_args unchanged and will be consumed by MTP layer directly
         if context is not None:
             rst["context"] = context
         rst = {**dict_args, **rst}
@@ -859,7 +869,7 @@ class TransformerLayer(nn.Layer):
         # Log MLP raw output before BDA
         if (
             TransformerLayer._LOG_LAYER_MD5
-            and TransformerLayer._ERNIECORE_ALIGNMENT
+            and TransformerLayer._gpt_model_use_experimental_version
         ):
             _mlp_tensor = (
                 mlp_output_with_bias[0]

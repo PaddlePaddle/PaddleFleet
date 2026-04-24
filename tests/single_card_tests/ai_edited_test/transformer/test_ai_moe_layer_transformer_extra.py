@@ -297,5 +297,55 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
         layer.fp8_quant_weight()
 
 
+class TestMoELayerForwardLogging(unittest.TestCase):
+    """Test forward loss logging hooks."""
+
+    @patch("paddlefleet.transformer.moe.moe_layer.framework._dygraph_tracer")
+    @patch("paddlefleet.transformer.moe.moe_layer.log_moe_losses")
+    @patch("paddlefleet.transformer.moe.moe_layer._log_moe_md5")
+    def test_forward_logs_aux_and_zloss_when_has_grad(
+        self, mock_log_md5, mock_log_moe_losses, mock_tracer
+    ):
+        del mock_log_md5
+        hidden_states = paddle.randn([4, 64], dtype="float32")
+        aux_loss = paddle.to_tensor(1.5, dtype="float32")
+        z_loss = paddle.to_tensor(2.5, dtype="float32")
+
+        layer = MoELayer.__new__(MoELayer)
+        layer.sequence_parallel = False
+        layer.expert_model_parallel_size = 1
+        layer.shared_experts = None
+        layer.moe_shared_expert_overlap = False
+        layer.moe_use_fusion_node = False
+        layer.moe_grouped_gemm = False
+        layer.training = False
+        layer.router_aux_loss_coef = None
+        layer.layer_number = 7
+        layer.gate = MagicMock(
+            return_value=(
+                None,
+                paddle.randn([4, 2], dtype="float32"),
+                paddle.randint(0, 4, [4, 2], dtype="int64"),
+                paddle.randn([4, 4], dtype="float32"),
+                paddle.randint(0, 2, [4, 4], dtype="int64"),
+                None,
+                aux_loss,
+                z_loss,
+            )
+        )
+        layer._forward_single_card_moe = MagicMock(return_value=hidden_states)
+        tracer = MagicMock()
+        tracer._has_grad = True
+        mock_tracer.return_value = tracer
+
+        output, bias = layer.forward(hidden_states)
+
+        mock_log_moe_losses.assert_called_once_with(
+            7, aux_loss=aux_loss, z_loss=z_loss
+        )
+        self.assertEqual(list(output.shape), [4, 64])
+        self.assertIsNone(bias)
+
+
 if __name__ == "__main__":
     unittest.main()

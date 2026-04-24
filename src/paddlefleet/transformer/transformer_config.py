@@ -65,6 +65,15 @@ class TransformerConfig(ModelParallelConfig):
     use_dense_mtp: bool = False
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
 
+    separate_mtp_headloss: bool = False
+    """Separate MTP LMHead & Loss calculate for pipeline balance."""
+
+    experimental_dataflow: bool = False
+    """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
+    separate input instead of being appended to attn_mask_startend_row_indices.
+    The new dataflow requires: input_ids, labels, startend_row_indices (last dim=1, main seq only),
+    mtp_startend_row_indices_all ([B, num_nextn, S, 1]), position_ids."""
+
     num_empty_layers_add_in_head: int = 0
     """Number of EmptyLayer before the Decoder Layer.
     num_empty_layers_add_in_head=2 Example:
@@ -145,6 +154,9 @@ class TransformerConfig(ModelParallelConfig):
 
     attention_dropout: float = 0.0
     """Post attention dropout probability."""
+
+    _attn_implementation: str = "default"
+    """Attention implementation to use."""
 
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
@@ -639,6 +651,9 @@ class TransformerConfig(ModelParallelConfig):
 
     dsa_indexer_loss_coeff: float = 0.01
     """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
+
+    gpt_model_use_experimental_version: bool = False
+    """Enable experimental version code paths for precision alignment."""
 
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
