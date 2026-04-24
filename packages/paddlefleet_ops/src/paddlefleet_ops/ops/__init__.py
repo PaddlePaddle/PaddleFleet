@@ -285,7 +285,7 @@ if paddle.is_compiled_with_cuda():
     try:
         paddle.compat.enable_torch_proxy(scope={"triton"}, silent=True)
         from .._extensions.flashmask import (
-            rr_attn_estimate_triton_func,  # noqa: F401
+            rr_attn_estimate_triton_func,
         )
     finally:
         paddle.compat.disable_torch_proxy()

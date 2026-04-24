@@ -266,7 +266,10 @@ class EcosystemLibrary:
                     shutil.copy(src, dst)
 
             # Fix flash_mask imports for nested package structure
-            if self.name == "flash-attention" and artifact.target_name == "flash_mask":
+            if (
+                self.name == "flash-attention"
+                and artifact.target_name == "flash_mask"
+            ):
                 fix_flash_mask_imports(dst)
 
             # Fix DeepGEMM torch import to use Paddle compatibility layer
