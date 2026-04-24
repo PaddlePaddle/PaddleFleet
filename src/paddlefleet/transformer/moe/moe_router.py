@@ -612,18 +612,27 @@ class TopKRouter(StandardMoERouter):
     def set_layer_number(self, layer_number):
         self._layer_number = layer_number
 
-    def forward(self, input, input_ids_none_zero_mask=None, input_ids=None):
+    def forward(self, input, input_ids=None):
         if len(input.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape
             else:
                 seq_len, batch_size, d_model = input.shape
             input = input.reshape([-1, d_model])
+            if input_ids is not None:
+                input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
+                batch_size_, seq_len_ = input_ids.shape
+                assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
+                    f"input_ids shape mismatch with input: "
+                    f"input_ids=[{batch_size_}, {seq_len_}], "
+                    f"expected [batch_size={batch_size}, seq_len={seq_len}]"
+                )
+            else:
+                input_ids_none_zero_mask = None
         elif len(input.shape) == 2:
             raise ValueError(
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
             )
-
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
                 input,
@@ -637,7 +646,7 @@ class TopKRouter(StandardMoERouter):
         gates = self.gate_score_func(logits)
 
         if input_ids_none_zero_mask is not None:
-            # input_ids_none_zero_mask shape: [b,s,1]
+            # input_ids_none_zero_mask shape: [b*s,1]
             valid_mask = input_ids_none_zero_mask.astype(paddle.float32)
             assert valid_mask.shape[0] == logits.shape[0], (
                 f"check valid_mask shape {valid_mask.shape}"
