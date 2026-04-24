@@ -258,13 +258,24 @@ class MoELayer(nn.Layer):
                 "fp8 and sonic_moe cannot be used at the same time."
             )
 
-        self.use_latent_moe = self.config.use_latent_moe and self.config.moe_latent_size is not None
+        self.use_latent_moe = (
+            self.config.use_latent_moe
+            and self.config.moe_latent_size is not None
+        )
         if self.use_latent_moe:
             logger.info(
                 f"Latent MoE enabled: hidden_size={self.config.hidden_size} -> moe_latent_size={self.config.moe_latent_size}"
             )
-            self.fc1_latent_proj = nn.Linear(self.config.hidden_size, self.config.moe_latent_size, bias_attr=self.config.use_bias)
-            self.fc2_latent_proj = nn.Linear(self.config.moe_latent_size, self.config.hidden_size, bias_attr=self.config.use_bias)
+            self.fc1_latent_proj = nn.Linear(
+                self.config.hidden_size,
+                self.config.moe_latent_size,
+                bias_attr=self.config.use_bias,
+            )
+            self.fc2_latent_proj = nn.Linear(
+                self.config.moe_latent_size,
+                self.config.hidden_size,
+                bias_attr=self.config.use_bias,
+            )
             routed_expert_config.hidden_size = self.config.moe_latent_size
 
         expert_args = {}

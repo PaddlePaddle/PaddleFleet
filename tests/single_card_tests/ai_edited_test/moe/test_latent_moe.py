@@ -39,12 +39,12 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
-import paddle.nn as nn
-
+from paddle import nn
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_moe_config(**overrides):
     """Helper: create a TransformerConfig with sensible MoE defaults."""
@@ -101,7 +101,10 @@ def _make_pg_collection():
 
 
 def _make_moe_sublayers():
-    from paddlefleet.tensor_parallel import ColumnParallelLinear, RowParallelLinear
+    from paddlefleet.tensor_parallel import (
+        ColumnParallelLinear,
+        RowParallelLinear,
+    )
     from paddlefleet.transformer.mlp import MLPSublayersSpec
     from paddlefleet.transformer.moe.moe_layer import MoESublayers
 
@@ -127,6 +130,7 @@ def _make_moe_layer(config, pg_collection=None):
 # ---------------------------------------------------------------------------
 # 1. TransformerConfig – new fields
 # ---------------------------------------------------------------------------
+
 
 class TestLatentMoEConfig(unittest.TestCase):
     """Verify that the new config fields exist and have the correct defaults."""
@@ -156,9 +160,11 @@ class TestLatentMoEConfig(unittest.TestCase):
 # 2. MoELayer.__init__ – latent projection initialization
 # ---------------------------------------------------------------------------
 
+
 def _rng_tracker_ctx():
     """Return a context manager factory that mocks the CUDA RNG tracker fork."""
     import contextlib
+
     mock_tracker = MagicMock()
     mock_tracker.fork.return_value = contextlib.nullcontext()
     return mock_tracker
@@ -169,12 +175,15 @@ class TestLatentMoEInit(unittest.TestCase):
 
     def _run_init(self, config):
         """Instantiate MoELayer with full GPU-level mocks."""
-        with patch(
-            "paddlefleet.tensor_parallel.random.get_cuda_rng_tracker",
-            return_value=_rng_tracker_ctx(),
-        ), patch(
-            "paddlefleet.tensor_parallel.layers.get_cuda_rng_tracker",
-            return_value=_rng_tracker_ctx(),
+        with (
+            patch(
+                "paddlefleet.tensor_parallel.random.get_cuda_rng_tracker",
+                return_value=_rng_tracker_ctx(),
+            ),
+            patch(
+                "paddlefleet.tensor_parallel.layers.get_cuda_rng_tracker",
+                return_value=_rng_tracker_ctx(),
+            ),
         ):
             return _make_moe_layer(config)
 
@@ -199,8 +208,12 @@ class TestLatentMoEInit(unittest.TestCase):
         self.assertTrue(layer.use_latent_moe)
         # fc1: hidden_size → latent_size
         self.assertIsInstance(layer.fc1_latent_proj, nn.Linear)
-        self.assertEqual(layer.fc1_latent_proj.weight.shape[0], 64)  # in_features
-        self.assertEqual(layer.fc1_latent_proj.weight.shape[1], 32)  # out_features
+        self.assertEqual(
+            layer.fc1_latent_proj.weight.shape[0], 64
+        )  # in_features
+        self.assertEqual(
+            layer.fc1_latent_proj.weight.shape[1], 32
+        )  # out_features
         # fc2: latent_size → hidden_size
         self.assertIsInstance(layer.fc2_latent_proj, nn.Linear)
         self.assertEqual(layer.fc2_latent_proj.weight.shape[0], 32)
@@ -221,8 +234,9 @@ class TestLatentMoEInit(unittest.TestCase):
                         break
                 if first_linear is not None:
                     self.assertEqual(
-                        first_linear.weight.shape[0], 32,
-                        "Expert input must equal moe_latent_size=32"
+                        first_linear.weight.shape[0],
+                        32,
+                        "Expert input must equal moe_latent_size=32",
                     )
                 break  # Only check the first present expert
 
@@ -230,6 +244,7 @@ class TestLatentMoEInit(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # 3. dispatch_preprocess – latent projection before token dispatch
 # ---------------------------------------------------------------------------
+
 
 class TestDispatchPreprocessLatent(unittest.TestCase):
     """Test the use_latent_moe branch in dispatch_preprocess."""
@@ -260,8 +275,13 @@ class TestDispatchPreprocessLatent(unittest.TestCase):
         probs = paddle.ones([4, 2])
         indices = paddle.zeros([4, 2], dtype="int64")
 
-        with patch("paddlefleet.transformer.moe.moe_layer.MoEFlexTokenDispatcher", new=object):
-            result = MoELayer.dispatch_preprocess(stub, (hidden, probs, indices))
+        with patch(
+            "paddlefleet.transformer.moe.moe_layer.MoEFlexTokenDispatcher",
+            new=object,
+        ):
+            result = MoELayer.dispatch_preprocess(
+                stub, (hidden, probs, indices)
+            )
 
         # dispatch_preprocess_overlap receives tensor of latent_size=32
         call_args = stub.token_dispatcher.dispatch_preprocess_overlap.call_args
@@ -277,7 +297,10 @@ class TestDispatchPreprocessLatent(unittest.TestCase):
         probs = paddle.ones([4, 2])
         indices = paddle.zeros([4, 2], dtype="int64")
 
-        with patch("paddlefleet.transformer.moe.moe_layer.MoEFlexTokenDispatcher", new=object):
+        with patch(
+            "paddlefleet.transformer.moe.moe_layer.MoEFlexTokenDispatcher",
+            new=object,
+        ):
             MoELayer.dispatch_preprocess(stub, (hidden, probs, indices))
 
         call_args = stub.token_dispatcher.dispatch_preprocess_overlap.call_args
@@ -289,6 +312,7 @@ class TestDispatchPreprocessLatent(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # 4. aux_loss_compute – latent projection after combine
 # ---------------------------------------------------------------------------
+
 
 class TestAuxLossComputeLatent(unittest.TestCase):
     """Test the use_latent_moe branch in aux_loss_compute."""
@@ -338,10 +362,13 @@ class TestAuxLossComputeLatent(unittest.TestCase):
 # 5. forward – latent projections in the non-overlap single-card path
 # ---------------------------------------------------------------------------
 
+
 class TestForwardLatent(unittest.TestCase):
     """Test latent projections inside MoELayer.forward (single-card path)."""
 
-    def _make_forward_stub(self, use_latent_moe, hidden_size=64, latent_size=32):
+    def _make_forward_stub(
+        self, use_latent_moe, hidden_size=64, latent_size=32
+    ):
         """
         Minimal stub for forward().  Mocks gate + expert computation so we can
         observe whether fc1/fc2 projections are applied.
@@ -376,8 +403,14 @@ class TestForwardLatent(unittest.TestCase):
         aux_loss = paddle.zeros([1])
         z_loss = paddle.zeros([1])
         stub.gate.return_value = (
-            None, topk_weights, topk_indices, gates_masked, mask,
-            None, aux_loss, z_loss,
+            None,
+            topk_weights,
+            topk_indices,
+            gates_masked,
+            mask,
+            None,
+            aux_loss,
+            z_loss,
         )
 
         # _forward_single_card_moe returns a tensor in latent or hidden space
@@ -403,12 +436,18 @@ class TestForwardLatent(unittest.TestCase):
         # fc1 was called: _forward_single_card_moe received latent-size input
         call_args = stub._forward_single_card_moe.call_args[0]
         dispatched_input = call_args[0]
-        self.assertEqual(dispatched_input.shape[-1], 32,
-                         "Expert input must be latent_size=32")
+        self.assertEqual(
+            dispatched_input.shape[-1],
+            32,
+            "Expert input must be latent_size=32",
+        )
 
         # fc2 was called: final output must be hidden_size=64
-        self.assertEqual(output.shape, [bs, seq, 64],
-                         "Output must be restored to hidden_size=64")
+        self.assertEqual(
+            output.shape,
+            [bs, seq, 64],
+            "Output must be restored to hidden_size=64",
+        )
 
     def test_forward_without_latent_moe_skips_projections(self):
         """
