@@ -146,7 +146,6 @@ def scan_maxmin_chunked(
     tl.store(output_min_ptr + i_bh * num_chunks + offs_out, b_omin, mask=mask_out)
 
 
-@use_torch_proxy_guard(silent=True)
 def prepare_maxmin(
     input_tensor: paddle.Tensor,
     chunk_size: int,
@@ -408,7 +407,6 @@ def top_p_kernel(
     tl.store(out_row_ptr + ids_sorted, mask_keep.to(tl.int8), mask=mask_store)
 
 
-@use_torch_proxy_guard(silent=True)
 def find_blocks_topp(x: paddle.Tensor, p: float) -> paddle.Tensor:
     original_shape = x.shape
     n = original_shape[-1]
@@ -1092,7 +1090,6 @@ def _resolve_qchunk_config(
     return chunk_q_strides, config.segment_size
 
 
-@use_torch_proxy_guard(silent=True)
 def _launch_qchunk_two_kernel(
     q: paddle.Tensor,
     k: paddle.Tensor,
@@ -1251,7 +1248,6 @@ def _launch_qchunk_two_kernel(
             )
 
 
-@use_torch_proxy_guard(silent=True)
 def rr_attn_estimate_triton_func(
     q: paddle.Tensor,
     k: paddle.Tensor,
@@ -1306,36 +1302,37 @@ def rr_attn_estimate_triton_func(
     )
 
     scale = LOG2E / math.sqrt(head_dim) / stride
-    if _is_trivial_nomask(startend_row_indices, q_len, causal):
-        mask_ctx = None
-        n_strides = triton.cdiv(kv_len, stride)
-    else:
-        mode, raw = _extract_raw_ptrs(startend_row_indices, causal)
-        stride_mm = _prepare_stride_maxmin_ptrs(raw, mode, causal, stride)
-        mask_ctx = MaskContext(
-            mode=mode,
-            stride_mm=stride_mm,
-            num_indices_heads=num_indices_heads,
+    with use_torch_proxy_guard(silent=True):
+        if _is_trivial_nomask(startend_row_indices, q_len, causal):
+            mask_ctx = None
+            n_strides = triton.cdiv(kv_len, stride)
+        else:
+            mode, raw = _extract_raw_ptrs(startend_row_indices, causal)
+            stride_mm = _prepare_stride_maxmin_ptrs(raw, mode, causal, stride)
+            mask_ctx = MaskContext(
+                mode=mode,
+                stride_mm=stride_mm,
+                num_indices_heads=num_indices_heads,
+            )
+            n_strides = stride_mm.n_strides
+
+        _launch_qchunk_two_kernel(
+            q,
+            k,
+            attn_sums,
+            boundary_protection_mask,
+            stride=stride,
+            causal=causal,
+            scale=scale,
+            num_q_blocks=num_q_blocks,
+            num_k_blocks=num_k_blocks,
+            n_strides=n_strides,
+            chunk_size=chunk_size,
+            config=config,
+            mask_ctx=mask_ctx,
         )
-        n_strides = stride_mm.n_strides
 
-    _launch_qchunk_two_kernel(
-        q,
-        k,
-        attn_sums,
-        boundary_protection_mask,
-        stride=stride,
-        causal=causal,
-        scale=scale,
-        num_q_blocks=num_q_blocks,
-        num_k_blocks=num_k_blocks,
-        n_strides=n_strides,
-        chunk_size=chunk_size,
-        config=config,
-        mask_ctx=mask_ctx,
-    )
-
-    selected_blocks = find_blocks_topp(attn_sums.astype(paddle.float32), float(threshold))
+        selected_blocks = find_blocks_topp(attn_sums.astype(paddle.float32), float(threshold))
     if causal:
         visible_mask = _build_fa3_causal_block_visible_mask(attn_sums, q_len, kv_len)
         selected_blocks = paddle.logical_and(selected_blocks, visible_mask)

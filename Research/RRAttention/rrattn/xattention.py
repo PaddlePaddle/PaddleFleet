@@ -1,4 +1,5 @@
 import math
+from contextlib import nullcontext
 
 import paddle
 import paddle.nn.functional as F
@@ -20,7 +21,6 @@ def softmax_fuse_block_sum_kernel_causal(
     output_stride_1,
     output_stride_2,
     real_q_len,
-    real_k_len,
     k_len,
     chunk_start,
     chunk_end,
@@ -48,8 +48,6 @@ def softmax_fuse_block_sum_kernel_causal(
 
     for iter in range(0, num_iters_before_causal):
         X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
-        k_valid = (offs_k + iter * segment_size) < real_k_len
-        X = tl.where(k_valid[None, :], X, -1.0e6)
         m_local = tl.max(X, 1)
         m_new = tl.maximum(m_i, m_local)
         alpha = tl.math.exp2(m_i - m_new)
@@ -61,9 +59,7 @@ def softmax_fuse_block_sum_kernel_causal(
 
     for iter in range(num_iters_before_causal, num_iters_before_causal + 1):
         X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
-        qk_mask = offs_q[:, None] >= (offs_k[None, :] + iter * segment_size)
-        k_valid = (offs_k + iter * segment_size) < real_k_len
-        mask = qk_mask & k_valid[None, :]
+        mask = offs_q[:, None] >= (offs_k[None, :] + iter * segment_size)
         X = tl.where(mask, X, -1.0e6)
         m_local = tl.max(X, 1)
         m_new = tl.maximum(m_i, m_local)
@@ -79,8 +75,6 @@ def softmax_fuse_block_sum_kernel_causal(
 
     for iter in range(0, num_iters_before_causal):
         X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
-        k_valid = (offs_k + iter * segment_size) < real_k_len
-        X = tl.where(k_valid[None, :], X, -1.0e6)
         X = tl.exp2(X - m_i[:, None]) * l_i_inv[:, None]
         X = tl.where(q_valid, X, 0)
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
@@ -90,9 +84,7 @@ def softmax_fuse_block_sum_kernel_causal(
 
     for iter in range(num_iters_before_causal, num_iters_before_causal + 1):
         X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
-        qk_mask = offs_q[:, None] >= (offs_k[None, :] + iter * segment_size)
-        k_valid = (offs_k + iter * segment_size) < real_k_len
-        mask = qk_mask & k_valid[None, :]
+        mask = offs_q[:, None] >= (offs_k[None, :] + iter * segment_size)
         X = tl.where(mask, X, -1.0e6)
         X = tl.exp2(X - m_i[:, None]) * l_i_inv[:, None]
         X = tl.where(q_valid, X, 0)
@@ -118,7 +110,6 @@ def softmax_fuse_block_sum_kernel_non_causal(
     output_stride_1,
     output_stride_2,
     real_q_len,
-    real_k_len,
     k_len,
     chunk_start,
     chunk_end,
@@ -144,8 +135,6 @@ def softmax_fuse_block_sum_kernel_non_causal(
 
     for iter in range(0, num_iters):
         X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
-        k_valid = (offs_k + iter * segment_size) < real_k_len
-        X = tl.where(k_valid[None, :], X, -1.0e6)
         m_local = tl.max(X, 1)
         m_new = tl.maximum(m_i, m_local)
         alpha = tl.math.exp2(m_i - m_new)
@@ -160,8 +149,6 @@ def softmax_fuse_block_sum_kernel_non_causal(
 
     for iter in range(0, num_iters):
         X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
-        k_valid = (offs_k + iter * segment_size) < real_k_len
-        X = tl.where(k_valid[None, :], X, -1.0e6)
         X = tl.exp2(X - m_i[:, None]) * l_i_inv[:, None]
         X = tl.where(q_valid, X, 0)
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
@@ -224,7 +211,6 @@ def flat_group_gemm_fuse_reshape_kernel(
     tl.store(O_ptrs, o.to(Out.type.element_ty))
 
 
-@use_torch_proxy_guard(silent=True)
 def softmax_fuse_block_sum(
     attn_weights_slice,
     reshaped_block_size,
@@ -232,7 +218,6 @@ def softmax_fuse_block_sum(
     chunk_start,
     chunk_end,
     real_q_len,
-    real_k_len,
     scale,
     is_causal=True,
 ):
@@ -261,7 +246,6 @@ def softmax_fuse_block_sum(
             output.stride(1),
             output.stride(2),
             real_q_len,
-            real_k_len,
             k_len,
             chunk_start,
             chunk_end,
@@ -280,7 +264,6 @@ def softmax_fuse_block_sum(
             output.stride(1),
             output.stride(2),
             real_q_len,
-            real_k_len,
             k_len,
             chunk_start,
             chunk_end,
@@ -291,7 +274,6 @@ def softmax_fuse_block_sum(
     return output
 
 
-@use_torch_proxy_guard(silent=True)
 def flat_group_gemm_fuse_reshape(
     query_states,
     key_states,
@@ -393,7 +375,10 @@ def can_use_triton_kernels():
     if not paddle.device.is_compiled_with_cuda():
         return False
     try:
-        return paddle.device.get_device().startswith("gpu")
+        if not paddle.device.get_device().startswith("gpu"):
+            return False
+        device_name = paddle.device.cuda.get_device_name()
+        return "100" in device_name or "H800" in device_name in device_name
     except Exception:
         return False
 
@@ -459,7 +444,9 @@ def xattn_estimate(
     assert num_q_head == num_kv_head
 
     if use_triton and not can_use_triton_kernels():
-        raise RuntimeError("xattn v1 Triton kernels require a CUDA gpu device")
+        use_triton = False
+    if use_triton and kdb != 1:
+        raise ValueError("use_triton and kdb cannot be used together")
 
     k_num_to_pad = ((k_len + chunk_size - 1) // chunk_size) * chunk_size - k_len
     q_num_to_pad = ((q_len + chunk_size - 1) // chunk_size) * chunk_size - q_len
@@ -486,7 +473,6 @@ def xattn_estimate(
     k_reshaped_num_to_pad = k_num_to_pad // stride
     k_reshaped_seq_len = (k_len + k_num_to_pad) // stride
     q_reshaped_num_to_pad = q_num_to_pad // stride
-    q_reshaped_seq_len = (q_len + q_num_to_pad) // stride
     num_blocks_per_chunk = reshaped_chunk_size // reshaped_block_size
 
     if not use_triton:
@@ -534,115 +520,115 @@ def xattn_estimate(
             raise NotImplementedError(f"Unsupported select_mode={select_mode!r}")
         assert reshaped_key.shape[-2] == k_reshaped_seq_len
 
-    for chunk_idx in range(q_chunk_num):
-        if use_triton:
-            if kdb != 1:
-                raise ValueError("use_triton and kdb cannot be used together")
-            attn_weights_slice = flat_group_gemm_fuse_reshape(
-                pad_query_states[
-                    :,
-                    :,
-                    (chunk_idx * reshaped_chunk_size) * stride : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size)
-                    * stride,
-                    :,
-                ],
-                pad_key_states,
-                stride,
-                (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size,
-                (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size
-                + reshaped_chunk_size,
-                is_causal=causal,
-            )
-            attn_sum = softmax_fuse_block_sum(
-                attn_weights_slice,
-                reshaped_block_size,
-                min(4096, reshaped_block_size),
-                (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size,
-                (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size
-                + reshaped_chunk_size,
-                q_reshaped_seq_len - q_reshaped_num_to_pad,
-                k_reshaped_seq_len - k_reshaped_num_to_pad,
-                1.4426950408889634 / math.sqrt(head_dim) / stride / norm,
-                is_causal=causal,
-            )
-        else:
-            chunked_query = reshaped_query[
-                :,
-                :,
-                (chunk_idx * reshaped_chunk_size) // kdb : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size)
-                // kdb,
-                :,
-            ]
-            attn_weights_slice = paddle.matmul(
-                chunked_query,
-                reshaped_key.transpose(2, 3),
-            ).to(chunked_query.device)
-            attn_weights_slice = attn_weights_slice / math.sqrt(head_dim) / stride / norm
-
-            if causal:
-                causal_mask = paddle.zeros(
-                    (batch_size, num_q_head, reshaped_chunk_size, reshaped_chunk_size * k_chunk_num),
-                    device=key_states.device,
+    proxy_guard = use_torch_proxy_guard(silent=True) if use_triton else nullcontext()
+    with proxy_guard:
+        for chunk_idx in range(q_chunk_num):
+            if use_triton:
+                attn_weights_slice = flat_group_gemm_fuse_reshape(
+                    pad_query_states[
+                        :,
+                        :,
+                        (chunk_idx * reshaped_chunk_size)
+                        * stride : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size)
+                        * stride,
+                        :,
+                    ],
+                    pad_key_states,
+                    stride,
+                    (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size,
+                    (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size
+                    + reshaped_chunk_size,
+                    is_causal=causal,
                 )
-                if k_reshaped_num_to_pad > 0:
-                    causal_mask[:, :, :, -k_reshaped_num_to_pad:] = float("-inf")
-                chunk_start = (chunk_idx + offset_token_chunk_num) * reshaped_chunk_size
-                chunk_end = chunk_start + reshaped_chunk_size
-                causal_mask[:, :, :, chunk_start:chunk_end] = paddle.triu(
-                    paddle.ones(
-                        1,
-                        num_q_head,
-                        reshaped_chunk_size,
-                        reshaped_chunk_size,
-                        device=key_states.device,
-                    )
-                    * float("-inf"),
-                    diagonal=1,
-                )
-                if chunk_idx == q_chunk_num - 1 and q_reshaped_num_to_pad != 0:
-                    causal_mask[:, :, -(q_reshaped_num_to_pad // kdb) :, :] = float("-inf")
-                causal_mask[:, :, :, chunk_end:] = float("-inf")
-                causal_mask = causal_mask[:, :, kdb - 1 :: kdb, :]
-                attn_weights_slice = attn_weights_slice + causal_mask.to(attn_weights_slice.device)
-
-            if softmax:
-                attn_weights_slice = F.softmax(attn_weights_slice, dim=-1, dtype=paddle.float32).to(
-                    pad_query_states.dtype
+                attn_sum = softmax_fuse_block_sum(
+                    attn_weights_slice,
+                    reshaped_block_size,
+                    min(4096, reshaped_block_size),
+                    (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size,
+                    (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size
+                    + reshaped_chunk_size,
+                    k_reshaped_seq_len - k_reshaped_num_to_pad,
+                    1.4426950408889634 / math.sqrt(head_dim) / stride / norm,
+                    is_causal=causal,
                 )
             else:
-                attn_weights_slice = paddle.exp(attn_weights_slice).to(pad_query_states.dtype)
-            attn_weights_slice = F.dropout(attn_weights_slice, p=0, training=False)
+                chunked_query = reshaped_query[
+                    :,
+                    :,
+                    (chunk_idx * reshaped_chunk_size) // kdb : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size)
+                    // kdb,
+                    :,
+                ]
+                attn_weights_slice = paddle.matmul(
+                    chunked_query,
+                    reshaped_key.transpose(2, 3),
+                ).to(chunked_query.device)
+                attn_weights_slice = attn_weights_slice / math.sqrt(head_dim) / stride / norm
 
-            if chunk_idx == q_chunk_num - 1 and q_reshaped_num_to_pad != 0:
-                attn_weights_slice[:, :, -(q_reshaped_num_to_pad // kdb) :, :] = 0
+                if causal:
+                    causal_mask = paddle.zeros(
+                        (batch_size, num_q_head, reshaped_chunk_size, reshaped_chunk_size * k_chunk_num),
+                        device=key_states.device,
+                    )
+                    if k_reshaped_num_to_pad > 0:
+                        causal_mask[:, :, :, -k_reshaped_num_to_pad:] = float("-inf")
+                    chunk_start = (chunk_idx + offset_token_chunk_num) * reshaped_chunk_size
+                    chunk_end = chunk_start + reshaped_chunk_size
+                    causal_mask[:, :, :, chunk_start:chunk_end] = paddle.triu(
+                        paddle.ones(
+                            1,
+                            num_q_head,
+                            reshaped_chunk_size,
+                            reshaped_chunk_size,
+                            device=key_states.device,
+                        )
+                        * float("-inf"),
+                        diagonal=1,
+                    )
+                    if chunk_idx == q_chunk_num - 1 and q_reshaped_num_to_pad != 0:
+                        causal_mask[:, :, -(q_reshaped_num_to_pad // kdb) :, :] = float("-inf")
+                    causal_mask[:, :, :, chunk_end:] = float("-inf")
+                    causal_mask = causal_mask[:, :, kdb - 1 :: kdb, :]
+                    attn_weights_slice = attn_weights_slice + causal_mask.to(attn_weights_slice.device)
 
-            attn_sum = (
-                attn_weights_slice.view(
-                    batch_size,
-                    num_kv_head,
-                    num_blocks_per_chunk,
-                    reshaped_block_size // kdb,
-                    -1,
-                    reshaped_block_size,
+                if softmax:
+                    attn_weights_slice = F.softmax(attn_weights_slice, dim=-1, dtype=paddle.float32).to(
+                        pad_query_states.dtype
+                    )
+                else:
+                    attn_weights_slice = paddle.exp(attn_weights_slice).to(pad_query_states.dtype)
+                attn_weights_slice = F.dropout(attn_weights_slice, p=0, training=False)
+
+                if chunk_idx == q_chunk_num - 1 and q_reshaped_num_to_pad != 0:
+                    attn_weights_slice[:, :, -(q_reshaped_num_to_pad // kdb) :, :] = 0
+
+                attn_sum = (
+                    attn_weights_slice.view(
+                        batch_size,
+                        num_kv_head,
+                        num_blocks_per_chunk,
+                        reshaped_block_size // kdb,
+                        -1,
+                        reshaped_block_size,
+                    )
+                    .sum(dim=-1)
+                    .sum(dim=-2)
+                    .to(chunked_query.device)
                 )
-                .sum(dim=-1)
-                .sum(dim=-2)
-                .to(chunked_query.device)
-            )
-            del chunked_query
+                del chunked_query
 
-        simple_mask = find_blocks_chunked(
-            attn_sum,
-            k_block_num - q_block_num + chunk_idx * num_blocks_per_chunk,
-            threshold,
-            None,
-            decoding=False,
-            mode="prefill",
-            causal=causal,
-        )
-        attn_sum_list.append(attn_sum)
-        simple_mask_list.append(simple_mask)
-        del attn_weights_slice
+            simple_mask = find_blocks_chunked(
+                attn_sum,
+                k_block_num - q_block_num + chunk_idx * num_blocks_per_chunk,
+                threshold,
+                None,
+                decoding=False,
+                mode="prefill",
+                causal=causal,
+            )
+            attn_sum_list.append(attn_sum)
+            simple_mask_list.append(simple_mask)
+            del attn_weights_slice
 
     if not use_triton:
         del reshaped_query, reshaped_key
