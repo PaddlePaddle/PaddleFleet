@@ -460,9 +460,11 @@ class TransformerLayer(nn.Layer):
                     :, -self.config.num_nextn_predict_layers :
                 ]
                 dict_args["position_ids"] = decoder_ids
-
-            # #process attn_mask_startend_row_indices
-            if "attn_mask_startend_row_indices" in dict_args.keys():
+            if (
+                not self.config.experimental_dataflow
+                and "attn_mask_startend_row_indices" in dict_args.keys()
+            ):
+                # Old dataflow: main mask contains mtp parts appended along seq dim, need to split
                 attn_mask_startend_row_indices = dict_args[
                     "attn_mask_startend_row_indices"
                 ]
@@ -479,6 +481,10 @@ class TransformerLayer(nn.Layer):
                 dict_args["attn_mask_startend_row_indices"] = (
                     attn_mask_startend_row_indices_decoder
                 )
+            else:
+                # New dataflow (experimental_dataflow=True): main mask is already main-seq only,
+                # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly
+                attn_mask_startend_row_indices_mtp = None
 
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
@@ -546,7 +552,10 @@ class TransformerLayer(nn.Layer):
                 )
                 dict_args["position_ids"] = position_ids
 
-            if "attn_mask_startend_row_indices" in dict_args.keys():
+            if (
+                not self.config.experimental_dataflow
+                and "attn_mask_startend_row_indices" in dict_args.keys()
+            ):
                 if attn_mask_startend_row_indices_mtp is not None:
                     attn_mask_startend_row_indices = paddle.concat(
                         [
@@ -560,9 +569,9 @@ class TransformerLayer(nn.Layer):
                     attn_mask_startend_row_indices = dict_args[
                         "attn_mask_startend_row_indices"
                     ]
-                rst["attn_mask_startend_row_indices"] = (
-                    attn_mask_startend_row_indices
-                )
+
+            # New dataflow (experimental_dataflow=True): mtp_startend_row_indices_all passes through
+            # dict_args unchanged and will be consumed by MTP layer directly
         if context is not None:
             rst["context"] = context
         rst = {**dict_args, **rst}

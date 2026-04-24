@@ -359,10 +359,31 @@ class LanguageLoss(FleetLayer):
                     labels_cur_depth = labels_ori[
                         :, (depth + 1) : (depth + 1 + seq_length)
                     ]
-                    loss_cur_depth = self._forward(
-                        logits_cur_depth,
-                        labels_cur_depth,
-                    )
+                    if self.config.gpt_model_use_experimental_version:
+                        # Align with EB: compute per-token loss matrix and reduce
+                        # with global sum/count instead of going through forward_impl
+                        # which applies line-wise loss.
+                        loss_matrix_cur_depth = self.loss_func(
+                            logits_cur_depth.cast("float32"), labels_cur_depth
+                        )
+                        lossmask_cur_depth = (
+                            labels_cur_depth != self.ignored_index
+                        ).cast(paddle.float32)
+                        loss_matrix_cur_depth = loss_matrix_cur_depth.cast(
+                            paddle.float32
+                        ).reshape([-1]) * lossmask_cur_depth.reshape([-1])
+                        if lossmask_cur_depth.sum().item() > 0:
+                            loss_cur_depth = (
+                                loss_matrix_cur_depth.sum()
+                                / lossmask_cur_depth.sum()
+                            )
+                        else:
+                            loss_cur_depth = loss_matrix_cur_depth.sum() * 0.0
+                    else:
+                        loss_cur_depth = self._forward(
+                            logits_cur_depth,
+                            labels_cur_depth,
+                        )
                     mtp_loss.append(loss_cur_depth)
                     paddle.device.cuda.empty_cache()
             else:
@@ -458,12 +479,26 @@ class LanguageLoss(FleetLayer):
                 else:
                     return main_loss
 
-            loss = add_loss(
-                lm_loss,
-                self.config.mtp_loss_scaling_factor
-                * sum(mtp_loss)
-                / len(mtp_loss),
-            )
+            if self.config.gpt_model_use_experimental_version:
+                # Align with EB: accumulate inside loop to match float32
+                # arithmetic order: loss += scaling * loss_i / N
+                loss = lm_loss
+                if self.config.add_mtp_loss:
+                    num_mtp = len(mtp_loss)
+                    for mtp_l in mtp_loss:
+                        loss = (
+                            loss
+                            + self.config.mtp_loss_scaling_factor
+                            * mtp_l
+                            / num_mtp
+                        )
+            else:
+                loss = add_loss(
+                    lm_loss,
+                    self.config.mtp_loss_scaling_factor
+                    * sum(mtp_loss)
+                    / len(mtp_loss),
+                )
 
             return loss
         else:
