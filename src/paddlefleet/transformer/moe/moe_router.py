@@ -627,10 +627,6 @@ class TopKRouter(StandardMoERouter):
             # GPU kernel, avoiding FP32 rounding differences between
             # Triton's scalar loop and Paddle's tensor ops.
             FusedMoETopk = _get_fused_moe_topk()
-            if self._layer_number == 0:
-                print(
-                    f"[DEBUG] Using FusedMoETopk Triton kernel, layer={self._layer_number}, n_group={self.n_group}, topk_group={self.topk_group}, num_experts_per_tok={self.num_experts_per_tok}"
-                )
             use_node_limit = self.n_group > 1
             probs_for_choice = (
                 gates + self.e_score_correction_bias.detach().unsqueeze(0)
