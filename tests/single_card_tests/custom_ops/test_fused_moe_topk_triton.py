@@ -162,7 +162,7 @@ class TestFusedMoETopkTriton(unittest.TestCase):
         )
         gate_probs = paddle.nn.functional.softmax(gate_probs, axis=-1)
         gate_probs.stop_gradient = False
-        probs_for_choice = gate_probs.clone()
+        probs_for_choice = gate_probs.clone().detach()
 
         paddle.enable_compat(scope={"triton"}, silent=True)
         from paddlefleet.ops.triton_ops import FusedMoETopk
