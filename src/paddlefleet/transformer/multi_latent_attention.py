@@ -739,16 +739,9 @@ class MLASelfAttention(MultiLatentAttention):
                     # so we do not shorten it here.
                     rotary_pos_emb = rotary_pos_emb[:, 0:q_len]
 
-                # q_no_pe: [num_tokens, n, qk_nope_head_dim]
-                # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
-                q_no_pe, q_pos_emb = paddle.split(
-                    q,
-                    [
-                        self.config.qk_nope_head_dim,
-                        self.config.qk_rope_head_dim,
-                    ],
-                    axis=-1,
-                )
+                # Replace paddle.split with zero-copy slice views.
+                q_no_pe = q[..., : self.config.qk_nope_head_dim]
+                q_pos_emb = q[..., self.config.qk_nope_head_dim :]
 
                 # k_no_pe: [num_tokens, n, qk_nope_head_dim]
                 # value: [num_tokens, n, v_head_dim]
