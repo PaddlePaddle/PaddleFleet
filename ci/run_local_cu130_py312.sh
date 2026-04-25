@@ -233,7 +233,7 @@ install_dependencies() {
 
     # 安装 PaddleFleet
     echo "安装 PaddleFleet..."
-    pip install --pre paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/
+    pip install --pre paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 
     # 安装 Paddle（会覆盖 PaddleFleet 自带的 Paddle）
