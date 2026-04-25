@@ -64,6 +64,17 @@ def _set_random_seed(
         raise ValueError(f"Seed ({seed_}) should be a positive integer.")
 
 
+def _set_rng_flag(
+    FLAGS_deterministic_rng: bool = False,
+    FLAGS_deterministic_rng_grid: int = 624,
+):
+    """Set rng flag for weight initialization"""
+    os.environ["FLAGS_deterministic_rng"] = str(FLAGS_deterministic_rng)
+    os.environ["FLAGS_deterministic_rng_grid"] = str(
+        FLAGS_deterministic_rng_grid
+    )
+
+
 def run_cp(seed, batch_size, seq_len, vocab_size, config):
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
     strategy = fleet.DistributedStrategy()
@@ -90,6 +101,7 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
     initialize_fleet(strategy)
 
     _set_random_seed(seed)
+    _set_rng_flag(FLAGS_deterministic_rng=True)
 
     gpt_model = gpt_builder(config, num_stages=1)
 
