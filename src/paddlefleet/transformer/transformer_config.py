@@ -278,7 +278,7 @@ class TransformerConfig(ModelParallelConfig):
     use_qk_norm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
 
-    fused_qk_norm: bool = False
+    qk_norm_fusion: bool = False
     """If True, use Triton fused RMSNorm kernel for QK norm."""
 
     qk_norm_type: str = "per_head"

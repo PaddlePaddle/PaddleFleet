@@ -122,7 +122,7 @@ def get_attention_spec(
     use_triton_qk_norm = (
         attention_layer_type == "self_attention"
         and config.normalization == "RMSNorm"
-        and getattr(config, "fused_qk_norm", False)
+        and getattr(config, "qk_norm_fusion", False)
     )
     if use_triton_qk_norm:
         from paddlefleet.transformer.paddle_norm import WrappedRMSNormTriton
