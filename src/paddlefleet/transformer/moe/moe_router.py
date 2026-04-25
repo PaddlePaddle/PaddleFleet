@@ -136,8 +136,10 @@ class StandardMoERouter(nn.Layer):
         self.topk_group = config.topk_group
 
         self.routed_scaling_factor = config.routed_scaling_factor
+        self.routed_scaling_factor_learnable = (
+            config.routed_scaling_factor_learnable
+        )
 
-        self.gate_scaling_factor = config.gate_scaling_factor
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.sequence_parallel = config.sequence_parallel
         self.context_parallel_size = max(get_context_parallel_world_size(), 1)
@@ -158,32 +160,13 @@ class StandardMoERouter(nn.Layer):
             default_initializer=paddle.nn.initializer.Uniform(),
         )
 
-        if self.routed_scaling_factor == "learnable":
-            self.routed_scaling_factor = self.create_parameter(
+        if self.routed_scaling_factor_learnable:
+            self.routed_scaling_factor_param = self.create_parameter(
                 shape=[self.num_experts],
                 dtype="float32",
-                default_initializer=nn.initializer.Constant(1.0),
-            )
-        elif self.routed_scaling_factor is not None and not isinstance(
-            self.routed_scaling_factor, (int, float)
-        ):
-            raise ValueError(
-                f"routed_scaling_factor must be a float, 'learnable', or None, "
-                f"got {self.routed_scaling_factor!r}"
-            )
-
-        if self.gate_scaling_factor == "learnable":
-            self.gate_scaling_factor = self.create_parameter(
-                shape=[self.hidden_size],
-                dtype="float32",
-                default_initializer=nn.initializer.Constant(1.0),
-            )
-        elif self.gate_scaling_factor is not None and not isinstance(
-            self.gate_scaling_factor, (int, float)
-        ):
-            raise ValueError(
-                f"gate_scaling_factor must be a float, 'learnable', or None, "
-                f"got {self.gate_scaling_factor!r}"
+                default_initializer=nn.initializer.Constant(
+                    self.routed_scaling_factor
+                ),
             )
 
         if self.topk_method == "noaux_tc":
@@ -663,9 +646,6 @@ class TopKRouter(StandardMoERouter):
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
             )
 
-        if self.gate_scaling_factor is not None:
-            input = input * self.gate_scaling_factor * (self.hidden_size**-0.5)
-
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
                 input,
@@ -785,16 +765,15 @@ class TopKRouter(StandardMoERouter):
                 top_gate = top_gate / denominator
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
 
-        if self.routed_scaling_factor is not None:
-            if isinstance(self.routed_scaling_factor, paddle.Tensor):
-                safe_topk_indices = paddle.clip(top_idx, min=0)
-                gathered_scales = F.embedding(
-                    safe_topk_indices,
-                    self.routed_scaling_factor.unsqueeze(1),
-                ).squeeze(-1)
-                top_gate = top_gate * gathered_scales
-            elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
-                top_gate = top_gate * self.routed_scaling_factor
+        if self.routed_scaling_factor_learnable:
+            safe_topk_indices = paddle.clip(top_idx, min=0)
+            gathered_scales = F.embedding(
+                safe_topk_indices,
+                self.routed_scaling_factor_param.unsqueeze(1),
+            ).squeeze(-1)
+            top_gate = top_gate * gathered_scales
+        elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
+            top_gate = top_gate * self.routed_scaling_factor
 
         # Reconstruct probs (combine weights in [S, E] sparse layout) from final top_gate.
         probs = paddle.zeros_like(gates).put_along_axis(

@@ -406,26 +406,23 @@ class TransformerConfig(ModelParallelConfig):
     topk_group: int = 1
     """Number of selected groups per token for expert selection."""
 
-    gate_scaling_factor: float | str | None = None
-    """Per-dimension scaling factor applied to the router input hidden states before the gate
-    linear projection, combined with a ``hidden_size ** -0.5`` normalization.
-
-    Supported values:
-    - ``None`` (default): disable feature scaling and normalization entirely.
-    - ``"learnable"``: create a trainable parameter of shape ``[hidden_size]``, initialized to 1.0.
-    - ``float``: apply a fixed scalar multiplier (combined with ``hidden_size ** -0.5``)."""
-
-    routed_scaling_factor: float | str | None = None
-    """Scaling factor applied to the selected top-k routing weights after expert selection.
-    The final scaled weights are used in ``top_gate`` (``[S, K]``) , which is passed to the
+    routed_scaling_factor: float = 1.0
+    """Scalar multiplier applied to the selected top-k routing weights after expert selection.
+    The final scaled weights are used in ``top_gate`` (``[S, K]``), which is passed to the
     dispatch/combine flow for expert output weighting.
 
-    Supported values:
-    - ``None`` (default): disable routing weight scaling entirely.
-    - ``float``: fixed global scalar applied uniformly (e.g. ``2.5`` in DeepSeek-V3 to
-      compensate for sigmoid scores not summing to 1 after top-k selection).
-    - ``"learnable"``: create a trainable per-expert parameter of shape ``[num_experts]``,
-      initialized to 1.0."""
+    Default is ``1.0`` (no scaling effect). For example, set to ``2.5`` for DeepSeek-V3 to
+    compensate for sigmoid scores not summing to 1 after top-k selection.
+
+    When ``routed_scaling_factor_learnable=True``, this value is used as the initialization
+    value for the per-expert learnable parameter."""
+
+    routed_scaling_factor_learnable: bool = False
+    """Whether to use a learnable per-expert scaling parameter instead of a fixed scalar.
+
+    - ``False`` (default): apply ``routed_scaling_factor`` as a fixed scalar uniformly.
+    - ``True``: create a trainable parameter of shape ``[num_experts]``, initialized to
+      ``routed_scaling_factor``, and apply it via per-expert lookup after top-k selection."""
 
     moe_dequant_input: bool = False
     """Whether to dequantize input."""

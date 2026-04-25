@@ -145,31 +145,19 @@ class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
         self.assertEqual(config.moe_layer_freq, expected)
 
 
-class TestRoutedAndGateScalingFactorConfig(unittest.TestCase):
-    """Tests for the new gate_scaling_factor and routed_scaling_factor field types
-    introduced in TransformerConfig."""
+class TestRoutedScalingFactorConfig(unittest.TestCase):
+    """Tests for the routed_scaling_factor and routed_scaling_factor_learnable fields
+    in TransformerConfig."""
 
-    def test_gate_scaling_factor_default_is_none(self):
-        """gate_scaling_factor defaults to None when not specified."""
+    def test_routed_scaling_factor_default_is_1(self):
+        """routed_scaling_factor defaults to 1.0 when not specified."""
         config = TransformerConfig(num_hidden_layers=4)
-        self.assertIsNone(config.gate_scaling_factor)
+        self.assertAlmostEqual(config.routed_scaling_factor, 1.0)
 
-    def test_gate_scaling_factor_float(self):
-        """gate_scaling_factor accepts a float value."""
-        config = TransformerConfig(num_hidden_layers=4, gate_scaling_factor=0.5)
-        self.assertAlmostEqual(config.gate_scaling_factor, 0.5)
-
-    def test_gate_scaling_factor_learnable_string(self):
-        """gate_scaling_factor accepts the string 'learnable'."""
-        config = TransformerConfig(
-            num_hidden_layers=4, gate_scaling_factor="learnable"
-        )
-        self.assertEqual(config.gate_scaling_factor, "learnable")
-
-    def test_routed_scaling_factor_default_is_none(self):
-        """routed_scaling_factor defaults to None when not specified (new default)."""
+    def test_routed_scaling_factor_learnable_default_is_false(self):
+        """routed_scaling_factor_learnable defaults to False when not specified."""
         config = TransformerConfig(num_hidden_layers=4)
-        self.assertIsNone(config.routed_scaling_factor)
+        self.assertFalse(config.routed_scaling_factor_learnable)
 
     def test_routed_scaling_factor_float(self):
         """routed_scaling_factor accepts a float value (e.g., 2.5 for DeepSeek-V3)."""
@@ -178,22 +166,15 @@ class TestRoutedAndGateScalingFactorConfig(unittest.TestCase):
         )
         self.assertAlmostEqual(config.routed_scaling_factor, 2.5)
 
-    def test_routed_scaling_factor_learnable_string(self):
-        """routed_scaling_factor accepts the string 'learnable'."""
-        config = TransformerConfig(
-            num_hidden_layers=4, routed_scaling_factor="learnable"
-        )
-        self.assertEqual(config.routed_scaling_factor, "learnable")
-
-    def test_both_scaling_factors_can_be_set_together(self):
-        """Both gate_scaling_factor and routed_scaling_factor can be set simultaneously."""
+    def test_routed_scaling_factor_learnable_true(self):
+        """routed_scaling_factor_learnable can be set to True."""
         config = TransformerConfig(
             num_hidden_layers=4,
-            gate_scaling_factor="learnable",
             routed_scaling_factor=2.5,
+            routed_scaling_factor_learnable=True,
         )
-        self.assertEqual(config.gate_scaling_factor, "learnable")
         self.assertAlmostEqual(config.routed_scaling_factor, 2.5)
+        self.assertTrue(config.routed_scaling_factor_learnable)
 
 
 if __name__ == "__main__":
