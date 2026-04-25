@@ -137,6 +137,7 @@ class StandardMoERouter(nn.Layer):
 
         self.routed_scaling_factor = config.routed_scaling_factor
 
+        self.gate_scaling_factor = config.gate_scaling_factor
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.sequence_parallel = config.sequence_parallel
         self.context_parallel_size = max(get_context_parallel_world_size(), 1)
@@ -156,6 +157,34 @@ class StandardMoERouter(nn.Layer):
             dtype="float32",
             default_initializer=paddle.nn.initializer.Uniform(),
         )
+
+        if self.routed_scaling_factor == "learnable":
+            self.routed_scaling_factor = self.create_parameter(
+                shape=[self.num_experts],
+                dtype="float32",
+                default_initializer=nn.initializer.Constant(1.0),
+            )
+        elif self.routed_scaling_factor is not None and not isinstance(
+            self.routed_scaling_factor, (int, float)
+        ):
+            raise ValueError(
+                f"routed_scaling_factor must be a float, 'learnable', or None, "
+                f"got {self.routed_scaling_factor!r}"
+            )
+
+        if self.gate_scaling_factor == "learnable":
+            self.gate_scaling_factor = self.create_parameter(
+                shape=[self.hidden_size],
+                dtype="float32",
+                default_initializer=nn.initializer.Constant(1.0),
+            )
+        elif self.gate_scaling_factor is not None and not isinstance(
+            self.gate_scaling_factor, (int, float)
+        ):
+            raise ValueError(
+                f"gate_scaling_factor must be a float, 'learnable', or None, "
+                f"got {self.gate_scaling_factor!r}"
+            )
 
         if self.topk_method == "noaux_tc":
             self.register_buffer(
@@ -633,6 +662,10 @@ class TopKRouter(StandardMoERouter):
             raise ValueError(
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
             )
+
+        if self.gate_scaling_factor is not None:
+            input = input * self.gate_scaling_factor * (self.hidden_size**-0.5)
+
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
                 input,
@@ -642,7 +675,6 @@ class TopKRouter(StandardMoERouter):
             )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
-
         gates = self.gate_score_func(logits)
 
         if input_ids_none_zero_mask is not None:
@@ -656,7 +688,6 @@ class TopKRouter(StandardMoERouter):
 
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
 
-        _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
         gates_ori = gates.clone()
         if self.scoring_func == "sigmoid":
@@ -745,10 +776,7 @@ class TopKRouter(StandardMoERouter):
             # -1 means neither participates in routing nor expert calculation
             top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
 
-        gates_masked = gates * mask
-
         # norm
-
         if self.norm_topk_prob:
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
@@ -756,19 +784,24 @@ class TopKRouter(StandardMoERouter):
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
-            # Reconstruct gates_masked from top_gate  to ensure
-            # bit-exact alignment. Instead of normalizing gates_masked independently
-            # (which uses different FP32 reduction over E=32 elements vs K=8),
-            # scatter the already-normalized top_gate values back to [S, E] layout.
-            gates_masked = paddle.zeros_like(gates).put_along_axis(
-                top_idx, top_gate, axis=1
-            )
 
-        if abs(self.routed_scaling_factor - 1.0) > 1e-6:
-            top_gate = top_gate * self.routed_scaling_factor
-            gates_masked *= self.routed_scaling_factor
+        if self.routed_scaling_factor is not None:
+            if isinstance(self.routed_scaling_factor, paddle.Tensor):
+                safe_topk_indices = paddle.clip(top_idx, min=0)
+                gathered_scales = F.embedding(
+                    safe_topk_indices,
+                    self.routed_scaling_factor.unsqueeze(1),
+                ).squeeze(-1)
+                top_gate = top_gate * gathered_scales
+            elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
+                top_gate = top_gate * self.routed_scaling_factor
 
-        _log_moe_md5(gates_masked, "gates_masked", self._layer_number)
+        # Reconstruct probs (combine weights in [S, E] sparse layout) from final top_gate.
+        probs = paddle.zeros_like(gates).put_along_axis(
+            top_idx, top_gate, axis=1
+        )
+
+        _log_moe_md5(probs, "probs", self._layer_number)
         _log_moe_md5(top_gate, "topk_weights_normed", self._layer_number)
 
         if self.topk_method == "noaux_tc":
@@ -796,7 +829,7 @@ class TopKRouter(StandardMoERouter):
             None,  # new capacity
             top_gate,  # weights of selected experts for each token [num_tokens, num_experts_per_token]
             top_idx,  # indices of selected experts for each token [num_tokens, num_experts_per_token]
-            gates_masked,  # masked gates. for each token, the selected experts are remainded with their original values, others are 0 [num_tokens, num_experts]
+            probs,  # combine weights in [S, E] sparse layout; non-selected positions are 0 [num_tokens, num_experts]
             mask,  # mask. for each token, the selected experts are marked with 1s [num_tokens, num_experts]
             None,  # token priority
             l_aux,

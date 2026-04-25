@@ -44,7 +44,8 @@ class MockTransformerConfig:
         # Router Specific Parameters
         self.topk_method = "noaux_tc"
         self.norm_topk_prob = True
-        self.routed_scaling_factor = 1.0
+        self.routed_scaling_factor = None
+        self.gate_scaling_factor = None
         self.scoring_func = "softmax"
         self.moe_router_load_balancing_type = "aux_loss"
         self.moe_router_force_load_balancing = False
@@ -389,6 +390,379 @@ class TestTopKRouter(unittest.TestCase):
         )
         self.assertEqual(loss.shape, [])
         self.assertGreater(loss.item(), 0.0)
+
+
+class TestScalingFactorInit(unittest.TestCase):
+    """Test initialization behavior for gate_scaling_factor and routed_scaling_factor."""
+
+    def setUp(self):
+        self.config = MockTransformerConfig()
+        patcher = patch(
+            "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+            return_value=1,
+        )
+        self.mock_cp = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # ---- routed_scaling_factor ----
+
+    def test_routed_scaling_factor_none(self):
+        """routed_scaling_factor=None: stored as None, not a Parameter."""
+        self.config.routed_scaling_factor = None
+        router = TopKRouter(self.config)
+        self.assertIsNone(router.routed_scaling_factor)
+
+    def test_routed_scaling_factor_float(self):
+        """routed_scaling_factor=2.5 (float): stored as float."""
+        self.config.routed_scaling_factor = 2.5
+        router = TopKRouter(self.config)
+        self.assertIsInstance(router.routed_scaling_factor, float)
+        self.assertAlmostEqual(router.routed_scaling_factor, 2.5)
+
+    def test_routed_scaling_factor_learnable(self):
+        """routed_scaling_factor='learnable': creates a trainable Parameter of shape [num_experts]."""
+        self.config.routed_scaling_factor = "learnable"
+        router = TopKRouter(self.config)
+        self.assertIsInstance(router.routed_scaling_factor, paddle.Tensor)
+        self.assertEqual(
+            list(router.routed_scaling_factor.shape),
+            [self.config.n_routed_experts],
+        )
+        # Initialized to 1.0
+        np.testing.assert_allclose(
+            router.routed_scaling_factor.numpy(),
+            np.ones(self.config.n_routed_experts, dtype="float32"),
+        )
+        # Should be a trainable parameter
+        self.assertFalse(router.routed_scaling_factor.stop_gradient)
+
+    def test_routed_scaling_factor_invalid_raises(self):
+        """routed_scaling_factor with an invalid type (e.g., a list) should raise ValueError."""
+        self.config.routed_scaling_factor = [1.0, 2.0]
+        with self.assertRaises(ValueError):
+            TopKRouter(self.config)
+
+    def test_routed_scaling_factor_invalid_string_raises(self):
+        """routed_scaling_factor='unknown' should raise ValueError."""
+        self.config.routed_scaling_factor = "unknown"
+        with self.assertRaises(ValueError):
+            TopKRouter(self.config)
+
+    # ---- gate_scaling_factor ----
+
+    def test_gate_scaling_factor_none(self):
+        """gate_scaling_factor=None: stored as None."""
+        self.config.gate_scaling_factor = None
+        router = TopKRouter(self.config)
+        self.assertIsNone(router.gate_scaling_factor)
+
+    def test_gate_scaling_factor_float(self):
+        """gate_scaling_factor=0.5 (float): stored as float."""
+        self.config.gate_scaling_factor = 0.5
+        router = TopKRouter(self.config)
+        self.assertIsInstance(router.gate_scaling_factor, float)
+        self.assertAlmostEqual(router.gate_scaling_factor, 0.5)
+
+    def test_gate_scaling_factor_learnable(self):
+        """gate_scaling_factor='learnable': creates a trainable Parameter of shape [hidden_size]."""
+        self.config.gate_scaling_factor = "learnable"
+        router = TopKRouter(self.config)
+        self.assertIsInstance(router.gate_scaling_factor, paddle.Tensor)
+        self.assertEqual(
+            list(router.gate_scaling_factor.shape), [self.config.hidden_size]
+        )
+        # Initialized to 1.0
+        np.testing.assert_allclose(
+            router.gate_scaling_factor.numpy(),
+            np.ones(self.config.hidden_size, dtype="float32"),
+        )
+        self.assertFalse(router.gate_scaling_factor.stop_gradient)
+
+    def test_gate_scaling_factor_invalid_raises(self):
+        """gate_scaling_factor with an invalid type (e.g., a list) should raise ValueError."""
+        self.config.gate_scaling_factor = [1.0]
+        with self.assertRaises(ValueError):
+            TopKRouter(self.config)
+
+    def test_gate_scaling_factor_invalid_string_raises(self):
+        """gate_scaling_factor='bad_value' should raise ValueError."""
+        self.config.gate_scaling_factor = "bad_value"
+        with self.assertRaises(ValueError):
+            TopKRouter(self.config)
+
+
+class TestGateScalingFactorForward(unittest.TestCase):
+    """Test that gate_scaling_factor correctly scales input before the gate projection."""
+
+    def setUp(self):
+        self.config = MockTransformerConfig()
+        self.config.topk_method = "greedy"
+        self.config.norm_topk_prob = False
+        self.config.router_aux_loss_coef = 0.0
+        self.config.router_z_loss_coef = 0.0
+        patcher = patch(
+            "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+            return_value=1,
+        )
+        self.mock_cp = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_gate_scaling_none_no_effect(self):
+        """gate_scaling_factor=None: forward should succeed and output shapes should be correct."""
+        self.config.gate_scaling_factor = None
+        router = TopKRouter(self.config)
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+        outputs = router(hidden)
+        self.assertIsNotNone(outputs)
+        _, top_gate, top_idx, probs, mask, _, _, _ = outputs
+        self.assertEqual(top_gate.shape, [8, self.config.num_experts_per_tok])
+        self.assertEqual(probs.shape, [8, self.config.n_routed_experts])
+
+    def test_gate_scaling_float_changes_logits(self):
+        """gate_scaling_factor=float: the scaled path should produce different top_gate than unscaled."""
+        paddle.seed(42)
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+
+        self.config.gate_scaling_factor = None
+        router_no_scale = TopKRouter(self.config)
+
+        self.config.gate_scaling_factor = 2.0
+        router_scaled = TopKRouter(self.config)
+        # Copy same weights so only the scaling differs
+        router_scaled.weight.set_value(router_no_scale.weight.clone())
+
+        _, top_gate_no, top_idx_no, _, _, _, _, _ = router_no_scale(hidden)
+        _, top_gate_yes, top_idx_yes, _, _, _, _, _ = router_scaled(hidden)
+
+        # At least some routing weights should differ
+        self.assertFalse(
+            np.allclose(top_gate_no.numpy(), top_gate_yes.numpy(), atol=1e-5),
+            "gate_scaling_factor=2.0 should change the routing weights",
+        )
+
+    def test_gate_scaling_learnable_forward(self):
+        """gate_scaling_factor='learnable': forward runs without error and output shapes are correct."""
+        self.config.gate_scaling_factor = "learnable"
+        router = TopKRouter(self.config)
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+        outputs = router(hidden)
+        self.assertIsNotNone(outputs)
+        _, top_gate, top_idx, probs, mask, _, _, _ = outputs
+        self.assertEqual(probs.shape, [8, self.config.n_routed_experts])
+
+
+class TestRoutedScalingFactorForward(unittest.TestCase):
+    """Test that routed_scaling_factor correctly scales top_gate after top-k selection."""
+
+    def setUp(self):
+        self.config = MockTransformerConfig()
+        self.config.topk_method = "greedy"
+        self.config.norm_topk_prob = False
+        self.config.router_aux_loss_coef = 0.0
+        self.config.router_z_loss_coef = 0.0
+        patcher = patch(
+            "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+            return_value=1,
+        )
+        self.mock_cp = patcher.start()
+        self.addCleanup(patcher.stop)
+        paddle.seed(99)
+        self.hidden = paddle.randn([2, 4, self.config.hidden_size])
+
+    def _make_router(self, rsf):
+        self.config.routed_scaling_factor = rsf
+        return TopKRouter(self.config)
+
+    def test_none_no_scaling(self):
+        """routed_scaling_factor=None: top_gate should NOT be additionally scaled."""
+        router_none = self._make_router(None)
+        self.config.routed_scaling_factor = 1.0
+        router_one = self._make_router(1.0)
+        # Copy same weights
+        router_one.weight.set_value(router_none.weight.clone())
+
+        _, top_gate_none, _, _, _, _, _, _ = router_none(self.hidden)
+        _, top_gate_one, _, _, _, _, _, _ = router_one(self.hidden)
+
+        # routed_scaling_factor=1.0 should be a no-op (abs(1.0-1.0)<=1e-6), so results equal
+        np.testing.assert_allclose(
+            top_gate_none.numpy(),
+            top_gate_one.numpy(),
+            atol=1e-5,
+            err_msg="None and 1.0 routed_scaling_factor should yield identical top_gate",
+        )
+
+    def test_float_scaling(self):
+        """routed_scaling_factor=2.5 (DeepSeek-V3 style): top_gate should be multiplied by 2.5."""
+        router_none = self._make_router(None)
+        router_25 = self._make_router(2.5)
+        router_25.weight.set_value(router_none.weight.clone())
+
+        _, top_gate_none, _, _, _, _, _, _ = router_none(self.hidden)
+        _, top_gate_25, _, _, _, _, _, _ = router_25(self.hidden)
+
+        np.testing.assert_allclose(
+            top_gate_25.numpy(),
+            top_gate_none.numpy() * 2.5,
+            rtol=1e-5,
+            err_msg="routed_scaling_factor=2.5 should multiply top_gate by 2.5",
+        )
+
+    def test_float_scaling_one_is_noop(self):
+        """routed_scaling_factor=1.0 (abs diff <= 1e-6): top_gate unchanged compared to None."""
+        router_none = self._make_router(None)
+        router_one = self._make_router(1.0)
+        router_one.weight.set_value(router_none.weight.clone())
+
+        _, top_gate_none, _, _, _, _, _, _ = router_none(self.hidden)
+        _, top_gate_one, _, _, _, _, _, _ = router_one(self.hidden)
+
+        np.testing.assert_allclose(
+            top_gate_none.numpy(),
+            top_gate_one.numpy(),
+            atol=1e-5,
+        )
+
+    def test_learnable_scaling(self):
+        """routed_scaling_factor='learnable': per-expert scaling via embedding lookup."""
+        router = self._make_router("learnable")
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+        outputs = router(hidden)
+        self.assertIsNotNone(outputs)
+        _, top_gate, top_idx, probs, mask, _, _, _ = outputs
+
+        # Learnable scales are initialized to 1.0, so top_gate == scaled_by_1_top_gate
+        router_none = self._make_router(None)
+        router_none.weight.set_value(router.weight.clone())
+        _, top_gate_none, _, _, _, _, _, _ = router_none(hidden)
+
+        np.testing.assert_allclose(
+            top_gate.numpy(),
+            top_gate_none.numpy(),
+            atol=1e-5,
+            err_msg="learnable scales init=1.0 should give same result as no scaling",
+        )
+
+    def test_probs_sparse_layout_consistency(self):
+        """probs[S, E] should be 0 for non-selected experts and equal to top_gate for selected ones."""
+        router = self._make_router(2.5)
+        hidden = paddle.randn([1, 6, self.config.hidden_size])
+        _, top_gate, top_idx, probs, mask, _, _, _ = router(hidden)
+
+        num_tokens = 6
+        k = self.config.num_experts_per_tok
+
+        # For each token, gather the probs values at the selected expert indices
+        for t in range(num_tokens):
+            for ki in range(k):
+                expert_id = top_idx[t, ki].item()
+                self.assertGreaterEqual(
+                    expert_id, 0, "Expert index should be non-negative"
+                )
+                self.assertAlmostEqual(
+                    probs[t, expert_id].item(),
+                    top_gate[t, ki].item(),
+                    places=5,
+                    msg=f"probs[{t},{expert_id}] should equal top_gate[{t},{ki}]",
+                )
+
+
+class TestForwardOutputRenaming(unittest.TestCase):
+    """Test that the return tuple at position 3 is 'probs' (formerly 'gates_masked')."""
+
+    def setUp(self):
+        self.config = MockTransformerConfig()
+        patcher = patch(
+            "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+            return_value=1,
+        )
+        self.mock_cp = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_probs_output_shape_and_sparsity(self):
+        """
+        Return value at index 3 (probs) should have shape [S, E].
+        Non-selected expert positions should be exactly 0.
+        """
+        self.config.topk_method = "noaux_tc"
+        router = TopKRouter(self.config)
+        batch_size, seq_len = 2, 5
+        hidden = paddle.randn([batch_size, seq_len, self.config.hidden_size])
+
+        (_, top_gate, top_idx, probs, mask, _, _, _) = router(hidden)
+
+        num_tokens = batch_size * seq_len
+        k = self.config.num_experts_per_tok
+        n_e = self.config.n_routed_experts
+
+        self.assertEqual(probs.shape, [num_tokens, n_e])
+
+        # Count non-zero entries per token; should equal k (num_experts_per_tok)
+        probs_np = probs.numpy()
+        for t in range(num_tokens):
+            nnz = np.count_nonzero(probs_np[t])
+            self.assertEqual(
+                nnz,
+                k,
+                f"Token {t}: expected {k} non-zero probs, got {nnz}",
+            )
+
+    def test_probs_consistent_with_mask(self):
+        """
+        probs non-zero positions should exactly match mask==1 positions.
+        """
+        self.config.topk_method = "greedy"
+        self.config.norm_topk_prob = False
+        self.config.router_aux_loss_coef = 0.0
+        self.config.router_z_loss_coef = 0.0
+        router = TopKRouter(self.config)
+
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+        (_, _, _, probs, mask, _, _, _) = router(hidden)
+
+        probs_np = probs.numpy()
+        mask_np = mask.numpy()
+
+        # Where mask==0, probs must be 0
+        np.testing.assert_array_equal(
+            (probs_np != 0).astype(int),
+            mask_np.astype(int),
+            err_msg="probs non-zero pattern must match mask",
+        )
+
+    def test_forward_with_input_ids_probs_name(self):
+        """
+        With input_ids masking, padding tokens' probs row should be all zeros.
+        This replaces the old gates_masked variable name check.
+        """
+        self.config.topk_method = "noaux_tc"
+        router = TopKRouter(self.config)
+
+        batch_size, seq_len = 2, 4
+        paddle.seed(42)
+        hidden = paddle.randn([batch_size, seq_len, self.config.hidden_size])
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+
+        _, top_gate, top_idx, probs, mask, _, _, _ = router(
+            hidden, input_ids=input_ids
+        )
+
+        # Padding flat positions: 2, 3, 7
+        for p in [2, 3, 7]:
+            self.assertAlmostEqual(
+                probs[p].sum().item(),
+                0.0,
+                places=5,
+                msg=f"probs at padding position {p} should be 0",
+            )
+
+        # Valid flat positions must have non-zero probs rows
+        for p in [0, 1, 4, 5, 6]:
+            self.assertGreater(
+                probs[p].sum().item(),
+                0.0,
+                msg=f"probs at valid position {p} should be non-zero",
+            )
 
 
 if __name__ == "__main__":

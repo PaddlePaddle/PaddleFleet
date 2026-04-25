@@ -534,13 +534,13 @@ class AllToAllTokenDispatcher(nn.Layer):
     def dispatch_preprocess(
         self,
         hidden_states: paddle.Tensor,
-        gates_masked: paddle.Tensor,  # probs
+        probs: paddle.Tensor,
         mask: paddle.Tensor,  # routing_map
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ) -> tuple[paddle.Tensor, paddle.Tensor]:
         self.routing_map = mask
-        self.gates_masked = gates_masked
+        self.probs = probs
         self.num_experts = (
             self.num_experts_per_device * self.expert_model_parallel_size
         )
@@ -683,7 +683,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.reshaped_input_shape,
-            probs=self.gates_masked,
+            probs=self.probs,
             routing_map=self.routing_map,
         )
 

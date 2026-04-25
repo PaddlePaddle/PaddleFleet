@@ -788,7 +788,7 @@ class MoELayer(nn.Layer):
             capacity,
             topk_weights,
             topk_indices,
-            gates_masked,
+            probs,
             mask,
             priorities,
             aux_loss,
@@ -798,10 +798,11 @@ class MoELayer(nn.Layer):
             input_ids=input_ids,
         )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
-        # gates_masked, mask: Shape is [seq_len, num_experts], sometimes their names are "probs" and "routing_map"
+        # probs: combine weights in [S, E] sparse layout (non-selected positions are 0) [seq_len, num_experts]
+        # mask (routing_map): binary selection matrix [seq_len, num_experts]
         # capacity, priorities are used for dropping tokens, currently they are not used
 
-        _log_moe_md5(gates_masked, "gates_masked", layer_idx)
+        _log_moe_md5(probs, "probs", layer_idx)
         _log_moe_md5(mask, "routing_mask", layer_idx)
         if framework._dygraph_tracer()._has_grad:
             log_moe_losses(layer_idx, aux_loss=aux_loss, z_loss=z_loss)
@@ -822,7 +823,7 @@ class MoELayer(nn.Layer):
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
                     hidden_states,
-                    gates_masked,
+                    probs,
                     mask,
                     combine_overlap_handle,
                     topk_weights=topk_weights,
@@ -831,7 +832,7 @@ class MoELayer(nn.Layer):
             else:
                 output = self.custom_forward(
                     hidden_states,
-                    gates_masked,
+                    probs,
                     mask,
                     topk_weights=topk_weights,
                     topk_indices=topk_indices,
@@ -847,7 +848,7 @@ class MoELayer(nn.Layer):
                 reshaped_input = self.fc1_latent_proj(reshaped_input)
             if self.moe_grouped_gemm:
                 output = self._forward_single_card_grouped_gemm_moe(
-                    reshaped_input, mask, gates_masked
+                    reshaped_input, mask, probs
                 )
             else:
                 output = self._forward_single_card_moe(

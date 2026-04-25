@@ -145,5 +145,56 @@ class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
         self.assertEqual(config.moe_layer_freq, expected)
 
 
+class TestRoutedAndGateScalingFactorConfig(unittest.TestCase):
+    """Tests for the new gate_scaling_factor and routed_scaling_factor field types
+    introduced in TransformerConfig."""
+
+    def test_gate_scaling_factor_default_is_none(self):
+        """gate_scaling_factor defaults to None when not specified."""
+        config = TransformerConfig(num_hidden_layers=4)
+        self.assertIsNone(config.gate_scaling_factor)
+
+    def test_gate_scaling_factor_float(self):
+        """gate_scaling_factor accepts a float value."""
+        config = TransformerConfig(num_hidden_layers=4, gate_scaling_factor=0.5)
+        self.assertAlmostEqual(config.gate_scaling_factor, 0.5)
+
+    def test_gate_scaling_factor_learnable_string(self):
+        """gate_scaling_factor accepts the string 'learnable'."""
+        config = TransformerConfig(
+            num_hidden_layers=4, gate_scaling_factor="learnable"
+        )
+        self.assertEqual(config.gate_scaling_factor, "learnable")
+
+    def test_routed_scaling_factor_default_is_none(self):
+        """routed_scaling_factor defaults to None when not specified (new default)."""
+        config = TransformerConfig(num_hidden_layers=4)
+        self.assertIsNone(config.routed_scaling_factor)
+
+    def test_routed_scaling_factor_float(self):
+        """routed_scaling_factor accepts a float value (e.g., 2.5 for DeepSeek-V3)."""
+        config = TransformerConfig(
+            num_hidden_layers=4, routed_scaling_factor=2.5
+        )
+        self.assertAlmostEqual(config.routed_scaling_factor, 2.5)
+
+    def test_routed_scaling_factor_learnable_string(self):
+        """routed_scaling_factor accepts the string 'learnable'."""
+        config = TransformerConfig(
+            num_hidden_layers=4, routed_scaling_factor="learnable"
+        )
+        self.assertEqual(config.routed_scaling_factor, "learnable")
+
+    def test_both_scaling_factors_can_be_set_together(self):
+        """Both gate_scaling_factor and routed_scaling_factor can be set simultaneously."""
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            gate_scaling_factor="learnable",
+            routed_scaling_factor=2.5,
+        )
+        self.assertEqual(config.gate_scaling_factor, "learnable")
+        self.assertAlmostEqual(config.routed_scaling_factor, 2.5)
+
+
 if __name__ == "__main__":
     unittest.main()
