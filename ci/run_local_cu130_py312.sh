@@ -27,7 +27,7 @@ export PYTHON_VERSION="3.12"
 export PYTHONPATH=$(pwd)/PaddleFleet:$PYTHONPATH
 
 # Paddle URL
-export PADDLE_URL="https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release3_4-Training-Linux-Gpu-Cuda130-Cudnn913-Mkl-Avx-Gcc11-Cp312-Incubate/283a6c3785b3b0d144801497b27118fb2db41256/paddlepaddle_gpu-3.4.0.post20260420+283a6c3785b-cp312-cp312-linux_x86_64.whl"
+export PADDLE_URL="https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-Training-Linux-Gpu-Cuda130-Cudnn913-Mkl-Avx-Gcc11-Cp312-Incubate/eda0f7f2dad9cddbbf91f8ffd542ad9aa85acc91/paddlepaddle_gpu-3.4.0.post20260424+eda0f7f2dad-cp312-cp312-linux_x86_64.whl"
 
 # 测试选项 (默认全部为 false)
 RUN_SINGLE_UNIT=false
