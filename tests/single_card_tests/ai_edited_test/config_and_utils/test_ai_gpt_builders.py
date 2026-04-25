@@ -90,6 +90,7 @@ class TestGptBuilder(unittest.TestCase):
         mock_config.use_qk_norm = False
         mock_config.multi_latent_attention = False
         mock_config.normalization = "RMSNorm"
+        mock_config.separate_mtp_headloss = False
 
         mock_loss = MagicMock()
 
@@ -125,6 +126,7 @@ class TestGptBuilder(unittest.TestCase):
         mock_config.rope_theta = 10000.0
         mock_config.rope_scaling = None
         mock_config.parallel_output = True
+        mock_config.separate_mtp_headloss = False
 
         mock_loss = MagicMock()
 
@@ -163,6 +165,7 @@ class TestGptBuilder(unittest.TestCase):
         mock_config.use_qk_norm = False
         mock_config.multi_latent_attention = False
         mock_config.normalization = "RMSNorm"
+        mock_config.separate_mtp_headloss = False
 
         with (
             patch("paddlefleet.gpt_builders.get_gpt_spec") as mock_get_spec,

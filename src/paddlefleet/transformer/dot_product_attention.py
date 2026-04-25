@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -45,10 +44,6 @@ from paddlefleet.transformer.utils import (
     is_layer_window_attention,
 )
 from paddlefleet.utils import divide
-
-_ERNIECORE_ALIGNMENT = (
-    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-)
 
 
 class DotProductAttention(FleetLayer):
@@ -192,12 +187,6 @@ class DotProductAttention(FleetLayer):
         Otherwise falls back to flash_attention with causal=True.
         Handles MLA value padding (q_head_dim != v_head_dim).
         """
-        if not hasattr(self, "_ec_attn_path_logged"):
-            print(
-                "[ALIGNMENT PATH HIT] dot_product_attention: _ec_compatible_flash_attention entered",
-                flush=True,
-            )
-            self._ec_attn_path_logged = True
         bsz, q_len, num_heads, q_head_dim = query.shape
         v_head_dim = value.shape[-1]
         need_value_padding = q_head_dim != v_head_dim
@@ -266,7 +255,7 @@ class DotProductAttention(FleetLayer):
         )
 
         # EC-compatible flash attention path for alignment mode
-        if _ERNIECORE_ALIGNMENT:
+        if self.config.gpt_model_use_experimental_version:
             return self._ec_compatible_flash_attention(
                 query, key, value, attn_mask_startend_row_indices
             )
@@ -278,6 +267,13 @@ class DotProductAttention(FleetLayer):
         else:
             from paddle.nn.functional.flash_attention import (
                 flashmask_attention as _flashmask_attention,
+            )
+        use_eager = self.config._attn_implementation == "eager"
+
+        if use_eager and packed_seq_params is not None:
+            raise ValueError(
+                'packed_seq_params does not support _attn_implementation="eager"; '
+                "please disable packed sequence inputs or use a fused attention implementation."
             )
         if packed_seq_params is not None:
             assert (
@@ -329,8 +325,10 @@ class DotProductAttention(FleetLayer):
             attn_output = attn_output.reshape([0, 0, -1])
             return attn_output
         if (
-            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
-        ) and attn_mask_startend_row_indices is None:
+            (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
+            and attn_mask_startend_row_indices is None
+            and not use_eager
+        ):
             # Note:
             # attention_mask is None in default
             # is_causal is True in default
@@ -354,8 +352,10 @@ class DotProductAttention(FleetLayer):
             return attn_output
 
         elif (
-            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
-        ) and attn_mask_startend_row_indices is not None:
+            (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
+            and attn_mask_startend_row_indices is not None
+            and not use_eager
+        ):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             flashmask_attention_func = (

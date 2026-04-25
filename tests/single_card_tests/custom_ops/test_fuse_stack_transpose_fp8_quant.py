@@ -61,37 +61,35 @@ def ceil_to_ue8m0_paddle(x: paddle.Tensor):
     return paddle.pow(paddle.to_tensor(2.0, dtype=x.dtype), ceil_log2_x)
 
 
-def _get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl(
+def _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl(
     x: paddle.Tensor,
 ):
-    assert x.dtype == paddle.float and x.dim() in (2, 3)
+    assert x.dtype == paddle.float32 and len(x.shape) in (2, 3)
 
-    ue8m0_tensor = (x.view(paddle.int) >> 23).to(paddle.uint8)
+    ue8m0_tensor = (x.view(paddle.int32) >> 23).cast(paddle.uint8)
 
     mn, k = x.shape[-2], x.shape[-1]
     remove_dim = False
 
-    if x.dim() == 2:
+    if len(x.shape) == 2:
         x, remove_dim = x.unsqueeze(0), True
     b = x.shape[0]
 
     aligned_mn = get_tma_aligned_size(mn, 4)
     aligned_k = align(k, 4)
 
-    padded = paddle.zeros(
-        (b, aligned_mn, aligned_k), device=x.device, dtype=paddle.uint8
-    )
+    padded = paddle.zeros([b, aligned_mn, aligned_k], dtype=paddle.uint8)
     padded[:, :mn, :k] = ue8m0_tensor
 
     padded = (
-        padded.view(-1)
-        .view(dtype=paddle.int)
-        .view(b, aligned_mn, aligned_k // 4)
+        padded.reshape([-1])
+        .view(paddle.int32)
+        .reshape([b, aligned_mn, aligned_k // 4])
     )
 
     transposed = paddle.zeros(
-        (b, aligned_k // 4, aligned_mn), device=x.device, dtype=paddle.int
-    ).mT
+        [b, aligned_k // 4, aligned_mn], dtype=paddle.int32
+    ).transpose([0, 2, 1])
     transposed[:, :, :] = padded
 
     aligned_x = transposed[:, :mn, :]
@@ -101,11 +99,11 @@ def _get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl(
 
 def transform_scale_ue8m0(sf, mn, weight_block_size=None):
     get_mn_major_tma_aligned_packed_ue8m0_tensor = (
-        _get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl
+        _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl
     )
     if weight_block_size:
         assert weight_block_size == [128, 128]
-        sf = sf.index_select(-2, paddle.arange(mn, device=sf.device) // 128)
+        sf = sf.index_select(paddle.arange(mn) // 128, axis=-2)
     sf = get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
     return sf
 
@@ -149,34 +147,16 @@ class TestFusedStackTransposeQuant(unittest.TestCase):
     def test_transpose_input_output_consistency(self):
         if not core.is_compiled_with_cuda():
             return
+        arch = paddle.device.cuda.get_device_capability()[0]
 
         np.random.seed(0)
         w_paddle_list = []
 
         for _ in range(3):
             w = paddle.randn([N, K], dtype=DTYPE_PD)
-            # y = paddle.zeros([M, N], dtype=DTYPE_PD)
             w_paddle_list.append(w)
 
-        # Case 1: output_scale_transpose = False, use_ue8m0_scale = True
-        out_false, scale_false = self.run_op(
-            w_paddle_list,
-            transpose=True,
-            using_pow2_scaling=False,
-            use_ue8m0_scale=True,
-            output_scale_transpose=False,
-        )
-
-        # Case 2: output_scale_transpose = True, use_ue8m0_scale = True
-        out_true, scale_true = self.run_op(
-            w_paddle_list,
-            transpose=True,
-            using_pow2_scaling=False,
-            use_ue8m0_scale=True,
-            output_scale_transpose=True,
-        )
-
-        # Case 3: output_scale_transpose = True, use_ue8m0_scale = False
+        # Non-ue8m0 cases (run on all GPUs)
         out_32_false, scale_32_false = self.run_op(
             w_paddle_list,
             transpose=True,
@@ -185,58 +165,77 @@ class TestFusedStackTransposeQuant(unittest.TestCase):
             output_scale_transpose=False,
         )
 
+        out_32_true, scale_32_true = self.run_op(
+            w_paddle_list,
+            transpose=True,
+            using_pow2_scaling=True,
+            use_ue8m0_scale=False,
+            output_scale_transpose=True,
+        )
+
+        # output_scale_transpose should not affect quantized output
         np.testing.assert_allclose(
-            out_false.numpy(), out_true.numpy(), atol=0, rtol=0
+            out_32_false.numpy(), out_32_true.numpy(), atol=0, rtol=0
         )
+        # Transposed scale should match
         np.testing.assert_allclose(
-            out_false.numpy(), out_32_false.numpy(), atol=0, rtol=0
+            scale_32_false.numpy().T, scale_32_true.numpy(), atol=0, rtol=0
         )
 
-        scale_false_np = scale_false.numpy()
-        scale_true_np = scale_true.numpy()
+        # UE8M0 cases (only on Blackwell SM >= 10)
+        if arch >= 10:
+            out_false, scale_false = self.run_op(
+                w_paddle_list,
+                transpose=True,
+                using_pow2_scaling=False,
+                use_ue8m0_scale=True,
+                output_scale_transpose=False,
+            )
 
-        scale_false_T = scale_false_np.T
+            out_true, scale_true = self.run_op(
+                w_paddle_list,
+                transpose=True,
+                using_pow2_scaling=False,
+                use_ue8m0_scale=True,
+                output_scale_transpose=True,
+            )
 
-        scale_32_ref = quant_ref(
-            scale_32_false, out_32_false.shape[-2], [128, 128]
-        )
+            np.testing.assert_allclose(
+                out_false.numpy(), out_true.numpy(), atol=0, rtol=0
+            )
+            np.testing.assert_allclose(
+                out_false.numpy(), out_32_false.numpy(), atol=0, rtol=0
+            )
 
-        np.testing.assert_allclose(
-            scale_32_ref.numpy(), scale_true_np.T, atol=0, rtol=0
-        )
-        np.testing.assert_allclose(scale_false_T, scale_true_np, atol=0, rtol=0)
+            scale_false_np = scale_false.numpy()
+            scale_true_np = scale_true.numpy()
+
+            scale_false_T = scale_false_np.T
+
+            scale_32_ref = quant_ref(
+                scale_32_false, out_32_false.shape[-2], [128, 128]
+            )
+
+            np.testing.assert_allclose(
+                scale_32_ref.numpy(), scale_true_np.T, atol=0, rtol=0
+            )
+            np.testing.assert_allclose(
+                scale_false_T, scale_true_np, atol=0, rtol=0
+            )
 
     def test_output_consistency(self):
         if not core.is_compiled_with_cuda():
             return
+        arch = paddle.device.cuda.get_device_capability()[0]
 
         np.random.seed(0)
         w_paddle_list = []
 
         for _ in range(3):
             w = paddle.randn([N, K], dtype=DTYPE_PD)
-            # y = paddle.zeros([M, N], dtype=DTYPE_PD)
             w_paddle_list.append(w)
 
-        # Case 1: output_scale_transpose = False, use_ue8m0_scale = True
-        out_false, scale_false = self.run_op(
-            w_paddle_list,
-            transpose=False,
-            using_pow2_scaling=False,
-            use_ue8m0_scale=True,
-            output_scale_transpose=False,
-        )
-
-        # Case 2: output_scale_transpose = True, use_ue8m0_scale = True
-        out_true, scale_true = self.run_op(
-            w_paddle_list,
-            transpose=False,
-            using_pow2_scaling=False,
-            use_ue8m0_scale=True,
-            output_scale_transpose=True,
-        )
-
-        # Case 3: output_scale_transpose = True, use_ue8m0_scale = False
+        # Non-ue8m0 cases (run on all GPUs)
         out_32_false, scale_32_false = self.run_op(
             w_paddle_list,
             transpose=False,
@@ -245,58 +244,75 @@ class TestFusedStackTransposeQuant(unittest.TestCase):
             output_scale_transpose=False,
         )
 
-        np.testing.assert_allclose(
-            out_false.numpy(), out_true.numpy(), atol=0, rtol=0
-        )
-        np.testing.assert_allclose(
-            out_false.numpy(), out_32_false.numpy(), atol=0, rtol=0
-        )
-
-        scale_false_np = scale_false.numpy()
-        scale_true_np = scale_true.numpy()
-
-        scale_false_T = scale_false_np.T
-
-        scale_32_ref = quant_ref(
-            scale_32_false, out_32_false.shape[-2], [128, 128]
+        out_32_true, scale_32_true = self.run_op(
+            w_paddle_list,
+            transpose=False,
+            using_pow2_scaling=True,
+            use_ue8m0_scale=False,
+            output_scale_transpose=True,
         )
 
         np.testing.assert_allclose(
-            scale_32_ref.numpy(), scale_true_np.T, atol=0, rtol=0
+            out_32_false.numpy(), out_32_true.numpy(), atol=0, rtol=0
         )
-        np.testing.assert_allclose(scale_false_T, scale_true_np, atol=0, rtol=0)
+        np.testing.assert_allclose(
+            scale_32_false.numpy().T, scale_32_true.numpy(), atol=0, rtol=0
+        )
+
+        # UE8M0 cases (only on Blackwell SM >= 10)
+        if arch >= 10:
+            out_false, scale_false = self.run_op(
+                w_paddle_list,
+                transpose=False,
+                using_pow2_scaling=False,
+                use_ue8m0_scale=True,
+                output_scale_transpose=False,
+            )
+
+            out_true, scale_true = self.run_op(
+                w_paddle_list,
+                transpose=False,
+                using_pow2_scaling=False,
+                use_ue8m0_scale=True,
+                output_scale_transpose=True,
+            )
+
+            np.testing.assert_allclose(
+                out_false.numpy(), out_true.numpy(), atol=0, rtol=0
+            )
+            np.testing.assert_allclose(
+                out_false.numpy(), out_32_false.numpy(), atol=0, rtol=0
+            )
+
+            scale_false_np = scale_false.numpy()
+            scale_true_np = scale_true.numpy()
+
+            scale_false_T = scale_false_np.T
+
+            scale_32_ref = quant_ref(
+                scale_32_false, out_32_false.shape[-2], [128, 128]
+            )
+
+            np.testing.assert_allclose(
+                scale_32_ref.numpy(), scale_true_np.T, atol=0, rtol=0
+            )
+            np.testing.assert_allclose(
+                scale_false_T, scale_true_np, atol=0, rtol=0
+            )
 
     def test_gemm_out(self):
         if not core.is_compiled_with_cuda():
             return
+        arch = paddle.device.cuda.get_device_capability()[0]
 
         np.random.seed(0)
         w_paddle_list = []
 
         for _ in range(3):
             w = paddle.randn([N, K], dtype=DTYPE_PD)
-            # y = paddle.zeros([M, N], dtype=DTYPE_PD)
             w_paddle_list.append(w)
 
-        # Case 1: output_scale_transpose = False, use_ue8m0_scale = True
-        out_false, scale_false = self.run_op(
-            w_paddle_list,
-            transpose=False,
-            using_pow2_scaling=False,
-            use_ue8m0_scale=True,
-            output_scale_transpose=False,
-        )
-
-        # Case 2: output_scale_transpose = True, use_ue8m0_scale = True
-        out_true, scale_true = self.run_op(
-            w_paddle_list,
-            transpose=False,
-            using_pow2_scaling=False,
-            use_ue8m0_scale=True,
-            output_scale_transpose=True,
-        )
-
-        # Case 3: output_scale_transpose = True, use_ue8m0_scale = False
+        # Non-ue8m0 cases (run on all GPUs)
         out_32_false, scale_32_false = self.run_op(
             w_paddle_list,
             transpose=False,
@@ -305,26 +321,61 @@ class TestFusedStackTransposeQuant(unittest.TestCase):
             output_scale_transpose=False,
         )
 
-        np.testing.assert_allclose(
-            out_false.numpy(), out_true.numpy(), atol=0, rtol=0
-        )
-        np.testing.assert_allclose(
-            out_false.numpy(), out_32_false.numpy(), atol=0, rtol=0
-        )
-
-        scale_false_np = scale_false.numpy()
-        scale_true_np = scale_true.numpy()
-
-        scale_false_T = scale_false_np.T
-
-        scale_32_ref = quant_ref(
-            scale_32_false, out_32_false.shape[-2], [128, 128]
+        out_32_true, scale_32_true = self.run_op(
+            w_paddle_list,
+            transpose=False,
+            using_pow2_scaling=True,
+            use_ue8m0_scale=False,
+            output_scale_transpose=True,
         )
 
         np.testing.assert_allclose(
-            scale_32_ref.numpy(), scale_true_np.T, atol=0, rtol=0
+            out_32_false.numpy(), out_32_true.numpy(), atol=0, rtol=0
         )
-        np.testing.assert_allclose(scale_false_T, scale_true_np, atol=0, rtol=0)
+        np.testing.assert_allclose(
+            scale_32_false.numpy().T, scale_32_true.numpy(), atol=0, rtol=0
+        )
+
+        # UE8M0 cases (only on Blackwell SM >= 10)
+        if arch >= 10:
+            out_false, scale_false = self.run_op(
+                w_paddle_list,
+                transpose=False,
+                using_pow2_scaling=False,
+                use_ue8m0_scale=True,
+                output_scale_transpose=False,
+            )
+
+            out_true, scale_true = self.run_op(
+                w_paddle_list,
+                transpose=False,
+                using_pow2_scaling=False,
+                use_ue8m0_scale=True,
+                output_scale_transpose=True,
+            )
+
+            np.testing.assert_allclose(
+                out_false.numpy(), out_true.numpy(), atol=0, rtol=0
+            )
+            np.testing.assert_allclose(
+                out_false.numpy(), out_32_false.numpy(), atol=0, rtol=0
+            )
+
+            scale_false_np = scale_false.numpy()
+            scale_true_np = scale_true.numpy()
+
+            scale_false_T = scale_false_np.T
+
+            scale_32_ref = quant_ref(
+                scale_32_false, out_32_false.shape[-2], [128, 128]
+            )
+
+            np.testing.assert_allclose(
+                scale_32_ref.numpy(), scale_true_np.T, atol=0, rtol=0
+            )
+            np.testing.assert_allclose(
+                scale_false_T, scale_true_np, atol=0, rtol=0
+            )
 
 
 if __name__ == "__main__":

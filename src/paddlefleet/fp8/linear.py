@@ -27,7 +27,14 @@ class _FP8Gemm(paddle.autograd.Function):
     """Forward and backward function for FP8 GEMM"""
 
     @staticmethod
-    def forward(ctx, inp, weight, inp_quant_func, weight_quant_func):
+    def forward(
+        ctx,
+        inp,
+        weight,
+        inp_quant_func,
+        weight_quant_func,
+        use_pow2_scale=False,
+    ):
         """
         Forward pass for FP8 GEMM.
 
@@ -56,6 +63,7 @@ class _FP8Gemm(paddle.autograd.Function):
         ctx.save_for_backward(
             inp_t_fp8, inp_t_scale, weight, weight_fp8, weight_scale
         )
+        ctx.use_pow2_scale = use_pow2_scale
         out = paddle.empty(
             [inp_fp8.shape[0], weight_fp8.shape[0]], dtype=paddle.bfloat16
         )
@@ -102,6 +110,7 @@ class _FP8Gemm(paddle.autograd.Function):
                 output_scale_transpose=False,
                 quant_method="1x128",
                 input_transpose=True,
+                using_pow2_scale=ctx.use_pow2_scale,
             )
         )
 
@@ -194,13 +203,23 @@ class FP8Linear(ColumnParallelLinear):
         # print("==== self.weight after ====")
         # print(self.weight.strides)
 
+        self.use_pow2_scale = (
+            paddle.device.cuda.get_device_capability()[0] == 10
+        )
         self.inp_quant_func, self.weight_quant_func = get_quant_func(
-            config.fp8_recipe, input_trans=True, out_scale_trans=False
+            config.fp8_recipe,
+            input_trans=True,
+            out_scale_trans=False,
+            pow2_scale=self.use_pow2_scale,
         )
 
     def forward(self, inp):
         out = _FP8Gemm.apply(
-            inp, self.weight, self.inp_quant_func, self.weight_quant_func
+            inp,
+            self.weight,
+            self.inp_quant_func,
+            self.weight_quant_func,
+            self.use_pow2_scale,
         )
         if self.bias is not None:
             out = out + self.bias

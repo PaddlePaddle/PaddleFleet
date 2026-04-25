@@ -35,10 +35,7 @@ from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 
-# Alignment switch: match ErnieCore's MoE router behavior for bit-level alignment
-_ERNIECORE_ALIGNMENT = (
-    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-)
+# MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
 # Lazy-loaded EC FusedMoETopk Triton kernel for bit-exact alignment
@@ -59,9 +56,9 @@ _moe_router_logger = logging.getLogger(__name__)
 
 def _log_moe_md5(tensor, name, layer_idx=None):
     """Log MD5 of a tensor for MoE precision alignment debugging."""
-    if _LOG_LAYER_MD5 and _ERNIECORE_ALIGNMENT:
-        from paddlefleet.transformer.transformer_layer import TransformerLayer
+    from paddlefleet.transformer.transformer_layer import TransformerLayer
 
+    if _LOG_LAYER_MD5 and TransformerLayer._gpt_model_use_experimental_version:
         if TransformerLayer._skip_mtp_probes:
             return  # Skip MTP passes — EC has no MTP
         data = tensor.detach().cast("float32").numpy().tobytes()
@@ -606,26 +603,27 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(logits, "gate_logits", self._layer_number)
 
         gates = self.gate_score_func(logits)
-
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
-
-        gates_ori = gates
+        # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
+        gates_ori = gates.clone()
         if self.scoring_func == "sigmoid":
-            gates_ori = gates_ori / (
-                gates_ori.sum(axis=-1, keepdim=True) + 1e-20
-            )
+            if not getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
+                gates_ori = gates_ori / (
+                    gates_ori.sum(axis=-1, keepdim=True) + 1e-20
+                )
+            else:
+                # Use clip() to ensure the computation logic is consistent with EC; it may be useful when gradients are very small.
+                gates_ori = gates_ori / paddle.clip(
+                    gates_ori.sum(-1, keepdim=True), min=1e-12
+                )
 
-        if _ERNIECORE_ALIGNMENT:
+        if getattr(self.config, "gpt_model_use_experimental_version", False):
             # Use EC's FusedMoETopk Triton kernel for bit-exact alignment.
             # This ensures the topk selection + normalization uses the exact same
             # GPU kernel as ErnieCore, avoiding FP32 rounding differences between
             # Triton's scalar loop and Paddle's tensor ops.
-            if not hasattr(self, "_ec_topk_path_logged"):
-                print(
-                    "[ALIGNMENT PATH HIT] moe_router: FusedMoETopk Triton kernel used",
-                    flush=True,
-                )
-                self._ec_topk_path_logged = True
             FusedMoETopk = _get_fused_moe_topk()
             use_node_limit = self.n_group > 1
             probs_for_choice = (
@@ -692,19 +690,15 @@ class TopKRouter(StandardMoERouter):
         gates_masked = gates * mask
 
         # norm
-        if not _ERNIECORE_ALIGNMENT:
-            # When _ERNIECORE_ALIGNMENT is True, top_gate is already normalized by FusedMoETopk
-            if self.norm_topk_prob:
+
+        if self.norm_topk_prob:
+            if not getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
-                if self.num_experts_per_tok > 1:
-                    gates_s = paddle.sum(gates_masked, axis=-1, keepdim=True)
-                    denom_s = paddle.clip(
-                        gates_s, min=paddle.finfo(gates_masked.dtype).eps
-                    )
-                    gates_masked = gates_masked / denom_s
-        else:
-            # Reconstruct gates_masked from top_gate (Triton kernel output) to ensure
+            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
+            # Reconstruct gates_masked from top_gate  to ensure
             # bit-exact alignment. Instead of normalizing gates_masked independently
             # (which uses different FP32 reduction over E=32 elements vs K=8),
             # scatter the already-normalized top_gate values back to [S, E] layout.

@@ -31,6 +31,13 @@ except ImportError:
 import paddle.distributed as dist
 from paddle.autograd.py_layer import PyLayer
 
+from paddlefleet.tensor_parallel.random import (
+    get_cuda_rng_tracker,
+    get_expert_parallel_rng_tracker_name,
+)
+from paddlefleet.training.global_vars import get_global_training_logs
+from paddlefleet.utils import get_pg_size
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -231,7 +238,13 @@ class RandomSTE(paddle.autograd.PyLayer):
     def forward(ctx, x):
         ctx.x_shape = x.shape
         ctx.x_dtype = x.dtype
-        return paddle.randn(x.shape).cast(x.dtype)
+        if dist.get_world_size() <= 1:
+            return paddle.randn(x.shape).cast(x.dtype)
+        else:
+            with get_cuda_rng_tracker().fork(
+                get_expert_parallel_rng_tracker_name()
+            ):
+                return paddle.randn(x.shape).cast(x.dtype)
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -243,6 +256,160 @@ def apply_random_logits(logits):
     Apply the RandomSTE function to the logits.
     """
     return RandomSTE.apply(logits)
+
+
+def global_moe_balance_training_logs_enabled():
+    logs = get_global_training_logs()
+    if logs is None:
+        return False
+
+    is_enabled = getattr(logs, "is_moe_balance_logs_enabled", None)
+    return callable(is_enabled) and is_enabled()
+
+
+def log_moe_losses(layer_number, aux_loss=None, z_loss=None):
+    if not global_moe_balance_training_logs_enabled():
+        return
+    logs = get_global_training_logs()
+    if logs is None or not hasattr(logs, "update"):
+        return
+
+    log = {}
+    if aux_loss is not None:
+        aux_loss = aux_loss.detach()
+        log["aux_loss"] = aux_loss
+        if layer_number is not None:
+            log[f"aux_loss_layer_{layer_number}"] = aux_loss
+
+    if z_loss is not None:
+        z_loss = z_loss.detach()
+        log["zloss"] = z_loss
+        if layer_number is not None:
+            log[f"zloss_layer_{layer_number}"] = z_loss
+
+    logs.update(**log)
+
+
+def _all_gather_local_tokens(local_tokens_per_expert, group):
+    local_tokens_per_expert = local_tokens_per_expert.reshape([-1])
+    if group is None or get_pg_size(group) <= 1 or not group.is_member():
+        return local_tokens_per_expert.reshape([1, -1])
+
+    if local_tokens_per_expert.place.is_cpu_place():
+        gathered = []
+        dist.all_gather_object(
+            gathered,
+            local_tokens_per_expert.tolist(),
+            group=group,
+        )
+        return paddle.to_tensor(
+            gathered,
+            dtype=local_tokens_per_expert.dtype,
+            place=paddle.CPUPlace(),
+        ).reshape([get_pg_size(group), -1])
+
+    output_shape = local_tokens_per_expert.shape
+    output_shape[0] *= get_pg_size(group)
+    output = paddle.empty(output_shape, dtype=local_tokens_per_expert.dtype)
+    dist.stream.all_gather(
+        output,
+        local_tokens_per_expert,
+        group=group,
+        use_calc_stream=True,
+    )
+    return output.reshape([get_pg_size(group), -1])
+
+
+def _log_summary(key, layer_number, summary_data):
+    logs = get_global_training_logs()
+    if logs is None or not hasattr(logs, "update"):
+        return
+
+    summary_data = summary_data.detach()
+    if summary_data.numel() == 0:
+        return
+
+    summary_data = summary_data.astype("float32")
+    max_value = float(paddle.max(summary_data).item())
+    min_value = float(paddle.min(summary_data).item())
+    var_value = float(paddle.var(summary_data).item())
+    median_value = float(paddle.median(summary_data).item())
+    mean_value = float(paddle.mean(summary_data).item())
+    max_mean_ratio = max_value / mean_value if mean_value != 0 else 1.0
+    min_mean_ratio = min_value / mean_value if mean_value != 0 else 1.0
+
+    prefix = f"{key}_layer_{layer_number}"
+    logs.update(
+        **{
+            f"{prefix}_max": max_value,
+            f"{prefix}_min": min_value,
+            f"{prefix}_var": var_value,
+            f"{prefix}_median": median_value,
+            f"{prefix}_mean": mean_value,
+            f"{prefix}_max_mean_ratio": max_mean_ratio,
+            f"{prefix}_min_mean_ratio": min_mean_ratio,
+        }
+    )
+
+
+def _log_tokens_per_expert(layer_number, key, summary_data, count):
+    count = count.reshape([1]).astype("float32")
+    count = paddle.ones_like(count) if count.item() == 0 else count
+    avg_data = summary_data.astype("float32") / count
+
+    _log_summary(f"{key}_avg", layer_number, avg_data)
+    _log_summary(key, layer_number, summary_data)
+
+
+def _log_local_tokens_per_card(layer_number, local_tokens_by_rank):
+    card_totals = local_tokens_by_rank.sum(axis=1)
+    _log_summary(
+        "local_tokens_per_card",
+        layer_number,
+        card_totals,
+    )
+
+
+def log_moe_balance(
+    layer_number,
+    moe_group,
+    num_experts_per_tok,
+    tokens_per_expert,
+):
+    """Log fixed-topk MoE balance summaries from dispatched expert counts."""
+    if tokens_per_expert is None:
+        return
+
+    with paddle.no_grad():
+        if not isinstance(tokens_per_expert, paddle.Tensor):
+            tokens_per_expert = paddle.to_tensor(
+                tokens_per_expert,
+                dtype="int64",
+                place=paddle.CPUPlace(),
+            )
+        else:
+            tokens_per_expert = tokens_per_expert.detach()
+            if not tokens_per_expert.place.is_cpu_place():
+                # Moving a GPU tensor to CPU here introduces a synchronization
+                # point, so this path is slower and can affect training
+                # performance.
+                tokens_per_expert = tokens_per_expert.cpu()
+
+        local_tokens_by_rank = _all_gather_local_tokens(
+            tokens_per_expert,
+            moe_group,
+        )
+        topk = max(int(num_experts_per_tok or 1), 1)
+        summary = local_tokens_by_rank.reshape([-1])
+        count = summary.astype("float32").sum().reshape([1]) / topk
+
+        _log_tokens_per_expert(
+            layer_number,
+            "tokens_per_expert",
+            summary.clone() if isinstance(summary, paddle.Tensor) else summary,
+            count,
+        )
+        _log_local_tokens_per_card(layer_number, local_tokens_by_rank)
 
 
 def is_tensor(data):

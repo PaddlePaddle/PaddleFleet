@@ -20,9 +20,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn
 
-_ENABLE_EC_ALIGNMENT = (
-    os.environ.get("gpt_model_use_experimental_version", "0") == "1"
-)
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
 if TYPE_CHECKING:
@@ -418,33 +415,17 @@ class Attention(FleetLayer, ABC):
         # relative positional embedding (rotary embedding)
         # ================================================
         if (
-            _ENABLE_EC_ALIGNMENT
+            self.config.gpt_model_use_experimental_version
             and position_ids is not None
             and not self.config.multi_latent_attention
         ):
             # EC-compatible complex multiplication 3D MRoPE
-            # EC model config uses rope_theta=1000000.0 (from eb5_A13B_117B_moe/model_config.json)
-            # PF model config uses rope_theta=5000000.0 (from MiniMax-V2.5-bf16/config.json)
-            # For alignment, use EC's value
-            _ec_rope_theta = 1000000.0
-            if not hasattr(self, "_ec_rope_path_logged"):
-                print(
-                    "[ALIGNMENT PATH HIT] attention: _apply_ec_complex_3d_mrope called (non-MLA)",
-                    flush=True,
-                )
-                self._ec_rope_path_logged = True
-            if _LOG_LAYER_MD5:
-                import logging
-
-                logging.getLogger(__name__).info(
-                    f"[EC RoPE] Layer={self.layer_number} EC RoPE path taken, pos_ids shape={list(position_ids.shape)} rope_theta={_ec_rope_theta} head_dim={self.config.head_dim}"
-                )
             query, key = _apply_ec_complex_3d_mrope(
                 query,
                 key,
                 position_ids,
                 head_dim=self.config.head_dim,
-                rope_theta=_ec_rope_theta,
+                rope_theta=self.config.rope_theta,
                 mrope_section=getattr(self.config, "mrope_section", [16, 1, 1]),
                 layer_number=self.layer_number,
             )
@@ -610,7 +591,7 @@ class Attention(FleetLayer, ABC):
         if gate is not None:
             core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
 
-        if _ENABLE_EC_ALIGNMENT and _LOG_LAYER_MD5:
+        if self.config.gpt_model_use_experimental_version and _LOG_LAYER_MD5:
             import logging
 
             _rank = paddle.distributed.get_rank()
@@ -621,7 +602,7 @@ class Attention(FleetLayer, ABC):
 
         output, bias = self.o_proj(core_attn_out)
 
-        if _ENABLE_EC_ALIGNMENT and _LOG_LAYER_MD5:
+        if self.config.gpt_model_use_experimental_version and _LOG_LAYER_MD5:
             _out = output
             _o_md5 = _md5(_out)
             logging.getLogger(__name__).info(
