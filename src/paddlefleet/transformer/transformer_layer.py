@@ -460,6 +460,27 @@ class TransformerLayer(nn.Layer):
                     :, -self.config.num_nextn_predict_layers :
                 ]
                 dict_args["position_ids"] = decoder_ids
+
+            # process input_ids (for MoE padding mask): split into main and mtp parts
+            mtp_input_ids = None
+            if (
+                "input_ids" in dict_args.keys()
+                and dict_args["input_ids"] is not None
+            ):
+                full_input_ids = dict_args["input_ids"]
+                if (
+                    full_input_ids.shape[-1]
+                    > hidden_states.shape[
+                        0 if self.config.sequence_parallel else 1
+                    ]
+                ):
+                    decoder_input_ids = full_input_ids[
+                        :, : -self.config.num_nextn_predict_layers
+                    ].contiguous()
+                    mtp_input_ids = full_input_ids[
+                        :, -self.config.num_nextn_predict_layers :
+                    ].contiguous()
+                    dict_args["input_ids"] = decoder_input_ids
             if (
                 not self.config.experimental_dataflow
                 and "attn_mask_startend_row_indices" in dict_args.keys()
@@ -553,6 +574,12 @@ class TransformerLayer(nn.Layer):
                     [dict_args["position_ids"], mtp_ids], axis=1
                 )
                 dict_args["position_ids"] = position_ids
+
+            # Restore input_ids: concatenate main and mtp parts back
+            if mtp_input_ids is not None and "input_ids" in dict_args.keys():
+                dict_args["input_ids"] = paddle.concat(
+                    [dict_args["input_ids"], mtp_input_ids], axis=1
+                )
 
             if (
                 not self.config.experimental_dataflow

@@ -143,6 +143,9 @@ class GPTEmbedding(FleetLayer):
         # The input_ids_for_moe_mask for moe router is same as input_ids.
         # The moe router will use it to generate the padding mask for the current sequence.
         input_ids_for_moe_mask = None
+        # Per-depth MTP input_ids for MoE routing in MTP layers.
+        # Shape: [B, num_mtp, max_seq] when MTP is enabled, None otherwise.
+        mtp_input_ids_for_moe_mask = None
         if decoder_input is None:
             decoder_input = self.embedding(
                 input_ids=input_ids,
@@ -168,6 +171,26 @@ class GPTEmbedding(FleetLayer):
                 assert not self.multimodal_embedding, (
                     "MTP not support mm for now."
                 )
+                num_nextn_predict_layers = self.config.num_nextn_predict_layers
+                # Split input_ids for MoE mask: main part for backbone, per-depth for MTP
+                if input_ids_for_moe_mask is not None:
+                    # Main backbone input_ids: [B, max_seq]
+                    # Use .contiguous() because slices are non-contiguous and PP P2P send requires contiguous tensors.
+                    input_ids_for_moe_mask = input_ids[
+                        :, :-num_nextn_predict_layers
+                    ].contiguous()
+                    # Construct per-depth MTP input_ids: for depth k, use
+                    # input_ids[:, (k+1):(k+1+max_seq)] matching embedding shift
+                    seq_length = input_ids.shape[1] - num_nextn_predict_layers
+                    mtp_ids_list = []
+                    for depth in range(num_nextn_predict_layers):
+                        mtp_ids_list.append(
+                            input_ids[:, (depth + 1) : (depth + 1 + seq_length)]
+                        )
+                    # [B, num_mtp, max_seq] - paddle.stack creates a new contiguous tensor
+                    mtp_input_ids_for_moe_mask = paddle.stack(
+                        mtp_ids_list, axis=1
+                    )
                 inputs_embeds_extra = decoder_input[
                     :, -self.config.num_nextn_predict_layers :, :
                 ]  # [B, S, H]
@@ -385,6 +408,7 @@ class GPTEmbedding(FleetLayer):
             "visual_pos_masks": visual_pos_masks,
             "labels": labels,
             "input_ids": input_ids_for_moe_mask,
+            "mtp_input_ids_for_moe_mask": mtp_input_ids_for_moe_mask,
         }
         # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all
         # through dict_args to MTP layer. They must both be present or both be absent.

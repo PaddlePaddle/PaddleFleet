@@ -382,6 +382,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         packed_seq_params: PackedSeqParams | None = None,
         attn_mask_startend_row_indices: paddle.Tensor | None = None,
         mtp_hidden_inputs_mask: paddle.Tensor | None = None,
+        input_ids: paddle.Tensor | None = None,
         **kwargs,
     ) -> paddle.Tensor:
         """
@@ -409,6 +410,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "packed_seq_params": packed_seq_params,
                 "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
                 "is_mtp": True,
+                "input_ids": input_ids,
             }
             rst_dict = self.transformer_layer(input_dict)
         if not self.config.gpt_model_use_experimental_version:
@@ -434,6 +436,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             attention_bias = kwargs.get("attention_bias", None)
             packed_seq_params = kwargs.get("packed_seq_params", None)
             mtp_hidden_inputs_mask = kwargs.get("mtp_hidden_inputs_mask", None)
+            input_ids = kwargs.get("input_ids", None)
             return recompute(
                 forward_func,
                 hidden_states=hidden_states
@@ -468,6 +471,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 mtp_hidden_inputs_mask=mtp_hidden_inputs_mask
                 if mtp_hidden_inputs_mask is not None
                 else None,
+                input_ids=input_ids if input_ids is not None else None,
             )
 
         if self.config.recompute_method == "uniform":
@@ -511,6 +515,13 @@ class MultiTokenPredictionLayer(FleetLayer):
         mtp_hidden_inputs_mask_all = dict_args.pop(
             "mtp_hidden_inputs_mask_all", None
         )
+        # Pop per-depth MTP input_ids for MoE routing mask.
+        # Shape: [B, num_nextn_predict_layers, max_seq] when present, None otherwise.
+        mtp_input_ids_for_moe_mask = dict_args.pop(
+            "mtp_input_ids_for_moe_mask", None
+        )
+        # Save and clear backbone input_ids so it doesn't leak into MTP transformer layers
+        origin_input_ids = dict_args.pop("input_ids", None)
         # Shape check: mtp_startend_row_indices_all [B, num_nextn, S, 1],
         #              mtp_hidden_inputs_mask_all   [B, num_nextn, S]
         if mtp_startend_row_indices_all is not None:
@@ -560,6 +571,14 @@ class MultiTokenPredictionLayer(FleetLayer):
                     dict_args["mtp_hidden_inputs_mask"] = (
                         mtp_hidden_inputs_mask_all[:, i : i + 1, :]
                     )
+
+                # Get per-depth input_ids for MoE routing mask
+                if mtp_input_ids_for_moe_mask is not None:
+                    dict_args["input_ids"] = mtp_input_ids_for_moe_mask[
+                        :, i, :
+                    ].contiguous()
+                else:
+                    dict_args.pop("input_ids", None)
 
                 if (
                     self.config.recompute_granularity == "full"
@@ -612,6 +631,14 @@ class MultiTokenPredictionLayer(FleetLayer):
                     ]
                 )
 
+            # Get per-depth input_ids for MoE routing mask
+            if mtp_input_ids_for_moe_mask is not None:
+                dict_args["input_ids"] = mtp_input_ids_for_moe_mask[
+                    :, self.layer_number, :
+                ].contiguous()
+            else:
+                dict_args.pop("input_ids", None)
+
             # print(dict_args["attn_mask_startend_row_indices"])
             # assert 0
             if self.config.recompute_granularity == "full" and self.training:
@@ -637,6 +664,14 @@ class MultiTokenPredictionLayer(FleetLayer):
         # Restore mtp_hidden_inputs_mask_all for subsequent MTP layers (num_nextn > 1)
         if mtp_hidden_inputs_mask_all is not None:
             dict_args["mtp_hidden_inputs_mask_all"] = mtp_hidden_inputs_mask_all
+        # Restore mtp_input_ids_for_moe_mask for subsequent MTP layers (num_nextn > 1)
+        if mtp_input_ids_for_moe_mask is not None:
+            dict_args["mtp_input_ids_for_moe_mask"] = mtp_input_ids_for_moe_mask
+        # Restore backbone input_ids
+        if origin_input_ids is not None:
+            dict_args["input_ids"] = origin_input_ids
+        else:
+            dict_args.pop("input_ids", None)
         # Clean up per-depth slice key
         dict_args.pop("mtp_hidden_inputs_mask", None)
         if origin_start_row_indices is not None:
