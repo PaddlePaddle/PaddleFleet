@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .fused_rms_norm import FusedRMSNormTriton
+from .rms_norm_fusion import RMSNormFusionTriton
 
 __all__ = [
-    "FusedRMSNormTriton",
+    "RMSNormFusionTriton",
 ]

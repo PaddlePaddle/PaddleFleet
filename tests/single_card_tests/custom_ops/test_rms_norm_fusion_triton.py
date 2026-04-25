@@ -21,7 +21,7 @@ from paddlefleet.transformer.paddle_norm import RMSNorm
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-class TestFusedRMSNormTriton(unittest.TestCase):
+class TestRMSNormFusionTriton(unittest.TestCase):
     def setUp(self):
         paddle.seed(2026)
         self.config = TransformerConfig(
@@ -51,9 +51,9 @@ class TestFusedRMSNormTriton(unittest.TestCase):
 
         # Triton
         paddle.enable_compat(scope={"triton"}, silent=True)
-        from paddlefleet.ops.triton_ops import FusedRMSNormTriton
+        from paddlefleet.ops.triton_ops import RMSNormFusionTriton
 
-        y1 = FusedRMSNormTriton.apply(
+        y1 = RMSNormFusionTriton.apply(
             x, self.ref_norm.weight, self.config.rms_norm_eps
         )
         y1.backward(dy)

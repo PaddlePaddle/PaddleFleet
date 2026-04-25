@@ -175,7 +175,7 @@ def rms_norm_bwd_dw_final_kernel(
     tl.store(DW_ptr + cols, dw.to(DW_ptr.dtype.element_ty), mask=mask)
 
 
-class FusedRMSNormTriton(paddle.autograd.PyLayer):
+class RMSNormFusionTriton(paddle.autograd.PyLayer):
     """Triton RMSNorm with autograd support."""
 
     @staticmethod
