@@ -38,17 +38,17 @@ from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 # MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
-# Lazy-loaded FusedMoETopk Triton kernel for bit-exact alignment
-_FusedMoETopk = None
+# Lazy-loaded MoETopkFusion Triton kernel for bit-exact alignment
+_MoETopkFusion = None
 
 
-def _get_fused_moe_topk():
-    global _FusedMoETopk
-    if _FusedMoETopk is None:
-        from paddlefleet.ops.triton_ops.fused_moe_topk import FusedMoETopk
+def _get_moe_topk_fusion():
+    global _MoETopkFusion
+    if _MoETopkFusion is None:
+        from paddlefleet.ops.triton_ops.moe_topk_fusion import MoETopkFusion
 
-        _FusedMoETopk = FusedMoETopk
-    return _FusedMoETopk
+        _MoETopkFusion = MoETopkFusion
+    return _MoETopkFusion
 
 
 _moe_router_logger = logging.getLogger(__name__)
@@ -619,14 +619,12 @@ class TopKRouter(StandardMoERouter):
                     gates_ori.sum(-1, keepdim=True), min=1e-12
                 )
 
-        if getattr(
-            self.config, "gpt_model_use_experimental_version", False
-        ) or getattr(self.config, "fused_moe_topk", False):
-            # Use FusedMoETopk Triton kernel for bit-exact alignment.
+        if getattr(self.config, "moe_topk_fusion", False):
+            # Use MoETopkFusion Triton kernel for bit-exact alignment.
             # This ensures the topk selection + normalization uses the exact same
             # GPU kernel, avoiding FP32 rounding differences between
             # Triton's scalar loop and Paddle's tensor ops.
-            FusedMoETopk = _get_fused_moe_topk()
+            MoETopkFusion = _get_moe_topk_fusion()
             use_node_limit = self.n_group > 1
             probs_for_choice = (
                 gates + self.e_score_correction_bias.detach().unsqueeze(0)
@@ -640,7 +638,7 @@ class TopKRouter(StandardMoERouter):
                 _log_moe_md5(
                     probs_for_choice, "probs_for_choice", self._layer_number
                 )
-            top_gate, top_idx = FusedMoETopk.apply(
+            top_gate, top_idx = MoETopkFusion.apply(
                 gates,  # gate_probs (original sigmoid scores)
                 probs_for_choice,  # probs_for_choice (with correction bias)
                 self.num_experts_per_tok,
@@ -699,7 +697,7 @@ class TopKRouter(StandardMoERouter):
             ):
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
-            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
+            # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
             # Reconstruct gates_masked from top_gate  to ensure
             # bit-exact alignment. Instead of normalizing gates_masked independently
             # (which uses different FP32 reduction over E=32 elements vs K=8),

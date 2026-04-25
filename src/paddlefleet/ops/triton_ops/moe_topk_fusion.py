@@ -246,7 +246,7 @@ def _bwd_kernel(
     )
 
 
-class FusedMoETopk(paddle.autograd.PyLayer):
+class MoETopkFusion(paddle.autograd.PyLayer):
     """
     Fused MoE TopK operation accelerated with Triton.
 
@@ -515,7 +515,7 @@ def _routing_map_fwd_kernel(
 # -----------------------------------------------------------
 
 
-def routing_map_forward(
+def routing_map_fusion_forward(
     gate_probs, topk_indices, input_ids=None, is_pure_text_line=None
 ):
     """

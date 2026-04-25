@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .fused_moe_topk import FusedMoETopk, routing_map_forward
+from .moe_topk_fusion import MoETopkFusion, routing_map_fusion_forward
 
 __all__ = [
-    "FusedMoETopk",
-    "routing_map_forward",
+    "MoETopkFusion",
+    "routing_map_fusion_forward",
 ]
