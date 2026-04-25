@@ -278,7 +278,9 @@ class TestTransformerLayerMTP(unittest.TestCase):
             captured["input_ids"] = kwargs.get("input_ids")
             return kwargs["hidden_states"]
 
-        with patch.object(layer, "_forward_impl", side_effect=mock_forward_impl):
+        with patch.object(
+            layer, "_forward_impl", side_effect=mock_forward_impl
+        ):
             result = layer.forward(dict_args)
 
         # During forward, input_ids should have been trimmed to [B, S]
@@ -320,7 +322,9 @@ class TestTransformerLayerMTP(unittest.TestCase):
             captured["input_ids"] = kwargs.get("input_ids")
             return kwargs["hidden_states"]
 
-        with patch.object(layer, "_forward_impl", side_effect=mock_forward_impl):
+        with patch.object(
+            layer, "_forward_impl", side_effect=mock_forward_impl
+        ):
             layer.forward(dict_args)
 
         # input_ids should be passed through without trimming
@@ -354,7 +358,9 @@ class TestTransformerLayerMTP(unittest.TestCase):
             captured["input_ids"] = kwargs.get("input_ids")
             return kwargs["hidden_states"]
 
-        with patch.object(layer, "_forward_impl", side_effect=mock_forward_impl):
+        with patch.object(
+            layer, "_forward_impl", side_effect=mock_forward_impl
+        ):
             layer.forward(dict_args)
 
         self.assertIsNone(captured["input_ids"])

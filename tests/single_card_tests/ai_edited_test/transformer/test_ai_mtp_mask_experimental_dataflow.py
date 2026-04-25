@@ -1267,9 +1267,7 @@ class TestGPTEmbeddingMTPInputIdsForMoeMask(unittest.TestCase):
                 max_sequence_length=32,
                 position_embedding_type="none",
             )
-            emb.embedding = MagicMock(
-                return_value=paddle.randn([B, S, H])
-            )
+            emb.embedding = MagicMock(return_value=paddle.randn([B, S, H]))
         return emb
 
     def test_mtp_input_ids_none_when_no_moe(self):
@@ -1283,7 +1281,9 @@ class TestGPTEmbeddingMTPInputIdsForMoeMask(unittest.TestCase):
         emb = self._build_embedding(config, B, S_total, H)
         dict_args = {
             "input_ids": paddle.randint(0, 128, [B, S_total]),
-            "position_ids": paddle.arange(S_total).unsqueeze(0).expand([B, S_total]),
+            "position_ids": paddle.arange(S_total)
+            .unsqueeze(0)
+            .expand([B, S_total]),
         }
         result = emb.forward(dict_args)
         self.assertIsNone(result.get("mtp_input_ids_for_moe_mask"))
@@ -1305,7 +1305,9 @@ class TestGPTEmbeddingMTPInputIdsForMoeMask(unittest.TestCase):
         input_ids = paddle.arange(S_total).unsqueeze(0).expand([B, S_total])
         dict_args = {
             "input_ids": input_ids.clone(),
-            "position_ids": paddle.arange(S_total).unsqueeze(0).expand([B, S_total]),
+            "position_ids": paddle.arange(S_total)
+            .unsqueeze(0)
+            .expand([B, S_total]),
         }
         result = emb.forward(dict_args)
 
@@ -1336,7 +1338,9 @@ class TestGPTEmbeddingMTPInputIdsForMoeMask(unittest.TestCase):
         input_ids = paddle.arange(S_total).unsqueeze(0).expand([B, S_total])
         dict_args = {
             "input_ids": input_ids.clone(),
-            "position_ids": paddle.arange(S_total).unsqueeze(0).expand([B, S_total]),
+            "position_ids": paddle.arange(S_total)
+            .unsqueeze(0)
+            .expand([B, S_total]),
         }
         result = emb.forward(dict_args)
 
@@ -1358,7 +1362,9 @@ class TestMTPForwardInputIdsForMoeMask(unittest.TestCase):
 
     def _make_dict_args(self, B, S, H, num_nextn, with_moe_mask=True):
         total_sections = num_nextn + 1
-        hidden_states = paddle.randn([B * total_sections, S, H], dtype="float32")
+        hidden_states = paddle.randn(
+            [B * total_sections, S, H], dtype="float32"
+        )
         dict_args = {"hidden_states": hidden_states}
         if with_moe_mask:
             # Distinct per-depth input_ids: depth k filled with k+10
@@ -1440,7 +1446,7 @@ class TestMTPForwardInputIdsForMoeMask(unittest.TestCase):
                 expected = paddle.full([B, S], d + 10, dtype="int64")
                 self.assertTrue(
                     paddle.equal_all(passed_ids, expected),
-                    f"Depth {d}: expected {d+10}, got {passed_ids}",
+                    f"Depth {d}: expected {d + 10}, got {passed_ids}",
                 )
 
     def test_restore_after_forward(self):
@@ -1470,7 +1476,9 @@ class TestMTPForwardInputIdsForMoeMask(unittest.TestCase):
             # mtp_input_ids_for_moe_mask should be restored
             self.assertIn("mtp_input_ids_for_moe_mask", result)
             self.assertTrue(
-                paddle.equal_all(result["mtp_input_ids_for_moe_mask"], original_mtp_ids)
+                paddle.equal_all(
+                    result["mtp_input_ids_for_moe_mask"], original_mtp_ids
+                )
             )
             # backbone input_ids should be restored
             self.assertIn("input_ids", result)
@@ -1496,7 +1504,9 @@ class TestMTPForwardInputIdsForMoeMask(unittest.TestCase):
             )
             layer = _build_mtp_layer(config, layer_number=0)
 
-            dict_args = self._make_dict_args(B, S, H, num_nextn, with_moe_mask=False)
+            dict_args = self._make_dict_args(
+                B, S, H, num_nextn, with_moe_mask=False
+            )
 
             captured = []
 
