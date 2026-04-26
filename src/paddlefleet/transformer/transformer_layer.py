@@ -1012,6 +1012,7 @@ class TransformerLayerWithOverlap(TransformerLayer):
             topk_weights,
             topk_indices,
             aux_loss,
+            z_loss,
         )
 
     def dispatch_preprocess_compute(self, args):
@@ -1108,6 +1109,7 @@ class TransformerLayerNode(ScheduleNode):
                 topk_weights,
                 topk_indices,
                 aux_loss,
+                z_loss,
             ) = self.pre_process_node.forward(hidden_states)
 
             hidden_states, token_indices, token_weights = (
@@ -1139,7 +1141,7 @@ class TransformerLayerNode(ScheduleNode):
             combine_fw_event.calc_stream_wait(self.group_id)
 
             hidden_states = self.aux_loss_node.forward(
-                (hidden_states, aux_loss, residuals)
+                (hidden_states, aux_loss, z_loss, residuals)
             )
 
             self.post_process_recompute_args = (hidden_states, residual)
@@ -1186,7 +1188,7 @@ class TransformerLayerNode(ScheduleNode):
                 output_grad
             )
 
-            output_grad, aux_loss_grad, residuals_grad = (
+            output_grad, aux_loss_grad, z_loss_grad, residuals_grad = (
                 self.aux_loss_node.backward(output_grad)
             )
 
@@ -1219,6 +1221,7 @@ class TransformerLayerNode(ScheduleNode):
                     topk_weights_grad,
                     topk_indices_grad,
                     aux_loss_grad,
+                    z_loss_grad,
                 )
             )
 
@@ -1286,7 +1289,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
             output_grad, residual_grad = (
                 self.backward_node.post_process_node.backward(output_grad)
             )
-            output_grad, aux_loss_grad, residuals_grad = (
+            output_grad, aux_loss_grad, z_loss_grad, residuals_grad = (
                 self.backward_node.aux_loss_node.backward(output_grad)
             )
 
@@ -1310,6 +1313,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
                 topk_weights,
                 topk_indices,
                 aux_loss,
+                z_loss,
             ) = self.forward_node.pre_process_node.forward(hidden_states)
 
             hidden_states, token_indices, token_weights = (
@@ -1374,6 +1378,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
                     topk_weights_grad,
                     topk_indices_grad,
                     aux_loss_grad,
+                    z_loss_grad,
                 )
             )
             output_grad = self.backward_node.attn_node.backward(output_grad)
@@ -1381,7 +1386,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
             # 10. POST(F)
             combine_fw_event.calc_stream_wait(self.forward_node.group_id)
             hidden_states = self.forward_node.aux_loss_node.forward(
-                (hidden_states, aux_loss, residuals)
+                (hidden_states, aux_loss, z_loss, residuals)
             )
             if self.forward_node.full_recompute:
                 self.forward_node.post_process_recompute_args = (

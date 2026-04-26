@@ -747,7 +747,7 @@ class MoELayer(nn.Layer):
         return hidden_states
 
     def aux_loss_compute(self, args):
-        hidden_states, aux_loss, residuals = args
+        hidden_states, aux_loss, z_loss, residuals = args
         if self.use_latent_moe:
             hidden_states = self.fc2_latent_proj(hidden_states)
         if self.training and self.router_aux_loss_coef:
@@ -755,6 +755,8 @@ class MoELayer(nn.Layer):
             output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
         else:
             output = hidden_states
+        if self.training and z_loss is not None:
+            output = AddAuxiliaryLoss.apply(output, z_loss)
         output = output.reshape(residuals.shape)
         if self.shared_experts is not None:
             shared_output = self.shared_experts(residuals)[0]
@@ -863,6 +865,9 @@ class MoELayer(nn.Layer):
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(output, aux_loss)
+
+        if self.training and z_loss is not None:
+            output = AddAuxiliaryLoss.apply(output, z_loss)
 
         output = output.reshape(orig_shape)
         if self.shared_experts is not None:
