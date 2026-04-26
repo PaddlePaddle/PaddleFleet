@@ -403,11 +403,11 @@ class _HybridEPManager(_DispatchManager):
         async_finish: bool = False,
     ) -> paddle.Tensor:
         del async_finish
-        hidden_states = hybrid_ep_combine(
-            hidden_states,
-            self,
-            combine_overlap_handle=combine_overlap_handle,
-        )
+        if combine_overlap_handle is not None:
+            raise NotImplementedError(
+                "HybridEP backend does not support combine overlap in PaddleFleet."
+            )
+        hidden_states = hybrid_ep_combine(hidden_states, self)
         self.dispatched_probs = None
         self.handle = None
         return hidden_states

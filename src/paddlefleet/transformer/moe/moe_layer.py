@@ -267,6 +267,15 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type == "deepep":
                 self.moe_use_fusion_node = config.moe_use_fusion_node
+                if (
+                    self.moe_use_fusion_node
+                    and is_hybrid_ep_backend_selected()
+                    and self.moe_shared_expert_overlap
+                ):
+                    logger.info(
+                        "HybridEP backend does not support moe_shared_expert_overlap; disabling it."
+                    )
+                    self.moe_shared_expert_overlap = False
             else:
                 if self.moe_grouped_gemm:
                     raise ValueError(

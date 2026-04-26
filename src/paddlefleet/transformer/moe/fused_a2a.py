@@ -601,56 +601,6 @@ class HybridEPCombine(PyLayer):
         return grad_x
 
 
-class HybridEPCombineAsync(PyLayer):
-    """HybridEP combine bridge with shared-expert overlap support."""
-
-    @staticmethod
-    def forward(
-        ctx,
-        x,
-        manager,
-        *fn_args,
-        fn,
-        is_first_fwd=False,
-    ):
-        handle = manager.handle
-        use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
-        combined_x, _ = manager._buffer.combine_with_unpermute(
-            hidden=x,
-            handle=handle,
-            pad_multiple=FP8_ALIGN if use_fp8_dispatch else None,
-        )
-        combined_x.stop_gradient = False
-
-        assert fn is not None, "use HybridEPCombineAsync, but fn is None."
-        ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
-
-        ctx.buffer = manager._buffer
-        ctx.handle = handle
-        ctx.group = manager.group
-        ctx.use_fp8_dispatch = use_fp8_dispatch
-        ctx.num_permuted_tokens = x.shape[0]
-
-        wait_for_deepep(manager.group.id)
-
-        return (combined_x,) + fn_out
-
-    @staticmethod
-    def backward(ctx, grad_output, *fn_out_grads):
-        grad_x = _replay_hybrid_ep_dispatch_backward(
-            ctx.buffer,
-            ctx.handle,
-            grad_output,
-            ctx.num_permuted_tokens,
-            ctx.use_fp8_dispatch,
-        )
-
-        wait_for_deepep(ctx.group.id)
-        fn_args_grads = ctx.bwf(*fn_out_grads)
-        wait_for_deepep(ctx.group.id)
-        return (grad_x,) + fn_args_grads  # noqa: RUF005
-
-
 def hybrid_ep_dispatch(
     x,
     token_indices,
@@ -668,27 +618,12 @@ def hybrid_ep_dispatch(
     )
 
 
-def hybrid_ep_combine(x, manager, combine_overlap_handle=None):
+def hybrid_ep_combine(x, manager):
     """Perform HybridEP combine_with_unpermute with explicit Paddle autograd."""
-    if combine_overlap_handle is None:
-        return HybridEPCombine.apply(
-            x,
-            manager,
-        )
-
-    assert isinstance(combine_overlap_handle, dict)
-    assert "fn" in combine_overlap_handle
-    assert "fn_args" in combine_overlap_handle
-    assert isinstance(combine_overlap_handle["fn_args"], tuple)
-    combined_x, *fn_out = HybridEPCombineAsync.apply(
+    return HybridEPCombine.apply(
         x,
         manager,
-        *(combine_overlap_handle["fn_args"]),
-        fn=combine_overlap_handle["fn"],
-        is_first_fwd=not framework._dygraph_tracer()._has_grad,
     )
-    combine_overlap_handle["fn_out"] = fn_out
-    return combined_x
 
 
 class DispatchNode:
