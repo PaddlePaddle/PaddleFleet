@@ -1897,7 +1897,7 @@ def _hybrid_ep_prepare_expert_counts(
 
 
 def _pad_front_rows(tensor, target_shape):
-    if tensor.shape == target_shape:
+    if tuple(tensor.shape) == tuple(target_shape):
         return tensor
     padded_tensor = paddle.zeros(target_shape, dtype=tensor.dtype)
     padded_tensor[: tensor.shape[0]] = tensor

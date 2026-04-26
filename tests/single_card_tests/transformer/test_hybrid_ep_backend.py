@@ -14,14 +14,24 @@
 
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.moe import token_dispatcher
+from paddlefleet.transformer.moe import fused_a2a, token_dispatcher
 from paddlefleet.transformer.moe.fused_a2a import (
     HybridEPCombine,
+    HybridEPDispatch,
+    _replay_hybrid_ep_dispatch_backward,
     hybrid_ep_combine,
+    hybrid_ep_dispatch,
+)
+from paddlefleet.transformer.moe.fusion_layer_utils import (
+    HybridEPMoePyLayer,
+    _hybrid_ep_prepare_expert_counts,
+    _pad_front_rows,
+    _restore_hybrid_ep_prob_grad_shape,
 )
 from paddlefleet.transformer.moe.moe_layer import MoELayer, MoESublayers
 from paddlefleet.transformer.moe.token_dispatcher import (
@@ -85,6 +95,41 @@ def _make_pg_collection(moe_world_size=2):
     return pg
 
 
+class _PyLayerContext:
+    def set_grad_in_dtype_consistent(self, enabled):
+        self.grad_in_dtype_consistent = enabled
+
+    def save_for_backward(self, tensors):
+        self._saved_tensors = tensors
+
+    def saved_tensor(self):
+        return (self._saved_tensors,)
+
+
+def _new_hybrid_manager(**overrides):
+    manager = _HybridEPManager.__new__(_HybridEPManager)
+    manager.group = SimpleNamespace(nranks=2)
+    manager.router_topk = 2
+    manager.num_experts = 4
+    manager.num_local_experts = 2
+    manager.moe_ep_barrier = True
+    manager.routing_map = None
+    manager.routing_probs = None
+    manager.token_indices = None
+    manager.token_probs = None
+    manager.dispatched_indices = None
+    manager.dispatched_probs = None
+    manager.tokens_per_expert = None
+    manager.padded_tokens_per_expert = None
+    manager.handle = None
+    manager._buffer = None
+    manager._buffer_hidden_dim = None
+    manager._buffer_max_num_of_tokens_per_rank = 0
+    for key, value in overrides.items():
+        setattr(manager, key, value)
+    return manager
+
+
 class TestHybridEPBackendSelection(unittest.TestCase):
     def test_backend_defaults_to_deepep_and_ignores_env(self):
         with (
@@ -105,6 +150,15 @@ class TestHybridEPBackendSelection(unittest.TestCase):
                 get_selected_deep_ep_backend_name("hybridep"), "hybrid"
             )
             self.assertTrue(is_hybrid_ep_backend_selected("hybrid_ep"))
+
+    def test_backend_rejects_invalid_and_unavailable_hybrid(self):
+        with self.assertRaisesRegex(ValueError, "moe_flex_dispatcher_backend"):
+            get_selected_deep_ep_backend_name("unknown")
+        with (
+            patch.object(token_dispatcher, "HAVE_HYBRID_EP", False),
+            self.assertRaisesRegex(ImportError, "HybridEP runtime"),
+        ):
+            get_selected_deep_ep_backend_name("hybridep")
 
     def test_flex_dispatcher_uses_hybrid_backend(self):
         mock_group = MagicMock()
@@ -176,6 +230,565 @@ class TestHybridEPBackendSelection(unittest.TestCase):
         self.assertIs(manager.padded_tokens_per_expert, padded_counts)
         self.assertIsInstance(manager.tokens_per_expert, paddle.Tensor)
 
+    def test_hybrid_ep_dispatch_quantizes_when_fp8_enabled(self):
+        manager = _new_hybrid_manager(
+            group=SimpleNamespace(nranks=1),
+            router_topk=1,
+            num_experts=2,
+            num_local_experts=2,
+            routing_map=paddle.to_tensor(
+                [[True, False], [False, True]], dtype="bool"
+            ),
+            routing_probs=paddle.to_tensor(
+                [[1.0, 0.0], [0.0, 1.0]], dtype="float32"
+            ),
+        )
+        buffer = MagicMock()
+        padded_counts = paddle.to_tensor([1, 1], dtype="int64")
+        handle = (
+            None,
+            None,
+            None,
+            paddle.to_tensor(2, dtype="int64"),
+            manager.routing_map,
+        )
+        buffer.dispatch_with_permute.return_value = (
+            paddle.zeros([2, 4], dtype="float32"),
+            paddle.ones([2], dtype="float32"),
+            paddle.ones([2, 1], dtype="float32"),
+            padded_counts,
+            handle,
+        )
+        quantized_hidden = paddle.full([2, 4], 2.0, dtype="float32")
+        scaling_factor = paddle.ones([2, 1], dtype="float32")
+
+        with (
+            patch.object(manager, "_get_buffer", return_value=buffer),
+            patch(
+                "paddle.incubate.nn.functional.fp8_quant_blockwise",
+                return_value=(quantized_hidden, scaling_factor),
+            ) as mock_quant,
+        ):
+            manager._dispatch_with_permute_impl(
+                paddle.ones([2, 4], dtype="float32"),
+                paddle.to_tensor([[0], [1]], dtype="int64"),
+                paddle.ones([2, 1], dtype="float32"),
+                use_fp8=True,
+            )
+
+        mock_quant.assert_called_once()
+        dispatch_kwargs = buffer.dispatch_with_permute.call_args.kwargs
+        self.assertIs(dispatch_kwargs["hidden"], quantized_hidden)
+        self.assertTrue(dispatch_kwargs["use_fp8"])
+        self.assertEqual(dispatch_kwargs["pad_multiple"], 128)
+        self.assertEqual(dispatch_kwargs["scaling_factor"].shape, [1, 2])
+
+
+class TestHybridEPManagerContract(unittest.TestCase):
+    def test_manager_init_records_runtime_contract(self):
+        group = SimpleNamespace(nranks=2)
+        with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
+            manager = _HybridEPManager(
+                group=group,
+                router_topk=2,
+                num_experts=4,
+                num_local_experts=2,
+                moe_ep_barrier=False,
+            )
+
+        self.assertIs(manager.group, group)
+        self.assertEqual(manager.router_topk, 2)
+        self.assertEqual(manager.num_experts, 4)
+        self.assertEqual(manager.num_local_experts, 2)
+        self.assertFalse(manager.moe_ep_barrier)
+        self.assertIsNone(manager.routing_map)
+        self.assertIsNone(manager.routing_probs)
+        self.assertIsNone(manager.token_indices)
+        self.assertIsNone(manager.token_probs)
+        self.assertIsNone(manager.dispatched_indices)
+        self.assertIsNone(manager.dispatched_probs)
+        self.assertIsNone(manager.tokens_per_expert)
+        self.assertIsNone(manager.padded_tokens_per_expert)
+        self.assertIsNone(manager.handle)
+        self.assertIsNone(manager._buffer)
+        self.assertIsNone(manager._buffer_hidden_dim)
+        self.assertEqual(manager._buffer_max_num_of_tokens_per_rank, 0)
+
+    def test_buffer_is_reused_until_shape_or_capacity_changes(self):
+        constructed = []
+
+        class FakeHybridEPBuffer:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                constructed.append(self)
+
+        manager = _new_hybrid_manager(num_local_experts=3)
+        fake_deep_ep = SimpleNamespace(HybridEPBuffer=FakeHybridEPBuffer)
+
+        with patch.object(token_dispatcher, "deep_ep", fake_deep_ep):
+            first = manager._get_buffer(paddle.zeros([4, 16]))
+            second = manager._get_buffer(paddle.zeros([2, 16]))
+            third = manager._get_buffer(
+                paddle.zeros([2, 16]), max_num_of_tokens_per_rank=8
+            )
+            fourth = manager._get_buffer(paddle.zeros([2, 32]))
+
+        self.assertIs(first, second)
+        self.assertIsNot(first, third)
+        self.assertIsNot(third, fourth)
+        self.assertEqual(len(constructed), 3)
+        self.assertEqual(constructed[0].kwargs["hidden_dim"], 16)
+        self.assertEqual(constructed[0].kwargs["num_local_experts"], 3)
+
+    def test_topk_indices_are_converted_to_dense_metadata(self):
+        manager = _new_hybrid_manager(num_experts=4)
+        token_indices = paddle.to_tensor(
+            [[1, -1], [0, 2], [3, 1]], dtype="int64"
+        )
+        token_weights = paddle.to_tensor(
+            [[0.5, 0.0], [0.25, 0.75], [0.6, 0.4]],
+            dtype="float16",
+        )
+
+        routing_map, probs = manager._indices_to_dense_metadata(
+            token_indices, token_weights
+        )
+
+        self.assertEqual(
+            routing_map.numpy().tolist(),
+            [
+                [False, True, False, False],
+                [True, False, True, False],
+                [False, True, False, True],
+            ],
+        )
+        self.assertEqual(probs.dtype, paddle.float32)
+        self.assertTrue(
+            paddle.allclose(
+                probs,
+                paddle.to_tensor(
+                    [
+                        [0.0, 0.5, 0.0, 0.0],
+                        [0.25, 0.0, 0.75, 0.0],
+                        [0.0, 0.4, 0.0, 0.6],
+                    ],
+                    dtype="float32",
+                ),
+                atol=1e-3,
+            ).item()
+        )
+
+    def test_dispatch_metadata_prefers_cached_dense_metadata(self):
+        routing_map = paddle.to_tensor([[True, False]], dtype="bool")
+        routing_probs = paddle.to_tensor([[1.0, 0.0]], dtype="float32")
+        manager = _new_hybrid_manager(
+            routing_map=routing_map,
+            routing_probs=routing_probs,
+        )
+
+        cached_map, cached_probs = manager._get_dispatch_metadata(None, None)
+        self.assertIs(cached_map, routing_map)
+        self.assertIs(cached_probs, routing_probs)
+
+        manager.routing_map = None
+        with self.assertRaisesRegex(AssertionError, "routing metadata"):
+            manager._get_dispatch_metadata(None, None)
+
+    def test_setup_metadata_uses_router_topk_when_available(self):
+        manager = _new_hybrid_manager(router_topk=2, num_experts=4)
+        routing_map = paddle.to_tensor(
+            [[True, False, True, False], [False, True, True, False]],
+            dtype="bool",
+        )
+        probs = paddle.to_tensor(
+            [[0.7, 0.0, 0.3, 0.0], [0.0, 0.6, 0.4, 0.0]],
+            dtype="float16",
+        )
+        topk_weights = paddle.to_tensor(
+            [[0.7, 0.3], [0.6, 0.4]], dtype="float32"
+        )
+        topk_indices = paddle.to_tensor([[0, 2], [1, 2]], dtype="int64")
+
+        manager.setup_metadata(
+            routing_map,
+            probs,
+            topk_weights=topk_weights,
+            topk_indices=topk_indices,
+        )
+
+        self.assertEqual(manager.routing_probs.dtype, paddle.float32)
+        self.assertTrue(
+            paddle.allclose(
+                manager.token_probs,
+                paddle.to_tensor([[0.7, 0.3], [0.6, 0.4]], dtype="float32"),
+                atol=1e-6,
+            ).item()
+        )
+        self.assertEqual(
+            manager.token_indices.numpy().tolist(), [[0, 2], [1, 2]]
+        )
+        self.assertTrue(manager.token_indices.stop_gradient)
+
+    def test_setup_metadata_falls_back_to_dense_topk(self):
+        manager = _new_hybrid_manager(router_topk=2, num_experts=4)
+        routing_map = paddle.to_tensor(
+            [[True, False, True, False]], dtype="bool"
+        )
+        probs = paddle.to_tensor([[0.2, 0.1, 0.7, 0.0]], dtype="float32")
+
+        manager.setup_metadata(routing_map, probs)
+
+        self.assertEqual(manager.token_indices.numpy().tolist(), [[2, 0]])
+        self.assertTrue(
+            paddle.allclose(
+                manager.token_probs,
+                paddle.to_tensor([[0.7, 0.2]], dtype="float32"),
+                atol=1e-6,
+            ).item()
+        )
+
+    def test_runtime_metadata_accessors_follow_hybrid_ep_contract(self):
+        manager = _new_hybrid_manager(router_topk=2, num_local_experts=3)
+        self.assertEqual(manager._get_num_permuted_tokens_upper_bound(5), 401)
+
+        local_expert_routing_map = paddle.to_tensor(
+            [
+                [True, False, False],
+                [False, True, True],
+                [False, True, False],
+            ],
+            dtype="bool",
+        )
+        tokens_per_expert = manager._extract_tokens_per_expert(
+            2, local_expert_routing_map
+        )
+        self.assertEqual(tokens_per_expert.numpy().tolist(), [1, 1, 1])
+
+        hidden_states = paddle.ones([2, 3], dtype="float32")
+        self.assertIs(
+            manager.get_permuted_hidden_states_by_experts(hidden_states),
+            hidden_states,
+        )
+        self.assertIs(
+            manager.get_restored_hidden_states_by_experts(hidden_states),
+            hidden_states,
+        )
+
+        manager.dispatched_probs = paddle.to_tensor([0.25, 0.5])
+        restored = manager.get_restored_hidden_states_by_experts(hidden_states)
+        self.assertEqual(
+            restored.numpy().tolist(),
+            [[0.25, 0.25, 0.25], [0.5, 0.5, 0.5]],
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "does not expose"):
+            manager.get_dispatched_metadata()
+        manager.dispatched_indices = paddle.to_tensor([[0], [1]], dtype="int64")
+        dispatched_indices, dispatched_probs = manager.get_dispatched_metadata()
+        self.assertIs(dispatched_indices, manager.dispatched_indices)
+        self.assertIs(dispatched_probs, manager.dispatched_probs)
+        manager.tokens_per_expert = tokens_per_expert
+        self.assertIs(
+            manager.get_number_of_tokens_per_expert(), tokens_per_expert
+        )
+
+    def test_dispatch_overlap_stores_topk_metadata_and_scale_handle(self):
+        manager = _new_hybrid_manager()
+        hidden_states = paddle.zeros([2, 4])
+        token_indices = paddle.to_tensor([[0, 1], [1, 0]], dtype="int64")
+        token_weights = paddle.ones([2, 2], dtype="float32")
+        dispatched = paddle.ones([4, 4], dtype="float32")
+        dispatched_probs = paddle.ones([4], dtype="float32")
+        scale = paddle.ones([4, 1], dtype="float32")
+
+        with patch.object(
+            token_dispatcher,
+            "hybrid_ep_dispatch",
+            return_value=(dispatched, dispatched_probs, scale),
+        ) as mock_dispatch:
+            result, fp8_handle = manager.dispatch_overlap(
+                hidden_states,
+                token_indices,
+                token_weights,
+                fp8_dispatch=True,
+                async_finish=True,
+            )
+
+        self.assertIs(result, dispatched)
+        self.assertEqual(fp8_handle, {"scale": scale})
+        self.assertIs(manager.token_indices, token_indices)
+        self.assertIs(manager.token_probs, token_weights)
+        self.assertIs(manager.dispatched_probs, dispatched_probs)
+        self.assertIsNone(manager.dispatched_indices)
+        mock_dispatch.assert_called_once_with(
+            hidden_states,
+            token_indices,
+            token_weights,
+            manager,
+            True,
+        )
+
+    def test_dispatch_reuses_setup_metadata(self):
+        manager = _new_hybrid_manager(
+            token_indices=paddle.to_tensor([[0]], dtype="int64"),
+            token_probs=paddle.ones([1, 1], dtype="float32"),
+        )
+        hidden_states = paddle.zeros([1, 4], dtype="float32")
+        with patch.object(
+            manager,
+            "dispatch_overlap",
+            return_value=(hidden_states, None),
+        ) as mock_dispatch:
+            result = manager.dispatch(hidden_states, async_finish=True)
+
+        self.assertEqual(result, (hidden_states, None))
+        mock_dispatch.assert_called_once_with(
+            hidden_states,
+            manager.token_indices,
+            manager.token_probs,
+            fp8_dispatch=False,
+            async_finish=True,
+        )
+
+    def test_dispatch_preprocess_overlap_records_topk_metadata(self):
+        dispatcher = MoEFlexTokenDispatcher.__new__(MoEFlexTokenDispatcher)
+        dispatcher._comm_manager = SimpleNamespace()
+        hidden_states = paddle.zeros([2, 3, 4], dtype="float32")
+        token_probs = paddle.ones([6, 2], dtype="float32")
+        token_indices = paddle.zeros([6, 2], dtype="int64")
+
+        flattened = dispatcher.dispatch_preprocess_overlap(
+            hidden_states,
+            token_probs,
+            token_indices,
+        )
+
+        self.assertEqual(flattened.shape, [6, 4])
+        self.assertEqual(dispatcher.hidden_shape, [2, 3, 4])
+        self.assertIsNone(dispatcher._comm_manager.routing_map)
+        self.assertIsNone(dispatcher._comm_manager.routing_probs)
+        self.assertIs(dispatcher._comm_manager.token_probs, token_probs)
+        self.assertIs(dispatcher._comm_manager.token_indices, token_indices)
+
+
+class TestHybridEPFusedA2ABridge(unittest.TestCase):
+    def test_dispatch_bridge_records_runtime_state_and_maps_prob_grads(self):
+        ctx = _PyLayerContext()
+        buffer = MagicMock()
+        handle = ("handle",)
+        manager = MagicMock()
+
+        def dispatch_impl(x, token_indices, token_probs, use_fp8):
+            manager._buffer = buffer
+            manager.handle = handle
+            self.assertTrue(use_fp8)
+            return (
+                x + 1,
+                token_probs.reshape([-1]),
+                paddle.ones([2, 1], dtype="float32"),
+            )
+
+        manager._dispatch_with_permute_impl.side_effect = dispatch_impl
+        x = paddle.zeros([2, 4], dtype="float32")
+        token_indices = paddle.to_tensor([[2, 0], [1, 1]], dtype="int64")
+        token_probs = paddle.ones([2, 2], dtype="float32")
+
+        recv_x, recv_probs, scale = HybridEPDispatch.forward(
+            ctx, x, token_indices, token_probs, manager, fp8_dispatch=True
+        )
+
+        self.assertEqual(recv_x.numpy().tolist(), [[1.0] * 4, [1.0] * 4])
+        self.assertEqual(recv_probs.shape, [4])
+        self.assertEqual(scale.shape, [2, 1])
+        self.assertIs(ctx.buffer, buffer)
+        self.assertIs(ctx.handle, handle)
+        self.assertIs(ctx.token_indices, token_indices)
+        self.assertEqual(ctx.hidden_dtype, paddle.float32)
+        self.assertTrue(ctx.use_fp8_dispatch)
+        self.assertFalse(ctx.grad_in_dtype_consistent)
+
+        grad_dense_probs = paddle.to_tensor(
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype="float32"
+        )
+        grad_x = paddle.ones([2, 4], dtype="float32")
+        buffer.combine_with_unpermute.return_value = (
+            grad_x,
+            grad_dense_probs,
+        )
+
+        grad_hidden, grad_indices, grad_probs = HybridEPDispatch.backward(
+            ctx,
+            paddle.ones([2, 4], dtype="float64"),
+            paddle.ones([2, 2], dtype="float16"),
+        )
+
+        self.assertIs(grad_hidden, grad_x)
+        self.assertIsNone(grad_indices)
+        self.assertTrue(
+            paddle.allclose(
+                grad_probs,
+                paddle.to_tensor([[0.3, 0.1], [0.5, 0.5]], dtype="float32"),
+                atol=1e-6,
+            ).item()
+        )
+        self.assertEqual(
+            buffer.combine_with_unpermute.call_args.kwargs["pad_multiple"],
+            128,
+        )
+        self.assertEqual(
+            buffer.combine_with_unpermute.call_args.kwargs["hidden"].dtype,
+            paddle.float32,
+        )
+        self.assertEqual(
+            buffer.combine_with_unpermute.call_args.kwargs["probs"].dtype,
+            paddle.float32,
+        )
+
+    def test_dispatch_bridge_allows_missing_prob_grad(self):
+        ctx = _PyLayerContext()
+        ctx.buffer = MagicMock()
+        ctx.handle = ("handle",)
+        ctx.token_indices = paddle.to_tensor([[0]], dtype="int64")
+        ctx.hidden_dtype = paddle.float32
+        ctx.use_fp8_dispatch = False
+        ctx.buffer.combine_with_unpermute.return_value = (
+            paddle.ones([1, 2], dtype="float32"),
+            None,
+        )
+
+        _, _, grad_probs = HybridEPDispatch.backward(
+            ctx,
+            paddle.ones([1, 2], dtype="float32"),
+            None,
+        )
+
+        self.assertIsNone(grad_probs)
+        self.assertIsNone(
+            ctx.buffer.combine_with_unpermute.call_args.kwargs["probs"]
+        )
+        self.assertIsNone(
+            ctx.buffer.combine_with_unpermute.call_args.kwargs["pad_multiple"]
+        )
+
+    def test_replay_dispatch_backward_rebuilds_fp8_handle(self):
+        buffer = MagicMock()
+        original_config = SimpleNamespace(
+            token_data_type="UINT8",
+            num_of_experts_per_rank=2,
+        )
+        replay_config = SimpleNamespace(token_data_type="UINT16")
+        handle = (
+            "sparse_to_dense",
+            "rdma_to_attn",
+            "attn_to_rdma",
+            "num_tokens",
+            "local_map",
+            "rank_prefix",
+            16,
+            original_config,
+            "tail",
+        )
+        buffer.update_template_config.return_value = replay_config
+        buffer.dispatch_with_permute.return_value = (
+            paddle.arange(12, dtype="float32").reshape([3, 4]),
+            None,
+            None,
+            None,
+            None,
+        )
+
+        grad_x = _replay_hybrid_ep_dispatch_backward(
+            buffer,
+            handle,
+            paddle.ones([2, 4], dtype="float32"),
+            num_permuted_tokens=2,
+            use_fp8_dispatch=True,
+        )
+
+        self.assertEqual(grad_x.shape, [2, 4])
+        buffer.update_template_config.assert_called_once_with(
+            hidden_dim=4,
+            num_of_tokens_per_rank=16,
+            num_local_experts=2,
+            use_fp8=False,
+        )
+        replay_handle = buffer.dispatch_with_permute.call_args.kwargs["handle"]
+        self.assertIs(replay_handle[7], replay_config)
+        self.assertEqual(
+            buffer.dispatch_with_permute.call_args.kwargs["pad_multiple"],
+            128,
+        )
+        self.assertFalse(
+            buffer.dispatch_with_permute.call_args.kwargs["non_blocking"]
+        )
+
+    def test_combine_bridge_replays_dispatch_in_backward(self):
+        ctx = _PyLayerContext()
+        runtime_config = SimpleNamespace(token_data_type="UINT8")
+        handle = (None, None, None, None, None, None, 8, runtime_config, None)
+        buffer = MagicMock()
+        combined = paddle.ones([2, 4], dtype="float32")
+        buffer.combine_with_unpermute.return_value = (combined, None)
+        manager = SimpleNamespace(handle=handle, _buffer=buffer)
+
+        result = HybridEPCombine.forward(
+            ctx,
+            paddle.zeros([2, 4], dtype="float32"),
+            manager,
+        )
+
+        self.assertIs(result, combined)
+        self.assertFalse(result.stop_gradient)
+        self.assertIs(ctx.buffer, buffer)
+        self.assertIs(ctx.handle, handle)
+        self.assertTrue(ctx.use_fp8_dispatch)
+        self.assertEqual(ctx.num_permuted_tokens, 2)
+
+        with patch.object(
+            fused_a2a,
+            "_replay_hybrid_ep_dispatch_backward",
+            return_value=paddle.full([2, 4], 2.0, dtype="float32"),
+        ) as mock_replay:
+            grad_x = HybridEPCombine.backward(
+                ctx, paddle.ones([2, 4], dtype="float32")
+            )
+
+        self.assertEqual(grad_x.numpy().tolist(), [[2.0] * 4, [2.0] * 4])
+        mock_replay.assert_called_once()
+
+    def test_dispatch_and_combine_wrappers_use_pylayer_apply(self):
+        x = paddle.randn([2, 4], dtype="float32")
+        token_indices = paddle.to_tensor([[0, 1], [1, 0]], dtype="int64")
+        token_probs = paddle.ones([2, 2], dtype="float32")
+        manager = object()
+        dispatched = object()
+        combined = object()
+
+        with patch.object(
+            HybridEPDispatch, "apply", return_value=dispatched
+        ) as mock_dispatch:
+            result = hybrid_ep_dispatch(
+                x, token_indices, token_probs, manager, fp8_dispatch=True
+            )
+
+        self.assertIs(result, dispatched)
+        dispatch_args = mock_dispatch.call_args.args
+        self.assertEqual(dispatch_args[0].shape, x.shape)
+        self.assertIs(dispatch_args[1], token_indices)
+        self.assertIs(dispatch_args[2], token_probs)
+        self.assertIs(dispatch_args[3], manager)
+        self.assertTrue(dispatch_args[4])
+
+        with patch.object(
+            HybridEPCombine, "apply", return_value=combined
+        ) as mock_combine:
+            result = hybrid_ep_combine(x, manager)
+
+        self.assertIs(result, combined)
+        combine_args = mock_combine.call_args.args
+        self.assertIs(combine_args[0], x)
+        self.assertIs(combine_args[1], manager)
+
 
 class TestHybridEPCombineContract(unittest.TestCase):
     def test_manager_combine_rejects_overlap(self):
@@ -220,7 +833,345 @@ class TestHybridEPCombineContract(unittest.TestCase):
             )
 
 
+class TestHybridEPMoeFusionContract(unittest.TestCase):
+    def test_prepare_expert_counts_preserves_list_and_tensor_contracts(self):
+        manager = SimpleNamespace(padded_tokens_per_expert=[2, 0, 1])
+        custom_map = SimpleNamespace(
+            token_dispatcher=SimpleNamespace(_comm_manager=manager)
+        )
+
+        counts, num_tokens = _hybrid_ep_prepare_expert_counts(
+            custom_map,
+            paddle.CPUPlace(),
+            use_fp8_mlp=False,
+            moe_grouped_gemm=False,
+        )
+
+        self.assertEqual(counts, [2, 0, 1])
+        self.assertEqual(num_tokens, 3)
+
+        manager.padded_tokens_per_expert = paddle.to_tensor(
+            [4, 2], dtype="int32"
+        )
+        counts, num_tokens = _hybrid_ep_prepare_expert_counts(
+            custom_map,
+            paddle.CPUPlace(),
+            use_fp8_mlp=True,
+            moe_grouped_gemm=True,
+        )
+
+        self.assertIsInstance(counts, paddle.Tensor)
+        self.assertEqual(counts.dtype, paddle.int64)
+        self.assertEqual(counts.numpy().tolist(), [4, 2])
+        self.assertEqual(int(num_tokens.item()), 6)
+
+    def test_prepare_expert_counts_requires_hybrid_ep_counts(self):
+        custom_map = SimpleNamespace(
+            token_dispatcher=SimpleNamespace(
+                _comm_manager=SimpleNamespace(padded_tokens_per_expert=None)
+            )
+        )
+
+        with self.assertRaisesRegex(AssertionError, "padded_tokens_per_expert"):
+            _hybrid_ep_prepare_expert_counts(
+                custom_map,
+                paddle.CPUPlace(),
+                use_fp8_mlp=False,
+                moe_grouped_gemm=False,
+            )
+
+    def test_pad_and_prob_grad_restore_shape(self):
+        tensor = paddle.ones([2, 3], dtype="float32")
+        self.assertIs(_pad_front_rows(tensor, (2, 3)), tensor)
+
+        padded = _pad_front_rows(tensor, (4, 3))
+        self.assertEqual(padded.shape, [4, 3])
+        self.assertEqual(
+            padded.numpy().tolist(),
+            [
+                [1.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+        )
+
+        restored = _restore_hybrid_ep_prob_grad_shape(
+            paddle.to_tensor([[0.25], [0.5]], dtype="float32"),
+            (4,),
+        )
+        self.assertEqual(restored.shape, [4])
+        self.assertEqual(restored.numpy().tolist(), [0.25, 0.5, 0.0, 0.0])
+
+        with self.assertRaisesRegex(AssertionError, "expected to stay 1D"):
+            _restore_hybrid_ep_prob_grad_shape(
+                paddle.ones([2], dtype="float32"),
+                (2, 1),
+            )
+        with self.assertRaisesRegex(AssertionError, "normalize back to 1D"):
+            _restore_hybrid_ep_prob_grad_shape(
+                paddle.ones([2, 2], dtype="float32"),
+                (2,),
+            )
+
+    def test_hybrid_ep_moe_pylayer_slices_padded_rows_and_restores_grads(self):
+        class FakeExpertsNode:
+            instance = None
+
+            def __init__(self, custom_map, **kwargs):
+                self.custom_map = custom_map
+                self.kwargs = kwargs
+                self.clear_count = 0
+                FakeExpertsNode.instance = self
+
+            def forward(
+                self, hidden_states, probs, tokens_per_expert, scale=None
+            ):
+                self.forward_hidden_shape = hidden_states.shape
+                self.forward_probs_shape = probs.shape
+                self.forward_tokens_per_expert = tokens_per_expert
+                self.forward_scale = scale
+                return hidden_states + probs.unsqueeze(-1)
+
+            def cached_tensors(self):
+                return [paddle.to_tensor([1], dtype="int64")]
+
+            def clear_cached_tensors(self):
+                self.clear_count += 1
+
+            def set_cached_tensors(self, tensors):
+                self.restored_tensors = tensors
+
+            def backward(self, output_grad, dispatched_probs):
+                self.backward_output_shape = output_grad.shape
+                self.backward_probs_shape = dispatched_probs.shape
+                return (
+                    paddle.full([3, 4], 2.0, dtype="float32"),
+                    paddle.ones([3, 1], dtype="float32"),
+                )
+
+            def reset_state(self):
+                self.reset_called = True
+
+        manager = SimpleNamespace(padded_tokens_per_expert=[2, 1])
+        custom_map = SimpleNamespace(
+            token_dispatcher=SimpleNamespace(_comm_manager=manager)
+        )
+        ctx = _PyLayerContext()
+
+        with patch(
+            "paddlefleet.transformer.moe.fusion_layer_utils.ExpertsGroupGemmContiguousNode",
+            FakeExpertsNode,
+        ):
+            out = HybridEPMoePyLayer.forward(
+                ctx,
+                paddle.ones([4, 4], dtype="float32"),
+                paddle.arange(4, dtype="float32"),
+                custom_map,
+                use_fp8_mlp=False,
+                moe_deep_gemm=False,
+                moe_grouped_gemm=False,
+                recompute_moe_gate_up=True,
+                use_bf16_gemm_weight_grad=True,
+                is_first_fwd=True,
+            )
+            hidden_grad, probs_grad = HybridEPMoePyLayer.backward(
+                ctx, paddle.ones_like(out)
+            )
+
+        node = FakeExpertsNode.instance
+        self.assertEqual(out.shape, [3, 4])
+        self.assertEqual(node.forward_hidden_shape, [3, 4])
+        self.assertEqual(node.forward_probs_shape, [3])
+        self.assertEqual(node.forward_tokens_per_expert, [2, 1])
+        self.assertIsNone(node.forward_scale)
+        self.assertTrue(node.kwargs["recompute_moe_gate_up"])
+        self.assertTrue(node.kwargs["use_bf16_gemm_weight_grad"])
+        self.assertEqual(node.clear_count, 2)
+        self.assertEqual(node.backward_output_shape, [3, 4])
+        self.assertEqual(node.backward_probs_shape, [3])
+        self.assertTrue(node.reset_called)
+        self.assertEqual(hidden_grad.shape, [4, 4])
+        self.assertEqual(probs_grad.shape, [4])
+        self.assertEqual(hidden_grad[-1].numpy().tolist(), [0.0] * 4)
+        self.assertEqual(probs_grad.numpy().tolist(), [1.0, 1.0, 1.0, 0.0])
+
+
 class TestHybridEPMoELayerContract(unittest.TestCase):
+    def test_use_hybrid_ep_fusion_requires_fusion_node_and_backend(self):
+        layer = MoELayer.__new__(MoELayer)
+        layer.moe_use_fusion_node = True
+        layer.moe_flex_dispatcher_backend = "hybridep"
+
+        with patch(
+            "paddlefleet.transformer.moe.moe_layer.is_hybrid_ep_backend_selected",
+            return_value=True,
+        ) as mock_selected:
+            self.assertTrue(layer._use_hybrid_ep_fusion())
+
+        mock_selected.assert_called_once_with("hybridep")
+
+        layer.moe_use_fusion_node = False
+        with patch(
+            "paddlefleet.transformer.moe.moe_layer.is_hybrid_ep_backend_selected",
+            return_value=True,
+        ) as mock_selected:
+            self.assertFalse(layer._use_hybrid_ep_fusion())
+        mock_selected.assert_not_called()
+
+    def test_run_hybrid_ep_fusion_delegates_to_pylayer(self):
+        layer = MoELayer.__new__(MoELayer)
+        layer.fp8 = True
+        layer.moe_deep_gemm = True
+        layer.moe_grouped_gemm = False
+        layer.recompute_moe_gate_up = True
+        layer.fp8_wgrad = False
+        hidden_states = paddle.ones([2, 4], dtype="float32")
+        dispatched_probs = paddle.ones([2], dtype="float32")
+        fp8_handle = {"scale": paddle.ones([2, 1], dtype="float32")}
+        fused_out = object()
+
+        with patch(
+            "paddlefleet.transformer.moe.moe_layer.HybridEPMoePyLayer.apply",
+            return_value=fused_out,
+        ) as mock_apply:
+            result = layer._run_hybrid_ep_fusion(
+                hidden_states,
+                dispatched_probs,
+                fp8_dispatched_handle=fp8_handle,
+                is_first_fwd=True,
+            )
+
+        self.assertIs(result, fused_out)
+        self.assertFalse(hidden_states.stop_gradient)
+        self.assertFalse(dispatched_probs.stop_gradient)
+        args = mock_apply.call_args.args
+        kwargs = mock_apply.call_args.kwargs
+        self.assertIs(args[0], hidden_states)
+        self.assertIs(args[1], dispatched_probs)
+        self.assertIs(args[2], layer)
+        self.assertTrue(kwargs["use_fp8_mlp"])
+        self.assertTrue(kwargs["moe_deep_gemm"])
+        self.assertFalse(kwargs["moe_grouped_gemm"])
+        self.assertTrue(kwargs["recompute_moe_gate_up"])
+        self.assertTrue(kwargs["use_bf16_gemm_weight_grad"])
+        self.assertIs(kwargs["fp8_dispatched_handle"], fp8_handle)
+        self.assertTrue(kwargs["is_first_fwd"])
+
+    def test_dispatch_preprocess_keeps_manager_topk_outputs(self):
+        layer = MoELayer.__new__(MoELayer)
+        layer.use_latent_moe = False
+        dispatcher = MoEFlexTokenDispatcher.__new__(MoEFlexTokenDispatcher)
+        token_probs = paddle.ones([6, 2], dtype="float32")
+        token_indices = paddle.zeros([6, 2], dtype="int64")
+        flattened = paddle.zeros([6, 4], dtype="float32")
+        dispatcher.dispatch_preprocess_overlap = MagicMock(
+            return_value=flattened
+        )
+        dispatcher._comm_manager = SimpleNamespace(
+            token_probs=token_probs,
+            token_indices=token_indices,
+        )
+        layer.token_dispatcher = dispatcher
+        hidden_states = paddle.zeros([2, 3, 4], dtype="float32")
+
+        result = layer.dispatch_preprocess(
+            (hidden_states, token_probs, token_indices)
+        )
+
+        self.assertIs(result[0], flattened)
+        self.assertIs(result[1], token_indices)
+        self.assertIs(result[2], token_probs)
+        preprocess_args = dispatcher.dispatch_preprocess_overlap.call_args.args
+        self.assertIs(preprocess_args[0], hidden_states)
+        self.assertIs(preprocess_args[1], token_probs)
+        self.assertIs(preprocess_args[2], token_indices)
+
+    def test_compute_dispatch_omits_indices_for_hybrid_ep_fusion(self):
+        layer = MoELayer.__new__(MoELayer)
+        layer.moe_use_fusion_node = True
+        layer.fp8_dispatch = True
+        layer._use_hybrid_ep_fusion = MagicMock(return_value=True)
+        dispatched_hidden = paddle.ones([4, 8], dtype="float32")
+        dispatched_probs = paddle.ones([4], dtype="float32")
+        fp8_handle = {"scale": paddle.ones([4, 1], dtype="float32")}
+        tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        dispatcher = MoEFlexTokenDispatcher.__new__(MoEFlexTokenDispatcher)
+        dispatcher.token_dispatch_overlap = MagicMock(
+            return_value=(dispatched_hidden, fp8_handle)
+        )
+        dispatcher._comm_manager = SimpleNamespace(
+            dispatched_probs=dispatched_probs,
+            tokens_per_expert=tokens_per_expert,
+            dispatched_indices=paddle.zeros([4, 1], dtype="int64"),
+        )
+        layer.token_dispatcher = dispatcher
+        hidden_states = paddle.zeros([2, 8], dtype="float32")
+        token_indices = paddle.zeros([2, 2], dtype="int64")
+        token_weights = paddle.ones([2, 2], dtype="float32")
+
+        (
+            guarded_hidden,
+            dispatched_indices,
+            returned_probs,
+            returned_fp8_handle,
+            returned_tokens_per_expert,
+            guard_status,
+        ) = layer.compute_dispatch(
+            (hidden_states, token_indices, token_weights),
+            async_finish=True,
+        )
+
+        self.assertEqual(guarded_hidden.shape, [0])
+        self.assertIsNone(dispatched_indices)
+        self.assertIs(returned_probs, dispatched_probs)
+        self.assertIs(returned_fp8_handle, fp8_handle)
+        self.assertIs(returned_tokens_per_expert, tokens_per_expert)
+        self.assertIs(guard_status["x"], dispatched_hidden)
+        self.assertTrue(guard_status["x"].stop_gradient)
+        dispatch_args = dispatcher.token_dispatch_overlap.call_args.args
+        dispatch_kwargs = dispatcher.token_dispatch_overlap.call_args.kwargs
+        self.assertIs(dispatch_args[0], hidden_states)
+        self.assertIs(dispatch_args[1], token_indices)
+        self.assertIs(dispatch_args[2], token_weights)
+        self.assertTrue(dispatch_args[3])
+        self.assertTrue(dispatch_kwargs["async_finish"])
+
+    def test_compute_experts_uses_hybrid_ep_fusion_output(self):
+        layer = MoELayer.__new__(MoELayer)
+        layer.moe_use_fusion_node = True
+        layer._use_hybrid_ep_fusion = MagicMock(return_value=True)
+        fused_out = paddle.ones([4, 8], dtype="float32")
+        layer._run_hybrid_ep_fusion = MagicMock(return_value=fused_out)
+        tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        comm_manager = SimpleNamespace(tokens_per_expert=None)
+        layer.token_dispatcher = SimpleNamespace(_comm_manager=comm_manager)
+        original_hidden = paddle.ones([4, 8], dtype="float32")
+        guard_status = {"x": original_hidden}
+        dispatched_probs = paddle.ones([4], dtype="float32")
+        fp8_handle = {"scale": paddle.ones([4, 1], dtype="float32")}
+
+        result = layer.compute_experts(
+            (
+                paddle.empty([0], dtype="float32"),
+                None,
+                dispatched_probs,
+                fp8_handle,
+                tokens_per_expert,
+                guard_status,
+            ),
+            is_first_fwd=True,
+        )
+
+        self.assertIs(result, fused_out)
+        self.assertIs(comm_manager.tokens_per_expert, tokens_per_expert)
+        layer._run_hybrid_ep_fusion.assert_called_once_with(
+            original_hidden,
+            dispatched_probs,
+            fp8_dispatched_handle=fp8_handle,
+            is_first_fwd=True,
+        )
+
     def test_hybrid_ep_backend_disables_shared_expert_overlap(self):
         config = _make_moe_config()
         pg_collection = _make_pg_collection()
