@@ -638,8 +638,7 @@ class MlpNode:
             None,
             unzipped_probs,
             [padding_token_per_experts],
-            tokens_per_expert,
-            unzipped_out,
+            output=unzipped_out,
         )
 
         # recompute_moe_premute 场景下，forward 完成后释放 input_fp8
@@ -1077,7 +1076,6 @@ class MlpNode:
                 unzipped_tokens,
                 unzipped_probs,
                 self.padding_token_per_experts,
-                self.tokens_per_expert,
                 output=expert_unzipped_out,
                 scale=unzipped_scale,
             )

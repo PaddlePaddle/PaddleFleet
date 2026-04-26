@@ -96,7 +96,6 @@ class TestDeepEPImport(unittest.TestCase):
             Buffer,
             Config,
             EventOverlap,
-            topk_idx_t,
         )
 
         print(paddlefleet.ops.deep_ep)
