@@ -233,8 +233,8 @@ class DotProductAttention(FleetLayer):
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
-        assert (
-            not use_rr_flash_attention and self.config.flashmask_use_varlen
+        assert not (
+            use_rr_flash_attention and self.config.flashmask_use_varlen
         ), "flashmask_use_varlen does not support refined recompute now."
 
         # EC-compatible flash attention path for alignment mode
