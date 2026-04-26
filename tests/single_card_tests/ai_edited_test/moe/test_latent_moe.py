@@ -338,8 +338,11 @@ class TestAuxLossComputeLatent(unittest.TestCase):
         hidden = paddle.randn([4, 32])
         residuals = paddle.randn([4, 64])
         aux_loss = paddle.zeros([1])
+        z_loss = None
 
-        output = MoELayer.aux_loss_compute(stub, (hidden, aux_loss, residuals))
+        output = MoELayer.aux_loss_compute(
+            stub, (hidden, aux_loss, z_loss, residuals)
+        )
 
         # Must be expanded back to hidden_size=64
         self.assertEqual(output.shape[-1], 64)
@@ -352,8 +355,11 @@ class TestAuxLossComputeLatent(unittest.TestCase):
         hidden = paddle.randn([4, 64])
         residuals = paddle.randn([4, 64])
         aux_loss = paddle.zeros([1])
+        z_loss = None
 
-        output = MoELayer.aux_loss_compute(stub, (hidden, aux_loss, residuals))
+        output = MoELayer.aux_loss_compute(
+            stub, (hidden, aux_loss, z_loss, residuals)
+        )
 
         self.assertEqual(output.shape[-1], 64)
 
