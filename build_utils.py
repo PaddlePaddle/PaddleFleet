@@ -267,10 +267,14 @@ def get_libs():
             artifacts=[
                 Artifact("deep_ep", "deep_ep"),
                 Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
+                Artifact("hybrid_ep_cpp.so", "hybrid_ep_cpp.so"),
             ],
-            extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
-            if (cuda_major == 12 and cuda_minor < 8)
-            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0;10.3"},
+            extra_env={
+                "HYBRID_EP_MULTINODE": "1",
+                "PADDLE_CUDA_ARCH_LIST": "9.0"
+                if (cuda_major == 12 and cuda_minor < 8)
+                else "9.0;10.0;10.3",
+            },
         ),
         EcosystemLibrary(
             name="flash-attention",
