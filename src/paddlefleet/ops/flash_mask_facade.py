@@ -16,7 +16,6 @@ import inspect
 from functools import partial
 
 import paddle
-from paddleformers.utils.tools import get_env_device
 
 from paddlefleet.ops import is_flash_mask_available
 
@@ -62,7 +61,7 @@ def flashmask_attention(
             "use_varlen" in inspect.signature(_flashmask_attention).parameters
         ), "The flash_mask installed does not support use_varlen"
 
-    if get_env_device() == "xpu":
+    if "xpu" in paddle.get_device():
         fa_version = 2
     else:
         fa_version = paddle.base.framework.get_flags(
