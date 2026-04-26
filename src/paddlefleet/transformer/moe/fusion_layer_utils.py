@@ -1887,25 +1887,15 @@ def _hybrid_ep_prepare_expert_counts(
             "int64"
         )
 
-    # Python expert loops consume host-side per-expert sizes. That includes:
-    # - bf16 grouped_gemm via batched_gemm(batch_sizes)
-    # - bf16 non-grouped expert loops
-    # - fp8 non-grouped split_group_gemm expert loops
-    needs_host_counts = (not use_fp8_mlp) or (not moe_grouped_gemm)
-    if needs_host_counts:
+    if not use_fp8_mlp or not moe_grouped_gemm:
         if padded_tokens_per_expert_list is None:
             padded_tokens_per_expert_list = (
                 padded_tokens_per_expert_tensor.tolist()
             )
-
-    if not use_fp8_mlp or not moe_grouped_gemm:
-        padded_tokens_per_expert = padded_tokens_per_expert_list
-        num_permuted_tokens = sum(padded_tokens_per_expert)
-    else:
-        padded_tokens_per_expert = padded_tokens_per_expert_tensor
-        num_permuted_tokens = paddle.sum(padded_tokens_per_expert)
-
-    return padded_tokens_per_expert, num_permuted_tokens
+        return padded_tokens_per_expert_list, sum(padded_tokens_per_expert_list)
+    return padded_tokens_per_expert_tensor, paddle.sum(
+        padded_tokens_per_expert_tensor
+    )
 
 
 def _pad_front_rows(tensor, target_shape):

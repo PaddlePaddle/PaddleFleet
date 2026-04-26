@@ -168,7 +168,6 @@ class _HybridEPManager(_DispatchManager):
         num_experts: int | None = None,
         num_local_experts: int | None = None,
         moe_ep_barrier: bool = True,
-        needs_host_counts: bool = False,
     ):
         if not HAVE_HYBRID_EP:
             raise ImportError("HybridEP runtime is not available.")
@@ -190,7 +189,6 @@ class _HybridEPManager(_DispatchManager):
         self._buffer = None
         self._buffer_hidden_dim = None
         self._buffer_max_num_of_tokens_per_rank = 0
-        self._needs_host_counts = needs_host_counts
 
     def _get_buffer(
         self,
@@ -299,16 +297,12 @@ class _HybridEPManager(_DispatchManager):
         self,
         num_dispatched_tokens: int,
         local_expert_routing_map: paddle.Tensor,
-        padded_tokens_per_expert,
     ):
-        actual_tokens_per_expert = (
+        return (
             local_expert_routing_map[:num_dispatched_tokens]
             .astype("int64")
             .sum(axis=0)
         )
-        if isinstance(padded_tokens_per_expert, list):
-            return actual_tokens_per_expert.tolist()
-        return actual_tokens_per_expert
 
     def dispatch_overlap(
         self,
@@ -372,7 +366,7 @@ class _HybridEPManager(_DispatchManager):
             scaling_factor=scaling_factor,
             pad_multiple=FP8_ALIGN if use_fp8 else None,
             num_permuted_tokens=num_permuted_tokens,
-            non_blocking=not self._needs_host_counts,
+            non_blocking=True,
         )
         self.padded_tokens_per_expert = tokens_per_expert
         (
@@ -387,7 +381,6 @@ class _HybridEPManager(_DispatchManager):
         self.tokens_per_expert = self._extract_tokens_per_expert(
             num_dispatched_tokens,
             local_expert_routing_map,
-            tokens_per_expert,
         )
         return hidden_states, dispatched_probs, scale
 
@@ -475,9 +468,7 @@ class _DeepepManager(_DispatchManager):
         num_experts: int | None = None,
         num_local_experts: int | None = None,
         moe_ep_barrier: bool = True,
-        needs_host_counts: bool = False,
     ):
-        del needs_host_counts
         self.group = group
         self.router_topk = router_topk
         self.num_experts = num_experts
@@ -730,7 +721,6 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         ep_group: Group,
         moe_ep_barrier: bool = True,
         backend_name: str | None = None,
-        needs_host_counts: bool = False,
     ):
         super().__init__(ep_group)
 
@@ -746,7 +736,6 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             num_experts=n_routed_experts,
             num_local_experts=self.num_local_experts,
             moe_ep_barrier=moe_ep_barrier,
-            needs_host_counts=needs_host_counts,
         )
 
     def dispatch_preprocess(

@@ -340,7 +340,6 @@ class MoELayer(nn.Layer):
                     self.moe_group,
                     self.moe_ep_barrier,
                     backend_name=self.moe_flex_dispatcher_backend,
-                    needs_host_counts=self._needs_hybrid_ep_host_counts(),
                 )
             elif self.moe_token_dispatcher_type == "alltoall":
                 local_expert_indices = list(
@@ -696,11 +695,6 @@ class MoELayer(nn.Layer):
     def _use_hybrid_ep_fusion(self):
         return self.moe_use_fusion_node and is_hybrid_ep_backend_selected(
             self.moe_flex_dispatcher_backend
-        )
-
-    def _needs_hybrid_ep_host_counts(self):
-        return self.moe_use_fusion_node and (
-            (not self.fp8) or (not self.moe_grouped_gemm)
         )
 
     def _run_hybrid_ep_fusion(

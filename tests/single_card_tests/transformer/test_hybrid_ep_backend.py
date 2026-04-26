@@ -123,13 +123,58 @@ class TestHybridEPBackendSelection(unittest.TestCase):
                 n_routed_experts=4,
                 ep_group=mock_group,
                 backend_name="hybridep",
-                needs_host_counts=True,
             )
 
         self.assertIs(dispatcher._comm_manager, mock_manager_cls.return_value)
         self.assertEqual(
-            mock_manager_cls.call_args.kwargs["needs_host_counts"], True
+            mock_manager_cls.call_args.kwargs["num_local_experts"], 2
         )
+
+    def test_hybrid_ep_dispatch_keeps_counts_on_device(self):
+        manager = _HybridEPManager.__new__(_HybridEPManager)
+        manager.group = MagicMock()
+        manager.group.nranks = 1
+        manager.router_topk = 1
+        manager.num_experts = 2
+        manager.num_local_experts = 2
+        manager.routing_map = paddle.to_tensor(
+            [[True, False], [False, True]], dtype="bool"
+        )
+        manager.routing_probs = paddle.to_tensor(
+            [[1.0, 0.0], [0.0, 1.0]], dtype="float32"
+        )
+        manager.tokens_per_expert = None
+        manager.padded_tokens_per_expert = None
+
+        buffer = MagicMock()
+        padded_counts = paddle.to_tensor([1, 1], dtype="int64")
+        handle = (
+            None,
+            None,
+            None,
+            paddle.to_tensor(2, dtype="int64"),
+            manager.routing_map,
+        )
+        buffer.dispatch_with_permute.return_value = (
+            paddle.zeros([2, 4], dtype="float32"),
+            paddle.ones([2], dtype="float32"),
+            None,
+            padded_counts,
+            handle,
+        )
+        with patch.object(manager, "_get_buffer", return_value=buffer):
+            manager._dispatch_with_permute_impl(
+                paddle.zeros([2, 4], dtype="float32"),
+                paddle.to_tensor([[0], [1]], dtype="int64"),
+                paddle.ones([2, 1], dtype="float32"),
+                use_fp8=False,
+            )
+
+        self.assertTrue(
+            buffer.dispatch_with_permute.call_args.kwargs["non_blocking"]
+        )
+        self.assertIs(manager.padded_tokens_per_expert, padded_counts)
+        self.assertIsInstance(manager.tokens_per_expert, paddle.Tensor)
 
 
 class TestHybridEPCombineContract(unittest.TestCase):
