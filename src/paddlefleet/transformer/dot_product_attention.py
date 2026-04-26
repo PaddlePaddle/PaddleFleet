@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+from functools import partial
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -232,6 +233,9 @@ class DotProductAttention(FleetLayer):
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
+        assert (
+            not use_rr_flash_attention and self.config.flashmask_use_varlen
+        ), "flashmask_use_varlen does not support refined recompute now."
 
         # EC-compatible flash attention path for alignment mode
         if self.config.gpt_model_use_experimental_version:
@@ -280,11 +284,15 @@ class DotProductAttention(FleetLayer):
                     .unsqueeze(0)
                 )  # [1, 1, seq_len, 4]
 
-            flashmask_attention_func = (
-                self.rr_flashmask_attention_func
-                if use_rr_flash_attention
-                else flashmask_attention
-            )
+            if use_rr_flash_attention:
+                flashmask_attention_func = self.rr_flashmask_attention_func
+            elif self.config.flashmask_use_varlen:
+                flashmask_attention_func = partial(
+                    flashmask_attention, use_varlen=True
+                )
+            else:
+                flashmask_attention_func = flashmask_attention
+
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -548,6 +556,10 @@ class CPDotProductAttention(FleetLayer):
         )
         assert self.context_parallel_size > 1, (
             "CPDotProductAttention is only for context_parallel_size > 1."
+        )
+
+        assert not self.config.flashmask_use_varlen, (
+            "flashmask_use_varlen does not support context parallel now."
         )
 
         b, seq_len = key.shape[0], key.shape[1]
