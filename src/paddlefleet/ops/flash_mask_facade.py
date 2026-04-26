@@ -94,6 +94,8 @@ def flashmask_attention(
         flashmask_attention_func = partial(
             _flashmask_attention, use_varlen=True
         )
+    else:
+        flashmask_attention_func = _flashmask_attention
 
     attn_out, lse = flashmask_attention_func(
         query=query,
