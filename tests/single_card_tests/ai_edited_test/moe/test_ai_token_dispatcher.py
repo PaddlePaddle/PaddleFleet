@@ -230,10 +230,10 @@ class TestTokenDispatcher(unittest.TestCase):
         routing_map[1, 0] = 1.0
         routing_map[2, 1] = 1.0
         routing_map[3, 1] = 1.0
-        gates_masked = routing_map.clone()
+        probs = routing_map.clone()
         dispatcher.reshaped_input_shape = hidden.shape
         dispatcher.routing_map = routing_map
-        dispatcher.gates_masked = gates_masked
+        dispatcher.probs = probs
 
         _, dispatcher.reversed_local_input_permutation_mapping = permute(
             hidden, routing_map

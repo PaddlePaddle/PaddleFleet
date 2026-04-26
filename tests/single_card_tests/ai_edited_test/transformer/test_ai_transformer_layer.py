@@ -25,6 +25,7 @@ sys.path.insert(
 
 
 import unittest
+from unittest.mock import patch
 
 import paddle
 
@@ -241,6 +242,128 @@ class TestTransformerLayerMTP(unittest.TestCase):
     paddle.split(x, num_sections) splits along axis 0 by default.
     So for num_nextn_predict_layers=2, total_sections=3, seq must be divisible by 3.
     """
+
+    def test_input_ids_split_and_concat(self):
+        """When input_ids seq > hidden_states seq, it should be split then restored."""
+        num_nextn = 2
+        B, S, H = 2, 6, 64
+        config = _make_config(
+            num_nextn_predict_layers=num_nextn,
+            mtp_load_weight_only=False,
+            experimental_dataflow=False,
+        )
+        layer = _make_layer(config)
+        layer.eval()
+
+        total_sections = num_nextn + 1
+        # hidden_states: [total_sections * S, B, H] (seq-first for non-SP)
+        hidden_states = paddle.randn([total_sections * S, B, H])
+        # input_ids covers full concat seq: S + num_nextn
+        full_seq = S + num_nextn
+        input_ids = paddle.arange(full_seq).unsqueeze(0).expand([B, full_seq])
+        # attn_mask covers full concat seq along dim 2
+        attn_mask = paddle.randn([B, 1, S * total_sections + num_nextn, 1])
+
+        dict_args = {
+            "hidden_states": hidden_states,
+            "input_ids": input_ids.clone(),
+            "attention_mask": None,
+            "attn_mask_startend_row_indices": attn_mask,
+        }
+
+        # Mock _forward_impl to just return hidden_states unchanged
+        captured = {}
+
+        def mock_forward_impl(**kwargs):
+            captured["input_ids"] = kwargs.get("input_ids")
+            return kwargs["hidden_states"]
+
+        with patch.object(
+            layer, "_forward_impl", side_effect=mock_forward_impl
+        ):
+            result = layer.forward(dict_args)
+
+        # During forward, input_ids should have been trimmed to [B, S]
+        self.assertIsNotNone(captured["input_ids"])
+        self.assertEqual(list(captured["input_ids"].shape), [B, S])
+        # After forward, input_ids should be restored to [B, S + num_nextn]
+        restored_ids = dict_args.get("input_ids")
+        self.assertIsNotNone(restored_ids)
+        self.assertEqual(list(restored_ids.shape), [B, full_seq])
+        self.assertTrue(paddle.equal_all(restored_ids, input_ids))
+
+    def test_input_ids_no_split_when_short(self):
+        """When input_ids seq <= hidden_states batch dim, no split should happen."""
+        num_nextn = 2
+        B, S, H = 4, 6, 64  # B=4 so input_ids.shape[-1]=2 <= B
+        config = _make_config(
+            num_nextn_predict_layers=num_nextn,
+            mtp_load_weight_only=False,
+            experimental_dataflow=True,  # skips attn mask split
+        )
+        layer = _make_layer(config)
+        layer.eval()
+
+        total_sections = num_nextn + 1
+        hidden_states = paddle.randn([total_sections * S, B, H])
+        # input_ids with seq_len=2 <= B=4, so condition is false -> no split
+        short_seq = 2
+        input_ids = paddle.arange(short_seq).unsqueeze(0).expand([B, short_seq])
+
+        dict_args = {
+            "hidden_states": hidden_states,
+            "input_ids": input_ids.clone(),
+            "attention_mask": None,
+        }
+
+        captured = {}
+
+        def mock_forward_impl(**kwargs):
+            captured["input_ids"] = kwargs.get("input_ids")
+            return kwargs["hidden_states"]
+
+        with patch.object(
+            layer, "_forward_impl", side_effect=mock_forward_impl
+        ):
+            layer.forward(dict_args)
+
+        # input_ids should be passed through without trimming
+        self.assertIsNotNone(captured["input_ids"])
+        self.assertEqual(list(captured["input_ids"].shape), [B, short_seq])
+
+    def test_input_ids_none_no_error(self):
+        """When input_ids is None, no split/concat logic runs."""
+        num_nextn = 2
+        B, S, H = 2, 6, 64
+        config = _make_config(
+            num_nextn_predict_layers=num_nextn,
+            mtp_load_weight_only=False,
+            experimental_dataflow=True,
+        )
+        layer = _make_layer(config)
+        layer.eval()
+
+        total_sections = num_nextn + 1
+        hidden_states = paddle.randn([total_sections * S, B, H])
+
+        dict_args = {
+            "hidden_states": hidden_states,
+            "input_ids": None,
+            "attention_mask": None,
+        }
+
+        captured = {}
+
+        def mock_forward_impl(**kwargs):
+            captured["input_ids"] = kwargs.get("input_ids")
+            return kwargs["hidden_states"]
+
+        with patch.object(
+            layer, "_forward_impl", side_effect=mock_forward_impl
+        ):
+            layer.forward(dict_args)
+
+        self.assertIsNone(captured["input_ids"])
 
 
 class TestTransformerLayerBuildScheduleNode(unittest.TestCase):

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from unittest.mock import MagicMock
 
 import paddle
 from paddle.distributed import fleet
@@ -63,6 +64,50 @@ class TestBaseEmbedding(unittest.TestCase):
         assert embeddings.shape[0] == input_ids.shape[0]
         assert embeddings.shape[1] == self.base_embedding.max_sequence_length
         assert embeddings.shape[2] == self.base_embedding.config.hidden_size
+
+
+class TestGPTEmbeddingFillFeatureBranch(unittest.TestCase):
+    """Test fill_feature branch (lines 153-162) in GPTEmbedding.forward."""
+
+    def test_forward_zeros_padding_and_sets_moe_mask(self):
+        """Cover: fill_feature zeroes padding embeddings, input_ids_for_moe_mask is set."""
+        from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
+
+        B, S, H = 2, 4, 8
+        # Bypass __init__ to avoid heavy distributed dependencies
+        emb = object.__new__(GPTEmbedding)
+        emb.sequence_parallel = False
+        emb.multimodal_embedding = False
+        emb.position_embedding_type = "none"
+        emb.rotary_pos_emb = None
+        emb.mrope_section = None
+        emb.embedding = MagicMock(
+            return_value=paddle.ones([B, S, H], dtype="float32")
+        )
+        cfg = MagicMock()
+        cfg.expert_model_parallel_size = 2  # > 1 triggers the branch
+        cfg.tensor_model_parallel_size = 1  # < 2 satisfies second condition
+        cfg.num_nextn_predict_layers = None
+        cfg.mtp_load_weight_only = False
+        cfg.sequence_parallel = False
+        emb.config = cfg
+
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 0, 5, 0]])
+        result = emb.forward({"input_ids": input_ids})
+
+        hidden = result["hidden_states"]
+        self.assertEqual(hidden.shape, [B, S, H])
+        # Padding positions (input_ids==0) should be zeroed
+        self.assertAlmostEqual(hidden[0, 2, 0].item(), 0.0)
+        self.assertAlmostEqual(hidden[0, 3, 0].item(), 0.0)
+        self.assertAlmostEqual(hidden[1, 1, 0].item(), 0.0)
+        self.assertAlmostEqual(hidden[1, 3, 0].item(), 0.0)
+        # Valid positions should remain 1.0
+        self.assertAlmostEqual(hidden[0, 0, 0].item(), 1.0)
+        self.assertAlmostEqual(hidden[1, 2, 0].item(), 1.0)
+        # input_ids_for_moe_mask is passed through as "input_ids"
+        self.assertIn("input_ids", result)
+        self.assertTrue(paddle.equal_all(result["input_ids"], input_ids).item())
 
 
 if __name__ == "__main__":

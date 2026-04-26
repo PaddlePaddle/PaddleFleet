@@ -1242,5 +1242,284 @@ class TestMTPPerDepthMaskSlicing(unittest.TestCase):
                 )
 
 
+# ---------------------------------------------------------------------------
+# Test: GPTEmbedding — mtp_input_ids_for_moe_mask construction
+# ---------------------------------------------------------------------------
+
+
+class TestGPTEmbeddingMTPInputIdsForMoeMask(unittest.TestCase):
+    """Test GPTEmbedding splits input_ids into backbone and per-depth MTP parts
+    for MoE routing mask when expert_model_parallel_size > 1."""
+
+    def _build_embedding(self, config, B, S, H):
+        from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
+
+        with patch(
+            "paddlefleet.models.gpt.gpt_embedding.build_spec_layer",
+            side_effect=_mock_build_layer_side_effect,
+        ):
+            mock_spec = MagicMock()
+            mock_spec.rope_embedding = None
+            emb = GPTEmbedding(
+                sublayers_spec=mock_spec,
+                config=config,
+                vocab_size=128,
+                max_sequence_length=32,
+                position_embedding_type="none",
+            )
+            emb.embedding = MagicMock(return_value=paddle.randn([B, S, H]))
+        return emb
+
+    def test_mtp_input_ids_none_when_no_moe(self):
+        """Without expert_model_parallel_size > 1, mtp_input_ids_for_moe_mask is None."""
+        num_nextn = 2
+        B, S_total, H = 2, 10, 64  # S_total = seq_length + num_nextn
+        config = _make_config(
+            num_nextn_predict_layers=num_nextn,
+            expert_model_parallel_size=1,
+        )
+        emb = self._build_embedding(config, B, S_total, H)
+        dict_args = {
+            "input_ids": paddle.randint(0, 128, [B, S_total]),
+            "position_ids": paddle.arange(S_total)
+            .unsqueeze(0)
+            .expand([B, S_total]),
+        }
+        result = emb.forward(dict_args)
+        self.assertIsNone(result.get("mtp_input_ids_for_moe_mask"))
+
+    def test_mtp_input_ids_shape_and_values(self):
+        """With MoE + MTP, mtp_input_ids_for_moe_mask has [B, num_nextn, seq_length]
+        and each depth k contains input_ids[:, k+1 : k+1+seq_length]."""
+        num_nextn = 2
+        seq_length = 8
+        S_total = seq_length + num_nextn  # 10
+        B, H = 2, 64
+        config = _make_config(
+            num_nextn_predict_layers=num_nextn,
+            expert_model_parallel_size=2,
+            tensor_model_parallel_size=1,
+        )
+        emb = self._build_embedding(config, B, S_total, H)
+
+        input_ids = paddle.arange(S_total).unsqueeze(0).expand([B, S_total])
+        dict_args = {
+            "input_ids": input_ids.clone(),
+            "position_ids": paddle.arange(S_total)
+            .unsqueeze(0)
+            .expand([B, S_total]),
+        }
+        result = emb.forward(dict_args)
+
+        mtp_ids = result.get("mtp_input_ids_for_moe_mask")
+        self.assertIsNotNone(mtp_ids)
+        self.assertEqual(list(mtp_ids.shape), [B, num_nextn, seq_length])
+
+        # depth 0: input_ids[:, 1:1+8] = [1,2,...,8]
+        expected_d0 = input_ids[:, 1 : 1 + seq_length]
+        self.assertTrue(paddle.equal_all(mtp_ids[:, 0, :], expected_d0))
+        # depth 1: input_ids[:, 2:2+8] = [2,3,...,9]
+        expected_d1 = input_ids[:, 2 : 2 + seq_length]
+        self.assertTrue(paddle.equal_all(mtp_ids[:, 1, :], expected_d1))
+
+    def test_backbone_input_ids_trimmed(self):
+        """With MoE + MTP, backbone input_ids is trimmed to [B, seq_length]."""
+        num_nextn = 2
+        seq_length = 8
+        S_total = seq_length + num_nextn
+        B, H = 2, 64
+        config = _make_config(
+            num_nextn_predict_layers=num_nextn,
+            expert_model_parallel_size=2,
+            tensor_model_parallel_size=1,
+        )
+        emb = self._build_embedding(config, B, S_total, H)
+
+        input_ids = paddle.arange(S_total).unsqueeze(0).expand([B, S_total])
+        dict_args = {
+            "input_ids": input_ids.clone(),
+            "position_ids": paddle.arange(S_total)
+            .unsqueeze(0)
+            .expand([B, S_total]),
+        }
+        result = emb.forward(dict_args)
+
+        backbone_ids = result.get("input_ids")
+        self.assertIsNotNone(backbone_ids)
+        self.assertEqual(list(backbone_ids.shape), [B, seq_length])
+        expected = input_ids[:, :seq_length]
+        self.assertTrue(paddle.equal_all(backbone_ids, expected))
+
+
+# ---------------------------------------------------------------------------
+# Test: MultiTokenPredictionLayer — mtp_input_ids_for_moe_mask slicing
+# ---------------------------------------------------------------------------
+
+
+class TestMTPForwardInputIdsForMoeMask(unittest.TestCase):
+    """Test MTP forward correctly slices mtp_input_ids_for_moe_mask per-depth
+    and restores dict_args after forward."""
+
+    def _make_dict_args(self, B, S, H, num_nextn, with_moe_mask=True):
+        total_sections = num_nextn + 1
+        hidden_states = paddle.randn(
+            [B * total_sections, S, H], dtype="float32"
+        )
+        dict_args = {"hidden_states": hidden_states}
+        if with_moe_mask:
+            # Distinct per-depth input_ids: depth k filled with k+10
+            mtp_ids = paddle.zeros([B, num_nextn, S], dtype="int64")
+            for k in range(num_nextn):
+                mtp_ids[:, k, :] = k + 10
+            dict_args["mtp_input_ids_for_moe_mask"] = mtp_ids
+            dict_args["input_ids"] = paddle.ones([B, S], dtype="int64") * 99
+        return dict_args
+
+    def test_single_layer_slices_correct_depth(self):
+        """layer_number=1 should get mtp_input_ids_for_moe_mask[:, 1, :]."""
+        with (
+            _common_patches()[0],
+            _common_patches()[1],
+            _common_patches()[2],
+            _common_patches()[3],
+            _common_patches()[4],
+        ):
+            num_nextn = 2
+            B, S, H = 2, 8, 64
+            config = _make_config(
+                num_nextn_predict_layers=num_nextn,
+                train_mtp_only=False,
+                experimental_dataflow=True,
+            )
+            layer = _build_mtp_layer(config, layer_number=1)
+
+            dict_args = self._make_dict_args(B, S, H, num_nextn)
+
+            captured = []
+
+            def capture_proj(**kwargs):
+                captured.append(dict(kwargs))
+                return kwargs.get("hidden_states", paddle.randn([B, S, H]))
+
+            layer._proj_and_transformer_layer = capture_proj
+            layer.forward(dict_args)
+
+            self.assertEqual(len(captured), 1)
+            passed_ids = captured[0].get("input_ids")
+            self.assertIsNotNone(passed_ids)
+            # depth 1 -> value 11
+            expected = paddle.full([B, S], 11, dtype="int64")
+            self.assertTrue(paddle.equal_all(passed_ids, expected))
+
+    def test_train_mtp_only_each_depth_gets_correct_ids(self):
+        """train_mtp_only loops all depths, each should get its own input_ids slice."""
+        with (
+            _common_patches()[0],
+            _common_patches()[1],
+            _common_patches()[2],
+            _common_patches()[3],
+            _common_patches()[4],
+        ):
+            num_nextn = 3
+            B, S, H = 2, 8, 64
+            config = _make_config(
+                num_nextn_predict_layers=num_nextn,
+                train_mtp_only=True,
+                experimental_dataflow=True,
+            )
+            layer = _build_mtp_layer(config, layer_number=0)
+
+            dict_args = self._make_dict_args(B, S, H, num_nextn)
+
+            captured = []
+
+            def capture_proj(**kwargs):
+                captured.append(dict(kwargs))
+                return kwargs.get("hidden_states", paddle.randn([B, S, H]))
+
+            layer._proj_and_transformer_layer = capture_proj
+            layer.forward(dict_args)
+
+            self.assertEqual(len(captured), num_nextn)
+            for d in range(num_nextn):
+                passed_ids = captured[d].get("input_ids")
+                expected = paddle.full([B, S], d + 10, dtype="int64")
+                self.assertTrue(
+                    paddle.equal_all(passed_ids, expected),
+                    f"Depth {d}: expected {d + 10}, got {passed_ids}",
+                )
+
+    def test_restore_after_forward(self):
+        """After forward, mtp_input_ids_for_moe_mask and backbone input_ids are restored."""
+        with (
+            _common_patches()[0],
+            _common_patches()[1],
+            _common_patches()[2],
+            _common_patches()[3],
+            _common_patches()[4],
+        ):
+            num_nextn = 2
+            B, S, H = 2, 8, 64
+            config = _make_config(
+                num_nextn_predict_layers=num_nextn,
+                train_mtp_only=False,
+                experimental_dataflow=True,
+            )
+            layer = _build_mtp_layer(config, layer_number=0)
+
+            dict_args = self._make_dict_args(B, S, H, num_nextn)
+            original_mtp_ids = dict_args["mtp_input_ids_for_moe_mask"].clone()
+            original_backbone_ids = dict_args["input_ids"].clone()
+
+            result = layer.forward(dict_args)
+
+            # mtp_input_ids_for_moe_mask should be restored
+            self.assertIn("mtp_input_ids_for_moe_mask", result)
+            self.assertTrue(
+                paddle.equal_all(
+                    result["mtp_input_ids_for_moe_mask"], original_mtp_ids
+                )
+            )
+            # backbone input_ids should be restored
+            self.assertIn("input_ids", result)
+            self.assertTrue(
+                paddle.equal_all(result["input_ids"], original_backbone_ids)
+            )
+
+    def test_no_moe_mask_clears_input_ids(self):
+        """When mtp_input_ids_for_moe_mask is None, input_ids should be cleared for MTP layers."""
+        with (
+            _common_patches()[0],
+            _common_patches()[1],
+            _common_patches()[2],
+            _common_patches()[3],
+            _common_patches()[4],
+        ):
+            num_nextn = 2
+            B, S, H = 2, 8, 64
+            config = _make_config(
+                num_nextn_predict_layers=num_nextn,
+                train_mtp_only=False,
+                experimental_dataflow=True,
+            )
+            layer = _build_mtp_layer(config, layer_number=0)
+
+            dict_args = self._make_dict_args(
+                B, S, H, num_nextn, with_moe_mask=False
+            )
+
+            captured = []
+
+            def capture_proj(**kwargs):
+                captured.append(dict(kwargs))
+                return kwargs.get("hidden_states", paddle.randn([B, S, H]))
+
+            layer._proj_and_transformer_layer = capture_proj
+            layer.forward(dict_args)
+
+            # input_ids should not be passed when no moe mask
+            self.assertIsNone(captured[0].get("input_ids"))
+
+
 if __name__ == "__main__":
     unittest.main()
