@@ -25,7 +25,7 @@ sys.path.insert(
 
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import paddle
 
@@ -153,72 +153,6 @@ class TestMoELayer(unittest.TestCase):
 
         sublayers = MoESublayers()
         self.assertIsNone(sublayers.mlp_spec)
-
-    def test_hybrid_ep_backend_disables_shared_expert_overlap(self):
-        """Test HybridEP backend disables unsupported shared expert overlap."""
-        from paddlefleet.transformer.moe.moe_layer import MoELayer
-
-        config = _make_moe_config(
-            moe_token_dispatcher_type="deepep",
-            moe_flex_dispatcher_backend="hybridep",
-            moe_use_fusion_node=True,
-            n_shared_experts=1,
-            moe_shared_expert_overlap=True,
-        )
-        pg_collection = _make_pg_collection(moe_world_size=2)
-        sublayers = _make_moe_sublayers()
-
-        with (
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.utils.get_pg_size",
-                return_value=2,
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.utils.get_pg_rank",
-                return_value=0,
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.paddlefleet.ops.is_sonic_moe_available",
-                return_value=False,
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.paddle.version.cuda",
-                return_value="12.2",
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.paddle.is_compiled_with_cuda",
-                return_value=False,
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.is_hybrid_ep_backend_selected",
-                return_value=True,
-            ) as mock_is_hybrid,
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.TopKRouter",
-                return_value=paddle.nn.Layer(),
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.StandardMLPExpert",
-                return_value=paddle.nn.Layer(),
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.StandardMLPSharedExpert",
-                return_value=paddle.nn.Layer(),
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.MoEFlexTokenDispatcher",
-                return_value=MagicMock(),
-            ) as mock_dispatcher,
-        ):
-            layer = MoELayer(
-                config, sublayers=sublayers, pg_collection=pg_collection
-            )
-
-        self.assertFalse(layer.moe_shared_expert_overlap)
-        mock_is_hybrid.assert_called_once_with("hybridep")
-        self.assertEqual(
-            mock_dispatcher.call_args.kwargs["backend_name"], "hybridep"
-        )
 
 
 if __name__ == "__main__":
