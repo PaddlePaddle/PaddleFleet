@@ -365,6 +365,126 @@ class TestAuxLossComputeLatent(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 4b. z_loss handling in aux_loss_compute
+# ---------------------------------------------------------------------------
+
+
+class TestAuxLossComputeZLoss(unittest.TestCase):
+    """Test z_loss branches in aux_loss_compute added by commit b0bbb0a."""
+
+    def _make_stub(self, training, router_aux_loss_coef=0.0, hidden_size=64):
+        stub = MagicMock()
+        stub.use_latent_moe = False
+        stub.training = training
+        stub.router_aux_loss_coef = router_aux_loss_coef
+        stub.shared_experts = None
+        stub.expert_model_parallel_size = 1
+        stub.sequence_parallel = False
+        return stub
+
+    def test_z_loss_applied_when_training_and_not_none(self):
+        """z_loss should be added via AddAuxiliaryLoss when training=True and z_loss is not None."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            AddAuxiliaryLoss,
+            MoELayer,
+        )
+
+        stub = self._make_stub(training=True)
+        hidden = paddle.randn([4, 64])
+        residuals = paddle.randn([4, 64])
+        aux_loss = paddle.zeros([1])
+        z_loss = paddle.to_tensor([0.5], dtype="float32")
+
+        with patch.object(
+            AddAuxiliaryLoss, "apply", side_effect=lambda x, _loss: x
+        ) as mock_apply:
+            MoELayer.aux_loss_compute(
+                stub, (hidden, aux_loss, z_loss, residuals)
+            )
+            # AddAuxiliaryLoss.apply should be called once for z_loss
+            # (aux_loss path is skipped because router_aux_loss_coef=0.0)
+            mock_apply.assert_called_once()
+            _, call_loss = mock_apply.call_args[0]
+            self.assertTrue(
+                paddle.equal_all(call_loss, z_loss),
+                "AddAuxiliaryLoss must be called with z_loss",
+            )
+
+    def test_z_loss_skipped_when_not_training(self):
+        """z_loss should NOT be applied when training=False, even if z_loss is not None."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            AddAuxiliaryLoss,
+            MoELayer,
+        )
+
+        stub = self._make_stub(training=False)
+        hidden = paddle.randn([4, 64])
+        residuals = paddle.randn([4, 64])
+        aux_loss = paddle.zeros([1])
+        z_loss = paddle.to_tensor([0.5], dtype="float32")
+
+        with patch.object(
+            AddAuxiliaryLoss, "apply", side_effect=lambda x, _loss: x
+        ) as mock_apply:
+            MoELayer.aux_loss_compute(
+                stub, (hidden, aux_loss, z_loss, residuals)
+            )
+            mock_apply.assert_not_called()
+
+    def test_z_loss_skipped_when_none(self):
+        """z_loss=None should not trigger AddAuxiliaryLoss even in training mode."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            AddAuxiliaryLoss,
+            MoELayer,
+        )
+
+        stub = self._make_stub(training=True)
+        hidden = paddle.randn([4, 64])
+        residuals = paddle.randn([4, 64])
+        aux_loss = paddle.zeros([1])
+        z_loss = None
+
+        with patch.object(
+            AddAuxiliaryLoss, "apply", side_effect=lambda x, _loss: x
+        ) as mock_apply:
+            MoELayer.aux_loss_compute(
+                stub, (hidden, aux_loss, z_loss, residuals)
+            )
+            mock_apply.assert_not_called()
+
+    def test_z_loss_and_aux_loss_both_applied(self):
+        """When both aux_loss and z_loss are active, AddAuxiliaryLoss is called twice."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            AddAuxiliaryLoss,
+            MoELayer,
+        )
+
+        stub = self._make_stub(training=True, router_aux_loss_coef=0.01)
+        hidden = paddle.randn([4, 64])
+        residuals = paddle.randn([4, 64])
+        aux_loss = paddle.to_tensor([1.0], dtype="float32")
+        z_loss = paddle.to_tensor([0.5], dtype="float32")
+
+        with patch.object(
+            AddAuxiliaryLoss, "apply", side_effect=lambda x, _loss: x
+        ) as mock_apply:
+            MoELayer.aux_loss_compute(
+                stub, (hidden, aux_loss, z_loss, residuals)
+            )
+            self.assertEqual(
+                mock_apply.call_count,
+                2,
+                "AddAuxiliaryLoss must be called for both aux_loss and z_loss",
+            )
+            # Second call should be for z_loss
+            _, second_call_loss = mock_apply.call_args_list[1][0]
+            self.assertTrue(
+                paddle.equal_all(second_call_loss, z_loss),
+                "Second AddAuxiliaryLoss call must use z_loss",
+            )
+
+
+# ---------------------------------------------------------------------------
 # 5. forward – latent projections in the non-overlap single-card path
 # ---------------------------------------------------------------------------
 
@@ -471,6 +591,136 @@ class TestForwardLatent(unittest.TestCase):
         dispatched_input = call_args[0]
         self.assertEqual(dispatched_input.shape[-1], 64)
         self.assertEqual(output.shape, [bs, seq, 64])
+
+    def _make_forward_stub_for_zloss(
+        self, training, z_loss_val, router_aux_loss_coef=0.0
+    ):
+        """Build a stub for forward() focused on z_loss testing."""
+        num_experts = 4
+        topk = 2
+        bs, seq = 2, 6
+        hidden_size = 64
+
+        stub = MagicMock()
+        stub.use_latent_moe = False
+        stub.expert_model_parallel_size = 1
+        stub.sequence_parallel = False
+        stub.moe_grouped_gemm = False
+        stub.shared_experts = None
+        stub.moe_shared_expert_overlap = False
+        stub.moe_use_fusion_node = False
+        stub.training = training
+        stub.router_aux_loss_coef = router_aux_loss_coef
+
+        topk_weights = paddle.ones([bs * seq, topk]) / topk
+        topk_indices = paddle.zeros([bs * seq, topk], dtype="int64")
+        gates_masked = paddle.ones([bs * seq, num_experts]) / num_experts
+        mask = paddle.ones([bs * seq, num_experts], dtype="bool")
+        aux_loss = paddle.zeros([1])
+        stub.gate.return_value = (
+            None,
+            topk_weights,
+            topk_indices,
+            gates_masked,
+            mask,
+            None,
+            aux_loss,
+            z_loss_val,
+        )
+        stub._forward_single_card_moe.return_value = paddle.randn(
+            [bs * seq, hidden_size]
+        )
+        return stub, bs, seq
+
+    def test_forward_applies_z_loss_when_training(self):
+        """In forward(), z_loss must be applied via AddAuxiliaryLoss when training=True."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            AddAuxiliaryLoss,
+            MoELayer,
+        )
+
+        z_loss = paddle.to_tensor([0.5], dtype="float32")
+        stub, bs, seq = self._make_forward_stub_for_zloss(
+            training=True, z_loss_val=z_loss
+        )
+        hidden = paddle.randn([bs, seq, 64])
+
+        with patch.object(
+            AddAuxiliaryLoss, "apply", side_effect=lambda x, _loss: x
+        ) as mock_apply:
+            MoELayer.forward(stub, hidden)
+            # aux_loss path skipped (coef=0.0), only z_loss path fires
+            mock_apply.assert_called_once()
+            _, call_loss = mock_apply.call_args[0]
+            self.assertTrue(
+                paddle.equal_all(call_loss, z_loss),
+                "forward() must call AddAuxiliaryLoss with z_loss",
+            )
+
+    def test_forward_skips_z_loss_when_not_training(self):
+        """In forward(), z_loss must NOT be applied when training=False."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            AddAuxiliaryLoss,
+            MoELayer,
+        )
+
+        z_loss = paddle.to_tensor([0.5], dtype="float32")
+        stub, bs, seq = self._make_forward_stub_for_zloss(
+            training=False, z_loss_val=z_loss
+        )
+        hidden = paddle.randn([bs, seq, 64])
+
+        with patch.object(
+            AddAuxiliaryLoss, "apply", side_effect=lambda x, _loss: x
+        ) as mock_apply:
+            MoELayer.forward(stub, hidden)
+            mock_apply.assert_not_called()
+
+    def test_forward_skips_z_loss_when_none(self):
+        """In forward(), z_loss=None must not trigger AddAuxiliaryLoss even in training."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            AddAuxiliaryLoss,
+            MoELayer,
+        )
+
+        stub, bs, seq = self._make_forward_stub_for_zloss(
+            training=True, z_loss_val=None
+        )
+        hidden = paddle.randn([bs, seq, 64])
+
+        with patch.object(
+            AddAuxiliaryLoss, "apply", side_effect=lambda x, _loss: x
+        ) as mock_apply:
+            MoELayer.forward(stub, hidden)
+            mock_apply.assert_not_called()
+
+    def test_forward_applies_both_aux_loss_and_z_loss(self):
+        """In forward(), both aux_loss and z_loss should be applied when training=True."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            AddAuxiliaryLoss,
+            MoELayer,
+        )
+
+        z_loss = paddle.to_tensor([0.5], dtype="float32")
+        stub, bs, seq = self._make_forward_stub_for_zloss(
+            training=True, z_loss_val=z_loss, router_aux_loss_coef=0.01
+        )
+        hidden = paddle.randn([bs, seq, 64])
+
+        with patch.object(
+            AddAuxiliaryLoss, "apply", side_effect=lambda x, _loss: x
+        ) as mock_apply:
+            MoELayer.forward(stub, hidden)
+            self.assertEqual(
+                mock_apply.call_count,
+                2,
+                "forward() must call AddAuxiliaryLoss for both aux_loss and z_loss",
+            )
+            _, second_call_loss = mock_apply.call_args_list[1][0]
+            self.assertTrue(
+                paddle.equal_all(second_call_loss, z_loss),
+                "Second call must use z_loss",
+            )
 
 
 # ---------------------------------------------------------------------------
