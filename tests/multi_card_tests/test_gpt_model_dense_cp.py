@@ -69,9 +69,11 @@ def _set_rng_flag(
     FLAGS_deterministic_rng_grid: int = 624,
 ):
     """Set rng flag for weight initialization"""
-    os.environ["FLAGS_deterministic_rng"] = str(FLAGS_deterministic_rng)
-    os.environ["FLAGS_deterministic_rng_grid"] = str(
-        FLAGS_deterministic_rng_grid
+    paddle.set_flags(
+        {
+            "FLAGS_deterministic_rng": FLAGS_deterministic_rng,
+            "FLAGS_deterministic_rng_grid": FLAGS_deterministic_rng_grid,
+        }
     )
 
 
