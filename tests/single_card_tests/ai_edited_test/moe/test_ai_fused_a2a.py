@@ -198,6 +198,35 @@ class TestFusedA2A(unittest.TestCase):
             )
             self.assertIsNotNone(result)
 
+    def test_hybrid_ep_combine_uses_sync_pylayer(self):
+        """Test hybrid_ep_combine delegates to the sync HybridEP PyLayer."""
+        from paddlefleet.transformer.moe.fused_a2a import (
+            HybridEPCombine,
+            hybrid_ep_combine,
+        )
+
+        x = paddle.randn([4, 64], dtype=paddle.float32)
+        manager = MagicMock()
+        combined = object()
+        with patch.object(
+            HybridEPCombine, "apply", return_value=combined
+        ) as mock_apply:
+            result = hybrid_ep_combine(x, manager)
+
+        self.assertIs(result, combined)
+        mock_apply.assert_called_once_with(x, manager)
+
+    def test_hybrid_ep_combine_has_no_overlap_argument(self):
+        """Test HybridEP combine API does not expose fake overlap support."""
+        from paddlefleet.transformer.moe.fused_a2a import hybrid_ep_combine
+
+        with self.assertRaises(TypeError):
+            hybrid_ep_combine(
+                paddle.randn([4, 64], dtype=paddle.float32),
+                MagicMock(),
+                {"fn": MagicMock()},
+            )
+
     def test_fused_dispatch_backward_func(self):
         """Test fused_dispatch_backward_func."""
         from paddlefleet.transformer.moe.fused_a2a import (

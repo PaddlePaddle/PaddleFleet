@@ -162,6 +162,7 @@ class MoELayer(nn.Layer):
         self.sequence_parallel = config.sequence_parallel
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        self.moe_flex_dispatcher_backend = config.moe_flex_dispatcher_backend
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
         self.fp8_dispatch = bool(config.fp8)
@@ -271,7 +272,9 @@ class MoELayer(nn.Layer):
                 self.moe_use_fusion_node = config.moe_use_fusion_node
                 if (
                     self.moe_use_fusion_node
-                    and is_hybrid_ep_backend_selected()
+                    and is_hybrid_ep_backend_selected(
+                        self.moe_flex_dispatcher_backend
+                    )
                     and self.moe_shared_expert_overlap
                 ):
                     logger.info(
@@ -336,6 +339,7 @@ class MoELayer(nn.Layer):
                     self.num_experts,
                     self.moe_group,
                     self.moe_ep_barrier,
+                    backend_name=self.moe_flex_dispatcher_backend,
                     needs_host_counts=self._needs_hybrid_ep_host_counts(),
                 )
             elif self.moe_token_dispatcher_type == "alltoall":
@@ -690,7 +694,9 @@ class MoELayer(nn.Layer):
         return self.gate(hidden_states, input_ids=input_ids)
 
     def _use_hybrid_ep_fusion(self):
-        return self.moe_use_fusion_node and is_hybrid_ep_backend_selected()
+        return self.moe_use_fusion_node and is_hybrid_ep_backend_selected(
+            self.moe_flex_dispatcher_backend
+        )
 
     def _needs_hybrid_ep_host_counts(self):
         return self.moe_use_fusion_node and (

@@ -45,10 +45,15 @@ HAVE_HYBRID_EP = False
 HYBRID_EP_LOAD_CACHED_KERNELS = bool(
     int(os.getenv("HYBRID_EP_LOAD_CACHED_KERNELS", "0"))
 )
-_DEEP_EP_BACKEND = os.getenv(
-    "PF_DEEP_EP_BACKEND",
-    os.getenv("PADDLEFLEET_DEEP_EP_BACKEND", "auto"),
-).lower()
+_DEEP_EP_BACKEND_ALIASES = {
+    "deep_ep": "deepep",
+    "deepep": "deepep",
+    "hybrid": "hybrid",
+    "hybrid_ep": "hybrid",
+    "hybridep": "hybrid",
+    "deep_ep_v2": "deep_ep_v2",
+    "deepep_v2": "deep_ep_v2",
+}
 
 try:
     from paddlefleet.ops import is_deep_ep_available
@@ -63,27 +68,29 @@ except ImportError:
     deep_ep = None
 
 
-def is_hybrid_ep_backend_selected() -> bool:
-    return get_selected_deep_ep_backend_name() == "hybrid"
+def is_hybrid_ep_backend_selected(backend_name: str | None = None) -> bool:
+    return get_selected_deep_ep_backend_name(backend_name) == "hybrid"
 
 
 def get_selected_deep_ep_backend_name(backend_name: str | None = None) -> str:
-    selected_backend = (
-        _DEEP_EP_BACKEND if backend_name is None else backend_name
-    ).lower()
-    if selected_backend not in frozenset({"auto", "deepep", "hybrid"}):
+    selected_backend = _DEEP_EP_BACKEND_ALIASES.get(
+        (backend_name or "deepep").lower()
+    )
+    if selected_backend is None:
         raise ValueError(
-            "PADDLEFLEET_DEEP_EP_BACKEND must be one of: auto, hybrid, deepep"
+            "moe_flex_dispatcher_backend must be one of: deepep, hybridep, deep_ep_v2"
+        )
+    if selected_backend == "deep_ep_v2":
+        raise NotImplementedError(
+            "moe_flex_dispatcher_backend=deep_ep_v2 is reserved but not supported yet."
         )
     if selected_backend == "hybrid":
         if not HAVE_HYBRID_EP:
             raise ImportError(
-                "PADDLEFLEET_DEEP_EP_BACKEND=hybrid but HybridEP runtime is unavailable."
+                "moe_flex_dispatcher_backend=hybridep but HybridEP runtime is unavailable."
             )
         return "hybrid"
-    if selected_backend == "deepep":
-        return "deepep"
-    return "hybrid" if HAVE_HYBRID_EP else "deepep"
+    return "deepep"
 
 
 class _DispatchManager(ABC):
