@@ -51,8 +51,6 @@ _DEEP_EP_BACKEND_ALIASES = {
     "hybrid": "hybrid",
     "hybrid_ep": "hybrid",
     "hybridep": "hybrid",
-    "deep_ep_v2": "deep_ep_v2",
-    "deepep_v2": "deep_ep_v2",
 }
 
 try:
@@ -78,11 +76,7 @@ def get_selected_deep_ep_backend_name(backend_name: str | None = None) -> str:
     )
     if selected_backend is None:
         raise ValueError(
-            "moe_flex_dispatcher_backend must be one of: deepep, hybridep, deep_ep_v2"
-        )
-    if selected_backend == "deep_ep_v2":
-        raise NotImplementedError(
-            "moe_flex_dispatcher_backend=deep_ep_v2 is reserved but not supported yet."
+            "moe_flex_dispatcher_backend must be one of: deepep, hybridep"
         )
     if selected_backend == "hybrid":
         if not HAVE_HYBRID_EP:

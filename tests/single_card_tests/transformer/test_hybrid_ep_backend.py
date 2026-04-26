@@ -106,10 +106,6 @@ class TestHybridEPBackendSelection(unittest.TestCase):
             )
             self.assertTrue(is_hybrid_ep_backend_selected("hybrid_ep"))
 
-    def test_backend_deep_ep_v2_is_reserved(self):
-        with self.assertRaisesRegex(NotImplementedError, "deep_ep_v2"):
-            get_selected_deep_ep_backend_name("deep_ep_v2")
-
     def test_flex_dispatcher_uses_hybrid_backend(self):
         mock_group = MagicMock()
         mock_group.world_size = 2
