@@ -2001,7 +2001,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         ctx.original_probs_shape = original_probs_shape
         if is_first_fwd:
             node.clear_cached_tensors()
-        ctx.save_for_backward(node.cached_tensors() + [dispatched_probs])
+        ctx.save_for_backward([*node.cached_tensors(), dispatched_probs])
         node.clear_cached_tensors()
         return out
 

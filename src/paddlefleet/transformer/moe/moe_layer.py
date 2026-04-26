@@ -56,6 +56,8 @@ logger = logging.getLogger(__name__)
 
 # MD5 logging for MoE precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
+
+
 def _log_moe_md5(tensor, name, layer_idx=None):
     """Log MD5 of a tensor for MoE precision alignment debugging."""
     from paddlefleet.transformer.transformer_layer import TransformerLayer
@@ -691,9 +693,8 @@ class MoELayer(nn.Layer):
         return self.moe_use_fusion_node and is_hybrid_ep_backend_selected()
 
     def _needs_hybrid_ep_host_counts(self):
-        return (
-            self.moe_use_fusion_node
-            and ((not self.fp8) or (not self.moe_grouped_gemm))
+        return self.moe_use_fusion_node and (
+            (not self.fp8) or (not self.moe_grouped_gemm)
         )
 
     def _run_hybrid_ep_fusion(

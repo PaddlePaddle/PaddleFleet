@@ -15,8 +15,8 @@
 # limitations under the License.
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import os
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import paddle
@@ -26,13 +26,13 @@ if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
 
+from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
     fused_combine,
     fused_dispatch,
     hybrid_ep_combine,
     hybrid_ep_dispatch,
 )
-from .fp8_utils import FP8_ALIGN
 from .moe_utils import (
     AllGatherGroupOp,
     _AllToAll,
@@ -217,14 +217,14 @@ class _HybridEPManager(_DispatchManager):
             self._buffer_max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
         return self._buffer
 
-    def _get_num_permuted_tokens_upper_bound(self, num_local_tokens: int) -> int:
+    def _get_num_permuted_tokens_upper_bound(
+        self, num_local_tokens: int
+    ) -> int:
         total_routed_tokens = (
             num_local_tokens * self.group.nranks * self.router_topk
         )
         if FP8_ALIGN > 1:
-            total_routed_tokens += self.num_local_experts * (
-                FP8_ALIGN - 1
-            )
+            total_routed_tokens += self.num_local_experts * (FP8_ALIGN - 1)
         return total_routed_tokens
 
     def _indices_to_dense_metadata(
@@ -262,7 +262,9 @@ class _HybridEPManager(_DispatchManager):
     ) -> tuple[paddle.Tensor, paddle.Tensor | None]:
         if self.routing_map is not None:
             return self.routing_map, self.routing_probs
-        assert token_indices is not None, "HybridEP dispatch requires routing metadata."
+        assert token_indices is not None, (
+            "HybridEP dispatch requires routing metadata."
+        )
         return self._indices_to_dense_metadata(token_indices, token_weights)
 
     def setup_metadata(
@@ -273,15 +275,19 @@ class _HybridEPManager(_DispatchManager):
         topk_indices: paddle.Tensor | None = None,
     ):
         num_tokens = routing_map.shape[0]
-        self.routing_map = routing_map.reshape([num_tokens, self.num_experts]).astype(
-            "bool"
-        )
+        self.routing_map = routing_map.reshape(
+            [num_tokens, self.num_experts]
+        ).astype("bool")
         self.routing_probs = probs.reshape([num_tokens, self.num_experts])
         if self.routing_probs.dtype != paddle.float32:
             self.routing_probs = self.routing_probs.astype("float32")
         if topk_weights is not None and topk_indices is not None:
-            self.token_probs = topk_weights.reshape([num_tokens, self.router_topk])
-            self.token_indices = topk_indices.reshape([num_tokens, self.router_topk])
+            self.token_probs = topk_weights.reshape(
+                [num_tokens, self.router_topk]
+            )
+            self.token_indices = topk_indices.reshape(
+                [num_tokens, self.router_topk]
+            )
             self.token_indices.stop_gradient = True
             return
         self.token_probs, self.token_indices = paddle.topk(
@@ -294,9 +300,11 @@ class _HybridEPManager(_DispatchManager):
         local_expert_routing_map: paddle.Tensor,
         padded_tokens_per_expert,
     ):
-        actual_tokens_per_expert = local_expert_routing_map[
-            :num_dispatched_tokens
-        ].astype("int64").sum(axis=0)
+        actual_tokens_per_expert = (
+            local_expert_routing_map[:num_dispatched_tokens]
+            .astype("int64")
+            .sum(axis=0)
+        )
         if isinstance(padded_tokens_per_expert, list):
             return actual_tokens_per_expert.tolist()
         return actual_tokens_per_expert

@@ -100,9 +100,7 @@ def _ensure_zero_weight_grad(weight):
             weight.main_grad.zero_()
     else:
         if weight.grad is None:
-            weight.grad = paddle.zeros(
-                shape=weight.shape, dtype=paddle.float32
-            )
+            weight.grad = paddle.zeros(shape=weight.shape, dtype=paddle.float32)
         else:
             weight.grad.zero_()
     if hasattr(weight, "_apply_backward_hook") and not weight.stop_gradient:
@@ -987,6 +985,7 @@ class ExpertsGroupGemmContiguousNode:
                 and not expert_w2[i].stop_gradient
             ):
                 expert_w2[i]._apply_backward_hook()
+
     def bwd_gate_up_weight(self, do1, input_x, expert_w1, clear_input=False):
         """
         dw1 = dx_t * do1
@@ -1067,6 +1066,7 @@ class ExpertsGroupGemmContiguousNode:
                 and not expert_w1[i].stop_gradient
             ):
                 expert_w1[i]._apply_backward_hook()
+
     @paddle.no_grad()
     def forward(
         self,

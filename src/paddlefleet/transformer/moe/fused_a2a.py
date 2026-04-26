@@ -505,7 +505,9 @@ class HybridEPDispatch(PyLayer):
     """Fused HybridEP dispatch bridge for Paddle autograd."""
 
     @staticmethod
-    def forward(ctx, x, token_indices, token_probs, manager, fp8_dispatch=False):
+    def forward(
+        ctx, x, token_indices, token_probs, manager, fp8_dispatch=False
+    ):
         recv_x, recv_token_probs, scale = manager._dispatch_with_permute_impl(
             x, token_indices, token_probs, use_fp8=fp8_dispatch
         )
