@@ -158,6 +158,9 @@ class TransformerConfig(ModelParallelConfig):
     _attn_implementation: str = "default"
     """Attention implementation to use."""
 
+    flashmask_use_varlen: bool = False
+    """If True, convert flashmask to varlen in attention."""
+
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""
