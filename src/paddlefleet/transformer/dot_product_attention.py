@@ -195,7 +195,14 @@ class DotProductAttention(FleetLayer):
 
         if attn_mask_startend_row_indices is not None:
             # flashmask path — matches EC's scaled_dot_product_attention
-            attn_output = flashmask_attention(
+            if self.config.flashmask_use_varlen:
+                flashmask_attention_func = partial(
+                    flashmask_attention, use_varlen=True
+                )
+            else:
+                flashmask_attention_func = flashmask_attention
+
+            attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
                 value,
@@ -236,6 +243,8 @@ class DotProductAttention(FleetLayer):
         assert not (
             use_rr_flash_attention and self.config.flashmask_use_varlen
         ), "flashmask_use_varlen does not support refined recompute now."
+        bsz, q_len, num_heads, q_head_dim = query.shape
+        v_head_dim = value.shape[-1]
 
         # EC-compatible flash attention path for alignment mode
         if self.config.gpt_model_use_experimental_version:
@@ -301,7 +310,7 @@ class DotProductAttention(FleetLayer):
                 dropout=self.config.attention_dropout,
                 causal=False,
             )
-            attn_output = attn_output.reshape([0, 0, -1])
+            attn_output = attn_output.reshape([bsz, q_len, -1])
             return attn_output
         if (
             (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
@@ -337,19 +346,20 @@ class DotProductAttention(FleetLayer):
         ):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
-            flashmask_attention_func = (
-                self.rr_flashmask_attention_func
-                if use_rr_flash_attention
-                else flashmask_attention
-            )
+            if use_rr_flash_attention:
+                flashmask_attention_func = self.rr_flashmask_attention_func
+            elif self.config.flashmask_use_varlen:
+                flashmask_attention_func = partial(
+                    flashmask_attention, use_varlen=True
+                )
+            else:
+                flashmask_attention_func = flashmask_attention
 
             # TODO(umiswing): move this padding to flash_mask_facade,
             # flash_mask_facade wrap the padding logic for fa/fm function call,
             # but it does not wrap the padding for rr now.
             # Handle MLA case where query/key head_dim != value head_dim
             # flashmask_attention requires head_dim_q == head_dim_v for backward pass
-            q_head_dim = query.shape[-1]
-            v_head_dim = value.shape[-1]
             need_value_padding = (
                 use_rr_flash_attention and q_head_dim != v_head_dim
             )
@@ -380,7 +390,7 @@ class DotProductAttention(FleetLayer):
                 # attn_output: [b, s, h, q_head_dim] -> [b, s, h, v_head_dim]
                 attn_output = attn_output[..., :v_head_dim]
 
-            attn_output = attn_output.reshape([0, 0, -1])
+            attn_output = attn_output.reshape([bsz, q_len, -1])
 
             return attn_output
 

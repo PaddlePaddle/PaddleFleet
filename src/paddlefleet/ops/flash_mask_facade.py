@@ -96,7 +96,7 @@ def flashmask_attention(
     else:
         flashmask_attention_func = _flashmask_attention
 
-    attn_out, lse = flashmask_attention_func(
+    outs = flashmask_attention_func(
         query=query,
         key=key,
         value=value,
@@ -104,7 +104,7 @@ def flashmask_attention(
         dropout=dropout,
         causal=causal,
         window_size=window_size,
-        return_softmax_lse=True,
+        return_softmax_lse=return_softmax_lse,
         return_seed_offset=return_seed_offset,
         fixed_seed_offset=fixed_seed_offset,
         rng_name=rng_name,
@@ -113,6 +113,11 @@ def flashmask_attention(
         softmax_scale=softmax_scale,
         block_mask=block_mask,
     )
+
+    if return_softmax_lse:
+        attn_out, lse = outs
+    else:
+        attn_out = outs[0]
 
     if need_value_padding:
         attn_out = attn_out[..., :v_head_dim]
