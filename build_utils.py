@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -227,6 +228,9 @@ def get_special_build_deps():
             "paddlepaddle-gpu==3.4.0.post20260424+eda0f7f2dad",
         ]
         # for deep_ep build
+        if platform.machine() == "aarch64":
+            deps.append("nvidia-nvshmem-cu13>=3.3.9,<3.5")
+            return deps
         if cuda_major == 12:
             if cuda_minor > 6:
                 deps.append("paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5")
