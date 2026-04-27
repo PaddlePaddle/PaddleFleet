@@ -488,15 +488,8 @@ class ExpertsGroupGemmContiguousNode:
     ):
         self.tokens_per_expert = tokens_per_expert
         if self.moe_deep_gemm:
-            if isinstance(self.tokens_per_expert, paddle.Tensor):
-                token_counts = self.tokens_per_expert.cast("int32")
-            else:
-                token_counts = paddle.to_tensor(
-                    self.tokens_per_expert, dtype="int32"
-                )
-            self.tokens_per_expert_indices = paddle.repeat_interleave(
-                paddle.arange(token_counts.shape[0], dtype="int32"),
-                token_counts,
+            self.tokens_per_expert_indices = self.gen_m_indices(
+                self.tokens_per_expert
             )
         if not self.use_fp8_mlp:
             return self.fwd_gate_up_bf16(x, expert_w1)

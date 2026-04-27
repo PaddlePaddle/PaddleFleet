@@ -71,6 +71,24 @@ def is_hybrid_ep_backend_selected(backend_name: str | None = None) -> bool:
     return True
 
 
+def _try_setup_router_topk_metadata(
+    manager,
+    num_tokens: int,
+    topk_weights: paddle.Tensor | None,
+    topk_indices: paddle.Tensor | None,
+) -> bool:
+    if topk_weights is None or topk_indices is None:
+        return False
+    manager.token_probs = topk_weights.reshape(
+        [num_tokens, manager.router_topk]
+    )
+    manager.token_indices = topk_indices.reshape(
+        [num_tokens, manager.router_topk]
+    )
+    manager.token_indices.stop_gradient = True
+    return True
+
+
 class _DispatchManager(ABC):
     """
     A manager class to handle dispatch and combine processes for MoE models.
@@ -160,7 +178,6 @@ class _HybridEPManager(_DispatchManager):
         self.router_topk = router_topk
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
-        self.moe_ep_barrier = moe_ep_barrier
         self.routing_map = None
         self.routing_probs = None
         self.token_indices = None
@@ -264,14 +281,9 @@ class _HybridEPManager(_DispatchManager):
         self.routing_probs = probs.reshape([num_tokens, self.num_experts])
         if self.routing_probs.dtype != paddle.float32:
             self.routing_probs = self.routing_probs.astype("float32")
-        if topk_weights is not None and topk_indices is not None:
-            self.token_probs = topk_weights.reshape(
-                [num_tokens, self.router_topk]
-            )
-            self.token_indices = topk_indices.reshape(
-                [num_tokens, self.router_topk]
-            )
-            self.token_indices.stop_gradient = True
+        if _try_setup_router_topk_metadata(
+            self, num_tokens, topk_weights, topk_indices
+        ):
             return
         self.token_probs, self.token_indices = paddle.topk(
             self.routing_probs, self.router_topk, axis=-1
@@ -479,15 +491,9 @@ class _DeepepManager(_DispatchManager):
     ):
         num_tokens = routing_map.shape[0]
 
-        if topk_weights is not None and topk_indices is not None:
-            # Reuse router's topk results, skip recomputing topk.
-            self.token_probs = topk_weights.reshape(
-                [num_tokens, self.router_topk]
-            )
-            self.token_indices = topk_indices.reshape(
-                [num_tokens, self.router_topk]
-            )
-            self.token_indices.stop_gradient = True
+        if _try_setup_router_topk_metadata(
+            self, num_tokens, topk_weights, topk_indices
+        ):
             return
 
         routing_map = routing_map.reshape([num_tokens, self.num_experts])

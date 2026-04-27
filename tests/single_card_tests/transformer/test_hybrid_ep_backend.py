@@ -159,7 +159,6 @@ def _new_hybrid_manager(**overrides):
     manager.router_topk = 2
     manager.num_experts = 4
     manager.num_local_experts = 2
-    manager.moe_ep_barrier = True
     manager.routing_map = None
     manager.routing_probs = None
     manager.token_indices = None
@@ -328,7 +327,6 @@ class TestHybridEPManagerContract(unittest.TestCase):
         self.assertEqual(manager.router_topk, 2)
         self.assertEqual(manager.num_experts, 4)
         self.assertEqual(manager.num_local_experts, 2)
-        self.assertFalse(manager.moe_ep_barrier)
         self.assertIsNone(manager.routing_map)
         self.assertIsNone(manager.routing_probs)
         self.assertIsNone(manager.token_indices)
@@ -992,14 +990,12 @@ class TestHybridEPMoELayerContract(unittest.TestCase):
     def test_use_hybrid_ep_fusion_requires_fusion_node_and_backend(self):
         layer = MoELayer.__new__(MoELayer)
         layer.moe_use_fusion_node = True
-        layer.moe_flex_dispatcher_backend = "hybridep"
+        layer.use_hybrid_ep_backend = True
 
-        with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
-            self.assertTrue(layer._use_hybrid_ep_fusion())
+        self.assertTrue(layer._use_hybrid_ep_fusion())
 
         layer.moe_use_fusion_node = False
-        with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
-            self.assertFalse(layer._use_hybrid_ep_fusion())
+        self.assertFalse(layer._use_hybrid_ep_fusion())
 
     def test_run_hybrid_ep_fusion_delegates_to_pylayer(self):
         layer = MoELayer.__new__(MoELayer)
@@ -1077,7 +1073,7 @@ class TestHybridEPMoELayerContract(unittest.TestCase):
         layer = MoELayer.__new__(MoELayer)
         layer.moe_use_fusion_node = True
         layer.fp8_dispatch = True
-        layer._use_hybrid_ep_fusion = lambda: True
+        layer.use_hybrid_ep_backend = True
         dispatched_hidden = paddle.ones([4, 8], dtype="float32")
         dispatched_probs = paddle.ones([4], dtype="float32")
         fp8_handle = {"scale": paddle.ones([4, 1], dtype="float32")}
@@ -1130,7 +1126,7 @@ class TestHybridEPMoELayerContract(unittest.TestCase):
     def test_compute_experts_uses_hybrid_ep_fusion_output(self):
         layer = MoELayer.__new__(MoELayer)
         layer.moe_use_fusion_node = True
-        layer._use_hybrid_ep_fusion = lambda: True
+        layer.use_hybrid_ep_backend = True
         fused_out = paddle.ones([4, 8], dtype="float32")
         fusion_call = {}
 
