@@ -34,7 +34,6 @@ from paddlefleet.transformer.moe.moe_layer import MoELayer, MoESublayers
 from paddlefleet.transformer.moe.token_dispatcher import (
     MoEFlexTokenDispatcher,
     _HybridEPManager,
-    get_selected_deep_ep_backend_name,
     is_hybrid_ep_backend_selected,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -181,13 +180,10 @@ def _new_hybrid_manager(**overrides):
 class TestHybridEPBackendSelection(unittest.TestCase):
     def test_backend_defaults_to_deepep_without_backend_config(self):
         with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
-            self.assertEqual(get_selected_deep_ep_backend_name(), "deepep")
+            self.assertFalse(is_hybrid_ep_backend_selected())
 
     def test_backend_selects_hybrid_explicitly(self):
         with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
-            self.assertEqual(
-                get_selected_deep_ep_backend_name("hybridep"), "hybrid"
-            )
             self.assertTrue(is_hybrid_ep_backend_selected("hybridep"))
 
     def test_backend_rejects_invalid_and_unavailable_hybrid(self):
@@ -198,12 +194,12 @@ class TestHybridEPBackendSelection(unittest.TestCase):
                     ValueError, "moe_flex_dispatcher_backend"
                 ),
             ):
-                get_selected_deep_ep_backend_name(backend_name)
+                is_hybrid_ep_backend_selected(backend_name)
         with (
             patch.object(token_dispatcher, "HAVE_HYBRID_EP", False),
             self.assertRaisesRegex(ImportError, "HybridEP runtime"),
         ):
-            get_selected_deep_ep_backend_name("hybridep")
+            is_hybrid_ep_backend_selected("hybridep")
 
     def test_flex_dispatcher_uses_hybrid_backend(self):
         group = SimpleNamespace(world_size=2)

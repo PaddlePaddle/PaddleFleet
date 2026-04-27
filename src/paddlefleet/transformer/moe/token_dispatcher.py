@@ -57,22 +57,18 @@ except ImportError:
 
 
 def is_hybrid_ep_backend_selected(backend_name: str | None = None) -> bool:
-    return get_selected_deep_ep_backend_name(backend_name) == "hybrid"
-
-
-def get_selected_deep_ep_backend_name(backend_name: str | None = None) -> str:
     selected_backend = backend_name or "deepep"
     if selected_backend not in ("deepep", "hybridep"):
         raise ValueError(
             "moe_flex_dispatcher_backend must be one of: deepep, hybridep"
         )
-    if selected_backend == "hybridep":
-        if not HAVE_HYBRID_EP:
-            raise ImportError(
-                "moe_flex_dispatcher_backend=hybridep but HybridEP runtime is unavailable."
-            )
-        return "hybrid"
-    return "deepep"
+    if selected_backend == "deepep":
+        return False
+    if not HAVE_HYBRID_EP:
+        raise ImportError(
+            "moe_flex_dispatcher_backend=hybridep but HybridEP runtime is unavailable."
+        )
+    return True
 
 
 class _DispatchManager(ABC):
@@ -714,9 +710,10 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
 
         self.num_local_experts = num_local_experts
         assert self.ep_size > 1, "Flex token dispatcher requires EP > 1"
-        selected_backend = get_selected_deep_ep_backend_name(backend_name)
         manager_cls = (
-            _HybridEPManager if selected_backend == "hybrid" else _DeepepManager
+            _HybridEPManager
+            if is_hybrid_ep_backend_selected(backend_name)
+            else _DeepepManager
         )
         self._comm_manager = manager_cls(
             group=self.ep_group,
