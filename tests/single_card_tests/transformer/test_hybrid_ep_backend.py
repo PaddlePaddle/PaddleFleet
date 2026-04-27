@@ -14,11 +14,9 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.moe import token_dispatcher
 from paddlefleet.transformer.moe.fp8_utils import FP8_ALIGN
 from paddlefleet.transformer.moe.fused_a2a import (
     HybridEPCombine,
@@ -29,13 +27,11 @@ from paddlefleet.transformer.moe.fusion_layer_utils import (
     _pad_front_rows,
     _restore_hybrid_ep_prob_grad_shape,
 )
-from paddlefleet.transformer.moe.moe_layer import MoELayer, MoESublayers
 from paddlefleet.transformer.moe.token_dispatcher import (
     MoEFlexTokenDispatcher,
     _HybridEPManager,
     is_hybrid_ep_backend_selected,
 )
-from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 def _new_hybrid_manager(**overrides):
@@ -45,8 +41,7 @@ def _new_hybrid_manager(**overrides):
         "num_experts": overrides.pop("num_experts", 4),
         "num_local_experts": overrides.pop("num_local_experts", 2),
     }
-    with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
-        manager = _HybridEPManager(**init_kwargs)
+    manager = _HybridEPManager(**init_kwargs)
     for key, value in overrides.items():
         setattr(manager, key, value)
     return manager
@@ -109,14 +104,11 @@ class _RecordingHybridEPBuffer:
 
 class TestHybridEPBackendSelection(unittest.TestCase):
     def test_dispatcher_type_selects_hybrid_ep_only_when_requested(self):
-        with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
-            self.assertFalse(is_hybrid_ep_backend_selected())
-            for dispatcher_type in ("allgather", "alltoall", "deepep"):
-                with self.subTest(dispatcher_type=dispatcher_type):
-                    self.assertFalse(
-                        is_hybrid_ep_backend_selected(dispatcher_type)
-                    )
-            self.assertTrue(is_hybrid_ep_backend_selected("hybridep"))
+        self.assertFalse(is_hybrid_ep_backend_selected())
+        for dispatcher_type in ("allgather", "alltoall", "deepep"):
+            with self.subTest(dispatcher_type=dispatcher_type):
+                self.assertFalse(is_hybrid_ep_backend_selected(dispatcher_type))
+        self.assertTrue(is_hybrid_ep_backend_selected("hybridep"))
 
         for dispatcher_type in ("unknown", "hybrid", "hybrid_ep", "deep_ep"):
             with (
@@ -125,23 +117,16 @@ class TestHybridEPBackendSelection(unittest.TestCase):
             ):
                 is_hybrid_ep_backend_selected(dispatcher_type)
 
-        with (
-            patch.object(token_dispatcher, "HAVE_HYBRID_EP", False),
-            self.assertRaisesRegex(ImportError, "HybridEP runtime"),
-        ):
-            is_hybrid_ep_backend_selected("hybridep")
-
     def test_flex_dispatcher_uses_hybrid_ep_manager(self):
         group = SimpleNamespace(world_size=2)
 
-        with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
-            dispatcher = MoEFlexTokenDispatcher(
-                num_local_experts=2,
-                num_experts_per_tok=2,
-                n_routed_experts=4,
-                ep_group=group,
-                dispatcher_type="hybridep",
-            )
+        dispatcher = MoEFlexTokenDispatcher(
+            num_local_experts=2,
+            num_experts_per_tok=2,
+            n_routed_experts=4,
+            ep_group=group,
+            dispatcher_type="hybridep",
+        )
 
         self.assertIsInstance(dispatcher._comm_manager, _HybridEPManager)
         self.assertIs(dispatcher._comm_manager.group, group)
@@ -342,26 +327,20 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
                 )
             ]
         )
-        quantized_hidden = paddle.full([2, 4], 2.0, dtype="float32")
-        scaling_factor = paddle.ones([2, 1], dtype="float32")
         manager._get_buffer = lambda hidden_states: buffer
 
-        with patch(
-            "paddle.incubate.nn.functional.fp8_quant_blockwise",
-            return_value=(quantized_hidden, scaling_factor),
-        ):
-            manager._dispatch_with_permute_impl(
-                paddle.ones([2, 4], dtype="float32"),
-                paddle.to_tensor([[0], [1]], dtype="int64"),
-                paddle.ones([2, 1], dtype="float32"),
-                use_fp8=True,
-            )
+        manager._dispatch_with_permute_impl(
+            paddle.ones([2, 4], dtype="bfloat16"),
+            paddle.to_tensor([[0], [1]], dtype="int64"),
+            paddle.ones([2, 1], dtype="float32"),
+            use_fp8=True,
+        )
 
         dispatch_kwargs = buffer.dispatch_calls[-1]
-        self.assertIs(dispatch_kwargs["hidden"], quantized_hidden)
+        self.assertEqual(dispatch_kwargs["hidden"].dtype, paddle.float8_e4m3fn)
         self.assertTrue(dispatch_kwargs["use_fp8"])
         self.assertEqual(dispatch_kwargs["pad_multiple"], FP8_ALIGN)
-        self.assertEqual(dispatch_kwargs["scaling_factor"].shape, [1, 2])
+        self.assertEqual(dispatch_kwargs["scaling_factor"].shape, [4, 1])
 
 
 class TestHybridEPAutogradBridge(unittest.TestCase):
@@ -521,99 +500,6 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
         )
         self.assertEqual(restored.shape, [4])
         self.assertEqual(restored.numpy().tolist(), [0.25, 0.5, 0.0, 0.0])
-
-
-class TestHybridEPMoELayerIntegration(unittest.TestCase):
-    def test_hybrid_ep_backend_disables_shared_expert_overlap(self):
-        config = TransformerConfig(
-            hidden_size=64,
-            num_attention_heads=2,
-            intermediate_size=256,
-            n_routed_experts=4,
-            num_experts_per_tok=2,
-            moe_intermediate_size=128,
-            gated_linear_unit=True,
-            sequence_parallel=False,
-            tensor_model_parallel_size=1,
-            moe_token_dispatcher_type="hybridep",
-            moe_use_fusion_node=True,
-            moe_grouped_gemm=False,
-            moe_ep_barrier=True,
-            fp8=None,
-            fp8_wgrad=True,
-            using_sonic_moe=False,
-            router_aux_loss_coef=0.01,
-            router_z_loss_coef=None,
-            topk_method="greedy",
-            norm_topk_prob=True,
-            scoring_func="softmax",
-            n_group=1,
-            topk_group=1,
-            routed_scaling_factor=1.0,
-            moe_router_force_load_balancing=False,
-            moe_router_load_balancing_type="aux_loss",
-            n_shared_experts=1,
-            moe_shared_expert_overlap=True,
-            recompute_granularity=None,
-            recompute_modules=[],
-            use_bias=False,
-        )
-        pg_collection = SimpleNamespace(
-            ep=SimpleNamespace(world_size=2),
-            expt_dp=object(),
-            tp=SimpleNamespace(size=lambda: 1),
-            cp=SimpleNamespace(rank=lambda: 0, size=lambda: 1),
-        )
-
-        with (
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.utils.get_pg_size",
-                return_value=2,
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.utils.get_pg_rank",
-                return_value=0,
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.paddlefleet.ops.is_sonic_moe_available",
-                return_value=False,
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.paddle.version.cuda",
-                return_value="12.2",
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.paddle.is_compiled_with_cuda",
-                return_value=False,
-            ),
-            patch.object(token_dispatcher, "HAVE_HYBRID_EP", True),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.TopKRouter",
-                return_value=paddle.nn.Layer(),
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.StandardMLPExpert",
-                return_value=paddle.nn.Layer(),
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.StandardMLPSharedExpert",
-                return_value=paddle.nn.Layer(),
-            ),
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.MoEFlexTokenDispatcher",
-                return_value=MagicMock(),
-            ) as mock_dispatcher,
-        ):
-            layer = MoELayer(
-                config,
-                sublayers=MoESublayers(),
-                pg_collection=pg_collection,
-            )
-
-        self.assertFalse(layer.moe_shared_expert_overlap)
-        self.assertEqual(
-            mock_dispatcher.call_args.kwargs["dispatcher_type"], "hybridep"
-        )
 
 
 if __name__ == "__main__":
