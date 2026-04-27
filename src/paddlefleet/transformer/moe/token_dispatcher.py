@@ -42,18 +42,23 @@ from .moe_utils import (
 
 HAVE_HYBRID_EP = False
 HYBRID_EP_LOAD_CACHED_KERNELS = True
+hybrid_ep = None
 
 try:
-    from paddlefleet.ops import is_deep_ep_available
+    from paddlefleet.ops import is_hybrid_ep_available
 
-    if is_deep_ep_available():
-        if paddle.is_compiled_with_cuda():
-            from paddlefleet.ops import deep_ep
-        else:
-            from paddle.distributed.communication import deep_ep
-        HAVE_HYBRID_EP = hasattr(deep_ep, "HybridEPBuffer")
+    HAVE_HYBRID_EP = is_hybrid_ep_available()
 except ImportError:
-    deep_ep = None
+    pass
+
+
+def _get_hybrid_ep_module():
+    global hybrid_ep
+    if hybrid_ep is None:
+        from paddlefleet.ops import hybrid_ep as hybrid_ep_module
+
+        hybrid_ep = hybrid_ep_module
+    return hybrid_ep
 
 
 def is_hybrid_ep_backend_selected(
@@ -202,7 +207,7 @@ class _HybridEPManager(_DispatchManager):
         self,
         hidden_states: paddle.Tensor,
         max_num_of_tokens_per_rank: int | None = None,
-    ) -> deep_ep.HybridEPBuffer:
+    ):
         hidden_dim = hidden_states.shape[-1]
         if max_num_of_tokens_per_rank is None:
             max_num_of_tokens_per_rank = hidden_states.shape[0]
@@ -212,7 +217,7 @@ class _HybridEPManager(_DispatchManager):
             or self._buffer_max_num_of_tokens_per_rank
             < max_num_of_tokens_per_rank
         ):
-            self._buffer = deep_ep.HybridEPBuffer(
+            self._buffer = _get_hybrid_ep_module().HybridEPBuffer(
                 group=self.group,
                 hidden_dim=hidden_dim,
                 max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,

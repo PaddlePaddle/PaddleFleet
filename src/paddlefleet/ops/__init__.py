@@ -72,9 +72,12 @@ if paddle.is_compiled_with_cuda():
 
     DEEP_EP_HINT = (
         "For developers: guard imports with `is_deep_ep_available()` and only call `paddlefleet.ops.deep_ep` when flag branch enabled.\n"
-        "For users: avoid `moe_token_dispatcher_type='deepep'` or "
-        "`moe_token_dispatcher_type='hybridep'`, or use a GPU with compute "
-        "capability >= 9.0 to enable."
+        "For users: avoid `moe_token_dispatcher_type='deepep'`, or use a GPU with compute capability >= 9.0 to enable."
+    )
+
+    HYBRID_EP_HINT = (
+        "For developers: guard imports with `is_hybrid_ep_available()` and only call `paddlefleet.ops.hybrid_ep` when HybridEP branch enabled.\n"
+        "For users: avoid `moe_token_dispatcher_type='hybridep'`, or use a GPU with compute capability >= 9.0 to enable."
     )
 
     SONIC_MOE_HINT = (
@@ -84,6 +87,7 @@ if paddle.is_compiled_with_cuda():
 else:
     DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
     DEEP_EP_HINT = "deep_ep is not supported on XPU backend."
+    HYBRID_EP_HINT = "hybrid_ep is not supported on XPU backend."
     SONIC_MOE_HINT = "sonicmoe is not supported on XPU backend."
 
 FLASH_MASK_HINT = (
@@ -142,6 +146,7 @@ def _sonic_moe_requirement(
 
 _DEEP_GEMM_AVAILABLE = False
 _DEEP_EP_AVAILABLE = False
+_HYBRID_EP_AVAILABLE = False
 _SONIC_MOE_AVAILABLE = False
 _FLASH_MASK_AVAILABLE = False
 
@@ -149,6 +154,7 @@ if paddle.is_compiled_with_cuda():
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
         _DEEP_EP_AVAILABLE = True
+        _HYBRID_EP_AVAILABLE = (ops_dir / "hybrid_ep").exists()
     if paddle.cuda.get_device_capability()[0] == 10:
         _FLASH_MASK_AVAILABLE = True
     if (
@@ -168,6 +174,10 @@ def is_deep_gemm_available():
 
 def is_deep_ep_available():
     return _DEEP_EP_AVAILABLE
+
+
+def is_hybrid_ep_available():
+    return _HYBRID_EP_AVAILABLE
 
 
 def is_sonic_moe_available():
@@ -250,6 +260,13 @@ if paddle.is_compiled_with_cuda():
         logger.warning(warning)
         blocked_import_messages["paddlefleet.ops.deep_ep"] = error
 
+    if not is_hybrid_ep_available():
+        warning, error = _hopper_requirement(
+            "paddlefleet.ops.hybrid_ep", hint=HYBRID_EP_HINT
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet.ops.hybrid_ep"] = error
+
     if is_sonic_moe_available():
         paddle.enable_compat(scope={"sonicmoe", "quack", "triton"}, silent=True)
         _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
@@ -288,5 +305,11 @@ def __getattr__(name):
 
     if module_name in blocked_import_messages:
         raise RuntimeError(blocked_import_messages[module_name])
+
+    if name == "hybrid_ep" and is_hybrid_ep_available():
+        paddle.enable_compat(scope={"hybrid_ep"}, silent=True)
+        _try_load_nvshmem(ops_dir)
+        _safe_load_ecosystem_lib("hybrid_ep", ops_dir, globals())
+        return globals()[name]
 
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

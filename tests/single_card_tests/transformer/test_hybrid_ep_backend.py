@@ -103,6 +103,15 @@ class _RecordingHybridEPBuffer:
 
 
 class TestHybridEPBackendSelection(unittest.TestCase):
+    def test_deep_ep_and_hybrid_ep_imports_are_separate(self):
+        from paddlefleet.ops import deep_ep, hybrid_ep
+
+        self.assertTrue(hasattr(deep_ep, "Buffer"))
+        self.assertFalse(hasattr(deep_ep, "HybridEPBuffer"))
+        self.assertTrue(hasattr(hybrid_ep, "HybridEPBuffer"))
+        self.assertFalse(hasattr(hybrid_ep, "Buffer"))
+        self.assertIsNot(deep_ep, hybrid_ep)
+
     def test_dispatcher_type_selects_hybrid_ep_only_when_requested(self):
         self.assertFalse(is_hybrid_ep_backend_selected())
         for dispatcher_type in ("allgather", "alltoall", "deepep"):
