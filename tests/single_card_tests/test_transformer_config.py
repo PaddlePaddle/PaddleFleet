@@ -145,5 +145,37 @@ class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
         self.assertEqual(config.moe_layer_freq, expected)
 
 
+class TestRoutedScalingFactorConfig(unittest.TestCase):
+    """Tests for the routed_scaling_factor and routed_scaling_factor_learnable fields
+    in TransformerConfig."""
+
+    def test_routed_scaling_factor_default_is_1(self):
+        """routed_scaling_factor defaults to 1.0 when not specified."""
+        config = TransformerConfig(num_hidden_layers=4)
+        self.assertAlmostEqual(config.routed_scaling_factor, 1.0)
+
+    def test_routed_scaling_factor_learnable_default_is_false(self):
+        """routed_scaling_factor_learnable defaults to False when not specified."""
+        config = TransformerConfig(num_hidden_layers=4)
+        self.assertFalse(config.routed_scaling_factor_learnable)
+
+    def test_routed_scaling_factor_float(self):
+        """routed_scaling_factor accepts a float value (e.g., 2.5 for DeepSeek-V3)."""
+        config = TransformerConfig(
+            num_hidden_layers=4, routed_scaling_factor=2.5
+        )
+        self.assertAlmostEqual(config.routed_scaling_factor, 2.5)
+
+    def test_routed_scaling_factor_learnable_true(self):
+        """routed_scaling_factor_learnable can be set to True."""
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            routed_scaling_factor=2.5,
+            routed_scaling_factor_learnable=True,
+        )
+        self.assertAlmostEqual(config.routed_scaling_factor, 2.5)
+        self.assertTrue(config.routed_scaling_factor_learnable)
+
+
 if __name__ == "__main__":
     unittest.main()

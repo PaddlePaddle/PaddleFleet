@@ -201,7 +201,9 @@ class DotProductAttention(FleetLayer):
         if attn_mask_startend_row_indices is not None:
             # flashmask path — matches EC's scaled_dot_product_attention
             try:
-                from flash_mask.cute.interface import flashmask_attention
+                from paddlefleet.ops.flash_mask.cute.interface import (
+                    flashmask_attention,
+                )
             except (ImportError, ModuleNotFoundError):
                 from paddle.nn.functional.flash_attention import (
                     flashmask_attention,
@@ -218,7 +220,9 @@ class DotProductAttention(FleetLayer):
         else:
             # simple causal path — no document boundaries
             try:
-                from flash_mask.cute.interface import flash_attention
+                from paddlefleet.ops.flash_mask.cute.interface import (
+                    flash_attention,
+                )
             except (ImportError, ModuleNotFoundError):
                 from paddle.nn.functional.flash_attention import flash_attention
 

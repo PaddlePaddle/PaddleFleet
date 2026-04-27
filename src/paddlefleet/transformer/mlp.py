@@ -179,7 +179,21 @@ class MLP(FleetLayer):
         nvtx_range_pop(suffix="up_gate_proj")
 
         nvtx_range_push(suffix="activation")
-        if self.config.bias_activation_fusion:
+
+        # Alignment mode: use Paddle native F.swiglu
+        _use_paddle_swiglu = getattr(
+            self.config, "gpt_model_use_experimental_version", False
+        )
+
+        if (
+            _use_paddle_swiglu
+            and self.hidden_act == F.silu
+            and self.config.gated_linear_unit
+        ):
+            if bias_parallel is not None:
+                intermediate_parallel = intermediate_parallel + bias_parallel
+            intermediate_parallel = F.swiglu(intermediate_parallel)
+        elif self.config.bias_activation_fusion:
             if per_token_scale is not None:
                 if self.hidden_act == F.silu and self.config.gated_linear_unit:
                     # dtype is handled inside the fused kernel

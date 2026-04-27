@@ -15,6 +15,7 @@
 from .moe_topk_fusion import MoETopkFusion, routing_map_fusion_forward
 
 __all__ = [
+    "RMSNormFusionTriton",
     "MoETopkFusion",
     "routing_map_fusion_forward",
 ]

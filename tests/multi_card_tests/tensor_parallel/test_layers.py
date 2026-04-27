@@ -593,6 +593,7 @@ def test_Linear_repr():
     assert "Linear" in r
     assert "8" in r  # in_features
     assert "6" in r  # out_features
+    assert "bias=True" in r  # bias is enabled
     assert "TP=1" in r
 
 
@@ -673,3 +674,10 @@ if __name__ == "__main__":
     test_Linear_extra_state()
     test_Linear_repr()
     test_Linear_via_backend_linear()
+
+    # Synchronize all ranks and destroy process groups to ensure clean NCCL
+    # shutdown. Without this, concurrent launches sharing the same GPUs may
+    # cause SIGSEGV during process exit due to NCCL communicator teardown
+    # races.
+    dist.barrier()
+    dist.destroy_process_group()
