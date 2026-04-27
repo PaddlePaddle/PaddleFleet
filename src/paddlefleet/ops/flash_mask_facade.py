@@ -101,7 +101,7 @@ def flashmask_attention(
         query=query,
         key=key,
         value=value,
-        startend_row_indices=startend_row_indices,
+        startend_row_indices=startend_row_indices.clone(),
         dropout=dropout,
         causal=causal,
         window_size=window_size,
