@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -180,17 +179,8 @@ def _new_hybrid_manager(**overrides):
 
 
 class TestHybridEPBackendSelection(unittest.TestCase):
-    def test_backend_defaults_to_deepep_and_ignores_env(self):
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "PF_DEEP_EP_BACKEND": "hybrid",
-                    "PADDLEFLEET_DEEP_EP_BACKEND": "hybrid",
-                },
-            ),
-            patch.object(token_dispatcher, "HAVE_HYBRID_EP", True),
-        ):
+    def test_backend_defaults_to_deepep_without_backend_config(self):
+        with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
             self.assertEqual(get_selected_deep_ep_backend_name(), "deepep")
 
     def test_backend_selects_hybrid_explicitly(self):
@@ -198,11 +188,17 @@ class TestHybridEPBackendSelection(unittest.TestCase):
             self.assertEqual(
                 get_selected_deep_ep_backend_name("hybridep"), "hybrid"
             )
-            self.assertTrue(is_hybrid_ep_backend_selected("hybrid_ep"))
+            self.assertTrue(is_hybrid_ep_backend_selected("hybridep"))
 
     def test_backend_rejects_invalid_and_unavailable_hybrid(self):
-        with self.assertRaisesRegex(ValueError, "moe_flex_dispatcher_backend"):
-            get_selected_deep_ep_backend_name("unknown")
+        for backend_name in ("unknown", "hybrid", "hybrid_ep", "deep_ep"):
+            with (
+                self.subTest(backend_name=backend_name),
+                self.assertRaisesRegex(
+                    ValueError, "moe_flex_dispatcher_backend"
+                ),
+            ):
+                get_selected_deep_ep_backend_name(backend_name)
         with (
             patch.object(token_dispatcher, "HAVE_HYBRID_EP", False),
             self.assertRaisesRegex(ImportError, "HybridEP runtime"),
@@ -375,6 +371,7 @@ class TestHybridEPManagerContract(unittest.TestCase):
         self.assertEqual(len(constructed), 3)
         self.assertEqual(constructed[0].kwargs["hidden_dim"], 16)
         self.assertEqual(constructed[0].kwargs["num_local_experts"], 3)
+        self.assertTrue(constructed[0].kwargs["load_cached_kernels"])
 
     def test_topk_indices_are_converted_to_dense_metadata(self):
         manager = _new_hybrid_manager(num_experts=4)

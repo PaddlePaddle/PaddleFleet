@@ -15,7 +15,6 @@
 # limitations under the License.
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -42,16 +41,7 @@ from .moe_utils import (
 )
 
 HAVE_HYBRID_EP = False
-HYBRID_EP_LOAD_CACHED_KERNELS = bool(
-    int(os.getenv("HYBRID_EP_LOAD_CACHED_KERNELS", "0"))
-)
-_DEEP_EP_BACKEND_ALIASES = {
-    "deep_ep": "deepep",
-    "deepep": "deepep",
-    "hybrid": "hybrid",
-    "hybrid_ep": "hybrid",
-    "hybridep": "hybrid",
-}
+HYBRID_EP_LOAD_CACHED_KERNELS = True
 
 try:
     from paddlefleet.ops import is_deep_ep_available
@@ -71,14 +61,12 @@ def is_hybrid_ep_backend_selected(backend_name: str | None = None) -> bool:
 
 
 def get_selected_deep_ep_backend_name(backend_name: str | None = None) -> str:
-    selected_backend = _DEEP_EP_BACKEND_ALIASES.get(
-        (backend_name or "deepep").lower()
-    )
-    if selected_backend is None:
+    selected_backend = backend_name or "deepep"
+    if selected_backend not in ("deepep", "hybridep"):
         raise ValueError(
             "moe_flex_dispatcher_backend must be one of: deepep, hybridep"
         )
-    if selected_backend == "hybrid":
+    if selected_backend == "hybridep":
         if not HAVE_HYBRID_EP:
             raise ImportError(
                 "moe_flex_dispatcher_backend=hybridep but HybridEP runtime is unavailable."
