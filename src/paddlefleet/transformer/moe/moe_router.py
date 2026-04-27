@@ -798,38 +798,8 @@ class TopKRouter(StandardMoERouter):
             with paddle.no_grad():
                 self.expert_usage += exp_counts
 
-        def _log_aux_md5(tensor, name, layer_idx=None):
-            """Log MD5 of a tensor for MoE precision alignment debugging."""
-            from paddlefleet.transformer.transformer_layer import (
-                TransformerLayer,
-            )
-
-            if tensor is None:
-                print(f"[MD5 MoE aux loss] {name} is None")
-                return
-
-            if False and TransformerLayer._gpt_model_use_experimental_version:
-                if TransformerLayer._skip_mtp_probes:
-                    return  # Skip MTP passes — EC has no MTP
-                md5 = tensor._md5sum()
-                rank = (
-                    paddle.distributed.get_rank()
-                    if paddle.distributed.is_initialized()
-                    else 0
-                )
-                layer_str = (
-                    f" Layer={layer_idx}" if layer_idx is not None else ""
-                )
-                print(
-                    f"[MD5 MoE aux loss] Rank={rank}{layer_str} {name} MD5={md5} shape={list(tensor.shape)}",
-                    flush=True,
-                )
-
         # aux_loss
         if self.config.router_aux_loss_coef:
-            _log_aux_md5(gates_ori, "gates", self._layer_number)
-            _log_aux_md5(input_ids, "input_ids", self._layer_number)
-
             if self.routing_type == "seq_aux_loss":
                 l_aux = self._cal_seq_aux_loss(
                     gates_ori,
@@ -838,11 +808,6 @@ class TopKRouter(StandardMoERouter):
                     seq_len,
                     batch_size,
                     input_ids=input_ids,
-                )
-                _log_aux_md5(l_aux, "l_aux", self._layer_number)
-                print(
-                    f"Layer {self._layer_number} l_aux: {l_aux.sum().item()}",
-                    flush=True,
                 )
 
             else:
