@@ -402,11 +402,10 @@ class ExpertsGroupGemmContiguousNode:
         """
         generate m indices
         """
-        tokens = []
-        for i in range(len(tokens_per_expert)):
-            tokens.append(paddle.full([tokens_per_expert[i]], i, dtype="int32"))
-        out = paddle.concat(tokens, axis=0)
-        return out
+        return paddle.repeat_interleave(
+            paddle.arange(len(tokens_per_expert), dtype="int32"),
+            paddle.assign(tokens_per_expert).cast("int32"),
+        )
 
     def fwd_gate_up_bf16(self, x, expert_w1):
         """
