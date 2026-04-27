@@ -117,6 +117,7 @@ def flashmask_attention(
 
     if return_softmax_lse:
         attn_out, lse = outs
+        lse = lse.reshape([bsz, q_len])
     else:
         attn_out = outs[0]
 
@@ -124,7 +125,6 @@ def flashmask_attention(
         attn_out = attn_out[..., :v_head_dim]
 
     attn_out = attn_out.reshape([bsz, q_len, num_heads, v_head_dim])
-    lse = lse.reshape([bsz, q_len])
 
     if return_softmax_lse:
         return [attn_out, lse]
