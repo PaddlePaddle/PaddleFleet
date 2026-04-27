@@ -305,7 +305,7 @@ class ExpertsGroupGemmContiguousNode:
         moe_subbatch_token_num_after_dispatch=None,
         use_bf16_gemm_weight_grad=False,
         use_fp8_mlp=True,
-        moe_deep_gemm=True,
+        moe_deep_gemm=False,
         moe_grouped_gemm=False,
     ):
         """
