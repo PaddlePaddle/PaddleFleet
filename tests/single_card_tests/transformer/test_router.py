@@ -368,6 +368,7 @@ class TestTopKRouter(unittest.TestCase):
         """Cover gpt_model_use_experimental_version=True branch in _cal_seq_aux_loss."""
         self.config.topk_method = "greedy"
         self.config.gpt_model_use_experimental_version = True
+        self.config.num_nextn_predict_layers = 0
         router = TopKRouter(self.config)
 
         batch_size, seq_len = 2, 4
