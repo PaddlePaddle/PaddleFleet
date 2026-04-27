@@ -119,7 +119,7 @@ def flashmask_attention(
         attn_out, lse = outs
         lse = lse.reshape([bsz, q_len])
     else:
-        attn_out = outs[0]
+        attn_out = outs
 
     if need_value_padding:
         attn_out = attn_out[..., :v_head_dim]
