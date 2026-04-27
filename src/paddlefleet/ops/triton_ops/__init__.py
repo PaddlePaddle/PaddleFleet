@@ -13,7 +13,9 @@
 # limitations under the License.
 
 from .rms_norm_fusion import RMSNormFusionTriton
+from .sigmoid_gate_fusion import SigmoidGateFusionTriton
 
 __all__ = [
     "RMSNormFusionTriton",
+    "SigmoidGateFusionTriton",
 ]

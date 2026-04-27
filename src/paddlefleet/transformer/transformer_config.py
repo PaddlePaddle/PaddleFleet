@@ -306,6 +306,9 @@ class TransformerConfig(ModelParallelConfig):
     apply_rope_fusion: bool = False
     """If True, use fused RoPE kernel."""
 
+    sigmoid_gate_fusion: bool = False
+    """If True, use Triton fused sigmoid gate kernel."""
+
     ####################
     # activation recomputation
     ####################

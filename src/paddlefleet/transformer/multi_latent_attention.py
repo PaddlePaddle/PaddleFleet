@@ -33,6 +33,7 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_mscale,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
     gather_from_tensor_model_parallel_region,
@@ -263,6 +264,12 @@ class MultiLatentAttention(Attention):
             self.gated_attention = False
             self.gate_proj = None
 
+        self.recompute_gated_attn = (
+            self.config.recompute_granularity == "selective"
+            and self.config.recompute_modules is not None
+            and "gated_attn" in self.config.recompute_modules
+        )
+
     def forward(
         self,
         hidden_states,
@@ -369,14 +376,36 @@ class MultiLatentAttention(Attention):
 
         # Apply gated attention
         if self.gated_attention:
-            gate, _ = self.gate_proj(hidden_states)
-            core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
+            if self.recompute_gated_attn:
+                gate_recompute = RecomputeWithoutOutput()
+                core_attn_out = gate_recompute.recompute(
+                    self._gate,
+                    hidden_states,
+                    core_attn_out,
+                    preserve_rng_state=False,
+                    share_grad_holder=True,
+                )
+            else:
+                core_attn_out = self._gate(hidden_states, core_attn_out)
 
         output, bias = self.o_proj(core_attn_out)
+
+        if self.gated_attention and self.recompute_gated_attn:
+            gate_recompute.discard_output_and_register_recompute(output)
 
         _log(output, "attn_o_proj_out", layer_num)
 
         return output, bias
+
+    def _gate(self, hidden_states, core_attn_out):
+        gate, _ = self.gate_proj(hidden_states)
+        if self.config.sigmoid_gate_fusion:
+            from paddlefleet.ops.triton_ops import SigmoidGateFusionTriton
+
+            core_attn_out = SigmoidGateFusionTriton.apply(core_attn_out, gate)
+        else:
+            core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
+        return core_attn_out
 
 
 class MLASelfAttention(MultiLatentAttention):
