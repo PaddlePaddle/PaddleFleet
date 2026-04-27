@@ -151,6 +151,44 @@ class FusedRMSNorm(RMSNorm):
             return rms_norm_out.astype(self.weight.dtype)
 
 
+class RMSNormTriton(RMSNorm):
+    """Wrapper for triton RMSNorm, used for fused QK norm."""
+
+    def forward(self, hidden_states: Tensor):
+        from paddlefleet.ops.triton_ops.rms_norm_fusion import (
+            RMSNormFusionTriton,
+        )
+
+        return RMSNormFusionTriton.apply(
+            hidden_states, self.weight, self.variance_epsilon
+        )
+
+
+class WrappedRMSNormTriton:
+    """Factory class for RMSNormTriton, handles parameter name conversion.
+
+    Converts build_spec_layer parameters (hidden_size, eps) to
+    RMSNorm parameters (normalized_shape, norm_eps).
+    """
+
+    def __new__(
+        cls,
+        config: TransformerConfig,
+        hidden_size: int,
+        eps: float = 1e-5,
+        input_is_parallel: bool | None = None,
+        **kwargs,
+    ):
+        return RMSNormTriton(
+            config=config,
+            normalized_shape=hidden_size,
+            norm_eps=eps,
+            input_is_parallel=input_is_parallel
+            if input_is_parallel is not None
+            else False,
+        )
+
+
 class WrappedPaddleNorm:
     def __new__(
         cls,

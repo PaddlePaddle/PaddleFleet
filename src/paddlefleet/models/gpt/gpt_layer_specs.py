@@ -110,10 +110,26 @@ def get_attention_spec(
     """
     assert config is not None, "config must be specified."
     backend = LocalSpecProvider()
+
+    # Standard RMSNorm for general use (MLA, etc.)
     if config.normalization == "RMSNorm":
-        qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
+        qk_norm_standard = backend.layer_norm(rms_norm=True, for_qk=True)
     else:
-        qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
+        qk_norm_standard = backend.layer_norm(rms_norm=False, for_qk=True)
+
+    # Triton-optimized RMSNorm only for self_attention QK norm (head_dim=128)
+    # MLA uses larger latent_dim (1536) which exceeds Triton kernel limit (≤1024)
+    use_triton_qk_norm = (
+        attention_layer_type == "self_attention"
+        and config.normalization == "RMSNorm"
+        and getattr(config, "qk_norm_fusion", False)
+    )
+    if use_triton_qk_norm:
+        from paddlefleet.transformer.paddle_norm import WrappedRMSNormTriton
+
+        qk_norm = WrappedRMSNormTriton
+    else:
+        qk_norm = qk_norm_standard
 
     use_qk_norm = getattr(config, "use_qk_norm", False)
     qk_l2_norm = getattr(config, "qk_l2_norm", False)
@@ -179,8 +195,8 @@ def get_attention_spec(
                 kv_b_proj=backend.column_parallel_linear(),
                 core_attention=backend.core_attention(),
                 o_proj=backend.row_parallel_linear(),
-                q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+                q_a_layernorm=qk_norm_standard if use_qk_norm else IdentityOp,
+                kv_a_layernorm=qk_norm_standard if use_qk_norm else IdentityOp,
                 gate_proj=backend.column_parallel_linear()
                 if gated_attention
                 else None,
