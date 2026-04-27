@@ -39,23 +39,14 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 def _new_hybrid_manager(**overrides):
-    manager = _HybridEPManager.__new__(_HybridEPManager)
-    manager.group = SimpleNamespace(nranks=2)
-    manager.router_topk = 2
-    manager.num_experts = 4
-    manager.num_local_experts = 2
-    manager.routing_map = None
-    manager.routing_probs = None
-    manager.token_indices = None
-    manager.token_probs = None
-    manager.dispatched_indices = None
-    manager.dispatched_probs = None
-    manager.tokens_per_expert = None
-    manager.padded_tokens_per_expert = None
-    manager.handle = None
-    manager._buffer = None
-    manager._buffer_hidden_dim = None
-    manager._buffer_max_num_of_tokens_per_rank = 0
+    init_kwargs = {
+        "group": overrides.pop("group", SimpleNamespace(nranks=2)),
+        "router_topk": overrides.pop("router_topk", 2),
+        "num_experts": overrides.pop("num_experts", 4),
+        "num_local_experts": overrides.pop("num_local_experts", 2),
+    }
+    with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
+        manager = _HybridEPManager(**init_kwargs)
     for key, value in overrides.items():
         setattr(manager, key, value)
     return manager
