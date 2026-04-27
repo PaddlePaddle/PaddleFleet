@@ -153,7 +153,7 @@ class TestExpertsGroupGemmContiguousNode(unittest.TestCase):
         self.assertFalse(node.recompute_moe_gate_up)
         self.assertFalse(node.dequant_input)
         self.assertTrue(node.use_fp8_mlp)
-        self.assertTrue(node.moe_deep_gemm)
+        self.assertFalse(node.moe_deep_gemm)
 
     def test_construction_with_expert_id(self):
         custom_map = MagicMock()
