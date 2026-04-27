@@ -442,7 +442,7 @@ class _HybridEPManager(_DispatchManager):
         ).unsqueeze(-1)
 
 
-class _DeepepManager(_DispatchManager):
+class _DeepEPManager(_DispatchManager):
     """
     A manager class to handle fused all-to-all communication processes for MoE models using
     DeepEP backend. See https://github.com/deepseek-ai/deepep for more details.
@@ -726,7 +726,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         manager_cls = (
             _HybridEPManager
             if is_hybrid_ep_backend_selected(dispatcher_type)
-            else _DeepepManager
+            else _DeepEPManager
         )
         self._comm_manager = manager_cls(
             group=self.ep_group,

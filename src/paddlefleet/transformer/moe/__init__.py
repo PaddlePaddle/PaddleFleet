@@ -48,7 +48,7 @@ from .token_dispatcher import (
     AllToAllTokenDispatcher,
     MoEFlexTokenDispatcher,
     MoETokenDispatcher,
-    _DeepepManager,
+    _DeepEPManager,
     _DispatchManager,
 )
 
@@ -76,5 +76,5 @@ __all__ = [
     "MoEFlexTokenDispatcher",
     "AllToAllTokenDispatcher",
     "_DispatchManager",
-    "_DeepepManager",
+    "_DeepEPManager",
 ]
