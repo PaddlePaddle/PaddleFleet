@@ -154,7 +154,7 @@ if paddle.is_compiled_with_cuda():
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
         _DEEP_EP_AVAILABLE = True
-        _HYBRID_EP_AVAILABLE = (ops_dir / "hybrid_ep").exists()
+        _HYBRID_EP_AVAILABLE = True
     if paddle.cuda.get_device_capability()[0] == 10:
         _FLASH_MASK_AVAILABLE = True
     if (
@@ -260,7 +260,10 @@ if paddle.is_compiled_with_cuda():
         logger.warning(warning)
         blocked_import_messages["paddlefleet.ops.deep_ep"] = error
 
-    if not is_hybrid_ep_available():
+    if is_hybrid_ep_available():
+        paddle.enable_compat(scope={"hybrid_ep"}, silent=True)
+        _safe_load_ecosystem_lib("hybrid_ep", ops_dir, globals())
+    else:
         warning, error = _hopper_requirement(
             "paddlefleet.ops.hybrid_ep", hint=HYBRID_EP_HINT
         )
@@ -305,11 +308,5 @@ def __getattr__(name):
 
     if module_name in blocked_import_messages:
         raise RuntimeError(blocked_import_messages[module_name])
-
-    if name == "hybrid_ep" and is_hybrid_ep_available():
-        paddle.enable_compat(scope={"hybrid_ep"}, silent=True)
-        _try_load_nvshmem(ops_dir)
-        _safe_load_ecosystem_lib("hybrid_ep", ops_dir, globals())
-        return globals()[name]
 
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
