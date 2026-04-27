@@ -274,8 +274,8 @@ def fused_combine_backward_func(
     return grad_x
 
 
-class FusedDispatch(PyLayer):
-    """Fused dispatch operation for MoE routing combining computation and communication."""
+class DeepEPDispatch(PyLayer):
+    """DeepEP dispatch operation for MoE routing and expert parallel communication."""
 
     @staticmethod
     def forward(
@@ -341,8 +341,8 @@ class FusedDispatch(PyLayer):
         )
 
 
-class FusedCombine(PyLayer):
-    """Fused combine operation for MoE output combining computation and communication."""
+class DeepEPCombine(PyLayer):
+    """DeepEP combine operation for restoring MoE outputs across expert parallel ranks."""
 
     @staticmethod
     def forward(
@@ -383,8 +383,8 @@ class FusedCombine(PyLayer):
         )
 
 
-class FusedCombineAsync(PyLayer):
-    """FusedCombineAsync."""
+class DeepEPCombineAsync(PyLayer):
+    """DeepEP combine with shared expert overlap."""
 
     @staticmethod
     def forward(
@@ -404,7 +404,7 @@ class FusedCombineAsync(PyLayer):
             async_finish=True,
         )
 
-        assert fn is not None, "use FusedCombineAsync async, but fn is None."
+        assert fn is not None, "use DeepEPCombineAsync async, but fn is None."
         ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
 
         ctx.handle = states["handle"]
@@ -456,9 +456,9 @@ if HAVE_DEEP_EP:
             moe_ep_barrier: Whether to use barrier for expert parallelism
 
         Returns:
-            Result of FusedDispatch
+            Result of DeepEPDispatch
         """
-        return FusedDispatch.apply(
+        return DeepEPDispatch.apply(
             x.contiguous(),
             token_indices,
             token_probs,
@@ -491,12 +491,12 @@ if HAVE_DEEP_EP:
             moe_ep_barrier: Whether to use barrier for expert parallelism
 
         Returns:
-            Result of FusedCombine
+            Result of DeepEPCombine
         """
         states = {}
         states["handle"] = handle
         if combine_overlap_handle is None:
-            return FusedCombine.apply(
+            return DeepEPCombine.apply(
                 x,
                 group,
                 states,
@@ -510,7 +510,7 @@ if HAVE_DEEP_EP:
             assert "fn" in combine_overlap_handle
             assert "fn_args" in combine_overlap_handle
             assert isinstance(combine_overlap_handle["fn_args"], tuple)
-            combined_x, *fn_out = FusedCombineAsync.apply(
+            combined_x, *fn_out = DeepEPCombineAsync.apply(
                 x,
                 group,
                 states,
