@@ -76,6 +76,7 @@ def flashmask_attention(
     need_value_padding = (
         not (
             fa_version == 4
+            and use_varlen
             and is_fa4_support_d192_dv128
             and q_head_dim == 192
             and v_head_dim == 128
