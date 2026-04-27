@@ -617,6 +617,15 @@ class TransformerConfig(ModelParallelConfig):
     loss_subbatch_sequence_length: int = -1
     """Sequence length of subbatch for loss computation."""
 
+    fused_linear_ce_loss_chunk: int = 0
+    """Enable fused linear + cross-entropy loss when > 0.
+
+    When set to a positive integer N, LM head skips materializing the full
+    [B, S, V] logits tensor and instead passes (hidden_states, weight, bias)
+    to LanguageLoss, which dispatches to LigerFusedLinearCrossEntropyFunction
+    with num_chunks=N. Only compatible with tensor_model_parallel_size == 1
+    (or parallel_output disabled)."""
+
     # cache_mla_latents: bool = False
 
     ####################
