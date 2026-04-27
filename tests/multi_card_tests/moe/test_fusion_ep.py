@@ -84,6 +84,11 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             moe_grouped_gemm=True,
             bias_activation_fusion=True,
         )
+        transformer_config_moe_use_fusion_node.deepep_buffer_configs = {
+            "num_sms": 20,
+            "dispatch_config": [6, 256],
+            "combine_config": [6, 256],
+        }
 
         transformer_layer_spec = get_gpt_layer_local_spec(
             transformer_config_moe_use_fusion_node, num_experts=n_routed_experts

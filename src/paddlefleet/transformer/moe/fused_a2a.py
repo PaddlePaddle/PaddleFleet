@@ -60,6 +60,31 @@ def get_hidden_bytes(x: paddle.Tensor) -> int:
     return x.shape[1] * max(x.element_size(), 2)
 
 
+def configure_buffer(num_sms=None, dispatch_config=None, combine_config=None):
+    """
+    Configure the runtime parameters for deep_ep kernels.
+    Must be called before calling get_buffer() to take effect.
+
+    Args:
+        num_sms (int): Number of SMs allocated to deep_ep kernels.
+        dispatch_config (List[int]):
+            Token capacity parameters for dispatch kernels, in the form
+            [nvl_send_tokens, nvl_recv_tokens, rdma_send_tokens, rdma_recv_tokens].
+            Trailing values may be omitted to use the defaults.
+        combine_config (List[int]): Same as above, but for combine kernels.
+    """
+    if num_sms is not None:
+        deep_ep.Buffer.set_num_sms(num_sms)
+    if dispatch_config is not None:
+        deep_ep.Buffer.get_dispatch_config = staticmethod(
+            lambda _: deep_ep.Config(deep_ep.Buffer.num_sms, *dispatch_config)
+        )
+    if combine_config is not None:
+        deep_ep.Buffer.get_combine_config = staticmethod(
+            lambda _: deep_ep.Config(deep_ep.Buffer.num_sms, *combine_config)
+        )
+
+
 def get_buffer(group: Group, hidden_bytes: int):
     """Get or create a buffer for all-to-all communication.
 
