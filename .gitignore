@@ -15,12 +15,16 @@ runs/
 **/dist/
 .idea
 log
+ducc_storage/
+paddlefleet-*.whl
+test_log
 
 # Ignore files generated from `uv sync` for custom ops
-src/paddlefleet/_extensions/ops_pd_.so
-src/paddlefleet/_extensions/ops.py
+packages/paddlefleet_ops/src/paddlefleet_ops/_extensions/ops_pd_.so
+packages/paddlefleet_ops/src/paddlefleet_ops/_extensions/ops.py
 
 # Ignore build artifacts for submodule
+# workspace root (legacy path, kept for files already on disk)
 src/_third_party_install_temp
 src/paddlefleet/ops/deep_gemm
 src/paddlefleet/ops/deep_gemm_cpp
@@ -30,5 +34,17 @@ src/paddlefleet/ops/sonicmoe
 src/paddlefleet/ops/quack
 src/paddlefleet/ops/flash_mask
 
+# packages/paddlefleet_ops (new path after refactor)
+packages/paddlefleet_ops/src/_third_party_install_temp
+packages/paddlefleet_ops/src/paddlefleet_ops/ops/deep_gemm
+packages/paddlefleet_ops/src/paddlefleet_ops/ops/deep_gemm_cpp
+packages/paddlefleet_ops/src/paddlefleet_ops/ops/deep_ep
+packages/paddlefleet_ops/src/paddlefleet_ops/ops/deep_ep_cpp.so
+packages/paddlefleet_ops/src/paddlefleet_ops/ops/flash_mask
+packages/paddlefleet_ops/src/paddlefleet_ops/ops/sonicmoe
+packages/paddlefleet_ops/src/paddlefleet_ops/ops/quack
+
 # Generated version files
+# Both version.py files are auto-generated at build time by build_backend.py.
+packages/paddlefleet_ops/src/paddlefleet_ops/version.py
 src/paddlefleet/version.py

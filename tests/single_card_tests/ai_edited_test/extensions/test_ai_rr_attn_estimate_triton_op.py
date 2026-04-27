@@ -65,7 +65,7 @@ except Exception:
 
 _SKIP_RR = False
 try:
-    from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_func import (
+    from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_func import (
         rr_attn_estimate_triton_func,  # noqa: F401
     )
 
@@ -111,7 +111,7 @@ class TestFlashmaskInit(unittest.TestCase):
 
     def test_all(self):
         """Test __all__ export."""
-        from paddlefleet._extensions.flashmask import __all__
+        from paddlefleet_ops._extensions.flashmask import __all__
 
         self.assertIn("rr_attn_estimate_triton_func", __all__)
 

@@ -1,0 +1,12 @@
+[files]
+extend-exclude = [
+    "third_party/",
+    "src/_third_party_install_temp/",
+    "packages/paddlefleet_ops/src/_third_party_install_temp/",
+]
+
+[default.extend-words]
+# "subtile" / "subtiles" are legitimate GPU kernel domain terms
+# describing a subdivision of a tile in flash-attention CUDA code.
+subtile = "subtile"
+subtiles = "subtiles"

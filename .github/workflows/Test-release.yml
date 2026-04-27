@@ -146,7 +146,15 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          uv build --wheel -v
+          uv build --wheel --package paddlefleet --out-dir dist --clear -v
+          uv build --wheel --package paddlefleet-ops --out-dir dist -v
+          ROOT_WHL=$(ls dist/paddlefleet-*.whl | head -n1)
+          OPS_WHL=$(ls dist/paddlefleet_ops-*.whl | head -n1)
+          ROOT_DST=dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl
+          OPS_DST=dist/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
+          [ "${ROOT_WHL}" != "${ROOT_DST}" ] && cp "${ROOT_WHL}" "${ROOT_DST}"
+          [ "${OPS_WHL}" != "${OPS_DST}" ] && cp "${OPS_WHL}" "${OPS_DST}"
+          ls -lh dist
           '
 
       - name: upload whl to BOS
@@ -236,6 +244,7 @@ jobs:
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib
+          pip install dist/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -340,6 +349,7 @@ jobs:
           tar -xf paddldfleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest
+          pip install dist/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -459,6 +469,7 @@ jobs:
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          pip install dist/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -651,6 +662,7 @@ jobs:
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          pip install dist/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -995,6 +1007,7 @@ jobs:
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          pip install dist/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq

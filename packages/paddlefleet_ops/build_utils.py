@@ -27,10 +27,13 @@ import backends
 
 logger = logging.getLogger(__name__)
 
+# packages/paddlefleet_ops/
+PKG_ROOT = Path(__file__).parent.resolve()
+# workspace root (packages/paddlefleet_ops/ → packages/ → workspace root)
+ROOT_DIR = PKG_ROOT.parent.parent.resolve()
 
-ROOT_DIR = Path(__file__).parent.resolve()
-OPS_DIR = ROOT_DIR / "src" / "paddlefleet" / "ops"
-THIRD_PARTY_INSTALL_TEMP = ROOT_DIR / "src" / "_third_party_install_temp"
+OPS_DIR = PKG_ROOT / "src" / "paddlefleet_ops" / "ops"
+THIRD_PARTY_INSTALL_TEMP = PKG_ROOT / "src" / "_third_party_install_temp"
 
 
 def remove_path(path: Path) -> None:
@@ -52,7 +55,7 @@ def create_symlink(src: Path, dst: Path) -> None:
 @dataclass
 class Artifact:
     """
-    Defines a mapping from a path in the installation directory to a target name in the ops directory.
+    Defines a mapping from a path in installation directory to a target name in ops directory.
 
     source_rel_path: Relative path from the library's installation directory (e.g., 'deep_gemm').
     target_name: Name of the symlink/directory to create in 'src/paddlefleet/ops' (e.g., 'deep_gemm').
@@ -62,10 +65,106 @@ class Artifact:
     target_name: str
 
 
+def fix_flash_mask_imports(dst_dir: Path) -> None:
+    """Fix flash_mask imports to use relative imports for nested package structure.
+
+    flash_mask uses `from flash_mask.cute.xxx` and `import flash_mask.cute.xxx as xxx`
+    imports, but when nested under paddlefleet_ops.ops.flash_mask, we need to use
+    relative imports.
+    """
+    if not dst_dir.exists():
+        return
+
+    for py_file in dst_dir.rglob("*.py"):
+        try:
+            with open(py_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            original = content
+
+            # For files in flash_mask/cute/: fix imports to use relative paths
+            if "cute" in py_file.parts:
+                # `from flash_mask.cute.xxx` -> `from .xxx`
+                content = re.sub(
+                    r"^from flash_mask\.cute\.",
+                    "from .",
+                    content,
+                    flags=re.MULTILINE,
+                )
+                # `from flash_mask.cute import` -> `from . import`
+                content = re.sub(
+                    r"^from flash_mask\.cute import",
+                    "from . import",
+                    content,
+                    flags=re.MULTILINE,
+                )
+                # `import flash_mask.cute.xxx as xxx` -> `from . import xxx`
+                # This handles cases like: `import flash_mask.cute.utils as utils`
+                content = re.sub(
+                    r"^import flash_mask\.cute\.(\w+) as (\w+)",
+                    r"from . import \1 as \2",
+                    content,
+                    flags=re.MULTILINE,
+                )
+                # `import flash_mask.cute.xxx` -> `from . import xxx`
+                content = re.sub(
+                    r"^import flash_mask\.cute\.(\w+)$",
+                    r"from . import \1",
+                    content,
+                    flags=re.MULTILINE,
+                )
+
+            if content != original:
+                with open(py_file, "w", encoding="utf-8") as f:
+                    f.write(content)
+                logger.debug(f"Fixed imports in {py_file}")
+        except Exception as e:
+            logger.warning(f"Failed to fix imports in {py_file}: {e}")
+
+
+def fix_deep_gemm_torch_import(dst_dir: Path) -> None:
+    """Fix DeepGEMM torch import to use Paddle compatibility layer.
+
+    DeepGEMM uses `import torch` which expects Paddle's torch compatibility layer.
+    When running directly without the compatibility layer, this fails.
+    """
+    init_file = dst_dir / "__init__.py"
+    if not init_file.exists():
+        return
+
+    try:
+        with open(init_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        original = content
+
+        # Find the position after "import os" and "import subprocess"
+        # and insert the paddle compatibility import
+        lines = content.split("\n")
+
+        # Find the import torch line
+        for i, line in enumerate(lines):
+            if line.strip() == "import torch" and i < len(lines) - 1:
+                # Add import paddle and enable compat before import torch
+                lines.insert(i, "import paddle")
+                lines.insert(i + 1, "paddle.enable_compat()")
+                lines.insert(i + 2, "")
+                break
+
+        new_content = "\n".join(lines)
+
+        if new_content != original:
+            with open(init_file, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            logger.debug(f"Fixed torch import in {init_file}")
+    except Exception as e:
+        logger.warning(f"Failed to fix torch import in {init_file}: {e}")
+
+
 class EcosystemLibrary:
     """
     Represents an external ecosystem operator library.
-    Encapsulates the logic for building and installing the library.
+    Encapsulates logic for building and installing library.
     """
 
     def __init__(
@@ -76,6 +175,7 @@ class EcosystemLibrary:
         extra_env: dict[str, str] | None = None,
     ):
         self.name = name
+        # source_rel_path is relative to workspace root (where third_party/ lives)
         self.source_dir = ROOT_DIR / source_rel_path
         # Install into a subdirectory named after the library
         self.install_dir = THIRD_PARTY_INSTALL_TEMP / name
@@ -83,8 +183,14 @@ class EcosystemLibrary:
         self._extra_env = extra_env or {}
 
     def build(self) -> None:
-        """Builds the library."""
+        """Builds the library unconditionally."""
         logger.info(f"Building ecosystem library: {self.name}")
+        # Clean any stale artifacts from a previous (possibly partial) build
+        # so that pip install does not warn about existing directories and
+        # leave inconsistent state.
+        if self.install_dir.exists():
+            logger.info(f"Removing stale install dir: {self.install_dir}")
+            shutil.rmtree(self.install_dir)
         self.install_dir.mkdir(parents=True, exist_ok=True)
 
         # Special pre-build step for DeepGEMM: link CUTLASS headers into deep_gemm/include
@@ -115,20 +221,33 @@ class EcosystemLibrary:
             "--no-deps",
             "--no-build-isolation",
             "--no-compile",
-            "--upgrade",
             "-v",
         ]
 
         try:
             _env = os.environ.copy()
             _env.update(self._extra_env)
+            # Remove parent build backend paths from PYTHONPATH so that
+            # sub-package builds (quack, sonic-moe, etc.) can correctly
+            # locate their own build backend (e.g. setuptools.build_meta)
+            # instead of resolving against the paddlefleet_ops backend-path.
+            pythonpath = _env.get("PYTHONPATH", "")
+            cleaned = os.pathsep.join(
+                p
+                for p in pythonpath.split(os.pathsep)
+                if p and str(PKG_ROOT) not in p
+            )
+            if cleaned:
+                _env["PYTHONPATH"] = cleaned
+            else:
+                _env.pop("PYTHONPATH", None)
             subprocess.check_call(cmd, cwd=self.source_dir, env=_env)
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to build {self.name}: {e}")
             raise
 
     def install(self, use_symlinks: bool = False) -> None:
-        """Installs artifacts to the ops directory via symlink or copy."""
+        """Installs artifacts to ops directory via symlink or copy."""
         for artifact in self.artifacts:
             # Artifact source path is relative to the installation directory
             src = self.install_dir / artifact.source_rel_path
@@ -145,6 +264,17 @@ class EcosystemLibrary:
                     )
                 else:
                     shutil.copy(src, dst)
+
+            # Fix flash_mask imports for nested package structure
+            if (
+                self.name == "flash-attention"
+                and artifact.target_name == "flash_mask"
+            ):
+                fix_flash_mask_imports(dst)
+
+            # Fix DeepGEMM torch import to use Paddle compatibility layer
+            if self.name == "DeepGEMM" and artifact.target_name == "deep_gemm":
+                fix_deep_gemm_torch_import(dst)
 
             if artifact.target_name == "deep_ep_cpp.so":
                 cmd = [
@@ -251,12 +381,29 @@ def get_special_build_deps():
 def get_libs():
     cuda_major, cuda_minor = get_cuda_version()
 
+    # Allow CI or users to pin the arch list via PADDLE_CUDA_ARCH_LIST.
+    # Falls back to sensible defaults derived from the detected CUDA version:
+    #   < 12.8  → SM90 only (H800)
+    #   ≥ 12.8 / 13.x → SM90 + SM100 + SM103 (H800 + B100/B200)
+    _default_arch = (
+        "9.0" if (cuda_major == 12 and cuda_minor < 8) else "9.0;10.0;10.3"
+    )
+    _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _default_arch)
+    # Normalize: some callers use comma-separated (e.g. "8.0,9.0,10.0,10.3").
+    # Paddle's _get_cuda_arch_flags only accepts semicolon-separated values,
+    # and DeepEP only supports SM90/SM100/SM103 — drop anything outside that set.
+    _supported = {"9.0", "10.0", "10.3"}
+    _deep_ep_arch = (
+        ";".join(a for a in re.split(r"[;,]", _raw) if a.strip() in _supported)
+        or _default_arch
+    )
+
     LIBRARIES: list[EcosystemLibrary] = [
         EcosystemLibrary(
             name="DeepGEMM",
             source_rel_path="third_party/DeepGEMM",
             artifacts=[
-                # Updated paths to point to the installation directory
+                # Updated paths to point to installation directory
                 Artifact("deep_gemm", "deep_gemm"),
                 Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
             ],
@@ -268,9 +415,7 @@ def get_libs():
                 Artifact("deep_ep", "deep_ep"),
                 Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
             ],
-            extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
-            if (cuda_major == 12 and cuda_minor < 8)
-            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0;10.3"},
+            extra_env={"PADDLE_CUDA_ARCH_LIST": _deep_ep_arch},
         ),
         EcosystemLibrary(
             name="flash-attention",

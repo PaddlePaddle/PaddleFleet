@@ -98,7 +98,8 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
@@ -178,7 +179,8 @@ jobs:
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
@@ -277,7 +279,8 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -435,7 +438,8 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -689,7 +693,8 @@ jobs:
           pip uninstall paddlefleet -y
           pip install colorlog>=6.10.1
           pip install nvidia-cutlass-dsl==4.2.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '

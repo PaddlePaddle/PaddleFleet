@@ -62,7 +62,7 @@ class TestFindBlocksTopp(unittest.TestCase):
         """Test find_blocks_topp basic functionality."""
         import paddle
 
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             find_blocks_topp,
         )
 
@@ -71,7 +71,7 @@ class TestFindBlocksTopp(unittest.TestCase):
         mock_mask = paddle.ones([1, 1, 2, 4], dtype="bool")
         with (
             mock.patch(
-                "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+                "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
             ),
             mock.patch("triton.next_power_of_2", return_value=4),
         ):
@@ -82,14 +82,14 @@ class TestFindBlocksTopp(unittest.TestCase):
         """Test find_blocks_topp reshapes correctly."""
         import paddle
 
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             find_blocks_topp,
         )
 
         x = paddle.randn([2, 4, 2, 8], dtype="float32")
         with (
             mock.patch(
-                "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+                "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
             ),
             mock.patch("triton.next_power_of_2", return_value=8),
         ):
@@ -100,7 +100,7 @@ class TestFindBlocksTopp(unittest.TestCase):
         """Test find_blocks_topp with n < 1."""
         import paddle
 
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             find_blocks_topp,
         )
 
@@ -108,7 +108,7 @@ class TestFindBlocksTopp(unittest.TestCase):
         mock_mask = paddle.ones([1, 1, 2, 1], dtype="bool")
         with (
             mock.patch(
-                "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+                "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
             ),
             mock.patch("triton.next_power_of_2", return_value=1),
         ):
@@ -121,7 +121,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
 
     def test_load_bounds_exists(self):
         """Test _load_bounds is defined."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _load_bounds,
         )
 
@@ -129,7 +129,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
 
     def test_is_block_fully_masked_exists(self):
         """Test _is_block_fully_masked is defined."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _is_block_fully_masked,
         )
 
@@ -137,7 +137,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
 
     def test_check_fully_masked_state_exists(self):
         """Test check_fully_masked_state is defined."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             check_fully_masked_state,
         )
 
@@ -145,7 +145,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
 
     def test_is_block_partially_masked_exists(self):
         """Test _is_block_partially_masked is defined."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _is_block_partially_masked,
         )
 
@@ -153,7 +153,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
 
     def test_check_partially_masked_state_exists(self):
         """Test check_partially_masked_state is defined."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             check_partially_masked_state,
         )
 
@@ -161,7 +161,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
 
     def test_compare_and_swap_exists(self):
         """Test _compare_and_swap is defined."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _compare_and_swap,
         )
 
@@ -169,7 +169,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
 
     def test_bitonic_merge_exists(self):
         """Test _bitonic_merge is defined."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _bitonic_merge,
         )
 
@@ -177,7 +177,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
 
     def test_bitonic_argsort_device_exists(self):
         """Test bitonic_argsort_device is defined."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             bitonic_argsort_device,
         )
 
@@ -185,7 +185,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
 
     def test_top_p_kernel_exists(self):
         """Test top_p_kernel is defined."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             top_p_kernel,
         )
 
@@ -197,12 +197,12 @@ class TestBlockMaskUtilsUsedByTritonOp(unittest.TestCase):
 
     def test_imports_in_triton_op(self):
         """Test that triton_op imports from block_mask_utils."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             check_fully_masked_state as cfm,
             check_partially_masked_state as cpm,
             find_blocks_topp as fbt,
         )
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             check_fully_masked_state,
             check_partially_masked_state,
             find_blocks_topp,
