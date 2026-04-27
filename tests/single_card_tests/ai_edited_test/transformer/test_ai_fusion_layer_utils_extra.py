@@ -139,7 +139,7 @@ class TestMlpNodeConstruction(unittest.TestCase):
             num_experts_per_tok=2,
         )
         self.assertTrue(node.moe_expert_fusion)
-        self.assertFalse(node.recompute_moe_premute)
+        self.assertFalse(node.recompute_moe_permute)
         self.assertIsNotNone(node.experts_group_gemm_node)
         self.assertIsNotNone(node.unzip_node)
         self.assertIsNotNone(node.zip_node)

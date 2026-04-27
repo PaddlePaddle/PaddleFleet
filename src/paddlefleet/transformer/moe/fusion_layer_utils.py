@@ -253,7 +253,7 @@ class MlpNode:
         recompute_moe_gate_up=False,
         dequant_input=False,
         moe_expert_fusion=True,
-        recompute_moe_premute=False,
+        recompute_moe_permute=False,
         moe_subbatch_token_num_after_dispatch=None,
         use_bf16_gemm_weight_grad=False,
         use_fp8_mlp=True,
@@ -284,17 +284,17 @@ class MlpNode:
             if not moe_expert_fusion
             else 0
         )
-        if recompute_moe_premute:
+        if recompute_moe_permute:
             assert not moe_expert_fusion, (
                 "moe_expert_fusion must be disabled when recompute_unzipped = True"
             )
             assert recompute_moe_gate_up, (
-                "recompute_moe_gate_up must be enabled when recompute_moe_premute = True"
+                "recompute_moe_gate_up must be enabled when recompute_moe_permute = True"
             )
             assert dequant_input, (
-                "dequant_input must be enabled with recompute_moe_premute = True"
+                "dequant_input must be enabled with recompute_moe_permute = True"
             )
-        self.recompute_moe_premute = recompute_moe_premute
+        self.recompute_moe_permute = recompute_moe_permute
 
         self.moe_subbatch_token_num_after_dispatch = (
             moe_subbatch_token_num_after_dispatch
@@ -642,8 +642,8 @@ class MlpNode:
             unzipped_out,
         )
 
-        # recompute_moe_premute 场景下，forward 完成后释放 input_fp8
-        if start_idx is None and self.recompute_moe_premute:
+        # recompute_moe_permute 场景下，forward 完成后释放 input_fp8
+        if start_idx is None and self.recompute_moe_permute:
             gemm_node.input_fp8 = None
             gemm_node.input_scale = None
 
@@ -830,7 +830,7 @@ class MlpNode:
                 不做量化（直接用 unzipped_tokens），fp8/scale = None
 
             Step 4 - 保存 recompute 输入:
-              recompute_moe_premute=True 时保存 fp8/scale 供反向重算
+              recompute_moe_permute=True 时保存 fp8/scale 供反向重算
 
         Args:
             hs_2d_dispatched: 输入 token。bf16 Tensor 或 (FP8 Tensor, scale) tuple。
@@ -905,7 +905,7 @@ class MlpNode:
             hs_2d_dispatched._clear_to_zero_allocation()
 
             # 4. 保存输入供 recompute 使用（仅逐专家路径需要）
-        if self.recompute_moe_premute and hs_2d_dispatched_fp8 is not None:
+        if self.recompute_moe_permute and hs_2d_dispatched_fp8 is not None:
             self.hs_2d_dispatched_fp8 = hs_2d_dispatched_fp8
             self.hs_2d_dispatched_scale = hs_2d_dispatched_scale
 
@@ -1019,7 +1019,7 @@ class MlpNode:
         else:
             # 由于 unzip 必须整专家进行，需要预留 n2 空间，
             # 若不重计算，则需要预留所有专家的 n2
-            if self.recompute_moe_premute:
+            if self.recompute_moe_permute:
                 unzipped_tokens_placeholder = paddle.empty(
                     [max(self.padding_token_per_experts), hidden_size],
                     dtype=unzipped_tokens.dtype,
@@ -1115,7 +1115,7 @@ class MlpNode:
                     ]
                 else:
                     # 释放 placeholder，为实际 n2 buffer 腾出空间
-                    if self.recompute_moe_premute:
+                    if self.recompute_moe_permute:
                         unzipped_tokens_placeholder = None
                     else:
                         unzipped_tokens_placeholder[expert_id] = None
@@ -1146,7 +1146,7 @@ class MlpNode:
                             start_idx=sb_start,
                             end_idx=sb_end,
                         )
-                if self.recompute_moe_premute:
+                if self.recompute_moe_permute:
                     gemm_node.input_fp8 = None
                     gemm_node.input_scale = None
                     gemm_node.input = None
@@ -1214,7 +1214,7 @@ class MlpNode:
         --------------------------------------------------
         0. 判断 zip_unzip_fusion
         1. zip_grad: dn3[S,H] -> do3[N,H] (梯度按专家展开)
-           如果 recompute_premute + fusion, 同时重算前向的 n2
+           如果 recompute_permute + fusion, 同时重算前向的 n2
         2. subbatch planning:
            - 如果 not zip_unzip_fusion: 预分配 do3/n2 placeholder 占位,
              分配 dn1 累加 buffer
@@ -1235,7 +1235,7 @@ class MlpNode:
 
         # 如果 do3 和 n2 (如果recompute) 能同时分配，则可以不用切 zip_grad/unzip，避免重复读写
         zip_unzip_features = [num_unzipped_tokens * hidden_size * 2]
-        if self.recompute_moe_premute:
+        if self.recompute_moe_permute:
             zip_unzip_features.append(num_unzipped_tokens * hidden_size)
         zip_unzip_fusion = (
             find_max_concurrent_subbatch_size(zip_unzip_features, upper=1) > 0
@@ -1251,7 +1251,7 @@ class MlpNode:
             tokens_per_expert=self.tokens_per_expert,
             fill_output=zip_unzip_fusion,
         )
-        if self.recompute_moe_premute and zip_unzip_fusion:
+        if self.recompute_moe_permute and zip_unzip_fusion:
             (unzipped_tokens, _, _, unzipped_scale) = self.unzip_node.forward(
                 (self.hs_2d_dispatched_fp8, self.hs_2d_dispatched_scale),
                 self.dispatched_indices,
@@ -1276,7 +1276,7 @@ class MlpNode:
                 [max_unzipped_tokens_per_expert, hidden_size],
                 dtype=hidden_states_out_grad.dtype,
             )
-            if self.recompute_moe_premute:
+            if self.recompute_moe_permute:
                 unzipped_tokens_placeholder = paddle.empty(
                     [max_unzipped_tokens_per_expert, hidden_size],
                     dtype=self.hs_2d_dispatched_fp8.dtype,
@@ -1340,7 +1340,7 @@ class MlpNode:
         # 确定 subbatch_rows 后，就可以把刚才占位的显存释放了
         if not zip_unzip_fusion:
             del unzipped_grad_placeholder
-            if self.recompute_moe_premute:
+            if self.recompute_moe_permute:
                 del unzipped_tokens_placeholder
 
         # 3. experts
@@ -1380,7 +1380,7 @@ class MlpNode:
                 # 如果前面 zip_grad 一次做完了，这里只需进行切片；否则需要做一次专家级的 zip_grad
                 if zip_unzip_fusion:
                     expert_unzipped_grad = unzipped_grad[start_idx:end_idx]
-                    if self.recompute_moe_premute:
+                    if self.recompute_moe_permute:
                         self.subbatch_prepare_gemm_node(
                             (
                                 unzipped_tokens[start_idx:end_idx],
@@ -1401,7 +1401,7 @@ class MlpNode:
                         tokens_per_expert=self.tokens_per_expert,
                         padding_multiplex=FP8_ALIGN,
                     )
-                    if self.recompute_moe_premute:
+                    if self.recompute_moe_permute:
                         self.subbatch_unzip_and_prepare_gemm_node(
                             (
                                 self.hs_2d_dispatched_fp8,
@@ -1450,7 +1450,7 @@ class MlpNode:
 
         # 4. unzip_grad
         hidden_states_out_grad._clear_to_zero_allocation()  # dn1 复用 dn3
-        if self.recompute_moe_premute and zip_unzip_fusion:
+        if self.recompute_moe_permute and zip_unzip_fusion:
             del unzipped_tokens, unzipped_scale
 
         # 如果不切 unzip_grad，则在这里做一次完整的 unzip_grad；否则 unzip_grad 已经在前面分批完成，这里只需合并结果
@@ -1579,7 +1579,7 @@ class MlpNode:
                             end_idx=sb_end,
                         )
                     # nparts>1 的 expert 全部 subbatch 跑完后，释放 input_fp8
-                    if self.recompute_moe_premute:
+                    if self.recompute_moe_permute:
                         gemm_node = self.experts_group_gemm_node[
                             self._gemm_node_id_offset + expert_id
                         ]
@@ -1688,7 +1688,7 @@ class MlpNode:
                     padding_multiplex=FP8_ALIGN,
                 )
 
-                if self.recompute_moe_premute:
+                if self.recompute_moe_permute:
                     self.subbatch_unzip_and_prepare_gemm_node(
                         (
                             self.hs_2d_dispatched_fp8,
@@ -1786,7 +1786,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         recompute_moe_gate_up=False,
         dequant_input=True,
         moe_expert_fusion=True,
-        recompute_moe_premute=False,
+        recompute_moe_permute=False,
         moe_subbatch_token_num_after_dispatch=None,
         use_bf16_gemm_weight_grad=False,
         is_first_fwd=False,
@@ -1812,7 +1812,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             recompute_moe_gate_up=recompute_moe_gate_up,
             dequant_input=dequant_input,
             moe_expert_fusion=moe_expert_fusion,
-            recompute_moe_premute=recompute_moe_premute,
+            recompute_moe_permute=recompute_moe_permute,
             moe_subbatch_token_num_after_dispatch=moe_subbatch_token_num_after_dispatch,
             use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
             use_fp8_mlp=use_fp8_mlp,

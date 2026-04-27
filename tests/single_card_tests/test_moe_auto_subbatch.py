@@ -212,7 +212,7 @@ class TestAutoSubbatch(unittest.TestCase):
             "recompute_moe_gate_up": True,
             "dequant_input": True,
             "moe_expert_fusion": is_ref,
-            "recompute_moe_premute": False,
+            "recompute_moe_permute": False,
             "use_bf16_gemm_weight_grad": True,
             "fp8_dispatched_handle": {"scale": self.scale},
             "use_auto_subbatch": not is_ref,
@@ -277,7 +277,7 @@ class TestAutoSubbatch(unittest.TestCase):
         # --- group_gemm + no_recompute (moe_expert_fusion=False) ---
         kwargs = {
             "moe_expert_fusion": True,
-            "recompute_moe_premute": False,
+            "recompute_moe_permute": False,
             "recompute_moe_gate_up": False,
             "moe_grouped_gemm": True,
         }
@@ -303,7 +303,7 @@ class TestAutoSubbatch(unittest.TestCase):
 
         kwargs = {
             "moe_expert_fusion": True,
-            "recompute_moe_premute": False,
+            "recompute_moe_permute": False,
             "recompute_moe_gate_up": True,
             "moe_grouped_gemm": True,
             # "recompute_unzipped": True,
@@ -328,17 +328,17 @@ class TestAutoSubbatch(unittest.TestCase):
             tight_forward=True, tight_backward=True, **kwargs
         )
 
-        # --- group_gemm + selective_recompute (recompute_moe_gate_up + recompute_moe_premute) ---
-        # when recompute_moe_premute is True. recompute_moe_gate_up must be true
+        # --- group_gemm + selective_recompute (recompute_moe_gate_up + recompute_moe_permute) ---
+        # when recompute_moe_permute is True. recompute_moe_gate_up must be true
         kwargs = {
             "moe_expert_fusion": True,
-            "recompute_moe_premute": False,
+            "recompute_moe_permute": False,
             "recompute_moe_gate_up": False,
             "moe_grouped_gemm": True,
         }
         # case9: 显存充裕 → 走 3a group_gemm
         logging.info(
-            "case9 (recompute_moe_gate_up,recompute_moe_premute, group, plenty)"
+            "case9 (recompute_moe_gate_up,recompute_moe_permute, group, plenty)"
         )
         cases["case9 (group, plenty)"] = self.run_moe_layer(**kwargs)
         # case10: 前向紧张 → fallback 到逐专家
@@ -347,14 +347,14 @@ class TestAutoSubbatch(unittest.TestCase):
         )
         # case11: 反向紧张 → 前向 3a, 反向 fallback
         logging.info(
-            "case11 (recompute_moe_gate_up,recompute_moe_premute, group, tight_bwd)"
+            "case11 (recompute_moe_gate_up,recompute_moe_permute, group, tight_bwd)"
         )
         cases["case11 (group, tight_bwd)"] = self.run_moe_layer(
             tight_backward=True, **kwargs
         )
         # case12: 向+反向都紧张, fallback
         logging.info(
-            "case12 (recompute_moe_gate_up,recompute_moe_premute, group, tight_both)"
+            "case12 (recompute_moe_gate_up,recompute_moe_permute, group, tight_both)"
         )
         cases["case12 (group, tight_both)"] = self.run_moe_layer(
             tight_forward=True, tight_backward=True, **kwargs
@@ -363,7 +363,7 @@ class TestAutoSubbatch(unittest.TestCase):
         # split gemm + no moe_subbatch_token_num_after_dispatch ---
         kwargs = {
             "moe_expert_fusion": False,
-            "recompute_moe_premute": False,
+            "recompute_moe_permute": False,
             "recompute_moe_gate_up": False,
             "moe_grouped_gemm": False,
         }
@@ -389,7 +389,7 @@ class TestAutoSubbatch(unittest.TestCase):
         # split gemm + moe_subbatch_token_num_after_dispatch 512 ---
         kwargs = {
             "moe_expert_fusion": False,
-            "recompute_moe_premute": False,
+            "recompute_moe_permute": False,
             "recompute_moe_gate_up": True,
             "moe_grouped_gemm": False,
             "moe_subbatch_token_num_after_dispatch": 512,
@@ -416,7 +416,7 @@ class TestAutoSubbatch(unittest.TestCase):
         # group gemm + 预量化
         kwargs = {
             "moe_expert_fusion": True,
-            "recompute_moe_premute": False,
+            "recompute_moe_permute": False,
             "recompute_moe_gate_up": False,
             "moe_grouped_gemm": True,
         }
@@ -439,7 +439,7 @@ class TestAutoSubbatch(unittest.TestCase):
         # split gemm + recompute + moe_subbatch_token_num_after_dispatch 512 ---
         kwargs = {
             "moe_expert_fusion": False,
-            "recompute_moe_premute": True,
+            "recompute_moe_permute": True,
             "recompute_moe_gate_up": True,
             "moe_grouped_gemm": False,
             "moe_subbatch_token_num_after_dispatch": 512,

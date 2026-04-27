@@ -797,7 +797,7 @@ class TestFusionMoeForwardLatent(unittest.TestCase):
         stub.moe_deep_gemm = False
         stub.moe_grouped_gemm = False
         stub.recompute_moe_gate_up = False
-        stub.recompute_moe_premute = False
+        stub.recompute_moe_permute = False
         stub.fp8_wgrad = True
         stub.dispatch.return_value = (
             paddle.randn([bs_seq, expert_out_size]),
