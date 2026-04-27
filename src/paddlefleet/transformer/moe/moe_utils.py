@@ -151,17 +151,15 @@ class AddAuxiliaryLoss(paddle.autograd.PyLayer):
     def forward(ctx, x, loss):
         assert paddle.numel(loss) == 1
         ctx.dtype = loss.dtype
-        ctx.required_x_grad = not x.stop_gradient
         ctx.required_aux_loss = not loss.stop_gradient
         return x.clone()
 
     @staticmethod
     def backward(ctx, grad_output):
-        grad_x = grad_output if ctx.required_x_grad else None
         grad_loss = None
         if ctx.required_aux_loss:
             grad_loss = paddle.ones(1, dtype=ctx.dtype)
-        return grad_x, grad_loss
+        return grad_output, grad_loss
 
 
 class _AllToAll(paddle.autograd.PyLayer):
