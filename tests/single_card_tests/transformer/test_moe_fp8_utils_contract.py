@@ -19,7 +19,6 @@ import paddle
 
 from paddlefleet.transformer.moe.fp8_utils import (
     ExpertsGroupGemmContiguousNode,
-    _ensure_zero_weight_grad,
     _get_fp8_weight_and_scale,
 )
 
@@ -44,40 +43,6 @@ class _WeightWithGrad:
 
     def _apply_backward_hook(self):
         self.hook_calls += 1
-
-
-class TestEnsureZeroWeightGrad(unittest.TestCase):
-    def test_initializes_and_clears_main_grad(self):
-        weight = _WeightWithMainGrad()
-
-        _ensure_zero_weight_grad(weight)
-
-        self.assertEqual(weight.main_grad.shape, [2, 3])
-        self.assertEqual(weight.main_grad.numpy().tolist(), [[0.0] * 3] * 2)
-        self.assertEqual(weight.hook_calls, 1)
-
-        weight.main_grad.set_value(paddle.ones([2, 3], dtype="float32"))
-        _ensure_zero_weight_grad(weight)
-
-        self.assertEqual(weight.main_grad.numpy().tolist(), [[0.0] * 3] * 2)
-        self.assertEqual(weight.hook_calls, 2)
-
-    def test_initializes_and_clears_grad_without_hook_when_stopped(self):
-        weight = _WeightWithGrad()
-        weight.stop_gradient = True
-
-        _ensure_zero_weight_grad(weight)
-
-        self.assertEqual(weight.grad.shape, [2, 3])
-        self.assertEqual(weight.grad.numpy().tolist(), [[0.0] * 3] * 2)
-        self.assertEqual(weight.hook_calls, 0)
-
-        weight.stop_gradient = False
-        weight.grad.set_value(paddle.ones([2, 3], dtype="float32"))
-        _ensure_zero_weight_grad(weight)
-
-        self.assertEqual(weight.grad.numpy().tolist(), [[0.0] * 3] * 2)
-        self.assertEqual(weight.hook_calls, 1)
 
 
 class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
@@ -163,41 +128,6 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
         self.assertEqual(
             node.tokens_per_expert_indices.numpy().tolist(), [0, 0, 1]
         )
-
-    def test_zero_token_fp8_weight_grad_initializes_expert_grads(self):
-        node = ExpertsGroupGemmContiguousNode.__new__(
-            ExpertsGroupGemmContiguousNode
-        )
-        node.tokens_per_expert = paddle.to_tensor([0, 0], dtype="int64")
-        node.fused_transpose_split_quant = lambda *_args: (
-            [None, None],
-            [None, None],
-        )
-        weights = [_WeightWithMainGrad(), _WeightWithGrad()]
-
-        node.bwd_down_weight(
-            paddle.empty([0, 3], dtype="float32"),
-            paddle.empty([0, 3], dtype="float32"),
-            weights,
-        )
-
-        self.assertEqual(weights[0].main_grad.shape, [2, 3])
-        self.assertEqual(weights[1].grad.shape, [2, 3])
-        self.assertEqual(weights[0].hook_calls, 1)
-        self.assertEqual(weights[1].hook_calls, 1)
-
-        node.bwd_gate_up_weight(
-            paddle.empty([0, 3], dtype="float32"),
-            paddle.empty([0, 3], dtype="float32"),
-            weights,
-            clear_input=True,
-        )
-
-        self.assertIsNone(node.input)
-        self.assertIsNone(node.input_fp8)
-        self.assertIsNone(node.input_scale)
-        self.assertEqual(weights[0].hook_calls, 2)
-        self.assertEqual(weights[1].hook_calls, 2)
 
     def test_bf16_weight_grad_runs_grouped_and_per_expert_contracts(self):
         node = ExpertsGroupGemmContiguousNode.__new__(

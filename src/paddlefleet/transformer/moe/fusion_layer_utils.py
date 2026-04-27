@@ -1862,7 +1862,6 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
 
 def _hybrid_ep_prepare_expert_counts(
     custom_map,
-    place,
     use_fp8_mlp,
     moe_grouped_gemm,
 ):
@@ -1872,24 +1871,10 @@ def _hybrid_ep_prepare_expert_counts(
         "HybridEP manager must populate padded_tokens_per_expert before "
         "HybridEPMoePyLayer runs."
     )
-    if isinstance(padded_tokens_per_expert, list):
-        padded_tokens_per_expert_list = padded_tokens_per_expert
-        padded_tokens_per_expert_tensor = paddle.to_tensor(
-            padded_tokens_per_expert,
-            dtype="int64",
-            place=place,
-        )
-    else:
-        padded_tokens_per_expert_list = None
-        padded_tokens_per_expert_tensor = padded_tokens_per_expert.astype(
-            "int64"
-        )
+    padded_tokens_per_expert_tensor = padded_tokens_per_expert.astype("int64")
 
     if not use_fp8_mlp or not moe_grouped_gemm:
-        if padded_tokens_per_expert_list is None:
-            padded_tokens_per_expert_list = (
-                padded_tokens_per_expert_tensor.tolist()
-            )
+        padded_tokens_per_expert_list = padded_tokens_per_expert_tensor.tolist()
         return padded_tokens_per_expert_list, sum(padded_tokens_per_expert_list)
     return padded_tokens_per_expert_tensor, paddle.sum(
         padded_tokens_per_expert_tensor
@@ -1965,7 +1950,6 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             num_permuted_tokens,
         ) = _hybrid_ep_prepare_expert_counts(
             custom_map,
-            hidden_states.place,
             use_fp8_mlp,
             moe_grouped_gemm,
         )

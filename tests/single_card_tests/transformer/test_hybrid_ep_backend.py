@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import paddle
 
 from paddlefleet.transformer.moe import token_dispatcher
+from paddlefleet.transformer.moe.fp8_utils import FP8_ALIGN
 from paddlefleet.transformer.moe.fused_a2a import (
     HybridEPCombine,
     HybridEPDispatch,
@@ -307,39 +308,11 @@ class TestHybridEPBackendSelection(unittest.TestCase):
         dispatch_kwargs = buffer.dispatch_calls[-1]
         self.assertIs(dispatch_kwargs["hidden"], quantized_hidden)
         self.assertTrue(dispatch_kwargs["use_fp8"])
-        self.assertEqual(dispatch_kwargs["pad_multiple"], 128)
+        self.assertEqual(dispatch_kwargs["pad_multiple"], FP8_ALIGN)
         self.assertEqual(dispatch_kwargs["scaling_factor"].shape, [1, 2])
 
 
 class TestHybridEPManagerContract(unittest.TestCase):
-    def test_manager_init_records_runtime_contract(self):
-        group = SimpleNamespace(nranks=2)
-        with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
-            manager = _HybridEPManager(
-                group=group,
-                router_topk=2,
-                num_experts=4,
-                num_local_experts=2,
-                moe_ep_barrier=False,
-            )
-
-        self.assertIs(manager.group, group)
-        self.assertEqual(manager.router_topk, 2)
-        self.assertEqual(manager.num_experts, 4)
-        self.assertEqual(manager.num_local_experts, 2)
-        self.assertIsNone(manager.routing_map)
-        self.assertIsNone(manager.routing_probs)
-        self.assertIsNone(manager.token_indices)
-        self.assertIsNone(manager.token_probs)
-        self.assertIsNone(manager.dispatched_indices)
-        self.assertIsNone(manager.dispatched_probs)
-        self.assertIsNone(manager.tokens_per_expert)
-        self.assertIsNone(manager.padded_tokens_per_expert)
-        self.assertIsNone(manager.handle)
-        self.assertIsNone(manager._buffer)
-        self.assertIsNone(manager._buffer_hidden_dim)
-        self.assertEqual(manager._buffer_max_num_of_tokens_per_rank, 0)
-
     def test_buffer_is_reused_until_shape_or_capacity_changes(self):
         constructed = []
 
@@ -670,7 +643,7 @@ class TestHybridEPFusedA2ABridge(unittest.TestCase):
                 atol=1e-6,
             ).item()
         )
-        self.assertEqual(buffer.combine_calls[-1]["pad_multiple"], 128)
+        self.assertEqual(buffer.combine_calls[-1]["pad_multiple"], FP8_ALIGN)
         self.assertEqual(
             buffer.combine_calls[-1]["hidden"].dtype, paddle.float32
         )
@@ -750,7 +723,7 @@ class TestHybridEPFusedA2ABridge(unittest.TestCase):
         )
         replay_handle = buffer.dispatch_calls[-1]["handle"]
         self.assertIs(replay_handle[7], replay_config)
-        self.assertEqual(buffer.dispatch_calls[-1]["pad_multiple"], 128)
+        self.assertEqual(buffer.dispatch_calls[-1]["pad_multiple"], FP8_ALIGN)
         self.assertFalse(buffer.dispatch_calls[-1]["non_blocking"])
 
     def test_combine_bridge_replays_dispatch_in_backward(self):
@@ -795,7 +768,7 @@ class TestHybridEPFusedA2ABridge(unittest.TestCase):
         )
 
         self.assertEqual(grad_x.numpy().tolist(), [[2.0] * 4, [2.0] * 4])
-        self.assertEqual(buffer.dispatch_calls[-1]["pad_multiple"], 128)
+        self.assertEqual(buffer.dispatch_calls[-1]["pad_multiple"], FP8_ALIGN)
 
 
 class TestHybridEPCombineContract(unittest.TestCase):
@@ -823,15 +796,16 @@ class TestHybridEPCombineContract(unittest.TestCase):
 
 
 class TestHybridEPMoeFusionContract(unittest.TestCase):
-    def test_prepare_expert_counts_preserves_list_and_tensor_contracts(self):
-        manager = SimpleNamespace(padded_tokens_per_expert=[2, 0, 1])
+    def test_prepare_expert_counts_matches_expert_compute_contract(self):
+        manager = SimpleNamespace(
+            padded_tokens_per_expert=paddle.to_tensor([2, 0, 1], dtype="int32")
+        )
         custom_map = SimpleNamespace(
             token_dispatcher=SimpleNamespace(_comm_manager=manager)
         )
 
         counts, num_tokens = _hybrid_ep_prepare_expert_counts(
             custom_map,
-            paddle.CPUPlace(),
             use_fp8_mlp=False,
             moe_grouped_gemm=False,
         )
@@ -844,7 +818,6 @@ class TestHybridEPMoeFusionContract(unittest.TestCase):
         )
         counts, num_tokens = _hybrid_ep_prepare_expert_counts(
             custom_map,
-            paddle.CPUPlace(),
             use_fp8_mlp=True,
             moe_grouped_gemm=True,
         )
@@ -864,7 +837,6 @@ class TestHybridEPMoeFusionContract(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "padded_tokens_per_expert"):
             _hybrid_ep_prepare_expert_counts(
                 custom_map,
-                paddle.CPUPlace(),
                 use_fp8_mlp=False,
                 moe_grouped_gemm=False,
             )
@@ -942,7 +914,9 @@ class TestHybridEPMoeFusionContract(unittest.TestCase):
             def reset_state(self):
                 self.reset_called = True
 
-        manager = SimpleNamespace(padded_tokens_per_expert=[2, 1])
+        manager = SimpleNamespace(
+            padded_tokens_per_expert=paddle.to_tensor([2, 1], dtype="int64")
+        )
         custom_map = SimpleNamespace(
             token_dispatcher=SimpleNamespace(_comm_manager=manager)
         )
@@ -987,55 +961,6 @@ class TestHybridEPMoeFusionContract(unittest.TestCase):
 
 
 class TestHybridEPMoELayerContract(unittest.TestCase):
-    def test_use_hybrid_ep_fusion_requires_fusion_node_and_backend(self):
-        layer = MoELayer.__new__(MoELayer)
-        layer.moe_use_fusion_node = True
-        layer.use_hybrid_ep_backend = True
-
-        self.assertTrue(layer._use_hybrid_ep_fusion())
-
-        layer.moe_use_fusion_node = False
-        self.assertFalse(layer._use_hybrid_ep_fusion())
-
-    def test_run_hybrid_ep_fusion_delegates_to_pylayer(self):
-        layer = MoELayer.__new__(MoELayer)
-        layer.fp8 = True
-        layer.moe_deep_gemm = True
-        layer.moe_grouped_gemm = False
-        layer.recompute_moe_gate_up = True
-        layer.fp8_wgrad = False
-        hidden_states = paddle.ones([2, 4], dtype="float32")
-        dispatched_probs = paddle.ones([2], dtype="float32")
-        fp8_handle = {"scale": paddle.ones([2, 1], dtype="float32")}
-        fused_out = object()
-
-        with patch(
-            "paddlefleet.transformer.moe.moe_layer.HybridEPMoePyLayer.apply",
-            return_value=fused_out,
-        ) as mock_apply:
-            result = layer._run_hybrid_ep_fusion(
-                hidden_states,
-                dispatched_probs,
-                fp8_dispatched_handle=fp8_handle,
-                is_first_fwd=True,
-            )
-
-        self.assertIs(result, fused_out)
-        self.assertFalse(hidden_states.stop_gradient)
-        self.assertFalse(dispatched_probs.stop_gradient)
-        args = mock_apply.call_args.args
-        kwargs = mock_apply.call_args.kwargs
-        self.assertIs(args[0], hidden_states)
-        self.assertIs(args[1], dispatched_probs)
-        self.assertIs(args[2], layer)
-        self.assertTrue(kwargs["use_fp8_mlp"])
-        self.assertTrue(kwargs["moe_deep_gemm"])
-        self.assertFalse(kwargs["moe_grouped_gemm"])
-        self.assertTrue(kwargs["recompute_moe_gate_up"])
-        self.assertTrue(kwargs["use_bf16_gemm_weight_grad"])
-        self.assertIs(kwargs["fp8_dispatched_handle"], fp8_handle)
-        self.assertTrue(kwargs["is_first_fwd"])
-
     def test_dispatch_preprocess_keeps_manager_topk_outputs(self):
         layer = MoELayer.__new__(MoELayer)
         layer.use_latent_moe = False

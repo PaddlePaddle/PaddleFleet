@@ -90,23 +90,6 @@ __all__ = [
 FP8_ALIGN = 128
 
 
-def _ensure_zero_weight_grad(weight):
-    if hasattr(weight, "main_grad"):
-        if weight.main_grad is None:
-            weight.main_grad = paddle.zeros(
-                shape=weight.shape, dtype=paddle.float32
-            )
-        else:
-            weight.main_grad.zero_()
-    else:
-        if weight.grad is None:
-            weight.grad = paddle.zeros(shape=weight.shape, dtype=paddle.float32)
-        else:
-            weight.grad.zero_()
-    if hasattr(weight, "_apply_backward_hook") and not weight.stop_gradient:
-        weight._apply_backward_hook()
-
-
 def _get_fp8_weight_and_scale(weight, transpose=False):
     """_get_fp8_weight_and_scale"""
     fp8_weight, fp8_scale = (
@@ -934,15 +917,7 @@ class ExpertsGroupGemmContiguousNode:
             do3, None, self.tokens_per_expert, True
         )
 
-        token_counts = (
-            self.tokens_per_expert
-            if isinstance(self.tokens_per_expert, (list, tuple))
-            else self.tokens_per_expert.tolist()
-        )
-        for i, token_count in enumerate(token_counts):
-            if int(token_count) == 0:
-                _ensure_zero_weight_grad(expert_w2[i])
-                continue
+        for i in range(len(expert_w2)):
             if hasattr(expert_w2[i], "main_grad"):
                 if expert_w2[i].main_grad is None:
                     expert_w2[i].main_grad = paddle.zeros(
@@ -1015,15 +990,7 @@ class ExpertsGroupGemmContiguousNode:
             do1, None, self.tokens_per_expert, True
         )
 
-        token_counts = (
-            self.tokens_per_expert
-            if isinstance(self.tokens_per_expert, (list, tuple))
-            else self.tokens_per_expert.tolist()
-        )
-        for i, token_count in enumerate(token_counts):
-            if int(token_count) == 0:
-                _ensure_zero_weight_grad(expert_w1[i])
-                continue
+        for i in range(len(expert_w1)):
             if hasattr(expert_w1[i], "main_grad"):
                 if expert_w1[i].main_grad is None:
                     expert_w1[i].main_grad = paddle.zeros(
@@ -1597,11 +1564,11 @@ class ExpertsGroupGemmContiguousNode:
                         trans_lhs=True,
                     )
                     weights.grad.add_(weights_res.cast(weights.grad.dtype))
-                if (
-                    hasattr(weights, "_apply_backward_hook")
-                    and not weights.stop_gradient
-                ):
-                    weights._apply_backward_hook()
+            if (
+                hasattr(weights, "_apply_backward_hook")
+                and not weights.stop_gradient
+            ):
+                weights._apply_backward_hook()
         else:
             start_idx = 0
             for i, n in enumerate(self.tokens_per_expert):
