@@ -65,6 +65,15 @@ class TransformerConfig(ModelParallelConfig):
     use_dense_mtp: bool = False
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
 
+    separate_mtp_headloss: bool = False
+    """Separate MTP LMHead & Loss calculate for pipeline balance."""
+
+    experimental_dataflow: bool = False
+    """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
+    separate input instead of being appended to attn_mask_startend_row_indices.
+    The new dataflow requires: input_ids, labels, startend_row_indices (last dim=1, main seq only),
+    mtp_startend_row_indices_all ([B, num_nextn, S, 1]), position_ids."""
+
     num_empty_layers_add_in_head: int = 0
     """Number of EmptyLayer before the Decoder Layer.
     num_empty_layers_add_in_head=2 Example:
@@ -275,6 +284,9 @@ class TransformerConfig(ModelParallelConfig):
     use_qk_norm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
 
+    qk_norm_fusion: bool = False
+    """If True, use Triton fused RMSNorm kernel for QK norm."""
+
     qk_norm_type: str = "per_head"
     """Type of qk normalization:
     - "per_head": normalize each attention head independently (default for most models)
@@ -398,8 +410,22 @@ class TransformerConfig(ModelParallelConfig):
     """Number of selected groups per token for expert selection."""
 
     routed_scaling_factor: float = 1.0
-    """Scaling factor for routing score in top-k selection, only works when moe_router_pre_softmax
-    enabled. Defaults to None, which means no scaling."""
+    """Scalar multiplier applied to the selected top-k routing weights after expert selection.
+    The final scaled weights are used in ``top_gate`` (``[S, K]``), which is passed to the
+    dispatch/combine flow for expert output weighting.
+
+    Default is ``1.0`` (no scaling effect). For example, set to ``2.5`` for DeepSeek-V3 to
+    compensate for sigmoid scores not summing to 1 after top-k selection.
+
+    When ``routed_scaling_factor_learnable=True``, this value is used as the initialization
+    value for the per-expert learnable parameter."""
+
+    routed_scaling_factor_learnable: bool = False
+    """Whether to use a learnable per-expert scaling parameter instead of a fixed scalar.
+
+    - ``False`` (default): apply ``routed_scaling_factor`` as a fixed scalar uniformly.
+    - ``True``: create a trainable parameter of shape ``[num_experts]``, initialized to
+      ``routed_scaling_factor``, and apply it via per-expert lookup after top-k selection."""
 
     moe_dequant_input: bool = False
     """Whether to dequantize input."""
@@ -412,6 +438,14 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_subbatch_token_num_after_dispatch: int | None = None
     """Whether to enable subbatch after dispatch, the value means the number of tokens in one subbatch."""
+
+    use_auto_subbatch: bool = False
+    """When True, dynamically determine subbatch sizes based on VMM free block analysis
+    instead of using a fixed moe_subbatch_token_num_after_dispatch value."""
+
+    moe_subbatch_diag: bool = False
+    """When True, print auto_subbatch diagnostic info (path, subbatch_rows, zip_unzip_fusion)
+    after each forward/backward pass. Useful for debugging memory behavior."""
 
     moe_grouped_gemm: bool = False
     """Whether to use grouped gemm."""
@@ -437,6 +471,13 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""
+
+    use_latent_moe: bool = False
+    """Whether to use latent MoE. When enabled, adds projection layers
+    to compress hidden states before routing and decompress after."""
+
+    moe_latent_size: int | None = None
+    """The latent dimension size for latent MoE. Only used when use_latent_moe is True."""
 
     ##################
     # Context Parallel

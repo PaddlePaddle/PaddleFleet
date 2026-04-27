@@ -18,7 +18,10 @@ from functools import partial
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet.models.common.empty_layer import EmptyLayer
-from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
+from paddlefleet.models.common.language_loss.language_loss import (
+    LanguageLoss,
+    MainLanguageLoss,
+)
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_layers_spec,
     get_gpt_layer_local_spec,
@@ -76,7 +79,10 @@ def gpt_builder(config, **kwargs):
         )
 
     tail_empty_layers_spec = []
-    for i in range(config.num_empty_layers_add_in_tail):
+    num_empty_layers_add_in_tail = config.num_empty_layers_add_in_tail
+    if config.separate_mtp_headloss:
+        num_empty_layers_add_in_tail -= 1
+    for i in range(num_empty_layers_add_in_tail):
         tail_empty_layers_spec.append(
             LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
         )
@@ -100,6 +106,9 @@ def gpt_builder(config, **kwargs):
     loss_fn = None
     if "loss_fn" in kwargs:
         loss_fn = kwargs.pop("loss_fn")
+
+    if config.separate_mtp_headloss:
+        loss_fn = MainLanguageLoss(config)
 
     return build_spec_layer(
         gpt_spec,

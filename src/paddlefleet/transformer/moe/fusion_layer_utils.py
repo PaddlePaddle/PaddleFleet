@@ -12,11 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import copy
+import logging
+
 import paddle
 
+import paddlefleet
 from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
-from .fp8_utils import FP8_ALIGN
+from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant
+from .vmm_utils import (
+    find_max_concurrent_subbatch_size,
+    find_max_sequence_subbatch_size,
+    merge_subbatch_cast,
+    tokens_zip_unique_add_with_subbatch,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class UnZipNode:
@@ -106,6 +119,7 @@ class UnZipNode:
                 num_experts=num_experts,
                 tokens_per_expert=tokens_per_expert,
                 padding_alignment=FP8_ALIGN,
+                do_gather=fill_output,
             )
 
         if scale is None:
@@ -222,6 +236,7 @@ class ZipNode:
                 num_experts,
                 tokens_per_expert,
                 padding_alignment=FP8_ALIGN,
+                do_gather=fill_output,
             )
         return unzipped_grad
 
@@ -244,12 +259,31 @@ class MlpNode:
         use_fp8_mlp=True,
         moe_deep_gemm=True,
         moe_grouped_gemm=False,
+        use_auto_subbatch=False,
+        moe_subbatch_diag=False,
     ):
         """
         Constructor
         """
         self.token_dispatcher = custom_map.token_dispatcher
         self.moe_expert_fusion = moe_expert_fusion
+        self.experts = getattr(custom_map, "experts", None)
+        # 记录 EP 分片信息，用于计算 experts_group_gemm_node 的索引偏移。
+        # 初始 non-fusion 模式下，experts_group_gemm_node 按全局 ID 构建，
+        # tokens_per_expert 循环变量是本地 ID（0..num_local-1），需要加偏移才能
+        # 正确索引。fallback_to_no_expert_fusion 后列表重建为本地长度，偏移置 0。
+        self.moe_rank = getattr(custom_map, "moe_rank", 0)
+        self.num_experts_per_device = getattr(
+            custom_map,
+            "num_experts_per_device",
+            len(self.experts) if self.experts is not None else 0,
+        )
+        # 初始 non-fusion 时 experts_group_gemm_node 是全局长度列表，需要偏移
+        self._gemm_node_id_offset = (
+            self.moe_rank * self.num_experts_per_device
+            if not moe_expert_fusion
+            else 0
+        )
         if recompute_moe_premute:
             assert not moe_expert_fusion, (
                 "moe_expert_fusion must be disabled when recompute_unzipped = True"
@@ -282,9 +316,20 @@ class MlpNode:
             )
 
         if not self.moe_expert_fusion:
-            raise NotImplementedError(
-                "moe_expert_fusion = False is not supported currently"
-            )
+            self.experts_group_gemm_node = [
+                ExpertsGroupGemmContiguousNode(
+                    custom_map,
+                    recompute_moe_gate_up=recompute_moe_gate_up,
+                    dequant_input=dequant_input,
+                    expert_id=expert_id,
+                    moe_subbatch_token_num_after_dispatch=moe_subbatch_token_num_after_dispatch,
+                    use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
+                    use_fp8_mlp=use_fp8_mlp,
+                    moe_deep_gemm=moe_deep_gemm,
+                    moe_grouped_gemm=moe_grouped_gemm,
+                )
+                for expert_id in range(len(custom_map.experts))
+            ]
         else:
             self.experts_group_gemm_node = ExpertsGroupGemmContiguousNode(
                 custom_map,
@@ -315,6 +360,22 @@ class MlpNode:
             self.token_offsets.append(self.token_offsets[-1] + padding_token)
         self.router_topk = num_experts_per_tok
         self.use_fp8_mlp = use_fp8_mlp
+        self.use_auto_subbatch = use_auto_subbatch
+        self.moe_subbatch_diag = moe_subbatch_diag
+        if self.use_auto_subbatch:
+            (vmm_flag,) = paddle.framework.get_flags(
+                "FLAGS_use_virtual_memory_auto_growth"
+            ).values()
+            assert vmm_flag, (
+                "use_auto_subbatch requires FLAGS_use_virtual_memory_auto_growth=True"
+            )
+
+        if self.moe_subbatch_token_num_after_dispatch is not None:
+            self.min_auto_subbatch_rows = (
+                self.moe_subbatch_token_num_after_dispatch
+            )
+        else:
+            self.min_auto_subbatch_rows = FP8_ALIGN**2 // 2
 
     def cached_tensors(self):
         """
@@ -428,6 +489,1006 @@ class MlpNode:
             self.experts_group_gemm_node.reset_state()
         self.experts_group_gemm_node = None
 
+    # ==================== auto_subbatch helper methods ====================
+
+    def subbatch_unzip_and_prepare_gemm_node(
+        self, hs_2d_dispatched, zipped_expertwise_rowmap, expert_id
+    ):
+        """
+        zip_unzip_fusion=False 时的单专家输入准备：
+        从 zipped 空间 gather 出该专家的 token，设置到 gemm_node 上。
+        返回 expert_unzipped_idx，供后续 scatter-add回zipped空间使用。
+
+        Example (expert_id=1, tokens_per_expert=[2,3,1], FP8_ALIGN=4):
+
+            zipped 空间 (hs_2d_dispatched):     unzip gather 后 (expert_id=1):
+            ┌─────────────┐                     ┌─────────────┐
+            │ tok0 (E0,E1)│ ──────────────────► │ tok0        │ row 0
+            │ tok1 (E0)   │                     │ tok2        │ row 1
+            │ tok2 (E1,E2)│ ──────────────────► │ tok4        │ row 2
+            │ tok3 (E0)   │                     │ <pad>       │ row 3 (pad to FP8_ALIGN=4)
+            │ tok4 (E1)   │ ──────────────────► └─────────────┘
+            │ tok5 (E2)   │                     gemm_node.input_fp8 = 上面 4 行
+            └─────────────┘                     expert_unzipped_idx = [0, 2, 4]
+        """
+        hs_2d_dispatched, hs_2d_dispatched_scale = hs_2d_dispatched
+        # 从 zipped 空间按 expert_id gather，输出已 pad 到 FP8_ALIGN 对齐
+        (
+            expert_out,
+            expert_out_scale,
+            expert_unzipped_idx,
+        ) = paddlefleet.ops.tokens_unzip_gather(
+            hs_2d_dispatched,
+            hs_2d_dispatched_scale,
+            zipped_expertwise_rowmap,
+            expert_id,
+            self.tokens_per_expert,
+            FP8_ALIGN,
+        )
+        # 将 gather 出的输入设置到对应专家的 gemm_node 上
+        # expert_id 是本地 ID，需加偏移才能索引全局 experts_group_gemm_node
+        gemm_node = self.experts_group_gemm_node[
+            self._gemm_node_id_offset + expert_id
+        ]
+        if self.use_fp8_mlp is not None:
+            gemm_node.input_fp8 = expert_out
+            gemm_node.input_scale = expert_out_scale
+        else:
+            expert_out = paddle.incubate.nn.functional.fused_act_dequant(
+                expert_out, expert_out_scale
+            )
+            gemm_node.input = expert_out
+        return expert_unzipped_idx
+
+    def subbatch_prepare_gemm_node(self, unzipped_hs_2d, expert_id):
+        """
+        Prepare input for this node. Dequant if needed.
+        """
+        input_fp8, input_scale = unzipped_hs_2d
+        gemm_node = self.experts_group_gemm_node[expert_id]
+        if self.use_fp8_mlp is not None:
+            gemm_node.input_fp8 = input_fp8
+            gemm_node.input_scale = input_scale
+        else:
+            gemm_node.input = paddle.incubate.nn.functional.fused_act_dequant(
+                input_fp8, input_scale
+            )
+
+    def gemm_forward_subbatch(
+        self,
+        expert_id,
+        unzipped_probs,
+        unzipped_idx,
+        output,
+        total_zipped_tokens,
+        unzipped_out=None,
+        start_idx=None,
+        end_idx=None,
+    ):
+        """
+        对单个专家执行一次（或一个 subbatch 的）前向 GEMM，并将结果写回输出。
+
+        Example (expert_id=1, 该专家有 300 个 token, subbatch_rows=128):
+
+            gemm_node.input_fp8 (300 tokens, padded to 384):
+            ┌──────────────────────────────────────────────┐
+            │ tok0 ... tok127 │ tok128 ... tok255 │ tok256 ... tok299 + pad │
+            └──────────────────────────────────────────────┘
+                 subbatch 0        subbatch 1         subbatch 2
+              start=0,end=128    start=128,end=256   start=256,end=300
+
+            每个 subbatch 独立执行:
+            1. _slice 截取输入/probs/输出 → 临时替换 gemm_node 上的引用
+            2. gemm_node.forward: gate_up → SwiGLU → down_proj
+            3. 写回结果:
+               - unzipped_out 非 None → in-place 写入预分配 buffer (zip_unzip_fusion)
+               - unzipped_out 为 None → scatter-add 到 float32 累加器
+            4. 恢复 gemm_node 的原始引用，下一个 subbatch 再切
+
+        Args:
+            expert_id: 专家编号。
+            unzipped_probs: 该专家的 token 权重。
+            unzipped_idx: scatter-add 回 zipped 空间的索引（zip_unzip_fusion=False 时使用）。
+            output: 累加输出 buffer（float32 累加器或 list[Tensor]）。
+            total_zipped_tokens: zipped 空间的总 token 数。
+            unzipped_out: 预分配的输出 buffer（zip_unzip_fusion=True 时传入，GEMM 结果 in-place 写入）。
+            start_idx/end_idx: subbatch 切片范围。None 表示不切片，整个专家一次算完。
+        """
+        # expert_id 是本地 ID，需加偏移才能索引全局 experts_group_gemm_node
+        gemm_node = self.experts_group_gemm_node[
+            self._gemm_node_id_offset + expert_id
+        ]
+        if start_idx is not None:
+            # --- subbatch 切片：从完整专家的输入/输出中截取 [start_idx, end_idx) ---
+            tokens_per_expert = end_idx - start_idx
+            padding_token_per_experts = (
+                (tokens_per_expert + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
+            )
+            padding_end_idx = start_idx + padding_token_per_experts
+
+            unzipped_probs = unzipped_probs._slice(start_idx, padding_end_idx)
+            unzipped_idx = unzipped_idx._slice(start_idx, end_idx)
+            if self.use_fp8_mlp is not None:
+                origin_input_fp8 = gemm_node.input_fp8
+                origin_input_scale = gemm_node.input_scale
+                gemm_node.input_fp8 = origin_input_fp8._slice(
+                    start_idx, padding_end_idx
+                )
+                gemm_node.input_scale = origin_input_scale.contiguous()._slice(
+                    start_idx, padding_end_idx
+                )
+            else:
+                origin_input = gemm_node.input
+                gemm_node.input = origin_input._slice(
+                    start_idx, padding_end_idx
+                )
+            if unzipped_out is not None:
+                unzipped_out = unzipped_out._slice(start_idx, padding_end_idx)
+            gemm_node.tokens_per_expert = [padding_token_per_experts]
+        else:
+            # --- 不切片：整个专家一次算完 ---
+            tokens_per_expert = self.tokens_per_expert[expert_id]
+            padding_token_per_experts = self.padding_token_per_experts[
+                expert_id
+            ]
+
+        # 执行 gate_up → SwiGLU → down_proj GEMM
+        # hs_out=None 表示从 gemm_node.input_fp8 取输入（已在 prepare 阶段设置）
+        expert_out = gemm_node.forward(
+            None,
+            unzipped_probs,
+            [padding_token_per_experts],
+            tokens_per_expert,
+            unzipped_out,
+        )
+
+        # recompute_moe_premute 场景下，forward 完成后释放 input_fp8
+        if start_idx is None and self.recompute_moe_premute:
+            gemm_node.input_fp8 = None
+            gemm_node.input_scale = None
+
+        # zip_unzip_fusion=False 时，需要 scatter-add 到 output 累加器，output是一个list
+        # zip_unzip_fusion=True 时，结果已 in-place 写入 unzipped_out，无需额外操作
+        if unzipped_out is None:
+            output = tokens_zip_unique_add_with_subbatch(
+                output,
+                expert_out,
+                unzipped_idx,
+                zipped_rows=total_zipped_tokens,
+                subbatch_rows=(
+                    self.moe_subbatch_token_num_after_dispatch
+                    if isinstance(output, paddle.Tensor)
+                    else output[0].shape[0]
+                ),
+            )
+
+        # subbatch 切片后恢复 gemm_node 的原始输入引用
+        if start_idx is not None:
+            if self.use_fp8_mlp is not None:
+                gemm_node.input_fp8 = origin_input_fp8
+                gemm_node.input_scale = origin_input_scale
+            else:
+                gemm_node.input = origin_input
+            gemm_node.tokens_per_expert = [
+                self.padding_token_per_experts[expert_id]
+            ]
+
+        return output
+
+    # ==================== forward methods ====================
+
+    def fallback_to_no_expert_fusion(self):
+        """
+        从 expert_fusion=True 回退到 False 模式，将融合的 experts_group_gemm_node 拆成逐专家节点。
+
+        当 auto_subbatch 检测到显存不足以一次做 group_gemm 时调用，通过 copy.copy
+        浅拷贝出每个专家的独立 gemm_node，并将前向保存的 input_fp8/o1 按专家切片。
+        """
+        fused_gemm_node = self.experts_group_gemm_node
+        self.experts_group_gemm_node = []
+        self.moe_expert_fusion = False
+        # 重建后列表为本地长度，local_id 直接索引，不需要偏移
+        self._gemm_node_id_offset = 0
+
+        for local_id, tokens_per_expert in enumerate(
+            self.padding_token_per_experts
+        ):
+            expert_id = self.moe_rank * self.num_experts_per_device + local_id
+            gemm_node = copy.copy(fused_gemm_node)
+            gemm_node.is_split_group_gemm = True
+            gemm_node.moe_grouped_gemm = False
+            gemm_node.recompute_moe_gate_up = fused_gemm_node.o1 is None
+            gemm_node.experts = [fused_gemm_node.experts[expert_id]]
+            gemm_node.expert_id = expert_id
+            gemm_node.tokens_per_expert = [tokens_per_expert]
+            self.experts_group_gemm_node.append(gemm_node)
+
+            start_idx = self.token_offsets[local_id]
+            end_idx = self.token_offsets[local_id + 1]
+
+            # 如果是在反向才 fallback，需要将前向保存的 input_fp8/o1 切分给每个专家
+            if fused_gemm_node.input_fp8 is not None:
+                gemm_node.input_fp8 = fused_gemm_node.input_fp8._slice(
+                    start_idx, end_idx
+                )
+                gemm_node.input_scale = (
+                    fused_gemm_node.input_scale.contiguous()._slice(
+                        start_idx, end_idx
+                    )
+                )
+            if fused_gemm_node.o1 is not None:
+                gemm_node.o1 = fused_gemm_node.o1._slice(start_idx, end_idx)
+
+    @contextlib.contextmanager
+    def slice_fp8_weight(self, expert_id):
+        """
+        当初始为 expert_fusion=True 但回退到逐专家时，临时切片当前专家的 fp8_weight/scale。
+
+        expert_fusion=True 时 FP8 权重以 stacked 形式存在 experts[0] 上（所有专家堆叠），
+        回退后每个专家需要独立的权重切片。此上下文管理器临时设置并在退出时恢复/清理。
+        """
+        if not (
+            len(self.experts) > 1
+            and getattr(
+                self.experts[0].up_gate_proj.weight, "fp8_weight_stacked", None
+            )
+            is not None
+            and getattr(
+                self.experts[1].up_gate_proj.weight, "fp8_weight_stacked", None
+            )
+            is None
+        ):
+            yield
+            return
+
+        w1 = self.experts[0].up_gate_proj.weight
+        w2 = self.experts[0].down_proj.weight
+        w1_weight, w1_scale = w1.fp8_weight_stacked, w1.fp8_scale_stacked
+        w2_weight, w2_scale = w2.fp8_weight_stacked, w2.fp8_scale_stacked
+
+        def slice_expert(t):
+            chunk_size = t.shape[0] // len(self.experts)
+            return t._slice(
+                chunk_size * expert_id, chunk_size * (expert_id + 1)
+            )
+
+        cur_w1 = self.experts[expert_id].up_gate_proj.weight
+        cur_w2 = self.experts[expert_id].down_proj.weight
+        cur_w1.fp8_weight_stacked = slice_expert(w1_weight)
+        cur_w1.fp8_scale_stacked = slice_expert(w1_scale)
+        cur_w1.fp8_weight_stacked_transpose = None
+        cur_w1.fp8_scale_stacked_transpose = None
+        cur_w2.fp8_weight_stacked = slice_expert(w2_weight)
+        cur_w2.fp8_scale_stacked = slice_expert(w2_scale)
+        cur_w2.fp8_weight_stacked_transpose = None
+        cur_w2.fp8_scale_stacked_transpose = None
+
+        try:
+            yield
+        finally:
+            # 对于 0 号专家，需要恢复成融合的 fp8_weight；对于其他专家，直接删除其 fp8_weight
+            if expert_id == 0:
+                w1.fp8_weight_stacked, w1.fp8_scale_stacked = (
+                    w1_weight,
+                    w1_scale,
+                )
+                w2.fp8_weight_stacked, w2.fp8_scale_stacked = (
+                    w2_weight,
+                    w2_scale,
+                )
+            else:
+                del cur_w1.fp8_weight_stacked, cur_w1.fp8_scale_stacked
+                del cur_w2.fp8_weight_stacked, cur_w2.fp8_scale_stacked
+            del (
+                cur_w1.fp8_weight_stacked_transpose,
+                cur_w1.fp8_scale_stacked_transpose,
+            )
+            del (
+                cur_w2.fp8_weight_stacked_transpose,
+                cur_w2.fp8_scale_stacked_transpose,
+            )
+
+    def _prepare_forward(
+        self,
+        hs_2d_dispatched,
+        dispatched_indices,
+        dispatched_probs,
+        fill_output,
+    ):
+        """
+        前向计算的公共预处理，被 forward() 和 forward_auto_subbatch() 共用。
+        完成 4 步操作：cast indices → unzip → record_stream → 条件 quant。
+
+        Example (6 tokens, 3 experts, topk=2, FP8_ALIGN=128):
+
+            输入:
+              hs_2d_dispatched: [6, 4096] (bf16 或 FP8 tuple)
+              dispatched_indices: [6, 2] = [[0,1], [0,-1], [1,2], [0,-1], [1,-1], [2,-1]]
+              dispatched_probs:   [6, 2]
+
+            Step 1 - unzip (moe_permute):
+              按专家分组 + pad 到 FP8_ALIGN 对齐
+              tokens_per_expert = [3, 3, 2]  →  padding 后 = [128, 128, 128]
+
+              fill_output=True 时:
+                unzipped_tokens: [384, 4096]  ← 实际拷贝数据（fusion 路径）
+              fill_output=False 时:
+                unzipped_tokens: [384, 4096]  ← 数据未填充，只计算 rowmap（逐专家 gather 路径）
+
+              zipped_expertwise_rowmap: 索引映射（供后续 gather/scatter 使用）
+              unzipped_probs: [384, 1]
+
+            Step 2 - record_stream:
+              标记输入 tensor 可被 CUDA stream 异步释放
+
+            Step 3 - 条件 FP8 量化:
+              fill_output=False（逐专家路径）:
+                tilewise_quant(hs_2d_dispatched) → hs_2d_dispatched_fp8 [6, 4096] (FP8)
+                                                   hs_2d_dispatched_scale [6, 32]
+                释放原始 bf16 数据
+              fill_output=True（fusion 路径）:
+                不做量化（直接用 unzipped_tokens），fp8/scale = None
+
+            Step 4 - 保存 recompute 输入:
+              recompute_moe_premute=True 时保存 fp8/scale 供反向重算
+
+        Args:
+            hs_2d_dispatched: 输入 token。bf16 Tensor 或 (FP8 Tensor, scale) tuple。
+            dispatched_indices: 专家分配索引 [S, topk]。
+            dispatched_probs: 专家分配权重 [S, topk]。
+            fill_output: 控制 moe_permute 是否实际 gather 数据。
+                True  → unzipped_tokens 有数据（fusion 路径 / zip_unzip_fusion=True）
+                False → 只计算 rowmap（逐专家 gather 路径）
+
+        Returns:
+            tuple:
+                - use_fp8_dispatch_a2a (bool): 输入是否已经是 FP8（a2a 阶段已量化）。
+                - num_experts (int): 专家总数。
+                - num_zipped_tokens (int): zipped 空间的 token 数（即原始序列长度 S）。
+                - hidden_size (int): 隐藏层维度 H。
+                - unzipped_tokens (Tensor): 按专家分组后的 token [N_total_padded, H]。
+                    fill_output=True 时有数据，False 时数据未填充（需后续逐专家 gather）。
+                - zipped_expertwise_rowmap (Tensor): unzip/zip 的索引映射，供 gather/scatter 使用。
+                - unzipped_probs (Tensor): 按专家分组后的权重 [N_total_padded, 1]。
+                - unzipped_scale (Tensor|None): FP8 量化 scale，非 FP8 输入时为 None。
+                - hs_2d_dispatched_fp8 (Tensor|None): zipped 空间的 FP8 数据。
+                    逐专家路径用于后续 gather；fusion 路径为 None。
+                - hs_2d_dispatched_scale (Tensor|None): 对应的 FP8 scale。
+        """
+        use_fp8_dispatch_a2a = isinstance(hs_2d_dispatched, tuple)
+        num_experts = len(self.tokens_per_expert)
+
+        # 1. unzip: 按专家分组 + pad 到 FP8_ALIGN 对齐
+        self.dispatched_indices = dispatched_indices.to(paddle.int32)
+        (
+            unzipped_tokens,
+            zipped_expertwise_rowmap,
+            unzipped_probs,
+            unzipped_scale,
+        ) = self.unzip_node.forward(
+            hs_2d_dispatched,
+            self.dispatched_indices,
+            dispatched_probs,
+            topk=self.router_topk,
+            num_experts=num_experts,
+            tokens_per_expert=self.tokens_per_expert,
+            fill_output=fill_output,
+        )
+        self.unzipped_probs = unzipped_probs
+
+        # 2. 获取 shape 信息 + record_stream（标记 tensor 可被异步释放）
+        if use_fp8_dispatch_a2a:
+            num_zipped_tokens = hs_2d_dispatched[0].shape[0]
+            hidden_size = hs_2d_dispatched[0].shape[-1]
+            hs_2d_dispatched[0]._record_stream()
+            hs_2d_dispatched[1]._record_stream()
+        else:
+            num_zipped_tokens = hs_2d_dispatched.shape[0]
+            hidden_size = hs_2d_dispatched.shape[-1]
+            hs_2d_dispatched._record_stream()
+        dispatched_indices._record_stream()
+        dispatched_probs._record_stream()
+        if self.dispatched_indices.dtype is not dispatched_indices.dtype:
+            dispatched_indices._clear_to_zero_allocation()
+
+        # 3. FP8 量化（逐专家路径需要从 zipped 空间 gather，所以需要量化后的 zipped 数据）
+        #    fusion 路径直接使用 unzipped_tokens，不需要量化 zipped 数据
+        hs_2d_dispatched_fp8, hs_2d_dispatched_scale = None, None
+
+        if use_fp8_dispatch_a2a:
+            hs_2d_dispatched_fp8, hs_2d_dispatched_scale = hs_2d_dispatched
+        else:
+            if self.use_auto_subbatch:
+                hs_2d_dispatched_fp8, hs_2d_dispatched_scale = tilewise_quant(
+                    hs_2d_dispatched
+                )
+            hs_2d_dispatched._clear_to_zero_allocation()
+
+            # 4. 保存输入供 recompute 使用（仅逐专家路径需要）
+        if self.recompute_moe_premute and hs_2d_dispatched_fp8 is not None:
+            self.hs_2d_dispatched_fp8 = hs_2d_dispatched_fp8
+            self.hs_2d_dispatched_scale = hs_2d_dispatched_scale
+
+        return (
+            use_fp8_dispatch_a2a,
+            num_experts,
+            num_zipped_tokens,
+            hidden_size,
+            unzipped_tokens,
+            zipped_expertwise_rowmap,
+            unzipped_probs,
+            unzipped_scale,
+            hs_2d_dispatched_fp8,
+            hs_2d_dispatched_scale,
+        )
+
+    def forward_auto_subbatch(
+        self, hs_2d_dispatched, dispatched_indices, dispatched_probs
+    ):
+        """
+        AutoSubbatch 前向: 根据 VMM 空闲显存动态决定每次处理多少 token.
+
+        背景
+        ----
+        MoE 前向 = unzip(按专家展开) -> expert_gemm -> zip(合并回原序).
+        expert_gemm 产生大量中间变量 (o1, o2 等), 显存可能不够一次做完,
+        因此需要把 token 切成多个 subbatch 分批计算.
+
+        两个关键决策
+        -----------
+        1) zip_unzip_fusion: 能否一次性分配 unzip 后的完整 buffer?
+           - True:  分配 n2[N,H] + o3[N,H], unzip/zip 各做一次
+           - False: 显存不够, 不分配整块, 每个专家单独 gather/scatter
+        2) subbatch_rows: 每个 subbatch 处理多少 token?
+           由 VMM 空闲显存 / 单个 subbatch 峰值 (o1[2H] + o2[H/2]) 决定.
+           如果 subbatch_rows >= 总token数 且 fusion, 则走 group_gemm 一次算完.
+
+        流程 (S=seq_len, H=hidden_size, N=unzipped_tokens)
+        --------------------------------------------------
+        0. 预分配 n3[S,H] (最终输出, 必须整块), 判断 zip_unzip_fusion
+        1. unzip: 按专家重排 token + FP8 量化
+        2. subbatch planning:
+           - 如果 not zip_unzip_fusion: 预分配 n2 placeholder 占位,
+             分配 n3 累加 buffer
+           - del n3 释放空间给专家计算
+           - 查询 VMM 空闲 -> 算出 subbatch_rows
+        3. expert_gemm:
+           a) group_gemm: subbatch_rows >= N -> 一次完成
+           b) per_expert: 逐专家循环, 每个专家按 subbatch_rows 切片:
+              o1=gate_up(n2), o2=swiglu(o1), o3=down(o2)
+              not zip_unzip_fusion 时: 先 gather n2 再算, 算完 scatter 回 n3
+        4. zip: 合并专家输出回原序 -> 最终 output[S,H]
+        """
+        use_fp8_dispatch_a2a = isinstance(hs_2d_dispatched, tuple)
+
+        # 先分配 n3，因为 n3 必须整个分配，避免先分配了后面的 n2/o3 导致 n3 分配不出来
+        zipped_out = paddle.empty(
+            shape=(
+                hs_2d_dispatched[0].shape
+                if use_fp8_dispatch_a2a
+                else hs_2d_dispatched.shape
+            ),
+            dtype=(
+                paddle.bfloat16
+                if use_fp8_dispatch_a2a
+                else hs_2d_dispatched.dtype
+            ),
+        )
+
+        # 如果能够分配连续的 n2 和 o3，则可以不切 zip/unzip
+        num_unzipped_tokens = self.token_offsets[-1]
+        hidden_size = zipped_out.shape[1]
+        zip_unzip_fusion = (
+            find_max_concurrent_subbatch_size(
+                [
+                    num_unzipped_tokens * zipped_out.shape[1] * 2,
+                    num_unzipped_tokens * zipped_out.shape[1],
+                ],
+                upper=1,
+            )
+            > 0
+        )
+        if zip_unzip_fusion:
+            expert_unzipped_out = paddle.empty(
+                [num_unzipped_tokens, zipped_out.shape[1]], zipped_out.dtype
+            )
+
+        # 1. 公共预处理：unzip → record_stream → quant
+        (
+            use_fp8_dispatch_a2a,
+            num_experts,
+            num_zipped_tokens,
+            hidden_size,
+            unzipped_tokens,
+            zipped_expertwise_rowmap,
+            unzipped_probs,
+            unzipped_scale,
+            hs_2d_dispatched_fp8,
+            hs_2d_dispatched_scale,
+        ) = self._prepare_forward(
+            hs_2d_dispatched,
+            dispatched_indices,
+            dispatched_probs,
+            fill_output=zip_unzip_fusion,
+        )
+
+        # 2. subbatch planning
+        # 分配 n3 的累加 buffer（如需）
+        if zip_unzip_fusion or num_zipped_tokens == 0:
+            output = paddle.empty([0, hidden_size], dtype=paddle.float32)
+        else:
+            # 由于 unzip 必须整专家进行，需要预留 n2 空间，
+            # 若不重计算，则需要预留所有专家的 n2
+            if self.recompute_moe_premute:
+                unzipped_tokens_placeholder = paddle.empty(
+                    [max(self.padding_token_per_experts), hidden_size],
+                    dtype=unzipped_tokens.dtype,
+                )
+            else:
+                unzipped_tokens_placeholder = [
+                    paddle.empty(
+                        [num_tokens, hidden_size],
+                        dtype=unzipped_tokens.dtype,
+                    )
+                    for num_tokens in self.padding_token_per_experts
+                ]
+
+            # 当 zip 不是一次性完成时，需要为 n3 分配更高精度的累加 buffer
+            n3_subbatch_rows = find_max_sequence_subbatch_size(
+                feature_size=hidden_size * 4, length=num_zipped_tokens
+            )
+            n3_subbatch_rows = max(
+                n3_subbatch_rows, self.min_auto_subbatch_rows
+            )
+            output = [
+                paddle.zeros(
+                    [
+                        min(n3_subbatch_rows, num_zipped_tokens - idx),
+                        hidden_size,
+                    ],
+                    dtype=paddle.float32,
+                )
+                for idx in range(0, num_zipped_tokens, n3_subbatch_rows)
+            ]
+
+        # 在专家计算过程中 n3 可以暂时释放，因为 n3 和专家计算的中间变量的生命周期不重叠
+        del zipped_out
+
+        # 找到最大的 subbatch_rows
+        # 只需考虑 o1 和 o2，因为 o3 可复用 o1 或预分配 buffer
+        subbatch_rows = (
+            find_max_concurrent_subbatch_size(
+                [FP8_ALIGN * hidden_size * 2, FP8_ALIGN * hidden_size // 2],
+                upper=self.token_offsets[-1] // FP8_ALIGN,
+            )
+            * FP8_ALIGN
+        )
+        subbatch_rows = max(subbatch_rows, self.min_auto_subbatch_rows)
+        # 3. experts
+        fwd_path = "unknown"
+        if (
+            self.moe_expert_fusion
+            and zip_unzip_fusion
+            and subbatch_rows >= self.token_offsets[-1]
+        ):
+            fwd_path = "group_gemm"
+            # 3a) 显存充足, subbatch_rows 大于总 token 数时，直接用 group_gemm 一次计算所有专家
+            self.experts_group_gemm_node.forward(
+                unzipped_tokens,
+                unzipped_probs,
+                self.padding_token_per_experts,
+                self.tokens_per_expert,
+                output=expert_unzipped_out,
+                scale=unzipped_scale,
+            )
+        else:
+            fwd_path = "per_expert"
+            # 3b) 显存不足或非 fusion 模式，回退到 expert_fusion=False, 逐专家处理
+            if self.moe_expert_fusion:
+                self.fallback_to_no_expert_fusion()
+
+            for expert_id, tokens_per_expert in enumerate(
+                self.tokens_per_expert
+            ):
+                gemm_node = self.experts_group_gemm_node[expert_id]
+                start_idx, end_idx = (
+                    self.token_offsets[expert_id],
+                    self.token_offsets[expert_id + 1],
+                )
+                expert_unzipped_idx = paddle.empty(
+                    [tokens_per_expert, 0], dtype=paddle.int64
+                )
+                tmp_unzipped_probs = unzipped_probs[start_idx:end_idx]
+                tmp_expert_unzipped_out = None
+
+                # 如果不切 unzip，则专家输入直接通过切片引用；否则每个专家都要执行一次 unzip (gather)
+                if zip_unzip_fusion:
+                    self.subbatch_prepare_gemm_node(
+                        (
+                            unzipped_tokens[start_idx:end_idx],
+                            unzipped_scale[start_idx:end_idx],
+                        ),
+                        expert_id,
+                    )
+                    tmp_expert_unzipped_out = expert_unzipped_out[
+                        start_idx:end_idx
+                    ]
+                else:
+                    # 释放 placeholder，为实际 n2 buffer 腾出空间
+                    if self.recompute_moe_premute:
+                        unzipped_tokens_placeholder = None
+                    else:
+                        unzipped_tokens_placeholder[expert_id] = None
+                    expert_unzipped_idx = (
+                        self.subbatch_unzip_and_prepare_gemm_node(
+                            (hs_2d_dispatched_fp8, hs_2d_dispatched_scale),
+                            zipped_expertwise_rowmap,
+                            expert_id,
+                        )
+                    )
+
+                # 遍历当前专家的每个 subbatch（可能只有一个subbatch）
+
+                with self.slice_fp8_weight(expert_id):
+                    for sb_start in range(0, tokens_per_expert, subbatch_rows):
+                        sb_end = min(
+                            sb_start + subbatch_rows, tokens_per_expert
+                        )
+                        if sb_start == 0 and sb_end == tokens_per_expert:
+                            sb_start = sb_end = None
+                        output = self.gemm_forward_subbatch(
+                            expert_id,
+                            tmp_unzipped_probs,
+                            expert_unzipped_idx,
+                            output,
+                            num_zipped_tokens,
+                            unzipped_out=tmp_expert_unzipped_out,
+                            start_idx=sb_start,
+                            end_idx=sb_end,
+                        )
+                if self.recompute_moe_premute:
+                    gemm_node.input_fp8 = None
+                    gemm_node.input_scale = None
+                    gemm_node.input = None
+
+                del expert_unzipped_idx
+                del tmp_expert_unzipped_out, tmp_unzipped_probs
+
+        # 4. zip
+        # 如果不切 zip，则在这里做一次完整的 zip；否则 zip 已经在前面分批完成，这里只需合并结果
+        if zip_unzip_fusion:
+            output = self.zip_node.forward(
+                expert_unzipped_out,
+                zipped_expertwise_rowmap,
+                self.dispatched_indices,
+                unzipped_probs,
+                total_zipped_tokens=num_zipped_tokens,
+                num_experts=num_experts,
+            )
+        else:
+            output_dtype = (
+                paddle.bfloat16
+                if use_fp8_dispatch_a2a
+                else hs_2d_dispatched.dtype
+            )
+            output = merge_subbatch_cast(output, output_dtype)
+
+        self.dispatched_probs = dispatched_probs
+        output.stop_gradient = False
+
+        if self.moe_subbatch_diag:
+            logger.info(
+                "[AutoSubbatch FWD] path=%s, total_tokens=%d, "
+                "subbatch_rows=%d, zip_unzip_fusion=%s",
+                fwd_path,
+                num_unzipped_tokens,
+                subbatch_rows,
+                zip_unzip_fusion,
+            )
+
+        return output
+
+    # ==================== backward methods ====================
+
+    def backward_auto_subbatch(self, hidden_states_out_grad):
+        """
+        AutoSubbatch 反向: 与前向对称, 根据 VMM 空闲显存动态决定 subbatch 大小.
+
+        背景
+        ----
+        MoE 反向 = zip_grad(梯度按专家展开) -> expert_bwd -> unzip_grad(合并回原序).
+        与前向对称, 但反向的显存峰值更大 (需要重算前向中间变量 + 存储梯度),
+        因此更需要 subbatch 切分.
+
+        两个关键决策 (与前向相同)
+        -----------------------
+        1) zip_unzip_fusion: 能否一次性分配展开后的完整梯度 buffer?
+           - True:  分配 do3[N,H], zip_grad/unzip_grad 各做一次
+           - False: 显存不够, 每个专家单独 gather/scatter_add
+        2) subbatch_rows: 由 VMM 空闲 / 反向峰值决定.
+           峰值与 swiglu_bwd 是否 inplace 相关:
+             inplace:     o1/do1 共享(2H) + o2_s(H) + n2_s(2H) = 5H
+             out-of-place: o1(2H) + do1(2H) + o2_s(H) + n2_s(2H) = 7H
+
+        流程 (S=seq_len, H=hidden_size, N=unzipped_tokens)
+        --------------------------------------------------
+        0. 判断 zip_unzip_fusion
+        1. zip_grad: dn3[S,H] -> do3[N,H] (梯度按专家展开)
+           如果 recompute_premute + fusion, 同时重算前向的 n2
+        2. subbatch planning:
+           - 如果 not zip_unzip_fusion: 预分配 do3/n2 placeholder 占位,
+             分配 dn1 累加 buffer
+           - 查询 VMM 空闲 -> 算出 subbatch_rows -> 释放 placeholder
+        3. expert_bwd:
+           a) group_gemm: subbatch_rows >= N -> 一次完成
+           b) per_expert: 逐专家循环, 每个专家按 subbatch_rows 切片:
+              do2=do3@W2, do1=swiglu_bwd(o1), dW2=o2^T@do3, dW1=n2^T@do1, dn2=do1@W1
+              not zip_unzip_fusion 时: gather do3 -> 算完 -> scatter_add 回 dn1
+        4. unzip_grad: 合并梯度回原序 -> dn1[S,H]
+           释放 dn3 物理页给 dn1 复用
+        """
+        num_unzipped_tokens = self.token_offsets[-1]
+        num_zipped_tokens = hidden_states_out_grad.shape[0]
+        hidden_size = hidden_states_out_grad.shape[-1]
+        output = paddle.empty([0, hidden_size], dtype=paddle.float32)
+        probs_grad_list = []
+
+        # 如果 do3 和 n2 (如果recompute) 能同时分配，则可以不用切 zip_grad/unzip，避免重复读写
+        zip_unzip_features = [num_unzipped_tokens * hidden_size * 2]
+        if self.recompute_moe_premute:
+            zip_unzip_features.append(num_unzipped_tokens * hidden_size)
+        zip_unzip_fusion = (
+            find_max_concurrent_subbatch_size(zip_unzip_features, upper=1) > 0
+        )
+
+        # 1. zip_grad and unzip (recompute)
+        unzipped_grad = self.zip_node.backward(
+            hidden_states_out_grad,
+            self.dispatched_indices,
+            self.dispatched_probs,
+            top_k=self.router_topk,
+            num_experts=len(self.tokens_per_expert),
+            tokens_per_expert=self.tokens_per_expert,
+            fill_output=zip_unzip_fusion,
+        )
+        if self.recompute_moe_premute and zip_unzip_fusion:
+            (unzipped_tokens, _, _, unzipped_scale) = self.unzip_node.forward(
+                (self.hs_2d_dispatched_fp8, self.hs_2d_dispatched_scale),
+                self.dispatched_indices,
+                self.dispatched_probs,
+                topk=self.router_topk,
+                num_experts=len(self.tokens_per_expert),
+                tokens_per_expert=self.tokens_per_expert,
+                fill_output=True,
+            )
+
+        # 2. subbatch planning
+        # 分配 dn1 的累加 buffer（如需）
+        if not zip_unzip_fusion:
+            # 由于 zip_grad/unzip 不切专家，我们需要保证最大的专家的 unzipped_grad/unzipped_tokens 能够完整分配，
+            # 所以我们先分配两者，再计算 subbatch_rows，避免 subbatch_rows 过大导致两者分配不出来
+            max_unzipped_tokens_per_expert = (
+                (max(self.tokens_per_expert) + FP8_ALIGN - 1)
+                // FP8_ALIGN
+                * FP8_ALIGN
+            )
+            unzipped_grad_placeholder = paddle.empty(
+                [max_unzipped_tokens_per_expert, hidden_size],
+                dtype=hidden_states_out_grad.dtype,
+            )
+            if self.recompute_moe_premute:
+                unzipped_tokens_placeholder = paddle.empty(
+                    [max_unzipped_tokens_per_expert, hidden_size],
+                    dtype=self.hs_2d_dispatched_fp8.dtype,
+                )
+
+            # 当 unzip_grad 不是一次性完成时，需要为 dn1 分配更高精度的的累加 buffer
+            dn1_subbatch_rows = find_max_sequence_subbatch_size(
+                feature_size=hidden_size * 4, length=num_zipped_tokens
+            )
+            dn1_subbatch_rows = max(
+                dn1_subbatch_rows, self.min_auto_subbatch_rows
+            )
+            output = [
+                paddle.zeros(
+                    [
+                        min(dn1_subbatch_rows, num_zipped_tokens - idx),
+                        hidden_size,
+                    ],
+                    dtype=paddle.float32,
+                )
+                for idx in range(0, num_zipped_tokens, dn1_subbatch_rows)
+            ]
+            if num_zipped_tokens == 0:
+                output = paddle.empty([0, hidden_size], dtype=paddle.float32)
+
+        # 找到最大的 subbatch_rows
+        # 反向需要考虑3个临时变量：o1、do2、n2_s；其他：n2、do3 已分配，do1、o2_s、dn2 是原地复用
+        # o1与swiglu_bwd 是否 inplace相关：
+        #
+        # inplace（USE_INPLACE_SWIGLU_BWD=True：
+        #   do1 复用 o1 buffer，峰值在 dw1（D 点）：
+        #   do1/o1(2H) + o2_s(H) + n2_s(2H) = 5H
+        #   → feature_sizes = [2H, H, 2H]
+        #
+        # out-of-place（USE_INPLACE_SWIGLU_BWD=False）：
+        #   do1 是独立新 buffer，o1 延迟释放，峰值在 dw1（D 点）：
+        #   o1(2H) + do1(2H) + o2_s(H) + n2_s(2H) = 7H
+        #   → feature_sizes = [2H, 2H, H, 2H]
+        if USE_INPLACE_SWIGLU_BWD:
+            bwd_feature_sizes = [
+                FP8_ALIGN * hidden_size * 2,  # o1/do1（inplace 共享）
+                FP8_ALIGN * hidden_size,  # o2_s
+                FP8_ALIGN * hidden_size * 2,  # n2_s
+            ]
+        else:
+            bwd_feature_sizes = [
+                FP8_ALIGN * hidden_size * 2,  # o1
+                FP8_ALIGN * hidden_size * 2,  # do1（out-of-place 独立 buffer）
+                FP8_ALIGN * hidden_size,  # o2_s
+                FP8_ALIGN * hidden_size * 2,  # n2_s
+            ]
+        subbatch_rows = (
+            find_max_concurrent_subbatch_size(
+                bwd_feature_sizes,
+                upper=self.token_offsets[-1] // FP8_ALIGN,
+            )
+            * FP8_ALIGN
+        )
+        subbatch_rows = max(subbatch_rows, self.min_auto_subbatch_rows)
+
+        # 确定 subbatch_rows 后，就可以把刚才占位的显存释放了
+        if not zip_unzip_fusion:
+            del unzipped_grad_placeholder
+            if self.recompute_moe_premute:
+                del unzipped_tokens_placeholder
+
+        # 3. experts
+        bwd_path = "unknown"
+        # 3a) 如果前向走了 group_gemm，且当前显存也足够，则反向也使用 group_gemm
+        if self.moe_expert_fusion:
+            if zip_unzip_fusion and subbatch_rows >= self.token_offsets[-1]:
+                bwd_path = "group_gemm"
+                unzipped_grad, unzipped_probs_grad = (
+                    self.experts_group_gemm_node.backward(
+                        unzipped_grad, self.unzipped_probs
+                    )
+                )
+                probs_grad_list.append(unzipped_probs_grad)
+            else:
+                # 显存不够做 group_gemm，回退到回退到 expert_fusion=False，逐专家处理
+                bwd_path = "per_expert (fallback)"
+                self.fallback_to_no_expert_fusion()
+
+        # 3b) 逐专家处理
+        if not self.moe_expert_fusion:
+            if bwd_path == "unknown":
+                bwd_path = "per_expert"
+            for expert_id, tokens_per_expert in enumerate(
+                self.tokens_per_expert
+            ):
+                gemm_node = self.experts_group_gemm_node[expert_id]
+                start_idx, end_idx = (
+                    self.token_offsets[expert_id],
+                    self.token_offsets[expert_id + 1],
+                )
+
+                gemm_node.moe_subbatch_token_num_after_dispatch = (
+                    subbatch_rows if subbatch_rows < tokens_per_expert else None
+                )
+
+                # 如果前面 zip_grad 一次做完了，这里只需进行切片；否则需要做一次专家级的 zip_grad
+                if zip_unzip_fusion:
+                    expert_unzipped_grad = unzipped_grad[start_idx:end_idx]
+                    if self.recompute_moe_premute:
+                        self.subbatch_prepare_gemm_node(
+                            (
+                                unzipped_tokens[start_idx:end_idx],
+                                unzipped_scale[start_idx:end_idx],
+                            ),
+                            expert_id,
+                        )
+                else:
+                    (
+                        expert_unzipped_grad,
+                        _,
+                        unzipped_grad_idx,
+                    ) = paddlefleet.ops.tokens_unzip_gather(
+                        hidden_states_out_grad,
+                        None,
+                        self.unzip_node.zipped_expertwise_rowmap,
+                        expert_id=expert_id,
+                        tokens_per_expert=self.tokens_per_expert,
+                        padding_multiplex=FP8_ALIGN,
+                    )
+                    if self.recompute_moe_premute:
+                        self.subbatch_unzip_and_prepare_gemm_node(
+                            (
+                                self.hs_2d_dispatched_fp8,
+                                self.hs_2d_dispatched_scale,
+                            ),
+                            self.unzip_node.zipped_expertwise_rowmap,
+                            expert_id,
+                        )
+
+                # 进行单个专家的 backward，注意 expert_unzipped_grad 是原地修改
+                with self.slice_fp8_weight(expert_id):
+                    expert_unzipped_grad, unzipped_probs_grad = (
+                        gemm_node.backward(
+                            expert_unzipped_grad,
+                            self.unzipped_probs[start_idx:end_idx],
+                        )
+                    )
+
+                # 如果 unzip_grad 不是一次做完，则需要每个专家分别做一次 unzip_grad (scatter_add)
+                if not zip_unzip_fusion:
+                    output = tokens_zip_unique_add_with_subbatch(
+                        output,
+                        expert_unzipped_grad,
+                        unzipped_grad_idx,
+                        zipped_rows=num_zipped_tokens,
+                        subbatch_rows=(
+                            None
+                            if isinstance(output, paddle.Tensor)
+                            else output[0].shape[0]
+                        ),
+                    )
+                    del unzipped_grad_idx
+
+                if len(unzipped_probs_grad.shape) > 1:
+                    unzipped_probs_grad = unzipped_probs_grad.squeeze(-1)
+                assert len(unzipped_probs_grad.shape) == 1, (
+                    unzipped_probs_grad.shape
+                )
+                probs_grad_list.append(unzipped_probs_grad)
+
+                # gemm_node.moe_subbatch_token_num_after_dispatch = (
+                #     original_subbatch_rows
+                # )
+
+                del expert_unzipped_grad
+
+        # 4. unzip_grad
+        hidden_states_out_grad._clear_to_zero_allocation()  # dn1 复用 dn3
+        if self.recompute_moe_premute and zip_unzip_fusion:
+            del unzipped_tokens, unzipped_scale
+
+        # 如果不切 unzip_grad，则在这里做一次完整的 unzip_grad；否则 unzip_grad 已经在前面分批完成，这里只需合并结果
+        if zip_unzip_fusion:
+            probs_grad = paddle.concat(probs_grad_list)
+            del probs_grad_list
+            hs_fp8_dispatched_grad, dispatched_probs_grad = (
+                self.unzip_node.backward(
+                    unzipped_grad,
+                    hidden_states_out_grad.shape,
+                    probs_grad,
+                    self.dispatched_indices,
+                    num_experts=len(self.tokens_per_expert),
+                )
+            )
+        else:
+            hs_fp8_dispatched_grad = merge_subbatch_cast(
+                output, hidden_states_out_grad.dtype
+            )
+            del output
+            dispatched_probs_grad = paddlefleet.ops.tokens_zip_prob(
+                probs_grad_list,
+                self.unzip_node.zipped_expertwise_rowmap,
+                self.dispatched_indices,
+            )
+
+        if self.moe_subbatch_diag:
+            logger.info(
+                "[AutoSubbatch BWD] path=%s, total_tokens=%d, "
+                "subbatch_rows=%d, zip_unzip_fusion=%s",
+                bwd_path,
+                num_unzipped_tokens,
+                subbatch_rows,
+                zip_unzip_fusion,
+            )
+
+        return hs_fp8_dispatched_grad, dispatched_probs_grad
+
     @paddle.no_grad()
     def forward(self, hs_2d_dispatched, dispatched_indices, dispatched_probs):
         """
@@ -442,51 +1503,106 @@ class MlpNode:
             Tensor: 经过前向传播计算后的输出数据。
 
         """
-        use_fp8_dispatch_a2a = isinstance(hs_2d_dispatched, tuple)
+        if self.use_auto_subbatch:
+            return self.forward_auto_subbatch(
+                hs_2d_dispatched, dispatched_indices, dispatched_probs
+            )
 
-        num_experts = len(self.tokens_per_expert)
-        # 1 unzip
-        self.dispatched_indices = dispatched_indices.to(paddle.int32)
+        # 1. 公共预处理：unzip → record_stream → quant
         (
+            use_fp8_dispatch_a2a,
+            num_experts,
+            total_zipped_tokens,
+            hidden_size,
             unzipped_tokens,
             zipped_expertwise_rowmap,
             unzipped_probs,
             unzipped_scale,
-        ) = self.unzip_node.forward(
+            hs_2d_dispatched_fp8,
+            hs_2d_dispatched_scale,
+        ) = self._prepare_forward(
             hs_2d_dispatched,
-            self.dispatched_indices,
+            dispatched_indices,
             dispatched_probs,
-            topk=self.router_topk,
-            num_experts=num_experts,
-            tokens_per_expert=self.tokens_per_expert,
             fill_output=self.moe_expert_fusion,
         )
-        self.unzipped_probs = unzipped_probs
-        if not self.moe_expert_fusion:
-            unzipped_tokens = None
-
-        if use_fp8_dispatch_a2a:
-            total_zipped_tokens = hs_2d_dispatched[0].shape[0]
-            hidden_size = hs_2d_dispatched[0].shape[-1]
-            hs_2d_dispatched[0]._record_stream()
-            hs_2d_dispatched[1]._record_stream()
-        else:
-            total_zipped_tokens = hs_2d_dispatched.shape[0]
-            hidden_size = hs_2d_dispatched.shape[-1]
-            hs_2d_dispatched._record_stream()
-        dispatched_indices._record_stream()
-        dispatched_probs._record_stream()
-        if self.dispatched_indices is not dispatched_indices:
-            dispatched_indices._clear_to_zero_allocation()
 
         if not self.moe_expert_fusion:
-            raise NotImplementedError(
-                "moe_expert_fusion = False is not supported currently"
+            # 路径 2：逐专家 gather → 逐专家 GEMM → scatter-add
+            expected_output_dtype = (
+                paddle.bfloat16
+                if use_fp8_dispatch_a2a
+                else hs_2d_dispatched.dtype
             )
+            output = paddle.empty([0, hidden_size], dtype=paddle.float32)
+
+            for expert_id, tokens_per_expert in enumerate(
+                self.tokens_per_expert
+            ):
+                expert_unzipped_idx = self.subbatch_unzip_and_prepare_gemm_node(
+                    (hs_2d_dispatched_fp8, hs_2d_dispatched_scale),
+                    zipped_expertwise_rowmap,
+                    expert_id,
+                )
+
+                if (
+                    self.moe_subbatch_token_num_after_dispatch is not None
+                    and self.moe_subbatch_token_num_after_dispatch > 0
+                    and tokens_per_expert
+                    > self.moe_subbatch_token_num_after_dispatch
+                ):
+                    num_subbatches = (
+                        tokens_per_expert
+                        + self.moe_subbatch_token_num_after_dispatch
+                        - 1
+                    ) // self.moe_subbatch_token_num_after_dispatch
+                    for i in range(num_subbatches):
+                        sb_start = (
+                            i * self.moe_subbatch_token_num_after_dispatch
+                        )
+                        sb_end = min(
+                            sb_start
+                            + self.moe_subbatch_token_num_after_dispatch,
+                            tokens_per_expert,
+                        )
+                        output = self.gemm_forward_subbatch(
+                            expert_id,
+                            unzipped_probs[
+                                self.token_offsets[
+                                    expert_id
+                                ] : self.token_offsets[expert_id + 1]
+                            ],
+                            expert_unzipped_idx,
+                            output,
+                            total_zipped_tokens,
+                            start_idx=sb_start,
+                            end_idx=sb_end,
+                        )
+                    # nparts>1 的 expert 全部 subbatch 跑完后，释放 input_fp8
+                    if self.recompute_moe_premute:
+                        gemm_node = self.experts_group_gemm_node[
+                            self._gemm_node_id_offset + expert_id
+                        ]
+                        gemm_node.input_fp8 = None
+                        gemm_node.input_scale = None
+                else:
+                    output = self.gemm_forward_subbatch(
+                        expert_id,
+                        unzipped_probs[
+                            self.token_offsets[expert_id] : self.token_offsets[
+                                expert_id + 1
+                            ]
+                        ],
+                        expert_unzipped_idx,
+                        output,
+                        total_zipped_tokens,
+                    )
+
+            expert_out = merge_subbatch_cast(output, expected_output_dtype)
         else:
+            # 路径 1：一次性 group GEMM → zip
             if not use_fp8_dispatch_a2a:
                 hs_2d_dispatched._clear_to_zero_allocation()
-            # 2 experts
             expert_out = self.experts_group_gemm_node.forward(
                 unzipped_tokens,
                 unzipped_probs,
@@ -496,7 +1612,6 @@ class MlpNode:
                 scale=unzipped_scale,  # maybe None
             )
 
-            # 3 zip
             expert_out = expert_out.reshape([-1, expert_out.shape[-1]])
 
             expert_out = self.zip_node.forward(
@@ -510,6 +1625,14 @@ class MlpNode:
 
         self.dispatched_probs = dispatched_probs
         expert_out.stop_gradient = False
+
+        if self.moe_subbatch_diag:
+            fwd_path = "group_gemm" if self.moe_expert_fusion else "per_expert"
+            logger.info(
+                "[Subbatch FWD] path=%s, total_tokens=%d",
+                fwd_path,
+                total_zipped_tokens,
+            )
 
         return expert_out
 
@@ -527,6 +1650,9 @@ class MlpNode:
                 - dispatched_probs_grad (Tensor): 分发概率梯度。
 
         """
+        if self.use_auto_subbatch:
+            return self.backward_auto_subbatch(hidden_states_out_grad)
+
         # zip_grad
         hidden_states_out_grad_shape = hidden_states_out_grad.shape
         unzipped_grad = self.zip_node.backward(
@@ -541,8 +1667,74 @@ class MlpNode:
         hidden_states_out_grad._record_stream()
 
         if not self.moe_expert_fusion:
-            raise NotImplementedError(
-                "moe_expert_fusion = False is not supported currently"
+            # Per-expert backward path (non-fusion)
+            output = paddle.empty(
+                [0, hidden_states_out_grad_shape[-1]], dtype=paddle.float32
+            )
+            probs_grad_list = []
+            for expert_id, tokens_per_expert in enumerate(
+                self.tokens_per_expert
+            ):
+                (
+                    expert_unzipped_grad,
+                    _,
+                    unzipped_grad_idx,
+                ) = paddlefleet.ops.tokens_unzip_gather(
+                    hidden_states_out_grad,
+                    None,
+                    self.unzip_node.zipped_expertwise_rowmap,
+                    expert_id=expert_id,
+                    tokens_per_expert=self.tokens_per_expert,
+                    padding_multiplex=FP8_ALIGN,
+                )
+
+                if self.recompute_moe_premute:
+                    self.subbatch_unzip_and_prepare_gemm_node(
+                        (
+                            self.hs_2d_dispatched_fp8,
+                            self.hs_2d_dispatched_scale,
+                        ),
+                        self.unzip_node.zipped_expertwise_rowmap,
+                        expert_id,
+                    )
+
+                _gn = self.experts_group_gemm_node[
+                    self._gemm_node_id_offset + expert_id
+                ]
+                expert_unzipped_grad, unzipped_probs_grad = _gn.backward(
+                    expert_unzipped_grad,
+                    self.unzipped_probs[
+                        self.token_offsets[expert_id] : self.token_offsets[
+                            expert_id + 1
+                        ]
+                    ],
+                )
+
+                output = tokens_zip_unique_add_with_subbatch(
+                    output,
+                    expert_unzipped_grad,
+                    unzipped_grad_idx,
+                    zipped_rows=hidden_states_out_grad_shape[0],
+                    subbatch_rows=self.moe_subbatch_token_num_after_dispatch,
+                )
+                del unzipped_grad_idx
+
+                if len(unzipped_probs_grad.shape) > 1:
+                    unzipped_probs_grad = unzipped_probs_grad.squeeze(-1)
+                probs_grad_list.append(unzipped_probs_grad)
+
+                del expert_unzipped_grad
+
+            hidden_states_out_grad._clear_to_zero_allocation()
+            hs_fp8_dispatched_grad = merge_subbatch_cast(
+                output, hidden_states_out_grad.dtype
+            )
+            del output
+
+            dispatched_probs_grad = paddlefleet.ops.tokens_zip_prob(
+                probs_grad_list,
+                self.unzip_node.zipped_expertwise_rowmap,
+                self.dispatched_indices,
             )
         else:
             hidden_states_out_grad._clear_to_zero_allocation()
@@ -563,6 +1755,15 @@ class MlpNode:
                 )
             )
         self.reset_state()
+
+        if self.moe_subbatch_diag:
+            bwd_path = "group_gemm" if self.moe_expert_fusion else "per_expert"
+            logger.info(
+                "[Subbatch BWD] path=%s, total_tokens=%d",
+                bwd_path,
+                hs_fp8_dispatched_grad.shape[0],
+            )
+
         return hs_fp8_dispatched_grad, dispatched_probs_grad
 
 
@@ -590,6 +1791,8 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         use_bf16_gemm_weight_grad=False,
         is_first_fwd=False,
         fp8_dispatched_handle=None,
+        use_auto_subbatch=False,
+        moe_subbatch_diag=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -615,6 +1818,8 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             use_fp8_mlp=use_fp8_mlp,
             moe_deep_gemm=moe_deep_gemm,
             moe_grouped_gemm=moe_grouped_gemm,
+            use_auto_subbatch=use_auto_subbatch,
+            moe_subbatch_diag=moe_subbatch_diag,
         )
 
         if fp8_dispatched_handle is not None:
@@ -628,6 +1833,9 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
 
         if is_first_fwd:
             ctx.node.release_mem()
+
+        # Expose node on moe_layer for diagnostic access
+        custom_map._fusion_node = ctx.node
 
         cached_tensors = ctx.node.cached_tensors()
         ctx.save_for_backward(cached_tensors)

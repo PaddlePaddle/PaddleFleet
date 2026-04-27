@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rrattn"
+version = "0.0.1"
+description = "Paddle implementation of RRAttention."
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["rrattn*"]

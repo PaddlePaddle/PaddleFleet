@@ -442,3 +442,28 @@ GPU_SPECIFICATIONS_REGISTRATION = [
         FP8_TFLOPS=5000,
     ),
 ]
+
+
+def fill_feature(input_embeds, target_index, value):
+    """
+    Fill positions in `input_embeds` specified by `target_index` with the given `value`.
+
+    Padding-Token embedding will be set to `value` to avoid gradient propagation updates.
+
+    Args:
+        input_embeds (Tensor): Input feature tensor of shape [..., D].
+        target_index (Tensor): Bool index tensor specifying positions to fill.
+        value (float): Scalar value to fill with.
+
+    Returns:
+        Tensor: Feature tensor with specified positions filled by `value`,
+                same shape as `input_embeds`.
+    """
+    input_embeds_shape = input_embeds.shape
+    input_embeds = input_embeds.reshape([-1, input_embeds.shape[-1]])
+    indices = paddle.nonzero(target_index.flatten()).flatten()
+    assert not isinstance(value, paddle.Tensor), type(value)
+    if input_embeds.size > 0 and indices.size > 0:
+        input_embeds[indices] = value
+    input_embeds = input_embeds.reshape(input_embeds_shape)
+    return input_embeds

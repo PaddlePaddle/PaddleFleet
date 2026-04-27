@@ -19,8 +19,17 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import random
 
+import numpy as np
 import paddle
+from paddle.distributed.fleet.layers.mpu.random import get_rng_state_tracker
+from paddle.distributed.fleet.recompute.recompute import (
+    custom_state_manager,
+    detach_variable,
+    switch_rng_state_tracker,
+)
+from paddle.framework import core
 
 from ..parallel_state import (
     get_expert_model_parallel_rank,
@@ -395,58 +404,174 @@ def checkpoint(function, *args, **kwargs):
     pass
 
 
-class CheckpointWithoutOutputFunction(paddle.autograd.Function):
-    """
-    Checkpoint Function Helper for CheckpointWithoutOutput.
-    Save context for recompute.
-    """
+@contextlib.contextmanager
+def enable_share_grad_holder():
+    """Temporarily enable grad-holder sharing instead of copying the grad."""
+    flag = "FLAGS_share_tensor_for_grad_tensor_holder"
+    old_value = paddle.get_flags([flag])[flag]
+    if not old_value:
+        paddle.set_flags({flag: True})
+    try:
+        yield
+    finally:
+        if not old_value:
+            paddle.set_flags({flag: False})
+
+
+class RecomputeWithoutOutputFunction(paddle.autograd.PyLayer):
+    """Autograd wrapper for RecomputeWithoutOutput."""
 
     @staticmethod
-    def forward(ctx, run_function, checkpoint_without_output_obj, *args):
-        """Forward pass."""
-        pass
+    def forward(ctx, run_function, owner, *args):
+        """forward"""
+        with paddle.no_grad():
+            outputs = run_function(*args)
+        ctx.save_for_backward(*detach_variable(args))
+        owner.ctx = ctx
+        return outputs
 
     @staticmethod
-    def backward(ctx, *args):
-        """Backward pass."""
-        pass
+    def backward(ctx, *output_grads):
+        """backward"""
+        inputs = ctx.inputs
+        outputs = ctx.outputs
+        share_grad_holder = (
+            enable_share_grad_holder()
+            if ctx.share_grad_holder
+            else contextlib.nullcontext()
+        )
+        with paddle.amp.auto_cast(enable=False), share_grad_holder:
+            paddle.autograd.backward(outputs, output_grads)
+        ctx.outputs = None
+        ctx.inputs = None
+        grads = tuple(
+            inp.grad for inp in inputs if isinstance(inp, paddle.Tensor)
+        )
+        return grads
 
 
-class CheckpointWithoutOutput:
-    """
-    Checkpoint a model or part of the model and release the output.
+class RecomputeWithoutOutput:
+    """Manage forward-output discard and backward-time recompute to save memory."""
 
-    For the normal 'checkpoint` function, the outputs of it may be cached by the following
-    operations for its backward computation. However, the output of the checkpointed function is
-    re-generated at recomputation, so the output store is not technically needed. This method can
-    manually discard the output in the forward pass and restore it by recomputation in the
-    backward pass to reduce the memory usage.
-    """
-
-    def __init__(self, fp8=False):
-        self.fp8 = fp8 is not None
+    def __init__(self):
         self.run_function = None
-        self.fwd_cpu_rng_state = None
-        self.fwd_cuda_rng_state = None
-        self.fwd_cuda_rng_state_tracker = None
         self.ctx = None
         self.outputs = None
 
-    def checkpoint(self, run_function, *args):
-        """Checkpoint function."""
-        pass
+    def recompute(
+        self,
+        run_function,
+        *args,
+        preserve_rng_state=True,
+        share_grad_holder=False,
+    ):
+        """
+        Recompute without saving outputs to save memory.
 
-    def _recompute(self, _):
-        """Used as a hook to recompute the output."""
-        pass
+        Args:
+            run_function: The forward function that will be executed again during backward.
+            *args: Positional tensor and non-tensor inputs passed to `run_function`.
+            preserve_rng_state: Whether to preserve RNG states for deterministic recomputation.
+            share_grad_holder: Whether to share the grad holder instead of copying the grad in backward.
+        """
+        self.run_function = run_function
+        self.preserve_rng_state = preserve_rng_state
+
+        if preserve_rng_state:
+            self.fw_rng_state = paddle.get_rng_state()
+            self.fwd_rng_state_tracker = (
+                get_rng_state_tracker().get_states_tracker()
+            )
+            self.fwd_numpy_state = np.random.get_state()
+            self.fwd_random_state = random.getstate()
+
+            if custom_state_manager.custom_get_state_func is None:
+                assert custom_state_manager.custom_set_state_func is None
+                custom_get_state_func = lambda x=None: None
+                custom_set_state_func = lambda x=None: None
+            else:
+                custom_get_state_func = (
+                    custom_state_manager.custom_get_state_func
+                )
+                custom_set_state_func = (
+                    custom_state_manager.custom_set_state_func
+                )
+
+            self.fwd_custom_state = custom_get_state_func()
+            self.custom_get_state_func = custom_get_state_func
+            self.custom_set_state_func = custom_set_state_func
+
+        tracer = paddle.base.framework._dygraph_tracer()
+        self.is_fw_autocast = (
+            False if tracer._amp_level == core.AmpLevel.O0 else True
+        )
+        if tracer._amp_level == core.AmpLevel.O2:
+            self.amp_level = "O2"
+        elif tracer._amp_level in (core.AmpLevel.O1, core.AmpLevel.O0):
+            self.amp_level = "O1"
+        else:
+            raise ValueError(f"unsupported amp level: {tracer._amp_level}")
+
+        if tracer._amp_dtype == "float16":
+            self.amp_dtype = "float16"
+        elif tracer._amp_dtype in ("bfloat16", "float32"):
+            self.amp_dtype = "bfloat16"
+        else:
+            raise ValueError(f"unsupported amp dtype: {tracer._amp_dtype}")
+
+        self.amp_white_list, self.amp_black_list = tracer._get_amp_op_list()
+
+        outputs = RecomputeWithoutOutputFunction.apply(
+            run_function, self, *args
+        )
+        self.outputs = outputs if isinstance(outputs, tuple) else (outputs,)
+        self.ctx.share_grad_holder = share_grad_holder
+        return outputs
+
+    def _recompute(self, grad):
+        """Re-run the saved forward under restored states when the backward hook is triggered."""
+        if self.preserve_rng_state:
+            rng_ctx = switch_rng_state_tracker(
+                self.fw_rng_state,
+                self.fwd_rng_state_tracker,
+                self.fwd_numpy_state,
+                self.fwd_random_state,
+                self.fwd_custom_state,
+                self.custom_get_state_func,
+                self.custom_set_state_func,
+            )
+        else:
+            rng_ctx = contextlib.nullcontext()
+
+        amp_ctx = paddle.amp.auto_cast(
+            enable=self.is_fw_autocast,
+            custom_white_list=self.amp_white_list,
+            custom_black_list=self.amp_black_list,
+            level=self.amp_level,
+            dtype=self.amp_dtype,
+        )
+
+        inputs = detach_variable(self.ctx.saved_tensor())
+
+        with rng_ctx, amp_ctx:
+            outputs = self.run_function(*inputs)
+
+        if isinstance(outputs, paddle.Tensor):
+            outputs = (outputs,)
+
+        for stale_output, recomputed_output in zip(self.outputs, outputs):
+            recomputed_output._share_buffer_to(stale_output)
+
+        self.ctx.inputs = inputs
+        self.ctx.outputs = outputs
+        self.outputs = None
+        self.ctx = None
+        self.run_function = None
 
     def discard_output_and_register_recompute(self, hook_tensor):
-        """
-        Release the output tensor storages and register the recompute function as a grad hook of
-        the hook_tensor.
+        """Clear saved output data and register the recomputation hook on the target tensor."""
+        for output in self.outputs:
+            output._clear_data()
 
-        Note: the caller should make sure that the output tensors are no longer used
-        in the forward pass and the gradient of the hook_tensor is computed before the recomputed
-        tensors are used.
-        """
-        pass
+        if not hook_tensor.stop_gradient:
+            hook_tensor.register_hook(self._recompute)

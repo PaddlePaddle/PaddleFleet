@@ -214,14 +214,18 @@ class TestFusionLayerUtils(unittest.TestCase):
                 moe_grouped_gemm=False,
             )
 
-    def test_mlp_node_non_fusion_not_implemented(self):
-        """Test MlpNode with moe_expert_fusion=False raises."""
+    def test_mlp_node_non_fusion_init(self):
+        """Test MlpNode with moe_expert_fusion=False initializes correctly."""
         from paddlefleet.transformer.moe.fusion_layer_utils import MlpNode
 
         mock_custom_map = _make_mock_custom_map()
 
-        with self.assertRaises(NotImplementedError):
-            MlpNode(
+        with patch(
+            "paddlefleet.transformer.moe.fusion_layer_utils.ExpertsGroupGemmContiguousNode"
+        ) as MockGemm:
+            MockGemm.return_value = MagicMock()
+
+            node = MlpNode(
                 mock_custom_map,
                 2,
                 moe_expert_fusion=False,
@@ -229,6 +233,7 @@ class TestFusionLayerUtils(unittest.TestCase):
                 moe_deep_gemm=False,
                 moe_grouped_gemm=False,
             )
+            self.assertIsNotNone(node)
 
     def test_mlp_node_subbatch_assertions(self):
         """Test MlpNode init with subbatch asserts."""

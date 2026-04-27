@@ -34,10 +34,17 @@ from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
+from paddlefleet.models.common.language_loss.language_loss import (
+    MTPLanguageLoss,
+)
 from paddlefleet.models.gpt import GPTModel
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding, GPTEmbeddingSpec
 from paddlefleet.models.gpt.gpt_model import GPTSublayersSpec
-from paddlefleet.models.gpt.lm_head import GPTLMHead
+from paddlefleet.models.gpt.lm_head import (
+    GPTLMHead,
+    GPTMainLMHead,
+    GPTMTPLMHead,
+)
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
@@ -103,10 +110,26 @@ def get_attention_spec(
     """
     assert config is not None, "config must be specified."
     backend = LocalSpecProvider()
+
+    # Standard RMSNorm for general use (MLA, etc.)
     if config.normalization == "RMSNorm":
-        qk_norm = backend.layer_norm(rms_norm=True, for_qk=True)
+        qk_norm_standard = backend.layer_norm(rms_norm=True, for_qk=True)
     else:
-        qk_norm = backend.layer_norm(rms_norm=False, for_qk=True)
+        qk_norm_standard = backend.layer_norm(rms_norm=False, for_qk=True)
+
+    # Triton-optimized RMSNorm only for self_attention QK norm (head_dim=128)
+    # MLA uses larger latent_dim (1536) which exceeds Triton kernel limit (≤1024)
+    use_triton_qk_norm = (
+        attention_layer_type == "self_attention"
+        and config.normalization == "RMSNorm"
+        and getattr(config, "qk_norm_fusion", False)
+    )
+    if use_triton_qk_norm:
+        from paddlefleet.transformer.paddle_norm import WrappedRMSNormTriton
+
+        qk_norm = WrappedRMSNormTriton
+    else:
+        qk_norm = qk_norm_standard
 
     use_qk_norm = getattr(config, "use_qk_norm", False)
     qk_l2_norm = getattr(config, "qk_l2_norm", False)
@@ -159,6 +182,8 @@ def get_attention_spec(
             and getattr(config, "index_n_heads", None) is not None
         )
         attn_cls = MLASelfAttentionWithDSA if use_dsa else MLASelfAttention
+        # Gated attention
+        gated_attention = getattr(config, "gated_attention", False)
         return LayerSpec(
             layer=attn_cls,
             extra_kwargs={"attn_mask_type": attn_mask_type},
@@ -170,8 +195,11 @@ def get_attention_spec(
                 kv_b_proj=backend.column_parallel_linear(),
                 core_attention=backend.core_attention(),
                 o_proj=backend.row_parallel_linear(),
-                q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+                q_a_layernorm=qk_norm_standard if use_qk_norm else IdentityOp,
+                kv_a_layernorm=qk_norm_standard if use_qk_norm else IdentityOp,
+                gate_proj=backend.column_parallel_linear()
+                if gated_attention
+                else None,
             ),
         )
     else:
@@ -529,6 +557,67 @@ def get_gpt_spec(
             ),
         )
 
+    # separate mtp head & loss
+    mtp_lm_head_spec = None
+    mtp_loss_spec = None
+    if config.separate_mtp_headloss:
+        assert (
+            config.num_nextn_predict_layers is not None
+            and config.num_nextn_predict_layers > 0
+        ), (
+            "If you set separate_mtp_headloss to True, mtp layer num must be greater than 0."
+        )
+
+        mtp_lm_head_spec = LayerSpec(
+            layer=GPTMTPLMHead,
+            extra_kwargs={
+                "input_size": config.hidden_size,
+                "output_size": vocab_size,
+                "config": config,
+                "init_method": config.init_method,
+                "bias": False,
+                "skip_bias_add": False,
+                "gather_output": not parallel_output,
+                "skip_weight_param_allocation": skip_weight_param_allocation,
+                "block_attn_res": lm_head_block_attn_res,
+            },
+        )
+        mtp_loss_spec = LayerSpec(
+            layer=MTPLanguageLoss,
+            extra_kwargs={
+                "config": config,
+            },
+        )
+        lm_head_spec = LayerSpec(
+            layer=GPTMainLMHead,
+            extra_kwargs={
+                "input_size": config.hidden_size,
+                "output_size": vocab_size,
+                "config": config,
+                "init_method": config.init_method,
+                "bias": False,
+                "skip_bias_add": False,
+                "gather_output": not parallel_output,
+                "skip_weight_param_allocation": skip_weight_param_allocation,
+                "block_attn_res": lm_head_block_attn_res,
+            },
+        )
+    else:
+        lm_head_spec = LayerSpec(
+            layer=GPTLMHead,
+            extra_kwargs={
+                "input_size": config.hidden_size,
+                "output_size": vocab_size,
+                "config": config,
+                "init_method": config.init_method,
+                "bias": False,
+                "skip_bias_add": False,
+                "gather_output": not parallel_output,
+                "skip_weight_param_allocation": skip_weight_param_allocation,
+                "block_attn_res": lm_head_block_attn_res,
+            },
+        )
+
     norm_input_parallel = (
         config.sequence_parallel and config.tensor_model_parallel_size > 1
     )
@@ -548,6 +637,8 @@ def get_gpt_spec(
             transformer_layers=transformer_layers_spec,
             tail_empty_layers=tail_empty_layers_spec,
             mtp=mtp_layers_spec,
+            mtp_lm_head=mtp_lm_head_spec,
+            mtp_loss=mtp_loss_spec,
             layer_norm=LayerSpec(
                 layer=WrappedPaddleNormPipe,
                 extra_kwargs={
@@ -557,19 +648,6 @@ def get_gpt_spec(
                     "input_is_parallel": norm_input_parallel,
                 },
             ),
-            lm_head=LayerSpec(
-                layer=GPTLMHead,
-                extra_kwargs={
-                    "input_size": config.hidden_size,
-                    "output_size": vocab_size,
-                    "config": config,
-                    "init_method": config.init_method,
-                    "bias": False,
-                    "skip_bias_add": False,
-                    "gather_output": not parallel_output,
-                    "skip_weight_param_allocation": skip_weight_param_allocation,
-                    "block_attn_res": lm_head_block_attn_res,
-                },
-            ),
+            lm_head=lm_head_spec,
         ),
     )
