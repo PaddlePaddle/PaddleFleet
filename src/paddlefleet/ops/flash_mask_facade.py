@@ -123,6 +123,9 @@ def flashmask_attention(
     if need_value_padding:
         attn_out = attn_out[..., :v_head_dim]
 
+    attn_out = attn_out.reshape([bsz, q_len, num_heads, v_head_dim])
+    lse = lse.reshape([bsz, q_len])
+
     if return_softmax_lse:
         return [attn_out, lse]
     else:
@@ -170,6 +173,8 @@ def flash_attention(
 
     if need_value_padding:
         attn_output = attn_output[..., :v_head_dim]
+
+    attn_output = attn_output.reshape([bsz, q_len, num_heads, v_head_dim])
 
     return attn_output, softmax_result
 
