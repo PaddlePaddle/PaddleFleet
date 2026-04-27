@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import paddle
 
@@ -118,7 +118,13 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
         node.moe_deep_gemm = True
         node.use_fp8_mlp = False
         expected = paddle.ones([3, 4], dtype="float32")
-        node.fwd_gate_up_bf16 = MagicMock(return_value=expected)
+        bf16_calls = []
+
+        def fwd_gate_up_bf16(*args):
+            bf16_calls.append(args)
+            return expected
+
+        node.fwd_gate_up_bf16 = fwd_gate_up_bf16
         x = paddle.zeros([3, 4], dtype="float32")
         token_counts = paddle.to_tensor([1, 2], dtype="int64")
 
@@ -134,7 +140,9 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
         self.assertEqual(
             node.tokens_per_expert_indices.numpy().tolist(), [0, 1, 1]
         )
-        node.fwd_gate_up_bf16.assert_called_once_with(x, [])
+        self.assertEqual(len(bf16_calls), 1)
+        self.assertIs(bf16_calls[0][0], x)
+        self.assertEqual(bf16_calls[0][1], [])
 
     def test_fwd_gate_up_builds_deep_gemm_indices_from_list_counts(self):
         node = ExpertsGroupGemmContiguousNode.__new__(
@@ -143,7 +151,7 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
         node.moe_deep_gemm = True
         node.use_fp8_mlp = False
         expected = paddle.ones([3, 4], dtype="float32")
-        node.fwd_gate_up_bf16 = MagicMock(return_value=expected)
+        node.fwd_gate_up_bf16 = lambda *_args: expected
 
         node.fwd_gate_up(
             paddle.zeros([3, 4], dtype="float32"),
@@ -161,8 +169,9 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
             ExpertsGroupGemmContiguousNode
         )
         node.tokens_per_expert = paddle.to_tensor([0, 0], dtype="int64")
-        node.fused_transpose_split_quant = MagicMock(
-            return_value=([None, None], [None, None])
+        node.fused_transpose_split_quant = lambda *_args: (
+            [None, None],
+            [None, None],
         )
         weights = [_WeightWithMainGrad(), _WeightWithGrad()]
 
@@ -204,9 +213,12 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
         grouped_weight.shape = [2, 3, 4]
         grouped_weight.grad = paddle.zeros(grouped_weight.shape)
 
+        def batched_gemm(*_args, **_kwargs):
+            return paddle.ones(grouped_weight.shape)
+
         with patch(
             "paddle.incubate.nn.functional.batched_gemm",
-            return_value=paddle.ones(grouped_weight.shape),
+            batched_gemm,
         ):
             node.bf16_weight_grad(
                 paddle.ones([2, 4], dtype="float32"),
@@ -222,16 +234,22 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
         node.moe_grouped_gemm = False
         node.tokens_per_expert = [1, 0]
         weights = [_WeightWithGrad(), _WeightWithMainGrad()]
+        grad_add_calls = []
+
+        def fused_linear_param_grad_add(*args):
+            grad_add_calls.append(args)
+
         with patch(
-            "paddle._C_ops.fused_linear_param_grad_add"
-        ) as mock_grad_add:
+            "paddle._C_ops.fused_linear_param_grad_add",
+            fused_linear_param_grad_add,
+        ):
             node.bf16_weight_grad(
                 paddle.ones([1, 4], dtype="float32"),
                 paddle.ones([1, 3], dtype="float32"),
                 weights,
             )
 
-        mock_grad_add.assert_called_once()
+        self.assertEqual(len(grad_add_calls), 1)
         self.assertEqual(weights[0].hook_calls, 1)
         self.assertEqual(weights[1].hook_calls, 1)
 
