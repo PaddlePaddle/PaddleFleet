@@ -56,17 +56,24 @@ except ImportError:
     deep_ep = None
 
 
-def is_hybrid_ep_backend_selected(backend_name: str | None = None) -> bool:
-    selected_backend = backend_name or "deepep"
-    if selected_backend not in ("deepep", "hybridep"):
+def is_hybrid_ep_backend_selected(
+    dispatcher_type: str | None = None,
+) -> bool:
+    selected_dispatcher = dispatcher_type or "deepep"
+    if selected_dispatcher not in (
+        "allgather",
+        "alltoall",
+        "deepep",
+        "hybridep",
+    ):
         raise ValueError(
-            "moe_flex_dispatcher_backend must be one of: deepep, hybridep"
+            "moe_token_dispatcher_type must be one of: allgather, alltoall, deepep, hybridep"
         )
-    if selected_backend == "deepep":
+    if selected_dispatcher != "hybridep":
         return False
     if not HAVE_HYBRID_EP:
         raise ImportError(
-            "moe_flex_dispatcher_backend=hybridep but HybridEP runtime is unavailable."
+            "moe_token_dispatcher_type=hybridep but HybridEP runtime is unavailable."
         )
     return True
 
@@ -710,7 +717,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         n_routed_experts: int,
         ep_group: Group,
         moe_ep_barrier: bool = True,
-        backend_name: str | None = None,
+        dispatcher_type: str | None = None,
     ):
         super().__init__(ep_group)
 
@@ -718,7 +725,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         assert self.ep_size > 1, "Flex token dispatcher requires EP > 1"
         manager_cls = (
             _HybridEPManager
-            if is_hybrid_ep_backend_selected(backend_name)
+            if is_hybrid_ep_backend_selected(dispatcher_type)
             else _DeepepManager
         )
         self._comm_manager = manager_cls(

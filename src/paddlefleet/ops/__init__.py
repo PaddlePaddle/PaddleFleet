@@ -72,7 +72,9 @@ if paddle.is_compiled_with_cuda():
 
     DEEP_EP_HINT = (
         "For developers: guard imports with `is_deep_ep_available()` and only call `paddlefleet.ops.deep_ep` when flag branch enabled.\n"
-        "For users: avoid `moe_token_dispatcher_type='deepep'` or use a GPU with compute capability >= 9.0 to enable."
+        "For users: avoid `moe_token_dispatcher_type='deepep'` or "
+        "`moe_token_dispatcher_type='hybridep'`, or use a GPU with compute "
+        "capability >= 9.0 to enable."
     )
 
     SONIC_MOE_HINT = (

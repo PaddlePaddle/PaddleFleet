@@ -51,8 +51,7 @@ def _make_moe_config(**overrides):
         "gated_linear_unit": True,
         "sequence_parallel": False,
         "tensor_model_parallel_size": 1,
-        "moe_token_dispatcher_type": "deepep",
-        "moe_flex_dispatcher_backend": "hybridep",
+        "moe_token_dispatcher_type": "hybridep",
         "moe_use_fusion_node": True,
         "moe_grouped_gemm": False,
         "moe_ep_barrier": True,
@@ -182,19 +181,25 @@ class TestHybridEPBackendSelection(unittest.TestCase):
         with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
             self.assertFalse(is_hybrid_ep_backend_selected())
 
+    def test_non_hybrid_dispatchers_do_not_select_hybrid_backend(self):
+        with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
+            for dispatcher_type in ("allgather", "alltoall", "deepep"):
+                with self.subTest(dispatcher_type=dispatcher_type):
+                    self.assertFalse(
+                        is_hybrid_ep_backend_selected(dispatcher_type)
+                    )
+
     def test_backend_selects_hybrid_explicitly(self):
         with patch.object(token_dispatcher, "HAVE_HYBRID_EP", True):
             self.assertTrue(is_hybrid_ep_backend_selected("hybridep"))
 
     def test_backend_rejects_invalid_and_unavailable_hybrid(self):
-        for backend_name in ("unknown", "hybrid", "hybrid_ep", "deep_ep"):
+        for dispatcher_type in ("unknown", "hybrid", "hybrid_ep", "deep_ep"):
             with (
-                self.subTest(backend_name=backend_name),
-                self.assertRaisesRegex(
-                    ValueError, "moe_flex_dispatcher_backend"
-                ),
+                self.subTest(dispatcher_type=dispatcher_type),
+                self.assertRaisesRegex(ValueError, "moe_token_dispatcher_type"),
             ):
-                is_hybrid_ep_backend_selected(backend_name)
+                is_hybrid_ep_backend_selected(dispatcher_type)
         with (
             patch.object(token_dispatcher, "HAVE_HYBRID_EP", False),
             self.assertRaisesRegex(ImportError, "HybridEP runtime"),
@@ -210,7 +215,7 @@ class TestHybridEPBackendSelection(unittest.TestCase):
                 num_experts_per_tok=2,
                 n_routed_experts=4,
                 ep_group=group,
-                backend_name="hybridep",
+                dispatcher_type="hybridep",
             )
 
         self.assertIsInstance(dispatcher._comm_manager, _HybridEPManager)
@@ -1141,7 +1146,7 @@ class TestHybridEPMoELayerContract(unittest.TestCase):
 
         self.assertFalse(layer.moe_shared_expert_overlap)
         self.assertEqual(
-            mock_dispatcher.call_args.kwargs["backend_name"], "hybridep"
+            mock_dispatcher.call_args.kwargs["dispatcher_type"], "hybridep"
         )
 
 

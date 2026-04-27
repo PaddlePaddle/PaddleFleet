@@ -362,11 +362,7 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
-    Options are 'allgather','alltoall' and 'deepep'."""
-
-    moe_flex_dispatcher_backend: Literal["deepep", "hybridep"] = "deepep"
-    """The backend to use for the flexible MoE dispatcher when ``moe_token_dispatcher_type='deepep'``.
-    Options are 'deepep' and 'hybridep'."""
+    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""

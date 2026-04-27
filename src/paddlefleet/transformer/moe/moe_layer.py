@@ -163,7 +163,6 @@ class MoELayer(nn.Layer):
         self.sequence_parallel = config.sequence_parallel
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
-        self.moe_flex_dispatcher_backend = config.moe_flex_dispatcher_backend
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
@@ -256,9 +255,9 @@ class MoELayer(nn.Layer):
             and paddle.device.get_device_capability()[0] < 9
         ):
             # TODO: Support Ampere architecture after upgrade deepep in paddlepaddle
-            if self.moe_token_dispatcher_type == "deepep":
+            if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
                 logger.info(
-                    "deepep in paddlepaddle does not support compute capability < 9.0, "
+                    "deepep/hybridep in paddlepaddle does not support compute capability < 9.0, "
                     "fallback to alltoall token dispatcher."
                 )
                 self.moe_token_dispatcher_type = "alltoall"
@@ -270,10 +269,10 @@ class MoELayer(nn.Layer):
 
         self.moe_use_fusion_node = False
         if self.expert_model_parallel_size > 1:
-            if self.moe_token_dispatcher_type == "deepep":
+            if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
                 self.moe_use_fusion_node = config.moe_use_fusion_node
                 self.use_hybrid_ep_backend = is_hybrid_ep_backend_selected(
-                    self.moe_flex_dispatcher_backend
+                    self.moe_token_dispatcher_type
                 )
                 if (
                     self.moe_use_fusion_node
@@ -287,7 +286,7 @@ class MoELayer(nn.Layer):
             else:
                 if self.moe_grouped_gemm:
                     raise ValueError(
-                        "moe_grouped_gemm is only supported when moe_token_dispatcher_type is 'deepep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
+                        "moe_grouped_gemm is only supported when moe_token_dispatcher_type is 'deepep' or 'hybridep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
                     )
                 self.fp8_dispatch = False
 
@@ -335,14 +334,14 @@ class MoELayer(nn.Layer):
             self.shared_experts = None
 
         if self.expert_model_parallel_size > 1:
-            if self.moe_token_dispatcher_type == "deepep":
+            if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
                 self.token_dispatcher = MoEFlexTokenDispatcher(
                     self.num_experts_per_device,
                     self.num_experts_per_tok,
                     self.num_experts,
                     self.moe_group,
                     self.moe_ep_barrier,
-                    backend_name=self.moe_flex_dispatcher_backend,
+                    dispatcher_type=self.moe_token_dispatcher_type,
                 )
                 if getattr(config, "deepep_buffer_configs", None) is not None:
                     configure_buffer(**config.deepep_buffer_configs)
