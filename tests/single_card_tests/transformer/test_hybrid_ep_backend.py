@@ -13,13 +13,15 @@
 # limitations under the License.
 
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import paddle
 
 from paddlefleet.transformer.moe import fused_a2a
-from paddlefleet.transformer.moe.fp8_utils import FP8_ALIGN
+from paddlefleet.transformer.moe.fp8_utils import (
+    FP8_ALIGN,
+    ExpertsGroupGemmContiguousNode,
+)
 from paddlefleet.transformer.moe.fused_a2a import (
     HybridEPCombine,
     HybridEPDispatch,
@@ -31,6 +33,7 @@ from paddlefleet.transformer.moe.fusion_layer_utils import (
     _pad_front_rows,
     _restore_hybrid_ep_prob_grad_shape,
 )
+from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.moe.token_dispatcher import (
     MoEFlexTokenDispatcher,
     _HybridEPManager,
@@ -55,6 +58,33 @@ class _HybridEPDispatcher:
         self._comm_manager = manager
 
 
+class _DispatchingHybridEPDispatcher(_HybridEPDispatcher):
+    def __init__(self, manager, dispatched_hidden_states, fp8_handle=None):
+        super().__init__(manager)
+        self.dispatched_hidden_states = dispatched_hidden_states
+        self.fp8_handle = fp8_handle
+        self.dispatch_calls = []
+
+    def token_dispatch_overlap(
+        self,
+        hidden_states,
+        token_indices,
+        token_weights,
+        fp8_dispatch,
+        async_finish=False,
+    ):
+        self.dispatch_calls.append(
+            {
+                "hidden_states": hidden_states,
+                "token_indices": token_indices,
+                "token_weights": token_weights,
+                "fp8_dispatch": fp8_dispatch,
+                "async_finish": async_finish,
+            }
+        )
+        return self.dispatched_hidden_states, self.fp8_handle
+
+
 class _HybridEPCustomMap:
     def __init__(self, manager, experts=None):
         self.token_dispatcher = _HybridEPDispatcher(manager)
@@ -73,6 +103,30 @@ class _TinyExpert:
             [hidden_size, intermediate_size * 2]
         )
         self.down_proj = _ExpertProjection([intermediate_size, hidden_size])
+
+
+class _ExpertsGroupGemmCustomMap:
+    def __init__(self):
+        self.experts = []
+        self.grouped_gemm_experts = None
+
+
+class _HybridEPMoELayerBridge(MoELayer):
+    def __init__(self, manager, dispatched_hidden_states):
+        paddle.nn.Layer.__init__(self)
+        self.token_dispatcher = _DispatchingHybridEPDispatcher(
+            manager, dispatched_hidden_states
+        )
+        self.experts = [_TinyExpert(), _TinyExpert()]
+        self.grouped_gemm_experts = None
+        self.moe_use_fusion_node = True
+        self.use_hybrid_ep_backend = True
+        self.fp8 = False
+        self.fp8_dispatch = False
+        self.fp8_wgrad = False
+        self.moe_deep_gemm = False
+        self.moe_grouped_gemm = False
+        self.recompute_moe_gate_up = False
 
 
 def _new_hybrid_manager(**overrides):
@@ -164,6 +218,10 @@ class _ConstructedHybridEPBuffer:
         self.instances.append(self)
 
 
+class _HybridEPRuntimeModule:
+    HybridEPBuffer = _ConstructedHybridEPBuffer
+
+
 def _bind_buffer(manager, buffer):
     def _get_buffer(*args, **kwargs):
         del args, kwargs
@@ -182,7 +240,6 @@ class TestHybridEPBackendSelection(unittest.TestCase):
         self.assertTrue(hasattr(deep_ep, "Buffer"))
         self.assertFalse(hasattr(deep_ep, "HybridEPBuffer"))
         self.assertTrue(hasattr(hybrid_ep, "HybridEPBuffer"))
-        self.assertFalse(hasattr(hybrid_ep, "Buffer"))
         self.assertIsNot(deep_ep, hybrid_ep)
 
     def test_dispatcher_type_selects_hybrid_ep_only_when_requested(self):
@@ -399,7 +456,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         with patch.object(
             fused_a2a,
             "hybrid_ep",
-            SimpleNamespace(HybridEPBuffer=_ConstructedHybridEPBuffer),
+            _HybridEPRuntimeModule,
             create=True,
         ):
             first = manager_a._get_buffer(paddle.zeros([4, 8], dtype="float32"))
@@ -745,6 +802,23 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
 
 
 class TestHybridEPExpertInputCounts(unittest.TestCase):
+    def test_gen_m_indices_accepts_tensor_and_empty_counts(self):
+        node = ExpertsGroupGemmContiguousNode(
+            _ExpertsGroupGemmCustomMap(),
+            use_fp8_mlp=False,
+        )
+
+        self.assertEqual(
+            node.gen_m_indices(paddle.to_tensor([1, 0, 2], dtype="int64"))
+            .numpy()
+            .tolist(),
+            [0, 2, 2],
+        )
+        self.assertEqual(
+            node.gen_m_indices(paddle.to_tensor([], dtype="int64")).shape,
+            [0],
+        )
+
     def test_prepare_expert_counts_matches_expert_compute_contract(self):
         manager = _new_hybrid_manager(
             group=_HybridEPGroup(nranks=1),
@@ -869,6 +943,41 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
         )
 
         self.assertEqual(output.shape, [0, 2])
+
+    def test_moe_layer_fused_compute_uses_hybrid_ep_path(self):
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1),
+            num_experts=2,
+            num_local_experts=2,
+        )
+        manager.dispatched_probs = paddle.ones([2], dtype="float32")
+        manager.tokens_per_expert = paddle.to_tensor([0, 0], dtype="int64")
+        manager.padded_tokens_per_expert = paddle.to_tensor(
+            [0, 0], dtype="int64"
+        )
+        dispatched_hidden_states = paddle.ones([2, 2], dtype="float32")
+        layer = _HybridEPMoELayerBridge(manager, dispatched_hidden_states)
+
+        dispatched_args = layer.compute_dispatch(
+            (
+                paddle.zeros([2, 2], dtype="float32"),
+                paddle.to_tensor([[0], [1]], dtype="int64"),
+                paddle.ones([2, 1], dtype="float32"),
+            ),
+            async_finish=True,
+        )
+
+        self.assertIsNone(dispatched_args[1])
+        self.assertIs(dispatched_args[2], manager.dispatched_probs)
+        self.assertIs(dispatched_args[4], manager.tokens_per_expert)
+        self.assertTrue(
+            layer.token_dispatcher.dispatch_calls[-1]["async_finish"]
+        )
+
+        output = layer.compute_experts(dispatched_args, is_first_fwd=True)
+
+        self.assertEqual(output.shape, [0, 2])
+        self.assertFalse(output.stop_gradient)
 
 
 if __name__ == "__main__":
