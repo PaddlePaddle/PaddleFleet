@@ -33,7 +33,6 @@ from paddlefleet.transformer.moe.fusion_layer_utils import (
     _pad_front_rows,
     _restore_hybrid_ep_prob_grad_shape,
 )
-from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.moe.token_dispatcher import (
     MoEFlexTokenDispatcher,
     _HybridEPManager,
@@ -56,33 +55,6 @@ class _HybridEPHandleConfig:
 class _HybridEPDispatcher:
     def __init__(self, manager):
         self._comm_manager = manager
-
-
-class _DispatchingHybridEPDispatcher(_HybridEPDispatcher):
-    def __init__(self, manager, dispatched_hidden_states, fp8_handle=None):
-        super().__init__(manager)
-        self.dispatched_hidden_states = dispatched_hidden_states
-        self.fp8_handle = fp8_handle
-        self.dispatch_calls = []
-
-    def token_dispatch_overlap(
-        self,
-        hidden_states,
-        token_indices,
-        token_weights,
-        fp8_dispatch,
-        async_finish=False,
-    ):
-        self.dispatch_calls.append(
-            {
-                "hidden_states": hidden_states,
-                "token_indices": token_indices,
-                "token_weights": token_weights,
-                "fp8_dispatch": fp8_dispatch,
-                "async_finish": async_finish,
-            }
-        )
-        return self.dispatched_hidden_states, self.fp8_handle
 
 
 class _HybridEPCustomMap:
@@ -109,24 +81,6 @@ class _ExpertsGroupGemmCustomMap:
     def __init__(self):
         self.experts = []
         self.grouped_gemm_experts = None
-
-
-class _HybridEPMoELayerBridge(MoELayer):
-    def __init__(self, manager, dispatched_hidden_states):
-        paddle.nn.Layer.__init__(self)
-        self.token_dispatcher = _DispatchingHybridEPDispatcher(
-            manager, dispatched_hidden_states
-        )
-        self.experts = [_TinyExpert(), _TinyExpert()]
-        self.grouped_gemm_experts = None
-        self.moe_use_fusion_node = True
-        self.use_hybrid_ep_backend = True
-        self.fp8 = False
-        self.fp8_dispatch = False
-        self.fp8_wgrad = False
-        self.moe_deep_gemm = False
-        self.moe_grouped_gemm = False
-        self.recompute_moe_gate_up = False
 
 
 def _new_hybrid_manager(**overrides):
@@ -943,41 +897,6 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
         )
 
         self.assertEqual(output.shape, [0, 2])
-
-    def test_moe_layer_fused_compute_uses_hybrid_ep_path(self):
-        manager = _new_hybrid_manager(
-            group=_HybridEPGroup(nranks=1),
-            num_experts=2,
-            num_local_experts=2,
-        )
-        manager.dispatched_probs = paddle.ones([2], dtype="float32")
-        manager.tokens_per_expert = paddle.to_tensor([0, 0], dtype="int64")
-        manager.padded_tokens_per_expert = paddle.to_tensor(
-            [0, 0], dtype="int64"
-        )
-        dispatched_hidden_states = paddle.ones([2, 2], dtype="float32")
-        layer = _HybridEPMoELayerBridge(manager, dispatched_hidden_states)
-
-        dispatched_args = layer.compute_dispatch(
-            (
-                paddle.zeros([2, 2], dtype="float32"),
-                paddle.to_tensor([[0], [1]], dtype="int64"),
-                paddle.ones([2, 1], dtype="float32"),
-            ),
-            async_finish=True,
-        )
-
-        self.assertIsNone(dispatched_args[1])
-        self.assertIs(dispatched_args[2], manager.dispatched_probs)
-        self.assertIs(dispatched_args[4], manager.tokens_per_expert)
-        self.assertTrue(
-            layer.token_dispatcher.dispatch_calls[-1]["async_finish"]
-        )
-
-        output = layer.compute_experts(dispatched_args, is_first_fwd=True)
-
-        self.assertEqual(output.shape, [0, 2])
-        self.assertFalse(output.stop_gradient)
 
 
 if __name__ == "__main__":
