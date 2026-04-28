@@ -46,6 +46,10 @@ from paddlefleet.transformer.attention import (
     SelfAttentionSublayersSpec,
 )
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.gated_delta_net import (
+    GatedDeltaNet,
+    GatedDeltaNetSublayersSpec,
+)
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.multi_latent_attention import (
@@ -73,6 +77,77 @@ from paddlefleet.transformer.paddle_norm import (
 LNImpl = WrappedPaddleNorm
 
 
+def get_attention_spec(
+    backend: BackendSpecProvider,
+    attention_layer_type: str,
+    attn_mask_type: AttnMaskType,
+    use_qk_norm: bool,
+    qk_l2_norm: bool,
+    qk_norm,
+) -> LayerSpec:
+    """Build the self-attention LayerSpec for the given attention type.
+
+    Args:
+        backend: Backend spec provider.
+        attention_layer_type: One of "self_attention", "gated_delta_net",
+            "multi_latent_attention".
+        attn_mask_type: Attention mask type.
+        use_qk_norm: Whether to apply layernorm to queries/keys.
+        qk_l2_norm: Whether to apply L2 norm to queries/keys.
+        qk_norm: The LayerSpec / class to use for QK normalization.
+
+    Returns:
+        LayerSpec for the attention sublayer.
+    """
+    if attention_layer_type == "multi_latent_attention":
+        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
+        return LayerSpec(
+            layer=MLASelfAttention,
+            extra_kwargs={"attn_mask_type": attn_mask_type},
+            sublayers_spec=MLASelfAttentionSublayersSpec(
+                q_proj=backend.column_parallel_linear(),
+                q_a_proj=backend.column_parallel_linear(),
+                q_b_proj=backend.column_parallel_linear(),
+                kv_a_proj_with_mqa=backend.column_parallel_linear(),
+                kv_b_proj=backend.column_parallel_linear(),
+                core_attention=backend.core_attention(),
+                o_proj=backend.row_parallel_linear(),
+                q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+                kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
+            ),
+        )
+    elif attention_layer_type == "gated_delta_net":
+        return LayerSpec(
+            layer=GatedDeltaNet,
+            sublayers_spec=GatedDeltaNetSublayersSpec(
+                in_proj=backend.column_parallel_linear(),
+                out_norm=qk_norm if use_qk_norm else IdentityOp,
+                out_proj=backend.row_parallel_linear(),
+            ),
+        )
+    else:
+        # Default: standard self attention
+        return LayerSpec(
+            layer=SelfAttention,
+            extra_kwargs={"attn_mask_type": attn_mask_type},
+            sublayers_spec=SelfAttentionSublayersSpec(
+                qkv_proj=backend.column_parallel_linear(),
+                core_attention=backend.core_attention(),
+                o_proj=backend.row_parallel_linear(),
+                q_norm=(
+                    L2Norm
+                    if qk_l2_norm
+                    else (qk_norm if use_qk_norm else IdentityOp)
+                ),
+                k_norm=(
+                    L2Norm
+                    if qk_l2_norm
+                    else (qk_norm if use_qk_norm else IdentityOp)
+                ),
+            ),
+        )
+
+
 def get_gpt_layer_local_spec(
     config: TransformerConfig | None = None,
     num_experts: int | None = None,
@@ -82,6 +157,8 @@ def get_gpt_layer_local_spec(
     normalization: str | None = None,
     qk_l2_norm: bool | None = False,
     layer_number: int | None = 1,
+    attention_layer_type: str = "self_attention",
+    attn_mask_type: AttnMaskType = AttnMaskType.causal,
 ) -> LayerSpec:
     """Use this spec for an implementation using only layers in Fleet-Core.
 
@@ -92,10 +169,17 @@ def get_gpt_layer_local_spec(
         use_qk_norm (bool, optional): To use layernorm for queries/keys. Defaults to False.
         fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
         qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
+        attention_layer_type (str, optional): Attention layer type. One of "self_attention",
+            "gated_delta_net", "multi_latent_attention". Defaults to "self_attention".
+        attn_mask_type (AttnMaskType, optional): Attention mask type. Defaults to causal.
 
     Returns:
         LayerSpec: Layer specification with Fleet-Core layers
     """
+
+    # multi_latent_attention flag overrides attention_layer_type for backward compat.
+    if multi_latent_attention:
+        attention_layer_type = "multi_latent_attention"
 
     backend = LocalSpecProvider()
     # Adjust for RMS norm.
@@ -122,81 +206,44 @@ def get_gpt_layer_local_spec(
             )
             transformer_cls = TransformerLayerWithOverlap
 
-    if multi_latent_attention:
-        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-        return LayerSpec(
-            layer=transformer_cls,
-            sublayers_spec=TransformerLayerSublayersSpec(
-                input_layernorm=layer_norm,
-                self_attn=LayerSpec(
-                    layer=MLASelfAttention,
-                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
-                    sublayers_spec=MLASelfAttentionSublayersSpec(
-                        q_proj=backend.column_parallel_linear(),
-                        q_a_proj=backend.column_parallel_linear(),
-                        q_b_proj=backend.column_parallel_linear(),
-                        kv_a_proj_with_mqa=backend.column_parallel_linear(),
-                        kv_b_proj=backend.column_parallel_linear(),
-                        core_attention=backend.core_attention(),
-                        o_proj=backend.row_parallel_linear(),
-                        q_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                        kv_a_layernorm=qk_norm if use_qk_norm else IdentityOp,
-                    ),
-                ),
-                self_attn_bda=get_bias_dropout_add,
-                post_attention_layernorm=layer_norm,
-                mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
-            ),
-            extra_kwargs={
-                "config": config,
-                "layer_number": layer_number,
-                "hidden_dropout_prob": config.hidden_dropout_prob
-                if config is not None
-                else None,
-            },
-        )
-    else:
-        return LayerSpec(
-            layer=transformer_cls,
-            sublayers_spec=TransformerLayerSublayersSpec(
-                input_layernorm=layer_norm,
-                self_attn=LayerSpec(
-                    layer=SelfAttention,
-                    extra_kwargs={"attn_mask_type": AttnMaskType.causal},
-                    sublayers_spec=SelfAttentionSublayersSpec(
-                        qkv_proj=backend.column_parallel_linear(),
-                        core_attention=backend.core_attention(),
-                        o_proj=backend.row_parallel_linear(),
-                        q_norm=(
-                            L2Norm
-                            if qk_l2_norm
-                            else (qk_norm if use_qk_norm else IdentityOp)
-                        ),
-                        k_norm=(
-                            L2Norm
-                            if qk_l2_norm
-                            else (qk_norm if use_qk_norm else IdentityOp)
-                        ),
-                    ),
-                ),
-                self_attn_bda=get_bias_dropout_add,
-                post_attention_layernorm=layer_norm,
-                mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
-                sharded_state_dict_keys_map={
-                    "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
-                    "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
-                },
-            ),
-            extra_kwargs={
-                "config": config,
-                "layer_number": layer_number,
-                "hidden_dropout_prob": config.hidden_dropout_prob
-                if config is not None
-                else None,
-            },
-        )
+    attn_spec = get_attention_spec(
+        backend=backend,
+        attention_layer_type=attention_layer_type,
+        attn_mask_type=attn_mask_type,
+        use_qk_norm=use_qk_norm,
+        qk_l2_norm=qk_l2_norm,
+        qk_norm=qk_norm,
+    )
+
+    # sharded_state_dict_keys_map only applies to standard self attention
+    sharded_keys_map = None
+    if attention_layer_type == "self_attention":
+        sharded_keys_map = {
+            "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
+            "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
+        }
+
+    return LayerSpec(
+        layer=transformer_cls,
+        sublayers_spec=TransformerLayerSublayersSpec(
+            input_layernorm=layer_norm,
+            self_attn=attn_spec,
+            self_attn_bda=get_bias_dropout_add,
+            post_attention_layernorm=layer_norm,
+            mlp=mlp,
+            mlp_bda=get_bias_dropout_add,
+            sharded_state_dict_keys_map=sharded_keys_map
+            if sharded_keys_map is not None
+            else {},
+        ),
+        extra_kwargs={
+            "config": config,
+            "layer_number": layer_number,
+            "hidden_dropout_prob": config.hidden_dropout_prob
+            if config is not None
+            else None,
+        },
+    )
 
 
 def get_mlp_layer_spec_for_backend(
@@ -239,26 +286,30 @@ def get_gpt_decoder_layers_spec(
     qk_l2_norm: bool | None = False,
 ) -> list[LayerSpec]:
     """GPT block spec."""
+    # layer_types overrides multi_latent_attention flag when present; each entry
+    # is a string like "self_attention", "gated_delta_net", or
+    # "multi_latent_attention".
+    layer_types = getattr(config, "layer_types", None)
+
+    common_kwargs = {
+        "config": config,
+        "use_qk_norm": config.use_qk_norm,
+        "multi_latent_attention": config.multi_latent_attention,
+        "normalization": normalization,
+        "qk_l2_norm": qk_l2_norm,
+    }
     dense_layer_spec_func = partial(
         get_gpt_layer_local_spec,
-        config=config,
         num_experts=None,
         moe_grouped_gemm=False,
-        use_qk_norm=config.use_qk_norm,
-        multi_latent_attention=config.multi_latent_attention,
-        normalization=normalization,
-        qk_l2_norm=qk_l2_norm,
+        **common_kwargs,
     )
 
     moe_layer_spec_func = partial(
         get_gpt_layer_local_spec,
-        config=config,
         num_experts=config.n_routed_experts,
         moe_grouped_gemm=config.moe_grouped_gemm,
-        use_qk_norm=config.use_qk_norm,
-        multi_latent_attention=config.multi_latent_attention,
-        normalization=normalization,
-        qk_l2_norm=qk_l2_norm,
+        **common_kwargs,
     )
 
     # Parse config.moe_layer_freq to determine the pattern of expert/dense layers.
@@ -286,13 +337,25 @@ def get_gpt_decoder_layers_spec(
     layer_specs = []
     for layer_number in range(config.num_hidden_layers):
         real_layer_number = layer_number + config.num_empty_layers_add_in_head
+        # Determine per-layer attention type from layer_types if provided.
+        attn_type = (
+            layer_types[layer_number]
+            if layer_types is not None
+            else "self_attention"
+        )
         if moe_layer_pattern[layer_number] == 1:
             layer_specs.append(
-                moe_layer_spec_func(layer_number=real_layer_number)
+                moe_layer_spec_func(
+                    layer_number=real_layer_number,
+                    attention_layer_type=attn_type,
+                )
             )
         elif moe_layer_pattern[layer_number] == 0:
             layer_specs.append(
-                dense_layer_spec_func(layer_number=real_layer_number)
+                dense_layer_spec_func(
+                    layer_number=real_layer_number,
+                    attention_layer_type=attn_type,
+                )
             )
         else:
             raise ValueError(f"Invalid layer pattern: {moe_layer_pattern}")
@@ -353,7 +416,7 @@ def get_gpt_spec(
     head_empty_layers_spec: list[LayerSpec] | None = None,
     tail_empty_layers_spec: list[LayerSpec] | None = None,
     position_embedding_type: Literal[
-        "learned_absolute", "rope", "none"
+        "learned_absolute", "rope", "mrope", "none"
     ] = "learned_absolute",
     rotary_percent: float = 1.0,
     rotary_base: int = 10000,

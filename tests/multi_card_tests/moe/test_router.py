@@ -74,7 +74,9 @@ class TestTop2Router(unittest.TestCase):
         cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
         transformer_layer_spec = get_gpt_layer_local_spec(
-            num_experts=cls.n_routed_experts, moe_grouped_gemm=False
+            cls.transformer_config,
+            num_experts=cls.n_routed_experts,
+            moe_grouped_gemm=False,
         )
         cls.sequential_mlp = MoELayer(
             cls.transformer_config,

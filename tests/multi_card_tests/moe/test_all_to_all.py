@@ -81,13 +81,13 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
-            moe_grouped_gemm=True,
+            moe_grouped_gemm=False,
             moe_token_dispatcher_type="alltoall",
             bias_activation_fusion=True,
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(
-            num_experts=n_routed_experts
+            transformer_config_moe, num_experts=n_routed_experts
         )
 
         moe_layer = MoELayer(
