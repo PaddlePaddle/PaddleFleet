@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .rms_norm_fusion import RMSNormFusionTriton
 from .moe_topk_fusion import MoETopkFusion, routing_map_fusion_forward
 
 __all__ = [
