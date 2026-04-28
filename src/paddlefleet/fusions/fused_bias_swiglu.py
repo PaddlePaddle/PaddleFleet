@@ -62,6 +62,38 @@ def weighted_swiglu(y, weights):
     return res.to(dtype)
 
 
+def _fused_swiglu_bwd_fallback(g, y):
+    """XPU/CPU fallback for fused_swiglu_bwd using native Paddle APIs.
+
+    Forward: swiglu(y) = silu(y1) * y2, where y is chunked into [y1, y2] on the last dim.
+    Backward:
+        dx1 = g * y2 * d_silu(y1)
+        dx2 = g * silu(y1)
+        dx  = concat([dx1, dx2], axis=-1)
+
+    The math matches the CUDA kernel in swiglu_kernel.cu exactly.
+    """
+    # Split y into two halves along the last dimension
+    y1, y2 = paddle.chunk(y, chunks=2, axis=-1)
+
+    # silu(y1) = y1 * sigmoid(y1)
+    sig_y1 = paddle.nn.functional.sigmoid(y1)
+    silu_y1 = y1 * sig_y1
+
+    # dx2 = g * silu(y1)
+    dx2 = g * silu_y1
+
+    # d_silu = sigmoid(y1) * (1 + y1 * (1 - sigmoid(y1)))
+    d_silu = sig_y1 * (1.0 + y1 * (1.0 - sig_y1))
+
+    # dx1 = g * y2 * d_silu(y1)
+    dx1 = g * y2 * d_silu
+
+    # Concatenate back to original shape
+    dx = paddle.concat([dx1, dx2], axis=-1)
+    return dx
+
+
 # gradient of tanh approximation of gelu
 # gradient of actual gelu is:
 # 0.5 * (1. + paddle.erf(x * 0.70710678)) + 0.3989423 * x * paddle.exp(-0.5 * x * x)
@@ -82,9 +114,7 @@ def swiglu_back(g, y):
 
         return fused_swiglu_bwd(g, y)
     else:
-        raise NotImplementedError(
-            "fused_swiglu_bwd is not implemented for non-CUDA backends."
-        )
+        return _fused_swiglu_bwd_fallback(g, y)
 
 
 @jit_fuser
