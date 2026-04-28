@@ -19,14 +19,15 @@ import numpy as np
 import paddle
 from paddle import nn
 from paddle.distributed import fleet
-from paddle.nn import Layer
-
-from paddlefleet.pipeline_parallel import (
+from paddle.distributed.fleet.meta_parallel import (
     LayerDesc,
+    LayerSpec,
     NoPipelineParallel,
     PipelineLayer,
+    build_spec_layer,
 )
-from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddle.nn import Layer
+
 from paddlefleet.transformer.identity_op import IdentityOp
 
 
@@ -177,14 +178,14 @@ class TestPipeLayerAPI(unittest.TestCase):
 
     def test_pipelayer_desc(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(
+        pipe_model = build_spec_layer(
             alex_desc, num_stages=self.pipeline_parallel_size
         )
         np.testing.assert_array_equal(len(pipe_model.parameters()), 6)
 
     def test_pipelayer_desc_single(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(alex_desc, num_stages=1)
+        pipe_model = build_spec_layer(alex_desc, num_stages=1)
         np.testing.assert_array_equal(len(pipe_model.parameters()), 12)
         pipe_model = NoPipelineParallel(pipe_model, self.strategy)
         input = paddle.randn([256, 3, 224, 224])
@@ -192,9 +193,62 @@ class TestPipeLayerAPI(unittest.TestCase):
         data = [[input, input, input, input], [label, label, label, label]]
         pipe_model.forward_backward_pipeline(data)
 
+    def _create_no_pipeline_model(self):
+        """Helper to create a NoPipelineParallel model for eval_batch tests."""
+        alex_desc = get_alex_spec()
+        pipe_model = build_spec_layer(alex_desc, num_stages=1)
+        npp = NoPipelineParallel(pipe_model, self.strategy)
+        npp._delay_scale_loss = False
+        return npp
+
+    def _create_eval_data(self, acc_steps):
+        """Create data matching AlexNet architecture.
+        Input [256, 3, 224, 224] -> model output [147, 10] -> label [147, 1].
+        """
+        inputs = [paddle.randn([256, 3, 224, 224]) for _ in range(acc_steps)]
+        labels = [paddle.randint(0, 10, [147, 1]) for _ in range(acc_steps)]
+        return [inputs, labels]
+
+    def test_eval_batch_compute_loss(self):
+        npp = self._create_no_pipeline_model()
+        data = self._create_eval_data(npp.accumulate_steps)
+        result = npp.eval_batch(data, compute_loss=True)
+        self.assertIsInstance(result, paddle.Tensor)
+
+    # TODO(hushenwei2000): enable this test after migrate to paddle pp
+    # def test_eval_batch_no_compute_loss(self):
+    #     npp = self._create_no_pipeline_model()
+    #     data = self._create_eval_data(npp.accumulate_steps)
+    #     result = npp.eval_batch(data, compute_loss=False)
+    #     self.assertIsInstance(result, list)
+    #     self.assertEqual(len(result), npp.accumulate_steps)
+
+    def test_eval_batch_invalid_loss_fn_idx(self):
+        npp = self._create_no_pipeline_model()
+        data = self._create_eval_data(npp.accumulate_steps)
+        with self.assertRaises(AssertionError):
+            npp.eval_batch(data, compute_loss=True, loss_fn_idx=99)
+
+    def test_eval_batch_compute_loss_delay_scale(self):
+        npp = self._create_no_pipeline_model()
+        npp._delay_scale_loss = True
+        data = self._create_eval_data(npp.accumulate_steps)
+        result = npp.eval_batch(data, compute_loss=True)
+        self.assertIsInstance(result, paddle.Tensor)
+
+    # TODO(hushenwei2000): enable this test after migrate to paddle pp
+    # def test_eval_batch_return_host_tensor(self):
+    #     npp = self._create_no_pipeline_model()
+    #     data = self._create_eval_data(npp.accumulate_steps)
+    #     result = npp.eval_batch(
+    #         data, compute_loss=False, return_host_tensor=True
+    #     )
+    #     self.assertIsInstance(result, list)
+    #     self.assertEqual(len(result), npp.accumulate_steps)
+
     def test_pipelayer_segment_method_list(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(
+        pipe_model = build_spec_layer(
             alex_desc, num_stages=self.pipeline_parallel_size, seg_method=[0, 4]
         )
         stage_id = self.hcg.get_stage_id()
@@ -205,7 +259,7 @@ class TestPipeLayerAPI(unittest.TestCase):
 
     def test_pipelayer_segment_method_spec(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(
+        pipe_model = build_spec_layer(
             alex_desc,
             num_stages=self.pipeline_parallel_size,
             seg_method="layer:Conv2D|MaxPool2D",
@@ -218,7 +272,7 @@ class TestPipeLayerAPI(unittest.TestCase):
 
     def test_pipelayer_segment_method_vpp(self):
         alex_desc = get_alex_spec()
-        pipe_model = build_layer(
+        pipe_model = build_spec_layer(
             alex_desc,
             num_stages=self.pipeline_parallel_size,
             seg_method="layer:Conv2D|MaxPool2D",

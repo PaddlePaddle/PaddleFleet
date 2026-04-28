@@ -38,3 +38,5 @@ class GPTConfig(TransformerConfig):
     moe_grouped_gemm: bool = False
 
     parallel_output: bool = True
+
+    layer_types: list = None

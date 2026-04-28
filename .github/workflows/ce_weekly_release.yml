@@ -29,8 +29,8 @@ env:
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image_cu126: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda126-dev"
-  docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
-  docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev"
+  docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
+  docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda130-py312-dev"
   paddle_url_cu126_release: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   paddle_url_cu129_release: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   paddle_url_cu130_release: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
@@ -73,7 +73,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
@@ -172,7 +172,7 @@ jobs:
             echo "Using release paddle package"
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -335,7 +335,6 @@ jobs:
           git checkout ${fleet_branch}
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
-          pip install nvidia-cutlass-dsl==4.2.1
           fleet_wheel=paddlefleet-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "${paddlefleet_url}${CUDA_VERSION}/${fleet_wheel}" -O ${fleet_wheel}
           pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -343,7 +342,7 @@ jobs:
             echo "Using release paddle package"
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "Paddle Commit"
@@ -396,7 +395,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           cuda=${{ matrix.cuda }}
           python_version=${{ matrix.python }}
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
@@ -521,9 +520,9 @@ jobs:
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -755,9 +754,9 @@ jobs:
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -798,6 +797,25 @@ jobs:
             bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+          fi
+          '
+
+      - name: GLM4.5 sft cp
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+          glm45_exit_code=$?
+          if [[ "$glm45_exit_code" != "0" ]]; then
+            export case_name="glm45_sft_cp"
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 sft cp.\033[0m"
           fi
           '
 
@@ -1184,9 +1202,9 @@ jobs:
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
-          pip install coverage==7.6.1
+          pip install coverage==7.13.0
           pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"

@@ -15,10 +15,10 @@ from dataclasses import dataclass
 
 import paddle
 from paddle import nn
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.nn import functional as F
 
 from ...packed_seq_params import PackedSeqParams
-from ...spec_utils import LayerSpec, build_layer
 from ...transformer import TransformerConfig
 from ...transformer.layer import FleetLayer
 
@@ -64,13 +64,14 @@ class VisionEmbedding(FleetLayer):
 
         self.rotary_pos_emb = None
         if sublayers_spec.rope_embedding:
-            self.rotary_pos_emb = build_layer(
+            self.rotary_pos_emb = build_spec_layer(
                 sublayers_spec.rope_embedding,
             )
 
     def rot_pos_emb(self, grid_thw):
         pos_ids = []
         for t, h, w in grid_thw:
+            t, h, w = int(t), int(h), int(w)
             hpos_ids = paddle.arange(h).unsqueeze(1).expand([-1, w])
             hpos_ids = hpos_ids.reshape(
                 [
@@ -99,10 +100,16 @@ class VisionEmbedding(FleetLayer):
                     repeat_times=[t, 1]
                 )
             )
-        pos_ids = paddle.cat(x=pos_ids, axis=0)
-        max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(start_axis=1)
+        pos_ids = paddle.concat(x=pos_ids, axis=0)
+        max_grid_size = int(grid_thw[:, 1:].max())
+        # Get raw freqs [max_grid_size, head_dim//2] and index with 2D pos_ids
+        freqs = self.rotary_pos_emb.get_freqs_non_repeated(max_grid_size)
+        # pos_ids: [seq_len, 2], freqs: [max_grid_size, head_dim//2]
+        # Index freqs with each position dim: freqs[pos_ids] -> [seq_len, 2, head_dim//2]
+        rotary_pos_emb = freqs[pos_ids].flatten(start_axis=1)
+        # rotary_pos_emb: [seq_len, head_dim] (2 * head_dim//2)
+        # Duplicate to match expected format [seq_len, 1, 1, head_dim]
+        rotary_pos_emb = rotary_pos_emb[None, :, None, :]
         return rotary_pos_emb
 
     def fast_pos_embed_interpolate(self, grid_thw):
@@ -117,6 +124,7 @@ class VisionEmbedding(FleetLayer):
         weight_list = [[] for _ in range(4)]
 
         for t, h, w in zip(grid_ts, grid_hs, grid_ws):
+            t, h, w = int(t), int(h), int(w)
             h_idxs = paddle.linspace(0, self.num_grid_per_side - 1, h)
             w_idxs = paddle.linspace(0, self.num_grid_per_side - 1, w)
 
@@ -153,8 +161,8 @@ class VisionEmbedding(FleetLayer):
                 idx_list[i].extend(indices[i].tolist())
                 weight_list[i].extend(weights[i].tolist())
 
-        idx_tensor = paddle.tensor(idx_list, dtype=paddle.long, device=device)
-        weight_tensor = paddle.tensor(
+        idx_tensor = paddle.to_tensor(idx_list, dtype="int64")
+        weight_tensor = paddle.to_tensor(
             weight_list, dtype=self.pos_embed.weight.dtype
         )
         pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
@@ -162,8 +170,9 @@ class VisionEmbedding(FleetLayer):
             pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
         )
 
-        patch_pos_embeds = patch_pos_embeds.split(
-            [h * w for h, w in zip(grid_hs, grid_ws)]
+        patch_pos_embeds = paddle.split(
+            patch_pos_embeds,
+            [int(h) * int(w) for h, w in zip(grid_hs, grid_ws)],
         )
 
         patch_pos_embeds_permute = []
@@ -171,23 +180,23 @@ class VisionEmbedding(FleetLayer):
         for pos_embed, t, h, w in zip(
             patch_pos_embeds, grid_ts, grid_hs, grid_ws
         ):
-            pos_embed = pos_embed.repeat([t, 1])
+            pos_embed = pos_embed.tile([int(t), 1])
             pos_embed = (
-                pos_embed.view(
+                pos_embed.reshape(
                     [
-                        t,
-                        h // merge_size,
+                        int(t),
+                        int(h) // merge_size,
                         merge_size,
-                        w // merge_size,
+                        int(w) // merge_size,
                         merge_size,
                         -1,
                     ]
                 )
-                .permute(0, 1, 3, 2, 4, 5)
+                .transpose([0, 1, 3, 2, 4, 5])
                 .flatten(0, 4)
             )
             patch_pos_embeds_permute.append(pos_embed)
-        patch_pos_embeds = paddle.cat(patch_pos_embeds_permute)
+        patch_pos_embeds = paddle.concat(patch_pos_embeds_permute)
         return patch_pos_embeds
 
     def get_packed_seq_params(
@@ -196,18 +205,20 @@ class VisionEmbedding(FleetLayer):
     ):
         seqlens = paddle.repeat_interleave(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).contiguous()
-        cu_seqlens = seqlens.cumsum(dim=0, dtype=paddle.int32)
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0).contiguous()
-        cu_seqlens = cu_seqlens.squeeze().contiguous()
+        )
+        cu_seqlens = seqlens.cumsum(axis=0).astype("int32")
+        cu_seqlens = F.pad(cu_seqlens.unsqueeze(0), [1, 0], value=0).squeeze(0)
 
         max_seqlen = seqlens.max().item()
+        total_seqlen = cu_seqlens[-1].item()
 
         return PackedSeqParams(
             cu_seqlens_q=cu_seqlens,
             cu_seqlens_kv=cu_seqlens,
             max_seqlen_q=max_seqlen,
             max_seqlen_kv=max_seqlen,
+            total_seqlen_q=total_seqlen,
+            total_seqlen_kv=total_seqlen,
             qkv_format="thd",
         )
 
@@ -215,18 +226,32 @@ class VisionEmbedding(FleetLayer):
         pixel_values = dict_args["pixel_values"]
         grid_thw = dict_args["grid_thw"]
 
-        hidden_states = self.patch_embed(pixel_values).view()
+        pixel_values = pixel_values.reshape(
+            [
+                -1,
+                self.in_channels,
+                self.temporal_patch_size,
+                self.patch_size,
+                self.patch_size,
+            ]
+        )
+
+        hidden_states = (
+            self.patch_embed(pixel_values)
+            .flatten(2)
+            .transpose([0, 2, 1])
+            .reshape([-1, self.embed_dim])
+        )
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         hidden_states = hidden_states + pos_embeds
 
-        seq_len, _ = hidden_states.size()
+        seq_len, _ = hidden_states.shape
         hidden_states = hidden_states.reshape([seq_len, -1])
         hidden_states = hidden_states.unsqueeze(0)
 
-        rotary_pos_emb = self.rotary_pos_emb(grid_thw)
-        rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cos_sin(
-            grid_thw
-        )
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        rotary_pos_cos = paddle.cos(rotary_pos_emb)
+        rotary_pos_sin = paddle.sin(rotary_pos_emb)
 
         packed_seq_params = self.get_packed_seq_params(grid_thw)
 

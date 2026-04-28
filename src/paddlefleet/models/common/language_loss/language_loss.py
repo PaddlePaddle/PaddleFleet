@@ -22,6 +22,7 @@ from paddle import Tensor, nn
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.distributed.fleet.layers.mpu import mp_ops
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
@@ -33,7 +34,6 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
 )
-from paddlefleet.pipeline_parallel import ScheduleNode
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -196,8 +196,79 @@ class LanguageLoss(FleetLayer):
         )
         self.use_subbatch = self.loss_subbatch_sequence_length > 0
 
-    def forward_impl(self, logits: Tensor, labels: Tensor) -> Tensor:
+    def forward_impl(self, logits: Tensor | tuple, labels: Tensor) -> Tensor:
+        # Fused linear + cross-entropy path: `logits` is actually a
+        # (hidden_states, weight, bias) tuple emitted by GPTLMHead when
+        # config.fused_linear_ce_loss_chunk > 0. Dispatch to the fused kernel
+        # to avoid materializing the full [B, S, V] logits tensor.
+        if isinstance(logits, tuple):
+            assert not self.enable_parallel_cross_entropy, (
+                "fused_linear_ce_loss_chunk is incompatible with tensor parallel "
+                "parallel_output=True (ParallelCrossEntropy path)."
+            )
+            from paddlefleet.ops.triton_ops.fused_linear_cross_entropy import (
+                LigerFusedLinearCrossEntropyFunction,
+            )
+
+            hidden_states, weight, bias = logits
+            B, S, H = hidden_states.shape
+            _input = hidden_states.reshape([-1, H])
+            _labels = labels.reshape([-1])
+
+            loss_1d = LigerFusedLinearCrossEntropyFunction.apply(
+                _input,
+                weight,
+                _labels,
+                bias,
+                self.ignored_index,
+                "none",
+                self.config.fused_linear_ce_loss_chunk,
+            )
+            # Reshape back to [B, S] so downstream CP gather / lossmask
+            # handling matches the non-fused path exactly.
+            loss = loss_1d.reshape([B, S])
+
+            if get_context_parallel_world_size() > 1:
+                loss = ContextParallelGatherOp.apply(loss, axis=1)
+                labels = ContextParallelGatherOp.apply(labels, axis=1)
+
+            lossmask = labels != self.ignored_index
+            if (~lossmask).all():
+                return paddle.mean(loss) * 0.0
+
+            lossmask = lossmask.reshape([-1]).cast(paddle.float32)
+            loss = paddle.sum(
+                loss.cast(paddle.float32).reshape([-1]) * lossmask
+            )
+            loss = loss / lossmask.sum()
+            return loss
+
         seq_len = logits.shape[1]
+
+        # Loss-path MD5 probe: logits and labels before cross-entropy
+        import os
+
+        if (
+            os.environ.get("LOG_LAYER_MD5", "0") == "1"
+            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
+        ):
+            import hashlib
+
+            rank = paddle.distributed.get_rank()
+            lg_md5 = hashlib.md5(
+                logits.cast("float32").numpy().tobytes()
+            ).hexdigest()
+            lb_md5 = hashlib.md5(
+                labels.cast("int64").numpy().tobytes()
+            ).hexdigest()
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} loss_input_logits shape={list(logits.shape)} md5={lg_md5}",
+                flush=True,
+            )
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} loss_input_labels shape={list(labels.shape)} md5={lb_md5}",
+                flush=True,
+            )
 
         if self.use_subbatch and seq_len > self.loss_subbatch_sequence_length:
 
@@ -224,14 +295,83 @@ class LanguageLoss(FleetLayer):
             loss = paddle.mean(loss) * 0.0
         else:
             lossmask = lossmask.reshape([-1]).cast(paddle.float32)
-            loss = paddle.sum(
-                loss.cast(paddle.float32).reshape([-1]) * lossmask
-            )
-            loss = loss / lossmask.sum()
+
+            # Loss-path MD5 probe: per-token loss and lossmask
+            if (
+                os.environ.get("LOG_LAYER_MD5", "0") == "1"
+                or os.environ.get("LOG_LOSS_MD5", "0") == "1"
+            ):
+                import hashlib
+
+                rank = paddle.distributed.get_rank()
+                pt_md5 = hashlib.md5(
+                    loss.cast("float32").reshape([-1]).numpy().tobytes()
+                ).hexdigest()
+                lm_md5 = hashlib.md5(lossmask.numpy().tobytes()).hexdigest()
+                valid_count = lossmask.sum().item()
+                loss_sum_val = paddle.sum(
+                    loss.cast("float32").reshape([-1]) * lossmask
+                ).item()
+                print(
+                    f"[LOSS_PATH_MD5] rank={rank} per_token_loss md5={pt_md5}",
+                    flush=True,
+                )
+                print(
+                    f"[LOSS_PATH_MD5] rank={rank} lossmask md5={lm_md5} valid_tokens={valid_count}",
+                    flush=True,
+                )
+                print(
+                    f"[LOSS_PATH_MD5] rank={rank} loss_sum={loss_sum_val} final_loss={loss_sum_val / valid_count}",
+                    flush=True,
+                )
+                # Also compute line-wise loss (matches EC's _line_wise_loss) for exact comparison
+                if self.config.gpt_model_use_experimental_version:
+                    _probe_loss_2d = loss.cast(
+                        paddle.float32
+                    ) * lossmask.reshape(labels.shape)
+                    _probe_lm_2d = lossmask.reshape(labels.shape)
+                    _probe_tc = _probe_lm_2d.sum(-1)
+                    _probe_inv = (_probe_tc == 0).astype(paddle.float32)
+                    _probe_lpl = _probe_loss_2d.sum(-1) / (
+                        _probe_tc + 1e-6 * _probe_inv
+                    )
+                    _probe_lpl = _probe_lpl * (1 - _probe_inv)
+                    _probe_lw = _probe_lpl.sum() / (
+                        (1 - _probe_inv).sum() + 1e-6
+                    )
+                    print(
+                        f"[LOSS_PATH_MD5] rank={rank} line_wise_loss={_probe_lw.item():.20f}",
+                        flush=True,
+                    )
+
+            # EC-compat: line-wise loss (per-sample mean then average across samples)
+            # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
+            # is present, which changes the value due to division by (count + 1e-6).
+            if self.config.gpt_model_use_experimental_version:
+                loss_2d = loss.cast(paddle.float32) * lossmask.reshape(
+                    labels.shape
+                )
+                lossmask_2d = lossmask.reshape(labels.shape)
+                token_count_per_line = lossmask_2d.sum(-1)
+                is_invalid_line_float = (token_count_per_line == 0).astype(
+                    paddle.float32
+                )
+                loss_per_line = loss_2d.sum(-1) / (
+                    token_count_per_line + 1e-6 * is_invalid_line_float
+                )
+                loss_per_line = loss_per_line * (1 - is_invalid_line_float)
+                loss = loss_per_line.sum() / (
+                    (1 - is_invalid_line_float).sum() + 1e-6
+                )
+            else:
+                loss = paddle.sum(
+                    loss.cast(paddle.float32).reshape([-1]) * lossmask
+                )
+                loss = loss / lossmask.sum()
 
         return loss
 
-    def _forward(self, logits: Tensor, labels: Tensor):
+    def _forward(self, logits: Tensor | tuple, labels: Tensor):
         if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules
@@ -265,10 +405,31 @@ class LanguageLoss(FleetLayer):
                     labels_cur_depth = labels_ori[
                         :, (depth + 1) : (depth + 1 + seq_length)
                     ]
-                    loss_cur_depth = self._forward(
-                        logits_cur_depth,
-                        labels_cur_depth,
-                    )
+                    if self.config.gpt_model_use_experimental_version:
+                        # Align with EB: compute per-token loss matrix and reduce
+                        # with global sum/count instead of going through forward_impl
+                        # which applies line-wise loss.
+                        loss_matrix_cur_depth = self.loss_func(
+                            logits_cur_depth.cast("float32"), labels_cur_depth
+                        )
+                        lossmask_cur_depth = (
+                            labels_cur_depth != self.ignored_index
+                        ).cast(paddle.float32)
+                        loss_matrix_cur_depth = loss_matrix_cur_depth.cast(
+                            paddle.float32
+                        ).reshape([-1]) * lossmask_cur_depth.reshape([-1])
+                        if lossmask_cur_depth.sum().item() > 0:
+                            loss_cur_depth = (
+                                loss_matrix_cur_depth.sum()
+                                / lossmask_cur_depth.sum()
+                            )
+                        else:
+                            loss_cur_depth = loss_matrix_cur_depth.sum() * 0.0
+                    else:
+                        loss_cur_depth = self._forward(
+                            logits_cur_depth,
+                            labels_cur_depth,
+                        )
                     mtp_loss.append(loss_cur_depth)
                     paddle.device.cuda.empty_cache()
             else:
@@ -364,12 +525,26 @@ class LanguageLoss(FleetLayer):
                 else:
                     return main_loss
 
-            loss = add_loss(
-                lm_loss,
-                self.config.mtp_loss_scaling_factor
-                * sum(mtp_loss)
-                / len(mtp_loss),
-            )
+            if self.config.gpt_model_use_experimental_version:
+                # Align with EB: accumulate inside loop to match float32
+                # arithmetic order: loss += scaling * loss_i / N
+                loss = lm_loss
+                if self.config.add_mtp_loss:
+                    num_mtp = len(mtp_loss)
+                    for mtp_l in mtp_loss:
+                        loss = (
+                            loss
+                            + self.config.mtp_loss_scaling_factor
+                            * mtp_l
+                            / num_mtp
+                        )
+            else:
+                loss = add_loss(
+                    lm_loss,
+                    self.config.mtp_loss_scaling_factor
+                    * sum(mtp_loss)
+                    / len(mtp_loss),
+                )
 
             return loss
         else:
@@ -377,3 +552,112 @@ class LanguageLoss(FleetLayer):
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="LanguageLoss")
+
+
+class MainLanguageLoss(LanguageLoss):
+    # Class-level tracker for MTP loss, read by trainer for logging.
+    mtp_loss_tracker: dict[str, float] = {}
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        pg_collection=None,
+    ) -> None:
+        super().__init__(config=config, pg_collection=pg_collection)
+
+    def forward(self, dict_args: dict | list, labels: Tensor) -> Tensor:
+        assert (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+        )
+        labels_ori = labels
+        lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+        seq_length = lm_labels.shape[1]
+
+        mtp_loss = dict_args["mtp_loss"]
+        logits = dict_args["logits"]
+
+        assert not self.config.mtp_distillation_loss, (
+            "separate mtp head & loss don't support mtp_distillation_loss"
+        )
+
+        if self.config.train_mtp_only:
+            lm_loss = 0.0
+        else:
+            lm_loss = self._forward(logits, lm_labels)
+
+        # Store detached MTP loss tensors into class-level tracker.
+        # Use .detach() instead of .item() to avoid GPU synchronization on every
+        # micro-batch. The trainer will call .item() only at logging steps.
+        for i, loss_val in enumerate(mtp_loss):
+            MainLanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
+                loss_val.detach()
+            )
+
+        def add_loss(main_loss, loss):
+            if self.config.add_mtp_loss:
+                return main_loss + loss - loss.detach()
+            else:
+                return main_loss
+
+        loss = add_loss(
+            lm_loss,
+            self.config.mtp_loss_scaling_factor * sum(mtp_loss) / len(mtp_loss),
+        )
+
+        return loss
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="MainLanguageLoss")
+
+
+class MTPLanguageLoss(LanguageLoss):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        pg_collection=None,
+    ) -> None:
+        super().__init__(config=config, pg_collection=pg_collection)
+
+    def forward(self, dict_args: dict):
+        mtp_logits = dict_args.get("mtp_logits")
+        labels = dict_args.get("labels")
+        assert mtp_logits is not None, (
+            "separate mtp loss must provide mtp_logits"
+        )
+        assert labels is not None, "separate mtp loss must provide labels"
+        assert (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+        )
+        labels_ori = labels
+        lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+        seq_length = lm_labels.shape[1]
+
+        mtp_loss = []
+
+        assert not self.config.mtp_distillation_loss, (
+            "separate mtp head & loss don't support mtp_distillation_loss"
+        )
+
+        for depth in range(self.config.num_nextn_predict_layers):
+            logits_cur_depth = mtp_logits[depth]
+            labels_cur_depth = labels_ori[
+                :, (depth + 1) : (depth + 1 + seq_length)
+            ]
+            loss_cur_depth = self._forward(
+                logits_cur_depth,
+                labels_cur_depth,
+            )
+            mtp_loss.append(loss_cur_depth)
+            paddle.device.cuda.empty_cache()
+
+        dict_args.pop("mtp_logits")
+        dict_args["mtp_loss"] = mtp_loss
+
+        return dict_args
+
+    def build_schedule_node(self):
+        return ScheduleNode(self.forward, name="MTPLanguageLoss")

@@ -18,11 +18,12 @@
 from .cross_entropy import vocab_parallel_cross_entropy
 from .layers import (
     ColumnParallelLinear,
+    Linear,
     RowParallelLinear,
     VocabParallelEmbedding,
 )
 from .random import (
-    CheckpointWithoutOutput,
+    RecomputeWithoutOutput,
     checkpoint,
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
@@ -34,6 +35,7 @@ __all__ = [
     "vocab_parallel_cross_entropy",
     # layers.py
     "ColumnParallelLinear",
+    "Linear",
     "RowParallelLinear",
     "VocabParallelEmbedding",
     # random.py
@@ -41,5 +43,5 @@ __all__ = [
     "get_cuda_rng_tracker",
     "model_parallel_cuda_manual_seed",
     "get_expert_parallel_rng_tracker_name",
-    "CheckpointWithoutOutput",
+    "RecomputeWithoutOutput",
 ]

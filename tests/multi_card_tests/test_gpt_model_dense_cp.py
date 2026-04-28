@@ -20,11 +20,11 @@ import random
 import numpy as np
 import paddle
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
 import paddlefleet
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.pipeline_parallel import NoPipelineParallel
 from paddlefleet.training.initialize import initialize_fleet
 
 
@@ -64,6 +64,19 @@ def _set_random_seed(
         raise ValueError(f"Seed ({seed_}) should be a positive integer.")
 
 
+def _set_rng_flag(
+    FLAGS_deterministic_rng: bool = False,
+    FLAGS_deterministic_rng_grid: int = 624,
+):
+    """Set rng flag for weight initialization"""
+    paddle.set_flags(
+        {
+            "FLAGS_deterministic_rng": FLAGS_deterministic_rng,
+            "FLAGS_deterministic_rng_grid": FLAGS_deterministic_rng_grid,
+        }
+    )
+
+
 def run_cp(seed, batch_size, seq_len, vocab_size, config):
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
     strategy = fleet.DistributedStrategy()
@@ -90,6 +103,7 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
     initialize_fleet(strategy)
 
     _set_random_seed(seed)
+    _set_rng_flag(FLAGS_deterministic_rng=True)
 
     gpt_model = gpt_builder(config, num_stages=1)
 
@@ -121,7 +135,7 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
         loss.backward()
 
     print(f"actual loss: {loss.item()}")
-    loss_baseline = 7.2271623611450195
+    loss_baseline = 7.227203369140625
     np.testing.assert_allclose(
         np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
     )

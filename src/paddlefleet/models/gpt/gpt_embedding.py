@@ -17,12 +17,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    ScheduleNode,
+    build_spec_layer,
+)
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
 )
 
-from paddlefleet.pipeline_parallel import ScheduleNode
-from paddlefleet.spec_utils import LayerSpec, build_layer
+from paddlefleet.models.gpt.utils import fill_feature
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
@@ -57,7 +61,7 @@ class GPTEmbedding(FleetLayer):
         mrope_section: list[int] | None = None,
     ):
         super().__init__(config)
-        self.embedding = build_layer(
+        self.embedding = build_spec_layer(
             sublayers_spec.language_embedding,
             config=config,
             vocab_size=vocab_size,
@@ -83,7 +87,7 @@ class GPTEmbedding(FleetLayer):
         self.mrope_section = mrope_section
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
-            self.rotary_pos_emb = build_layer(
+            self.rotary_pos_emb = build_spec_layer(
                 sublayers_spec.rope_embedding,
                 head_dim=config.head_dim,
                 rotary_percent=rotary_percent,
@@ -106,6 +110,9 @@ class GPTEmbedding(FleetLayer):
         packed_seq_params: PackedSeqParams = None,
     ):
         input_ids = dict_args["input_ids"]
+        labels = dict_args.get("labels", None)
+        if labels is not None:
+            labels = labels.cuda()
         position_ids = dict_args.get("position_ids", None)
         device = paddle.device.get_device().split(":")[0].lower()
         position_ids = (
@@ -115,6 +122,11 @@ class GPTEmbedding(FleetLayer):
         attn_mask_startend_row_indices = dict_args.get(
             "attn_mask_startend_row_indices", None
         )
+        # Fallback: ernie5 trainer uses "startend_row_indices" key name
+        if attn_mask_startend_row_indices is None:
+            attn_mask_startend_row_indices = dict_args.get(
+                "startend_row_indices", None
+            )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None
@@ -128,6 +140,12 @@ class GPTEmbedding(FleetLayer):
             )
             decoder_input = dict_args["decoder_input"]
 
+        # The input_ids_for_moe_mask for moe router is same as input_ids.
+        # The moe router will use it to generate the padding mask for the current sequence.
+        input_ids_for_moe_mask = None
+        # Per-depth MTP input_ids for MoE routing in MTP layers.
+        # Shape: [B, num_mtp, max_seq] when MTP is enabled, None otherwise.
+        mtp_input_ids_for_moe_mask = None
         if decoder_input is None:
             decoder_input = self.embedding(
                 input_ids=input_ids,
@@ -135,6 +153,16 @@ class GPTEmbedding(FleetLayer):
                 if self.multimodal_embedding
                 else position_ids,
             )
+            # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
+            if (
+                self.config.expert_model_parallel_size > 1
+                and self.config.tensor_model_parallel_size < 2
+            ):
+                text_padding_indices = input_ids == 0
+                decoder_input = fill_feature(
+                    decoder_input, text_padding_indices, 0
+                )
+                input_ids_for_moe_mask = input_ids
             if (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
@@ -143,6 +171,26 @@ class GPTEmbedding(FleetLayer):
                 assert not self.multimodal_embedding, (
                     "MTP not support mm for now."
                 )
+                num_nextn_predict_layers = self.config.num_nextn_predict_layers
+                # Split input_ids for MoE mask: main part for backbone, per-depth for MTP
+                if input_ids_for_moe_mask is not None:
+                    # Main backbone input_ids: [B, max_seq]
+                    # Use .contiguous() because slices are non-contiguous and PP P2P send requires contiguous tensors.
+                    input_ids_for_moe_mask = input_ids[
+                        :, :-num_nextn_predict_layers
+                    ].contiguous()
+                    # Construct per-depth MTP input_ids: for depth k, use
+                    # input_ids[:, (k+1):(k+1+max_seq)] matching embedding shift
+                    seq_length = input_ids.shape[1] - num_nextn_predict_layers
+                    mtp_ids_list = []
+                    for depth in range(num_nextn_predict_layers):
+                        mtp_ids_list.append(
+                            input_ids[:, (depth + 1) : (depth + 1 + seq_length)]
+                        )
+                    # [B, num_mtp, max_seq] - paddle.stack creates a new contiguous tensor
+                    mtp_input_ids_for_moe_mask = paddle.stack(
+                        mtp_ids_list, axis=1
+                    )
                 inputs_embeds_extra = decoder_input[
                     :, -self.config.num_nextn_predict_layers :, :
                 ]  # [B, S, H]
@@ -345,6 +393,9 @@ class GPTEmbedding(FleetLayer):
                         [1, 0, 2, 3]
                     ).contiguous()
 
+        if paddle.core._has_grad():
+            decoder_input.stop_gradient = False  # Prevent errors in recompute_pylayer during LoRA training caused by base_weight lacking gradients.
+
         preproc_output = {
             "hidden_states": decoder_input,
             "attention_mask": attention_mask,
@@ -355,7 +406,40 @@ class GPTEmbedding(FleetLayer):
             "position_ids": position_ids,
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,
+            "labels": labels,
+            "input_ids": input_ids_for_moe_mask,
+            "mtp_input_ids_for_moe_mask": mtp_input_ids_for_moe_mask,
         }
+        # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all
+        # through dict_args to MTP layer. They must both be present or both be absent.
+        mtp_startend_row_indices_all = dict_args.get(
+            "mtp_startend_row_indices_all", None
+        )
+        mtp_hidden_inputs_mask_all = dict_args.get(
+            "mtp_hidden_inputs_mask_all", None
+        )
+        assert (mtp_startend_row_indices_all is None) == (
+            mtp_hidden_inputs_mask_all is None
+        ), (
+            "mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all must both be None or both be not None, "
+            f"got mtp_startend_row_indices_all={'None' if mtp_startend_row_indices_all is None else 'not None'}, "
+            f"mtp_hidden_inputs_mask_all={'None' if mtp_hidden_inputs_mask_all is None else 'not None'}"
+        )
+        if mtp_startend_row_indices_all is not None:
+            # Ensure tensor is on GPU (dataloader may deliver it as pinned CPU memory).
+            # PP P2P communication (NCCL) cannot send pinned tensors directly.
+            if not mtp_startend_row_indices_all.place.is_gpu_place():
+                mtp_startend_row_indices_all = (
+                    mtp_startend_row_indices_all.cuda()
+                )
+            preproc_output["mtp_startend_row_indices_all"] = (
+                mtp_startend_row_indices_all
+            )
+            if not mtp_hidden_inputs_mask_all.place.is_gpu_place():
+                mtp_hidden_inputs_mask_all = mtp_hidden_inputs_mask_all.cuda()
+            preproc_output["mtp_hidden_inputs_mask_all"] = (
+                mtp_hidden_inputs_mask_all
+            )
         if mtp_emb_res is not None:
             assert (
                 self.config.num_nextn_predict_layers is not None

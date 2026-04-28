@@ -41,6 +41,7 @@ def get_special_setup_deps():
         deps = [
             "triton",  # for deep_gemm, flashmask
             "nvidia-cutlass-dsl==4.4.1",  # for sonic_moe and flash_attention
+            "apache-tvm-ffi >= 0.1.5, < 0.2.0",  # for sonic_moe and flash_attention
             "filelock",  # for sonic_moe
         ]
         return deps
@@ -150,6 +151,7 @@ def setup_ops_extension():
             "./src/paddlefleet/_extensions/count_cumsum.cu",
             "./src/paddlefleet/_extensions/filter_scores.cu",
             "./src/paddlefleet/_extensions/fuse_stack_transpose_fp8_quant.cu",
+            "./src/paddlefleet/_extensions/fuse_apply_rotary_pos_emb_vision.cu",
         ],
         include_dirs=[
             os.path.join(os.getcwd(), "src/paddlefleet/_extensions"),

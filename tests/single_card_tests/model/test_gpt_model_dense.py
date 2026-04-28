@@ -21,6 +21,7 @@ import unittest
 import numpy as np
 import paddle
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
 # from tests.unit_tests.test_utilities import Utils
 import paddlefleet.parallel_state as ps
@@ -28,7 +29,6 @@ import paddlefleet.parallel_state as ps
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.pipeline_parallel import NoPipelineParallel
 
 
 def get_gpu_models_via_nvidia_smi():
@@ -163,8 +163,8 @@ class TestGPTModel(unittest.TestCase):
         print("embed_tokens_grad_norm", embed_tokens_grad_norm)
 
         if judge_machine_type() == "H":
-            assert loss.item() == 5.3997802734375, (
-                f"loss is not equal ({loss.item()} != 5.3997802734375), please check your modify"
+            assert loss.item() == 5.399779796600342, (
+                f"loss is not equal ({loss.item()} != 5.399779796600342), please check your modify"
             )
             assert embed_tokens_grad_norm == 4.742391586303711, (
                 f"grad norm of embed_tokens is not equal ({embed_tokens_grad_norm} != 4.742391586303711), please check your modify"

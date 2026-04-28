@@ -14,14 +14,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
-from paddle.incubate.nn.functional.fused_rms_norm_ext import fused_rms_norm_ext
-from paddle.nn.functional import layer_norm
-
-from ..spec_utils import LayerSpec
+from paddle.distributed.fleet.meta_parallel import LayerSpec
+from paddle.nn.functional import layer_norm, rms_norm
 
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
@@ -34,8 +33,9 @@ except ImportError:
         return parameter
 
 
+from paddle.distributed.fleet.meta_parallel import ScheduleNode
+
 from paddlefleet.jit import jit_fuser
-from paddlefleet.pipeline_parallel import ScheduleNode
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -73,9 +73,16 @@ class RMSNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
-        return fused_rms_norm_ext(
-            hidden_states, self.weight, self.variance_epsilon
-        )[0].astype(self.weight.dtype)
+        rms_norm_out = rms_norm(
+            hidden_states,
+            hidden_states.shape[-1:],
+            self.weight,
+            self.variance_epsilon,
+        )
+        if isinstance(rms_norm_out, (tuple, list)):
+            return rms_norm_out[0].astype(self.weight.dtype)
+        else:
+            return rms_norm_out.astype(self.weight.dtype)
 
     def enable_sequence_parallel(self):
         mark_as_sequence_parallel_parameter(self.weight)
@@ -132,9 +139,54 @@ class LayerNorm(paddle.nn.Layer):
 
 class FusedRMSNorm(RMSNorm):
     def forward(self, hidden_states: Tensor):
-        return fused_rms_norm_ext(
+        rms_norm_out = rms_norm(
+            hidden_states,
+            hidden_states.shape[-1:],
+            self.weight,
+            self.variance_epsilon,
+        )
+        if isinstance(rms_norm_out, (tuple, list)):
+            return rms_norm_out[0].astype(self.weight.dtype)
+        else:
+            return rms_norm_out.astype(self.weight.dtype)
+
+
+class RMSNormTriton(RMSNorm):
+    """Wrapper for triton RMSNorm, used for fused QK norm."""
+
+    def forward(self, hidden_states: Tensor):
+        from paddlefleet.ops.triton_ops.rms_norm_fusion import (
+            RMSNormFusionTriton,
+        )
+
+        return RMSNormFusionTriton.apply(
             hidden_states, self.weight, self.variance_epsilon
-        )[0].astype(self.weight.dtype)
+        )
+
+
+class WrappedRMSNormTriton:
+    """Factory class for RMSNormTriton, handles parameter name conversion.
+
+    Converts build_spec_layer parameters (hidden_size, eps) to
+    RMSNorm parameters (normalized_shape, norm_eps).
+    """
+
+    def __new__(
+        cls,
+        config: TransformerConfig,
+        hidden_size: int,
+        eps: float = 1e-5,
+        input_is_parallel: bool | None = None,
+        **kwargs,
+    ):
+        return RMSNormTriton(
+            config=config,
+            normalized_shape=hidden_size,
+            norm_eps=eps,
+            input_is_parallel=input_is_parallel
+            if input_is_parallel is not None
+            else False,
+        )
 
 
 class WrappedPaddleNorm:
@@ -157,7 +209,6 @@ class WrappedPaddleNorm:
                 config.sequence_parallel
                 or config.tensor_model_parallel_size > 1
             )
-
         return norm_cls(
             config=config,
             normalized_shape=hidden_size,
@@ -220,6 +271,22 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             )
             rst["hidden_states"] = hidden_states_concat
         rst = {**dict_args, **rst}
+
+        # Loss-path MD5 probe: final_layernorm output
+        if (
+            os.environ.get("LOG_LAYER_MD5", "0") == "1"
+            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
+        ):
+            import hashlib
+
+            rank = paddle.distributed.get_rank()
+            h = rst["hidden_states"]
+            md5 = hashlib.md5(h.cast("float32").numpy().tobytes()).hexdigest()
+            print(
+                f"[LOSS_PATH_MD5] rank={rank} final_layernorm_output shape={list(h.shape)} md5={md5}",
+                flush=True,
+            )
+
         return rst
 
     def build_schedule_node(self):

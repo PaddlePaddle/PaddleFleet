@@ -45,7 +45,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
 
       - name: Check docker image and run container
@@ -224,7 +224,7 @@ jobs:
     steps:
       - name: Determine the runner
         run: |
-          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') + 3 ))
+          gpu_id=$(( $(echo $PWD | awk -F'/' '{print $3}' | awk -F'-' '{print $2}') - 1 ))
           echo GPU_DEVICES="$gpu_id" >> $GITHUB_ENV
 
       - name: Check docker image and run container
@@ -487,6 +487,14 @@ jobs:
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
+          '
+
+      - name: GLM4.5 sft cp
+        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
           '
 
       - name: GLM4.5 lora

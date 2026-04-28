@@ -62,6 +62,18 @@ class TransformerConfig(ModelParallelConfig):
     mtp_load_weight_only: bool = False
     """When True, use WeightOnlyMTPLayer (holds weights but skips MTP computation and embedding processing)."""
 
+    use_dense_mtp: bool = False
+    """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
+
+    separate_mtp_headloss: bool = False
+    """Separate MTP LMHead & Loss calculate for pipeline balance."""
+
+    experimental_dataflow: bool = False
+    """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
+    separate input instead of being appended to attn_mask_startend_row_indices.
+    The new dataflow requires: input_ids, labels, startend_row_indices (last dim=1, main seq only),
+    mtp_startend_row_indices_all ([B, num_nextn, S, 1]), position_ids."""
+
     num_empty_layers_add_in_head: int = 0
     """Number of EmptyLayer before the Decoder Layer.
     num_empty_layers_add_in_head=2 Example:
@@ -142,6 +154,12 @@ class TransformerConfig(ModelParallelConfig):
 
     attention_dropout: float = 0.0
     """Post attention dropout probability."""
+
+    _attn_implementation: str = "default"
+    """Attention implementation to use."""
+
+    flashmask_use_varlen: bool = False
+    """If True, convert flashmask to varlen in attention."""
 
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
@@ -269,6 +287,15 @@ class TransformerConfig(ModelParallelConfig):
     use_qk_norm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
 
+    qk_norm_fusion: bool = False
+    """If True, use Triton fused RMSNorm kernel for QK norm."""
+
+    qk_norm_type: str = "per_head"
+    """Type of qk normalization:
+    - "per_head": normalize each attention head independently (default for most models)
+    - "per_layer": normalize across all heads jointly (full-dimension, used by MiniMax)
+    """
+
     rms_norm_eps: float = 1e-5
     """Epsilon value for norm."""
 
@@ -386,8 +413,22 @@ class TransformerConfig(ModelParallelConfig):
     """Number of selected groups per token for expert selection."""
 
     routed_scaling_factor: float = 1.0
-    """Scaling factor for routing score in top-k selection, only works when moe_router_pre_softmax
-    enabled. Defaults to None, which means no scaling."""
+    """Scalar multiplier applied to the selected top-k routing weights after expert selection.
+    The final scaled weights are used in ``top_gate`` (``[S, K]``), which is passed to the
+    dispatch/combine flow for expert output weighting.
+
+    Default is ``1.0`` (no scaling effect). For example, set to ``2.5`` for DeepSeek-V3 to
+    compensate for sigmoid scores not summing to 1 after top-k selection.
+
+    When ``routed_scaling_factor_learnable=True``, this value is used as the initialization
+    value for the per-expert learnable parameter."""
+
+    routed_scaling_factor_learnable: bool = False
+    """Whether to use a learnable per-expert scaling parameter instead of a fixed scalar.
+
+    - ``False`` (default): apply ``routed_scaling_factor`` as a fixed scalar uniformly.
+    - ``True``: create a trainable parameter of shape ``[num_experts]``, initialized to
+      ``routed_scaling_factor``, and apply it via per-expert lookup after top-k selection."""
 
     moe_dequant_input: bool = False
     """Whether to dequantize input."""
@@ -400,6 +441,14 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_subbatch_token_num_after_dispatch: int | None = None
     """Whether to enable subbatch after dispatch, the value means the number of tokens in one subbatch."""
+
+    use_auto_subbatch: bool = False
+    """When True, dynamically determine subbatch sizes based on VMM free block analysis
+    instead of using a fixed moe_subbatch_token_num_after_dispatch value."""
+
+    moe_subbatch_diag: bool = False
+    """When True, print auto_subbatch diagnostic info (path, subbatch_rows, zip_unzip_fusion)
+    after each forward/backward pass. Useful for debugging memory behavior."""
 
     moe_grouped_gemm: bool = False
     """Whether to use grouped gemm."""
@@ -419,8 +468,19 @@ class TransformerConfig(ModelParallelConfig):
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
+    moe_deep_gemm: bool = False
+    """Whether to use DeepGEMM for the bf16 grouped-gemm MoE path. This option only takes effect when
+    ``moe_grouped_gemm=True`` and fp8 is disabled, it is ignored when fp8 is enabled."""
+
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""
+
+    use_latent_moe: bool = False
+    """Whether to use latent MoE. When enabled, adds projection layers
+    to compress hidden states before routing and decompress after."""
+
+    moe_latent_size: int | None = None
+    """The latent dimension size for latent MoE. Only used when use_latent_moe is True."""
 
     ##################
     # Context Parallel
@@ -563,7 +623,92 @@ class TransformerConfig(ModelParallelConfig):
     loss_subbatch_sequence_length: int = -1
     """Sequence length of subbatch for loss computation."""
 
+    fused_linear_ce_loss_chunk: int = 0
+    """Enable fused linear + cross-entropy loss when > 0.
+
+    When set to a positive integer N, LM head skips materializing the full
+    [B, S, V] logits tensor and instead passes (hidden_states, weight, bias)
+    to LanguageLoss, which dispatches to LigerFusedLinearCrossEntropyFunction
+    with num_chunks=N. Only compatible with tensor_model_parallel_size == 1
+    (or parallel_output disabled)."""
+
     # cache_mla_latents: bool = False
+
+    ####################
+    # DSA (DeepSeek Sparse Attention)
+    ####################
+
+    dsa_index_n_heads: int | None = None
+    """Number of DSA Indexer heads. None disables DSA; non-None activates
+    DeepSeek V3.2 sparse attention path.
+
+    Note: This field corresponds to the HuggingFace config.json field "index_n_heads".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
+
+    dsa_index_head_dim: int = 128
+    """Per-head dimension for Indexer Q/K vectors.
+
+    Note: This field corresponds to the HuggingFace config.json field "index_head_dim".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
+
+    dsa_index_topk: int = 2048
+    """Number of token positions selected by Indexer per query token.
+
+    Note: This field corresponds to the HuggingFace config.json field "index_topk".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
+
+    dsa_indexer_loss_coeff: float | None = None
+    """KL loss coefficient for DSA Indexer training. None disables the KL loss.
+
+    Note: This field corresponds to the HuggingFace config.json field "indexer_loss_coeff".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
+
+    dsa_indexer_use_sparse_loss: bool = False
+    """Whether to restrict DSA KL loss to top-k positions only.
+
+    Note: This field corresponds to the HuggingFace config.json field "indexer_use_sparse_loss".
+    The mapping from HuggingFace field name to PaddleFleet internal field name is handled
+    by TransformerConfig.transform_rules.
+    """
+
+    dsa_indexer_rotary_interleaved: bool = False
+    """
+    Whether Indexer uses interleaved Rotary Position Embeddings.
+
+    When False (default), Indexer uses non-interleaved RoPE with
+    half-head frequencies [θ₁,θ₂,...,θ₁,θ₂,...].
+
+    When True, Indexer uses interleaved RoPE with paired frequencies
+    [θ₁,θ₁,θ₂,θ₂,...].
+
+    This allows compatibility with MLA's YaRN RoPE which always generates
+    interleaved frequencies.
+    """
+
+    dsa_indexer_loss_coeff: float = 0.01
+    """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
+
+    gpt_model_use_experimental_version: bool = False
+    """Enable experimental version code paths for precision alignment."""
+
+    # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
+    transform_rules = {
+        # DSA field mapping
+        "index_n_heads": "dsa_index_n_heads",
+        "index_head_dim": "dsa_index_head_dim",
+        "index_topk": "dsa_index_topk",
+        "indexer_loss_coeff": "dsa_indexer_loss_coeff",
+        "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
+        "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
+    }
 
     @classmethod
     def from_config(cls, config_dict):

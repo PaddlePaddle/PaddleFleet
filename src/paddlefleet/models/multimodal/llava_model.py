@@ -17,6 +17,7 @@ import logging
 from collections import namedtuple
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 
 from paddlefleet.config_logger import (
     has_config_logger_enabled,
@@ -31,7 +32,6 @@ from paddlefleet.models.vision.multimodal_projector import MultimodalProjector
 from paddlefleet.models.vision.radio import RADIOViTModel
 from paddlefleet.packed_seq_params import PackedSeqParams
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.spec_utils import LayerSpec
 from paddlefleet.transformer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import deprecate_inference_params, log_single_rank

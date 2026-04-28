@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+from functools import partial
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -31,6 +32,10 @@ from paddle import Tensor
 
 from paddlefleet.context_parallel_utils import flashmask_attention_cp
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
+from paddlefleet.ops.flash_mask_facade import (
+    flash_attention,
+    flashmask_attention,
+)
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.refined_recompute import (
@@ -177,6 +182,48 @@ class DotProductAttention(FleetLayer):
             raise ValueError("Softmax type not supported")
         self.rr_flashmask_attention_func = rr_flashmask_attention()
 
+    def _ec_compatible_flash_attention(
+        self, query, key, value, attn_mask_startend_row_indices=None
+    ):
+        """EC-compatible flash attention path for alignment mode.
+
+        When startend_row_indices is provided (multi-doc packing), uses
+        flashmask_attention with causal=True (matching EC behavior).
+        Otherwise falls back to flash_attention with causal=True.
+        """
+        bsz, q_len, num_heads, q_head_dim = query.shape
+
+        if attn_mask_startend_row_indices is not None:
+            # flashmask path — matches EC's scaled_dot_product_attention
+            if self.config.flashmask_use_varlen:
+                flashmask_attention_func = partial(
+                    flashmask_attention, use_varlen=True
+                )
+            else:
+                flashmask_attention_func = flashmask_attention
+
+            attn_output = flashmask_attention_func(
+                query.astype(value.dtype),
+                key.astype(value.dtype),
+                value,
+                startend_row_indices=attn_mask_startend_row_indices,
+                dropout=0.0,
+                causal=False,  # EC uses causal=False with 2-col startend_row_indices
+            )
+        else:
+            # simple causal path — no document boundaries
+            attn_output, _ = flash_attention(
+                query.astype(value.dtype),
+                key.astype(value.dtype),
+                value,
+                dropout=0.0,
+                causal=True,
+                return_softmax=False,
+            )
+
+        attn_output = attn_output.reshape([bsz, q_len, -1])
+        return attn_output
+
     def forward(
         self,
         query: Tensor,
@@ -193,38 +240,83 @@ class DotProductAttention(FleetLayer):
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
+        assert not (
+            use_rr_flash_attention and self.config.flashmask_use_varlen
+        ), "flashmask_use_varlen does not support refined recompute now."
+        bsz, q_len, num_heads, q_head_dim = query.shape
+        v_head_dim = value.shape[-1]
+
+        # EC-compatible flash attention path for alignment mode
+        if self.config.gpt_model_use_experimental_version:
+            return self._ec_compatible_flash_attention(
+                query, key, value, attn_mask_startend_row_indices
+            )
+
+        use_eager = self.config._attn_implementation == "eager"
+
+        if use_eager and packed_seq_params is not None:
+            raise ValueError(
+                'packed_seq_params does not support _attn_implementation="eager"; '
+                "please disable packed sequence inputs or use a fused attention implementation."
+            )
         if packed_seq_params is not None:
             assert (
                 query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
             ), "attention only support fp16/bf16 when use packed_seq_params"
-            lengths = (
-                packed_seq_params.cu_seqlens_kv[1:]
-                - packed_seq_params.cu_seqlens_kv[:-1]
-            )
-            splits = [
-                paddle.split(tensor, lengths.tolist(), axis=1)
-                for tensor in (query, key, value)
-            ]
-            attn_outputs = []
-            for q, k, v in zip(*splits):
-                attn_outputs.append(
-                    paddle.nn.functional.scaled_dot_product_attention(
-                        q,
-                        k,
-                        v,
-                        None,
-                        self.config.attention_dropout,
-                        is_causal=False,
+
+            if attn_mask_startend_row_indices is None:
+                # Build flashmask startend_row_indices from cu_seqlens for block-diagonal
+                # non-causal attention. Each token in segment i gets [end_i, total, 0, start_i],
+                # so it attends only to tokens within its own segment.
+                # This replaces the per-segment split + Python loop with a single FA call.
+                cu_seqlens = packed_seq_params.cu_seqlens_kv
+                seq_length = query.shape[1]
+                lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+                indices_per_segment = paddle.stack(
+                    [
+                        cu_seqlens[1:],  # col 0: lower_start = end_i
+                        paddle.full_like(
+                            cu_seqlens[1:], seq_length
+                        ),  # col 1: lower_end   = total_seq
+                        paddle.zeros_like(
+                            cu_seqlens[:-1]
+                        ),  # col 2: upper_start = 0
+                        cu_seqlens[:-1],  # col 3: upper_end   = start_i
+                    ],
+                    axis=1,
+                )  # [num_segments, 4]
+                attn_mask_startend_row_indices = (
+                    paddle.repeat_interleave(
+                        indices_per_segment, lengths, axis=0
                     )
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                )  # [1, 1, seq_len, 4]
+
+            if use_rr_flash_attention:
+                flashmask_attention_func = self.rr_flashmask_attention_func
+            elif self.config.flashmask_use_varlen:
+                flashmask_attention_func = partial(
+                    flashmask_attention, use_varlen=True
                 )
-            # [b,s,h_n,h_dim]
-            attn_output = paddle.cat(attn_outputs, axis=1)
-            return attn_output.reshape(
-                [0, 0, attn_output.shape[2] * attn_output.shape[3]]
+            else:
+                flashmask_attention_func = flashmask_attention
+
+            attn_output = flashmask_attention_func(
+                query.astype(value.dtype),
+                key.astype(value.dtype),
+                value.astype(value.dtype),
+                startend_row_indices=attn_mask_startend_row_indices,
+                dropout=self.config.attention_dropout,
+                causal=False,
             )
+            attn_output = attn_output.reshape([bsz, q_len, -1])
+            return attn_output
         if (
-            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
-        ) and attn_mask_startend_row_indices is None:
+            (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
+            and attn_mask_startend_row_indices is None
+            and not use_eager
+        ):
             # Note:
             # attention_mask is None in default
             # is_causal is True in default
@@ -248,29 +340,29 @@ class DotProductAttention(FleetLayer):
             return attn_output
 
         elif (
-            query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
-        ) and attn_mask_startend_row_indices is not None:
-            if self.config.fa_version == 4:
-                from paddlefleet.ops.flash_mask.cute.interface import (
-                    flashmask_attention as _flashmask_attention,
-                )
-            else:
-                from paddle.nn.functional.flash_attention import (
-                    flashmask_attention as _flashmask_attention,
-                )
+            (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
+            and attn_mask_startend_row_indices is not None
+            and not use_eager
+        ):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
-            flashmask_attention_func = (
-                self.rr_flashmask_attention_func
-                if use_rr_flash_attention
-                else _flashmask_attention
-            )
+            if use_rr_flash_attention:
+                flashmask_attention_func = self.rr_flashmask_attention_func
+            elif self.config.flashmask_use_varlen:
+                flashmask_attention_func = partial(
+                    flashmask_attention, use_varlen=True
+                )
+            else:
+                flashmask_attention_func = flashmask_attention
 
+            # TODO(umiswing): move this padding to flash_mask_facade,
+            # flash_mask_facade wrap the padding logic for fa/fm function call,
+            # but it does not wrap the padding for rr now.
             # Handle MLA case where query/key head_dim != value head_dim
             # flashmask_attention requires head_dim_q == head_dim_v for backward pass
-            q_head_dim = query.shape[-1]
-            v_head_dim = value.shape[-1]
-            need_value_padding = q_head_dim != v_head_dim
+            need_value_padding = (
+                use_rr_flash_attention and q_head_dim != v_head_dim
+            )
 
             if need_value_padding:
                 # Pad value to match query head_dim
@@ -298,7 +390,7 @@ class DotProductAttention(FleetLayer):
                 # attn_output: [b, s, h, q_head_dim] -> [b, s, h, v_head_dim]
                 attn_output = attn_output[..., :v_head_dim]
 
-            attn_output = attn_output.reshape([0, 0, -1])
+            attn_output = attn_output.reshape([bsz, q_len, -1])
 
             return attn_output
 
@@ -474,6 +566,10 @@ class CPDotProductAttention(FleetLayer):
         )
         assert self.context_parallel_size > 1, (
             "CPDotProductAttention is only for context_parallel_size > 1."
+        )
+
+        assert not self.config.flashmask_use_varlen, (
+            "flashmask_use_varlen does not support context parallel now."
         )
 
         b, seq_len = key.shape[0], key.shape[1]

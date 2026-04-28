@@ -34,8 +34,11 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor, nn
+from paddle.distributed.fleet.meta_parallel import (
+    LayerSpec,
+    build_spec_layer,
+)
 
-from paddlefleet.spec_utils import LayerSpec, build_layer
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -97,7 +100,7 @@ class BlockAttnRes(FleetLayer):
             self.config.rms_norm_eps,
             input_is_parallel,
         )
-        self.norm = build_layer(sublayers_spec.norm, **extra_args)
+        self.norm = build_spec_layer(sublayers_spec.norm, **extra_args)
 
     def forward(self, partial_block: Tensor, blocks: list[Tensor]) -> Tensor:
         """Compute Block Attention Residual.
@@ -131,5 +134,8 @@ class BlockAttnRes(FleetLayer):
         # Weighted sum: [B, S, H]
         # Equivalent to einsum("n b s, n b s d -> b s d", weights, V)
         h = (weights.unsqueeze(-1) * V).sum(axis=0)
+
+        if partial_block is not None and h.dtype != partial_block.dtype:
+            h = h.to(partial_block.dtype)
 
         return h

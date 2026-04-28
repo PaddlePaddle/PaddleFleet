@@ -17,23 +17,25 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from paddlefleet.pipeline_parallel import (
+from paddle.distributed.fleet.meta_parallel import (
     LayerDesc,
     PipelineLayer,
     SharedLayerDesc,
-)
-from paddlefleet.pipeline_parallel.pp_utils.utils import (
     dict_to_tuple_helper,
 )
 
 if TYPE_CHECKING:
-    from paddlefleet.spec_utils import LayerSpec
+    from paddle.distributed.fleet.meta_parallel import LayerSpec
+
 
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import GPTLMHead
-from paddlefleet.pipeline_parallel import ScheduleChunk
+from paddlefleet.transformer.multi_token_prediction import (
+    MultiTokenPredictionLayer,
+)
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerNode,
@@ -137,6 +139,8 @@ class GPTSublayersSpec:
     mtp: list[LayerSpec] | None = None
     layer_norm: LayerSpec | None = None
     lm_head: LayerSpec | None = None
+    mtp_lm_head: LayerDesc | None = None
+    mtp_loss: LayerDesc | None = None
 
 
 class GPTModel(PipelineLayer):
@@ -215,7 +219,8 @@ class GPTModel(PipelineLayer):
 
     def get_layer_desc_list(self, spec, tie_word_embeddings):
         layers = []
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+        model_type = getattr(self.config, "model_type", "")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
             name_prefix = "model.language_model"
         else:
             name_prefix = "model"
@@ -249,9 +254,13 @@ class GPTModel(PipelineLayer):
 
         # Always place layer_norm after transformer_layers and before tail_empty_layers/MTP,
         # so that the model structure is consistent regardless of whether MTP is enabled.
-        self.add_sequential_layer(
-            layers, LayerDesc(spec.layer_norm), name_prefix
-        )
+        if not (
+            self.config.gpt_model_use_experimental_version
+            and self.config.num_nextn_predict_layers >= 1
+        ):
+            self.add_sequential_layer(
+                layers, LayerDesc(spec.layer_norm), name_prefix
+            )
 
         if spec.mtp:
             for mtp_spec in spec.mtp:
@@ -259,13 +268,29 @@ class GPTModel(PipelineLayer):
                     layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"
                 )
                 i += 1
+
+        if spec.mtp_lm_head:
+            self.add_sequential_layer(
+                layers,
+                SharedLayerDesc(
+                    "embed",
+                    spec.mtp_lm_head,
+                    shared_weight_attr="embedding_weight",
+                ),
+                f"{name_prefix}.shared_mtp_lm_head",
+            )
+        if spec.mtp_loss:
+            self.add_sequential_layer(
+                layers, LayerDesc(spec.mtp_loss), f"{name_prefix}.mtp_loss"
+            )
+
         for tail_empty_layer in spec.tail_empty_layers:
             self.add_sequential_layer(
                 layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
 
-        if tie_word_embeddings:
+        if tie_word_embeddings or spec.mtp_lm_head:
             self.add_sequential_layer(
                 layers,
                 SharedLayerDesc(
@@ -533,7 +558,8 @@ class GPTModel(PipelineLayer):
         """
         state_dict = super().state_dict(*args, **kwargs)
 
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+        model_type = getattr(self.config, "model_type", "")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
             name_prefix = "model.language_model."
         else:
             name_prefix = ""
@@ -600,7 +626,8 @@ class GPTModel(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        if "qwen3_vl" in getattr(self.config, "model_type", ""):
+        model_type = getattr(self.config, "model_type", "")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
             name_prefix = "model.language_model."
         else:
             name_prefix = ""
@@ -656,10 +683,19 @@ class GPTModel(PipelineLayer):
                             batch_mode=batch_mode,
                             quant_transpose=quant_transpose,
                         )
+                    elif isinstance(layer, MultiTokenPredictionLayer):
+                        layer.transformer_layer.fp8_quant_weight(
+                            batch_mode=batch_mode,
+                            quant_transpose=quant_transpose,
+                        )
         else:
             for idx, layer in enumerate(self.run_function):
                 if isinstance(layer, TransformerLayer):
                     layer.fp8_quant_weight(
+                        batch_mode=batch_mode, quant_transpose=quant_transpose
+                    )
+                elif isinstance(layer, MultiTokenPredictionLayer):
+                    layer.transformer_layer.fp8_quant_weight(
                         batch_mode=batch_mode, quant_transpose=quant_transpose
                     )
 

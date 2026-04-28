@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from ...spec_utils import LayerSpec, build_layer
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
+
 from ..common.empty_layer import EmptyLayer
 from .layer_specs import (
     get_qwen3_vl_vision_spec,
@@ -46,4 +47,4 @@ def qwen3_vl_vision_builder(config, **kwargs):
         rope_scaling=config.rope_scaling,
     )
 
-    return build_layer(res_spec, **kwargs)
+    return build_spec_layer(res_spec, **kwargs)

@@ -14,6 +14,8 @@
 
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+from paddle.distributed.fleet.meta_parallel import LayerSpec
+
 from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
 from paddlefleet.fusions.fused_layer_norm import FusedLayerNorm
 from paddlefleet.models.gpt.gpt_layer_specs import get_mlp_layer_spec
@@ -27,7 +29,6 @@ from paddlefleet.transformer.attention import (
 )
 from paddlefleet.transformer.dot_product_attention import DotProductAttention
 from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.spec_utils import LayerSpec
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSublayersSpec,
