@@ -19,7 +19,7 @@ from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
 
-from paddlefleet.ops import is_deep_ep_available
+from paddlefleet.ops import is_deep_ep_available, is_hybrid_ep_available
 
 from .fp8_utils import FP8_ALIGN
 from .moe_utils import manual_backward
@@ -34,7 +34,19 @@ if is_deep_ep_available():
 else:
     HAVE_DEEP_EP = False
 
+if is_hybrid_ep_available():
+    from paddlefleet.ops import hybrid_ep
+
+    HAVE_HYBRID_EP = True
+else:
+    HAVE_HYBRID_EP = False
+
 _buffer = None
+_hybrid_ep_buffer = None
+_hybrid_ep_buffer_group = None
+_hybrid_ep_buffer_hidden_dim = None
+_hybrid_ep_buffer_max_num_of_tokens_per_rank = 0
+_hybrid_ep_buffer_num_local_experts = None
 
 
 def barrier_ep(ep_group):
@@ -121,6 +133,60 @@ def get_buffer(group: Group, hidden_bytes: int):
     ):
         _buffer = deep_ep.Buffer(group, num_nvl_bytes, num_rdma_bytes)
     return _buffer
+
+
+def reset_hybrid_ep_buffer():
+    """Reset the shared HybridEP communication buffer."""
+    global _hybrid_ep_buffer
+    global _hybrid_ep_buffer_group
+    global _hybrid_ep_buffer_hidden_dim
+    global _hybrid_ep_buffer_max_num_of_tokens_per_rank
+    global _hybrid_ep_buffer_num_local_experts
+
+    _hybrid_ep_buffer = None
+    _hybrid_ep_buffer_group = None
+    _hybrid_ep_buffer_hidden_dim = None
+    _hybrid_ep_buffer_max_num_of_tokens_per_rank = 0
+    _hybrid_ep_buffer_num_local_experts = None
+
+
+def get_hybrid_ep_buffer(
+    group: Group,
+    hidden_dim: int,
+    max_num_of_tokens_per_rank: int,
+    num_local_experts: int,
+    load_cached_kernels: bool = True,
+):
+    """Get or create the shared HybridEP communication buffer."""
+    global _hybrid_ep_buffer
+    global _hybrid_ep_buffer_group
+    global _hybrid_ep_buffer_hidden_dim
+    global _hybrid_ep_buffer_max_num_of_tokens_per_rank
+    global _hybrid_ep_buffer_num_local_experts
+
+    if (
+        _hybrid_ep_buffer is None
+        or _hybrid_ep_buffer_group != group
+        or _hybrid_ep_buffer_hidden_dim != hidden_dim
+        or _hybrid_ep_buffer_max_num_of_tokens_per_rank
+        < max_num_of_tokens_per_rank
+        or _hybrid_ep_buffer_num_local_experts != num_local_experts
+    ):
+        _hybrid_ep_buffer = hybrid_ep.HybridEPBuffer(
+            group=group,
+            hidden_dim=hidden_dim,
+            max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
+            num_local_experts=num_local_experts,
+            use_fp8=False,
+            load_cached_kernels=load_cached_kernels,
+        )
+        _hybrid_ep_buffer_group = group
+        _hybrid_ep_buffer_hidden_dim = hidden_dim
+        _hybrid_ep_buffer_max_num_of_tokens_per_rank = (
+            max_num_of_tokens_per_rank
+        )
+        _hybrid_ep_buffer_num_local_experts = num_local_experts
+    return _hybrid_ep_buffer
 
 
 def fused_dispatch_forward_func(
@@ -536,7 +602,7 @@ class HybridEPDispatch(PyLayer):
         recv_x, recv_token_probs, scale = manager._dispatch_with_permute_impl(
             x, token_indices, token_probs, use_fp8=fp8_dispatch
         )
-        ctx.buffer = manager._buffer
+        ctx.buffer = manager._active_buffer
         ctx.handle = manager.handle
         ctx.token_indices = token_indices
         ctx.hidden_dtype = x.dtype
@@ -604,13 +670,13 @@ class HybridEPCombine(PyLayer):
     def forward(ctx, x, manager):
         handle = manager.handle
         use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
-        combined_x, _ = manager._buffer.combine_with_unpermute(
+        combined_x, _ = manager._active_buffer.combine_with_unpermute(
             hidden=x,
             handle=handle,
             pad_multiple=FP8_ALIGN if use_fp8_dispatch else None,
         )
         combined_x.stop_gradient = False
-        ctx.buffer = manager._buffer
+        ctx.buffer = manager._active_buffer
         ctx.handle = handle
         ctx.use_fp8_dispatch = use_fp8_dispatch
         ctx.num_permuted_tokens = x.shape[0]

@@ -29,6 +29,7 @@ from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
     fused_combine,
     fused_dispatch,
+    get_hybrid_ep_buffer,
     hybrid_ep_combine,
     hybrid_ep_dispatch,
 )
@@ -47,12 +48,8 @@ try:
     from paddlefleet.ops import is_hybrid_ep_available
 
     HAVE_HYBRID_EP = is_hybrid_ep_available()
-    if HAVE_HYBRID_EP:
-        from paddlefleet.ops import hybrid_ep
-    else:
-        hybrid_ep = None
 except ImportError:
-    hybrid_ep = None
+    HAVE_HYBRID_EP = False
 
 
 def is_hybrid_ep_backend_selected(
@@ -164,9 +161,8 @@ class _HybridEPManager(_DispatchManager):
     """
     HybridEP path using dispatch_with_permute/combine_with_unpermute only.
 
-    The manager owns runtime handles and count metadata. Forward/backward graph
-    restoration is delegated to fused_a2a HybridEP bridges so MoE compute code
-    can keep consuming the same stateful manager interface.
+    The manager owns per-layer handles and count metadata. The communication
+    buffer is shared at fused_a2a module scope, matching DeepEP and Megatron.
     """
 
     def __init__(
@@ -193,9 +189,7 @@ class _HybridEPManager(_DispatchManager):
         self.tokens_per_expert = None
         self.padded_tokens_per_expert = None
         self.handle = None
-        self._buffer = None
-        self._buffer_hidden_dim = None
-        self._buffer_max_num_of_tokens_per_rank = 0
+        self._active_buffer = None
 
     def _get_buffer(
         self,
@@ -205,23 +199,14 @@ class _HybridEPManager(_DispatchManager):
         hidden_dim = hidden_states.shape[-1]
         if max_num_of_tokens_per_rank is None:
             max_num_of_tokens_per_rank = hidden_states.shape[0]
-        if (
-            self._buffer is None
-            or self._buffer_hidden_dim != hidden_dim
-            or self._buffer_max_num_of_tokens_per_rank
-            < max_num_of_tokens_per_rank
-        ):
-            self._buffer = hybrid_ep.HybridEPBuffer(
-                group=self.group,
-                hidden_dim=hidden_dim,
-                max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
-                num_local_experts=self.num_local_experts,
-                use_fp8=False,
-                load_cached_kernels=HYBRID_EP_LOAD_CACHED_KERNELS,
-            )
-            self._buffer_hidden_dim = hidden_dim
-            self._buffer_max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
-        return self._buffer
+        self._active_buffer = get_hybrid_ep_buffer(
+            group=self.group,
+            hidden_dim=hidden_dim,
+            max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
+            num_local_experts=self.num_local_experts,
+            load_cached_kernels=HYBRID_EP_LOAD_CACHED_KERNELS,
+        )
+        return self._active_buffer
 
     def _get_num_permuted_tokens_upper_bound(
         self, num_local_tokens: int

@@ -13,9 +13,12 @@
 # limitations under the License.
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import paddle
 
+from paddlefleet.transformer.moe import fused_a2a
 from paddlefleet.transformer.moe.fp8_utils import FP8_ALIGN
 from paddlefleet.transformer.moe.fused_a2a import (
     HybridEPCombine,
@@ -138,6 +141,36 @@ class _RecordingHybridEPBuffer:
     def update_template_config(self, **kwargs):
         self.update_template_config_calls.append(kwargs)
         return self.replay_config
+
+
+class _ConstructedHybridEPBuffer:
+    instances = []
+
+    def __init__(
+        self,
+        group,
+        hidden_dim,
+        max_num_of_tokens_per_rank,
+        num_local_experts,
+        use_fp8,
+        load_cached_kernels,
+    ):
+        self.group = group
+        self.hidden_dim = hidden_dim
+        self.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
+        self.num_local_experts = num_local_experts
+        self.use_fp8 = use_fp8
+        self.load_cached_kernels = load_cached_kernels
+        self.instances.append(self)
+
+
+def _bind_buffer(manager, buffer):
+    def _get_buffer(*args, **kwargs):
+        del args, kwargs
+        manager._active_buffer = buffer
+        return buffer
+
+    manager._get_buffer = _get_buffer
 
 
 class TestHybridEPBackendSelection(unittest.TestCase):
@@ -354,6 +387,43 @@ class TestHybridEPMetadata(unittest.TestCase):
 
 
 class TestHybridEPDispatchBoundary(unittest.TestCase):
+    def tearDown(self):
+        fused_a2a.reset_hybrid_ep_buffer()
+
+    def test_hybrid_ep_buffer_is_shared_across_managers(self):
+        group = _HybridEPGroup(nranks=2)
+        manager_a = _new_hybrid_manager(group=group)
+        manager_b = _new_hybrid_manager(group=group)
+        _ConstructedHybridEPBuffer.instances = []
+
+        with patch.object(
+            fused_a2a,
+            "hybrid_ep",
+            SimpleNamespace(HybridEPBuffer=_ConstructedHybridEPBuffer),
+            create=True,
+        ):
+            first = manager_a._get_buffer(paddle.zeros([4, 8], dtype="float32"))
+            second = manager_b._get_buffer(
+                paddle.zeros([2, 8], dtype="float32")
+            )
+            larger = manager_b._get_buffer(
+                paddle.zeros([8, 8], dtype="float32")
+            )
+            reused_larger = manager_a._get_buffer(
+                paddle.zeros([6, 8], dtype="float32")
+            )
+
+        self.assertIs(first, second)
+        self.assertIsNot(first, larger)
+        self.assertIs(larger, reused_larger)
+        self.assertEqual(
+            [
+                item.max_num_of_tokens_per_rank
+                for item in _ConstructedHybridEPBuffer.instances
+            ],
+            [4, 8],
+        )
+
     def test_dispatch_with_permute_uses_hybrid_ep_runtime_contract(self):
         routing_map = paddle.to_tensor(
             [[True, False], [False, True]], dtype="bool"
@@ -383,7 +453,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
                 )
             ]
         )
-        manager._get_buffer = lambda hidden_states: buffer
+        _bind_buffer(manager, buffer)
 
         manager._dispatch_with_permute_impl(
             paddle.zeros([2, 4], dtype="float32"),
@@ -427,7 +497,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
                 )
             ]
         )
-        manager._get_buffer = lambda hidden_states: buffer
+        _bind_buffer(manager, buffer)
 
         manager._dispatch_with_permute_impl(
             paddle.ones([2, 4], dtype="bfloat16"),
@@ -473,7 +543,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
                 )
             ]
         )
-        manager._get_buffer = lambda hidden_states: buffer
+        _bind_buffer(manager, buffer)
 
         output, fp8_handle = manager.dispatch(
             paddle.zeros([2, 4], dtype="float32"),
@@ -498,7 +568,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         buffer = _RecordingHybridEPBuffer(
             combine_results=[(paddle.ones([2, 4], dtype="float32"), None)]
         )
-        manager._buffer = buffer
+        manager._active_buffer = buffer
         manager.handle = _make_hybrid_ep_handle(token_data_type="BF16")
         manager.dispatched_probs = paddle.ones([2], dtype="float32")
         manager.tokens_per_expert = paddle.to_tensor([1, 1], dtype="int64")
@@ -557,7 +627,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             def _dispatch_with_permute_impl(
                 self, x, token_indices, token_probs, use_fp8
             ):
-                self._buffer = buffer
+                self._active_buffer = buffer
                 self.handle = handle
                 self.use_fp8 = use_fp8
                 return (
@@ -623,7 +693,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             num_local_experts=2,
         )
         manager.handle = handle
-        manager._buffer = buffer
+        manager._active_buffer = buffer
         manager.tokens_per_expert = paddle.to_tensor([1, 1], dtype="int64")
         manager.padded_tokens_per_expert = paddle.to_tensor(
             [1, 1], dtype="int64"
