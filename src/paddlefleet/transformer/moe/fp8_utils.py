@@ -90,7 +90,7 @@ __all__ = [
 FP8_ALIGN = 128
 
 
-def _get_fp8_weight_and_scale(weight, transpose=False):
+def _get_fp8_weight_and_scale(weight, transpose=False, num_expert=None):
     """_get_fp8_weight_and_scale"""
     fp8_weight, fp8_scale = (
         weight.fp8_weight_stacked,
@@ -108,7 +108,10 @@ def _get_fp8_weight_and_scale(weight, transpose=False):
             # 只有非转置版，on-the-fly reshape+transpose
             assert fp8_weight.shape[0] % weight.shape[0] == 0
             assert fp8_weight.ndim == 2
-            expert_num = fp8_weight.shape[0] // weight.shape[0]
+            if num_expert:
+                expert_num = num_expert
+            else:
+                expert_num = fp8_weight.shape[0] // weight.shape[0]
 
             def transpose_tensor(tensor):
                 assert tensor.ndim == 2
@@ -157,10 +160,12 @@ def fused_stack_quant_without_cache(
     return w, scale
 
 
-def fused_stack_quant(expert_weight_list, transpose=False, use_ue8m0=False):
+def fused_stack_quant(
+    expert_weight_list, transpose=False, use_ue8m0=False, num_expert=None
+):
     if hasattr(expert_weight_list[0], "fp8_weight_stacked"):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], transpose=transpose
+            expert_weight_list[0], transpose=transpose, num_expert=num_expert
         )
     else:
         w, scale = fused_stack_quant_without_cache(
@@ -504,7 +509,9 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 expert_w1 = [expert_w1]
 
-        w1_t_quant, w1_t_scale = fused_stack_quant(expert_w1, transpose=True)
+        w1_t_quant, w1_t_scale = fused_stack_quant(
+            expert_w1, transpose=True, num_expert=num_expert
+        )
         w1_t_quant = w1_t_quant.reshape([num_expert, -1, w1_t_quant.shape[-1]])
         w1_t_scale = w1_t_scale.reshape([num_expert, -1, w1_t_scale.shape[-1]])
 
@@ -650,7 +657,9 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 expert_w2 = [expert_w2]
 
-        w2_quant, w2_scale = fused_stack_quant(expert_w2, transpose=True)
+        w2_quant, w2_scale = fused_stack_quant(
+            expert_w2, transpose=True, num_expert=num_expert
+        )
         w2_quant = w2_quant.reshape([num_expert, -1, w2_quant.shape[-1]])
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
@@ -774,7 +783,9 @@ class ExpertsGroupGemmContiguousNode:
             local_expert_num = len(expert_w2)
 
         # fp8_gemm_nt(do3[m,k], w2[n,k]) = do3 @ w2^T = do3 @ [k,n]
-        bw_w2_quant, bw_w2_scale = fused_stack_quant(expert_w2, transpose=False)
+        bw_w2_quant, bw_w2_scale = fused_stack_quant(
+            expert_w2, transpose=False, num_expert=local_expert_num
+        )
         bw_w2_quant = bw_w2_quant.reshape(
             [local_expert_num, -1, bw_w2_quant.shape[-1]]
         )
@@ -918,7 +929,9 @@ class ExpertsGroupGemmContiguousNode:
         else:
             local_expert_num = len(expert_w1)
 
-        bw_w1_quant, bw_w1_scale = fused_stack_quant(expert_w1, transpose=False)
+        bw_w1_quant, bw_w1_scale = fused_stack_quant(
+            expert_w1, transpose=False, num_expert=local_expert_num
+        )
         bw_w1_quant = bw_w1_quant.reshape(
             [local_expert_num, -1, bw_w1_quant.shape[-1]]
         )
