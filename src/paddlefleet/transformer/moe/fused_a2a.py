@@ -47,6 +47,8 @@ _hybrid_ep_buffer_group = None
 _hybrid_ep_buffer_hidden_dim = None
 _hybrid_ep_buffer_max_num_of_tokens_per_rank = 0
 _hybrid_ep_buffer_num_local_experts = None
+_hybrid_ep_buffer_num_sms = None
+_hybrid_ep_buffer_active_num_sms = None
 
 
 def barrier_ep(ep_group):
@@ -85,13 +87,17 @@ def configure_buffer(num_sms=None, dispatch_config=None, combine_config=None):
             Trailing values may be omitted to use the defaults.
         combine_config (List[int]): Same as above, but for combine kernels.
     """
+    global _hybrid_ep_buffer_num_sms
+
     if num_sms is not None:
+        _hybrid_ep_buffer_num_sms = num_sms
+    if num_sms is not None and HAVE_DEEP_EP:
         deep_ep.Buffer.set_num_sms(num_sms)
-    if dispatch_config is not None:
+    if dispatch_config is not None and HAVE_DEEP_EP:
         deep_ep.Buffer.get_dispatch_config = staticmethod(
             lambda _: deep_ep.Config(deep_ep.Buffer.num_sms, *dispatch_config)
         )
-    if combine_config is not None:
+    if combine_config is not None and HAVE_DEEP_EP:
         deep_ep.Buffer.get_combine_config = staticmethod(
             lambda _: deep_ep.Config(deep_ep.Buffer.num_sms, *combine_config)
         )
@@ -142,12 +148,14 @@ def reset_hybrid_ep_buffer():
     global _hybrid_ep_buffer_hidden_dim
     global _hybrid_ep_buffer_max_num_of_tokens_per_rank
     global _hybrid_ep_buffer_num_local_experts
+    global _hybrid_ep_buffer_active_num_sms
 
     _hybrid_ep_buffer = None
     _hybrid_ep_buffer_group = None
     _hybrid_ep_buffer_hidden_dim = None
     _hybrid_ep_buffer_max_num_of_tokens_per_rank = 0
     _hybrid_ep_buffer_num_local_experts = None
+    _hybrid_ep_buffer_active_num_sms = None
 
 
 def get_hybrid_ep_buffer(
@@ -163,6 +171,7 @@ def get_hybrid_ep_buffer(
     global _hybrid_ep_buffer_hidden_dim
     global _hybrid_ep_buffer_max_num_of_tokens_per_rank
     global _hybrid_ep_buffer_num_local_experts
+    global _hybrid_ep_buffer_active_num_sms
 
     if (
         _hybrid_ep_buffer is None
@@ -171,6 +180,7 @@ def get_hybrid_ep_buffer(
         or _hybrid_ep_buffer_max_num_of_tokens_per_rank
         < max_num_of_tokens_per_rank
         or _hybrid_ep_buffer_num_local_experts != num_local_experts
+        or _hybrid_ep_buffer_active_num_sms != _hybrid_ep_buffer_num_sms
     ):
         _hybrid_ep_buffer = hybrid_ep.HybridEPBuffer(
             group=group,
@@ -178,6 +188,9 @@ def get_hybrid_ep_buffer(
             max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
             num_local_experts=num_local_experts,
             use_fp8=False,
+            num_sms_dispatch_api=_hybrid_ep_buffer_num_sms,
+            num_sms_combine_api=_hybrid_ep_buffer_num_sms,
+            num_sms_preprocessing_api=_hybrid_ep_buffer_num_sms,
             load_cached_kernels=load_cached_kernels,
         )
         _hybrid_ep_buffer_group = group
@@ -186,6 +199,7 @@ def get_hybrid_ep_buffer(
             max_num_of_tokens_per_rank
         )
         _hybrid_ep_buffer_num_local_experts = num_local_experts
+        _hybrid_ep_buffer_active_num_sms = _hybrid_ep_buffer_num_sms
     return _hybrid_ep_buffer
 
 

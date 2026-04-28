@@ -161,13 +161,19 @@ class _ConstructedHybridEPBuffer:
         max_num_of_tokens_per_rank,
         num_local_experts,
         use_fp8,
-        load_cached_kernels,
+        num_sms_dispatch_api=None,
+        num_sms_combine_api=None,
+        num_sms_preprocessing_api=None,
+        load_cached_kernels=False,
     ):
         self.group = group
         self.hidden_dim = hidden_dim
         self.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
         self.num_local_experts = num_local_experts
         self.use_fp8 = use_fp8
+        self.num_sms_dispatch_api = num_sms_dispatch_api
+        self.num_sms_combine_api = num_sms_combine_api
+        self.num_sms_preprocessing_api = num_sms_preprocessing_api
         self.load_cached_kernels = load_cached_kernels
         self.instances.append(self)
 
@@ -435,6 +441,29 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             [4, 8],
         )
 
+    def test_hybrid_ep_buffer_uses_configured_num_sms(self):
+        manager = _new_hybrid_manager(group=_HybridEPGroup(nranks=2))
+        _ConstructedHybridEPBuffer.instances = []
+        original_num_sms = fused_a2a._hybrid_ep_buffer_num_sms
+
+        try:
+            fused_a2a.configure_buffer(num_sms=20)
+            with patch.object(
+                fused_a2a,
+                "hybrid_ep",
+                _HybridEPRuntimeModule,
+                create=True,
+            ):
+                manager._get_buffer(paddle.zeros([4, 8], dtype="float32"))
+        finally:
+            fused_a2a._hybrid_ep_buffer_num_sms = original_num_sms
+            fused_a2a.reset_hybrid_ep_buffer()
+
+        buffer = _ConstructedHybridEPBuffer.instances[-1]
+        self.assertEqual(buffer.num_sms_dispatch_api, 20)
+        self.assertEqual(buffer.num_sms_combine_api, 20)
+        self.assertEqual(buffer.num_sms_preprocessing_api, 20)
+
     def test_dispatch_with_permute_uses_hybrid_ep_runtime_contract(self):
         routing_map = paddle.to_tensor(
             [[True, False], [False, True]], dtype="bool"
@@ -568,6 +597,49 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         self.assertIsNone(manager.dispatched_indices)
         self.assertEqual(manager.tokens_per_expert.numpy().tolist(), [1, 1])
         self.assertFalse(buffer.dispatch_calls[-1]["use_fp8"])
+
+    def test_public_dispatch_returns_fp8_scale_handle(self):
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1),
+            router_topk=1,
+            num_experts=2,
+            num_local_experts=2,
+        )
+        scale = paddle.ones([2, 1], dtype="float32")
+        buffer = _RecordingHybridEPBuffer(
+            dispatch_results=[
+                (
+                    paddle.zeros([2, 4], dtype="float32"),
+                    paddle.ones([2], dtype="float32"),
+                    scale,
+                    paddle.to_tensor([1, 1], dtype="int64"),
+                    _make_hybrid_ep_handle(
+                        num_dispatched_tokens=2,
+                        local_expert_routing_map=paddle.to_tensor(
+                            [[True, False], [False, True]], dtype="bool"
+                        ),
+                    ),
+                )
+            ]
+        )
+        _bind_buffer(manager, buffer)
+
+        token_indices = paddle.to_tensor([[0], [1]], dtype="int64")
+        token_weights = paddle.ones([2, 1], dtype="float32")
+
+        _, fp8_handle = manager.dispatch_overlap(
+            paddle.ones([2, 4], dtype="bfloat16"),
+            token_indices,
+            token_weights,
+            fp8_dispatch=True,
+        )
+
+        self.assertIs(fp8_handle["scale"], scale)
+        self.assertIs(manager.token_indices, token_indices)
+        self.assertIs(manager.token_probs, token_weights)
+        self.assertEqual(
+            manager.get_number_of_tokens_per_expert().numpy().tolist(), [1, 1]
+        )
 
     def test_public_combine_rejects_overlap_and_clears_runtime_state(self):
         manager = _new_hybrid_manager(
