@@ -850,5 +850,123 @@ class TestKGroupGemm(unittest.TestCase):
         )
 
 
+class TestMoELayerFp8QuantWeightBranches(unittest.TestCase):
+    """
+    Cover the three branches in MoELayer.fp8_quant_weight that are never reached
+    by the existing tests because the method's guard requires moe_use_fusion_node=True,
+    which in turn requires expert_model_parallel_size > 1 (impossible on single card).
+
+    Branches covered:
+      "enter this not in v0"  – batch_mode=True with grouped_gemm_experts present
+      "enter this not in v1"  – expert_w1_list is non-empty → quantize weight1
+      "enter this not in v2"  – expert_w2_list is non-empty → quantize weight2
+
+    Strategy: call MoELayer.fp8_quant_weight as an unbound method on a minimal
+    stub object that carries only the three attributes the method actually reads
+    (moe_use_fusion_node, fp8, grouped_gemm_experts), bypassing __init__ entirely.
+    """
+
+    # Reuse the same sizes as TestKGroupGemm to satisfy fp8 alignment requirements.
+    HIDDEN_SIZE = 512
+    INTERMEDIATE_SIZE = 256
+    N_EXPERTS = 4
+
+    def _make_grouped_experts(self):
+        """Create a real GroupedMLPExpert whose weight shapes satisfy fp8 alignment."""
+        config = TransformerConfig(
+            hidden_size=self.HIDDEN_SIZE,
+            gated_linear_unit=True,
+            moe_intermediate_size=self.INTERMEDIATE_SIZE,
+        )
+        return GroupedMLPExpert(self.N_EXPERTS, config, False, None)
+
+    # ---------------------------------------------------------------
+    # Test A: hit v0 + v1 + v2 together (quant_transpose=True)
+    # ---------------------------------------------------------------
+    def test_fp8_quant_weight_not_in_v0_v1_v2(self):
+        """
+        Drive all three branches in MoELayer.fp8_quant_weight:
+          v0: hasattr(self, 'grouped_gemm_experts') and batch_mode=True
+          v1: expert_w1_list is non-empty  → weight1 is quantized
+          v2: expert_w2_list is non-empty  → weight2 is quantized
+        """
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        class _Stub:
+            pass
+
+        obj = _Stub()
+        obj.moe_use_fusion_node = True  # pass the guard
+        obj.fp8 = "e4m3"  # pass the guard
+        obj.grouped_gemm_experts = self._make_grouped_experts()
+
+        # Call the real method as an unbound function on the stub
+        MoELayer.fp8_quant_weight(obj, batch_mode=True, quant_transpose=True)
+
+        w1 = obj.grouped_gemm_experts.weight1
+        w2 = obj.grouped_gemm_experts.weight2
+
+        # v1: weight1 was quantized
+        self.assertTrue(
+            hasattr(w1, "fp8_weight_stacked"),
+            "v1: weight1.fp8_weight_stacked should be set",
+        )
+        self.assertIsNotNone(w1.fp8_weight_stacked)
+        self.assertTrue(hasattr(w1, "fp8_weight_stacked_transpose"))
+        self.assertIsNotNone(w1.fp8_weight_stacked_transpose)
+
+        # v2: weight2 was quantized
+        self.assertTrue(
+            hasattr(w2, "fp8_weight_stacked"),
+            "v2: weight2.fp8_weight_stacked should be set",
+        )
+        self.assertIsNotNone(w2.fp8_weight_stacked)
+        self.assertTrue(hasattr(w2, "fp8_weight_stacked_transpose"))
+        self.assertIsNotNone(w2.fp8_weight_stacked_transpose)
+
+        print(
+            "[PASS] test_fp8_quant_weight_not_in_v0_v1_v2: v0/v1/v2 all covered"
+        )
+
+    # ---------------------------------------------------------------
+    # Test B: v0 + v1 + v2 with quant_transpose=False
+    #   Covers the else-branch inside quantize_weights where
+    #   fp8_weight_stacked_transpose is set to None.
+    # ---------------------------------------------------------------
+    def test_fp8_quant_weight_not_in_v0_no_transpose(self):
+        """
+        Same v0/v1/v2 path but with quant_transpose=False, verifying that
+        fp8_weight_stacked_transpose is explicitly set to None on both weights.
+        """
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        class _Stub:
+            pass
+
+        obj = _Stub()
+        obj.moe_use_fusion_node = True
+        obj.fp8 = "e4m3"
+        obj.grouped_gemm_experts = self._make_grouped_experts()
+
+        MoELayer.fp8_quant_weight(obj, batch_mode=True, quant_transpose=False)
+
+        w1 = obj.grouped_gemm_experts.weight1
+        w2 = obj.grouped_gemm_experts.weight2
+
+        self.assertTrue(hasattr(w1, "fp8_weight_stacked"))
+        self.assertIsNone(
+            w1.fp8_weight_stacked_transpose,
+            "quant_transpose=False: weight1 transpose should be None",
+        )
+        self.assertTrue(hasattr(w2, "fp8_weight_stacked"))
+        self.assertIsNone(
+            w2.fp8_weight_stacked_transpose,
+            "quant_transpose=False: weight2 transpose should be None",
+        )
+        print(
+            "[PASS] test_fp8_quant_weight_not_in_v0_no_transpose: no-transpose sub-path covered"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
