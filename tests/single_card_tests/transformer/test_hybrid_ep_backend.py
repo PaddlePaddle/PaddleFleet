@@ -21,6 +21,7 @@ from paddlefleet.transformer.moe.fp8_utils import FP8_ALIGN
 from paddlefleet.transformer.moe.fused_a2a import (
     HybridEPCombine,
     HybridEPDispatch,
+    _replay_hybrid_ep_dispatch_backward,
 )
 from paddlefleet.transformer.moe.fusion_layer_utils import (
     _hybrid_ep_prepare_expert_counts,
@@ -263,6 +264,57 @@ class TestHybridEPMetadata(unittest.TestCase):
             [[0.25, 0.25, 0.25], [0.5, 0.5, 0.5]],
         )
 
+    def test_dispatch_metadata_uses_cached_dense_metadata_when_available(self):
+        manager = _new_hybrid_manager(router_topk=2, num_experts=4)
+        routing_map = paddle.to_tensor(
+            [[True, False, True, False]], dtype="bool"
+        )
+        routing_probs = paddle.to_tensor(
+            [[0.2, 0.0, 0.8, 0.0]], dtype="float32"
+        )
+        manager.routing_map = routing_map
+        manager.routing_probs = routing_probs
+
+        dispatch_map, dispatch_probs = manager._get_dispatch_metadata(
+            paddle.to_tensor([[3, 1]], dtype="int64"),
+            paddle.ones([1, 2], dtype="float32"),
+        )
+
+        self.assertIs(dispatch_map, routing_map)
+        self.assertIs(dispatch_probs, routing_probs)
+
+    def test_dispatch_metadata_can_start_from_topk_metadata(self):
+        manager = _new_hybrid_manager(router_topk=2, num_experts=4)
+
+        routing_map, routing_probs = manager._get_dispatch_metadata(
+            paddle.to_tensor([[3, 1], [0, -1]], dtype="int64"),
+            paddle.to_tensor([[0.75, 0.25], [1.0, 0.0]], dtype="float32"),
+        )
+
+        self.assertEqual(
+            routing_map.numpy().tolist(),
+            [
+                [False, True, False, True],
+                [True, False, False, False],
+            ],
+        )
+        self.assertTrue(
+            paddle.allclose(
+                routing_probs,
+                paddle.to_tensor(
+                    [
+                        [0.0, 0.25, 0.0, 0.75],
+                        [1.0, 0.0, 0.0, 0.0],
+                    ],
+                    dtype="float32",
+                ),
+                atol=1e-6,
+            ).item()
+        )
+
+        with self.assertRaisesRegex(AssertionError, "routing metadata"):
+            manager._get_dispatch_metadata(None, None)
+
 
 class TestHybridEPDispatchBoundary(unittest.TestCase):
     def test_dispatch_with_permute_uses_hybrid_ep_runtime_contract(self):
@@ -353,6 +405,105 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         self.assertEqual(dispatch_kwargs["pad_multiple"], FP8_ALIGN)
         self.assertEqual(dispatch_kwargs["scaling_factor"].shape, [4, 1])
 
+    def test_public_dispatch_uses_router_metadata_and_records_runtime_state(
+        self,
+    ):
+        manager = _new_hybrid_manager(
+            group=SimpleNamespace(nranks=1),
+            router_topk=1,
+            num_experts=2,
+            num_local_experts=2,
+        )
+        manager.setup_metadata(
+            paddle.to_tensor([[True, False], [False, True]], dtype="bool"),
+            paddle.to_tensor([[1.0, 0.0], [0.0, 1.0]], dtype="float32"),
+            topk_weights=paddle.ones([2, 1], dtype="float32"),
+            topk_indices=paddle.to_tensor([[0], [1]], dtype="int64"),
+        )
+        dispatched = paddle.full([2, 4], 2.0, dtype="float32")
+        dispatched_probs = paddle.to_tensor([1.0, 1.0], dtype="float32")
+        buffer = _RecordingHybridEPBuffer(
+            dispatch_results=[
+                (
+                    dispatched,
+                    dispatched_probs,
+                    None,
+                    paddle.to_tensor([1, 1], dtype="int64"),
+                    _make_hybrid_ep_handle(
+                        num_dispatched_tokens=2,
+                        local_expert_routing_map=manager.routing_map,
+                    ),
+                )
+            ]
+        )
+        manager._get_buffer = lambda hidden_states: buffer
+
+        output, fp8_handle = manager.dispatch(
+            paddle.zeros([2, 4], dtype="float32"),
+            fp8_dispatch=False,
+            async_finish=True,
+        )
+
+        self.assertIsNone(fp8_handle)
+        self.assertTrue(paddle.allclose(output, dispatched).item())
+        self.assertIs(manager.dispatched_probs, dispatched_probs)
+        self.assertIsNone(manager.dispatched_indices)
+        self.assertEqual(manager.tokens_per_expert.numpy().tolist(), [1, 1])
+        self.assertFalse(buffer.dispatch_calls[-1]["use_fp8"])
+
+    def test_public_combine_rejects_overlap_and_clears_runtime_state(self):
+        manager = _new_hybrid_manager(
+            group=SimpleNamespace(nranks=1),
+            router_topk=1,
+            num_experts=2,
+            num_local_experts=2,
+        )
+        buffer = _RecordingHybridEPBuffer(
+            combine_results=[(paddle.ones([2, 4], dtype="float32"), None)]
+        )
+        manager._buffer = buffer
+        manager.handle = _make_hybrid_ep_handle(token_data_type="BF16")
+        manager.dispatched_probs = paddle.ones([2], dtype="float32")
+        manager.tokens_per_expert = paddle.to_tensor([1, 1], dtype="int64")
+        manager.padded_tokens_per_expert = paddle.to_tensor(
+            [1, 1], dtype="int64"
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "combine overlap"):
+            manager.combine(
+                paddle.zeros([2, 4], dtype="float32"),
+                combine_overlap_handle={"fn": object()},
+            )
+
+        output = manager.combine(
+            paddle.zeros([2, 4], dtype="float32"),
+            async_finish=True,
+        )
+
+        self.assertEqual(output.numpy().tolist(), [[1.0] * 4, [1.0] * 4])
+        self.assertIsNone(manager.handle)
+        self.assertIsNone(manager.dispatched_probs)
+        self.assertIsNone(buffer.combine_calls[-1].get("pad_multiple"))
+
+    def test_dispatched_metadata_is_unavailable_in_hybrid_fused_mode(self):
+        manager = _new_hybrid_manager()
+
+        with self.assertRaisesRegex(NotImplementedError, "dispatch metadata"):
+            manager.get_dispatched_metadata()
+
+        manager.dispatched_indices = paddle.to_tensor([0, 1], dtype="int64")
+        manager.dispatched_probs = paddle.to_tensor(
+            [0.5, 0.25], dtype="float32"
+        )
+
+        self.assertEqual(
+            tuple(
+                item.numpy().tolist()
+                for item in manager.get_dispatched_metadata()
+            ),
+            ([0, 1], [0.5, 0.25]),
+        )
+
 
 class TestHybridEPAutogradBridge(unittest.TestCase):
     def test_dispatch_pylayer_maps_dense_prob_grad_back_to_topk(self):
@@ -429,6 +580,10 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             num_experts_per_rank=2,
         )
         manager = SimpleNamespace(handle=handle, _buffer=buffer)
+        manager.tokens_per_expert = paddle.to_tensor([1, 1], dtype="int64")
+        manager.padded_tokens_per_expert = paddle.to_tensor(
+            [1, 1], dtype="int64"
+        )
         x = paddle.zeros([2, 4], dtype="float32")
         x.stop_gradient = False
 
@@ -448,6 +603,30 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
         )
         self.assertIs(buffer.dispatch_calls[-1]["handle"][7], replay_config)
         self.assertEqual(buffer.dispatch_calls[-1]["pad_multiple"], FP8_ALIGN)
+        self.assertFalse(buffer.dispatch_calls[-1]["non_blocking"])
+
+    def test_replay_dispatch_backward_preserves_bf16_handle_contract(self):
+        grad_output = paddle.ones([3, 4], dtype="float32")
+        replayed_grad = paddle.arange(12, dtype="float32").reshape([3, 4])
+        handle = _make_hybrid_ep_handle(token_data_type="BF16")
+        buffer = _RecordingHybridEPBuffer(
+            dispatch_results=[(replayed_grad, None, None, None, None)]
+        )
+
+        result = _replay_hybrid_ep_dispatch_backward(
+            buffer,
+            handle,
+            grad_output,
+            num_permuted_tokens=2,
+            use_fp8_dispatch=False,
+        )
+
+        self.assertEqual(
+            result.numpy().tolist(), replayed_grad[:2].numpy().tolist()
+        )
+        self.assertEqual(buffer.update_template_config_calls, [])
+        self.assertIs(buffer.dispatch_calls[-1]["handle"], handle)
+        self.assertIsNone(buffer.dispatch_calls[-1]["pad_multiple"])
         self.assertFalse(buffer.dispatch_calls[-1]["non_blocking"])
 
 
