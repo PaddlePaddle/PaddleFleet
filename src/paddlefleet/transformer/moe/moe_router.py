@@ -732,7 +732,7 @@ class TopKRouter(StandardMoERouter):
                 self.weight,
                 True,
                 self.config.moe_router_force_load_balancing,
-                self.config.dw_p2p_overlap,
+                getattr(self.config, "dw_p2p_overlap", False),
             )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)

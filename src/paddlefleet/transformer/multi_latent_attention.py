@@ -434,7 +434,9 @@ class MultiLatentAttention(Attention):
             gate, _ = self.gate_proj(hidden_states)
             core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
 
-        if self.config.dw_p2p_overlap is True and self.config.use_bias is False:
+        if getattr(self.config, "dw_p2p_overlap", False) and not getattr(
+            self.config, "use_bias", False
+        ):
             output = FP8OverlapProj.apply(core_attn_out, self.o_proj.weight)
             bias = None
         else:
