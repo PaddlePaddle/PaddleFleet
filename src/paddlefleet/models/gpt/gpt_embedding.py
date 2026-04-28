@@ -153,12 +153,13 @@ class GPTEmbedding(FleetLayer):
                 if self.multimodal_embedding
                 else position_ids,
             )
-            # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
+            # Zero only the configured padding token for MoE masking.
             if (
                 self.config.expert_model_parallel_size > 1
                 and self.config.tensor_model_parallel_size < 2
+                and getattr(self.config, "pad_token_id", None) is not None
             ):
-                text_padding_indices = input_ids == 0
+                text_padding_indices = input_ids == self.config.pad_token_id
                 decoder_input = fill_feature(
                     decoder_input, text_padding_indices, 0
                 )
