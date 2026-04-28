@@ -196,7 +196,53 @@ class LanguageLoss(FleetLayer):
         )
         self.use_subbatch = self.loss_subbatch_sequence_length > 0
 
-    def forward_impl(self, logits: Tensor, labels: Tensor) -> Tensor:
+    def forward_impl(self, logits: Tensor | tuple, labels: Tensor) -> Tensor:
+        # Fused linear + cross-entropy path: `logits` is actually a
+        # (hidden_states, weight, bias) tuple emitted by GPTLMHead when
+        # config.fused_linear_ce_loss_chunk > 0. Dispatch to the fused kernel
+        # to avoid materializing the full [B, S, V] logits tensor.
+        if isinstance(logits, tuple):
+            assert not self.enable_parallel_cross_entropy, (
+                "fused_linear_ce_loss_chunk is incompatible with tensor parallel "
+                "parallel_output=True (ParallelCrossEntropy path)."
+            )
+            from paddlefleet.ops.triton_ops.fused_linear_cross_entropy import (
+                LigerFusedLinearCrossEntropyFunction,
+            )
+
+            hidden_states, weight, bias = logits
+            B, S, H = hidden_states.shape
+            _input = hidden_states.reshape([-1, H])
+            _labels = labels.reshape([-1])
+
+            loss_1d = LigerFusedLinearCrossEntropyFunction.apply(
+                _input,
+                weight,
+                _labels,
+                bias,
+                self.ignored_index,
+                "none",
+                self.config.fused_linear_ce_loss_chunk,
+            )
+            # Reshape back to [B, S] so downstream CP gather / lossmask
+            # handling matches the non-fused path exactly.
+            loss = loss_1d.reshape([B, S])
+
+            if get_context_parallel_world_size() > 1:
+                loss = ContextParallelGatherOp.apply(loss, axis=1)
+                labels = ContextParallelGatherOp.apply(labels, axis=1)
+
+            lossmask = labels != self.ignored_index
+            if (~lossmask).all():
+                return paddle.mean(loss) * 0.0
+
+            lossmask = lossmask.reshape([-1]).cast(paddle.float32)
+            loss = paddle.sum(
+                loss.cast(paddle.float32).reshape([-1]) * lossmask
+            )
+            loss = loss / lossmask.sum()
+            return loss
+
         seq_len = logits.shape[1]
 
         # Loss-path MD5 probe: logits and labels before cross-entropy
@@ -325,7 +371,7 @@ class LanguageLoss(FleetLayer):
 
         return loss
 
-    def _forward(self, logits: Tensor, labels: Tensor):
+    def _forward(self, logits: Tensor | tuple, labels: Tensor):
         if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules

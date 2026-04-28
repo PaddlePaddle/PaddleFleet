@@ -134,7 +134,7 @@ class GPTEmbedding(FleetLayer):
         deepstack_visual_embeds = None
         visual_pos_mask = None
         mtp_emb_res = None
-        if input_ids is None:
+        if input_ids is None and decoder_input is None:
             assert dict_args["decoder_input"] is not None, (
                 "input_ids or decoder_input must be provided"
             )
