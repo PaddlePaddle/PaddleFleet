@@ -127,6 +127,24 @@ class GPTEmbedding(FleetLayer):
             attn_mask_startend_row_indices = dict_args.get(
                 "startend_row_indices", None
             )
+
+        if self.config.experimental_dataflow:
+            assert (
+                attn_mask_startend_row_indices.shape[-1] == 1
+                or attn_mask_startend_row_indices.shape[-1] == 2
+            ), (
+                f"attn_mask_startend_row_indices.shape[-1] must be 1 or 2, but got {attn_mask_startend_row_indices.shape[-1]}"
+            )
+            # when gpt_model_use_experimental_version = True, casual = False, attn_mask_startend_row_indices is expected to be of shape [..., 2]
+            # when gpt_model_use_experimental_version = False, casual = True, attn_mask_startend_row_indices is expected to be of shape [..., 1]
+            if (
+                attn_mask_startend_row_indices.shape[-1] == 2
+                and not self.config.gpt_model_use_experimental_version
+            ):
+                attn_mask_startend_row_indices = attn_mask_startend_row_indices[
+                    ..., :1
+                ].contiguous()
+
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None
