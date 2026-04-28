@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from paddle.distributed.fleet.meta_parallel import (
     LayerDesc,
@@ -202,6 +202,45 @@ class GPTModel(PipelineLayer):
             for param in self.state_dict().values()
             if getattr(param, "is_weight_only_mtp", False)
         ]
+
+    # ========================================
+    # Temporarily added generate method for inference
+    # This will be refactored in Step 2
+    # ========================================
+
+    @staticmethod
+    @paddle.no_grad()
+    def _hack_generate(
+        model,
+        input_ids: paddle.Tensor,
+        max_new_tokens: int = 100,
+        eos_token_id: Optional[int] = None,
+    ) -> paddle.Tensor:
+        """TEMPORARY: Greedy decode with KV cache (hack for Step 1).
+
+        Static method to bypass MRO: PaddleFormers' GPTModel inherits both
+        FleetGPTModel and PretrainedModel, so GenerationMixin.generate()
+        shadows FleetGPTModel.generate(). Call as::
+
+            from paddlefleet.models.gpt.gpt_model import GPTModel
+            GPTModel._hack_generate(model, input_ids, max_new_tokens, eos_token_id)
+
+        Args:
+            model: The FleetGPTModel instance
+            input_ids: Input token ids with shape [B, L]
+            max_new_tokens: Maximum number of new tokens to generate
+            eos_token_id: End of sequence token id (optional)
+
+        Returns:
+            paddle.Tensor: Generated token ids with shape [B, L + N]
+        """
+        from paddlefleet.generation.hack_generator import HackGreedyGenerator
+
+        if input_ids.ndim != 2:
+            raise ValueError("input_ids must be [B, L]")
+
+        gen = HackGreedyGenerator(model)
+        return gen.generate(input_ids, max_new_tokens, eos_token_id)
 
     def offload_weight_only_params(self):
         """Offload all weight-only MTP parameters to CPU pinned memory."""
