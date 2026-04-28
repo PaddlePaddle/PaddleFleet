@@ -98,7 +98,9 @@ class TestFusedStackQuant(unittest.TestCase):
         weight = MagicMock()
         weight.fp8_weight_stacked = True
         result = fused_stack_quant([weight], transpose=False)
-        mock_get.assert_called_once_with(weight, transpose=False)
+        mock_get.assert_called_once_with(
+            weight, transpose=False, num_expert=None
+        )
         self.assertEqual(len(result), 2)
 
     @patch("paddlefleet.transformer.moe.fp8_utils._get_fp8_weight_and_scale")
@@ -107,7 +109,9 @@ class TestFusedStackQuant(unittest.TestCase):
         weight = MagicMock()
         weight.fp8_weight_stacked_transpose = True
         result = fused_stack_quant([weight], transpose=True)
-        mock_get.assert_called_once_with(weight, transpose=True)
+        mock_get.assert_called_once_with(
+            weight, transpose=True, num_expert=None
+        )
         self.assertEqual(len(result), 2)
 
     @patch("paddlefleet.transformer.moe.fp8_utils._get_fp8_weight_and_scale")
@@ -139,7 +143,9 @@ class TestFusedStackQuant(unittest.TestCase):
         weight = MagicMock(spec=["fp8_weight_stacked"])
         weight.fp8_weight_stacked = True
         result = fused_stack_quant([weight], transpose=True)
-        mock_get.assert_called_once_with(weight, transpose=True)
+        mock_get.assert_called_once_with(
+            weight, transpose=True, num_expert=None
+        )
 
 
 class TestExpertsGroupGemmContiguousNode(unittest.TestCase):
