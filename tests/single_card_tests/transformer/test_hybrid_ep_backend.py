@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import unittest
-from types import SimpleNamespace
 
 import paddle
 
@@ -24,6 +23,7 @@ from paddlefleet.transformer.moe.fused_a2a import (
     _replay_hybrid_ep_dispatch_backward,
 )
 from paddlefleet.transformer.moe.fusion_layer_utils import (
+    HybridEPMoePyLayer,
     _hybrid_ep_prepare_expert_counts,
     _pad_front_rows,
     _restore_hybrid_ep_prob_grad_shape,
@@ -35,9 +35,46 @@ from paddlefleet.transformer.moe.token_dispatcher import (
 )
 
 
+class _HybridEPGroup:
+    def __init__(self, nranks=2):
+        self.nranks = nranks
+        self.world_size = nranks
+
+
+class _HybridEPHandleConfig:
+    def __init__(self, token_data_type="BF16", num_experts_per_rank=2):
+        self.token_data_type = token_data_type
+        self.num_of_experts_per_rank = num_experts_per_rank
+
+
+class _HybridEPDispatcher:
+    def __init__(self, manager):
+        self._comm_manager = manager
+
+
+class _HybridEPCustomMap:
+    def __init__(self, manager, experts=None):
+        self.token_dispatcher = _HybridEPDispatcher(manager)
+        self.experts = [] if experts is None else experts
+        self.grouped_gemm_experts = None
+
+
+class _ExpertProjection:
+    def __init__(self, shape):
+        self.weight = paddle.create_parameter(shape=shape, dtype="float32")
+
+
+class _TinyExpert:
+    def __init__(self, hidden_size=2, intermediate_size=1):
+        self.up_gate_proj = _ExpertProjection(
+            [hidden_size, intermediate_size * 2]
+        )
+        self.down_proj = _ExpertProjection([intermediate_size, hidden_size])
+
+
 def _new_hybrid_manager(**overrides):
     init_kwargs = {
-        "group": overrides.pop("group", SimpleNamespace(nranks=2)),
+        "group": overrides.pop("group", _HybridEPGroup(nranks=2)),
         "router_topk": overrides.pop("router_topk", 2),
         "num_experts": overrides.pop("num_experts", 4),
         "num_local_experts": overrides.pop("num_local_experts", 2),
@@ -68,9 +105,9 @@ def _make_hybrid_ep_handle(
         local_expert_routing_map,
         None,
         tokens_per_rank,
-        SimpleNamespace(
+        _HybridEPHandleConfig(
             token_data_type=token_data_type,
-            num_of_experts_per_rank=num_experts_per_rank,
+            num_experts_per_rank=num_experts_per_rank,
         ),
         None,
     )
@@ -130,7 +167,7 @@ class TestHybridEPBackendSelection(unittest.TestCase):
                 is_hybrid_ep_backend_selected(dispatcher_type)
 
     def test_flex_dispatcher_uses_hybrid_ep_manager(self):
-        group = SimpleNamespace(world_size=2)
+        group = _HybridEPGroup(nranks=2)
 
         dispatcher = MoEFlexTokenDispatcher(
             num_local_experts=2,
@@ -322,7 +359,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             [[True, False], [False, True]], dtype="bool"
         )
         manager = _new_hybrid_manager(
-            group=SimpleNamespace(nranks=1),
+            group=_HybridEPGroup(nranks=1),
             router_topk=1,
             num_experts=2,
             num_local_experts=2,
@@ -365,7 +402,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
 
     def test_fp8_dispatch_quantizes_and_aligns_expert_inputs(self):
         manager = _new_hybrid_manager(
-            group=SimpleNamespace(nranks=1),
+            group=_HybridEPGroup(nranks=1),
             router_topk=1,
             num_experts=2,
             num_local_experts=2,
@@ -409,7 +446,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         self,
     ):
         manager = _new_hybrid_manager(
-            group=SimpleNamespace(nranks=1),
+            group=_HybridEPGroup(nranks=1),
             router_topk=1,
             num_experts=2,
             num_local_experts=2,
@@ -453,7 +490,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
 
     def test_public_combine_rejects_overlap_and_clears_runtime_state(self):
         manager = _new_hybrid_manager(
-            group=SimpleNamespace(nranks=1),
+            group=_HybridEPGroup(nranks=1),
             router_topk=1,
             num_experts=2,
             num_local_experts=2,
@@ -560,7 +597,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
 
     def test_combine_pylayer_replays_dispatch_in_backward(self):
         combined = paddle.ones([2, 4], dtype="float32")
-        replay_config = SimpleNamespace(token_data_type="UINT16")
+        replay_config = _HybridEPHandleConfig(token_data_type="UINT16")
         buffer = _RecordingHybridEPBuffer(
             combine_results=[(combined, None)],
             dispatch_results=[
@@ -579,7 +616,14 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             token_data_type="UINT8",
             num_experts_per_rank=2,
         )
-        manager = SimpleNamespace(handle=handle, _buffer=buffer)
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1),
+            router_topk=1,
+            num_experts=2,
+            num_local_experts=2,
+        )
+        manager.handle = handle
+        manager._buffer = buffer
         manager.tokens_per_expert = paddle.to_tensor([1, 1], dtype="int64")
         manager.padded_tokens_per_expert = paddle.to_tensor(
             [1, 1], dtype="int64"
@@ -632,12 +676,15 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
 
 class TestHybridEPExpertInputCounts(unittest.TestCase):
     def test_prepare_expert_counts_matches_expert_compute_contract(self):
-        manager = SimpleNamespace(
-            padded_tokens_per_expert=paddle.to_tensor([2, 0, 1], dtype="int32")
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1),
+            num_experts=3,
+            num_local_experts=3,
         )
-        custom_map = SimpleNamespace(
-            token_dispatcher=SimpleNamespace(_comm_manager=manager)
+        manager.padded_tokens_per_expert = paddle.to_tensor(
+            [2, 0, 1], dtype="int32"
         )
+        custom_map = _HybridEPCustomMap(manager)
 
         counts, num_tokens = _hybrid_ep_prepare_expert_counts(
             custom_map,
@@ -663,11 +710,12 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
         self.assertEqual(int(num_tokens.item()), 6)
 
     def test_prepare_expert_counts_requires_hybrid_ep_counts(self):
-        custom_map = SimpleNamespace(
-            token_dispatcher=SimpleNamespace(
-                _comm_manager=SimpleNamespace(padded_tokens_per_expert=None)
-            )
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1),
+            num_experts=3,
+            num_local_experts=3,
         )
+        custom_map = _HybridEPCustomMap(manager)
 
         with self.assertRaisesRegex(AssertionError, "padded_tokens_per_expert"):
             _hybrid_ep_prepare_expert_counts(
@@ -690,6 +738,67 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
         )
         self.assertEqual(restored.shape, [4])
         self.assertEqual(restored.numpy().tolist(), [0.25, 0.5, 0.0, 0.0])
+
+    def test_hybrid_ep_moe_pylayer_restores_padded_zero_token_grads(self):
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1),
+            num_experts=2,
+            num_local_experts=2,
+        )
+        manager.padded_tokens_per_expert = paddle.to_tensor(
+            [0, 0], dtype="int64"
+        )
+        custom_map = _HybridEPCustomMap(
+            manager,
+            experts=[_TinyExpert(), _TinyExpert()],
+        )
+        hidden_states = paddle.ones([2, 2], dtype="float32")
+        hidden_states.stop_gradient = False
+        dispatched_probs = paddle.ones([2], dtype="float32")
+        dispatched_probs.stop_gradient = False
+
+        output = HybridEPMoePyLayer.apply(
+            hidden_states,
+            dispatched_probs,
+            custom_map,
+            use_fp8_mlp=False,
+            moe_deep_gemm=False,
+            moe_grouped_gemm=False,
+            is_first_fwd=True,
+        )
+        output.sum().backward()
+
+        self.assertEqual(output.shape, [0, 2])
+        self.assertEqual(hidden_states.grad.numpy().tolist(), [[0.0, 0.0]] * 2)
+        self.assertEqual(dispatched_probs.grad.numpy().tolist(), [0.0, 0.0])
+
+    def test_hybrid_ep_moe_pylayer_accepts_fp8_dispatch_scale(self):
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1),
+            num_experts=2,
+            num_local_experts=2,
+        )
+        manager.padded_tokens_per_expert = paddle.to_tensor(
+            [0, 0], dtype="int64"
+        )
+        custom_map = _HybridEPCustomMap(
+            manager,
+            experts=[_TinyExpert(), _TinyExpert()],
+        )
+
+        output = HybridEPMoePyLayer.apply(
+            paddle.empty([2, 2], dtype=paddle.float8_e4m3fn),
+            paddle.ones([2], dtype="float32"),
+            custom_map,
+            use_fp8_mlp=True,
+            moe_deep_gemm=False,
+            moe_grouped_gemm=False,
+            fp8_dispatched_handle={
+                "scale": paddle.ones([2, 1], dtype="float32")
+            },
+        )
+
+        self.assertEqual(output.shape, [0, 2])
 
 
 if __name__ == "__main__":

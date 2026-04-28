@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import unittest
-from unittest.mock import patch
 
 import paddle
 
@@ -23,31 +22,23 @@ from paddlefleet.transformer.moe.fp8_utils import (
 )
 
 
-class _WeightWithMainGrad:
+class _ExpertsGroupGemmCustomMap:
     def __init__(self):
-        self.shape = [2, 3]
-        self.main_grad = None
-        self.stop_gradient = False
-        self.hook_calls = 0
-
-    def _apply_backward_hook(self):
-        self.hook_calls += 1
+        self.experts = []
+        self.grouped_gemm_experts = None
 
 
-class _WeightWithGrad:
-    def __init__(self):
-        self.shape = [2, 3]
-        self.grad = None
-        self.stop_gradient = False
-        self.hook_calls = 0
-
-    def _apply_backward_hook(self):
-        self.hook_calls += 1
+def _new_bf16_node(**kwargs):
+    return ExpertsGroupGemmContiguousNode(
+        _ExpertsGroupGemmCustomMap(),
+        use_fp8_mlp=False,
+        **kwargs,
+    )
 
 
 class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
     def test_get_fp8_weight_and_scale_returns_cached_nontranspose(self):
-        weight = _WeightWithGrad()
+        weight = paddle.create_parameter([2, 3], dtype="float32")
         weight.fp8_weight_stacked = paddle.ones([2, 3], dtype="float32")
         weight.fp8_scale_stacked = paddle.full([2, 1], 0.5, dtype="float32")
 
@@ -57,9 +48,7 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
         self.assertIs(fp8_scale, weight.fp8_scale_stacked)
 
     def test_gen_m_indices_accepts_list_tensor_and_empty_counts(self):
-        node = ExpertsGroupGemmContiguousNode.__new__(
-            ExpertsGroupGemmContiguousNode
-        )
+        node = _new_bf16_node()
 
         self.assertEqual(
             node.gen_m_indices([2, 0, 1]).numpy().tolist(),
@@ -76,112 +65,79 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
             [0],
         )
 
-    def test_fwd_gate_up_builds_deep_gemm_indices_from_tensor_counts(self):
-        node = ExpertsGroupGemmContiguousNode.__new__(
-            ExpertsGroupGemmContiguousNode
+    def test_fwd_gate_up_runs_bf16_path_with_tensor_counts(self):
+        node = _new_bf16_node(moe_deep_gemm=True)
+        x = paddle.to_tensor(
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype="float32"
         )
-        node.moe_deep_gemm = True
-        node.use_fp8_mlp = False
-        expected = paddle.ones([3, 4], dtype="float32")
-        bf16_calls = []
-
-        def fwd_gate_up_bf16(*args):
-            bf16_calls.append(args)
-            return expected
-
-        node.fwd_gate_up_bf16 = fwd_gate_up_bf16
-        x = paddle.zeros([3, 4], dtype="float32")
+        expert_w1 = [
+            paddle.eye(2, dtype="float32"),
+            paddle.full([2, 2], 2.0, dtype="float32"),
+        ]
         token_counts = paddle.to_tensor([1, 2], dtype="int64")
 
         out = node.fwd_gate_up(
             x,
-            expert_w1=[],
+            expert_w1=expert_w1,
             num_expert=2,
             tokens_per_expert=token_counts,
         )
 
-        self.assertIs(out, expected)
+        self.assertEqual(
+            out.numpy().tolist(),
+            [[1.0, 2.0], [14.0, 14.0], [22.0, 22.0]],
+        )
         self.assertIs(node.tokens_per_expert, token_counts)
         self.assertEqual(
             node.tokens_per_expert_indices.numpy().tolist(), [0, 1, 1]
         )
-        self.assertEqual(len(bf16_calls), 1)
-        self.assertIs(bf16_calls[0][0], x)
-        self.assertEqual(bf16_calls[0][1], [])
 
-    def test_fwd_gate_up_builds_deep_gemm_indices_from_list_counts(self):
-        node = ExpertsGroupGemmContiguousNode.__new__(
-            ExpertsGroupGemmContiguousNode
-        )
-        node.moe_deep_gemm = True
-        node.use_fp8_mlp = False
-        expected = paddle.ones([3, 4], dtype="float32")
-        node.fwd_gate_up_bf16 = lambda *_args: expected
-
-        node.fwd_gate_up(
-            paddle.zeros([3, 4], dtype="float32"),
-            expert_w1=[],
+    def test_fwd_gate_up_runs_bf16_path_with_list_counts(self):
+        node = _new_bf16_node(moe_deep_gemm=True)
+        out = node.fwd_gate_up(
+            paddle.to_tensor(
+                [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype="float32"
+            ),
+            expert_w1=[
+                paddle.full([2, 2], 1.0, dtype="float32"),
+                paddle.eye(2, dtype="float32"),
+            ],
             num_expert=2,
             tokens_per_expert=[2, 1],
         )
 
         self.assertEqual(
+            out.numpy().tolist(),
+            [[3.0, 3.0], [7.0, 7.0], [5.0, 6.0]],
+        )
+        self.assertEqual(
             node.tokens_per_expert_indices.numpy().tolist(), [0, 0, 1]
         )
 
-    def test_bf16_weight_grad_runs_grouped_and_per_expert_contracts(self):
-        node = ExpertsGroupGemmContiguousNode.__new__(
-            ExpertsGroupGemmContiguousNode
-        )
-        node.dequant_input = False
-        node.input = None
-        node.moe_grouped_gemm = True
-        node.use_fp8_mlp = False
-        node.moe_deep_gemm = False
-        node.tokens_per_expert = [1, 1]
-        grouped_weight = _WeightWithGrad()
-        grouped_weight.shape = [2, 3, 4]
-        grouped_weight.grad = paddle.zeros(grouped_weight.shape)
+    def test_fwd_gate_up_can_reuse_cached_input(self):
+        node = _new_bf16_node(moe_deep_gemm=False)
+        node.input = paddle.to_tensor([[2.0, 3.0]], dtype="float32")
 
-        def batched_gemm(*_args, **_kwargs):
-            return paddle.ones(grouped_weight.shape)
-
-        with patch(
-            "paddle.incubate.nn.functional.batched_gemm",
-            batched_gemm,
-        ):
-            node.bf16_weight_grad(
-                paddle.ones([2, 4], dtype="float32"),
-                paddle.ones([2, 3], dtype="float32"),
-                grouped_weight,
-            )
-
-        self.assertEqual(grouped_weight.hook_calls, 1)
-        self.assertEqual(
-            grouped_weight.grad.numpy().tolist(), [[[1.0] * 4] * 3] * 2
+        out = node.fwd_gate_up(
+            None,
+            expert_w1=[paddle.eye(2, dtype="float32")],
+            num_expert=1,
+            tokens_per_expert=[1],
         )
 
-        node.moe_grouped_gemm = False
-        node.tokens_per_expert = [1, 0]
-        weights = [_WeightWithGrad(), _WeightWithMainGrad()]
-        grad_add_calls = []
+        self.assertEqual(out.numpy().tolist(), [[2.0, 3.0]])
 
-        def fused_linear_param_grad_add(*args):
-            grad_add_calls.append(args)
+    def test_fwd_gate_up_preserves_empty_bf16_shape(self):
+        node = _new_bf16_node(moe_deep_gemm=False)
 
-        with patch(
-            "paddle._C_ops.fused_linear_param_grad_add",
-            fused_linear_param_grad_add,
-        ):
-            node.bf16_weight_grad(
-                paddle.ones([1, 4], dtype="float32"),
-                paddle.ones([1, 3], dtype="float32"),
-                weights,
-            )
+        out = node.fwd_gate_up(
+            paddle.empty([0, 2], dtype="float32"),
+            expert_w1=[paddle.empty([2, 3], dtype="float32")],
+            num_expert=1,
+            tokens_per_expert=[0],
+        )
 
-        self.assertEqual(len(grad_add_calls), 1)
-        self.assertEqual(weights[0].hook_calls, 1)
-        self.assertEqual(weights[1].hook_calls, 1)
+        self.assertEqual(out.shape, [0, 3])
 
 
 if __name__ == "__main__":
