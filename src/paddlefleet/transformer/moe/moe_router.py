@@ -313,7 +313,17 @@ class StandardMoERouter(nn.Layer):
             if _ids.ndim == 1:
                 _ids = _ids.unsqueeze(axis=0)
             origin_valid_mask = (_ids != 0).astype(paddle.float32)
-            token_count_per_line = origin_valid_mask.sum(axis=-1, keepdim=True)
+            if getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
+                token_count_per_line = (
+                    origin_valid_mask.sum(axis=-1, keepdim=True)
+                    + self.config.num_nextn_predict_layers
+                )
+            else:
+                token_count_per_line = origin_valid_mask.sum(
+                    axis=-1, keepdim=True
+                )
             is_invalid_line_float = (token_count_per_line == 0).astype(
                 paddle.float32
             )
@@ -799,6 +809,7 @@ class TopKRouter(StandardMoERouter):
                     batch_size,
                     input_ids=input_ids,
                 )
+
             else:
                 l_aux = self._cal_aux_loss(gates, mask)
         else:
