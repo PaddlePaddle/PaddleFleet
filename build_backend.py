@@ -60,20 +60,6 @@ def get_git_commit_hash(cwd: Path) -> str:
         return "unknown"
 
 
-def get_git_commit_date(cwd: Path) -> str:
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "log", "-1", "--format=%cd", "--date=format:%Y%m%d"],
-                cwd=cwd,
-            )
-            .strip()
-            .decode("utf-8")
-        )
-    except Exception:
-        return "unknown"
-
-
 def _get_ops_version() -> str | None:
     """Read the paddlefleet-ops version from the workspace ops package.
 
@@ -94,7 +80,6 @@ def _generate_version_info() -> str:
         version = f.read().strip()
 
     git_commit_hash = get_git_commit_hash(_pkg_root)
-    git_commit_date = get_git_commit_date(_pkg_root)
 
     version_py = _pkg_root / "src" / "paddlefleet" / "version.py"
 
@@ -103,7 +88,7 @@ def _generate_version_info() -> str:
         logger.info("version.py already exists (not in git repo), keeping it")
         return version
 
-    final_version = f"{version}.dev{git_commit_date}"
+    final_version = f"{version}.dev{git_commit_hash[:8]}"
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
 

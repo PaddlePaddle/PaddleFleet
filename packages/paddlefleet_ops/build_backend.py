@@ -53,20 +53,6 @@ def get_git_commit_hash(cwd: Path | None) -> str:
         return "unknown"
 
 
-def get_git_commit_date(cwd: Path | None) -> str:
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "log", "-1", "--format=%cd", "--date=format:%Y%m%d"],
-                cwd=cwd,
-            )
-            .strip()
-            .decode("utf-8")
-        )
-    except Exception:
-        return "unknown"
-
-
 def _generate_version_info():
     """Generate version info file with git metadata."""
     version_file = _workspace_root / "version.txt"
@@ -75,7 +61,6 @@ def _generate_version_info():
 
     # Get git info
     git_commit_hash = get_git_commit_hash(_workspace_root)
-    git_commit_date = get_git_commit_date(_workspace_root)
 
     # Create version info in the source tree
     version_py = _pkg_root / "src" / "paddlefleet_ops" / "version.py"
@@ -88,7 +73,7 @@ def _generate_version_info():
         return version
 
     # In git repo (editable) or file doesn't exist, create/update it
-    final_version = f"{version}.dev{git_commit_date}"
+    final_version = f"{version}.dev{git_commit_hash[:8]}"
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
     with open(version_py, "w") as f:
