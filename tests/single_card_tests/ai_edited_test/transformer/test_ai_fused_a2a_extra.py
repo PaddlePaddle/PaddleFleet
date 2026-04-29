@@ -30,10 +30,10 @@ import paddle
 
 from paddlefleet.transformer.moe.fused_a2a import (
     CombineNode,
+    DeepEPCombine,
+    DeepEPCombineAsync,
+    DeepEPDispatch,
     DispatchNode,
-    FusedCombine,
-    FusedCombineAsync,
-    FusedDispatch,
     barrier_ep,
     get_hidden_bytes,
 )
@@ -73,37 +73,37 @@ class TestGetHiddenBytes(unittest.TestCase):
         self.assertEqual(get_hidden_bytes(x), 128)
 
 
-class TestFusedDispatch(unittest.TestCase):
-    """Test FusedDispatch PyLayer."""
+class TestDeepEPDispatch(unittest.TestCase):
+    """Test DeepEPDispatch PyLayer."""
 
     def test_has_forward_and_backward(self):
-        self.assertTrue(hasattr(FusedDispatch, "forward"))
-        self.assertTrue(hasattr(FusedDispatch, "backward"))
+        self.assertTrue(hasattr(DeepEPDispatch, "forward"))
+        self.assertTrue(hasattr(DeepEPDispatch, "backward"))
 
     def test_is_pylayer(self):
-        self.assertTrue(issubclass(FusedDispatch, paddle.autograd.PyLayer))
+        self.assertTrue(issubclass(DeepEPDispatch, paddle.autograd.PyLayer))
 
 
-class TestFusedCombine(unittest.TestCase):
-    """Test FusedCombine PyLayer."""
+class TestDeepEPCombine(unittest.TestCase):
+    """Test DeepEPCombine PyLayer."""
 
     def test_has_forward_and_backward(self):
-        self.assertTrue(hasattr(FusedCombine, "forward"))
-        self.assertTrue(hasattr(FusedCombine, "backward"))
+        self.assertTrue(hasattr(DeepEPCombine, "forward"))
+        self.assertTrue(hasattr(DeepEPCombine, "backward"))
 
     def test_is_pylayer(self):
-        self.assertTrue(issubclass(FusedCombine, paddle.autograd.PyLayer))
+        self.assertTrue(issubclass(DeepEPCombine, paddle.autograd.PyLayer))
 
 
-class TestFusedCombineAsync(unittest.TestCase):
-    """Test FusedCombineAsync PyLayer."""
+class TestDeepEPCombineAsync(unittest.TestCase):
+    """Test DeepEPCombineAsync PyLayer."""
 
     def test_has_forward_and_backward(self):
-        self.assertTrue(hasattr(FusedCombineAsync, "forward"))
-        self.assertTrue(hasattr(FusedCombineAsync, "backward"))
+        self.assertTrue(hasattr(DeepEPCombineAsync, "forward"))
+        self.assertTrue(hasattr(DeepEPCombineAsync, "backward"))
 
     def test_is_pylayer(self):
-        self.assertTrue(issubclass(FusedCombineAsync, paddle.autograd.PyLayer))
+        self.assertTrue(issubclass(DeepEPCombineAsync, paddle.autograd.PyLayer))
 
 
 class TestDispatchNode(unittest.TestCase):

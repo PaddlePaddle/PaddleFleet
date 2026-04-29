@@ -407,11 +407,16 @@ class ExpertsGroupGemmContiguousNode:
         """
         generate m indices
         """
-        tokens = []
-        for i in range(len(tokens_per_expert)):
-            tokens.append(paddle.full([tokens_per_expert[i]], i, dtype="int32"))
-        out = paddle.concat(tokens, axis=0)
-        return out
+        if isinstance(tokens_per_expert, paddle.Tensor):
+            counts = tokens_per_expert.cast("int32")
+        else:
+            counts = paddle.to_tensor(tokens_per_expert, dtype="int32")
+        if counts.shape[0] == 0:
+            return paddle.empty([0], dtype="int32")
+        return paddle.repeat_interleave(
+            paddle.arange(counts.shape[0], dtype="int32"),
+            counts,
+        )
 
     def fwd_gate_up_bf16(self, x, expert_w1):
         """
@@ -471,10 +476,9 @@ class ExpertsGroupGemmContiguousNode:
     ):
         self.tokens_per_expert = tokens_per_expert
         if self.moe_deep_gemm:
-            self.tokens_per_expert_indices = paddle.repeat_interleave(
-                paddle.arange(len(self.tokens_per_expert)),
-                paddle.to_tensor(self.tokens_per_expert),
-            ).cast("int32")
+            self.tokens_per_expert_indices = self.gen_m_indices(
+                self.tokens_per_expert
+            )
         if not self.use_fp8_mlp:
             return self.fwd_gate_up_bf16(x, expert_w1)
         else:
@@ -1066,6 +1070,7 @@ class ExpertsGroupGemmContiguousNode:
         do1_t_fp8, do1_t_scale = self.fused_transpose_split_quant(
             do1, None, self.tokens_per_expert, True
         )
+
         for i in range(len(expert_w1)):
             if hasattr(expert_w1[i], "main_grad"):
                 if expert_w1[i].main_grad is None:
@@ -1109,12 +1114,10 @@ class ExpertsGroupGemmContiguousNode:
         hs_out,
         unzipped_probs,
         tokens_per_expert,
-        origin_token_per_experts,
         output=None,
         scale=None,
     ):
         """如果传入了scale, 说明在a2a之前就做了quant, 这里的hs_out就是fp8。否则, hs_out是bf16"""
-        self.origin_token_per_experts = origin_token_per_experts
         if hs_out is None:
             assert self.input_fp8 is not None
             assert self.input_scale is not None
@@ -1684,7 +1687,6 @@ class ExpertsGroupGemmContiguousNode:
                     grad_attr = weights[i].grad
 
                 if n > 0:
-                    n = (n + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
                     end_idx = start_idx + n
                     paddle._C_ops.fused_linear_param_grad_add(
                         x._slice(start_idx, end_idx),

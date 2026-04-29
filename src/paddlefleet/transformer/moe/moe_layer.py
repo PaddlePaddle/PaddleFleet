@@ -42,12 +42,16 @@ from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
 from .fused_a2a import configure_buffer
-from .fusion_layer_utils import FusionMoePyLayer
+from .fusion_layer_utils import FusionMoePyLayer, HybridEPMoePyLayer
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
-from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
+from .token_dispatcher import (
+    AllToAllTokenDispatcher,
+    MoEFlexTokenDispatcher,
+    is_hybrid_ep_backend_selected,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +163,7 @@ class MoELayer(nn.Layer):
         self.sequence_parallel = config.sequence_parallel
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
         self.fp8_dispatch = bool(config.fp8)
@@ -248,9 +253,9 @@ class MoELayer(nn.Layer):
             and paddle.device.get_device_capability()[0] < 9
         ):
             # TODO: Support Ampere architecture after upgrade deepep in paddlepaddle
-            if self.moe_token_dispatcher_type == "deepep":
+            if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
                 logger.info(
-                    "deepep in paddlepaddle does not support compute capability < 9.0, "
+                    "deepep/hybridep in paddlepaddle does not support compute capability < 9.0, "
                     "fallback to alltoall token dispatcher."
                 )
                 self.moe_token_dispatcher_type = "alltoall"
@@ -262,12 +267,24 @@ class MoELayer(nn.Layer):
 
         self.moe_use_fusion_node = False
         if self.expert_model_parallel_size > 1:
-            if self.moe_token_dispatcher_type == "deepep":
+            if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
                 self.moe_use_fusion_node = config.moe_use_fusion_node
+                self.use_hybrid_ep_backend = is_hybrid_ep_backend_selected(
+                    self.moe_token_dispatcher_type
+                )
+                if (
+                    self.moe_use_fusion_node
+                    and self.use_hybrid_ep_backend
+                    and self.moe_shared_expert_overlap
+                ):
+                    logger.info(
+                        "HybridEP backend does not support moe_shared_expert_overlap; disabling it."
+                    )
+                    self.moe_shared_expert_overlap = False
             else:
                 if self.moe_grouped_gemm:
                     raise ValueError(
-                        "moe_grouped_gemm is only supported when moe_token_dispatcher_type is 'deepep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
+                        "moe_grouped_gemm is only supported when moe_token_dispatcher_type is 'deepep' or 'hybridep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
                     )
                 self.fp8_dispatch = False
 
@@ -316,13 +333,14 @@ class MoELayer(nn.Layer):
             self.shared_experts = None
 
         if self.expert_model_parallel_size > 1:
-            if self.moe_token_dispatcher_type == "deepep":
+            if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
                 self.token_dispatcher = MoEFlexTokenDispatcher(
                     self.num_experts_per_device,
                     self.num_experts_per_tok,
                     self.num_experts,
                     self.moe_group,
                     self.moe_ep_barrier,
+                    dispatcher_type=self.moe_token_dispatcher_type,
                 )
                 if getattr(config, "deepep_buffer_configs", None) is not None:
                     configure_buffer(**config.deepep_buffer_configs)
@@ -570,7 +588,13 @@ class MoELayer(nn.Layer):
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
 
         with profile("fusion_mlp"):
-            if self.using_sonic_moe:
+            if self._use_hybrid_ep_fusion():
+                hidden_states = self._run_hybrid_ep_fusion(
+                    dispatched_hidden_states,
+                    dispatched_probs,
+                    fp8_dispatched_handle=fp8_dispatched_handle,
+                )
+            elif self.using_sonic_moe:
                 T = dispatched_hidden_states.shape[0]
                 K = self.num_experts_per_tok
                 stream_id = paddle.device.cuda.current_stream().cuda_stream
@@ -671,6 +695,31 @@ class MoELayer(nn.Layer):
             hidden_states = GatherOp.apply(hidden_states)
         return self.gate(hidden_states, input_ids=input_ids)
 
+    def _use_hybrid_ep_fusion(self):
+        return self.moe_use_fusion_node and self.use_hybrid_ep_backend
+
+    def _run_hybrid_ep_fusion(
+        self,
+        dispatched_hidden_states,
+        dispatched_probs,
+        fp8_dispatched_handle=None,
+        is_first_fwd=False,
+    ):
+        dispatched_hidden_states.stop_gradient = False
+        dispatched_probs.stop_gradient = False
+        return HybridEPMoePyLayer.apply(
+            dispatched_hidden_states,
+            dispatched_probs,
+            self,
+            use_fp8_mlp=self.fp8,
+            moe_deep_gemm=self.moe_deep_gemm,
+            moe_grouped_gemm=self.moe_grouped_gemm,
+            recompute_moe_gate_up=self.recompute_moe_gate_up,
+            use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+            fp8_dispatched_handle=fp8_dispatched_handle,
+            is_first_fwd=is_first_fwd,
+        )
+
     def dispatch_preprocess(self, args):
         hidden_states, token_probs, token_indices = args
         if self.use_latent_moe:
@@ -695,9 +744,6 @@ class MoELayer(nn.Layer):
                     async_finish=async_finish,
                 )
             )
-            dispatched_indices = (
-                self.token_dispatcher._comm_manager.dispatched_indices
-            )
             dispatched_probs = (
                 self.token_dispatcher._comm_manager.dispatched_probs
             )
@@ -710,7 +756,11 @@ class MoELayer(nn.Layer):
                 dispatched_hidden_states, hidden_states.dtype
             )
             guard_status["x"].stop_gradient = True
-
+            dispatched_indices = None
+            if not self._use_hybrid_ep_fusion():
+                dispatched_indices = (
+                    self.token_dispatcher._comm_manager.dispatched_indices
+                )
             return (
                 dispatched_hidden_states,
                 dispatched_indices,
@@ -736,25 +786,34 @@ class MoELayer(nn.Layer):
             dispatched_hidden_states = GradDtypeUnguard.apply(
                 dispatched_hidden_states, guard_status
             )
-            hidden_states = FusionMoePyLayer.apply(
-                dispatched_hidden_states,
-                dispatched_probs,
-                dispatched_indices.clone()
-                if is_first_fwd
-                else dispatched_indices,
-                self,
-                self.num_experts_per_tok,
-                use_fp8_mlp=self.fp8,
-                moe_deep_gemm=self.moe_deep_gemm,
-                moe_grouped_gemm=self.moe_grouped_gemm,
-                recompute_moe_gate_up=self.recompute_moe_gate_up,
-                recompute_moe_premute=self.recompute_moe_premute,
-                fp8_dispatched_handle=fp8_dispatched_handle,
-                use_bf16_gemm_weight_grad=not self.fp8_wgrad,
-                use_auto_subbatch=self.use_auto_subbatch,
-                moe_expert_fusion=self.moe_expert_fusion,
-                moe_subbatch_diag=self.moe_subbatch_diag,
-            )
+            if self._use_hybrid_ep_fusion():
+                hidden_states = self._run_hybrid_ep_fusion(
+                    dispatched_hidden_states,
+                    dispatched_probs,
+                    fp8_dispatched_handle=fp8_dispatched_handle,
+                    is_first_fwd=is_first_fwd,
+                )
+            else:
+                hidden_states = FusionMoePyLayer.apply(
+                    dispatched_hidden_states,
+                    dispatched_probs,
+                    dispatched_indices.clone()
+                    if is_first_fwd
+                    else dispatched_indices,
+                    self,
+                    self.num_experts_per_tok,
+                    use_fp8_mlp=self.fp8,
+                    moe_deep_gemm=self.moe_deep_gemm,
+                    moe_grouped_gemm=self.moe_grouped_gemm,
+                    recompute_moe_gate_up=self.recompute_moe_gate_up,
+                    recompute_moe_premute=self.recompute_moe_premute,
+                    fp8_dispatched_handle=fp8_dispatched_handle,
+                    use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+                    use_auto_subbatch=self.use_auto_subbatch,
+                    moe_expert_fusion=self.moe_expert_fusion,
+                    moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
+                    moe_subbatch_diag=self.moe_subbatch_diag,
+                )
             if is_first_fwd:
                 hidden_states.stop_gradient = False
         else:
