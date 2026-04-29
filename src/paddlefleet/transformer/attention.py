@@ -353,6 +353,9 @@ class Attention(FleetLayer, ABC):
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
         in_recompute: bool = False,
+        past_key_values=None,
+        layer_idx=None,
+        use_cache: bool = False,
     ) -> tuple[Tensor, Tensor]:
         """
         Perform a forward pass through the attention layer.
@@ -579,6 +582,9 @@ class Attention(FleetLayer, ABC):
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention
                 and in_recompute,
+                past_key_values=past_key_values,
+                layer_idx=layer_idx,
+                use_cache=use_cache,
             )
         # =================
         # Output. [b, sq, h]

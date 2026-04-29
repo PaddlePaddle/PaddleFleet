@@ -697,6 +697,7 @@ class TransformerLayer(nn.Layer):
                     attention_bias=attention_bias,
                     packed_seq_params=packed_seq_params,
                     in_recompute=self.full_recompute,
+                    **kwargs,
                 )
             self._log_md5(
                 hidden_states, "post_attn_residual", self.layer_number
@@ -776,6 +777,9 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
             )
         else:
             attention_output_with_bias = self.self_attn(
@@ -789,6 +793,9 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
             )
 
         with paddle.enable_grad():

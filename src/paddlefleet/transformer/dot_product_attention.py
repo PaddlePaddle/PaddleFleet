@@ -235,6 +235,9 @@ class DotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
+        past_key_values=None,
+        layer_idx=None,
+        use_cache: bool = False,
     ):
         """Forward."""
         assert attention_bias is None, (
@@ -317,19 +320,22 @@ class DotProductAttention(FleetLayer):
             and attn_mask_startend_row_indices is None
             and not use_eager
         ):
-            # Note:
-            # attention_mask is None in default
-            # is_causal is True in default
-            # training is True in default
-            # Default values above maybe changed in the future
+            # KV cache support for inference
+            if use_cache and past_key_values is not None:
+                key, value = past_key_values.update(key, value, layer_idx)
+                is_causal = (query.shape[1] > 1)
+                attn_mask_kv = None
+            else:
+                is_causal = True
+                attn_mask_kv = attention_mask
+
             attn_output = paddle.nn.functional.scaled_dot_product_attention(
                 query,
                 key,
                 value,
-                attention_mask,
+                attn_mask_kv,
                 self.config.attention_dropout,
-                is_causal=True,
-                training=True,
+                is_causal=is_causal,
             )
 
             attn_output = paddle.reshape(
