@@ -164,15 +164,18 @@ class TestMlpNodeConstruction(unittest.TestCase):
     @patch(
         "paddlefleet.transformer.moe.fusion_layer_utils.ExpertsGroupGemmContiguousNode"
     )
-    def test_moe_expert_fusion_false_raises(self, mock_gemm_node):
+    def test_moe_expert_fusion_false_init(self, mock_gemm_node):
         mock_gemm_node.return_value = MagicMock()
         custom_map = MagicMock()
         custom_map.token_dispatcher = MagicMock()
         custom_map.token_dispatcher._comm_manager = MagicMock()
         custom_map.token_dispatcher._comm_manager.tokens_per_expert = [2, 2]
 
-        with self.assertRaises(NotImplementedError):
-            MlpNode(custom_map, num_experts_per_tok=2, moe_expert_fusion=False)
+        node = MlpNode(
+            custom_map, num_experts_per_tok=2, moe_expert_fusion=False
+        )
+        self.assertIsNotNone(node)
+        self.assertFalse(node.moe_expert_fusion)
 
 
 class TestMlpNodeCachedTensors(unittest.TestCase):

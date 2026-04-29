@@ -310,6 +310,11 @@ class Indexer(paddle.nn.Layer):
 
         topk_k = min(self.index_topk, index_scores.shape[-1])
         topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)[1]
+        # Clamp indices to valid range: paddle.topk may return garbage indices
+        # for -inf input values
+        topk_indices = paddle.clip(
+            topk_indices, min=0, max=index_scores.shape[-1] - 1
+        )
 
         return index_scores, topk_indices
 
@@ -698,6 +703,11 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
             masked_scores = index_scores
         topk_k = min(topk, masked_scores.shape[-1])
         topk_indices = paddle.topk(masked_scores, k=topk_k, axis=-1)[1]
+        # Clamp indices to valid range: paddle.topk may return garbage indices
+        # for -inf input values
+        topk_indices = paddle.clip(
+            topk_indices, min=0, max=masked_scores.shape[-1] - 1
+        )
 
         FusedDSAIndexerLoss._last_topk_indices = topk_indices.detach()
 

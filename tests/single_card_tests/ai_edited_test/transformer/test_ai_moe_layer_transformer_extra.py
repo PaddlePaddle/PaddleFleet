@@ -320,6 +320,7 @@ class TestMoELayerForwardLogging(unittest.TestCase):
         layer.moe_grouped_gemm = False
         layer.training = False
         layer.router_aux_loss_coef = None
+        layer.use_latent_moe = False
         layer.layer_number = 7
         layer.gate = MagicMock(
             return_value=(

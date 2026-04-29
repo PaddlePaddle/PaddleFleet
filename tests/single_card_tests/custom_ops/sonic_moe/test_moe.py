@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
+
 import paddle
 from parameterized import parameterized
 
@@ -21,6 +23,14 @@ from paddlefleet.ops.sonicmoe.enums import ActivationType
 from .commons_test import TestCommons
 
 _SEED = 42
+
+
+_gpu_capability = paddle.device.cuda.get_device_capability()
+_IS_SM90A = _gpu_capability == (9, 0)
+_SKIP_REASON = (
+    f"MmaF16BF16Op requires sm_90a, "
+    f"but current GPU capability is sm_{_gpu_capability[0]}{_gpu_capability[1]}a"
+)
 # torch._dynamo.config.cache_size_limit = 1024
 # torch._dynamo.config.accumulated_cache_size_limit = 1024
 # torch._funcpaddle.config.donated_buffer = False
@@ -28,6 +38,7 @@ _SEED = 42
 import os
 
 RUN_IN_PADDLE_CI = paddle.utils.strtobool(os.getenv("RUN_IN_PADDLE_CI", "0"))
+
 
 problem_shapes = [
     (8192, 768, 256, 128, 8),
@@ -48,6 +59,7 @@ if RUN_IN_PADDLE_CI:
     problem_shapes = problem_shapes[:1]
 
 
+@unittest.skipUnless(_IS_SM90A, _SKIP_REASON)
 class MoETest(TestCommons):
     @parameterized.expand(
         TestCommons.make_args_matrix(
