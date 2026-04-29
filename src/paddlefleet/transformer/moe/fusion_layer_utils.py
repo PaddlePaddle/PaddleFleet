@@ -106,6 +106,9 @@ class UnZipNode:
             hidden_states, scale = hs_2d_dispatched, None
 
         with paddle.amp.auto_cast(False):
+            using_ue8m0_scale = (
+                scale is not None and scale.dtype == paddle.int32
+            )
             (
                 unzipped_tokens,
                 zipped_expertwise_rowmap,
@@ -120,6 +123,7 @@ class UnZipNode:
                 tokens_per_expert=tokens_per_expert,
                 padding_alignment=FP8_ALIGN,
                 do_gather=fill_output,
+                using_ue8m0_scale=using_ue8m0_scale,
             )
 
         if scale is None:
@@ -261,6 +265,7 @@ class MlpNode:
         moe_grouped_gemm=False,
         use_auto_subbatch=False,
         moe_subbatch_diag=False,
+        use_ue8m0=False,
     ):
         """
         Constructor
@@ -327,6 +332,7 @@ class MlpNode:
                     use_fp8_mlp=use_fp8_mlp,
                     moe_deep_gemm=moe_deep_gemm,
                     moe_grouped_gemm=moe_grouped_gemm,
+                    use_ue8m0=use_ue8m0,
                 )
                 for expert_id in range(len(custom_map.experts))
             ]
@@ -340,6 +346,7 @@ class MlpNode:
                 use_fp8_mlp=use_fp8_mlp,
                 moe_deep_gemm=moe_deep_gemm,
                 moe_grouped_gemm=moe_grouped_gemm,
+                use_ue8m0=use_ue8m0,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -1790,6 +1797,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         fp8_dispatched_handle=None,
         use_auto_subbatch=False,
         moe_subbatch_diag=False,
+        use_ue8m0=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -1817,6 +1825,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             moe_grouped_gemm=moe_grouped_gemm,
             use_auto_subbatch=use_auto_subbatch,
             moe_subbatch_diag=moe_subbatch_diag,
+            use_ue8m0=use_ue8m0,
         )
 
         if fp8_dispatched_handle is not None:

@@ -370,6 +370,7 @@ class DeepEPDispatch(PyLayer):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         moe_ep_barrier: bool = True,
+        use_ue8m0: bool = False,
     ):
         """Forward pass of fused dispatch."""
         if fp8_dispatch:
@@ -379,6 +380,7 @@ class DeepEPDispatch(PyLayer):
                 input_transpose=False,
                 output_scale_transpose=True,
                 return_transpose_only=False,
+                using_ue8m0_scale=use_ue8m0,
             )
             scale = scale.T.contiguous()
             x = (x_fp8, scale)
@@ -523,6 +525,7 @@ if HAVE_DEEP_EP:
         async_finish=False,
         allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
+        use_ue8m0: bool = False,
     ):
         """Perform fused dispatch operation if deep_ep is available.
 
@@ -548,7 +551,8 @@ if HAVE_DEEP_EP:
             fp8_dispatch,
             async_finish,
             allocate_on_comm_stream,
-            moe_ep_barrier=moe_ep_barrier,
+            moe_ep_barrier,
+            use_ue8m0,
         )
 
     def fused_combine(
