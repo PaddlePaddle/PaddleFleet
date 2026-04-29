@@ -158,6 +158,9 @@ class TransformerConfig(ModelParallelConfig):
     _attn_implementation: str = "default"
     """Attention implementation to use."""
 
+    flashmask_use_varlen: bool = False
+    """If True, convert flashmask to varlen in attention."""
+
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""
@@ -283,6 +286,9 @@ class TransformerConfig(ModelParallelConfig):
 
     use_qk_norm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
+
+    qk_norm_fusion: bool = False
+    """If True, use Triton fused RMSNorm kernel for QK norm."""
 
     qk_norm_type: str = "per_head"
     """Type of qk normalization:
@@ -616,6 +622,15 @@ class TransformerConfig(ModelParallelConfig):
 
     loss_subbatch_sequence_length: int = -1
     """Sequence length of subbatch for loss computation."""
+
+    fused_linear_ce_loss_chunk: int = 0
+    """Enable fused linear + cross-entropy loss when > 0.
+
+    When set to a positive integer N, LM head skips materializing the full
+    [B, S, V] logits tensor and instead passes (hidden_states, weight, bias)
+    to LanguageLoss, which dispatches to LigerFusedLinearCrossEntropyFunction
+    with num_chunks=N. Only compatible with tensor_model_parallel_size == 1
+    (or parallel_output disabled)."""
 
     # cache_mla_latents: bool = False
 

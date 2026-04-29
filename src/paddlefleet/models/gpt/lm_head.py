@@ -99,6 +99,16 @@ class GPTLMHead(ColumnParallelLinear):
         return ScheduleNode(self.forward, name="GPTLMHead")
 
     def _forward(self, hidden_states: paddle.Tensor):
+        # Fused linear + cross-entropy path: skip materializing [B, S, V] logits
+        # and delegate the linear projection into LanguageLoss, which will call
+        # LigerFusedLinearCrossEntropyFunction.
+        if getattr(self.config, "fused_linear_ce_loss_chunk", 0):
+            if self.config.sequence_parallel:
+                # [S, B, H] -> [B, S, H] to match the logits layout consumers expect.
+                hidden_states = hidden_states.transpose([1, 0, 2]).contiguous()
+
+            return (hidden_states, self.weight, self.bias)
+
         if (
             self.config.recompute_modules is not None
             and "lm_head" in self.config.recompute_modules
