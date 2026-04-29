@@ -91,8 +91,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         )
 
         # This configuration should raise a ValueError because:
-        # moe_grouped_gemm=True is only supported when
-        # moe_token_dispatcher_type is 'deepep' or 'hybridep'
+        # moe_grouped_gemm=True is only supported when moe_token_dispatcher_type is 'deepep'
         # but current moe_token_dispatcher_type='alltoall'
         with self.assertRaises(ValueError) as context:
             moe_layer = MoELayer(
