@@ -1,4 +1,4 @@
-# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 """Unit tests for fused_apply_mla_rope_for_q / fused_apply_mla_rope_for_kv.
 
 Covers:
-  1. Forward pass accuracy vs a pure-Paddle reference for sbhd and thd.
+  1. Forward pass accuracy vs a pure-Paddle reference for bshd and thd.
   2. Backward pass accuracy vs the same reference.
   3. Multiple dtypes (float32 / float16 / bfloat16).
 
@@ -60,7 +60,7 @@ _TOL = {
 
 
 # ---------------------------------------------------------------------------
-# Reference implementation
+# Reference implementation (sbhd layout internally)
 # ---------------------------------------------------------------------------
 
 
@@ -238,24 +238,32 @@ class _BaseMLARopeTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# fused_apply_mla_rope_for_q: forward + backward, sbhd + thd
+# fused_apply_mla_rope_for_q: forward + backward, bshd + thd
 # ---------------------------------------------------------------------------
 
 
 class TestApplyMLARopeForQ(_BaseMLARopeTest):
-    def _run_sbhd_fwd(self, seq, bs, heads, qk_head_dim, emb_dim, dtype):
+    def _run_bshd_fwd(self, bs, seq, heads, qk_head_dim, emb_dim, dtype):
         head_dim = qk_head_dim + emb_dim
-        q = _rand([seq, bs, heads, head_dim], dtype, seed=1)
+        # bshd: [batch, seq, heads, head_dim]
+        q = _rand([bs, seq, heads, head_dim], dtype, seed=1)
         cos, sin = _make_cos_sin(seq, emb_dim, seed=7)
 
         q_in = q.clone().detach()
         out = fused_apply_mla_rope_for_q(
             q_in, cos, sin, qk_head_dim, emb_dim, None, 0, 1, False
         )
-        ref = apply_mla_rope_for_q_ref(q, cos, sin, qk_head_dim, emb_dim, None)
+        # Reference: transpose to sbhd, apply, transpose back
+        q_sbhd = q.transpose([1, 0, 2, 3])  # [seq, bs, heads, head_dim]
+        ref_sbhd = apply_mla_rope_for_q_ref(
+            q_sbhd, cos, sin, qk_head_dim, emb_dim, None
+        )
+        ref = ref_sbhd.transpose(
+            [1, 0, 2, 3]
+        )  # back to [bs, seq, heads, head_dim]
 
-        self.assertEqual(list(out.shape), [seq, bs, heads, head_dim])
-        _allclose(out, ref, dtype, f"Q sbhd fwd dtype={dtype}")
+        self.assertEqual(list(out.shape), [bs, seq, heads, head_dim])
+        _allclose(out, ref, dtype, f"Q bshd fwd dtype={dtype}")
 
     def _run_thd_fwd(self, seq_lens, heads, qk_head_dim, emb_dim, dtype):
         total = sum(seq_lens)
@@ -276,23 +284,30 @@ class TestApplyMLARopeForQ(_BaseMLARopeTest):
         self.assertEqual(list(out.shape), [total, heads, head_dim])
         _allclose(out, ref, dtype, f"Q thd fwd dtype={dtype}")
 
-    def _run_sbhd_bwd(self, seq, bs, heads, qk_head_dim, emb_dim, dtype):
+    def _run_bshd_bwd(self, bs, seq, heads, qk_head_dim, emb_dim, dtype):
         head_dim = qk_head_dim + emb_dim
         np.random.seed(11)
-        q_np = np.random.randn(seq, bs, heads, head_dim).astype("float32")
-        dout_np = np.random.randn(seq, bs, heads, head_dim).astype("float32")
+        q_np = np.random.randn(bs, seq, heads, head_dim).astype("float32")
+        dout_np = np.random.randn(bs, seq, heads, head_dim).astype("float32")
         cos, sin = _make_cos_sin(seq, emb_dim, seed=9)
 
-        # Reference gradient
-        q_ref = paddle.to_tensor(q_np, place="gpu").astype(dtype)
+        # Reference gradient (via sbhd transposition)
+        q_sbhd_np = q_np.transpose(1, 0, 2, 3)  # [seq, bs, heads, head_dim]
+        q_ref = paddle.to_tensor(q_sbhd_np, place="gpu").astype(dtype)
         q_ref.stop_gradient = False
         out_ref = apply_mla_rope_for_q_ref(
             q_ref, cos, sin, qk_head_dim, emb_dim, None
         )
-        dout_ref = paddle.to_tensor(dout_np, place="gpu").astype(out_ref.dtype)
-        g_ref = paddle.grad([out_ref], [q_ref], [dout_ref])[0]
+        dout_sbhd_np = dout_np.transpose(1, 0, 2, 3)
+        dout_ref = paddle.to_tensor(dout_sbhd_np, place="gpu").astype(
+            out_ref.dtype
+        )
+        g_ref_sbhd = paddle.grad([out_ref], [q_ref], [dout_ref])[0]
+        g_ref = g_ref_sbhd.transpose(
+            [1, 0, 2, 3]
+        )  # back to [bs, seq, heads, head_dim]
 
-        # Fused gradient
+        # Fused gradient (bshd)
         q_cu = paddle.to_tensor(q_np, place="gpu").astype(dtype)
         q_cu.stop_gradient = False
         out_cu = fused_apply_mla_rope_for_q(
@@ -301,21 +316,18 @@ class TestApplyMLARopeForQ(_BaseMLARopeTest):
         dout_cu = paddle.to_tensor(dout_np, place="gpu").astype(out_cu.dtype)
         g_cu = paddle.grad([out_cu], [q_cu], [dout_cu])[0]
 
-        _allclose(g_cu, g_ref, dtype, f"Q sbhd bwd dtype={dtype}")
+        _allclose(g_cu, g_ref, dtype, f"Q bshd bwd dtype={dtype}")
 
-    # ---- forward sbhd ----
-    def test_fwd_sbhd_fp32(self):
-        self._run_sbhd_fwd(64, 2, 8, 128, 64, "float32")
+    # ---- forward bshd ----
+    def test_fwd_bshd_fp32(self):
+        self._run_bshd_fwd(2, 64, 8, 128, 64, "float32")
 
-    def test_fwd_sbhd_bf16(self):
-        self._run_sbhd_fwd(64, 2, 8, 128, 64, "bfloat16")
+    def test_fwd_bshd_bf16(self):
+        self._run_bshd_fwd(2, 64, 8, 128, 64, "bfloat16")
 
-    def test_fwd_sbhd_fp16(self):
-        self._run_sbhd_fwd(64, 2, 8, 128, 64, "float16")
-
-    def test_fwd_sbhd_bf16_odd_heads(self):
+    def test_fwd_bshd_bf16_odd_heads(self):
         # head count not a power of two exercises BLOCK_H masking
-        self._run_sbhd_fwd(32, 1, 7, 64, 32, "bfloat16")
+        self._run_bshd_fwd(1, 32, 7, 64, 32, "bfloat16")
 
     # ---- forward thd ----
     def test_fwd_thd_fp32(self):
@@ -324,36 +336,85 @@ class TestApplyMLARopeForQ(_BaseMLARopeTest):
     def test_fwd_thd_bf16(self):
         self._run_thd_fwd([10, 17, 23], 4, 64, 32, "bfloat16")
 
-    # ---- backward ----
-    def test_bwd_sbhd_fp32(self):
-        self._run_sbhd_bwd(32, 2, 4, 64, 32, "float32")
+    # ---- backward bshd ----
+    def test_bwd_bshd_fp32(self):
+        self._run_bshd_bwd(2, 32, 4, 64, 32, "float32")
 
-    def test_bwd_sbhd_bf16(self):
-        self._run_sbhd_bwd(32, 2, 4, 64, 32, "bfloat16")
+    def test_bwd_bshd_bf16(self):
+        self._run_bshd_bwd(2, 32, 4, 64, 32, "bfloat16")
+
+    def test_bwd_bshd_bf16_odd_heads(self):
+        # head count not a power of two exercises BLOCK_H masking in backward
+        self._run_bshd_bwd(1, 32, 7, 64, 32, "bfloat16")
+
+    # ---- backward thd ----
+    def _run_thd_bwd(self, seq_lens, heads, qk_head_dim, emb_dim, dtype):
+        total = sum(seq_lens)
+        max_seq = max(seq_lens)
+        head_dim = qk_head_dim + emb_dim
+        np.random.seed(51)
+        q_np = np.random.randn(total, heads, head_dim).astype("float32")
+        dout_np = np.random.randn(total, heads, head_dim).astype("float32")
+        cos, sin = _make_cos_sin(max_seq, emb_dim, seed=52)
+        cu = paddle.to_tensor(
+            np.cumsum([0, *list(seq_lens)]).astype("int32"), place="gpu"
+        )
+
+        # Reference gradient via autograd on the pure-Paddle reference
+        q_ref = paddle.to_tensor(q_np, place="gpu").astype(dtype)
+        q_ref.stop_gradient = False
+        out_ref = apply_mla_rope_for_q_ref(
+            q_ref, cos, sin, qk_head_dim, emb_dim, cu
+        )
+        dout_ref = paddle.to_tensor(dout_np, place="gpu").astype(out_ref.dtype)
+        g_ref = paddle.grad([out_ref], [q_ref], [dout_ref])[0]
+
+        # Fused gradient (thd)
+        q_cu = paddle.to_tensor(q_np, place="gpu").astype(dtype)
+        q_cu.stop_gradient = False
+        out_cu = fused_apply_mla_rope_for_q(
+            q_cu, cos, sin, qk_head_dim, emb_dim, cu, 0, 1, False
+        )
+        dout_cu = paddle.to_tensor(dout_np, place="gpu").astype(out_cu.dtype)
+        g_cu = paddle.grad([out_cu], [q_cu], [dout_cu])[0]
+
+        _allclose(g_cu, g_ref, dtype, f"Q thd bwd dtype={dtype}")
+
+    def test_bwd_thd_fp32(self):
+        self._run_thd_bwd([10, 17, 23], 4, 64, 32, "float32")
+
+    def test_bwd_thd_bf16(self):
+        self._run_thd_bwd([10, 17, 23], 4, 64, 32, "bfloat16")
 
 
 # ---------------------------------------------------------------------------
-# fused_apply_mla_rope_for_kv: forward + backward, sbhd + thd
+# fused_apply_mla_rope_for_kv: forward + backward, bshd + thd
 # ---------------------------------------------------------------------------
 
 
 class TestApplyMLARopeForKV(_BaseMLARopeTest):
-    def _run_sbhd_fwd(self, seq, bs, heads, k_dim, v_dim, emb_dim, dtype):
-        kv = _rand([seq, bs, heads, k_dim + v_dim], dtype, seed=21)
-        k_pos_emb = _rand([seq, bs, 1, emb_dim], dtype, seed=22)
+    def _run_bshd_fwd(self, bs, seq, heads, k_dim, v_dim, emb_dim, dtype):
+        # bshd: [batch, seq, heads, k_dim+v_dim]
+        kv = _rand([bs, seq, heads, k_dim + v_dim], dtype, seed=21)
+        k_pos_emb = _rand([bs, seq, 1, emb_dim], dtype, seed=22)
         cos, sin = _make_cos_sin(seq, emb_dim, seed=23)
 
         key_out, val_out = fused_apply_mla_rope_for_kv(
             kv, k_pos_emb, cos, sin, emb_dim, k_dim, v_dim, None, 0, 1, False
         )
-        key_ref, val_ref = apply_mla_rope_for_kv_ref(
-            kv, k_pos_emb, cos, sin, emb_dim, k_dim, v_dim, None
+        # Reference: transpose to sbhd, apply, transpose back
+        kv_sbhd = kv.transpose([1, 0, 2, 3])
+        emb_sbhd = k_pos_emb.transpose([1, 0, 2, 3])
+        key_ref_sbhd, val_ref_sbhd = apply_mla_rope_for_kv_ref(
+            kv_sbhd, emb_sbhd, cos, sin, emb_dim, k_dim, v_dim, None
         )
+        key_ref = key_ref_sbhd.transpose([1, 0, 2, 3])
+        val_ref = val_ref_sbhd.transpose([1, 0, 2, 3])
 
-        self.assertEqual(list(key_out.shape), [seq, bs, heads, k_dim + emb_dim])
-        self.assertEqual(list(val_out.shape), [seq, bs, heads, v_dim])
-        _allclose(key_out, key_ref, dtype, f"KV sbhd fwd key dtype={dtype}")
-        _allclose(val_out, val_ref, dtype, f"KV sbhd fwd value dtype={dtype}")
+        self.assertEqual(list(key_out.shape), [bs, seq, heads, k_dim + emb_dim])
+        self.assertEqual(list(val_out.shape), [bs, seq, heads, v_dim])
+        _allclose(key_out, key_ref, dtype, f"KV bshd fwd key dtype={dtype}")
+        _allclose(val_out, val_ref, dtype, f"KV bshd fwd value dtype={dtype}")
 
     def _run_thd_fwd(self, seq_lens, heads, k_dim, v_dim, emb_dim, dtype):
         total = sum(seq_lens)
@@ -376,14 +437,14 @@ class TestApplyMLARopeForKV(_BaseMLARopeTest):
         _allclose(key_out, key_ref, dtype, f"KV thd fwd key dtype={dtype}")
         _allclose(val_out, val_ref, dtype, f"KV thd fwd value dtype={dtype}")
 
-    def _run_sbhd_bwd(self, seq, bs, heads, k_dim, v_dim, emb_dim, dtype):
+    def _run_bshd_bwd(self, bs, seq, heads, k_dim, v_dim, emb_dim, dtype):
         np.random.seed(41)
-        kv_np = np.random.randn(seq, bs, heads, k_dim + v_dim).astype("float32")
-        emb_np = np.random.randn(seq, bs, 1, emb_dim).astype("float32")
-        dkey_np = np.random.randn(seq, bs, heads, k_dim + emb_dim).astype(
+        kv_np = np.random.randn(bs, seq, heads, k_dim + v_dim).astype("float32")
+        emb_np = np.random.randn(bs, seq, 1, emb_dim).astype("float32")
+        dkey_np = np.random.randn(bs, seq, heads, k_dim + emb_dim).astype(
             "float32"
         )
-        dval_np = np.random.randn(seq, bs, heads, v_dim).astype("float32")
+        dval_np = np.random.randn(bs, seq, heads, v_dim).astype("float32")
         cos, sin = _make_cos_sin(seq, emb_dim, seed=42)
 
         def _make(xn, dt):
@@ -391,19 +452,25 @@ class TestApplyMLARopeForKV(_BaseMLARopeTest):
             t.stop_gradient = False
             return t
 
-        # Reference
-        kv_ref = _make(kv_np, dtype)
-        emb_ref = _make(emb_np, dtype)
+        # Reference via sbhd transposition
+        kv_ref = _make(kv_np.transpose(1, 0, 2, 3), dtype)
+        emb_ref = _make(emb_np.transpose(1, 0, 2, 3), dtype)
         key_ref, val_ref = apply_mla_rope_for_kv_ref(
             kv_ref, emb_ref, cos, sin, emb_dim, k_dim, v_dim, None
         )
-        dkey_ref = paddle.to_tensor(dkey_np, place="gpu").astype(key_ref.dtype)
-        dval_ref = paddle.to_tensor(dval_np, place="gpu").astype(val_ref.dtype)
-        gkv_ref, gemb_ref = paddle.grad(
+        dkey_ref = paddle.to_tensor(
+            dkey_np.transpose(1, 0, 2, 3), place="gpu"
+        ).astype(key_ref.dtype)
+        dval_ref = paddle.to_tensor(
+            dval_np.transpose(1, 0, 2, 3), place="gpu"
+        ).astype(val_ref.dtype)
+        gkv_ref_sbhd, gemb_ref_sbhd = paddle.grad(
             [key_ref, val_ref], [kv_ref, emb_ref], [dkey_ref, dval_ref]
         )
+        gkv_ref = gkv_ref_sbhd.transpose([1, 0, 2, 3])
+        gemb_ref = gemb_ref_sbhd.transpose([1, 0, 2, 3])
 
-        # Fused
+        # Fused bshd
         kv_cu = _make(kv_np, dtype)
         emb_cu = _make(emb_np, dtype)
         key_cu, val_cu = fused_apply_mla_rope_for_kv(
@@ -415,21 +482,18 @@ class TestApplyMLARopeForKV(_BaseMLARopeTest):
             [key_cu, val_cu], [kv_cu, emb_cu], [dkey_cu, dval_cu]
         )
 
-        _allclose(gkv_cu, gkv_ref, dtype, f"KV sbhd bwd dkv dtype={dtype}")
-        _allclose(gemb_cu, gemb_ref, dtype, f"KV sbhd bwd demb dtype={dtype}")
+        _allclose(gkv_cu, gkv_ref, dtype, f"KV bshd bwd dkv dtype={dtype}")
+        _allclose(gemb_cu, gemb_ref, dtype, f"KV bshd bwd demb dtype={dtype}")
 
-    # ---- forward sbhd ----
-    def test_fwd_sbhd_fp32(self):
-        self._run_sbhd_fwd(32, 2, 8, 128, 128, 64, "float32")
+    # ---- forward bshd ----
+    def test_fwd_bshd_fp32(self):
+        self._run_bshd_fwd(2, 32, 8, 128, 128, 64, "float32")
 
-    def test_fwd_sbhd_bf16(self):
-        self._run_sbhd_fwd(32, 2, 8, 128, 128, 64, "bfloat16")
+    def test_fwd_bshd_bf16(self):
+        self._run_bshd_fwd(2, 32, 8, 128, 128, 64, "bfloat16")
 
-    def test_fwd_sbhd_fp16(self):
-        self._run_sbhd_fwd(32, 2, 8, 128, 128, 64, "float16")
-
-    def test_fwd_sbhd_bf16_odd_heads(self):
-        self._run_sbhd_fwd(16, 1, 5, 64, 64, 32, "bfloat16")
+    def test_fwd_bshd_bf16_odd_heads(self):
+        self._run_bshd_fwd(1, 16, 5, 64, 64, 32, "bfloat16")
 
     # ---- forward thd ----
     def test_fwd_thd_fp32(self):
@@ -438,12 +502,70 @@ class TestApplyMLARopeForKV(_BaseMLARopeTest):
     def test_fwd_thd_bf16(self):
         self._run_thd_fwd([8, 13, 19], 4, 64, 64, 32, "bfloat16")
 
-    # ---- backward ----
-    def test_bwd_sbhd_fp32(self):
-        self._run_sbhd_bwd(16, 2, 4, 64, 64, 32, "float32")
+    # ---- backward bshd ----
+    def test_bwd_bshd_fp32(self):
+        self._run_bshd_bwd(2, 16, 4, 64, 64, 32, "float32")
 
-    def test_bwd_sbhd_bf16(self):
-        self._run_sbhd_bwd(16, 2, 4, 64, 64, 32, "bfloat16")
+    def test_bwd_bshd_bf16(self):
+        self._run_bshd_bwd(2, 16, 4, 64, 64, 32, "bfloat16")
+
+    def test_bwd_bshd_bf16_odd_heads(self):
+        # head count not a power of two exercises BLOCK_H masked-load in backward
+        self._run_bshd_bwd(1, 16, 5, 64, 64, 32, "bfloat16")
+
+    # ---- backward thd ----
+    def _run_thd_bwd(self, seq_lens, heads, k_dim, v_dim, emb_dim, dtype):
+        total = sum(seq_lens)
+        max_seq = max(seq_lens)
+        np.random.seed(61)
+        kv_np = np.random.randn(total, heads, k_dim + v_dim).astype("float32")
+        emb_np = np.random.randn(total, 1, emb_dim).astype("float32")
+        dkey_np = np.random.randn(total, heads, k_dim + emb_dim).astype(
+            "float32"
+        )
+        dval_np = np.random.randn(total, heads, v_dim).astype("float32")
+        cos, sin = _make_cos_sin(max_seq, emb_dim, seed=62)
+        cu = paddle.to_tensor(
+            np.cumsum([0, *list(seq_lens)]).astype("int32"), place="gpu"
+        )
+
+        def _make(xn, dt):
+            t = paddle.to_tensor(xn, place="gpu").astype(dt)
+            t.stop_gradient = False
+            return t
+
+        # Reference via autograd on pure-Paddle reference (thd)
+        kv_ref = _make(kv_np, dtype)
+        emb_ref = _make(emb_np, dtype)
+        key_ref, val_ref = apply_mla_rope_for_kv_ref(
+            kv_ref, emb_ref, cos, sin, emb_dim, k_dim, v_dim, cu
+        )
+        dkey_ref = paddle.to_tensor(dkey_np, place="gpu").astype(key_ref.dtype)
+        dval_ref = paddle.to_tensor(dval_np, place="gpu").astype(val_ref.dtype)
+        gkv_ref, gemb_ref = paddle.grad(
+            [key_ref, val_ref], [kv_ref, emb_ref], [dkey_ref, dval_ref]
+        )
+
+        # Fused thd
+        kv_cu = _make(kv_np, dtype)
+        emb_cu = _make(emb_np, dtype)
+        key_cu, val_cu = fused_apply_mla_rope_for_kv(
+            kv_cu, emb_cu, cos, sin, emb_dim, k_dim, v_dim, cu, 0, 1, False
+        )
+        dkey_cu = paddle.to_tensor(dkey_np, place="gpu").astype(key_cu.dtype)
+        dval_cu = paddle.to_tensor(dval_np, place="gpu").astype(val_cu.dtype)
+        gkv_cu, gemb_cu = paddle.grad(
+            [key_cu, val_cu], [kv_cu, emb_cu], [dkey_cu, dval_cu]
+        )
+
+        _allclose(gkv_cu, gkv_ref, dtype, f"KV thd bwd dkv dtype={dtype}")
+        _allclose(gemb_cu, gemb_ref, dtype, f"KV thd bwd demb dtype={dtype}")
+
+    def test_bwd_thd_fp32(self):
+        self._run_thd_bwd([8, 13, 19], 4, 64, 64, 32, "float32")
+
+    def test_bwd_thd_bf16(self):
+        self._run_thd_bwd([8, 13, 19], 4, 64, 64, 32, "bfloat16")
 
 
 if __name__ == "__main__":

@@ -78,7 +78,7 @@ def rotary_fwd_q_kernel(
     qk_head_dim,
     emb_dim: tl.constexpr,
     head_num: tl.constexpr,
-    batch_size,
+    seq_len,
     seq_num,
     cu_seqlens_q,
     stride_x_seq,
@@ -92,19 +92,20 @@ def rotary_fwd_q_kernel(
     This kernel inplace modifies the input tensor Q.
 
     Input:
-        Q: [seq_len, batch_size, head_num, qk_head_dim + emb_dim]
-            or [total_seq_len, head_num, qk_head_dim + emb_dim]
+        Q: [batch_size, seq_len, head_num, qk_head_dim + emb_dim] (bshd, viewed as flat)
+            or [total_seq_len, head_num, qk_head_dim + emb_dim] (thd)
         COS/SIN: [max_seq_len, emb_dim]
 
-        batch_size: batch size for sbhd format, not used for thd format
-        seq_num: number of sequences for thd format, not used for sbhd format
+        seq_len: sequence length for bshd format (not used for thd)
+        seq_num: number of sequences for thd format, not used for bshd
         cu_seqlens_q: [seq_num + 1] accumulated sequence lengths for thd format
     """
     pid_m = tl.program_id(axis=0)
     pid_head = tl.program_id(axis=1)
 
     if cu_seqlens_q is None:
-        token_idx = pid_m // batch_size
+        # bshd: pid_m = b * seq_len + s  →  token_idx = s
+        token_idx = pid_m % seq_len
     else:
         token_idx = _get_thd_token_idx(
             cu_seqlens_q, pid_m, seq_num, cp_rank, cp_size
@@ -164,7 +165,7 @@ def rotary_bwd_q_kernel(
     qk_head_dim,
     emb_dim: tl.constexpr,
     head_num: tl.constexpr,
-    batch_size,
+    seq_len,
     seq_num,
     cu_seqlens_q,
     stride_x_seq,
@@ -178,17 +179,17 @@ def rotary_bwd_q_kernel(
     This kernel inplace modifies the input tensor DO.
 
     Input:
-        DO: [seq_len, batch_size, head_num, qk_head_dim + emb_dim]
-            or [total_seq_len, head_num, qk_head_dim + emb_dim]
+        DO: [batch_size, seq_len, head_num, qk_head_dim + emb_dim] (bshd, viewed as flat)
+            or [total_seq_len, head_num, qk_head_dim + emb_dim] (thd)
         COS/SIN: [max_seq_len, emb_dim]
 
-        batch_size, seq_num, and cu_seqlens_q are the same as in the forward pass
+        seq_len, seq_num, and cu_seqlens_q are the same as in the forward pass
     """
     pid_m = tl.program_id(axis=0)
     pid_head = tl.program_id(axis=1)
 
     if cu_seqlens_q is None:
-        token_idx = pid_m // batch_size
+        token_idx = pid_m % seq_len
     else:
         token_idx = _get_thd_token_idx(
             cu_seqlens_q, pid_m, seq_num, cp_rank, cp_size
@@ -247,25 +248,32 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
         Forward function for ApplyMLARotaryEmbQ.
 
         Args:
-            q: [seq_len, batch_size, head_num, qk_head_dim + emb_dim]
-                or [total_seq_len, head_num, qk_head_dim + emb_dim]
+            q: [batch_size, seq_len, head_num, qk_head_dim + emb_dim] (bshd)
+                or [total_seq_len, head_num, qk_head_dim + emb_dim] (thd)
             cos/sin: [max_seq_len, 1, 1, emb_dim]
             cu_seqlens_q: [seq_num + 1] accumulated sequence lengths for thd format
             rotary_interleaved: whether to apply RoPE interleaved, only supports False for now
         """
         assert not rotary_interleaved
-        max_seqlen = None
         batch_size = None
+        max_seqlen = None
         seq_num = None
         if cu_seqlens_q is None:
-            # sbhd
-            max_seqlen, batch_size, nheads, headdim = q.shape
+            # bshd: [batch, seq, nhead, dim]
+            batch_size, max_seqlen, nheads, headdim = q.shape
             q = q.view(-1, nheads, headdim)
             total_seqlen = q.shape[0]
         else:
             # thd
             total_seqlen, nheads, headdim = q.shape
             seq_num = len(cu_seqlens_q) - 1
+            # Two-step reshape (via an intermediate different shape) creates a
+            # non-leaf view, allowing inplace kernel modification when the input
+            # requires gradient — consistent with the bshd path which uses
+            # q.view(-1, nheads, headdim) to achieve the same effect.
+            q = q.reshape([-1, headdim]).reshape(
+                [total_seqlen, nheads, headdim]
+            )
         assert q.stride(-1) == 1
         assert cos.is_contiguous()
         assert sin.is_contiguous()
@@ -280,7 +288,7 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
             qk_head_dim,
             emb_dim,
             nheads,
-            batch_size,
+            max_seqlen,
             seq_num,
             cu_seqlens_q,
             q.stride(0),
@@ -295,8 +303,10 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
         ctx.rotary_interleaved = rotary_interleaved
         ctx.cp_rank = cp_rank
         ctx.cp_size = cp_size
+        ctx.max_seqlen = max_seqlen
+        ctx.batch_size = batch_size
         if cu_seqlens_q is None:
-            q = q.view(max_seqlen, batch_size, nheads, headdim)
+            q = q.view(batch_size, max_seqlen, nheads, headdim)
         return q
 
     @staticmethod
@@ -305,15 +315,15 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
         Backward function for ApplyMLARotaryEmbQ.
 
         Args:
-            grad: [seq_len, batch_size, head_num, qk_head_dim + emb_dim]
-                or [total_seq_len, head_num, qk_head_dim + emb_dim]
+            grad: [batch_size, seq_len, head_num, qk_head_dim + emb_dim] (bshd)
+                or [total_seq_len, head_num, qk_head_dim + emb_dim] (thd)
         """
         cos, sin = ctx.saved_tensors
-        max_seqlen = None
         batch_size = None
+        max_seqlen = None
         seq_num = None
         if ctx.cu_seqlens_q is None:
-            max_seqlen, batch_size, nheads, headdim = grad.shape
+            batch_size, max_seqlen, nheads, headdim = grad.shape
             grad = grad.contiguous().view(-1, nheads, headdim)
             total_seqlen = grad.shape[0]
         else:
@@ -329,7 +339,7 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
             ctx.qk_head_dim,
             ctx.emb_dim,
             nheads,
-            batch_size,
+            max_seqlen,
             seq_num,
             ctx.cu_seqlens_q,
             grad.stride(0),
@@ -338,7 +348,7 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
             ctx.cp_size,
         )
         if ctx.cu_seqlens_q is None:
-            grad = grad.view(max_seqlen, batch_size, nheads, headdim)
+            grad = grad.view(batch_size, max_seqlen, nheads, headdim)
 
         if ctx.cu_seqlens_q is None:
             return grad, None, None  # q, cos, sin
@@ -363,15 +373,15 @@ def fused_apply_mla_rope_for_q(
     Along the last dimension of t, the last emb_dim elements are applied with RoPE.
     The first qk_head_dim elements are not modified.
     It is an experimental feature and may change in future versions.
-    It supports both sbhd and thd input formats.
+    It supports bshd and thd input formats.
 
-    For the notations below, seq_len is the length of the sequence per batch for sbhd format,
+    For the notations below, seq_len is the length of the sequence per batch for bshd format,
     total_seq_len is the total length of the sequences for thd format.
     max_seq_len is the maximum length of the sequences in the input tensor.
 
     Args:
-        t: [seq_len, batch_size, head_num, qk_head_dim + emb_dim]
-            or [total_seq_len, head_num, qk_head_dim + emb_dim]
+        t: [batch_size, seq_len, head_num, qk_head_dim + emb_dim] (bshd)
+            or [total_seq_len, head_num, qk_head_dim + emb_dim] (thd)
         cos/sin: [max_seq_len, 1, 1, emb_dim]
         cu_seqlens_q: [seq_num + 1] accumulated sequence lengths for thd format
         rotary_interleaved: whether to apply RoPE interleaved, only supports False for now
@@ -417,7 +427,7 @@ def rotary_fwd_kv_kernel(
     k_dim: tl.constexpr,
     v_dim: tl.constexpr,
     head_num: tl.constexpr,
-    batch_size,
+    seq_len,
     seq_num,
     cu_seqlens_kv,
     stride_kv_seq,
@@ -437,25 +447,26 @@ def rotary_fwd_kv_kernel(
     and concatenates the processed RoPE to the key.
 
     Input:
-        KV: [seq_len, batch_size, head_num, k_dim + v_dim]
-            or [total_seq_len, head_num, k_dim + v_dim]
-        K_POS_EMB: [seq_len, batch_size, emb_dim] or [total_seq_len, emb_dim]
+        KV: [batch_size, seq_len, head_num, k_dim + v_dim] (bshd, viewed as flat)
+            or [total_seq_len, head_num, k_dim + v_dim] (thd)
+        K_POS_EMB: [batch_size, seq_len, emb_dim] (bshd) or [total_seq_len, emb_dim] (thd)
         COS/SIN: [max_seq_len, emb_dim]
 
-        batch_size: batch size for sbhd format, not used for thd format
-        seq_num: number of sequences for thd format, not used for sbhd format
+        seq_len: sequence length for bshd format (not used for thd)
+        seq_num: number of sequences for thd format, not used for bshd
         cu_seqlens_kv: [seq_num + 1] accumulated sequence lengths for thd format
 
     Output:
-        O_KEY: [seq_len, batch_size, head_num, emb_dim + k_dim]
-            or [total_seq_len, head_num, emb_dim + k_dim]
-        O_VALUE: [seq_len, batch_size, head_num, v_dim] or [total_seq_len, head_num, v_dim]
+        O_KEY: [batch_size, seq_len, head_num, emb_dim + k_dim] (bshd)
+            or [total_seq_len, head_num, emb_dim + k_dim] (thd)
+        O_VALUE: [batch_size, seq_len, head_num, v_dim] (bshd)
+            or [total_seq_len, head_num, v_dim] (thd)
     """
     pid_m = tl.program_id(axis=0)
     pid_head = tl.program_id(axis=1)
 
     if cu_seqlens_kv is None:
-        token_idx = pid_m // batch_size
+        token_idx = pid_m % seq_len
     else:
         token_idx = _get_thd_token_idx(
             cu_seqlens_kv, pid_m, seq_num, cp_rank, cp_size
@@ -539,7 +550,7 @@ def rotary_bwd_kv_kernel(
     k_dim: tl.constexpr,
     v_dim: tl.constexpr,
     head_num: tl.constexpr,
-    batch_size,
+    seq_len,
     seq_num,
     cu_seqlens_kv,
     stride_dk_seq,
@@ -557,23 +568,24 @@ def rotary_bwd_kv_kernel(
     Triton kernel of the backward pass for applying YARN RoPE to MLA's key and value.
 
     Input:
-        dK: [seq_len, batch_size, head_num, emb_dim + k_dim]
-            or [total_seq_len, head_num, emb_dim + k_dim]
-        dV: [seq_len, batch_size, head_num, v_dim] or [total_seq_len, head_num, v_dim]
+        dK: [batch_size, seq_len, head_num, emb_dim + k_dim] (bshd, viewed as flat)
+            or [total_seq_len, head_num, emb_dim + k_dim] (thd)
+        dV: [batch_size, seq_len, head_num, v_dim] (bshd)
+            or [total_seq_len, head_num, v_dim] (thd)
         COS/SIN: [max_seq_len, emb_dim]
 
-        batch_size, seq_num, and cu_seqlens_kv are the same as in the forward pass
+        seq_len, seq_num, and cu_seqlens_kv are the same as in the forward pass
 
     Output:
-        dKV: [seq_len, batch_size, head_num, k_dim + v_dim]
-            or [total_seq_len, head_num, k_dim + v_dim]
-        dEMB: [seq_len, batch_size, emb_dim] or [total_seq_len, emb_dim]
+        dKV: [batch_size, seq_len, head_num, k_dim + v_dim] (bshd)
+            or [total_seq_len, head_num, k_dim + v_dim] (thd)
+        dEMB: [batch_size, seq_len, emb_dim] (bshd) or [total_seq_len, emb_dim] (thd)
     """
     pid_m = tl.program_id(axis=0)
     pid_head = tl.program_id(axis=1)
 
     if cu_seqlens_kv is None:
-        token_idx = pid_m // batch_size
+        token_idx = pid_m % seq_len
     else:
         token_idx = _get_thd_token_idx(
             cu_seqlens_kv, pid_m, seq_num, cp_rank, cp_size
@@ -611,14 +623,14 @@ def rotary_bwd_kv_kernel(
             mask = (i * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
             x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
             x_right_off = x_left_off + emb_dim // 2
-            x_left = tl.load(dK_ptr + x_left_off, mask=mask)
-            x_right = tl.load(dK_ptr + x_right_off, mask=mask)
+            x_left = tl.load(dK_ptr + x_left_off, mask=mask, other=0.0)
+            x_right = tl.load(dK_ptr + x_right_off, mask=mask, other=0.0)
             x_left_accum += x_left
             x_right_accum += x_right
         x_left_accum = tl.sum(x_left_accum, axis=0)
         x_right_accum = tl.sum(x_right_accum, axis=0)
-        x_left_accum = x_left_accum.to(dEMB.dtype.element_ty)
-        x_right_accum = x_right_accum.to(dEMB.dtype.element_ty)
+        # Keep in float32 for the cos/sin multiply to avoid bf16 precision loss;
+        # cast to output dtype only at store time.
 
         cos_left = tl.load(
             COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2)
@@ -642,8 +654,14 @@ def rotary_bwd_kv_kernel(
         x_1 = x_left_accum * cos_left + x_right_accum * sin_right
         x_2 = -x_left_accum * sin_left + x_right_accum * cos_right
         dEMB_ptr = dEMB + pid_m * stride_demb_seq
-        tl.store(dEMB_ptr + tl.arange(0, emb_dim // 2) * 2, x_1)
-        tl.store(dEMB_ptr + tl.arange(0, emb_dim // 2) * 2 + 1, x_2)
+        tl.store(
+            dEMB_ptr + tl.arange(0, emb_dim // 2) * 2,
+            x_1.to(dEMB.dtype.element_ty),
+        )
+        tl.store(
+            dEMB_ptr + tl.arange(0, emb_dim // 2) * 2 + 1,
+            x_2.to(dEMB.dtype.element_ty),
+        )
 
 
 class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
@@ -670,20 +688,21 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         Forward function for ApplyMLARotaryEmbKV.
 
         Args:
-            kv: [seq_len, batch_size, head_num, k_dim + v_dim]
-                or [total_seq_len, head_num, k_dim + v_dim]
-            k_pos_emb: [seq_len, batch_size, 1, emb_dim] or [total_seq_len, 1, emb_dim]
+            kv: [batch_size, seq_len, head_num, k_dim + v_dim] (bshd)
+                or [total_seq_len, head_num, k_dim + v_dim] (thd)
+            k_pos_emb: [batch_size, seq_len, 1, emb_dim] (bshd)
+                or [total_seq_len, 1, emb_dim] (thd)
             cos/sin: [max_seq_len, 1, 1, emb_dim]
             cu_seqlens_kv: [seq_num + 1] accumulated sequence lengths for thd format
             rotary_interleaved: whether to apply RoPE interleaved, only supports False for now
         """
         assert not rotary_interleaved
-        max_seqlen = None
         batch_size = None
+        max_seqlen = None
         seq_num = None
         if cu_seqlens_kv is None:
-            # sbhd
-            max_seqlen, batch_size, nheads, headdim = kv.shape
+            # bshd: [batch, seq, nhead, dim]
+            batch_size, max_seqlen, nheads, headdim = kv.shape
             kv = kv.view(-1, nheads, headdim)
             k_pos_emb = k_pos_emb.view(-1, emb_dim)
             total_seqlen = kv.shape[0]
@@ -713,7 +732,7 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
             k_dim,
             v_dim,
             nheads,
-            batch_size,
+            max_seqlen,
             seq_num,
             cu_seqlens_kv,
             kv.stride(0),
@@ -734,9 +753,11 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         ctx.cu_seqlens_kv = cu_seqlens_kv
         ctx.cp_rank = cp_rank
         ctx.cp_size = cp_size
+        ctx.max_seqlen = max_seqlen
+        ctx.batch_size = batch_size
         if cu_seqlens_kv is None:
-            o_key = o_key.view(max_seqlen, -1, nheads, emb_dim + k_dim)
-            o_value = o_value.view(max_seqlen, -1, nheads, v_dim)
+            o_key = o_key.view(batch_size, max_seqlen, nheads, emb_dim + k_dim)
+            o_value = o_value.view(batch_size, max_seqlen, nheads, v_dim)
         return o_key, o_value
 
     @staticmethod
@@ -745,17 +766,18 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         Backward function for ApplyMLARotaryEmbKV.
 
         Args:
-            dk: [seq_len, batch_size, head_num, emb_dim + k_dim]
-                or [total_seq_len, head_num, emb_dim + k_dim]
-            dv: [seq_len, batch_size, head_num, v_dim] or [total_seq_len, head_num, v_dim]
+            dk: [batch_size, seq_len, head_num, emb_dim + k_dim] (bshd)
+                or [total_seq_len, head_num, emb_dim + k_dim] (thd)
+            dv: [batch_size, seq_len, head_num, v_dim] (bshd)
+                or [total_seq_len, head_num, v_dim] (thd)
         """
         cos, sin = ctx.saved_tensors
-        max_seqlen = None
         batch_size = None
+        max_seqlen = None
         seq_num = None
         if ctx.cu_seqlens_kv is None:
-            # sbhd
-            max_seqlen, batch_size, nheads, _ = dk.shape
+            # bshd
+            batch_size, max_seqlen, nheads, _ = dk.shape
             dk = dk.contiguous().view(-1, nheads, ctx.emb_dim + ctx.k_dim)
             dv = dv.contiguous().view(-1, nheads, ctx.v_dim)
             total_seqlen = dk.shape[0]
@@ -781,7 +803,7 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
             ctx.k_dim,
             ctx.v_dim,
             nheads,
-            batch_size,
+            max_seqlen,
             seq_num,
             ctx.cu_seqlens_kv,
             dk.stride(0),
@@ -796,9 +818,9 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         )
         if ctx.cu_seqlens_kv is None:
             d_kv = d_kv.view(
-                max_seqlen, batch_size, nheads, ctx.k_dim + ctx.v_dim
+                batch_size, max_seqlen, nheads, ctx.k_dim + ctx.v_dim
             )
-            d_emb = d_emb.view(max_seqlen, batch_size, 1, ctx.emb_dim)
+            d_emb = d_emb.view(batch_size, max_seqlen, 1, ctx.emb_dim)
 
         if ctx.cu_seqlens_kv is None:
             return d_kv, d_emb, None, None  # kv, k_pos_emb, cos, sin
@@ -830,22 +852,24 @@ def fused_apply_mla_rope_for_kv(
     It splits the input tensor kv into key and value,
     and concatenates the processed RoPE to the key.
 
-    For the notations below, seq_len is the length of sequence per batch for sbhd format,
+    For the notations below, seq_len is the length of sequence per batch for bshd format,
     total_seq_len is the total length of the sequences for thd format.
     max_seq_len is the maximum length of the sequences in the input tensor.
 
     Args:
-        kv: [seq_len, batch_size, head_num, k_dim + v_dim]
-            or [total_seq_len, head_num, k_dim + v_dim]
-        k_pos_emb: [seq_len, batch_size, 1, emb_dim] or [total_seq_len, 1, emb_dim]
+        kv: [batch_size, seq_len, head_num, k_dim + v_dim] (bshd)
+            or [total_seq_len, head_num, k_dim + v_dim] (thd)
+        k_pos_emb: [batch_size, seq_len, 1, emb_dim] (bshd)
+            or [total_seq_len, 1, emb_dim] (thd)
         cos/sin: [max_seq_len, 1, 1, emb_dim]
         cu_seqlens_kv: [seq_num + 1] accumulated sequence lengths for thd format
         rotary_interleaved: whether to apply RoPE interleaved, only supports False for now
 
     Returns:
-        key: [seq_len, batch_size, head_num, emb_dim + k_dim]
-            or [total_seq_len, head_num, emb_dim + k_dim]
-        value: [seq_len, batch_size, head_num, v_dim] or [total_seq_len, head_num, v_dim]
+        key: [batch_size, seq_len, head_num, emb_dim + k_dim] (bshd)
+            or [total_seq_len, head_num, emb_dim + k_dim] (thd)
+        value: [batch_size, seq_len, head_num, v_dim] (bshd)
+            or [total_seq_len, head_num, v_dim] (thd)
     """
     return ApplyMLARotaryEmbKV.apply(
         kv,
