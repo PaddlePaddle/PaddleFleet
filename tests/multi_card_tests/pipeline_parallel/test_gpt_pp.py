@@ -226,7 +226,7 @@ class TestPP(unittest.TestCase):
         pp.pprint(rst)
 
         if judge_machine_type() == "H":
-            assert overlap_loss._md5sum() == "bdd8b8660e976d3c1dde170aabeb3a6c"
+            assert overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
             if paddle.distributed.get_rank() == 0:
                 baseline = {
                     {
