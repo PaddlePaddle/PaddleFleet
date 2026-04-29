@@ -18,7 +18,7 @@ import functools
 import numpy as np
 import paddle
 import paddle.distributed as dist
-from paddle import Tensor, nn
+from paddle import Tensor, framework, nn
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.distributed.fleet.layers.mpu import mp_ops
@@ -35,6 +35,7 @@ from paddlefleet.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -196,7 +197,29 @@ class LanguageLoss(FleetLayer):
         )
         self.use_subbatch = self.loss_subbatch_sequence_length > 0
 
-    def forward_impl(self, logits: Tensor | tuple, labels: Tensor) -> Tensor:
+    def _record_text_loss_logs(
+        self, loss_fp32: Tensor, lossmask: Tensor
+    ) -> None:
+        training_logs = get_global_training_logs()
+        if training_logs is None:
+            return
+
+        token_num = lossmask.sum()
+        text_loss = (loss_fp32 * lossmask).sum() / paddle.maximum(
+            token_num, paddle.ones_like(token_num)
+        )
+        text_loss = text_loss.detach()
+        training_logs.update(
+            stem_loss=text_loss,
+            pure_text_loss=text_loss,
+        )
+
+    def forward_impl(
+        self,
+        logits: Tensor | tuple,
+        labels: Tensor,
+        enable_text_loss_logs: bool = True,
+    ) -> Tensor:
         # Fused linear + cross-entropy path: `logits` is actually a
         # (hidden_states, weight, bias) tuple emitted by GPTLMHead when
         # config.fused_linear_ce_loss_chunk > 0. Dispatch to the fused kernel
@@ -236,10 +259,13 @@ class LanguageLoss(FleetLayer):
             if (~lossmask).all():
                 return paddle.mean(loss) * 0.0
 
-            lossmask = lossmask.reshape([-1]).cast(paddle.float32)
-            loss = paddle.sum(
-                loss.cast(paddle.float32).reshape([-1]) * lossmask
-            )
+            loss_fp32 = loss.cast(paddle.float32)
+            lossmask = lossmask.cast(paddle.float32)
+            if enable_text_loss_logs and framework._dygraph_tracer()._has_grad:
+                self._record_text_loss_logs(loss_fp32, lossmask)
+
+            lossmask = lossmask.reshape([-1])
+            loss = paddle.sum(loss_fp32.reshape([-1]) * lossmask)
             loss = loss / lossmask.sum()
             return loss
 
@@ -293,8 +319,13 @@ class LanguageLoss(FleetLayer):
         lossmask = labels != self.ignored_index
         if (~lossmask).all():
             loss = paddle.mean(loss) * 0.0
+            loss_fp32 = loss.cast(paddle.float32)
         else:
-            lossmask = lossmask.reshape([-1]).cast(paddle.float32)
+            loss_fp32 = loss.cast(paddle.float32)
+            lossmask = lossmask.cast(paddle.float32)
+            if enable_text_loss_logs and framework._dygraph_tracer()._has_grad:
+                self._record_text_loss_logs(loss_fp32, lossmask)
+            lossmask = lossmask.reshape([-1])
 
             # Loss-path MD5 probe: per-token loss and lossmask
             if (
@@ -305,12 +336,12 @@ class LanguageLoss(FleetLayer):
 
                 rank = paddle.distributed.get_rank()
                 pt_md5 = hashlib.md5(
-                    loss.cast("float32").reshape([-1]).numpy().tobytes()
+                    loss_fp32.reshape([-1]).numpy().tobytes()
                 ).hexdigest()
                 lm_md5 = hashlib.md5(lossmask.numpy().tobytes()).hexdigest()
                 valid_count = lossmask.sum().item()
                 loss_sum_val = paddle.sum(
-                    loss.cast("float32").reshape([-1]) * lossmask
+                    loss_fp32.reshape([-1]) * lossmask
                 ).item()
                 print(
                     f"[LOSS_PATH_MD5] rank={rank} per_token_loss md5={pt_md5}",
@@ -326,9 +357,7 @@ class LanguageLoss(FleetLayer):
                 )
                 # Also compute line-wise loss (matches EC's _line_wise_loss) for exact comparison
                 if self.config.gpt_model_use_experimental_version:
-                    _probe_loss_2d = loss.cast(
-                        paddle.float32
-                    ) * lossmask.reshape(labels.shape)
+                    _probe_loss_2d = loss_fp32 * lossmask.reshape(labels.shape)
                     _probe_lm_2d = lossmask.reshape(labels.shape)
                     _probe_tc = _probe_lm_2d.sum(-1)
                     _probe_inv = (_probe_tc == 0).astype(paddle.float32)
@@ -348,7 +377,7 @@ class LanguageLoss(FleetLayer):
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
             # is present, which changes the value due to division by (count + 1e-6).
             if self.config.gpt_model_use_experimental_version:
-                loss_2d = loss.cast(paddle.float32) * lossmask.reshape(
+                loss_2d = loss_fp32 * lossmask.reshape(
                     labels.shape
                 )
                 lossmask_2d = lossmask.reshape(labels.shape)
@@ -364,20 +393,32 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                loss = paddle.sum(
-                    loss.cast(paddle.float32).reshape([-1]) * lossmask
-                )
+                loss = paddle.sum(loss_fp32.reshape([-1]) * lossmask)
                 loss = loss / lossmask.sum()
 
         return loss
 
-    def _forward(self, logits: Tensor | tuple, labels: Tensor):
+    def _forward(
+        self,
+        logits: Tensor | tuple,
+        labels: Tensor,
+        enable_text_loss_logs: bool = True,
+    ):
         if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules
         ):
-            return recompute(self.forward_impl, logits, labels)
-        return self.forward_impl(logits, labels)
+            return recompute(
+                self.forward_impl,
+                logits,
+                labels,
+                enable_text_loss_logs,
+            )
+        return self.forward_impl(
+            logits,
+            labels,
+            enable_text_loss_logs=enable_text_loss_logs,
+        )
 
     def forward(self, logits: Tensor | list, labels: Tensor) -> Tensor:
         if isinstance(logits, list):
@@ -429,6 +470,7 @@ class LanguageLoss(FleetLayer):
                         loss_cur_depth = self._forward(
                             logits_cur_depth,
                             labels_cur_depth,
+                            enable_text_loss_logs=False,
                         )
                     mtp_loss.append(loss_cur_depth)
                     paddle.device.cuda.empty_cache()
@@ -650,6 +692,7 @@ class MTPLanguageLoss(LanguageLoss):
             loss_cur_depth = self._forward(
                 logits_cur_depth,
                 labels_cur_depth,
+                enable_text_loss_logs=False,
             )
             mtp_loss.append(loss_cur_depth)
             paddle.device.cuda.empty_cache()

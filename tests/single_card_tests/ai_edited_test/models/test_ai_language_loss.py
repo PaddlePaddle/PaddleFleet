@@ -13,6 +13,7 @@
 # limitations under the License.
 import os
 import sys
+import types
 
 sys.path.insert(
     0,
@@ -27,6 +28,7 @@ sys.path.insert(
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import unittest
+from unittest import mock
 
 import numpy as np
 import paddle
@@ -36,6 +38,11 @@ import paddlefleet.parallel_state as ps
 from paddlefleet.models.common.language_loss.language_loss import (
     LanguageLoss,
     subbatch,
+)
+from paddlefleet.training.global_vars import (
+    get_global_training_logs,
+    set_global_training_logs,
+    unset_global_variables,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -70,6 +77,186 @@ def _init_fleet():
         fleet.init(is_collective=True, strategy=strategy)
         hcg = fleet.get_hybrid_communicate_group()
         ps.initialize_model_parallel(hcg)
+
+
+class TestLanguageLossTextLossLogs(unittest.TestCase):
+    """Test LanguageLoss text loss logs without fleet init."""
+
+    class _CountingLogs:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, **kwargs):
+            self.updates.append(kwargs)
+
+    def tearDown(self):
+        unset_global_variables()
+
+    def _make_config(self):
+        config = TransformerConfig(
+            num_hidden_layers=2,
+            hidden_size=64,
+            num_attention_heads=4,
+            use_cpu_initialization=True,
+            parallel_output=False,
+            loss_subbatch_sequence_length=0,
+        )
+        config.recompute_modules = None
+        config.gpt_model_use_experimental_version = False
+        return config
+
+    def _make_loss_fn(self):
+        loss_fn = LanguageLoss.__new__(LanguageLoss)
+        loss_fn.config = self._make_config()
+        loss_fn.ignored_index = -100
+        loss_fn.enable_parallel_cross_entropy = False
+        loss_fn.use_subbatch = False
+        loss_matrix = paddle.to_tensor(
+            [[1.0, 2.0, 0.0], [10.0, 3.0, 4.0]], dtype="float32"
+        )
+        loss_fn.loss_func = lambda logits, labels: loss_matrix
+        return loss_fn
+
+    def _init_text_logs(self):
+        set_global_training_logs({})
+
+    def test_updates_text_loss_logs_from_lossmask(self):
+        """Test pure-text and stem metrics are accumulated from lossmask."""
+        self._init_text_logs()
+
+        loss_fn = self._make_loss_fn()
+        logits = paddle.zeros([2, 3, 1106], dtype="float32")
+        labels = paddle.to_tensor(
+            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
+        )
+
+        loss = loss_fn.forward(logits, labels)
+        logs = get_global_training_logs()
+
+        self.assertAlmostEqual(loss.item(), 4.0)
+        self.assertEqual(set(logs), {"pure_text_loss", "stem_loss"})
+        self.assertAlmostEqual(logs["pure_text_loss"].item(), 4.0)
+        self.assertAlmostEqual(logs["stem_loss"].item(), 4.0)
+
+    def test_text_loss_logs_skip_without_global_logs(self):
+        """Test text loss logs are skipped when no global logs are registered."""
+        loss_fn = self._make_loss_fn()
+        logits = paddle.zeros([2, 3, 1106], dtype="float32")
+        labels = paddle.to_tensor(
+            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
+        )
+
+        loss_fn.forward(logits, labels)
+
+        self.assertIsNone(get_global_training_logs())
+
+    def test_recompute_updates_text_loss_logs_once(self):
+        """Test recompute backward replay does not duplicate text loss logs."""
+        logs = self._CountingLogs()
+        set_global_training_logs(logs)
+
+        loss_fn = self._make_loss_fn()
+        loss_fn.config.recompute_modules = ["loss_fn"]
+        loss_matrix = paddle.to_tensor(
+            [[1.0, 2.0, 0.0], [10.0, 3.0, 4.0]], dtype="float32"
+        )
+        loss_fn.loss_func = (
+            lambda logits, labels: logits[:, :, 0] + loss_matrix
+        )
+        logits = paddle.zeros([2, 3, 1106], dtype="float32")
+        logits.stop_gradient = False
+        labels = paddle.to_tensor(
+            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
+        )
+
+        loss = loss_fn.forward(logits, labels)
+        self.assertEqual(len(logs.updates), 0)
+
+        loss.backward()
+        self.assertEqual(len(logs.updates), 1)
+        self.assertAlmostEqual(
+            logs.updates[0]["pure_text_loss"].item(),
+            4.0,
+        )
+
+    def test_fused_tuple_logits_updates_text_loss_logs(self):
+        """Test fused CE tuple path records text metrics from lossmask."""
+        self._init_text_logs()
+
+        loss_fn = self._make_loss_fn()
+        loss_fn.config.fused_linear_ce_loss_chunk = 1
+        fake_module = types.ModuleType(
+            "paddlefleet.ops.triton_ops.fused_linear_cross_entropy"
+        )
+
+        class _FakeFusedLinearCrossEntropyFunction:
+            @staticmethod
+            def apply(
+                _input,
+                weight,
+                labels,
+                bias,
+                ignored_index,
+                reduction,
+                chunk_size,
+            ):
+                del weight, labels, bias, ignored_index, reduction, chunk_size
+                loss_1d = paddle.to_tensor(
+                    [1.0, 2.0, 0.0, 10.0, 3.0, 4.0],
+                    dtype="float32",
+                )
+                return loss_1d + _input[:, 0] * 0.0
+
+        fake_module.LigerFusedLinearCrossEntropyFunction = (
+            _FakeFusedLinearCrossEntropyFunction
+        )
+
+        hidden_states = paddle.zeros([2, 3, 4], dtype="float32")
+        weight = paddle.zeros([8, 4], dtype="float32")
+        labels = paddle.to_tensor(
+            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
+        )
+        with mock.patch.dict(sys.modules, {fake_module.__name__: fake_module}):
+            loss = loss_fn.forward((hidden_states, weight, None), labels)
+
+        logs = get_global_training_logs()
+        self.assertAlmostEqual(loss.item(), 4.0)
+        self.assertAlmostEqual(logs["pure_text_loss"].item(), 4.0)
+        self.assertAlmostEqual(logs["stem_loss"].item(), 4.0)
+
+    def test_all_ignored_labels_skip_text_loss_logs(self):
+        """Test all ignored labels return zero loss without text metrics."""
+        self._init_text_logs()
+
+        loss_fn = self._make_loss_fn()
+        logits = paddle.zeros([2, 3, 1106], dtype="float32")
+        labels = paddle.full([2, 3], -100, dtype="int64")
+
+        loss = loss_fn.forward(logits, labels)
+
+        self.assertAlmostEqual(loss.item(), 0.0)
+        self.assertEqual(get_global_training_logs(), {})
+
+    def test_experimental_line_wise_loss_keeps_text_loss_token_mean(self):
+        """Test experimental loss and text metrics use their own reductions."""
+        self._init_text_logs()
+
+        loss_fn = self._make_loss_fn()
+        loss_fn.config.gpt_model_use_experimental_version = True
+        logits = paddle.zeros([2, 3, 1106], dtype="float32")
+        labels = paddle.to_tensor(
+            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
+        )
+
+        loss = loss_fn.forward(logits, labels)
+        logs = get_global_training_logs()
+
+        expected_line_wise = (
+            (1.0 + 2.0) / 2.0 + (10.0 + 3.0 + 4.0) / 3.0
+        ) / (2.0 + 1e-6)
+        self.assertAlmostEqual(loss.item(), expected_line_wise)
+        self.assertAlmostEqual(logs["pure_text_loss"].item(), 4.0)
+        self.assertAlmostEqual(logs["stem_loss"].item(), 4.0)
 
 
 class TestSubbatch(unittest.TestCase):
