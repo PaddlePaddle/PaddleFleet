@@ -119,10 +119,8 @@ def get_attention_spec(
 
     # Triton-optimized RMSNorm only for self_attention QK norm (head_dim=128)
     # MLA uses larger latent_dim (1536) which exceeds Triton kernel limit (≤1024)
-    use_triton_qk_norm = (
-        attention_layer_type == "self_attention"
-        and config.normalization == "RMSNorm"
-        and getattr(config, "qk_norm_fusion", False)
+    use_triton_qk_norm = config.normalization == "RMSNorm" and getattr(
+        config, "qk_norm_fusion", False
     )
     if use_triton_qk_norm:
         from paddlefleet.transformer.paddle_norm import WrappedRMSNormTriton
