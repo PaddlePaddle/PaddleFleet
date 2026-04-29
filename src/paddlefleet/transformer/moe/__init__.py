@@ -22,9 +22,9 @@ including communication mechanisms, routers, experts, and dispatchers.
 # Fused A2A operations
 from .fused_a2a import (
     CombineNode,
-    DeepEPCombine,
-    DeepEPDispatch,
     DispatchNode,
+    FusedCombine,
+    FusedDispatch,
     fused_combine,
     fused_dispatch,
 )
@@ -48,14 +48,14 @@ from .token_dispatcher import (
     AllToAllTokenDispatcher,
     MoEFlexTokenDispatcher,
     MoETokenDispatcher,
-    _DeepEPManager,
+    _DeepepManager,
     _DispatchManager,
 )
 
 __all__ = [
     # Fused A2A
-    "DeepEPDispatch",
-    "DeepEPCombine",
+    "FusedDispatch",
+    "FusedCombine",
     "DispatchNode",
     "CombineNode",
     "fused_dispatch",
@@ -76,5 +76,5 @@ __all__ = [
     "MoEFlexTokenDispatcher",
     "AllToAllTokenDispatcher",
     "_DispatchManager",
-    "_DeepEPManager",
+    "_DeepepManager",
 ]

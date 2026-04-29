@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -61,7 +60,6 @@ class Artifact:
 
     source_rel_path: str
     target_name: str
-    init_content: str | None = None
 
 
 class EcosystemLibrary:
@@ -162,18 +160,12 @@ class EcosystemLibrary:
                     logger.error(f"Failed to run {cmd_str}.")
                     raise
 
-            if artifact.init_content is not None:
-                init_file = dst / "__init__.py"
-                logger.info(f"Writing generated package init: {init_file}")
-                init_file.write_text(artifact.init_content)
-
 
 def check_submodule_updated():
     if backends.IS_NVIDIA:
         if not (
             (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists()
             and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
-            and (ROOT_DIR / "third_party" / "HybridEP" / ".git").exists()
             and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
             and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
             and (ROOT_DIR / "third_party" / "flash-attention" / ".git").exists()
@@ -235,9 +227,6 @@ def get_special_build_deps():
             "paddlepaddle-gpu==3.4.0.post20260424+eda0f7f2dad",
         ]
         # for deep_ep build
-        if platform.machine() == "aarch64":
-            deps.append("nvidia-nvshmem-cu13>=3.3.9,<3.5")
-            return deps
         if cuda_major == 12:
             if cuda_minor > 6:
                 deps.append("paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5")
@@ -261,47 +250,6 @@ def get_special_build_deps():
 
 def get_libs():
     cuda_major, cuda_minor = get_cuda_version()
-    cuda_arch_list = (
-        "9.0" if (cuda_major == 12 and cuda_minor < 8) else "9.0;10.0;10.3"
-    )
-    hybrid_ep_init = """# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-import paddle
-import sys
-from pathlib import Path
-
-paddle.enable_compat(
-    scope={"hybrid_ep", "paddlefleet.ops.hybrid_ep"}, silent=True
-)
-
-from .runtime_paths import configure_runtime_paths
-
-configure_runtime_paths()
-
-_ops_dir = str(Path(__file__).resolve().parent.parent)
-_added_ops_dir = _ops_dir not in sys.path
-if _added_ops_dir:
-    sys.path.insert(0, _ops_dir)
-try:
-    from .hybrid_ep_buffer import HybridEPBuffer
-    from hybrid_ep_cpp import HybridEpConfigInstance
-finally:
-    if _added_ops_dir:
-        sys.path.remove(_ops_dir)
-
-__all__ = ["HybridEPBuffer", "HybridEpConfigInstance"]
-"""
 
     LIBRARIES: list[EcosystemLibrary] = [
         EcosystemLibrary(
@@ -320,21 +268,9 @@ __all__ = ["HybridEPBuffer", "HybridEpConfigInstance"]
                 Artifact("deep_ep", "deep_ep"),
                 Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
             ],
-            extra_env={
-                "PADDLE_CUDA_ARCH_LIST": cuda_arch_list,
-            },
-        ),
-        EcosystemLibrary(
-            name="HybridEP",
-            source_rel_path="third_party/HybridEP",
-            artifacts=[
-                Artifact("deep_ep", "hybrid_ep", init_content=hybrid_ep_init),
-                Artifact("hybrid_ep_cpp.so", "hybrid_ep_cpp.so"),
-            ],
-            extra_env={
-                "HYBRID_EP_MULTINODE": "1",
-                "PADDLE_CUDA_ARCH_LIST": cuda_arch_list,
-            },
+            extra_env={"PADDLE_CUDA_ARCH_LIST": "9.0"}
+            if (cuda_major == 12 and cuda_minor < 8)
+            else {"PADDLE_CUDA_ARCH_LIST": "9.0;10.0;10.3"},
         ),
         EcosystemLibrary(
             name="flash-attention",
