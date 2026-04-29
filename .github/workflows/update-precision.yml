@@ -53,12 +53,12 @@ jobs:
         run: |
           set -x
           python -m pip install bce-python-sdk==0.8.74
-          wget -q -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
-          mkdir bos
-          tar xf bos_new.tar.gz -C bos
           export step="fleet"
           git clone https://github.com/PaddlePaddle/PaddleFormers.git
           cd PaddleFormers
+          wget -q -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir bos
+          tar xf bos_new.tar.gz -C bos
           bash -x tests/integration_test/update_precision.sh
 
   # update-precision-formers:

@@ -354,6 +354,43 @@ class TestGPUSpecifications(unittest.TestCase):
         self.assertEqual(gb200.BF16_TFLOPS, 2500)
 
 
+class TestFillFeature(unittest.TestCase):
+    """Test fill_feature function."""
+
+    def test_fill_target_positions(self):
+        """Fill marked positions with value, leave others unchanged."""
+        import paddle
+
+        from paddlefleet.models.gpt.utils import fill_feature
+
+        # [B, S, D] = [1, 4, 3]
+        input_embeds = paddle.ones([1, 4, 3], dtype="float32") * 2.0
+        # positions 0,2 are padding (True means fill)
+        target_index = paddle.to_tensor([[True, False, True, False]])
+
+        result = fill_feature(input_embeds, target_index, 0.0)
+
+        self.assertEqual(result.shape, [1, 4, 3])
+        # filled positions should be 0
+        self.assertAlmostEqual(result[0, 0, 0].item(), 0.0)
+        self.assertAlmostEqual(result[0, 2, 0].item(), 0.0)
+        # untouched positions should remain 2
+        self.assertAlmostEqual(result[0, 1, 0].item(), 2.0)
+        self.assertAlmostEqual(result[0, 3, 0].item(), 2.0)
+
+    def test_no_target_positions(self):
+        """When target_index is all False, input_embeds should be unchanged."""
+        import paddle
+
+        from paddlefleet.models.gpt.utils import fill_feature
+
+        input_embeds = paddle.ones([2, 3, 4], dtype="float32") * 5.0
+        target_index = paddle.zeros([2, 3], dtype="bool")
+
+        result = fill_feature(input_embeds, target_index, 0.0)
+        self.assertAlmostEqual(result.sum().item(), 5.0 * 2 * 3 * 4)
+
+
 class TestGetDevicePeakTFLOPS(unittest.TestCase):
     """Test _get_device_peak_tflops method."""
 

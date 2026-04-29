@@ -41,6 +41,7 @@ def get_special_setup_deps():
         deps = [
             "triton",  # for deep_gemm, flashmask
             "nvidia-cutlass-dsl==4.4.1",  # for sonic_moe and flash_attention
+            "apache-tvm-ffi >= 0.1.5, < 0.2.0",  # for sonic_moe and flash_attention
             "filelock",  # for sonic_moe
         ]
         return deps

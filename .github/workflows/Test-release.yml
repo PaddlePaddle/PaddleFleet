@@ -38,10 +38,55 @@ jobs:
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
 
+  check_documents_type:
+    needs: check-bypass
+    if: ${{ needs.check-bypass.outputs.can-skip == 'false' }}
+    name: check documents type for pull request
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_REPO_NAME: ${{ github.repository }}
+    outputs:
+      is_md_only: ${{ steps.check_files.outputs.is_md_only }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: git diff and check
+        id: check_files
+        if: |
+          github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'fleet-models-ci')
+        run: |
+          changed_files=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD --name-only)
+          echo "Changed files: $changed_files"
+          all_count=0
+          md_count=0
+          for file in $changed_files; do
+            all_count=$((all_count+1))
+            echo $file
+            if [[ $file == *.md ]] || [[ $file == *.png ]]; then
+              echo "Markdown document: $file has been changed."
+              md_count=$((md_count+1))
+            fi
+          done
+          echo "总计: all_count=$all_count, md_count=$md_count"
+          if [ "$md_count" -eq "$all_count" ]; then
+            echo "is_md_only=true" >> $GITHUB_OUTPUT
+            echo "is_md_only=true"
+          else
+            echo "is_md_only=false" >> $GITHUB_OUTPUT
+            echo "is_md_only=false"
+          fi
+          echo "is_md_only: $(cat $GITHUB_OUTPUT | grep is_md_only || echo '未找到')"
+
+
   build_whl:
     name: Build Fleet whl
-    needs: check-bypass
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    needs: [check-bypass, check_documents_type]
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
     runs-on:
       group: GZ_BD-CPU
     env:
@@ -133,8 +178,8 @@ jobs:
 
   single_card_test:
     name: Unit test (single card)
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    needs: [check-bypass, build_whl, check_documents_type]
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
     runs-on:
       group: Fleet-H-single-card
     env:
@@ -244,8 +289,8 @@ jobs:
 
   multi-card_test:
     name: Unit test (multi-card)
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    needs: [check-bypass, build_whl, check_documents_type]
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
     runs-on:
       group: Fleet-H-multi-card
     env:
@@ -349,8 +394,8 @@ jobs:
 
 
   integration-test-H20-single-card:
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    needs: [check-bypass, build_whl, check_documents_type]
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
     name: Integration test (H20, single card)
     runs-on:
       group: Fleet-H-single-card
@@ -550,8 +595,8 @@ jobs:
           docker rm -f ${{ env.container_name }}
 
   integration-test-H20-multi-card:
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    needs: [check-bypass, build_whl, check_documents_type]
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
     name: Integration test (H20, multi-card)
     runs-on:
       group: Fleet-H-multi-card
@@ -894,8 +939,8 @@ jobs:
 
 
   integration-test-a100:
-    needs: [check-bypass, build_whl]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    needs: [check-bypass, build_whl, check_documents_type]
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
     name: Integration test (A100)
     runs-on:
       group: Distribute
@@ -1164,7 +1209,7 @@ jobs:
   coverage_check:
     name: Coverage Upload And Check
     needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, check-bypass]
-    if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' }}
+    if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' && needs.single_card_test.result != 'skipped' }}
     runs-on: ubuntu-latest
     env:
       GITHUB_REPO_NAME: ${{ github.repository }}

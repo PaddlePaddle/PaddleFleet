@@ -461,8 +461,31 @@ class TransformerLayer(nn.Layer):
                 ]
                 dict_args["position_ids"] = decoder_ids
 
-            # #process attn_mask_startend_row_indices
-            if "attn_mask_startend_row_indices" in dict_args.keys():
+            # process input_ids (for MoE padding mask): split into main and mtp parts
+            mtp_input_ids = None
+            if (
+                "input_ids" in dict_args.keys()
+                and dict_args["input_ids"] is not None
+            ):
+                full_input_ids = dict_args["input_ids"]
+                if (
+                    full_input_ids.shape[-1]
+                    > hidden_states.shape[
+                        0 if self.config.sequence_parallel else 1
+                    ]
+                ):
+                    decoder_input_ids = full_input_ids[
+                        :, : -self.config.num_nextn_predict_layers
+                    ].contiguous()
+                    mtp_input_ids = full_input_ids[
+                        :, -self.config.num_nextn_predict_layers :
+                    ].contiguous()
+                    dict_args["input_ids"] = decoder_input_ids
+            if (
+                not self.config.experimental_dataflow
+                and "attn_mask_startend_row_indices" in dict_args.keys()
+            ):
+                # Old dataflow: main mask contains mtp parts appended along seq dim, need to split
                 attn_mask_startend_row_indices = dict_args[
                     "attn_mask_startend_row_indices"
                 ]
@@ -479,6 +502,10 @@ class TransformerLayer(nn.Layer):
                 dict_args["attn_mask_startend_row_indices"] = (
                     attn_mask_startend_row_indices_decoder
                 )
+            else:
+                # New dataflow (experimental_dataflow=True): main mask is already main-seq only,
+                # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly
+                attn_mask_startend_row_indices_mtp = None
 
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
@@ -497,6 +524,7 @@ class TransformerLayer(nn.Layer):
             position_ids = dict_args.get("position_ids", None)
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
+            input_ids = dict_args.get("input_ids", None)
             outputs = recompute(
                 self._forward_impl,
                 hidden_states=hidden_states,
@@ -520,6 +548,7 @@ class TransformerLayer(nn.Layer):
                 else None,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
+                input_ids=input_ids,
             )
         else:
             outputs = self._forward_impl(**dict_args)
@@ -546,7 +575,16 @@ class TransformerLayer(nn.Layer):
                 )
                 dict_args["position_ids"] = position_ids
 
-            if "attn_mask_startend_row_indices" in dict_args.keys():
+            # Restore input_ids: concatenate main and mtp parts back
+            if mtp_input_ids is not None and "input_ids" in dict_args.keys():
+                dict_args["input_ids"] = paddle.concat(
+                    [dict_args["input_ids"], mtp_input_ids], axis=1
+                )
+
+            if (
+                not self.config.experimental_dataflow
+                and "attn_mask_startend_row_indices" in dict_args.keys()
+            ):
                 if attn_mask_startend_row_indices_mtp is not None:
                     attn_mask_startend_row_indices = paddle.concat(
                         [
@@ -560,9 +598,9 @@ class TransformerLayer(nn.Layer):
                     attn_mask_startend_row_indices = dict_args[
                         "attn_mask_startend_row_indices"
                     ]
-                rst["attn_mask_startend_row_indices"] = (
-                    attn_mask_startend_row_indices
-                )
+
+            # New dataflow (experimental_dataflow=True): mtp_startend_row_indices_all passes through
+            # dict_args unchanged and will be consumed by MTP layer directly
         if context is not None:
             rst["context"] = context
         rst = {**dict_args, **rst}
@@ -581,6 +619,7 @@ class TransformerLayer(nn.Layer):
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
+        input_ids: Tensor | None = None,
         **kwargs,
     ):
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
@@ -637,6 +676,7 @@ class TransformerLayer(nn.Layer):
                 mlp_out = self._forward_mlp(
                     hidden_states,
                     block_attention_residuals=True,
+                    input_ids=input_ids,
                 )
 
             # Accumulate mlp output into partial_block
@@ -662,7 +702,7 @@ class TransformerLayer(nn.Layer):
                 hidden_states, "post_attn_residual", self.layer_number
             )
             with profile(timer_name):
-                output = self._forward_mlp(hidden_states)
+                output = self._forward_mlp(hidden_states, input_ids=input_ids)
             self._log_md5(output, "layer_output", self.layer_number)
         if context is not None:
             return output, context
@@ -807,6 +847,7 @@ class TransformerLayer(nn.Layer):
         hidden_states,
         is_first_fwd=False,
         block_attention_residuals=False,
+        input_ids=None,
         **kwargs,
     ):
         """
@@ -839,15 +880,28 @@ class TransformerLayer(nn.Layer):
         )
 
         if self.recompute_mlp:
+            _mlp_input_ids = (
+                input_ids if isinstance(self.mlp, MoELayer) else None
+            )
 
-            def recompute_handler(post_attention_layernorm_output):
-                mlp_output, bias = self.mlp(post_attention_layernorm_output)
+            def recompute_handler(
+                post_attention_layernorm_output, _mlp_input_ids=None
+            ):
+                if _mlp_input_ids is not None:
+                    mlp_output, bias = self.mlp(
+                        post_attention_layernorm_output,
+                        input_ids=_mlp_input_ids,
+                    )
+                else:
+                    mlp_output, bias = self.mlp(post_attention_layernorm_output)
                 if bias is None:
                     return mlp_output
                 return mlp_output, bias
 
             mlp_output_with_bias = recompute(
-                recompute_handler, post_attention_layernorm_output
+                recompute_handler,
+                post_attention_layernorm_output,
+                _mlp_input_ids,
             )
             if not isinstance(mlp_output_with_bias, tuple):
                 mlp_output_with_bias = (
@@ -855,7 +909,12 @@ class TransformerLayer(nn.Layer):
                     None,
                 )  # bias is None
         else:
-            mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
+            if isinstance(self.mlp, MoELayer) and input_ids is not None:
+                mlp_output_with_bias = self.mlp(
+                    post_attention_layernorm_output, input_ids=input_ids
+                )
+            else:
+                mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
 
         # Log MLP raw output before BDA
         if (
@@ -953,6 +1012,7 @@ class TransformerLayerWithOverlap(TransformerLayer):
             topk_weights,
             topk_indices,
             aux_loss,
+            z_loss,
         )
 
     def dispatch_preprocess_compute(self, args):
@@ -1049,6 +1109,7 @@ class TransformerLayerNode(ScheduleNode):
                 topk_weights,
                 topk_indices,
                 aux_loss,
+                z_loss,
             ) = self.pre_process_node.forward(hidden_states)
 
             hidden_states, token_indices, token_weights = (
@@ -1080,7 +1141,7 @@ class TransformerLayerNode(ScheduleNode):
             combine_fw_event.calc_stream_wait(self.group_id)
 
             hidden_states = self.aux_loss_node.forward(
-                (hidden_states, aux_loss, residuals)
+                (hidden_states, aux_loss, z_loss, residuals)
             )
 
             self.post_process_recompute_args = (hidden_states, residual)
@@ -1127,7 +1188,7 @@ class TransformerLayerNode(ScheduleNode):
                 output_grad
             )
 
-            output_grad, aux_loss_grad, residuals_grad = (
+            output_grad, aux_loss_grad, z_loss_grad, residuals_grad = (
                 self.aux_loss_node.backward(output_grad)
             )
 
@@ -1160,6 +1221,7 @@ class TransformerLayerNode(ScheduleNode):
                     topk_weights_grad,
                     topk_indices_grad,
                     aux_loss_grad,
+                    z_loss_grad,
                 )
             )
 
@@ -1227,7 +1289,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
             output_grad, residual_grad = (
                 self.backward_node.post_process_node.backward(output_grad)
             )
-            output_grad, aux_loss_grad, residuals_grad = (
+            output_grad, aux_loss_grad, z_loss_grad, residuals_grad = (
                 self.backward_node.aux_loss_node.backward(output_grad)
             )
 
@@ -1251,6 +1313,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
                 topk_weights,
                 topk_indices,
                 aux_loss,
+                z_loss,
             ) = self.forward_node.pre_process_node.forward(hidden_states)
 
             hidden_states, token_indices, token_weights = (
@@ -1315,6 +1378,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
                     topk_weights_grad,
                     topk_indices_grad,
                     aux_loss_grad,
+                    z_loss_grad,
                 )
             )
             output_grad = self.backward_node.attn_node.backward(output_grad)
@@ -1322,7 +1386,7 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
             # 10. POST(F)
             combine_fw_event.calc_stream_wait(self.forward_node.group_id)
             hidden_states = self.forward_node.aux_loss_node.forward(
-                (hidden_states, aux_loss, residuals)
+                (hidden_states, aux_loss, z_loss, residuals)
             )
             if self.forward_node.full_recompute:
                 self.forward_node.post_process_recompute_args = (

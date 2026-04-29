@@ -41,6 +41,7 @@ from paddlefleet import utils
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
+from .fused_a2a import configure_buffer
 from .fusion_layer_utils import FusionMoePyLayer
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
 from .moe_router import TopKRouter
@@ -88,6 +89,7 @@ from .moe_utils import (
     fused_expert_parallel_TC_topk_router_metadata,
     global_moe_balance_training_logs_enabled,
     log_moe_balance,
+    log_moe_losses,
     permute,
     unpermute,
 )
@@ -162,6 +164,10 @@ class MoELayer(nn.Layer):
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
         self.using_sonic_moe = self.config.using_sonic_moe
+        self.moe_expert_fusion = config.moe_expert_fusion
+        self.moe_subbatch_token_num_after_dispatch = (
+            config.moe_subbatch_token_num_after_dispatch
+        )
         if self.using_sonic_moe:
             assert paddlefleet.ops.is_sonic_moe_available(), (
                 paddlefleet.ops.blocked_import_messages[
@@ -176,8 +182,6 @@ class MoELayer(nn.Layer):
             incompatible_reasons = []
             if not self.moe_grouped_gemm:
                 incompatible_reasons.append("moe_grouped_gemm must be True")
-            if self.fp8:
-                incompatible_reasons.append("fp8 must be disabled")
             if incompatible_reasons:
                 logging.warning(
                     "moe_deep_gemm=True is ignored because %s; "
@@ -186,6 +190,28 @@ class MoELayer(nn.Layer):
                 )
                 self.moe_deep_gemm = False
         self.moe_ep_barrier = config.moe_ep_barrier
+
+        # Latent MoE initialization
+        self.use_latent_moe = (
+            self.config.use_latent_moe
+            and self.config.moe_latent_size is not None
+        )
+        if self.use_latent_moe:
+            logging.info(
+                f"Latent MoE enabled: hidden_size={self.config.hidden_size} -> moe_latent_size={self.config.moe_latent_size}"
+            )
+            self.fc1_latent_proj = nn.Linear(
+                self.config.hidden_size,
+                self.config.moe_latent_size,
+                bias_attr=self.config.use_bias,
+            )
+            self.fc2_latent_proj = nn.Linear(
+                self.config.moe_latent_size,
+                self.config.hidden_size,
+                bias_attr=self.config.use_bias,
+            )
+            # Update expert config to use latent size
+            routed_expert_config.hidden_size = self.config.moe_latent_size
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -263,7 +289,7 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
 
-        if self.moe_grouped_gemm and not self.fp8:
+        if self.moe_grouped_gemm and (not self.fp8 or self.moe_deep_gemm):
             self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
@@ -279,6 +305,7 @@ class MoELayer(nn.Layer):
                     self.experts.append(None)
 
         shared_expert_args = deepcopy(expert_args)
+        shared_expert_args["config"].hidden_size = self.config.hidden_size
         shared_expert_args["moe_intermediate_size"] = (
             self.moe_shared_expert_intermediate_size
         )
@@ -297,6 +324,8 @@ class MoELayer(nn.Layer):
                     self.moe_group,
                     self.moe_ep_barrier,
                 )
+                if getattr(config, "deepep_buffer_configs", None) is not None:
+                    configure_buffer(**config.deepep_buffer_configs)
             elif self.moe_token_dispatcher_type == "alltoall":
                 local_expert_indices = list(
                     range(
@@ -315,19 +344,31 @@ class MoELayer(nn.Layer):
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
                 )
 
-        self.recompute_moe_gate_up = (
+        self.recompute_moe_gate_up = getattr(
+            self.config, "recompute_moe_gate_up", False
+        ) or (
             self.config.recompute_granularity == "selective"
+            and self.config.recompute_modules is not None
             and "moe_gate_up" in self.config.recompute_modules
         )
-        self.recompute_moe_premute = (
+        self.recompute_moe_premute = getattr(
+            self.config, "recompute_moe_premute", False
+        ) or (
             self.config.recompute_granularity == "selective"
+            and self.config.recompute_modules is not None
             and "moe_premute" in self.config.recompute_modules
+        )
+        self.use_auto_subbatch = getattr(
+            self.config, "use_auto_subbatch", False
+        )
+        self.moe_subbatch_diag = getattr(
+            self.config, "moe_subbatch_diag", False
         )
 
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            if self.moe_grouped_gemm and not self.fp8:
+            if self.moe_grouped_gemm and (not self.fp8 or self.moe_deep_gemm):
                 for p in self.grouped_gemm_experts.parameters():
                     p.is_moe_param = True
                     p.color = {
@@ -419,10 +460,12 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
         async_finish: bool = False,
     ):
         hidden_states = self.token_dispatcher.dispatch_preprocess(
-            hidden_states, probs, routing_map
+            hidden_states, probs, routing_map, topk_weights, topk_indices
         )
         hidden_states, fp8_dispatched_handle = (
             self.token_dispatcher.token_dispatch(
@@ -465,10 +508,18 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
     ):
+        # Latent MoE: project hidden_states to latent space before dispatch
+        if self.use_latent_moe:
+            hidden_states = self.fc1_latent_proj(hidden_states)
+
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
-            hidden_states, _ = self.dispatch(hidden_states, probs, routing_map)
+            hidden_states, _ = self.dispatch(
+                hidden_states, probs, routing_map, topk_weights, topk_indices
+            )
         if should_log_balance and global_moe_balance_training_logs_enabled():
             log_moe_balance(
                 self.layer_number,
@@ -480,6 +531,11 @@ class MoELayer(nn.Layer):
             hidden_states = self.routed_experts_compute(hidden_states)
         with profile("combine"):
             hidden_states = self.combine(hidden_states)
+
+        # Latent MoE: project back from latent space to hidden_size
+        if self.use_latent_moe:
+            hidden_states = self.fc2_latent_proj(hidden_states)
+
         return hidden_states
 
     def fusion_moe_forward(
@@ -488,12 +544,18 @@ class MoELayer(nn.Layer):
         probs: paddle.Tensor,
         routing_map: paddle.Tensor,
         combine_overlap_handle: dict,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
     ):
         # TODO(deepllz): add fp8 dispatch config && implementation
+        # Latent MoE: project hidden_states to latent space before dispatch
+        if self.use_latent_moe:
+            hidden_states = self.fc1_latent_proj(hidden_states)
+
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
             dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
-                hidden_states, probs, routing_map
+                hidden_states, probs, routing_map, topk_weights, topk_indices
             )
         if should_log_balance and global_moe_balance_training_logs_enabled():
             log_moe_balance(
@@ -587,6 +649,10 @@ class MoELayer(nn.Layer):
                     recompute_moe_premute=self.recompute_moe_premute,
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+                    use_auto_subbatch=self.use_auto_subbatch,
+                    moe_expert_fusion=self.moe_expert_fusion,
+                    moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
+                    moe_subbatch_diag=self.moe_subbatch_diag,
                 )
 
         with profile("combine"):
@@ -594,15 +660,21 @@ class MoELayer(nn.Layer):
                 hidden_states, combine_overlap_handle
             )
 
+        # Latent MoE: project back from latent space to hidden_size
+        if self.use_latent_moe:
+            hidden_states = self.fc2_latent_proj(hidden_states)
+
         return hidden_states
 
-    def compute_gate(self, hidden_states):
+    def compute_gate(self, hidden_states, input_ids=None):
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             hidden_states = GatherOp.apply(hidden_states)
-        return self.gate(hidden_states)
+        return self.gate(hidden_states, input_ids=input_ids)
 
     def dispatch_preprocess(self, args):
         hidden_states, token_probs, token_indices = args
+        if self.use_latent_moe:
+            hidden_states = self.fc1_latent_proj(hidden_states)
         assert isinstance(self.token_dispatcher, MoEFlexTokenDispatcher)
         hidden_states = self.token_dispatcher.dispatch_preprocess_overlap(
             hidden_states, token_probs, token_indices
@@ -679,6 +751,9 @@ class MoELayer(nn.Layer):
                 recompute_moe_premute=self.recompute_moe_premute,
                 fp8_dispatched_handle=fp8_dispatched_handle,
                 use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+                use_auto_subbatch=self.use_auto_subbatch,
+                moe_expert_fusion=self.moe_expert_fusion,
+                moe_subbatch_diag=self.moe_subbatch_diag,
             )
             if is_first_fwd:
                 hidden_states.stop_gradient = False
@@ -697,12 +772,16 @@ class MoELayer(nn.Layer):
         return hidden_states
 
     def aux_loss_compute(self, args):
-        hidden_states, aux_loss, residuals = args
+        hidden_states, aux_loss, z_loss, residuals = args
+        if self.use_latent_moe:
+            hidden_states = self.fc2_latent_proj(hidden_states)
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
         else:
             output = hidden_states
+        if self.training and z_loss is not None:
+            output = AddAuxiliaryLoss.apply(output, z_loss)
         output = output.reshape(residuals.shape)
         if self.shared_experts is not None:
             shared_output = self.shared_experts(residuals)[0]
@@ -712,10 +791,15 @@ class MoELayer(nn.Layer):
             output = ScatterOp.apply(output)
         return output
 
-    def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
+    def forward(
+        self,
+        hidden_states: paddle.Tensor,
+        input_ids: paddle.Tensor | None = None,
+    ) -> paddle.Tensor:
         """
         Args:
             hidden_states: Shape: [batch_size, seq_len, hidden_size]
+            input_ids: Shape: [batch_size, seq_len], optional token ids from embedding input.
 
         Returns:
             output: Shape: [batch_size, seq_len, hidden_size]
@@ -727,23 +811,28 @@ class MoELayer(nn.Layer):
 
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
-
         (
             capacity,
             topk_weights,
             topk_indices,
-            gates_masked,
+            probs,
             mask,
             priorities,
             aux_loss,
             z_loss,
-        ) = self.gate(hidden_states)
+        ) = self.gate(
+            hidden_states,
+            input_ids=input_ids,
+        )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
-        # gates_masked, mask: Shape is [seq_len, num_experts], sometimes their names are "probs" and "routing_map"
+        # probs: combine weights in [S, E] sparse layout (non-selected positions are 0) [seq_len, num_experts]
+        # mask (routing_map): binary selection matrix [seq_len, num_experts]
         # capacity, priorities are used for dropping tokens, currently they are not used
 
-        _log_moe_md5(gates_masked, "gates_masked", layer_idx)
+        _log_moe_md5(probs, "probs", layer_idx)
         _log_moe_md5(mask, "routing_mask", layer_idx)
+        if framework._dygraph_tracer()._has_grad:
+            log_moe_losses(layer_idx, aux_loss=aux_loss, z_loss=z_loss)
 
         if (
             self.shared_experts is not None
@@ -760,30 +849,50 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
-                    hidden_states, gates_masked, mask, combine_overlap_handle
+                    hidden_states,
+                    probs,
+                    mask,
+                    combine_overlap_handle,
+                    topk_weights=topk_weights,
+                    topk_indices=topk_indices,
                 )
             else:
-                output = self.custom_forward(hidden_states, gates_masked, mask)
+                output = self.custom_forward(
+                    hidden_states,
+                    probs,
+                    mask,
+                    topk_weights=topk_weights,
+                    topk_indices=topk_indices,
+                )
         else:
             if len(hidden_states.shape) == 3:
                 batch_size, seq_len, d_model = hidden_states.shape
                 reshaped_input = hidden_states.reshape([-1, d_model])
             else:
                 reshaped_input = hidden_states
+            # Latent MoE: project to latent space before single-card MoE
+            if self.use_latent_moe:
+                reshaped_input = self.fc1_latent_proj(reshaped_input)
             if self.moe_grouped_gemm:
                 output = self._forward_single_card_grouped_gemm_moe(
-                    reshaped_input, mask, gates_masked
+                    reshaped_input, mask, probs
                 )
             else:
                 output = self._forward_single_card_moe(
                     reshaped_input, topk_indices, topk_weights
                 )
+            # Latent MoE: project back from latent space
+            if self.use_latent_moe:
+                output = self.fc2_latent_proj(output)
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
 
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(output, aux_loss)
+
+        if self.training and z_loss is not None:
+            output = AddAuxiliaryLoss.apply(output, z_loss)
 
         output = output.reshape(orig_shape)
         if self.shared_experts is not None:
@@ -973,34 +1082,55 @@ class MoELayer(nn.Layer):
             if weight_obj is None:
                 weight_obj = weight_list[0]
 
-            if quant_transpose is None:
-                fp8_weight, fp8_scale = fused_stack_quant_without_cache(
-                    weight_list, transpose=False
-                )
-                weight_obj.fp8_weight_stacked = fp8_weight
-                weight_obj.fp8_scale_stacked = fp8_scale
+            # 始终量化非转置版（行为对齐，fp8_weight_stacked 始终存在）
+            fp8_weight, fp8_scale = fused_stack_quant_without_cache(
+                weight_list, transpose=False
+            )
+            weight_obj.fp8_weight_stacked = fp8_weight
+            weight_obj.fp8_scale_stacked = fp8_scale
 
-                fp8_weight_t, fp8_scale_t = fused_stack_quant_without_cache(
-                    weight_list, transpose=True
-                )
-                weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
-                weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
-            elif quant_transpose is False:
-                # Only quantize without transpose
-                fp8_weight, fp8_scale = fused_stack_quant_without_cache(
-                    weight_list, transpose=False
-                )
-                weight_obj.fp8_weight_stacked = fp8_weight
-                weight_obj.fp8_scale_stacked = fp8_scale
-            elif quant_transpose is True:
-                # Only quantize with transpose
+            if quant_transpose is None or quant_transpose is True:
                 fp8_weight_t, fp8_scale_t = fused_stack_quant_without_cache(
                     weight_list, transpose=True
                 )
                 weight_obj.fp8_weight_stacked_transpose = fp8_weight_t
                 weight_obj.fp8_scale_stacked_transpose = fp8_scale_t
             else:
-                raise ValueError("Invalid value for `quant_transpose`.")
+                weight_obj.fp8_weight_stacked_transpose = None
+                weight_obj.fp8_scale_stacked_transpose = None
+
+        if hasattr(self, "grouped_gemm_experts"):
+            if batch_mode:
+                expert_w1 = self.grouped_gemm_experts.weight1
+                expert_w2 = self.grouped_gemm_experts.weight2
+                local_expert_num = expert_w1.shape[0]
+                expert_w1_list = [
+                    expert_w1[i, :, :] for i in range(local_expert_num)
+                ]
+                expert_w2_list = [
+                    expert_w2[i, :, :] for i in range(local_expert_num)
+                ]
+
+                # Batch mode: process all experts' weights together
+                if expert_w1_list:
+                    quantize_weights(
+                        expert_w1_list,
+                        self.grouped_gemm_experts.weight1,
+                        quant_transpose,
+                    )
+                if expert_w2_list:
+                    quantize_weights(
+                        expert_w2_list,
+                        self.grouped_gemm_experts.weight2,
+                        quant_transpose,
+                    )
+
+            else:
+                raise NotImplementedError(
+                    "Not support individual mode for fuse_expert_fp8_weight_quant yet."
+                )
+
+            return
 
         if batch_mode:
             # Batch mode: process all experts' weights together

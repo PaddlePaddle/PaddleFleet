@@ -44,6 +44,13 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_size
 
 try:
+    from paddlefleet.transformer.dot_product_attention import (
+        CPDotProductAttention,
+    )
+except Exception:
+    CPDotProductAttention = None
+
+try:
     from paddlefleet.fusions.fused_mla_yarn_rope_apply import (
         fused_apply_mla_rope_for_kv,
         fused_apply_mla_rope_for_q,
@@ -142,6 +149,7 @@ class MLASelfAttentionSublayersSpec:
     kv_b_proj: LayerSpec | type = None
     core_attention: LayerSpec | type = None
     o_proj: LayerSpec | type = None
+    gate_proj: LayerSpec | type = None
 
 
 class MultiLatentAttention(Attention):
@@ -234,6 +242,26 @@ class MultiLatentAttention(Attention):
             tp_comm_buffer_name="proj",
             tp_group=self.pg_collection.tp,
         )
+
+        # Gated attention
+        self.gated_attention = getattr(self.config, "gated_attention", False)
+        if self.gated_attention and sublayers_spec.gate_proj is not None:
+            self.gate_proj = build_spec_layer(
+                sublayers_spec.gate_proj,
+                self.config.hidden_size,
+                self.query_projection_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=self.config.use_bias,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="mla_gate",
+                tp_group=self.pg_collection.tp,
+            )
+        else:
+            self.gated_attention = False
+            self.gate_proj = None
 
     def forward(
         self,
@@ -338,6 +366,12 @@ class MultiLatentAttention(Attention):
         # =================
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
+
+        # Apply gated attention
+        if self.gated_attention:
+            gate, _ = self.gate_proj(hidden_states)
+            core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
+
         output, bias = self.o_proj(core_attn_out)
 
         _log(output, "attn_o_proj_out", layer_num)
@@ -705,16 +739,9 @@ class MLASelfAttention(MultiLatentAttention):
                     # so we do not shorten it here.
                     rotary_pos_emb = rotary_pos_emb[:, 0:q_len]
 
-                # q_no_pe: [num_tokens, n, qk_nope_head_dim]
-                # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
-                q_no_pe, q_pos_emb = paddle.split(
-                    q,
-                    [
-                        self.config.qk_nope_head_dim,
-                        self.config.qk_rope_head_dim,
-                    ],
-                    axis=-1,
-                )
+                # Replace paddle.split with zero-copy slice views.
+                q_no_pe = q[..., : self.config.qk_nope_head_dim]
+                q_pos_emb = q[..., self.config.qk_nope_head_dim :]
 
                 # k_no_pe: [num_tokens, n, qk_nope_head_dim]
                 # value: [num_tokens, n, v_head_dim]
@@ -804,6 +831,7 @@ class MLASelfAttention(MultiLatentAttention):
         self._backward_kv_proj()
         self._backward_q_proj()
         self._backward_output_proj()
+        # GATE backward?
 
     def _backward_kv_proj(self):
         """Computes weight gradients of KV projection layers"""
