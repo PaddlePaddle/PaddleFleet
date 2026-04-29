@@ -160,7 +160,8 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
 
             x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
             w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
-            w_grad = w_grad.T
+            if w_grad is not None:
+                w_grad = w_grad.T
 
             return x_grad, w_grad
 
