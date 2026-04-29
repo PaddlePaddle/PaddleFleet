@@ -377,9 +377,7 @@ class LanguageLoss(FleetLayer):
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
             # is present, which changes the value due to division by (count + 1e-6).
             if self.config.gpt_model_use_experimental_version:
-                loss_2d = loss_fp32 * lossmask.reshape(
-                    labels.shape
-                )
+                loss_2d = loss_fp32 * lossmask.reshape(labels.shape)
                 lossmask_2d = lossmask.reshape(labels.shape)
                 token_count_per_line = lossmask_2d.sum(-1)
                 is_invalid_line_float = (token_count_per_line == 0).astype(

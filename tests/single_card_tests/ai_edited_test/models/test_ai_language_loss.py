@@ -126,9 +126,7 @@ class TestLanguageLossTextLossLogs(unittest.TestCase):
 
         loss_fn = self._make_loss_fn()
         logits = paddle.zeros([2, 3, 1106], dtype="float32")
-        labels = paddle.to_tensor(
-            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
-        )
+        labels = paddle.to_tensor([[1, 2, -100], [1002, 3, 4]], dtype="int64")
 
         loss = loss_fn.forward(logits, labels)
         logs = get_global_training_logs()
@@ -142,9 +140,7 @@ class TestLanguageLossTextLossLogs(unittest.TestCase):
         """Test text loss logs are skipped when no global logs are registered."""
         loss_fn = self._make_loss_fn()
         logits = paddle.zeros([2, 3, 1106], dtype="float32")
-        labels = paddle.to_tensor(
-            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
-        )
+        labels = paddle.to_tensor([[1, 2, -100], [1002, 3, 4]], dtype="int64")
 
         loss_fn.forward(logits, labels)
 
@@ -160,14 +156,10 @@ class TestLanguageLossTextLossLogs(unittest.TestCase):
         loss_matrix = paddle.to_tensor(
             [[1.0, 2.0, 0.0], [10.0, 3.0, 4.0]], dtype="float32"
         )
-        loss_fn.loss_func = (
-            lambda logits, labels: logits[:, :, 0] + loss_matrix
-        )
+        loss_fn.loss_func = lambda logits, labels: logits[:, :, 0] + loss_matrix
         logits = paddle.zeros([2, 3, 1106], dtype="float32")
         logits.stop_gradient = False
-        labels = paddle.to_tensor(
-            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
-        )
+        labels = paddle.to_tensor([[1, 2, -100], [1002, 3, 4]], dtype="int64")
 
         loss = loss_fn.forward(logits, labels)
         self.assertEqual(len(logs.updates), 0)
@@ -213,9 +205,7 @@ class TestLanguageLossTextLossLogs(unittest.TestCase):
 
         hidden_states = paddle.zeros([2, 3, 4], dtype="float32")
         weight = paddle.zeros([8, 4], dtype="float32")
-        labels = paddle.to_tensor(
-            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
-        )
+        labels = paddle.to_tensor([[1, 2, -100], [1002, 3, 4]], dtype="int64")
         with mock.patch.dict(sys.modules, {fake_module.__name__: fake_module}):
             loss = loss_fn.forward((hidden_states, weight, None), labels)
 
@@ -244,16 +234,14 @@ class TestLanguageLossTextLossLogs(unittest.TestCase):
         loss_fn = self._make_loss_fn()
         loss_fn.config.gpt_model_use_experimental_version = True
         logits = paddle.zeros([2, 3, 1106], dtype="float32")
-        labels = paddle.to_tensor(
-            [[1, 2, -100], [1002, 3, 4]], dtype="int64"
-        )
+        labels = paddle.to_tensor([[1, 2, -100], [1002, 3, 4]], dtype="int64")
 
         loss = loss_fn.forward(logits, labels)
         logs = get_global_training_logs()
 
-        expected_line_wise = (
-            (1.0 + 2.0) / 2.0 + (10.0 + 3.0 + 4.0) / 3.0
-        ) / (2.0 + 1e-6)
+        expected_line_wise = ((1.0 + 2.0) / 2.0 + (10.0 + 3.0 + 4.0) / 3.0) / (
+            2.0 + 1e-6
+        )
         self.assertAlmostEqual(loss.item(), expected_line_wise)
         self.assertAlmostEqual(logs["pure_text_loss"].item(), 4.0)
         self.assertAlmostEqual(logs["stem_loss"].item(), 4.0)
