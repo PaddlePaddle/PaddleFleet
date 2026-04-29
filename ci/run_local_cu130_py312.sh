@@ -28,13 +28,16 @@ export PYTHONPATH=$(pwd)/PaddleFleet:$PYTHONPATH
 
 # Paddle URL
 export PADDLE_URL="https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-GpuAll-LinuxCentos-Gcc11-Cuda130-Cudnn913-Trt1013-Py312-Compile/ae7132d8a794ce87faec482b5bb2a68f0f8ab0e9/paddlepaddle_gpu-3.4.0.post20260426+ae7132d8a79-cp312-cp312-linux_x86_64.whl"
-
+# Fleet Release URL
+export fleet_wheel=paddlefleet-0.0.0-cp312-cp312-linux_x86_64.whl
+export paddlefleet_url=https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.3/latest/cu130/
 # 测试选项 (默认全部为 false)
 RUN_SINGLE_UNIT=false
 RUN_SINGLE_SONIC=false
 RUN_MULTI_UNIT=false
 RUN_SINGLE_MODEL=false
 RUN_MULTI_MODEL=false
+install_mode=""
 
 # 默认模型测试
 SINGLE_MODEL_TESTS=()
@@ -93,6 +96,10 @@ while [[ $# -gt 0 ]]; do
         --install-only)
             INSTALL_ONLY=true
             shift
+            ;;
+        --install-mode)
+            install_mode="$2"
+            shift 2
             ;;
         --help)
             echo "用法: $0 [选项]"
@@ -231,9 +238,22 @@ install_dependencies() {
     pip uninstall paddlepaddle-gpu -y || true
     pip uninstall paddleformers -y || true
 
-    # 安装 PaddleFleet
-    echo "安装 PaddleFleet..."
-    pip install --pre paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    if [[ $install_mode == "dev" ]]; then
+        # 安装 PaddleFleet
+        echo "安装 PaddleFleet..."
+        pip install --pre paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+        # 安装 Paddle
+        pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl  --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/
+    else if [[ $install_mode == "release" ]]; then
+        wget "${paddlefleet_url}/${fleet_wheel}" -O ${fleet_wheel}
+        pip install ${fleet_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+        rm -rf ./*
+        pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+    else
+        echo "安装指定版本的 Paddle..."
+        pip install ${PADDLE_URL} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+    fi
+
 
 
     # 安装 Paddle（会覆盖 PaddleFleet 自带的 Paddle）
@@ -342,7 +362,7 @@ fi
 
 # 运行单卡模型测试
 if [ "$RUN_SINGLE_MODEL" = true ]; then
-    export CACHE_DIR=/root/paddlejob/workspace/env_run/fleet-model-cache
+    export CACHE_DIR=/root/paddlejob/share-storage/gpfs/system-public/fleet-model-cache
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-single"
 
     # 如果没有指定具体模型，运行所有单卡模型测试
@@ -437,7 +457,7 @@ fi
 
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
-    export CACHE_DIR=/root/paddlejob/workspace/env_run/fleet-model-cache
+    export CACHE_DIR=/root/paddlejob/share-storage/gpfs/system-public/fleet-model-cache
     cd PaddleFormers
     pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     cd ..
@@ -604,6 +624,7 @@ if [ "$RUN_MULTI_MODEL" = true ]; then
                 ;;
             glm45_pt_fp8)
                 case_name="glm45_pt_fp8"
+                sed -i 's/fp8: "e4m3"/fp8: "e4m3"\nfp8_wgrad: false/' PaddleFormers/tests/config/ci/glm45_pt_fp8.yaml
                 run_test timeout 5m bash PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
                 exit_code=$TEST_EXIT_CODE
                 if [ "$exit_code" != "0" ]; then
