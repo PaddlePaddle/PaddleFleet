@@ -330,7 +330,7 @@ def _log_summary(key, layer_number, summary_data):
     summary_data = summary_data.astype("float32")
     max_value = float(paddle.max(summary_data).item())
     min_value = float(paddle.min(summary_data).item())
-    var_value = float(paddle.var(summary_data).item())
+    var_value = float(paddle.var(summary_data, correction=0).item())
     median_value = float(paddle.median(summary_data).item())
     mean_value = float(paddle.mean(summary_data).item())
     max_mean_ratio = max_value / mean_value if mean_value != 0 else 1.0
