@@ -976,8 +976,11 @@ class TransformerLayerWithOverlap(TransformerLayer):
             assert self.mlp.expert_model_parallel_size > 1, (
                 "By enabling `forward_backward_overlap_scheduler`, you should use expert parallel."
             )
-            assert self.mlp.moe_token_dispatcher_type == "deepep", (
-                "By enabling `forward_backward_overlap_scheduler`, you should use deepep for dispatching tokens."
+            assert self.mlp.moe_token_dispatcher_type in (
+                "deepep",
+                "hybridep",
+            ), (
+                "By enabling `forward_backward_overlap_scheduler`, you should use deepep or hybridep for dispatching tokens."
             )
 
     def compute_attention(self, dict_args, is_first_fwd=False):

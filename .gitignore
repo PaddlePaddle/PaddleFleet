@@ -26,6 +26,7 @@ src/paddlefleet/ops/deep_gemm
 src/paddlefleet/ops/deep_gemm_cpp
 src/paddlefleet/ops/deep_ep
 src/paddlefleet/ops/deep_ep_cpp.so
+src/paddlefleet/ops/hybrid_ep
 src/paddlefleet/ops/sonicmoe
 src/paddlefleet/ops/quack
 src/paddlefleet/ops/flash_mask

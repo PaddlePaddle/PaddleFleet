@@ -39,6 +39,7 @@ def fused_linear_cross_entropy_forward(
     ignore_index=-100,
     reduction="none",
     num_chunks=1,
+    ec_align=False,
 ):
     """前向：分 chunk 计算 logits / loss / grad_input / grad_weight。
 
@@ -50,6 +51,10 @@ def fused_linear_cross_entropy_forward(
         ignore_index: 被忽略的标签值。
         reduction: "none" / "mean" / "sum"。
         num_chunks: 分多少个 chunk 做计算。
+        ec_align: True 时启用与 ernie-core 的精度对齐模式：
+                  grad_weight 使用 [H, V] 布局（GEMM [H,C]@[C,V]），
+                  与 ernie-core 的 fused_linear_param_grad_add 调用完全相同。
+                  backward 中 main_grad.add_(grad_weight.T)。
     """
     input_requires_grad = not _input.stop_gradient
     weight_requires_grad = not weight.stop_gradient
@@ -66,11 +71,16 @@ def fused_linear_cross_entropy_forward(
         if input_requires_grad
         else None
     )
-    grad_weight = (
-        paddle.zeros(weight.shape, dtype=paddle.float32)
-        if (input_requires_grad and weight_requires_grad)
-        else None
-    )
+    # ec_align 模式：grad_weight 使用 [H, V] 布局，与 ernie-core 的 GEMM shape 一致。
+    # 默认模式：grad_weight 使用 [V, H] 布局（与 weight.shape 一致，main_grad 可直接 add_）。
+    if input_requires_grad and weight_requires_grad:
+        grad_weight = (
+            paddle.zeros([H, V], dtype=paddle.float32)
+            if ec_align
+            else paddle.zeros(weight.shape, dtype=paddle.float32)
+        )
+    else:
+        grad_weight = None
     grad_bias = (
         paddle.zeros([bias.shape[0]], dtype=paddle.float32)
         if (input_requires_grad and bias is not None)
@@ -126,14 +136,30 @@ def fused_linear_cross_entropy_forward(
 
         if grad_weight is not None:
             with paddle.amp.auto_cast(False):
-                paddle._C_ops.fused_linear_param_grad_add(
-                    grad_logits_chunk,  # [C, V]
-                    _input_chunk,  # [C, H]
-                    grad_weight,  # [V, H]
-                    None,
-                    True,
-                    False,
-                )
+                if ec_align:
+                    # ec_align: grad_weight=[H,V]，GEMM [H,C]@[C,V]，与 ernie-core 一致。
+                    # fused_linear_param_grad_add(x,y,dw): dw += x.T @ y
+                    # 令 x=_input_chunk[C,H], y=grad_logits_chunk[C,V] → dw += [H,C]@[C,V] = [H,V] ✓
+                    paddle._C_ops.fused_linear_param_grad_add(
+                        _input_chunk,  # [C, H]
+                        grad_logits_chunk,  # [C, V]
+                        grad_weight,  # [H, V]
+                        None,
+                        True,
+                        False,
+                    )
+                else:
+                    # 默认: grad_weight=[V,H]，GEMM [V,C]@[C,H]
+                    # fused_linear_param_grad_add(x,y,dw): dw += x.T @ y
+                    # 令 x=grad_logits_chunk[C,V], y=_input_chunk[C,H] → dw += [V,C]@[C,H] = [V,H] ✓
+                    paddle._C_ops.fused_linear_param_grad_add(
+                        grad_logits_chunk,  # [C, V]
+                        _input_chunk,  # [C, H]
+                        grad_weight,  # [V, H]
+                        None,
+                        True,
+                        False,
+                    )
 
         if grad_bias is not None:
             grad_bias.add_(grad_logits_chunk.sum(axis=0))
@@ -220,16 +246,14 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
 
     @staticmethod
     def forward(ctx, *args):
-        has_bias = args[-4]
-        ignore_index = args[-3]
-        reduction = args[-2]
-        num_chunks = args[-1]
-
-        tensor_args = args[:-4]
-        _input = tensor_args[0]
-        weight = tensor_args[1]
-        target = tensor_args[2]
-        bias = tensor_args[3] if has_bias else None
+        _input = args[0]
+        weight = args[1]
+        target = args[2]
+        bias = args[3]
+        ignore_index = args[4]
+        reduction = args[5]
+        num_chunks = args[6]
+        ec_align = args[7]
 
         loss, grad_input, grad_weight, grad_bias = (
             fused_linear_cross_entropy_forward(
@@ -240,6 +264,7 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
                 ignore_index=ignore_index,
                 reduction=reduction,
                 num_chunks=num_chunks,
+                ec_align=ec_align,
             )
         )
 
@@ -248,9 +273,10 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
             grad_weight.detach() if grad_weight is not None else None,
             grad_bias.detach() if grad_bias is not None else None,
         )
-        ctx.has_bias = has_bias
+        ctx.has_bias = bias is not None
         ctx.weight_ref = weight
         ctx.weight_requires_grad = not weight.stop_gradient
+        ctx.ec_align = ec_align
         return loss
 
     @staticmethod
@@ -269,7 +295,12 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
                     weight.main_grad = paddle.zeros(
                         weight.shape, dtype=paddle.float32
                     )
-                weight.main_grad.add_(grad_weight)
+                if ctx.ec_align:
+                    # ec_align: grad_weight=[H,V]，main_grad=[V,H]，需转置后累加
+                    weight.main_grad.add_(grad_weight.T)
+                else:
+                    # 默认: grad_weight=[V,H]，与 main_grad=[V,H] 相同，直接累加
+                    weight.main_grad.add_(grad_weight)
                 if hasattr(weight, "_apply_backward_hook"):
                     weight._apply_backward_hook()
                 grad_weight = None
@@ -278,50 +309,3 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
         if ctx.has_bias:
             result.append(grad_bias)
         return tuple(result)
-
-    @classmethod
-    def apply(
-        cls,
-        _input,
-        weight,
-        target,
-        bias=None,
-        ignore_index=-100,
-        reduction="none",
-        num_chunks=1,
-    ):
-        tensor_args = [_input, weight, target]
-        has_bias = bias is not None
-        if has_bias:
-            tensor_args.append(bias)
-        scalar_args = [has_bias, ignore_index, reduction, num_chunks]
-        return super().apply(*(tensor_args + scalar_args))
-
-
-class LigerFusedLinearCrossEntropyLoss(paddle.nn.Layer):
-    """nn.Layer 封装，便于在组网代码中直接替换 nn.CrossEntropyLoss。"""
-
-    def __init__(
-        self,
-        ignore_index: int = -100,
-        reduction: str = "none",
-        num_chunks: int = 1,
-    ):
-        super().__init__()
-        assert reduction in {"mean", "sum", "none"}, (
-            f"reduction must be 'mean', 'sum', or 'none'. Got: {reduction}"
-        )
-        self.ignore_index = ignore_index
-        self.reduction = reduction
-        self.num_chunks = num_chunks
-
-    def forward(self, lin_weight, _input, target, bias=None):
-        return LigerFusedLinearCrossEntropyFunction.apply(
-            _input,
-            lin_weight,
-            target,
-            bias,
-            self.ignore_index,
-            self.reduction,
-            self.num_chunks,
-        )

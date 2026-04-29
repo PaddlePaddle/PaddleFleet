@@ -360,17 +360,38 @@ class StandardMoERouter(nn.Layer):
             )
         return seq_aux_loss
 
-    def _cal_z_loss(self, logits) -> paddle.Tensor:
+    def _cal_z_loss(self, logits, input_ids=None) -> paddle.Tensor:
         """
         Calculate the z loss.
 
         Args:
             logits (paddle.Tensor): Model output. The shape is [batch_size, num_experts].
+            input_ids (paddle.Tensor, optional): Input token ids used to compute loss mask.
 
         Returns:
             paddle.Tensor: The z loss value.
         """
-        l_zloss = paddle.logsumexp(logits, axis=1).square().mean()
+        if input_ids is not None:
+            origin_loss_mask = (input_ids != 0).astype(paddle.float32)
+            loss_mask = origin_loss_mask.reshape([-1])
+            if getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
+                # Align to EC, which also consider mtp token
+                denom = (
+                    origin_loss_mask.sum()
+                    + origin_loss_mask.shape[0]
+                    * self.config.num_nextn_predict_layers
+                )
+            else:
+                denom = origin_loss_mask.sum()
+
+            l_zloss = (
+                logits.logsumexp(1).square() * loss_mask
+            ).sum() / paddle.clip(denom, min=1e-6)
+        else:
+            l_zloss = paddle.logsumexp(logits, axis=1).square().mean()
+
         return l_zloss
 
     def _priority(
@@ -753,7 +774,10 @@ class TopKRouter(StandardMoERouter):
 
         # z-loss
         if self.config.router_z_loss_coef:
-            l_zloss = self._cal_z_loss(logits) * self.config.router_z_loss_coef
+            l_zloss = (
+                self._cal_z_loss(logits, input_ids)
+                * self.config.router_z_loss_coef
+            )
         else:
             l_zloss = None
 
