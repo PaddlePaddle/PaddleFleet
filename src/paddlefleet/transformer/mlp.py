@@ -193,7 +193,10 @@ class MLP(FleetLayer):
             if bias_parallel is not None:
                 intermediate_parallel = intermediate_parallel + bias_parallel
             intermediate_parallel = F.swiglu(intermediate_parallel)
-        elif self.config.bias_activation_fusion:
+        elif (
+            self.config.bias_activation_fusion
+            and paddle.is_compiled_with_cuda()
+        ):
             if per_token_scale is not None:
                 if self.hidden_act == F.silu and self.config.gated_linear_unit:
                     # dtype is handled inside the fused kernel
