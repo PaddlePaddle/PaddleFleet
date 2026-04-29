@@ -241,33 +241,21 @@ class StandardMoERouter(nn.Layer):
 
         return capacity
 
-    def _cal_aux_loss(self, gates, mask, input_ids=None):
+    def _cal_aux_loss(self, gates, mask):
         """
         Calculate auxiliary loss
 
         Args:
             gates (paddle.Tensor): Represents the output probability of each expert. The shape is [batch_size, num_experts]
             mask (paddle.Tensor): Represents whether each sample belongs to a certain expert. The shape is [batch_size, num_experts]
-            input_ids (paddle.Tensor, optional): Input token ids used to compute valid token mask.
 
         Returns:
             paddle.Tensor: The value of auxiliary loss.
 
         """
         # TODO: @DrownFish19 update aux_loss for Qwen2MoE and DeepSeekV2&V3
-        if input_ids is not None:
-            assert input_ids.shape[0] == gates.shape[0], (
-                f"check input_ids shape {input_ids.shape}"
-            )
-            valid_mask = (input_ids != 0).astype(paddle.float32).reshape([-1])
-            seqlen_float = valid_mask.sum().item()
-            gates = gates * valid_mask.unsqueeze(-1)
-        else:
-            seqlen_float = float(gates.shape[0])
-        if seqlen_float == 0:
-            return paddle.to_tensor(0.0)
-        me = paddle.sum(gates, axis=0) / seqlen_float
-        ce = paddle.sum(mask.cast("float32"), axis=0) / seqlen_float
+        me = paddle.mean(gates, axis=0)
+        ce = paddle.mean(mask.cast("float32"), axis=0)
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
         return aux_loss
 
@@ -847,7 +835,7 @@ class TopKRouter(StandardMoERouter):
                 )
 
             else:
-                l_aux = self._cal_aux_loss(gates, mask, input_ids=input_ids)
+                l_aux = self._cal_aux_loss(gates, mask)
         else:
             l_aux = None
 

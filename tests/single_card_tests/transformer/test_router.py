@@ -645,5 +645,120 @@ class TestForwardOutputRenaming(unittest.TestCase):
             )
 
 
+class TestCalZLoss(unittest.TestCase):
+    """Unit tests for StandardMoERouter._cal_z_loss (new input_ids branch)."""
+
+    def setUp(self):
+        self.config = MockTransformerConfig()
+        patcher = patch(
+            "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+            return_value=1,
+        )
+        self.mock_cp = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.config.topk_method = "greedy"
+        self.config.router_aux_loss_coef = 0.0
+        self.config.router_z_loss_coef = 0.01
+        self.router = TopKRouter(self.config)
+
+    def test_no_input_ids_mean_reduction(self):
+        """Without input_ids, z_loss = logsumexp(logits,1).square().mean()."""
+        paddle.seed(0)
+        logits = paddle.randn([6, self.config.n_routed_experts])
+        loss = self.router._cal_z_loss(logits)
+        expected = paddle.logsumexp(logits, axis=1).square().mean()
+        self.assertAlmostEqual(loss.item(), expected.item(), places=5)
+
+    def test_input_ids_excludes_padding(self):
+        """With input_ids, padding tokens (id==0) contribute 0 to z_loss."""
+        n_tokens = 6
+        paddle.seed(2)
+        logits = paddle.randn([n_tokens, self.config.n_routed_experts])
+        # tokens 0-3 valid, tokens 4-5 padding → flat input_ids
+        input_ids = paddle.to_tensor([[1, 2, 3, 4, 0, 0]])
+
+        loss = self.router._cal_z_loss(logits, input_ids)
+        self.assertEqual(loss.shape, [])
+        # Full-mean (no masking) should differ
+        loss_no_mask = self.router._cal_z_loss(logits)
+        self.assertNotAlmostEqual(loss.item(), loss_no_mask.item(), places=4)
+
+    def test_input_ids_all_valid_equals_masked_sum_over_count(self):
+        """When all tokens are valid, z_loss with input_ids == sum / n_tokens."""
+        n_tokens = 4
+        paddle.seed(3)
+        logits = paddle.randn([n_tokens, self.config.n_routed_experts])
+        input_ids = paddle.to_tensor([[1, 2, 3, 4]])
+
+        loss_ids = self.router._cal_z_loss(logits, input_ids)
+        # Expected: sum / 4
+        expected = logits.logsumexp(1).square().sum() / n_tokens
+        self.assertAlmostEqual(loss_ids.item(), expected.item(), places=5)
+
+    def test_experimental_version_adds_mtp_denom(self):
+        """gpt_model_use_experimental_version=True uses denom + num_nextn_predict_layers * batch."""
+        self.config.gpt_model_use_experimental_version = True
+        self.config.num_nextn_predict_layers = 2
+        router = TopKRouter(self.config)
+
+        batch_size, seq_len = 2, 4
+        paddle.seed(4)
+        logits = paddle.randn(
+            [batch_size * seq_len, self.config.n_routed_experts]
+        )
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+
+        loss = router._cal_z_loss(logits, input_ids)
+        self.assertEqual(loss.shape, [])
+
+        # Manually compute expected
+        origin_mask = (input_ids != 0).astype(paddle.float32)
+        loss_mask = origin_mask.reshape([-1])
+        denom = origin_mask.sum() + origin_mask.shape[0] * 2
+        expected = (
+            logits.logsumexp(1).square() * loss_mask
+        ).sum() / paddle.clip(denom, min=1e-6)
+        self.assertAlmostEqual(loss.item(), expected.item(), places=5)
+
+    def test_experimental_version_without_mtp(self):
+        """gpt_model_use_experimental_version=True, num_nextn_predict_layers=0: denom equals valid count."""
+        self.config.gpt_model_use_experimental_version = True
+        self.config.num_nextn_predict_layers = 0
+        router = TopKRouter(self.config)
+
+        batch_size, seq_len = 2, 4
+        paddle.seed(5)
+        logits = paddle.randn(
+            [batch_size * seq_len, self.config.n_routed_experts]
+        )
+        input_ids = paddle.to_tensor([[1, 2, 3, 0], [5, 6, 7, 0]])
+
+        loss = router._cal_z_loss(logits, input_ids)
+        # With num_nextn_predict_layers=0, denom == valid token count == 6
+        origin_mask = (input_ids != 0).astype(paddle.float32)
+        loss_mask = origin_mask.reshape([-1])
+        denom = origin_mask.sum()
+        expected = (
+            logits.logsumexp(1).square() * loss_mask
+        ).sum() / paddle.clip(denom, min=1e-6)
+        self.assertAlmostEqual(loss.item(), expected.item(), places=5)
+
+    def test_forward_z_loss_with_input_ids(self):
+        """TopKRouter forward with z_loss coef > 0 and input_ids passes through correctly."""
+        self.config.router_aux_loss_coef = 0.0
+        self.config.router_z_loss_coef = 0.01
+        router = TopKRouter(self.config)
+
+        paddle.seed(42)
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+
+        _, _, _, _, _, _, l_aux, l_zloss = router(hidden, input_ids=input_ids)
+        self.assertIsNone(l_aux)
+        self.assertIsNotNone(l_zloss)
+        self.assertEqual(l_zloss.shape, [])
+        self.assertGreater(l_zloss.item(), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
