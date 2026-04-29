@@ -306,6 +306,7 @@ class MoELayer(nn.Layer):
                     self.experts.append(None)
 
         shared_expert_args = deepcopy(expert_args)
+        shared_expert_args["config"] = shared_expert_config
         shared_expert_args["moe_intermediate_size"] = (
             self.moe_shared_expert_intermediate_size
         )
