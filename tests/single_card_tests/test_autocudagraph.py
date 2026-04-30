@@ -809,7 +809,7 @@ class TestEndToEndPerformance(BaseTest):
             learning_rate=0.001, parameters=model_eager.parameters()
         )
 
-        total_steps = 100
+        total_steps = 1000
         batch_size = 4
 
         dummy_inputs = [
@@ -834,7 +834,7 @@ class TestEndToEndPerformance(BaseTest):
             loss.backward()
 
             losses_cg.append(loss.item())
-            grads_cg.append(model_cg.head2.weight.grad.clone())
+            grads_cg.append(model_cg.head2.weight.grad.clone().cpu())
 
             opt_cg.step()
             opt_cg.clear_grad()
@@ -856,7 +856,7 @@ class TestEndToEndPerformance(BaseTest):
             loss.backward()
 
             losses_eager.append(loss.item())
-            grads_eager.append(model_eager.head2.weight.grad.clone())
+            grads_eager.append(model_eager.head2.weight.grad.clone().cpu())
 
             opt_eager.step()
             opt_eager.clear_grad()
@@ -864,12 +864,13 @@ class TestEndToEndPerformance(BaseTest):
         paddle.device.synchronize()
         time_eager = time.perf_counter() - start_time_eager
 
+        assert_tensors_close(
+            self,
+            paddle.to_tensor(losses_cg),
+            paddle.to_tensor(losses_eager),
+            msg=f"Loss mismatch at step {step}",
+        )
         for step in range(total_steps):
-            assert_tensors_close(
-                losses_cg[step],
-                losses_eager[step],
-                err_msg=f"Loss mismatch at step {step}",
-            )
             assert_tensors_close(
                 self,
                 grads_cg[step],

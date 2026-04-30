@@ -208,7 +208,8 @@ def autocudagraph(
 
                     if bwd_outputs:
                         paddle.autograd.backward(
-                            bwd_outputs, bwd_outputs_grads, retain_graph=True
+                            bwd_outputs,
+                            bwd_outputs_grads,
                         )
 
                 # forward capture
