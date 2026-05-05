@@ -150,7 +150,10 @@ class RotaryEmbedding(nn.Layer):
     ) -> Tensor:
         """Generates matrix of frequencies based on positions in the sequence,
         used to create positional encodings"""
-        seq = paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
+        if position_ids is not None:
+            seq = position_ids.astype(self.inv_freq.dtype).reshape([-1])
+        else:
+            seq = paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
 
         if self.seq_len_interpolation_factor is not None:
             seq *= 1 / self.seq_len_interpolation_factor

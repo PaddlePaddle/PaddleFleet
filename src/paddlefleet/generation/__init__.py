@@ -15,5 +15,16 @@
 """Generation module for Fleet models."""
 
 from .config import GenerationConfig
+from .greedy_generator import DynamicKVCache, GreedyGenerator
+from .inference_utils import init_inference_fleet
+from .utils import apply_repetition_penalty, sample_with_top_k, sample_with_top_p
 
-__all__ = ["GenerationConfig"]
+__all__ = [
+    "DynamicKVCache",
+    "GenerationConfig",
+    "GreedyGenerator",
+    "apply_repetition_penalty",
+    "init_inference_fleet",
+    "sample_with_top_k",
+    "sample_with_top_p",
+]

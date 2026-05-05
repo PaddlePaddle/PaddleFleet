@@ -32,6 +32,10 @@ from .package_info import (
 )
 from .timers import Timers
 
+# Re-export from Paddle for backward compatibility (PaddleFormers imports these from paddlefleet)
+from paddle.distributed.fleet.meta_parallel import LayerSpec
+from paddle.distributed.fleet.meta_parallel import build_spec_layer as build_layer
+
 mpu = parallel_state
 
 __all__ = [

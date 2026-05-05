@@ -260,9 +260,12 @@ def get_gpt_layer_local_spec(
         )
     transformer_cls = getattr(config, "specific_layer", TransformerLayer)
     if paddle.distributed.is_initialized():
-        use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
-            "pp_configs"
-        ].forward_backward_overlap_scheduler
+        try:
+            use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
+                "pp_configs"
+            ].forward_backward_overlap_scheduler
+        except AttributeError:
+            use_overlap = False
         if use_overlap:
             assert transformer_cls.__name__ == TransformerLayer.__name__, (
                 "Only base TransformerLayer can be overlapped."

@@ -450,6 +450,11 @@ class GPTEmbedding(FleetLayer):
             hidden_states_concat = paddle.concat(mtp_emb_res)
             preproc_output["hidden_states"] = hidden_states_concat
 
+        # Pass through KV cache kwargs for inference
+        for key in ("past_key_values", "use_cache"):
+            if key in dict_args and key not in preproc_output:
+                preproc_output[key] = dict_args[key]
+
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:
                 preproc_output.pop(key)
