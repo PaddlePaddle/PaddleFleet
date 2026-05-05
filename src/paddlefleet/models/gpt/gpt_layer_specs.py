@@ -264,7 +264,7 @@ def get_gpt_layer_local_spec(
             use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
                 "pp_configs"
             ].forward_backward_overlap_scheduler
-        except AttributeError:
+        except (AttributeError, KeyError):
             use_overlap = False
         if use_overlap:
             assert transformer_cls.__name__ == TransformerLayer.__name__, (
