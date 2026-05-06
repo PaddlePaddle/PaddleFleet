@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddle._C_ops import matmul_grad
 
-from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
+from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp, ContextParallelGatherOp, ContextParallelScatterOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 
@@ -309,6 +309,8 @@ class StandardMoERouter(nn.Layer):
         # fixed max_seq_len. PF's input_ids plays the role of EC's origin_input_ids.
         # [B, 1]
         if input_ids is not None:
+            if get_context_parallel_world_size() > 1:
+                input_ids = ContextParallelGatherOp.apply(input_ids, axis=1)
             _ids = input_ids
             if _ids.ndim == 1:
                 _ids = _ids.unsqueeze(axis=0)
@@ -662,6 +664,8 @@ class TopKRouter(StandardMoERouter):
             else:
                 seq_len, batch_size, d_model = input.shape
             input = input.reshape([-1, d_model])
+            if get_context_parallel_world_size() > 1:
+                input_ids = ContextParallelScatterOp.apply(input_ids, axis=1)
             if input_ids is not None:
                 input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
                 batch_size_, seq_len_ = input_ids.shape

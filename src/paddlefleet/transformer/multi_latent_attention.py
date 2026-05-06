@@ -44,6 +44,12 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_size
 
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
+
 try:
     from paddlefleet.transformer.dot_product_attention import (
         CPDotProductAttention,
@@ -80,6 +86,10 @@ def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
         rope_base
         ** (paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim))
     )
+
+    if get_context_parallel_world_size() > 1:
+        seq_len = seq_len * get_context_parallel_world_size()
+
     # position ids: [0, 1, ..., seq_len-1]
     positions = paddle.arange(0, seq_len, dtype="float32")
     # freqs_table: [S, D/2]
@@ -93,6 +103,10 @@ def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
     # freqs_cis: complex [B, S, D/2] -> [B, S, 1, D/2]
     freqs_cis = paddle.polar(paddle.ones_like(freqs_expanded), freqs_expanded)
     freqs_cis = freqs_cis.unsqueeze(2)  # [B, S, 1, D/2]
+
+    if get_context_parallel_world_size() > 1:
+        # 针对mla计算，其对于position ids的cp切分，需要对于q_pe和k_pe进行旋转位置编码
+        freqs_cis = ContextParallelScatterOp.apply(freqs_cis, axis=1)
 
     # MD5 debug
     import hashlib as _hl

@@ -32,6 +32,15 @@ from paddlefleet.tensor_parallel.mappings import (
 )
 from paddlefleet.transformer.layer import FleetLayer
 
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
+
+from paddlefleet.context_parallel_utils import  mark_context_parallel_parameter_disable_scale_grad
+
+
 if TYPE_CHECKING:
     from paddle import Tensor
 
@@ -69,6 +78,9 @@ class GPTEmbedding(FleetLayer):
             position_embedding_type=position_embedding_type,
         )
         self.sequence_parallel = self.config.sequence_parallel
+
+        if self.config.gpt_model_use_experimental_version:
+            mark_context_parallel_parameter_disable_scale_grad(self.embedding.embed_tokens)
 
         self.multimodal_embedding = config.multimodal_embedding
         if self.sequence_parallel and (
@@ -200,6 +212,9 @@ class GPTEmbedding(FleetLayer):
                 inputs_embeds_ori = inputs_embeds
                 batch_size, seq_length, hidden_size = inputs_embeds.shape
 
+                if get_context_parallel_world_size() > 1 and self.config.gpt_model_use_experimental_version:
+                    inputs_embeds = ContextParallelScatterOp.apply(inputs_embeds, axis=1)
+
                 if self.sequence_parallel:
                     inputs_embeds = inputs_embeds.reshape(
                         [-1, inputs_embeds.shape[-1]]
@@ -219,6 +234,9 @@ class GPTEmbedding(FleetLayer):
                         ],
                         axis=1,
                     )
+                    if get_context_parallel_world_size() > 1 and self.config.experimental_dataflow:
+                        inputs_embeds_mtp = ContextParallelScatterOp.apply(inputs_embeds_mtp, axis=1)
+
                     if self.sequence_parallel:
                         inputs_embeds_mtp = inputs_embeds_mtp.reshape(
                             [-1, inputs_embeds_mtp.shape[-1]]

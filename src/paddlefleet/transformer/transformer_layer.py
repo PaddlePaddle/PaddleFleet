@@ -44,6 +44,13 @@ from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.utils import profile
 from paddlefleet.utils import log_single_rank
 
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
+
+
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():
         from paddlefleet.ops import deep_ep
@@ -468,11 +475,15 @@ class TransformerLayer(nn.Layer):
                 and dict_args["input_ids"] is not None
             ):
                 full_input_ids = dict_args["input_ids"]
+                
+                # cp场景下，hidden_states shape为[b, s/cp, h]，真实seq_lens需要乘上cp大小。
+                seq_lens = hidden_states.shape[ 0 if self.config.sequence_parallel else 1]
+                if get_context_parallel_world_size() > 1:
+                    seq_lens *= get_context_parallel_world_size()
+
                 if (
                     full_input_ids.shape[-1]
-                    > hidden_states.shape[
-                        0 if self.config.sequence_parallel else 1
-                    ]
+                    > seq_lens
                 ):
                     decoder_input_ids = full_input_ids[
                         :, : -self.config.num_nextn_predict_layers

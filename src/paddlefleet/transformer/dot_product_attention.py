@@ -597,24 +597,26 @@ class CPDotProductAttention(FleetLayer):
                 axis=-1,
             )
         elif attn_mask_startend_row_indices.shape[-1] == 2:
-            b, k_heads, k_seqlen, _ = attn_mask_startend_row_indices.shape
-            append_indices = paddle.to_tensor(
-                np.arange(seq_len),
-                dtype=attn_mask_startend_row_indices.dtype,
-            )
-            append_indices = append_indices.reshape(1, 1, seq_len, 1)
-            append_indices_expand0 = append_indices.expand(
-                b, k_heads, k_seqlen, 1
-            )
-            append_indices_expand1 = append_indices_expand0.clone()
-            attn_mask_startend_row_indices = paddle.concat(
-                [
-                    attn_mask_startend_row_indices,
-                    append_indices_expand0,
-                    append_indices_expand1,
-                ],
-                axis=-1,
-            )
+            # Not open gpt_model_use_experimental_version, attn_mask_startend_row_indices need extra operations.
+            if not self.config.gpt_model_use_experimental_version:
+                b, k_heads, k_seqlen, _ = attn_mask_startend_row_indices.shape
+                append_indices = paddle.to_tensor(
+                    np.arange(seq_len),
+                    dtype=attn_mask_startend_row_indices.dtype,
+                )
+                append_indices = append_indices.reshape(1, 1, seq_len, 1)
+                append_indices_expand0 = append_indices.expand(
+                    b, k_heads, k_seqlen, 1
+                )
+                append_indices_expand1 = append_indices_expand0.clone()
+                attn_mask_startend_row_indices = paddle.concat(
+                    [
+                        attn_mask_startend_row_indices,
+                        append_indices_expand0,
+                        append_indices_expand1,
+                    ],
+                    axis=-1,
+                )
         else:
             raise ValueError(
                 "Invalid attention mask shape, when using context parallel, attn_mask_startend_row_indices.shape[-1] must be either 1 or 2"
