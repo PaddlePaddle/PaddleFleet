@@ -272,6 +272,118 @@ class TestRotaryEmbeddingGetFreqsNonRepeated(unittest.TestCase):
         freqs = rope.get_freqs_non_repeated(max_seq_len=32, offset=5)
         self.assertEqual(freqs.shape, [32, 32])
 
+    @patch(
+        "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"
+    )
+    def test_get_freqs_with_1d_position_ids(self, mock_ps):
+        """Test get_freqs_non_repeated with 1D position_ids tensor."""
+        from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+            RotaryEmbedding,
+        )
+
+        mock_ps.get_context_parallel_group.return_value = None
+        rope = RotaryEmbedding(head_dim=64, rotary_percent=1.0)
+
+        # Create 1D position_ids
+        position_ids = paddle.arange(0, 16, dtype="int64")
+        freqs = rope.get_freqs_non_repeated(
+            max_seq_len=32, position_ids=position_ids
+        )
+
+        # Output shape should be [seq_len, dim] = [16, 32]
+        self.assertEqual(freqs.shape, [16, 32])
+        # Verify dtype matches inv_freq.dtype
+        self.assertEqual(freqs.dtype, rope.inv_freq.dtype)
+
+    @patch(
+        "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"
+    )
+    def test_get_freqs_with_2d_position_ids(self, mock_ps):
+        """Test get_freqs_non_repeated with 2D position_ids tensor (takes first row)."""
+        from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+            RotaryEmbedding,
+        )
+
+        mock_ps.get_context_parallel_group.return_value = None
+        rope = RotaryEmbedding(head_dim=64, rotary_percent=1.0)
+
+        # Create 2D position_ids with different rows
+        # First row: [0, 1, 2, 3, ...]
+        # Second row: [10, 11, 12, 13, ...]
+        position_ids = paddle.to_tensor(
+            [
+                paddle.arange(0, 16, dtype="int64"),
+                paddle.arange(10, 26, dtype="int64"),
+            ]
+        )
+        freqs = rope.get_freqs_non_repeated(
+            max_seq_len=32, position_ids=position_ids
+        )
+
+        # Should use first row [0, 1, 2, 3, ...], so output shape is [16, 32]
+        self.assertEqual(freqs.shape, [16, 32])
+        # Verify dtype matches inv_freq.dtype
+        self.assertEqual(freqs.dtype, rope.inv_freq.dtype)
+
+    @patch(
+        "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"
+    )
+    def test_get_freqs_position_ids_dtype_conversion(self, mock_ps):
+        """Test that position_ids is cast to match inv_freq.dtype."""
+        from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+            RotaryEmbedding,
+        )
+
+        mock_ps.get_context_parallel_group.return_value = None
+        rope = RotaryEmbedding(head_dim=64, rotary_percent=1.0)
+
+        # Create position_ids with different dtype (int64)
+        position_ids_1d = paddle.arange(0, 8, dtype="int64")
+        freqs_1d = rope.get_freqs_non_repeated(
+            max_seq_len=16, position_ids=position_ids_1d
+        )
+        self.assertEqual(freqs_1d.dtype, rope.inv_freq.dtype)
+
+        # Same for 2D
+        position_ids_2d = paddle.to_tensor([paddle.arange(0, 8, dtype="int64")])
+        freqs_2d = rope.get_freqs_non_repeated(
+            max_seq_len=16, position_ids=position_ids_2d
+        )
+        self.assertEqual(freqs_2d.dtype, rope.inv_freq.dtype)
+
+    @patch(
+        "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"
+    )
+    def test_get_freqs_position_ids_with_interpolation(self, mock_ps):
+        """Test position_ids with seq_len_interpolation_factor."""
+        from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+            RotaryEmbedding,
+        )
+
+        mock_ps.get_context_parallel_group.return_value = None
+        rope = RotaryEmbedding(
+            head_dim=64,
+            rotary_percent=1.0,
+            seq_len_interpolation_factor=2.0,
+        )
+
+        # Create position_ids
+        position_ids = paddle.arange(0, 16, dtype="int64")
+        freqs = rope.get_freqs_non_repeated(
+            max_seq_len=32, position_ids=position_ids
+        )
+
+        # With interpolation factor 2.0, positions are scaled by 1/2
+        # Output shape should still be [16, 32]
+        self.assertEqual(freqs.shape, [16, 32])
+        # Values should be different from no-interpolation case
+        rope_no_interp = RotaryEmbedding(head_dim=64, rotary_percent=1.0)
+        freqs_no_interp = rope_no_interp.get_freqs_non_repeated(
+            max_seq_len=32, position_ids=position_ids
+        )
+        # Frequencies should differ due to interpolation
+        self.assertFalse(paddle.allclose(freqs, freqs_no_interp))
+
 
 class TestRotaryEmbeddingApplyScaling(unittest.TestCase):
     """Tests for RotaryEmbedding._apply_scaling method."""
