@@ -865,7 +865,7 @@ jobs:
       - name: GLM4.5 sft cp
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
