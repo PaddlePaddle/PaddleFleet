@@ -193,7 +193,7 @@ class MultiLatentAttention(Attention):
             self.rotary_pos_emb = RotaryEmbedding(
                 self.config.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
-                rotary_percent=self.config.rotary_percent,
+                rotary_percent=1.0,
                 rotary_base=self.config.rope_theta,
                 cp_group=self.pg_collection.cp,
             )

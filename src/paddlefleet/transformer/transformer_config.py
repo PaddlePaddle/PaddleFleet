@@ -702,6 +702,12 @@ class TransformerConfig(ModelParallelConfig):
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
 
+    moe_topk_fusion: bool = False
+    """If True, use Triton fused MoE TopK kernel for expert selection."""
+
+    routing_map_fusion: bool = False
+    """If True, use Triton fused routing map kernel for MoE routing."""
+
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
         # DSA field mapping

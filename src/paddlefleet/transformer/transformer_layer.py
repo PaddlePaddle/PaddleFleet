@@ -953,7 +953,6 @@ class TransformerLayer(nn.Layer):
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         if isinstance(self.mlp, MoELayer):
-            logger.info(f"fp8 quant weight for mlp {type(self.mlp)}")
             self.mlp.fp8_quant_weight(
                 batch_mode=batch_mode, quant_transpose=quant_transpose
             )

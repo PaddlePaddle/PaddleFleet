@@ -14,6 +14,9 @@
 
 """Utilities for Triton ops: torch compat check and conditional dispatch."""
 
+from functools import cache
+from importlib.metadata import PackageNotFoundError, distribution
+
 import paddle
 
 
@@ -42,3 +45,63 @@ def dispatch_to(dispatch_fn, *, cond=None):
         return wrapper
 
     return decorator
+
+
+@cache
+def _is_package_installed(dist_name: str) -> bool:
+    """Check whether a package is installed."""
+    try:
+        distribution(dist_name)
+        return True
+    except PackageNotFoundError:
+        return False
+
+
+# Initialize the Paddle Triton driver (only when supported).
+_paddle_driver = None
+if _is_package_installed("torch") and paddle.is_compiled_with_cuda():
+    try:
+        with paddle.use_compat_guard(enable=True, silent=True):
+            from triton.runtime.driver import _create_driver
+
+            _paddle_driver = _create_driver()
+    except Exception:
+        pass
+
+
+def swap_driver_guard(fn):
+    """
+    Driver-switch guard: ensure the Triton kernel uses the correct Paddle
+    driver.
+    """
+    from triton.runtime.driver import driver
+
+    def wrapped_fn(*args, **kwargs):
+        if _paddle_driver is not None:
+            driver.set_active(_paddle_driver)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if _paddle_driver is not None:
+                driver.reset_active()
+
+    return wrapped_fn
+
+
+def enable_compat_on_triton_kernel(triton_kernel):
+    """
+    Triton kernel compatibility decorator.
+    Automatically handles the driver switch between Paddle and Triton so the
+    Triton kernel runs correctly within a PaddlePaddle environment.
+    """
+    if not paddle.is_compiled_with_cuda():
+        return triton_kernel
+
+    class WrappedTritonKernel:
+        def __init__(self, kernel):
+            self.kernel = kernel
+
+        def __getitem__(self, index):
+            return swap_driver_guard(self.kernel[index])
+
+    return WrappedTritonKernel(triton_kernel)

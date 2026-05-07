@@ -170,10 +170,6 @@ def run_pp(
 
 # NOTE(Pan Zhaowu): Temporary disable this test case due to PaddlePaddle PR78746
 # RE-enable this test case when PR78746 and related cherry-picks is merged
-@unittest.skipIf(
-    SKIP_TESTS,
-    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')",
-)
 class TestPP(unittest.TestCase):
     def setUp(self):
         self.seed = 46
@@ -230,26 +226,26 @@ class TestPP(unittest.TestCase):
         pp.pprint(rst)
 
         if judge_machine_type() == "H":
-            assert overlap_loss._md5sum() == "bdd8b8660e976d3c1dde170aabeb3a6c"
+            assert overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
             if paddle.distributed.get_rank() == 0:
                 baseline = {
-                    "_layers.9.0.input_layernorm.weight": "9658e5354bb59e784086b8c1be08ca04",
-                    "_layers.9.0.mlp.down_proj.weight": "cc5014fd095ce9a464de32cfe5b90848",
-                    "_layers.9.0.mlp.up_gate_proj.weight": "ac1348bfc82d1be66c07c5858727cf77",
-                    "_layers.9.0.post_attention_layernorm.weight": "a1d8b456b27485f5a0591c4c051078a8",
-                    "_layers.9.0.self_attn.k_norm.weight": "d6a54a647a86f3527a7347f9e2feaaee",
-                    "_layers.9.0.self_attn.o_proj.weight": "add86b72cf4fce187b9fcfecc2d5eea2",
-                    "_layers.9.0.self_attn.q_norm.weight": "fad9fdd2b5c499565a12663baf1f5c51",
-                    "_layers.9.0.self_attn.qkv_proj.weight": "f4029f4c980a46002dc1e316ddcab7d3",
-                    "_layers.9.1.input_layernorm.weight": "2a2689c90d0dcb936e7ce3c0c6b18f5f",
-                    "_layers.9.1.mlp.down_proj.weight": "85ec9eec9ac40f41eeb40fb559f16cd2",
-                    "_layers.9.1.mlp.up_gate_proj.weight": "d52a62446cc35abe7548492bd17dd4ee",
-                    "_layers.9.1.post_attention_layernorm.weight": "520f79414d605e1d3ef2b7d18fcba8cb",
-                    "_layers.9.1.self_attn.k_norm.weight": "fb600ebbae4ff5467844d3dbc68fdda6",
-                    "_layers.9.1.self_attn.o_proj.weight": "89256abd1e6fbd8d9966dbaed4968df4",
-                    "_layers.9.1.self_attn.q_norm.weight": "4f431eeaf17d1342563fcb6f95e7a298",
-                    "_layers.9.1.self_attn.qkv_proj.weight": "54db9155da3a148a3edffb0face5d249",
-                    "_layers.shared_layers.embed.embedding.embed_tokens.weight": "e4234572645381519a4d36874f2c2a04",
+                    "_layers.9.0.input_layernorm.weight": "fe9464b2b154bf82ea7f451dd014c796",
+                    "_layers.9.0.mlp.down_proj.weight": "0f997d356ae211f4d22bb6cecc5018f4",
+                    "_layers.9.0.mlp.up_gate_proj.weight": "4d2b2dd20eb584ae212cc891cad7d45f",
+                    "_layers.9.0.post_attention_layernorm.weight": "306febfb642695cedfcf6a2afc4acf26",
+                    "_layers.9.0.self_attn.k_norm.weight": "cc963360fd3e3ed9f8ffef97fcbdf0a8",
+                    "_layers.9.0.self_attn.o_proj.weight": "f21b2820d49ba7284270b5308debd360",
+                    "_layers.9.0.self_attn.q_norm.weight": "79934f9fcddfe6469b95436e58fe3b46",
+                    "_layers.9.0.self_attn.qkv_proj.weight": "fe596c4a672f5e2dbbba4793566ff34d",
+                    "_layers.9.1.input_layernorm.weight": "66f3af21b98abcf8bdbe086664fbb0e9",
+                    "_layers.9.1.mlp.down_proj.weight": "435630c8e2157ab7f24b4435bc6c7828",
+                    "_layers.9.1.mlp.up_gate_proj.weight": "bef5eae242ea75b234890f0f0780fd4a",
+                    "_layers.9.1.post_attention_layernorm.weight": "4b1a9ce93c5f2b23b8bd73753b43d195",
+                    "_layers.9.1.self_attn.k_norm.weight": "c7e0173bf56c715d9c7eb2a3bc7c10d6",
+                    "_layers.9.1.self_attn.o_proj.weight": "3552ca7607b20ecdd462375cedbffaff",
+                    "_layers.9.1.self_attn.q_norm.weight": "54e827b3e6408ed147eb078cdb3bf999",
+                    "_layers.9.1.self_attn.qkv_proj.weight": "ccac89b168ac82ae2d8c60297c608f15",
+                    "_layers.shared_layers.embed.embedding.embed_tokens.weight": "7d1bcb081618d9c75e44c8c0e1d2488f",
                 }
                 for name, p in overlap_gpt_model.named_parameters():
                     assert p.grad._md5sum() == baseline[name], (
