@@ -154,6 +154,8 @@ class RotaryEmbedding(nn.Layer):
         If position_ids is provided, it will be used instead of generating
         positions from 0..max_seq_len-1, which is useful for inference with KV cache.
         """
+        print("offset: ", offset)
+        print("position_ids: ", position_ids)
         if position_ids is not None:
             seq = position_ids[0] if position_ids.ndim == 2 else position_ids
             seq = seq.astype(self.inv_freq.dtype)
