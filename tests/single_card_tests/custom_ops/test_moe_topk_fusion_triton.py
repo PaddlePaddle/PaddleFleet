@@ -226,20 +226,13 @@ class TestMoETopkFusionTriton(unittest.TestCase):
 def _router_branch_fused(
     gates, top_idx, input_ids_none_zero_mask, input_ids=None
 ):
-    from paddlefleet.ops.triton_ops import routing_map_fusion_forward
-
-    if input_ids_none_zero_mask is not None and input_ids is not None:
-        fused_input_ids = input_ids.reshape([-1])
-    else:
-        fused_input_ids = None
-    fused_mask, top_idx, fused_dispatch_mask = routing_map_fusion_forward(
-        gates,
-        top_idx,
-        input_ids=fused_input_ids,
-        is_pure_text_line=None,
+    from paddlefleet.transformer.moe.moe_router import (
+        _apply_routing_map_fusion,
     )
-    mask = fused_mask.cast(gates.dtype)
-    return mask, top_idx, fused_dispatch_mask
+
+    return _apply_routing_map_fusion(
+        gates, top_idx, input_ids_none_zero_mask, input_ids
+    )
 
 
 def _router_branch_reference(gates, top_idx, input_ids_none_zero_mask):

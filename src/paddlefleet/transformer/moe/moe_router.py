@@ -113,6 +113,25 @@ def gate_detach_matmul(
     return score
 
 
+def _apply_routing_map_fusion(
+    gates, top_idx, input_ids_none_zero_mask, input_ids
+):
+    from paddlefleet.ops.triton_ops import routing_map_fusion_forward
+
+    if input_ids_none_zero_mask is not None and input_ids is not None:
+        fused_input_ids = input_ids.reshape([-1])
+    else:
+        fused_input_ids = None
+    fused_mask, top_idx, exp_counts = routing_map_fusion_forward(
+        gates,
+        top_idx,
+        input_ids=fused_input_ids,
+        is_pure_text_line=None,
+    )
+    mask = fused_mask.cast(gates.dtype)
+    return mask, top_idx, exp_counts
+
+
 class StandardMoERouter(nn.Layer):
     def __init__(
         self,
@@ -782,20 +801,9 @@ class TopKRouter(StandardMoERouter):
             l_zloss = None
 
         if getattr(self.config, "routing_map_fusion", False):
-            # Use the Triton-fused routing_map_fusion_forward kernel
-            from paddlefleet.ops.triton_ops import routing_map_fusion_forward
-
-            if input_ids_none_zero_mask is not None and input_ids is not None:
-                fused_input_ids = input_ids.reshape([-1])
-            else:
-                fused_input_ids = None
-            fused_mask, top_idx, exp_counts = routing_map_fusion_forward(
-                gates,
-                top_idx,
-                input_ids=fused_input_ids,
-                is_pure_text_line=None,
+            mask, top_idx, exp_counts = _apply_routing_map_fusion(
+                gates, top_idx, input_ids_none_zero_mask, input_ids
             )
-            mask = fused_mask.cast(gates.dtype)
         else:
             mask = paddle.zeros_like(gates).put_along_axis(
                 top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
