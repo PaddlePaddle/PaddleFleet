@@ -88,6 +88,7 @@ def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
     )
 
     if get_context_parallel_world_size() > 1:
+        # eb数据流下，q, k, v的shape在sw维度为 s/cp，但是这里需要对于全的s进行旋转位置编码，所以需要将s维度扩展为s*cp
         seq_len = seq_len * get_context_parallel_world_size()
 
     # position ids: [0, 1, ..., seq_len-1]
@@ -772,7 +773,9 @@ class MLASelfAttention(MultiLatentAttention):
                     q_len = q.size(1)
                 # rotary_pos_emb: squeeze [1, seq_len, 1, headdim]
 
-                if (
+                if get_context_parallel_world_size() > 1:
+                    rotary_pos_emb = ContextParallelScatterOp.apply(rotary_pos_emb, axis=1)
+                elif (
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
                 ):

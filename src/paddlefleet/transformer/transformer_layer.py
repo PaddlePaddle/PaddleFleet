@@ -476,7 +476,7 @@ class TransformerLayer(nn.Layer):
             ):
                 full_input_ids = dict_args["input_ids"]
                 
-                # cp场景下，hidden_states shape为[b, s/cp, h]，真实seq_lens需要乘上cp大小。
+                # cp场景下，hidden_states shape为[b, s/cp, h]，真实seq_lens需要乘上cp大小。否则就会因为input_ids shape为[b, s]将input_ids进行截取。
                 seq_lens = hidden_states.shape[ 0 if self.config.sequence_parallel else 1]
                 if get_context_parallel_world_size() > 1:
                     seq_lens *= get_context_parallel_world_size()

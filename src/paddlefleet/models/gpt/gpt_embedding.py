@@ -79,7 +79,7 @@ class GPTEmbedding(FleetLayer):
         )
         self.sequence_parallel = self.config.sequence_parallel
 
-        if self.config.gpt_model_use_experimental_version:
+        if self.config.experimental_dataflow:
             mark_context_parallel_parameter_disable_scale_grad(self.embedding.embed_tokens)
 
         self.multimodal_embedding = config.multimodal_embedding
@@ -212,7 +212,8 @@ class GPTEmbedding(FleetLayer):
                 inputs_embeds_ori = inputs_embeds
                 batch_size, seq_length, hidden_size = inputs_embeds.shape
 
-                if get_context_parallel_world_size() > 1 and self.config.gpt_model_use_experimental_version:
+                if get_context_parallel_world_size() > 1 and self.config.experimental_dataflow:
+                    # experimental_dataflow标识EB数据流，eb数据流的CP切分在embeding中进行。
                     inputs_embeds = ContextParallelScatterOp.apply(inputs_embeds, axis=1)
 
                 if self.sequence_parallel:

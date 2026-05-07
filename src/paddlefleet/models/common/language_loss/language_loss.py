@@ -380,7 +380,7 @@ class LanguageLoss(FleetLayer):
         return loss
 
     def _forward(self, logits: Tensor | tuple, labels: Tensor):
-        if get_context_parallel_world_size() > 1 and self.config.gpt_model_use_experimental_version:
+        if get_context_parallel_world_size() > 1 and self.config.experimental_dataflow:
             # 在ernie数据流且开启cp下，labels的shape为[b, s+k]，需要在计算loss前进行cp切分。
             labels = ContextParallelScatterOp.apply(labels, axis=1)
         if (
@@ -422,7 +422,7 @@ class LanguageLoss(FleetLayer):
                         # which applies line-wise loss.
 
                         if get_context_parallel_world_size() > 1:
-                            # 在ernie数据流且开启cp下，labels的shape为[b, s+k]，需要在计算loss前进行cp切分。
+                            # 在ernie数据流且开启cp下，labels的shape为[b, s]，由于不使用_forward进行loss计算，需要在计算loss前进行cp切分。
                             labels_cur_depth = ContextParallelScatterOp.apply(labels_cur_depth, axis=1)
 
                         loss_matrix_cur_depth = self.loss_func(
@@ -447,6 +447,7 @@ class LanguageLoss(FleetLayer):
                         else:
                             loss_cur_depth = loss_matrix_cur_depth.sum() * 0.0
                     else:
+                        # 非精度对齐模式下，label在_forward中进行切分。
                         loss_cur_depth = self._forward(
                             logits_cur_depth,
                             labels_cur_depth,

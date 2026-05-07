@@ -597,8 +597,10 @@ class CPDotProductAttention(FleetLayer):
                 axis=-1,
             )
         elif attn_mask_startend_row_indices.shape[-1] == 2:
-            # Not open gpt_model_use_experimental_version, attn_mask_startend_row_indices need extra operations.
-            if not self.config.gpt_model_use_experimental_version:
+            # 如果是eb数据流，传入的attn_mask_starend_row_indices就是处理好的，不需要再进行修改。
+            if self.config.experimental_dataflow:
+                pass
+            else:
                 b, k_heads, k_seqlen, _ = attn_mask_startend_row_indices.shape
                 append_indices = paddle.to_tensor(
                     np.arange(seq_len),
