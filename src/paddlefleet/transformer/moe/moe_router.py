@@ -114,7 +114,7 @@ def gate_detach_matmul(
 
 
 def _apply_routing_map_fusion(
-    gates, top_idx, input_ids_none_zero_mask, input_ids
+    gates, top_idx, input_ids_none_zero_mask, input_ids=None
 ):
     from paddlefleet.ops.triton_ops import routing_map_fusion_forward
 

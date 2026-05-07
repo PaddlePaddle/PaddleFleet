@@ -17,6 +17,8 @@ import unittest
 import numpy as np
 import paddle
 
+from paddlefleet.transformer.moe.moe_router import _apply_routing_map_fusion
+
 
 def reference_topk(
     gate_probs,
@@ -223,18 +225,6 @@ class TestMoETopkFusionTriton(unittest.TestCase):
         self.assertEqual(triton_probs.dtype, paddle.bfloat16)
 
 
-def _router_branch_fused(
-    gates, top_idx, input_ids_none_zero_mask, input_ids=None
-):
-    from paddlefleet.transformer.moe.moe_router import (
-        _apply_routing_map_fusion,
-    )
-
-    return _apply_routing_map_fusion(
-        gates, top_idx, input_ids_none_zero_mask, input_ids
-    )
-
-
 def _router_branch_reference(gates, top_idx, input_ids_none_zero_mask):
     mask = paddle.zeros_like(gates).put_along_axis(
         top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
@@ -264,7 +254,7 @@ class TestRoutingMapFusionRouterBranch(unittest.TestCase):
         gates, top_idx = self._make_inputs("float32")
 
         paddle.enable_compat(scope={"triton"}, silent=True)
-        fused_mask, fused_top_idx, dispatch_mask = _router_branch_fused(
+        fused_mask, fused_top_idx, dispatch_mask = _apply_routing_map_fusion(
             gates, top_idx.clone(), None
         )
         paddle.disable_compat()
@@ -294,8 +284,10 @@ class TestRoutingMapFusionRouterBranch(unittest.TestCase):
         valid_mask = (input_ids != 0).reshape([-1, 1]).cast("float32")
 
         paddle.enable_compat(scope={"triton"}, silent=True)
-        fused_mask, fused_top_idx, fused_dispatch_mask = _router_branch_fused(
-            gates, top_idx.clone(), valid_mask, input_ids=input_ids
+        fused_mask, fused_top_idx, fused_dispatch_mask = (
+            _apply_routing_map_fusion(
+                gates, top_idx.clone(), valid_mask, input_ids=input_ids
+            )
         )
         paddle.disable_compat()
         ref_mask, ref_top_idx = _router_branch_reference(
@@ -318,8 +310,8 @@ class TestRoutingMapFusionRouterBranch(unittest.TestCase):
         gates, top_idx = self._make_inputs("bfloat16")
 
         paddle.enable_compat(scope={"triton"}, silent=True)
-        fused_mask, fused_top_idx, fused_dispatch_mask = _router_branch_fused(
-            gates, top_idx.clone(), None
+        fused_mask, fused_top_idx, fused_dispatch_mask = (
+            _apply_routing_map_fusion(gates, top_idx.clone(), None)
         )
         paddle.disable_compat()
         ref_mask, ref_top_idx = _router_branch_reference(
