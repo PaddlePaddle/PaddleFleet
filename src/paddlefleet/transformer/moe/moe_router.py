@@ -781,14 +781,31 @@ class TopKRouter(StandardMoERouter):
         else:
             l_zloss = None
 
-        mask = paddle.zeros_like(gates).put_along_axis(
-            top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
-        )
-        if input_ids_none_zero_mask is not None:
-            valid_mask = input_ids_none_zero_mask
-            mask = mask * valid_mask.cast(mask.dtype)
-            # -1 means neither participates in routing nor expert calculation
-            top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
+        if getattr(self.config, "routing_map_fusion", False):
+            # Use the Triton-fused routing_map_fusion_forward kernel
+            from paddlefleet.ops.triton_ops import routing_map_fusion_forward
+
+            if input_ids_none_zero_mask is not None and input_ids is not None:
+                fused_input_ids = input_ids.reshape([-1])
+            else:
+                fused_input_ids = None
+            fused_mask, top_idx, exp_counts = routing_map_fusion_forward(
+                gates,
+                top_idx,
+                input_ids=fused_input_ids,
+                is_pure_text_line=None,
+            )
+            mask = fused_mask.cast(gates.dtype)
+        else:
+            mask = paddle.zeros_like(gates).put_along_axis(
+                top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
+            )
+            if input_ids_none_zero_mask is not None:
+                valid_mask = input_ids_none_zero_mask
+                mask = mask * valid_mask.cast(mask.dtype)
+                # -1 means neither participates in routing nor expert calculation
+                top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
+            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
 
         # norm
         if self.norm_topk_prob:
@@ -818,7 +835,6 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(top_gate, "topk_weights_normed", self._layer_number)
 
         if self.topk_method == "noaux_tc":
-            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
             with paddle.no_grad():
                 self.expert_usage += exp_counts
 
