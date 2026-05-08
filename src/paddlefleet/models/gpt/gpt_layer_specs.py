@@ -174,10 +174,10 @@ def get_attention_spec(
         )
     elif attention_layer_type == "multi_latent_attention":
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-        # Decide attention class: DSA variant if index_n_heads is configured
+        # Decide attention class: DSA variant if dsa_index_n_heads is configured
         use_dsa = (
             config is not None
-            and getattr(config, "index_n_heads", None) is not None
+            and getattr(config, "dsa_index_n_heads", None) is not None
         )
         attn_cls = MLASelfAttentionWithDSA if use_dsa else MLASelfAttention
         # Gated attention
