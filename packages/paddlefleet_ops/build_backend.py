@@ -54,28 +54,29 @@ def get_git_commit_hash(cwd: Path | None) -> str:
 
 
 def _generate_version_info():
-    """Generate version info file with git metadata."""
-    version_file = _workspace_root / "version.txt"
-    with open(version_file) as f:
-        version = f.read().strip()
+    """Generate version info file from ops_required_version.txt.
 
-    # Get git info
-    git_commit_hash = get_git_commit_hash(_workspace_root)
-
-    # Create version info in the source tree
+    The version is developer-maintained in ops_required_version.txt
+    (e.g. 0.3.0.dev1, 0.3.0.dev2, ...).  Developers bump it manually
+    whenever paddlefleet_ops code changes, as part of their PR.
+    CI release builds may override via PADDLEFLEET_VERSION env var.
+    """
     version_py = _pkg_root / "src" / "paddlefleet_ops" / "version.py"
+    ops_req_file = _workspace_root / "ops_required_version.txt"
 
-    # If file exists and not in git repo (installing from sdist), keep existing file
     if version_py.exists() and not is_git_repo():
         logger.info(
             "The version.py file already exists (not in git repo), keeping it"
         )
-        return version
+        return ops_req_file.read_text().strip()
 
-    # In git repo (editable) or file doesn't exist, create/update it
-    final_version = f"{version}.dev{git_commit_hash[:8]}"
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
+    else:
+        final_version = ops_req_file.read_text().strip()
+
+    git_commit_hash = get_git_commit_hash(_workspace_root)
+
     with open(version_py, "w") as f:
         f.write(
             "# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.\n"

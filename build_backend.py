@@ -27,6 +27,7 @@ rather than an unconstrained bare name.
 import logging
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from setuptools import build_meta as orig  # type: ignore[import-untyped]
@@ -61,11 +62,18 @@ def get_git_commit_hash(cwd: Path) -> str:
 
 
 def _get_ops_version() -> str | None:
-    """Read the paddlefleet-ops version from the workspace ops package.
+    """Read the required paddlefleet-ops version.
 
-    Returns the version string (e.g. '0.3.0.dev20260415') if available,
-    or None when building outside the workspace (e.g. from an sdist).
+    Prefers ``ops_required_version.txt`` (updated by paddlefleet_ops build,
+    decouples build cadence) over reading the ops source version.py directly.
+    Falls back to the ops source tree when building both packages together in
+    the same workspace without a pre-existing ops_required_version.txt.
     """
+    ops_req_file = _pkg_root / "ops_required_version.txt"
+    if ops_req_file.exists():
+        version = ops_req_file.read_text().strip()
+        if version:
+            return version
     if not _ops_version_py.exists():
         return None
     globs: dict = {}
@@ -88,9 +96,11 @@ def _generate_version_info() -> str:
         logger.info("version.py already exists (not in git repo), keeping it")
         return version
 
-    final_version = f"{version}.dev{git_commit_hash[:8]}"
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
+    else:
+        date_str = datetime.now().strftime("%Y%m%d")
+        final_version = f"{version}.dev{date_str}"
 
     with open(version_py, "w") as f:
         f.write(

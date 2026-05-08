@@ -151,7 +151,7 @@ if paddle.is_compiled_with_cuda():
         _FLASH_MASK_AVAILABLE = True
     if (
         sys.version_info >= (3, 12)
-        and paddle.cuda.get_device_capability()[0] == 9
+        and paddle.cuda.get_device_capability()[0] >= 9
         and _cuda_version >= (12, 9)
     ):
         _SONIC_MOE_AVAILABLE = True
