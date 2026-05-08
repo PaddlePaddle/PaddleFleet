@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .fuse_stack_ue8m0_scale_transpose import (
+    FuseStackUe8m0ScaleTransposeTriton,
+    fuse_stack_ue8m0_scale_transpose,
+)
 from .moe_topk_fusion import MoETopkFusion, routing_map_fusion_forward
 from .rms_norm_fusion import RMSNormFusionTriton
 from .sigmoid_gate_fusion import SigmoidGateFusionTriton
@@ -21,4 +25,6 @@ __all__ = [
     "MoETopkFusion",
     "routing_map_fusion_forward",
     "SigmoidGateFusionTriton",
+    "FuseStackUe8m0ScaleTransposeTriton",
+    "fuse_stack_ue8m0_scale_transpose",
 ]

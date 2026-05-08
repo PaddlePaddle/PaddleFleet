@@ -96,7 +96,9 @@ __all__ = [
 FP8_ALIGN = 128
 
 
-def _get_fp8_weight_and_scale(weight, transpose=False, num_expert=None):
+def _get_fp8_weight_and_scale(
+    weight, transpose=False, num_expert=None, use_ue8m0=None
+):
     """_get_fp8_weight_and_scale"""
     fp8_weight, fp8_scale = (
         weight.fp8_weight_stacked,
@@ -131,9 +133,14 @@ def _get_fp8_weight_and_scale(weight, transpose=False, num_expert=None):
                     .contiguous()
                 )
 
+            transpose_scale = (
+                weight.fp8_scale_stacked_transpose
+                if use_ue8m0
+                else transpose_tensor(fp8_scale)
+            )
             fp8_weight, fp8_scale = (
                 transpose_tensor(fp8_weight),
-                transpose_tensor(fp8_scale),
+                transpose_scale,
             )
 
     return fp8_weight, fp8_scale
@@ -171,7 +178,10 @@ def fused_stack_quant(
 ):
     if hasattr(expert_weight_list[0], "fp8_weight_stacked"):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], transpose=transpose, num_expert=num_expert
+            expert_weight_list[0],
+            transpose=transpose,
+            num_expert=num_expert,
+            use_ue8m0=use_ue8m0,
         )
     else:
         w, scale = fused_stack_quant_without_cache(

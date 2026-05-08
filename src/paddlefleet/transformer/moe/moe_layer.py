@@ -1111,6 +1111,18 @@ class MoELayer(nn.Layer):
             else:
                 weight_obj.fp8_weight_stacked_transpose = None
                 weight_obj.fp8_scale_stacked_transpose = None
+                if self.use_ue8m0:
+                    from paddlefleet.ops.triton_ops import (
+                        fuse_stack_ue8m0_scale_transpose,
+                    )
+
+                    converted_scale = fuse_stack_ue8m0_scale_transpose(
+                        fp8_scale,
+                        len(weight_list),
+                        weight_list[0].shape[0],
+                        weight_list[0].shape[1],
+                    )
+                    weight_obj.fp8_scale_stacked_transpose = converted_scale
 
         if hasattr(self, "grouped_gemm_experts"):
             if batch_mode:
