@@ -261,6 +261,7 @@ class MlpNode:
         moe_grouped_gemm=False,
         use_auto_subbatch=False,
         moe_subbatch_diag=False,
+        dw_p2p_overlap=False,
     ):
         """
         Constructor
@@ -327,6 +328,7 @@ class MlpNode:
                     use_fp8_mlp=use_fp8_mlp,
                     moe_deep_gemm=moe_deep_gemm,
                     moe_grouped_gemm=moe_grouped_gemm,
+                    dw_p2p_overlap=dw_p2p_overlap,
                 )
                 for expert_id in range(len(custom_map.experts))
             ]
@@ -340,6 +342,7 @@ class MlpNode:
                 use_fp8_mlp=use_fp8_mlp,
                 moe_deep_gemm=moe_deep_gemm,
                 moe_grouped_gemm=moe_grouped_gemm,
+                dw_p2p_overlap=dw_p2p_overlap,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -1793,6 +1796,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         fp8_dispatched_handle=None,
         use_auto_subbatch=False,
         moe_subbatch_diag=False,
+        dw_p2p_overlap=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -1820,6 +1824,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             moe_grouped_gemm=moe_grouped_gemm,
             use_auto_subbatch=use_auto_subbatch,
             moe_subbatch_diag=moe_subbatch_diag,
+            dw_p2p_overlap=dw_p2p_overlap,
         )
 
         if fp8_dispatched_handle is not None:

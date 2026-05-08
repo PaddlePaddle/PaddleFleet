@@ -21,7 +21,10 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from pathlib import Path
+
+from packaging.version import Version
 
 import backends
 
@@ -240,9 +243,19 @@ def get_special_build_deps():
             )
         return deps
     elif backends.IS_XPU:
-        deps = [
-            "paddlepaddle-xpu>=3.3.0",
-        ]
+        try:
+            xpu_version = get_pkg_version("paddlepaddle-xpu")
+        except PackageNotFoundError:
+            xpu_version = None
+
+        if xpu_version is not None:
+            if Version(xpu_version) < Version("3.3.0"):
+                raise ValueError(
+                    f"paddlepaddle-xpu {xpu_version} is too old, >=3.3.0 required."
+                )
+            deps = [f"paddlepaddle-xpu=={xpu_version}"]
+        else:
+            deps = ["paddlepaddle-xpu>=3.3.0"]
         return deps
     else:
         return []

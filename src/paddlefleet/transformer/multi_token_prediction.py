@@ -607,20 +607,12 @@ class MultiTokenPredictionLayer(FleetLayer):
             # New dataflow: get the mask for this layer's depth, shape [B, 1, S, 1]
             mtp_mask = None
             if mtp_startend_row_indices_all is not None:
-                if self.config.gpt_model_use_experimental_version:
-                    mtp_mask = mtp_startend_row_indices_all[
-                        :,
-                        self.layer_number : self.layer_number + 1,
-                        :,
-                        :,
-                    ]
-                else:
-                    mtp_mask = mtp_startend_row_indices_all[
-                        :,
-                        self.layer_number : self.layer_number + 1,
-                        :,
-                        :1,
-                    ]
+                mtp_mask = mtp_startend_row_indices_all[
+                    :,
+                    self.layer_number : self.layer_number + 1,
+                    :,
+                    :,
+                ]
                 dict_args["attn_mask_startend_row_indices"] = mtp_mask
 
             # New dataflow: get hidden inputs mask for this layer's depth, shape [B, 1, S]

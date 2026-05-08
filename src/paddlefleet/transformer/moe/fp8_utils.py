@@ -82,6 +82,12 @@ try:
 except ImportError:
     fused_transpose_wlch_split_quant = None
 
+from functools import partial
+
+from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
+    WeightGradStore,
+)
+
 __all__ = [
     "ExpertsGroupGemmContiguousNode",
 ]
@@ -312,6 +318,7 @@ class ExpertsGroupGemmContiguousNode:
         use_fp8_mlp=True,
         moe_deep_gemm=False,
         moe_grouped_gemm=False,
+        dw_p2p_overlap=False,
     ):
         """
             Initializes the experts group gemm contiguous node.
@@ -353,6 +360,7 @@ class ExpertsGroupGemmContiguousNode:
         self.moe_deep_gemm = moe_deep_gemm
         self.moe_grouped_gemm = moe_grouped_gemm
         self.is_split_group_gemm = not moe_grouped_gemm
+        self.dw_p2p_overlap = dw_p2p_overlap
 
     def cached_tensors(self):
         """
@@ -1544,7 +1552,7 @@ class ExpertsGroupGemmContiguousNode:
         if a2a_async_fn is None:
             # dw1
             if self.use_bf16_gemm_weight_grad:
-                self.bf16_weight_grad(do1, None, expert_w1)
+                self.bf16_weight_grad(do1, None, expert_w1, self.dw_p2p_overlap)
             else:
                 self.bwd_gate_up_weight(do1, None, expert_w1, clear_input=True)
             # 不调用 _record_stream，直接 None。
@@ -1601,7 +1609,7 @@ class ExpertsGroupGemmContiguousNode:
         self.reset_state()
         return dx, probs_grad
 
-    def bf16_weight_grad(self, dy, x, weights):
+    def bf16_weight_grad(self, dy, x, weights, p2p_overlap=False):
         """
         BF16 GEMM for weight grad
         """
@@ -1616,20 +1624,76 @@ class ExpertsGroupGemmContiguousNode:
         if self.moe_grouped_gemm and (
             not self.use_fp8_mlp or self.moe_deep_gemm
         ):
+
+            def _compute_weight_grad(
+                x,
+                dy,
+                weights,
+                weight_grad,
+                tokens_per_expert,
+                tokens_per_expert_tensor,
+                overlap_gemm,
+            ):
+                if overlap_gemm:
+                    deep_gemm.set_num_sms(118)
+                    deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+                        x,
+                        dy,
+                        weight_grad,
+                        tokens_per_expert,
+                        tokens_per_expert_tensor,
+                        weight_grad,
+                    )
+                    deep_gemm.set_num_sms(0)
+                else:
+                    deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+                        x,
+                        dy,
+                        weight_grad,
+                        tokens_per_expert,
+                        tokens_per_expert_tensor,
+                        weight_grad,
+                    )
+
+                if (
+                    hasattr(weights, "_apply_backward_hook")
+                    and not weights.stop_gradient
+                ):
+                    weights._apply_backward_hook()
+
             if hasattr(weights, "main_grad"):
                 if weights.main_grad is None:
                     weights.main_grad = paddle.zeros(
                         weights.shape, dtype=paddle.float32
                     )
                 if self.moe_deep_gemm:
-                    paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
-                        a=x,
-                        b=dy,
-                        d=weights.main_grad,
-                        ks=self.tokens_per_expert,
-                        ks_tensor=self.tokens_per_expert_tensor,
-                        c=weights.main_grad,
-                    )
+                    # Use WeightGradStore for deferred execution to overlap with P2P communication
+                    if p2p_overlap:
+                        WeightGradStore.enabled = True
+                        WeightGradStore.put(
+                            partial(
+                                _compute_weight_grad,
+                                x,
+                                dy,
+                                weights,
+                                weights.main_grad,
+                                self.tokens_per_expert,
+                                self.tokens_per_expert_tensor,
+                                p2p_overlap,
+                            )
+                        )
+                        WeightGradStore.enabled = False
+                    else:
+                        _compute_weight_grad(
+                            x,
+                            dy,
+                            weights,
+                            weights.main_grad,
+                            self.tokens_per_expert,
+                            self.tokens_per_expert_tensor,
+                            p2p_overlap,
+                        )
+
                 else:
                     weights_res = paddle.incubate.nn.functional.batched_gemm(
                         x,
@@ -1640,20 +1704,45 @@ class ExpertsGroupGemmContiguousNode:
                     weights.main_grad.add_(
                         weights_res.cast(weights.main_grad.dtype)
                     )
+
+                    if (
+                        hasattr(weights, "_apply_backward_hook")
+                        and not weights.stop_gradient
+                    ):
+                        weights._apply_backward_hook()
+
             else:
                 if weights.grad is None:
                     weights.grad = paddle.zeros(
                         weights.shape, dtype=paddle.float32
                     )
                 if self.moe_deep_gemm:
-                    paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
-                        a=x,
-                        b=dy,
-                        d=weights.grad,
-                        ks=self.tokens_per_expert,
-                        ks_tensor=self.tokens_per_expert_tensor,
-                        c=weights.grad,
-                    )
+                    # Use WeightGradStore for deferred execution to overlap with P2P communication
+                    if p2p_overlap:
+                        WeightGradStore.enabled = True
+                        WeightGradStore.put(
+                            partial(
+                                _compute_weight_grad,
+                                x,
+                                dy,
+                                weights,
+                                weights.grad,
+                                self.tokens_per_expert,
+                                self.tokens_per_expert_tensor,
+                                p2p_overlap,
+                            )
+                        )
+                        WeightGradStore.enabled = False
+                    else:
+                        _compute_weight_grad(
+                            x,
+                            dy,
+                            weights,
+                            weights.grad,
+                            self.tokens_per_expert,
+                            self.tokens_per_expert_tensor,
+                            p2p_overlap,
+                        )
                 else:
                     weights_res = paddle.incubate.nn.functional.batched_gemm(
                         x,
@@ -1662,11 +1751,12 @@ class ExpertsGroupGemmContiguousNode:
                         trans_lhs=True,
                     )
                     weights.grad.add_(weights_res.cast(weights.grad.dtype))
-            if (
-                hasattr(weights, "_apply_backward_hook")
-                and not weights.stop_gradient
-            ):
-                weights._apply_backward_hook()
+
+                    if (
+                        hasattr(weights, "_apply_backward_hook")
+                        and not weights.stop_gradient
+                    ):
+                        weights._apply_backward_hook()
         else:
             start_idx = 0
             for i, n in enumerate(self.tokens_per_expert):
