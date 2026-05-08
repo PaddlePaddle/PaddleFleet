@@ -227,7 +227,7 @@ def get_special_build_deps():
         major = sys.version_info.major
         minor = sys.version_info.minor
         deps = [
-            "paddlepaddle_gpu==3.4.0.post20260429+f2d27632b14",
+            "paddlepaddle_gpu==3.4.0.post20260508+faa93cd616a",
         ]
         # for deep_ep build
         if cuda_major == 12:
