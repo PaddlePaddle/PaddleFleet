@@ -105,11 +105,15 @@ class CustomBdistWheel(_bdist_wheel):
 
 
 def setup_ops_extension():
+    from paddle.base.core import is_compiled_with_onednn
     from paddle.utils.cpp_extension import CUDAExtension, setup
 
     from build_utils import get_cuda_version
 
-    # 定义 NVCC 编译参数
+    # Detect Paddle build config to ensure ABI compatibility
+    paddle_compiled_with_onednn = is_compiled_with_onednn()
+
+    # Define NVCC compile flags
     nvcc_args = [
         "-O3",
         "-U__CUDA_NO_HALF_OPERATORS__",
@@ -128,10 +132,28 @@ def setup_ops_extension():
         "-gencode=arch=compute_100,code=sm_100",
         "-DNDEBUG",
     ]
+
+    # Define PADDLE_WITH_DNNL if Paddle was built with OneDNN,
+    # to ensure ABI compatibility for DenseTensor, etc.
+    if paddle_compiled_with_onednn:
+        nvcc_args.append("-DPADDLE_WITH_DNNL")
+
     cuda_major, cuda_minor = get_cuda_version()
 
     if cuda_major == 12 and cuda_minor < 8:
         nvcc_args = [arg for arg in nvcc_args if "compute_100" not in arg]
+
+    # Add oneDNN include path if Paddle was built with OneDNN,
+    # otherwise Paddle headers that #include "dnnl.hpp" will fail
+    extra_include_dirs = []
+    if paddle_compiled_with_onednn:
+        import paddle
+        paddle_include_dir = os.path.join(os.path.dirname(paddle.__file__), "include")
+        onednn_include_dir = os.path.join(
+            paddle_include_dir, "third_party", "install", "onednn", "include"
+        )
+        if os.path.exists(onednn_include_dir):
+            extra_include_dirs.append(onednn_include_dir)
 
     ext_module = CUDAExtension(
         sources=[
@@ -155,7 +177,7 @@ def setup_ops_extension():
         ],
         include_dirs=[
             os.path.join(os.getcwd(), "src/paddlefleet/_extensions"),
-        ],
+        ] + extra_include_dirs,
         extra_compile_args={
             "cxx": [
                 "-O3",
@@ -163,7 +185,7 @@ def setup_ops_extension():
                 "-Wno-abi",
                 "-fPIC",
                 "-std=c++17",
-            ],
+            ] + (["-DPADDLE_WITH_DNNL"] if paddle_compiled_with_onednn else []),
             "nvcc": nvcc_args,
         },
     )
