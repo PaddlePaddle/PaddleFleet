@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from functools import partial
 from typing import TYPE_CHECKING
 
 import paddle
@@ -30,6 +31,9 @@ if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddle._C_ops import matmul_grad
+from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
+    WeightGradStore,
+)
 
 from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
@@ -38,17 +42,17 @@ from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 # MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
-# Lazy-loaded EC FusedMoETopk Triton kernel for bit-exact alignment
-_FusedMoETopk = None
+# Lazy-loaded MoETopkFusion Triton kernel for bit-exact alignment
+_MoETopkFusion = None
 
 
-def _get_fused_moe_topk():
-    global _FusedMoETopk
-    if _FusedMoETopk is None:
-        from ernie_core.ops.triton_ops.fused_moe_topk import FusedMoETopk
+def _get_moe_topk_fusion():
+    global _MoETopkFusion
+    if _MoETopkFusion is None:
+        from paddlefleet.ops.triton_ops.moe_topk_fusion import MoETopkFusion
 
-        _FusedMoETopk = FusedMoETopk
-    return _FusedMoETopk
+        _MoETopkFusion = MoETopkFusion
+    return _MoETopkFusion
 
 
 _moe_router_logger = logging.getLogger(__name__)
@@ -76,34 +80,101 @@ def _log_moe_md5(tensor, name, layer_idx=None):
 
 
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
+    """
+    FusedGateDetachMatmul
+    """
+
     @staticmethod
-    def forward(ctx, x, w):
+    def forward(ctx, x, w, dw_p2p_overlap=False):
+        """
+        forward
+        """
+        ctx.dw_p2p_overlap = dw_p2p_overlap
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
+        w = w.T
         return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
 
     @staticmethod
     def backward(ctx, y_grad):
+        """
+        backward
+        """
         x, w = ctx.saved_tensor()
         assert ctx.dtype == y_grad.dtype, "dtype not match"
-        x_g, w_g = matmul_grad(
-            x.cast(ctx.dtype),
-            w.cast(ctx.dtype),
-            y_grad,
-            False,
-            False,
-        )
 
-        x_grad = x_g.cast(x.dtype) if not x.stop_gradient else None
-        w_grad = w_g.cast(w.dtype) if not w.stop_gradient else None
-        return x_grad, w_grad
+        w_stop_grad = w.stop_gradient
+        x_stop_grad = x.stop_gradient
+
+        def _compute_weight_grad(x_cast, y_grad, weight):
+            with paddle.amp.auto_cast(False):
+                w_grad = paddle.matmul(
+                    x_cast, y_grad, transpose_x=True
+                ).T  # 始终先算梯度
+
+            if hasattr(weight, "main_grad"):
+                if weight.main_grad is None:
+                    weight.main_grad = paddle.zeros(
+                        weight.shape, dtype=paddle.float32
+                    )
+                assert w_grad.dtype == weight.main_grad.dtype, (
+                    f"w_grad dtype {w_grad.dtype} != main_grad dtype {weight.main_grad.dtype}"
+                )
+                weight.main_grad.add_(w_grad)
+            else:
+                raise AssertionError("fp8 overlap need main_grad attribute")
+
+            if hasattr(weight, "_apply_backward_hook"):
+                weight._apply_backward_hook()
+
+        if ctx.dw_p2p_overlap:
+            x_cast = x.cast(ctx.dtype)
+            w_cast = w.cast(ctx.dtype)
+
+            x_g = paddle.matmul(y_grad, w_cast.T, transpose_y=True)
+            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+
+            if w_stop_grad:
+                return x_grad, None
+            else:
+                WeightGradStore.enabled = True
+                WeightGradStore.put(
+                    partial(
+                        _compute_weight_grad,
+                        x_cast.detach(),
+                        y_grad.detach(),
+                        w,
+                    )
+                )
+                WeightGradStore.enabled = False
+                return x_grad, None
+        else:
+            w = w.T
+            x_g, w_g = matmul_grad(
+                x.cast(ctx.dtype),
+                w.cast(ctx.dtype),
+                y_grad,
+                False,
+                False,
+            )
+
+            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+            w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+            if w_grad is not None:
+                w_grad = w_grad.T
+
+            return x_grad, w_grad
 
 
 def gate_detach_matmul(
-    x, weight, use_fuse, moe_router_force_load_balancing=False
+    x,
+    weight,
+    use_fuse,
+    moe_router_force_load_balancing=False,
+    dw_p2p_overlap=False,
 ):
     if use_fuse:
-        score = FusedGateDetachMatmul.apply(x, weight)
+        score = FusedGateDetachMatmul.apply(x, weight, dw_p2p_overlap)
     else:
         x = x.cast(paddle.float32)
         score = F.linear(x, weight)
@@ -111,6 +182,25 @@ def gate_detach_matmul(
     if moe_router_force_load_balancing:
         score = apply_random_logits(score)
     return score
+
+
+def _apply_routing_map_fusion(
+    gates, top_idx, input_ids_none_zero_mask, input_ids=None
+):
+    from paddlefleet.ops.triton_ops import routing_map_fusion_forward
+
+    if input_ids_none_zero_mask is not None and input_ids is not None:
+        fused_input_ids = input_ids.reshape([-1])
+    else:
+        fused_input_ids = None
+    fused_mask, top_idx, exp_counts = routing_map_fusion_forward(
+        gates,
+        top_idx,
+        input_ids=fused_input_ids,
+        is_pure_text_line=None,
+    )
+    mask = fused_mask.cast(gates.dtype)
+    return mask, top_idx, exp_counts
 
 
 class StandardMoERouter(nn.Layer):
@@ -680,9 +770,10 @@ class TopKRouter(StandardMoERouter):
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
                 input,
-                self.weight.T,
+                self.weight,
                 True,
                 self.config.moe_router_force_load_balancing,
+                getattr(self.config, "dw_p2p_overlap", False),
             )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
@@ -714,12 +805,12 @@ class TopKRouter(StandardMoERouter):
                     gates_ori.sum(-1, keepdim=True), min=1e-12
                 )
 
-        if getattr(self.config, "gpt_model_use_experimental_version", False):
-            # Use EC's FusedMoETopk Triton kernel for bit-exact alignment.
+        if getattr(self.config, "moe_topk_fusion", False):
+            # Use MoETopkFusion Triton kernel for bit-exact alignment.
             # This ensures the topk selection + normalization uses the exact same
-            # GPU kernel as ErnieCore, avoiding FP32 rounding differences between
+            # GPU kernel, avoiding FP32 rounding differences between
             # Triton's scalar loop and Paddle's tensor ops.
-            FusedMoETopk = _get_fused_moe_topk()
+            MoETopkFusion = _get_moe_topk_fusion()
             use_node_limit = self.n_group > 1
             probs_for_choice = (
                 gates + self.e_score_correction_bias.detach().unsqueeze(0)
@@ -733,7 +824,7 @@ class TopKRouter(StandardMoERouter):
                 _log_moe_md5(
                     probs_for_choice, "probs_for_choice", self._layer_number
                 )
-            top_gate, top_idx = FusedMoETopk.apply(
+            top_gate, top_idx = MoETopkFusion.apply(
                 gates,  # gate_probs (original sigmoid scores)
                 probs_for_choice,  # probs_for_choice (with correction bias)
                 self.num_experts_per_tok,
@@ -781,14 +872,20 @@ class TopKRouter(StandardMoERouter):
         else:
             l_zloss = None
 
-        mask = paddle.zeros_like(gates).put_along_axis(
-            top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
-        )
-        if input_ids_none_zero_mask is not None:
-            valid_mask = input_ids_none_zero_mask
-            mask = mask * valid_mask.cast(mask.dtype)
-            # -1 means neither participates in routing nor expert calculation
-            top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
+        if getattr(self.config, "routing_map_fusion", False):
+            mask, top_idx, exp_counts = _apply_routing_map_fusion(
+                gates, top_idx, input_ids_none_zero_mask, input_ids
+            )
+        else:
+            mask = paddle.zeros_like(gates).put_along_axis(
+                top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
+            )
+            if input_ids_none_zero_mask is not None:
+                valid_mask = input_ids_none_zero_mask
+                mask = mask * valid_mask.cast(mask.dtype)
+                # -1 means neither participates in routing nor expert calculation
+                top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
+            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
 
         # norm
         if self.norm_topk_prob:
@@ -797,7 +894,7 @@ class TopKRouter(StandardMoERouter):
             ):
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
-            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
+            # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
 
         if self.routed_scaling_factor_learnable:
             safe_topk_indices = paddle.clip(top_idx, min=0)
@@ -818,7 +915,6 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(top_gate, "topk_weights_normed", self._layer_number)
 
         if self.topk_method == "noaux_tc":
-            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
             with paddle.no_grad():
                 self.expert_usage += exp_counts
 

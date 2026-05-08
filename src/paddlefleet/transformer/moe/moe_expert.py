@@ -322,12 +322,14 @@ class GroupedMLPExpert(FleetLayer):
                 axis=0,
                 group=self.ep_group,
             )
+            sharded_dict[full_key1].grouped_gemm_param = True
             sharded_dict[full_key2] = shard_weight(
                 key=full_key2,
                 weight=state_dict["weight2"],
                 axis=0,
                 group=self.ep_group,
             )
+            sharded_dict[full_key2].grouped_gemm_param = True
         return sharded_dict
 
 
