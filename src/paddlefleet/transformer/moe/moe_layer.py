@@ -210,8 +210,18 @@ class MoELayer(nn.Layer):
                 self.config.hidden_size,
                 bias_attr=self.config.use_bias,
             )
-            # Update expert config to use latent size
-            routed_expert_config.hidden_size = self.config.moe_latent_size
+            # Multi-Head: split latent into n_heads; each expert sees head_dim
+            self.moe_n_heads = getattr(self.config, "moe_n_heads", 1)
+            self.head_dim = self.config.moe_latent_size // self.moe_n_heads
+            assert self.config.moe_latent_size % self.moe_n_heads == 0, (
+                f"moe_latent_size({self.config.moe_latent_size}) must be divisible "
+                f"by moe_n_heads({self.moe_n_heads})"
+            )
+            logging.info(
+                f"  Multi-Head MoE: n_heads={self.moe_n_heads}, head_dim={self.head_dim}"
+            )
+            # Expert input dimension = head_dim (latent_size when n_heads==1)
+            routed_expert_config.hidden_size = self.head_dim
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -514,6 +524,13 @@ class MoELayer(nn.Layer):
         # Latent MoE: project hidden_states to latent space before dispatch
         if self.use_latent_moe:
             hidden_states = self.fc1_latent_proj(hidden_states)
+            # Multi-Head: flatten [T, latent_size] -> [T*H, head_dim]
+            if getattr(self, "moe_n_heads", 1) > 1:
+                hidden_states = hidden_states.reshape([-1, self.config.moe_latent_size])
+                _num_tok = hidden_states.shape[0]
+                hidden_states = hidden_states.reshape(
+                    [_num_tok * self.moe_n_heads, self.head_dim]
+                )
 
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
@@ -534,6 +551,12 @@ class MoELayer(nn.Layer):
 
         # Latent MoE: project back from latent space to hidden_size
         if self.use_latent_moe:
+            # Multi-Head: re-assemble [T*H, head_dim] -> [T, latent_size]
+            if getattr(self, "moe_n_heads", 1) > 1:
+                _num_tok = hidden_states.shape[0] // self.moe_n_heads
+                hidden_states = hidden_states.reshape(
+                    [_num_tok, self.config.moe_latent_size]
+                )
             hidden_states = self.fc2_latent_proj(hidden_states)
 
         return hidden_states
@@ -551,6 +574,13 @@ class MoELayer(nn.Layer):
         # Latent MoE: project hidden_states to latent space before dispatch
         if self.use_latent_moe:
             hidden_states = self.fc1_latent_proj(hidden_states)
+            # Multi-Head: flatten [T, latent_size] -> [T*H, head_dim]
+            if getattr(self, "moe_n_heads", 1) > 1:
+                hidden_states = hidden_states.reshape([-1, self.config.moe_latent_size])
+                _num_tok = hidden_states.shape[0]
+                hidden_states = hidden_states.reshape(
+                    [_num_tok * self.moe_n_heads, self.head_dim]
+                )
 
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
@@ -662,6 +692,12 @@ class MoELayer(nn.Layer):
 
         # Latent MoE: project back from latent space to hidden_size
         if self.use_latent_moe:
+            # Multi-Head: re-assemble [T*H, head_dim] -> [T, latent_size]
+            if getattr(self, "moe_n_heads", 1) > 1:
+                _num_tok = hidden_states.shape[0] // self.moe_n_heads
+                hidden_states = hidden_states.reshape(
+                    [_num_tok, self.config.moe_latent_size]
+                )
             hidden_states = self.fc2_latent_proj(hidden_states)
 
         return hidden_states
@@ -675,6 +711,13 @@ class MoELayer(nn.Layer):
         hidden_states, token_probs, token_indices = args
         if self.use_latent_moe:
             hidden_states = self.fc1_latent_proj(hidden_states)
+            # Multi-Head: flatten [T, latent_size] -> [T*H, head_dim]
+            if getattr(self, "moe_n_heads", 1) > 1:
+                hidden_states = hidden_states.reshape([-1, self.config.moe_latent_size])
+                _num_tok = hidden_states.shape[0]
+                hidden_states = hidden_states.reshape(
+                    [_num_tok * self.moe_n_heads, self.head_dim]
+                )
         assert isinstance(self.token_dispatcher, MoEFlexTokenDispatcher)
         hidden_states = self.token_dispatcher.dispatch_preprocess_overlap(
             hidden_states, token_probs, token_indices
@@ -774,6 +817,12 @@ class MoELayer(nn.Layer):
     def aux_loss_compute(self, args):
         hidden_states, aux_loss, z_loss, residuals = args
         if self.use_latent_moe:
+            # Multi-Head: re-assemble [T*H, head_dim] -> [T, latent_size]
+            if getattr(self, "moe_n_heads", 1) > 1:
+                _num_tok = hidden_states.shape[0] // self.moe_n_heads
+                hidden_states = hidden_states.reshape(
+                    [_num_tok, self.config.moe_latent_size]
+                )
             hidden_states = self.fc2_latent_proj(hidden_states)
         if self.training and self.router_aux_loss_coef:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
@@ -811,6 +860,20 @@ class MoELayer(nn.Layer):
 
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
+
+        # Multi-Head LatentMoE: project to latent space and reshape to
+        # [T, n_heads, head_dim] before gate so TopKRouter gets multi-head input.
+        if self.use_latent_moe and getattr(self, "moe_n_heads", 1) > 1:
+            _num_tokens = hidden_states.reshape([-1, self.config.hidden_size]).shape[0]
+            _latent = self.fc1_latent_proj(
+                hidden_states.reshape([-1, self.config.hidden_size])
+            )
+            gate_input = _latent.reshape(
+                [_num_tokens, self.moe_n_heads, self.head_dim]
+            )
+        else:
+            gate_input = hidden_states
+
         (
             capacity,
             topk_weights,
@@ -821,7 +884,7 @@ class MoELayer(nn.Layer):
             aux_loss,
             z_loss,
         ) = self.gate(
-            hidden_states,
+            gate_input,
             input_ids=input_ids,
         )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
@@ -873,6 +936,12 @@ class MoELayer(nn.Layer):
             # Latent MoE: project to latent space before single-card MoE
             if self.use_latent_moe:
                 reshaped_input = self.fc1_latent_proj(reshaped_input)
+                # Multi-Head: flatten [T, latent_size] -> [T*H, head_dim]
+                if getattr(self, "moe_n_heads", 1) > 1:
+                    _num_tok = reshaped_input.shape[0]
+                    reshaped_input = reshaped_input.reshape(
+                        [_num_tok * self.moe_n_heads, self.head_dim]
+                    )
             if self.moe_grouped_gemm:
                 output = self._forward_single_card_grouped_gemm_moe(
                     reshaped_input, mask, probs
@@ -883,6 +952,10 @@ class MoELayer(nn.Layer):
                 )
             # Latent MoE: project back from latent space
             if self.use_latent_moe:
+                # Multi-Head: re-assemble [T*H, head_dim] -> [T, latent_size]
+                if getattr(self, "moe_n_heads", 1) > 1:
+                    _num_tok = output.shape[0] // self.moe_n_heads
+                    output = output.reshape([_num_tok, self.config.moe_latent_size])
                 output = self.fc2_latent_proj(output)
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)

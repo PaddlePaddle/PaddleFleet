@@ -176,8 +176,28 @@ class StandardMoERouter(nn.Layer):
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
             dtype="float32",
-            default_initializer=paddle.nn.initializer.Uniform(),
+            # default_initializer=paddle.nn.initializer.Uniform(),
         )
+
+        # Multi-Head LatentMoE: per-head independent routing weights
+        # Only created when use_latent_moe=True AND moe_n_heads > 1.
+        # self.weight is kept unchanged for checkpoint compatibility.
+        self.moe_n_heads = getattr(config, "moe_n_heads", 1)
+        _use_latent = (
+            getattr(config, "use_latent_moe", False)
+            and getattr(config, "moe_latent_size", None) is not None
+        )
+        if _use_latent and self.moe_n_heads > 1:
+            assert config.moe_latent_size % self.moe_n_heads == 0, (
+                f"moe_latent_size({config.moe_latent_size}) must be divisible "
+                f"by moe_n_heads({self.moe_n_heads})"
+            )
+            _head_dim = config.moe_latent_size // self.moe_n_heads
+            self.mh_weight = self.create_parameter(
+                shape=[self.moe_n_heads, _head_dim, self.num_experts],
+                dtype="float32",
+                default_initializer=paddle.nn.initializer.Normal(std=0.02),
+            )
 
         if self.routed_scaling_factor_learnable:
             self.routed_scaling_factor_param = self.create_parameter(
@@ -675,7 +695,35 @@ class TopKRouter(StandardMoERouter):
         self._layer_number = layer_number
 
     def forward(self, input, input_ids=None):
-        if len(input.shape) == 3:
+        # Multi-Head LatentMoE: input is [num_tokens, n_heads, head_dim]
+        if getattr(self, "mh_weight", None) is not None:
+            num_tokens, n_heads, head_dim = input.shape
+            # Independent per-head scoring: [T,H,D] x [H,D,E] -> [T,H,E]
+            with paddle.amp.auto_cast(False):
+                logits = paddle.einsum(
+                    "thd,hde->the",
+                    input.cast("float32"),
+                    self.mh_weight.cast("float32"),
+                )
+            # Flatten to [T*H, E] so all downstream logic reuses unchanged
+            logits = logits.reshape([num_tokens * n_heads, self.num_experts])
+            input = input.reshape([num_tokens * n_heads, head_dim])
+            # Expand input_ids along the head dimension to preserve padding mask
+            if input_ids is not None:
+                batch_size = input_ids.shape[0]
+                seq_len = input_ids.shape[1] * n_heads
+                # [B, S] -> [B, S, H] -> [B, S*H]
+                input_ids = (
+                    input_ids.unsqueeze(-1)
+                    .expand([-1, -1, n_heads])
+                    .reshape([batch_size, seq_len])
+                )
+                input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
+            else:
+                input_ids_none_zero_mask = None
+                batch_size = 1
+                seq_len = num_tokens * n_heads
+        elif len(input.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape
             else:
@@ -696,13 +744,15 @@ class TopKRouter(StandardMoERouter):
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
             )
 
-        with paddle.amp.auto_cast(False):
-            logits = gate_detach_matmul(
-                input,
-                self.weight.T,
-                True,
-                self.config.moe_router_force_load_balancing,
-            )
+        # Standard gate scoring (skipped for multi-head path which already has logits)
+        if getattr(self, "mh_weight", None) is None:
+            with paddle.amp.auto_cast(False):
+                logits = gate_detach_matmul(
+                    input,
+                    self.weight.T,
+                    True,
+                    self.config.moe_router_force_load_balancing,
+                )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
         gates = self.gate_score_func(logits)
