@@ -12,279 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ctypes
-import importlib.util
-import logging
-import sys
-from pathlib import Path
-from typing import Any
+"""
+paddlefleet.ops — compatibility shim.
 
-import paddle
+All operator implementations now live in the `paddlefleet-ops` package
+(paddlefleet_ops.ops).  This module re-exports everything from there so
+that existing code using `paddlefleet.ops` continues to work unchanged.
+"""
 
-from .utils import (
+from __future__ import annotations
+
+import sys as _sys
+
+from paddlefleet_ops import ops as _ops_module
+from paddlefleet_ops.ops import (  # noqa: F401
     HardwareIncompatibleBlocker,
-    ModuleContext,
-    clean_module_namespace,
-    get_cuda_version,
-    get_nvshmem_host_lib_path,
-    import_custom_ops,
-    patch_module_namespace,
+    blocked_import_messages,
+    is_deep_ep_available,
+    is_deep_gemm_available,
+    is_flash_mask_available,
+    is_sonic_moe_available,
 )
 
-# paddle.enable_compat(scope={"triton"}) enables the torch proxy
-# specifically for the 'triton' module. This means `import torch` inside 'triton'
-# will actually import paddle's compatibility layer (acting as torch).
-#
-# 'scope' acts as an allowlist. To add other modules, you can do:
-# paddle.enable_compat(scope={"triton", "new_module"})
-#
-# Note: Ensure that any torch APIs used in 'new_module' are already implemented in Paddle.
+# Mirror the entire paddlefleet_ops.ops namespace into paddlefleet.ops so that
+# attribute access (e.g. `paddlefleet.ops.deep_gemm`) and wildcard imports
+# both work transparently.
+_sys.modules[__name__] = _ops_module
 
-if "torch" in sys.modules and sys.modules["torch"] is None:
-    # Note: In paddleformer's __init__.py, it will set sys.modules["torch"] to None
-    # We should restore or delete it before enabling compat mode.
-    del sys.modules["torch"]
-    if "torch_save" in sys.modules and sys.modules["torch_save"] is not None:
-        sys.modules["torch"] = sys.modules["torch_save"]
-
-logger = logging.getLogger(__name__)
-ops_dir = Path(__file__).parent
-cuda_capability = (
-    paddle.cuda.get_device_capability()
-    if paddle.is_compiled_with_cuda()
-    else None
-)
-if paddle.is_compiled_with_cuda():
-    _python_version = sys.version_info
-    _python_version_str = ".".join(map(str, _python_version[:3]))
-    _cuda_version = get_cuda_version()
-    _cuda_version_str = ".".join(map(str, _cuda_version))
-    _capability_str = (
-        f"{cuda_capability[0]}.{cuda_capability[1]}"
-        if cuda_capability
-        else "unavailable"
+# The HardwareIncompatibleBlocker installed by paddlefleet_ops.ops only
+# catches ``import paddlefleet_ops.ops.*``.  Install a second blocker that
+# intercepts ``import paddlefleet.ops.*`` so that old-namespace import
+# attempts also raise the informative RuntimeError.
+_compat_blocker_messages = {
+    k.replace("paddlefleet_ops.ops.", "paddlefleet.ops."): v
+    for k, v in blocked_import_messages.items()
+    if k.startswith("paddlefleet_ops.ops.")
+}
+if _compat_blocker_messages:
+    _sys.meta_path.insert(
+        0, HardwareIncompatibleBlocker(_compat_blocker_messages)
     )
-
-    DEEP_GEMM_HINT = (
-        "For developers: guard imports with `is_deep_gemm_available()` and only call `paddlefleet.ops.deep_gemm` when flag branch enabled.\n"
-        "For users: set `use_deep_gemm=False` if you want to skip it, or use a GPU with compute capability >= 9.0 to enable."
-    )
-
-    DEEP_EP_HINT = (
-        "For developers: guard imports with `is_deep_ep_available()` and only call `paddlefleet.ops.deep_ep` when flag branch enabled.\n"
-        "For users: avoid `moe_token_dispatcher_type='deepep'` or use a GPU with compute capability >= 9.0 to enable."
-    )
-
-    SONIC_MOE_HINT = (
-        "For developers: guard imports with `is_sonicmoe_available()` and only call `paddlefleet.ops.sonicmoe` when flag branch enabled.\n"
-        "For users: set `using_sonic_moe=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 9.0 to enable."
-    )
-else:
-    DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
-    DEEP_EP_HINT = "deep_ep is not supported on XPU backend."
-    SONIC_MOE_HINT = "sonicmoe is not supported on XPU backend."
-
-FLASH_MASK_HINT = (
-    "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet.ops.flash_mask` when flag branch enabled.\n"
-    "For users: use a GPU with compute capability >= 10.0 (Blackwell) to enable."
-)
-
-
-def _build_notice(
-    lib_module: str, reason: str, hint_for_error: str | None = None
-) -> tuple[str, str]:
-    """Compose warning/error messages; only errors carry extra hints."""
-    warning = f"{lib_module} not supported: {reason}"
-    error_reason = f"{reason} \n{hint_for_error}" if hint_for_error else reason
-    error = f"{lib_module} not supported: {error_reason}"
-    return warning, error
-
-
-def _hopper_requirement(
-    lib_module: str, hint: str | None = None
-) -> tuple[str, str]:
-    reason = (
-        f"{lib_module} requires GPU compute capability >= 9.0 (Hopper). "
-        f"Current capability: {_capability_str}."
-    )
-    return _build_notice(lib_module, reason, hint_for_error=hint)
-
-
-def _blackwell_requirement(
-    lib_module: str, hint: str | None = None
-) -> tuple[str, str]:
-    reason = (
-        f"{lib_module} requires GPU compute capability >= 10.0 (Blackwell). "
-        f"Current capability: {_capability_str}."
-    )
-    return _build_notice(lib_module, reason, hint_for_error=hint)
-
-
-def _sonic_moe_requirement(
-    lib_module: str, hint: str | None = None
-) -> tuple[str, str]:
-    reasons = []
-    if sys.version_info < (3, 12):
-        reasons.append(
-            f"Python >= 3.12 required (current {_python_version_str})"
-        )
-    if _cuda_version < (12, 9):
-        reasons.append(f"CUDA >= 12.9 required (current {_cuda_version_str})")
-    if not cuda_capability or cuda_capability[0] < 9:
-        reasons.append(
-            f"GPU compute capability >= 9.0 required (current {_capability_str})"
-        )
-    reason = "; ".join(reasons) if reasons else "Runtime requirements not met."
-    return _build_notice(lib_module, reason, hint_for_error=hint)
-
-
-_DEEP_GEMM_AVAILABLE = False
-_DEEP_EP_AVAILABLE = False
-_SONIC_MOE_AVAILABLE = False
-_FLASH_MASK_AVAILABLE = False
-
-if paddle.is_compiled_with_cuda():
-    if paddle.cuda.get_device_capability()[0] >= 9:
-        _DEEP_GEMM_AVAILABLE = True
-        _DEEP_EP_AVAILABLE = True
-    if paddle.cuda.get_device_capability()[0] == 10:
-        _FLASH_MASK_AVAILABLE = True
-    if (
-        sys.version_info >= (3, 12)
-        and paddle.cuda.get_device_capability()[0] >= 9
-        and _cuda_version >= (12, 9)
-    ):
-        _SONIC_MOE_AVAILABLE = True
-
-if paddle.is_compiled_with_xpu():
-    _DEEP_EP_AVAILABLE = True
-
-
-def is_deep_gemm_available():
-    return _DEEP_GEMM_AVAILABLE
-
-
-def is_deep_ep_available():
-    return _DEEP_EP_AVAILABLE
-
-
-def is_sonic_moe_available():
-    return _SONIC_MOE_AVAILABLE
-
-
-def is_flash_mask_available():
-    return _FLASH_MASK_AVAILABLE
-
-
-def _try_load_nvshmem(ops_dir: Path):
-    third_party_temp_dir = ops_dir.parent.parent / "_third_party_install_temp"
-    if third_party_temp_dir.exists():
-        try:
-            nvshmem_spec = importlib.util.find_spec("nvidia.nvshmem")
-            if nvshmem_spec and nvshmem_spec.submodule_search_locations:
-                nvshmem_dir = nvshmem_spec.submodule_search_locations[0]
-                nvshmem_host_lib_path = get_nvshmem_host_lib_path(nvshmem_dir)
-                logger.info(
-                    f"Pre-loading NVSHMEM library from: {nvshmem_host_lib_path}"
-                )
-                ctypes.CDLL(str(nvshmem_host_lib_path), mode=ctypes.RTLD_GLOBAL)
-        except Exception as e:
-            raise RuntimeError(
-                f"Unexpected error during NVSHMEM pre-loading: {e}"
-            ) from e
-
-
-def _safe_load_ecosystem_lib(
-    lib_name: str,
-    ops_dir: Path,
-    module_globals: dict[str, Any],
-    extra_libs_name: list[str] | None = None,
-):
-    lib_names = [lib_name]
-    if extra_libs_name:
-        lib_names += extra_libs_name
-    with ModuleContext(lib_names, ops_dir):
-        try:
-            module = importlib.import_module(lib_name)
-            patch_module_namespace(lib_name, "paddlefleet.ops.")
-            if extra_libs_name:
-                for extra_lib in extra_libs_name:
-                    clean_module_namespace(extra_lib)
-            module_globals[lib_name] = module
-            logger.info(f"Successfully loaded ecosystem library: {lib_name}")
-        except ImportError as e:
-            logger.warning(f"Ecosystem library '{lib_name}' not found: {e}")
-            raise RuntimeError(
-                f"Failed to load required library '{lib_name}'. Ensure it is correctly installed and accessible."
-            ) from e
-
-
-import_custom_ops(
-    package="paddlefleet._extensions", module_name=".ops", global_ns=globals()
-)
-
-blocked_import_messages: dict[str, str] = {}
-
-if paddle.is_compiled_with_cuda():
-    if is_deep_gemm_available():
-        paddle.enable_compat(scope={"deep_gemm", "triton"}, silent=True)
-        _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
-    else:
-        warning, error = _hopper_requirement(
-            "paddlefleet.ops.deep_gemm", hint=DEEP_GEMM_HINT
-        )
-        logger.warning(warning)
-        blocked_import_messages["paddlefleet.ops.deep_gemm"] = error
-
-    if is_deep_ep_available():
-        paddle.enable_compat(scope={"deep_ep"}, silent=True)
-        # Loading libnvshmem_host.so.* first when use editable install
-        _try_load_nvshmem(ops_dir)
-        _safe_load_ecosystem_lib("deep_ep", ops_dir, globals())
-    else:
-        warning, error = _hopper_requirement(
-            "paddlefleet.ops.deep_ep", hint=DEEP_EP_HINT
-        )
-        logger.warning(warning)
-        blocked_import_messages["paddlefleet.ops.deep_ep"] = error
-
-    if is_sonic_moe_available():
-        paddle.enable_compat(scope={"sonicmoe", "quack", "triton"}, silent=True)
-        _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
-    else:
-        warning, error = _sonic_moe_requirement(
-            "paddlefleet.ops.sonicmoe", hint=SONIC_MOE_HINT
-        )
-        logger.warning(warning)
-        blocked_import_messages["paddlefleet.ops.sonicmoe"] = error
-
-    if is_flash_mask_available():
-        _safe_load_ecosystem_lib("flash_mask", ops_dir, globals())
-    else:
-        warning, error = _blackwell_requirement(
-            "paddlefleet.ops.flash_mask", hint=FLASH_MASK_HINT
-        )
-        logger.warning(warning)
-        blocked_import_messages["paddlefleet.ops.flash_mask"] = error
-
-    if blocked_import_messages:
-        sys.meta_path.insert(
-            0, HardwareIncompatibleBlocker(blocked_import_messages)
-        )
-
-    try:
-        paddle.enable_compat(scope={"triton"}, silent=True)
-        from .._extensions.flashmask import (
-            rr_attn_estimate_triton_func,  # noqa: F401
-        )
-    finally:
-        paddle.disable_compat()
-
-
-def __getattr__(name):
-    module_name = f"paddlefleet.ops.{name}"
-
-    if module_name in blocked_import_messages:
-        raise RuntimeError(blocked_import_messages[module_name])
-
-    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

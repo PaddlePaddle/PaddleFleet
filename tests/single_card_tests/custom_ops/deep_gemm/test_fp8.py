@@ -19,7 +19,7 @@ import copy
 import random
 
 import torch
-from generators import (
+from .generators import (
     KernelType,
     enumerate_k_grouped_contiguous,
     enumerate_m_grouped_contiguous,

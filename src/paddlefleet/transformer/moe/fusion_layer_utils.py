@@ -1526,7 +1526,6 @@ class MlpNode:
             dispatched_probs,
             fill_output=self.moe_expert_fusion,
         )
-
         if not self.moe_expert_fusion:
             # 路径 2：逐专家 gather → 逐专家 GEMM → scatter-add
             expected_output_dtype = (
