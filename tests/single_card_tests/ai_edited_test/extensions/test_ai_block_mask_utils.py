@@ -61,7 +61,6 @@ class TestFindBlocksTopp(unittest.TestCase):
     def test_find_blocks_topp_basic(self):
         """Test find_blocks_topp basic functionality."""
         import paddle
-
         from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             find_blocks_topp,
         )
@@ -81,7 +80,6 @@ class TestFindBlocksTopp(unittest.TestCase):
     def test_find_blocks_topp_reshape(self):
         """Test find_blocks_topp reshapes correctly."""
         import paddle
-
         from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             find_blocks_topp,
         )
@@ -99,7 +97,6 @@ class TestFindBlocksTopp(unittest.TestCase):
     def test_find_blocks_topp_small_n(self):
         """Test find_blocks_topp with n < 1."""
         import paddle
-
         from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             find_blocks_topp,
         )

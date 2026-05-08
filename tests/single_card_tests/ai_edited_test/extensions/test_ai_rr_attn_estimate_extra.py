@@ -57,7 +57,6 @@ if not _triton_available:
     sys.modules.setdefault("triton.language", _mock_tl)
 
 import paddle
-
 from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
     RawPtrs,
     StrideMaxMinPtrs,

@@ -78,6 +78,7 @@ jobs:
             -e CACHE_DIR \
             -e PIP_CACHE_DIR \
             -e UV_HTTP_TIMEOUT \
+            -e PADDLE_CUDA_ARCH_LIST="8.0;9.0;10.0;10.3" \
             -e PR_ID \
             -e COMMIT_ID \
             -e BRANCH \

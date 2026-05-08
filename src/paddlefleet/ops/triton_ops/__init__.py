@@ -25,7 +25,7 @@ finds paddlefleet_ops/ops/triton_ops/ on the filesystem. This shim file exists
 only as documentation of the migration and is not actually loaded at runtime.
 """
 
-from paddlefleet_ops.ops.triton_ops import (  # noqa: F401
+from paddlefleet_ops.ops.triton_ops import (
     MoETopkFusion,
     RMSNormFusionTriton,
     SigmoidGateFusionTriton,

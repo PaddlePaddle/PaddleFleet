@@ -59,17 +59,12 @@ def _is_package_installed(dist_name: str) -> bool:
 
 # Initialize the Paddle Triton driver (only when supported).
 _paddle_driver = None
-if is_torch_compat_available() and paddle.is_compiled_with_cuda():
+if _is_package_installed("torch") and paddle.is_compiled_with_cuda():
     try:
         with paddle.use_compat_guard(enable=True, silent=True):
             from triton.runtime.driver import _create_driver
-            from triton.runtime.driver import driver as _triton_driver_mgr
 
             _paddle_driver = _create_driver()
-            # Pre-populate the DriverManager's _default so that reset_active()
-            # does not trigger another _create_driver() call outside the guard,
-            # which would fail because torch is only available via compat proxy.
-            _triton_driver_mgr._default = _paddle_driver
     except Exception:
         pass
 

@@ -61,8 +61,9 @@ class TestPrepareMaxmin(unittest.TestCase):
     def test_prepare_maxmin_chunk_size_equals_seq_len(self):
         """Test prepare_maxmin with chunk_size == seq_len."""
         import paddle
-
-        from paddlefleet_ops._extensions.flashmask.index_utils import prepare_maxmin
+        from paddlefleet_ops._extensions.flashmask.index_utils import (
+            prepare_maxmin,
+        )
 
         x = paddle.randint(0, 100, [2, 4, 16], dtype="int32")
 
@@ -76,8 +77,9 @@ class TestPrepareMaxmin(unittest.TestCase):
     def test_prepare_maxmin_chunk_size_larger_than_seq_len(self):
         """Test prepare_maxmin with chunk_size > seq_len."""
         import paddle
-
-        from paddlefleet_ops._extensions.flashmask.index_utils import prepare_maxmin
+        from paddlefleet_ops._extensions.flashmask.index_utils import (
+            prepare_maxmin,
+        )
 
         x = paddle.randint(0, 100, [2, 4, 16], dtype="int32")
 
@@ -91,8 +93,9 @@ class TestPrepareMaxmin(unittest.TestCase):
     def test_prepare_maxmin_uneven_chunks(self):
         """Test prepare_maxmin with seq_len not divisible by chunk_size."""
         import paddle
-
-        from paddlefleet_ops._extensions.flashmask.index_utils import prepare_maxmin
+        from paddlefleet_ops._extensions.flashmask.index_utils import (
+            prepare_maxmin,
+        )
 
         x = paddle.randint(0, 100, [2, 4, 15], dtype="int32")
 
@@ -106,8 +109,9 @@ class TestPrepareMaxmin(unittest.TestCase):
     def test_prepare_maxmin_chunk_size_one(self):
         """Test prepare_maxmin with chunk_size=1."""
         import paddle
-
-        from paddlefleet_ops._extensions.flashmask.index_utils import prepare_maxmin
+        from paddlefleet_ops._extensions.flashmask.index_utils import (
+            prepare_maxmin,
+        )
 
         x = paddle.randint(0, 100, [1, 1, 4], dtype="int32")
 

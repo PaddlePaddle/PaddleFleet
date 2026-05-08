@@ -113,6 +113,7 @@ jobs:
             -e UV_HTTP_TIMEOUT \
             -e PR_ID \
             -e COMMIT_ID \
+            -e PADDLE_CUDA_ARCH_LIST="8.0;9.0" \
             -e BRANCH \
             -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
             -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \

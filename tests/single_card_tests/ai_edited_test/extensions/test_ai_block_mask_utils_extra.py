@@ -58,7 +58,6 @@ if not _triton_available:
 
 
 import paddle
-
 from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
     _is_block_fully_masked,
     _is_block_partially_masked,

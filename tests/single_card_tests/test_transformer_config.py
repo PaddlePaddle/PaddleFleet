@@ -19,8 +19,8 @@ import paddle
 from paddlefleet.training.initialize import initialize_fleet
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
 
+class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         strategy = paddle.distributed.fleet.DistributedStrategy()
@@ -28,6 +28,7 @@ class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
             initialize_fleet(strategy=strategy)
         except AssertionError:
             pass  # already initialized in this process
+
     """Tests for the moe_layer_freq / first_k_dense_replace logic in TransformerConfig.__post_init__."""
 
     def test_both_none_defaults_moe_layer_freq_to_1(self):
