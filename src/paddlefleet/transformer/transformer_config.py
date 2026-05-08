@@ -509,6 +509,9 @@ class TransformerConfig(ModelParallelConfig):
     fp8_wgrad: bool = True
     """Whether to use fp8 wgrad."""
 
+    use_ue8m0: bool = False
+    """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
+
     ####################
     # initialization
     ####################

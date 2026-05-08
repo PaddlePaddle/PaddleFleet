@@ -120,6 +120,7 @@ class FakeMOELayer(nn.Layer):
         # MoELayer.fp8_quant_weight 检查 self.moe_use_fusion_node and self.fp8
         self.moe_use_fusion_node = True
         self.fp8 = True
+        self.use_ue8m0 = False
         MoELayer.fp8_quant_weight(
             self, batch_mode=batch_mode, quant_transpose=quant_transpose
         )
