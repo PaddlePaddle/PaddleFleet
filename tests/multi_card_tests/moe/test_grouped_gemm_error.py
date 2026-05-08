@@ -46,7 +46,8 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             "sharding_degree": 2,
             "sep_degree": 1,
             "cp_degree": 1,
-            "ep_degree": 1,
+            "ep_degree": 4,
+            "moe_sharding_degree": 2,
             "order": [
                 "sharding",
                 "moe_sharding",
@@ -62,10 +63,10 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         model_parallel_cuda_manual_seed(seed)
         self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
-    def test_moe_fusion(self):
-        n_routed_experts = 8
-        hidden_size = 64
-        transformer_config_moe = TransformerConfig(
+    def test_moe_grouped_gemm(self):
+        n_routed_experts = 64
+        hidden_size = 256
+        transformer_config = TransformerConfig(
             hidden_size=hidden_size,
             num_attention_heads=4,
             n_routed_experts=n_routed_experts,
@@ -82,29 +83,28 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             hidden_act=F.silu,
             moe_grouped_gemm=True,
             bias_activation_fusion=True,
+            moe_token_dispatcher_type="alltoall",
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(
-            transformer_config_moe, num_experts=n_routed_experts
+            transformer_config, num_experts=n_routed_experts
         )
 
-        moe_layer = MoELayer(
-            transformer_config_moe,
-            transformer_layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
-            self.pg_collection,
-        )
+        # This configuration should raise a ValueError because:
+        # moe_grouped_gemm=True is only supported when moe_token_dispatcher_type is 'deepep'
+        # but current moe_token_dispatcher_type='alltoall'
+        with self.assertRaises(ValueError) as context:
+            moe_layer = MoELayer(
+                transformer_config,
+                transformer_layer_spec.sublayers_spec.mlp.extra_kwargs[
+                    "sublayers"
+                ],
+                self.pg_collection,
+            )
 
-        gate_weight_shape = moe_layer.gate.weight.shape
-
-        moe_layer.gate.weight.set_value(
-            paddle.zeros(gate_weight_shape).astype("float32")
-        )
-
-        input_data = paddle.ones(16, 4, hidden_size, dtype=paddle.bfloat16)
-
-        output = moe_layer(input_data)[0]
-
-        assert output.shape == (16, 4, hidden_size)
+        # Verify the error message contains the expected content
+        expected_error_msg = "moe_grouped_gemm is only supported when moe_token_dispatcher_type is"
+        self.assertIn(expected_error_msg, str(context.exception))
 
     def tearDown(self):
         pass

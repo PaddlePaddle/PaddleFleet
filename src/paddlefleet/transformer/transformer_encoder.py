@@ -11,30 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from __future__ import annotations
 
+# Referred to NVIDIA Megatron-LM https://github.com/NVIDIA/Megatron-LM.git
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 import logging
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-from paddlefleet.pipeline_parallel import (
-    LayerDesc,
-    PipelineLayer,
-    SharedLayerDesc,
-)
-from paddlefleet.pipeline_parallel.pp_utils.utils import (
-    dict_to_tuple_helper,
-)
-
-if TYPE_CHECKING:
-    from paddlefleet.spec_utils import LayerSpec
 
 from paddle.distributed import fleet
 
-from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
-from paddlefleet.models.gpt.lm_head import GPTLMHead
-from paddlefleet.pipeline_parallel import ScheduleChunk
-from paddlefleet.transformer.transformer_layer import (
+from ..pipeline_parallel import (
+    LayerDesc,
+    PipelineLayer,
+    ScheduleChunk,
+    SharedLayerDesc,
+)
+from ..pipeline_parallel.pp_utils.utils import dict_to_tuple_helper
+from .transformer_layer import (
     TransformerLayer,
     TransformerLayerNode,
     TransformerLayerOverlappedScheduleNode,
@@ -123,24 +114,8 @@ def build_overlapped_nodes(forward_chunk, backward_chunk):
     )
 
 
-@dataclass
-class GPTSublayersSpec:
-    """p
-    The dataclass for LayerSpecs of GPT sublayers_spec
-    including embedding, n * transformer_layer, mtp, lm_head.
-    """
-
-    embedding: LayerSpec | None = None
-    head_empty_layers: list[LayerSpec] | None = None
-    transformer_layers: list[LayerSpec] | None = None
-    tail_empty_layers: list[LayerSpec] | None = None
-    mtp: list[LayerSpec] | None = None
-    layer_norm: LayerSpec | None = None
-    lm_head: LayerSpec | None = None
-
-
-class GPTModel(PipelineLayer):
-    """GPT Transformer language model.
+class TransformerEncoder(PipelineLayer):
+    """Transformer Encoder Model.
 
     Args:
         gpt_layer_desc:
@@ -148,26 +123,17 @@ class GPTModel(PipelineLayer):
 
     def __init__(
         self,
-        sublayers_spec: GPTSublayersSpec,
+        sublayers_spec,
         **kwargs,
     ) -> None:
         self.config = kwargs["config"]
-        tie_word_embeddings = (
-            kwargs["tie_word_embeddings"]
-            and self.config.pipeline_model_parallel_size > 1
-        )
-        skip_weight_param_allocation = (
-            self.config.tie_word_embeddings
-            and self.config.pipeline_model_parallel_size == 1
-        )
+        self.modal = kwargs.pop("modal", None)
         self._pipeline_name_mapping = None
         self._pp_to_single_mapping = None
         self._sequential_layers = self.get_layer_desc_list(
             sublayers_spec,
-            tie_word_embeddings,
         )
         self.layers = self.get_sequential_layers()
-        del kwargs["tie_word_embeddings"]
         del kwargs["config"]
 
         topology = (
@@ -183,57 +149,23 @@ class GPTModel(PipelineLayer):
             **kwargs,
         )
 
-        if skip_weight_param_allocation:
-            shared_embed_weight = None
-            for layer in self.run_function:
-                if isinstance(layer, GPTEmbedding):
-                    shared_embed_weight = layer.embedding_weight
-                if isinstance(layer, GPTLMHead):
-                    layer.weight = shared_embed_weight
-
-    def _get_weight_only_params(self):
-        """Get all parameters marked with is_weight_only_mtp flag."""
-        return [
-            param
-            for param in self.state_dict().values()
-            if getattr(param, "is_weight_only_mtp", False)
-        ]
-
-    def offload_weight_only_params(self):
-        """Offload all weight-only MTP parameters to CPU pinned memory."""
-        for param in self._get_weight_only_params():
-            if param.place.is_gpu_place():
-                cpu_param = param.pin_memory()
-                cpu_param._share_buffer_to(param)
-
-    def reload_weight_only_params(self):
-        """Reload weight-only MTP parameters from CPU pinned memory back to GPU."""
-        for param in self._get_weight_only_params():
-            if not param.place.is_gpu_place():
-                gpu_param = param.cuda()
-                gpu_param._share_buffer_to(param)
-
-    def get_layer_desc_list(self, spec, tie_word_embeddings):
+    def get_layer_desc_list(self, spec):
         layers = []
-        model_type = getattr(self.config, "model_type", "")
-        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
-            name_prefix = "model.language_model"
+        if self.modal:
+            name_prefix = f"model.{self.modal}"
         else:
             name_prefix = "model"
-        if tie_word_embeddings:
-            self.add_sequential_layer(
-                layers,
-                SharedLayerDesc(
-                    "embed",
-                    spec.embedding,
-                    shared_weight_attr="embedding_weight",
-                ),
-                name_prefix,
-            )
-        else:
-            self.add_sequential_layer(
-                layers, LayerDesc(spec.embedding), name_prefix
-            )
+        self.add_sequential_layer(
+            layers, LayerDesc(spec.embedding), name_prefix
+        )
+
+        self.get_encoder_layer_desc_list(layers, spec, name_prefix)
+
+        self.add_sequential_layer(layers, (spec.layer_norm), name_prefix)
+
+        return layers
+
+    def get_encoder_layer_desc_list(self, layers, spec, name_prefix):
         i = 0
         for head_empty_layer in spec.head_empty_layers:
             self.add_sequential_layer(
@@ -247,41 +179,11 @@ class GPTModel(PipelineLayer):
                 f"{name_prefix}.layers.{i}",
             )
             i += 1
-
-        # Always place layer_norm after transformer_layers and before tail_empty_layers/MTP,
-        # so that the model structure is consistent regardless of whether MTP is enabled.
-        self.add_sequential_layer(
-            layers, LayerDesc(spec.layer_norm), name_prefix
-        )
-
-        if spec.mtp:
-            for mtp_spec in spec.mtp:
-                self.add_sequential_layer(
-                    layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"
-                )
-                i += 1
         for tail_empty_layer in spec.tail_empty_layers:
             self.add_sequential_layer(
                 layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
-
-        if tie_word_embeddings:
-            self.add_sequential_layer(
-                layers,
-                SharedLayerDesc(
-                    "embed",
-                    spec.lm_head,
-                    shared_weight_attr="embedding_weight",
-                ),
-                f"{name_prefix}.shared_head",
-            )
-        else:
-            self.add_sequential_layer(
-                layers, LayerDesc(spec.lm_head), f"{name_prefix}.lm_head"
-            )
-
-        return layers
 
     def overlapped_forward_backward(
         self,
@@ -534,8 +436,7 @@ class GPTModel(PipelineLayer):
         """
         state_dict = super().state_dict(*args, **kwargs)
 
-        model_type = getattr(self.config, "model_type", "")
-        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
+        if "qwen3_vl" in getattr(self.config, "model_type", ""):
             name_prefix = "model.language_model."
         else:
             name_prefix = ""
@@ -602,8 +503,7 @@ class GPTModel(PipelineLayer):
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
 
-        model_type = getattr(self.config, "model_type", "")
-        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
+        if "qwen3_vl" in getattr(self.config, "model_type", ""):
             name_prefix = "model.language_model."
         else:
             name_prefix = ""

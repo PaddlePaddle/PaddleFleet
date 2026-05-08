@@ -86,7 +86,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         )
 
         transformer_layer_spec = get_gpt_layer_local_spec(
-            num_experts=n_routed_experts
+            transformer_config_moe_use_fusion_node, num_experts=n_routed_experts
         )
 
         moe_layer_moe_use_fusion_node = MoELayer(

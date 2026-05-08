@@ -221,6 +221,12 @@ class TransformerConfig(ModelParallelConfig):
 
     multimodal_embedding: bool = False
     """Whether to use multimodal embedding."""
+
+    gated_attention: bool = False
+    """If True, enables gated attention where a learnable sigmoid gate is applied to the
+    attention output before the output projection. The gate is produced alongside the query
+    from the fused QKV projection (doubling the query projection size). This allows the model
+    to dynamically control the information flow from attention. See Qwen3.5 for reference."""
     ####################
     # mixed-precision
     ####################
@@ -391,6 +397,9 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
+
+    moe_shared_expert_gate: bool = False
+    """Enable gate for shared expert."""
 
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
