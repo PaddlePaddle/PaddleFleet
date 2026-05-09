@@ -14,7 +14,7 @@
 
 """Lightweight PEP 517 build backend for the root paddlefleet package.
 
-Generates ``src/paddlefleet/version.py`` at build time (same pattern as
+Generates ``src/paddlefleet/_version.py`` at build time (same pattern as
 ``packages/paddlefleet_ops/build_backend.py``) and delegates every actual
 build hook to ``setuptools.build_meta``.
 
@@ -41,7 +41,7 @@ _ops_version_py = (
     / "paddlefleet_ops"
     / "src"
     / "paddlefleet_ops"
-    / "version.py"
+    / "_version.py"
 )
 
 
@@ -65,7 +65,7 @@ def _get_ops_version() -> str | None:
 
     Uses PADDLEFLEET_VERSION env var if set (CI builds), otherwise computes
     from version.txt (base) + ops_required_version.txt (build number) + branch.
-    Falls back to reading the ops source version.py directly when building
+    Falls back to reading the ops source _version.py directly when building
     both packages together in the same workspace.
     """
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
@@ -103,18 +103,18 @@ def _get_ops_version() -> str | None:
 
 
 def _generate_version_info() -> str:
-    """Generate ``src/paddlefleet/version.py`` with git metadata."""
+    """Generate ``src/paddlefleet/_version.py`` with git metadata."""
     version_file = _pkg_root / "version.txt"
     with open(version_file) as f:
         version = f.read().strip()
 
     git_commit_hash = get_git_commit_hash(_pkg_root)
 
-    version_py = _pkg_root / "src" / "paddlefleet" / "version.py"
+    version_py = _pkg_root / "src" / "paddlefleet" / "_version.py"
 
     # If file exists and not in git repo (installing from sdist), keep existing
     if version_py.exists() and not is_git_repo():
-        logger.info("version.py already exists (not in git repo), keeping it")
+        logger.info("_version.py already exists (not in git repo), keeping it")
         return version
 
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
@@ -122,6 +122,8 @@ def _generate_version_info() -> str:
     else:
         date_str = datetime.now().strftime("%Y%m%d")
         final_version = f"{version}.dev{date_str}"
+
+    ops_version = _get_ops_version() or "unknown"
 
     with open(version_py, "w") as f:
         f.write(
@@ -142,9 +144,10 @@ def _generate_version_info() -> str:
             '"""Auto-generated version info — do not edit."""\n'
             "\n"
             f'__version__ = "{final_version}"\n'
+            f'__ops_required_version__ = "{ops_version}"\n'
             f'commit = "{git_commit_hash}"\n'
         )
-    logger.info(f"Created version.py with version {final_version}")
+    logger.info(f"Created _version.py with version {final_version}")
     return final_version
 
 

@@ -257,21 +257,3 @@ known-first-party = ["paddlefleet"]
 [tool.ruff.lint.per-file-ignores]
 # Ignore for re-export in __init__ files
 "__init__.py" = ["PLC0414"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests", "packages"]
-addopts = "-v"
-# Ignore third_party and build directories
-norecursedirs = [
-    "third_party",
-    "build",
-    ".pytest_cache",
-    "packages/*/build",
-    "packages/*/_third_party_install_temp",
-    "packages/paddlefleet_ops/build",
-    "packages/*/src/_third_party_install_temp",
-]
-# Ignore test files in third_party submodules
-python_files = ["test_*.py", "*_test.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
