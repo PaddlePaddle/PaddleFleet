@@ -521,9 +521,12 @@ class MoELayer(nn.Layer):
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ):
-        # Latent MoE: project hidden_states to latent space before dispatch
+        # Latent MoE: project hidden_states to latent space before dispatch.
+        # If hidden_states is already in latent space (multi-head pre-projection
+        # from forward()), shape[-1] == moe_latent_size so we skip fc1.
         if self.use_latent_moe:
-            hidden_states = self.fc1_latent_proj(hidden_states)
+            if hidden_states.shape[-1] != self.config.moe_latent_size:
+                hidden_states = self.fc1_latent_proj(hidden_states)
             # Multi-Head: flatten [T, latent_size] -> [T*H, head_dim]
             if getattr(self, "moe_n_heads", 1) > 1:
                 hidden_states = hidden_states.reshape([-1, self.config.moe_latent_size])
@@ -571,9 +574,12 @@ class MoELayer(nn.Layer):
         topk_indices: paddle.Tensor | None = None,
     ):
         # TODO(deepllz): add fp8 dispatch config && implementation
-        # Latent MoE: project hidden_states to latent space before dispatch
+        # Latent MoE: project hidden_states to latent space before dispatch.
+        # If hidden_states is already in latent space (multi-head pre-projection
+        # from forward()), shape[-1] == moe_latent_size so we skip fc1.
         if self.use_latent_moe:
-            hidden_states = self.fc1_latent_proj(hidden_states)
+            if hidden_states.shape[-1] != self.config.moe_latent_size:
+                hidden_states = self.fc1_latent_proj(hidden_states)
             # Multi-Head: flatten [T, latent_size] -> [T*H, head_dim]
             if getattr(self, "moe_n_heads", 1) > 1:
                 hidden_states = hidden_states.reshape([-1, self.config.moe_latent_size])
@@ -709,8 +715,12 @@ class MoELayer(nn.Layer):
 
     def dispatch_preprocess(self, args):
         hidden_states, token_probs, token_indices = args
+        # Latent MoE: project hidden_states to latent space before dispatch.
+        # If hidden_states is already in latent space (multi-head pre-projection
+        # from forward()), shape[-1] == moe_latent_size so we skip fc1.
         if self.use_latent_moe:
-            hidden_states = self.fc1_latent_proj(hidden_states)
+            if hidden_states.shape[-1] != self.config.moe_latent_size:
+                hidden_states = self.fc1_latent_proj(hidden_states)
             # Multi-Head: flatten [T, latent_size] -> [T*H, head_dim]
             if getattr(self, "moe_n_heads", 1) > 1:
                 hidden_states = hidden_states.reshape([-1, self.config.moe_latent_size])
@@ -861,17 +871,20 @@ class MoELayer(nn.Layer):
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
 
-        # Multi-Head LatentMoE: project to latent space and reshape to
-        # [T, n_heads, head_dim] before gate so TopKRouter gets multi-head input.
+        # Multi-Head LatentMoE: project to latent space once here, reuse for both
+        # gate (routing) and dispatch (expert input) to avoid a double fc1 forward.
+        # _latent_for_dispatch is passed to execution paths in place of hidden_states
+        # so they can detect it is already projected and skip fc1.
         if self.use_latent_moe and getattr(self, "moe_n_heads", 1) > 1:
             _num_tokens = hidden_states.reshape([-1, self.config.hidden_size]).shape[0]
-            _latent = self.fc1_latent_proj(
+            _latent_for_dispatch = self.fc1_latent_proj(
                 hidden_states.reshape([-1, self.config.hidden_size])
             )
-            gate_input = _latent.reshape(
+            gate_input = _latent_for_dispatch.reshape(
                 [_num_tokens, self.moe_n_heads, self.head_dim]
             )
         else:
+            _latent_for_dispatch = None
             gate_input = hidden_states
 
         (
@@ -910,9 +923,12 @@ class MoELayer(nn.Layer):
         else:
             combine_overlap_handle = None
         if self.expert_model_parallel_size > 1:
+            # For multi-head latent MoE, fc1 was already applied above; pass the
+            # pre-projected latent so execution paths skip their own fc1 call.
+            dispatch_input = _latent_for_dispatch if _latent_for_dispatch is not None else hidden_states
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
-                    hidden_states,
+                    dispatch_input,
                     probs,
                     mask,
                     combine_overlap_handle,
@@ -921,21 +937,26 @@ class MoELayer(nn.Layer):
                 )
             else:
                 output = self.custom_forward(
-                    hidden_states,
+                    dispatch_input,
                     probs,
                     mask,
                     topk_weights=topk_weights,
                     topk_indices=topk_indices,
                 )
         else:
-            if len(hidden_states.shape) == 3:
+            if _latent_for_dispatch is not None:
+                # Multi-head: fc1 already applied, _latent_for_dispatch is [T, latent_size]
+                reshaped_input = _latent_for_dispatch
+            elif len(hidden_states.shape) == 3:
                 batch_size, seq_len, d_model = hidden_states.shape
                 reshaped_input = hidden_states.reshape([-1, d_model])
             else:
                 reshaped_input = hidden_states
             # Latent MoE: project to latent space before single-card MoE
             if self.use_latent_moe:
-                reshaped_input = self.fc1_latent_proj(reshaped_input)
+                if _latent_for_dispatch is None:
+                    # single-head or no multi-head: project now
+                    reshaped_input = self.fc1_latent_proj(reshaped_input)
                 # Multi-Head: flatten [T, latent_size] -> [T*H, head_dim]
                 if getattr(self, "moe_n_heads", 1) > 1:
                     _num_tok = reshaped_input.shape[0]
