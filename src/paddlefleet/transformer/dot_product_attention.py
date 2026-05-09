@@ -70,7 +70,10 @@ class _EagerQKScoresFn(paddle.autograd.PyLayer):
     def backward(ctx, d_scores):  # noqa: N805
         query, key_t = ctx.saved_tensor()
         scale = ctx.scale
-        d_query = paddle.matmul(d_scores, key_t, transpose_y=True) * scale
+        # Match Torch autograd of `matmul(Q, K.transpose(-1,-2)) * scale`: d_Q = matmul(d_scores, K) as NN-GEMM.
+        # Using transpose_y=True here picks a TN-GEMM cuBLAS algorithm and loses 1 ULP at bf16.
+        key = paddle.transpose(key_t, perm=[0, 2, 1]).contiguous()
+        d_query = paddle.matmul(d_scores, key) * scale
         d_key_t = paddle.matmul(query, d_scores, transpose_x=True) * scale
         return d_query, d_key_t
 
