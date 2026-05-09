@@ -53,8 +53,7 @@ jobs:
             echo "::error title=需要更新 ops_required_version.txt::检测到 packages/ 目录下有文件改动，但 ops_required_version.txt 未同步更新。"
             echo ""
             echo "请将 ops_required_version.txt 中的版本号 +1，例如："
-            echo "  dev 分支：0.3.0.dev1 → 0.3.0.dev2"
-            echo "  release 分支：0.3.0.post1 → 0.3.0.post2"
+            echo "  1 → 2"
             exit 1
           fi
           echo "✅ ops_required_version.txt 检查通过。"
