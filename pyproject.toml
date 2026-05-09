@@ -14,7 +14,7 @@
 
 [project]
 name = "paddlefleet"
-dynamic = ["version", "readme"]
+dynamic = ["version", "readme", "dependencies"]
 description = "Fleet Core - Core Functional Library for Large Scale Distributed Training"
 requires-python = ">=3.10"
 license = { text = "Apache 2.0" }
@@ -43,10 +43,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Typing :: Typed",
 ]
-dependencies = [
-    "colorlog>=6.10.1",
-    "paddlefleet-ops==0.3.0.dev1",
-]
 
 
 [project.urls]
@@ -68,6 +64,7 @@ include = ["paddlefleet*"]
 [tool.setuptools.dynamic]
 readme = { file = "README.md", content-type = "text/markdown" }
 version = { attr = "paddlefleet.version.__version__" }
+dependencies = { file = "requirements-build.txt" }
 
 [dependency-groups]
 test = [

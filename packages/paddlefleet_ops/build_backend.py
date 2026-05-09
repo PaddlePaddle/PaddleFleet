@@ -54,7 +54,7 @@ def get_git_commit_hash(cwd: Path | None) -> str:
         return "unknown"
 
 
-def _generate_version_info():
+def version_info():
     """Generate version info file from ops_required_version.txt.
 
     The version is developer-maintained in ops_required_version.txt
@@ -74,7 +74,46 @@ def _generate_version_info():
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
     else:
-        final_version = ops_req_file.read_text().strip()
+        # Generate version dynamically
+        # Read base version from version.txt
+        version_file = _workspace_root / "version.txt"
+        if not version_file.exists():
+            raise RuntimeError("version.txt not found in workspace root")
+        base_version = version_file.read_text().strip()
+
+        # Read build number from ops_required_version.txt
+        if not ops_req_file.exists():
+            raise RuntimeError(
+                "ops_required_version.txt not found in workspace root"
+            )
+        build_num = ops_req_file.read_text().strip()
+        if not build_num:
+            raise RuntimeError("ops_required_version.txt is empty")
+
+        # Determine suffix based on git branch
+        is_release_branch = False
+        try:
+            # Get current branch name
+            branch = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=_workspace_root,
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode("utf-8")
+                .strip()
+            )
+            # Check if branch starts with "release/"
+            is_release_branch = branch.startswith("release/")
+            logger.info(
+                f"Current branch: {branch}, is_release_branch: {is_release_branch}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to get git branch: {e}")
+
+        # Generate version with appropriate suffix
+        suffix = ".post" if is_release_branch else ".dev"
+        final_version = f"{base_version}{suffix}{build_num}"
 
     git_commit_hash = get_git_commit_hash(_workspace_root)
 
@@ -116,7 +155,7 @@ def _generate_version_info():
 
 
 # Generate version info as soon as this module is imported
-_generate_version_info()
+version_info()
 
 
 def _prepare_ecosystem(use_symlinks: bool):
