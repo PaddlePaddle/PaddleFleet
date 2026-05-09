@@ -44,14 +44,11 @@ def is_git_repo():
 
 
 def get_git_commit_hash(cwd: Path | None) -> str:
-    try:
-        return (
-            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd)
-            .strip()
-            .decode("utf-8")
-        )
-    except Exception:
-        return "unknown"
+    return (
+        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd)
+        .strip()
+        .decode("utf-8")
+    )
 
 
 def _generate_version_info():
@@ -92,24 +89,21 @@ def _generate_version_info():
 
         # Determine suffix based on git branch
         is_release_branch = False
-        try:
-            # Get current branch name
-            branch = (
-                subprocess.check_output(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                    cwd=_workspace_root,
-                    stderr=subprocess.DEVNULL,
-                )
-                .decode("utf-8")
-                .strip()
+        # Get current branch name
+        branch = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=_workspace_root,
+                stderr=subprocess.DEVNULL,
             )
-            # Check if branch starts with "release/"
-            is_release_branch = branch.startswith("release/")
-            logger.info(
-                f"Current branch: {branch}, is_release_branch: {is_release_branch}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to get git branch: {e}")
+            .decode("utf-8")
+            .strip()
+        )
+        # Check if branch starts with "release/"
+        is_release_branch = branch.startswith("release/")
+        logger.info(
+            f"Current branch: {branch}, is_release_branch: {is_release_branch}"
+        )
 
         # Generate version with appropriate suffix
         suffix = ".post" if is_release_branch else ".dev"
