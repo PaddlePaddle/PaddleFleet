@@ -501,7 +501,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         if bias is not None:
             output = paddle.nn.functional.linear(total_input, weight, bias)
         else:
-            output = paddle.matmul(total_input, weight)
+            # Use F.linear (aligns with Torch NT cuBLAS path for RowParallelLinear
+            # layers such as attention o_proj; MoE expert GEMM does not go through
+            # this function so V12/V13 small-M per-expert concerns do not apply here).
+            output = paddle.nn.functional.linear(total_input, weight)
         return output
 
     @staticmethod
