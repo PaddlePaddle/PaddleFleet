@@ -40,7 +40,17 @@ _workspace_root = _pkg_root.parent.parent.resolve()
 
 
 def is_git_repo():
-    return (_workspace_root / ".git").is_dir()
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=_workspace_root,
+                text=True,
+            ).strip()
+            == "true"
+        )
+    except Exception:
+        return False
 
 
 def get_git_commit_hash(cwd: Path | None) -> str:
@@ -58,7 +68,7 @@ def _generate_version_info():
     """Generate version info file from ops_required_version.txt.
 
     The version is developer-maintained in ops_required_version.txt
-    (e.g. 0.3.0.dev1, 0.3.0.dev2, ...).  Developers bump it manually
+    (e.g. 0.3.0.dev2, 0.3.0.dev3, ...).  Developers bump it manually
     whenever paddlefleet_ops code changes, as part of their PR.
     CI release builds may override via PADDLEFLEET_VERSION env var.
     """
