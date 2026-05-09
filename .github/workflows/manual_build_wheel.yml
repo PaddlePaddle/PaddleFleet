@@ -46,7 +46,7 @@ jobs:
       matrix:
         python_version: ["3.12"]
         cuda:
-          - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
+          - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
     env:
       TASK: PaddleFleet-nightly
       PIP_CACHE_DIR: /home/.cache/pip
@@ -72,7 +72,6 @@ jobs:
             -e PIP_CACHE_DIR \
             -e UV_HTTP_TIMEOUT \
             -e PR_ID \
-            -e PADDLE_CUDA_ARCH_LIST="${{ matrix.cuda.CUDA_ARCH_LIST }}" \
             -e COMMIT_ID \
             -e BRANCH \
             -e AK=paddle \

@@ -107,8 +107,6 @@ jobs:
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
           git submodule update --init --recursive
-          # if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "branch" ]]; then
-          #   export PADDLEFLEET_VERSION=$(cat version.txt).post$(git log -1 --format=%cd --date=format:%Y%m%d)+${{ matrix.cuda.bos_CUDA }}.$(git rev-parse --short=11 HEAD)
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
@@ -127,7 +125,6 @@ jobs:
             echo "[build] ccache enabled, CCACHE_DIR=${CCACHE_DIR}"
           fi
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
-          # uv build --wheel --package paddlefleet-ops --out-dir dist -v
           '
 
       - name: Upload wheel
@@ -143,8 +140,8 @@ jobs:
           PY_VERSION_SHORT="${PY_VERSION//./}"
           if [[ "${{ github.event_name }}" != "push" ]]; then
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu126/paddlefleet
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu126/paddlefleet
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu126/paddlefleet
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu129/paddlefleet
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu130/paddlefleet
             export AK=paddle
             export SK=paddle
             python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
@@ -253,8 +250,6 @@ jobs:
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
           git submodule update --init --recursive
-          # if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "branch" ]]; then
-          #   export PADDLEFLEET_VERSION=$(cat version.txt).post$(git log -1 --format=%cd --date=format:%Y%m%d)+$(git rev-parse --short=11 HEAD)
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
