@@ -1,4 +1,4 @@
-name: Publish wheel nightly
+name: PR update ops
 
 on:
   push:
@@ -11,9 +11,6 @@ on:
 
 permissions: read-all
 
-# concurrency:
-#   group: ${{ github.workflow }}-all-${{ github.sha }}-ops
-#   cancel-in-progress: true
 
 env:
   PR_ID: 'ops'
@@ -180,8 +177,6 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          # Enable ccache for C++/CUDA compilation if available in the image.
-          # CCACHE_DIR points to CFS so the cache persists across CI runs.
           if command -v ccache &>/dev/null; then
             export CCACHE_DIR=/home/.cache/ccache
             export CCACHE_MAXSIZE=20G
@@ -191,7 +186,6 @@ jobs:
             ccache --zero-stats
             echo "[build] ccache enabled, CCACHE_DIR=${CCACHE_DIR}"
           fi
-          # uv build --wheel --package paddlefleet --out-dir dist --clear -v
           uv build --wheel --package paddlefleet-ops --out-dir dist -v
           '
 
@@ -308,8 +302,6 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          # Enable ccache for C++/CUDA compilation if available in the image.
-          # CCACHE_DIR points to CFS so the cache persists across CI runs.
           if command -v ccache &>/dev/null; then
             export CCACHE_DIR=/home/.cache/ccache
             export CCACHE_MAXSIZE=20G

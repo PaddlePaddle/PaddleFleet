@@ -113,8 +113,6 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          # Enable ccache for C++/CUDA compilation if available in the image.
-          # CCACHE_DIR points to CFS so the cache persists across CI runs.
           if command -v ccache &>/dev/null; then
             export CCACHE_DIR=/home/.cache/ccache
             export CCACHE_MAXSIZE=20G
@@ -144,11 +142,11 @@ jobs:
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu130/paddlefleet
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
             # Rename to stable "latest" filenames for compatibility
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
             for whl in *-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl; do
-              python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+              python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/${BRANCH}/latest
             done
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu126/paddlefleet
@@ -160,9 +158,9 @@ jobs:
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu130/paddlefleet
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/latest
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
@@ -281,11 +279,11 @@ jobs:
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl
-            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
