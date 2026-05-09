@@ -47,17 +47,7 @@ _ops_version_py = (
 
 
 def is_git_repo() -> bool:
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "--is-inside-work-tree"],
-                cwd=_pkg_root,
-                text=True,
-            ).strip()
-            == "true"
-        )
-    except Exception:
-        return False
+    return (_pkg_root / ".git").exists()
 
 
 def get_git_commit_hash(cwd: Path) -> str:

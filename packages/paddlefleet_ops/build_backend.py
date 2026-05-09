@@ -40,17 +40,7 @@ _workspace_root = _pkg_root.parent.parent.resolve()
 
 
 def is_git_repo():
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "--is-inside-work-tree"],
-                cwd=_workspace_root,
-                text=True,
-            ).strip()
-            == "true"
-        )
-    except Exception:
-        return False
+    return (_workspace_root / ".git").exists()
 
 
 def get_git_commit_hash(cwd: Path | None) -> str:
