@@ -142,22 +142,9 @@ def _build_gencode_flags(cuda_major: int, cuda_minor: int) -> list[str]:
         )
 
     archs = [a.strip() for a in re.split(r"[;,]", raw) if a.strip()]
-    flags = []
-    for arch in archs:
-        flag = _ARCH_TO_GENCODE.get(arch)
-        if flag:
-            flags.append(flag)
-        else:
-            logging.warning(
-                f"Unsupported CUDA arch '{arch}', skipping. "
-                f"Supported: {list(_ARCH_TO_GENCODE)}"
-            )
-
-    if not flags:
-        logging.warning(
-            "No valid CUDA arch flags resolved; falling back to sm_90a."
-        )
-        flags = [_ARCH_TO_GENCODE["9.0"]]
+    flags = [
+        _ARCH_TO_GENCODE[arch] for arch in archs if arch in _ARCH_TO_GENCODE
+    ]
 
     logging.info(f"CUDA gencode flags: {flags}")
     return flags

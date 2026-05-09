@@ -45,7 +45,7 @@ classifiers = [
 ]
 dependencies = [
     "colorlog>=6.10.1",
-    "paddlefleet-ops",
+    "paddlefleet-ops==0.3.0.dev1",
 ]
 
 
@@ -263,7 +263,6 @@ known-first-party = ["paddlefleet"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "packages"]
-pythonpath = ["src"]
 addopts = "-v"
 # Ignore third_party and build directories
 norecursedirs = [

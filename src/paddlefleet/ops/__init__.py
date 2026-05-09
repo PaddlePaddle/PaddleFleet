@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-paddlefleet.ops — compatibility shim.
-
-All operator implementations now live in the `paddlefleet-ops` package
-(paddlefleet_ops.ops).  This module re-exports everything from there so
-that existing code using `paddlefleet.ops` continues to work unchanged.
-"""
 
 from __future__ import annotations
 
@@ -34,9 +27,12 @@ from paddlefleet_ops.ops import (  # noqa: F401
     is_sonic_moe_available,
 )
 
-# Mirror the entire paddlefleet_ops.ops namespace into paddlefleet.ops so that
-# attribute access (e.g. `paddlefleet.ops.deep_gemm`) and wildcard imports
-# both work transparently.
+for _key in list(_sys.modules.keys()):
+    if _key.startswith("paddlefleet_ops.ops."):
+        _alias = _key.replace("paddlefleet_ops.ops.", "paddlefleet.ops.", 1)
+        if _alias not in _sys.modules:
+            _sys.modules[_alias] = _sys.modules[_key]
+
 _sys.modules[__name__] = _ops_module
 
 # The HardwareIncompatibleBlocker installed by paddlefleet_ops.ops only

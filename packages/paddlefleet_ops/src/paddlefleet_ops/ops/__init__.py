@@ -236,9 +236,6 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.ops.deep_gemm"] = error
-        blocked_import_messages["paddlefleet.ops.deep_gemm"] = error
-        blocked_import_messages["paddlefleet.ops.deep_gemm"] = error
-
     if is_deep_ep_available():
         paddle.compat.enable_torch_proxy(scope={"deep_ep"}, silent=True)
         # Loading libnvshmem_host.so.* first when use editable install
@@ -250,8 +247,6 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.ops.deep_ep"] = error
-        blocked_import_messages["paddlefleet.ops.deep_ep"] = error
-        blocked_import_messages["paddlefleet.ops.deep_ep"] = error
 
     if is_sonic_moe_available():
         paddle.compat.enable_torch_proxy(
@@ -280,8 +275,6 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.ops.sonicmoe"] = error
-        blocked_import_messages["paddlefleet.ops.sonicmoe"] = error
-        blocked_import_messages["paddlefleet.ops.sonicmoe"] = error
 
     if is_flash_mask_available():
         _safe_load_ecosystem_lib("flash_mask", ops_dir, globals())
@@ -291,7 +284,6 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.ops.flash_mask"] = error
-        blocked_import_messages["paddlefleet.ops.flash_mask"] = error
 
     if blocked_import_messages:
         sys.meta_path.insert(
@@ -301,62 +293,10 @@ if paddle.is_compiled_with_cuda():
     try:
         paddle.compat.enable_torch_proxy(scope={"triton"}, silent=True)
         from .._extensions.flashmask import (
-            rr_attn_estimate_triton_func,
+            rr_attn_estimate_triton_func as rr_attn_estimate_triton_func,
         )
     finally:
         paddle.compat.disable_torch_proxy()
-
-elif paddle.is_compiled_with_xpu():
-    # XPU does not support CUDA-only modules — populate
-    # blocked_import_messages so that import attempts raise
-    # informative RuntimeError instead of bare AttributeError.
-    for _name, _hint in [
-        ("deep_gemm", DEEP_GEMM_HINT),
-        ("deep_ep", DEEP_EP_HINT),
-        ("sonicmoe", SONIC_MOE_HINT),
-        ("flash_mask", FLASH_MASK_HINT),
-    ]:
-        _msg = f"paddlefleet_ops.ops.{_name} not supported: {_hint}"
-        blocked_import_messages[f"paddlefleet_ops.ops.{_name}"] = _msg
-        blocked_import_messages[f"paddlefleet.ops.{_name}"] = _msg
-
-    if blocked_import_messages:
-        sys.meta_path.insert(
-            0, HardwareIncompatibleBlocker(blocked_import_messages)
-        )
-        blocked_import_messages["paddlefleet.ops.flash_mask"] = error
-
-    if blocked_import_messages:
-        sys.meta_path.insert(
-            0, HardwareIncompatibleBlocker(blocked_import_messages)
-        )
-
-    try:
-        paddle.compat.enable_torch_proxy(scope={"triton"}, silent=True)
-        from .._extensions.flashmask import (
-            rr_attn_estimate_triton_func,  # noqa: F401
-        )
-    finally:
-        paddle.compat.disable_torch_proxy()
-
-elif paddle.is_compiled_with_xpu():
-    # XPU does not support CUDA-only modules — populate
-    # blocked_import_messages so that import attempts raise
-    # informative RuntimeError instead of bare AttributeError.
-    for _name, _hint in [
-        ("deep_gemm", DEEP_GEMM_HINT),
-        ("deep_ep", DEEP_EP_HINT),
-        ("sonicmoe", SONIC_MOE_HINT),
-        ("flash_mask", FLASH_MASK_HINT),
-    ]:
-        _msg = f"paddlefleet_ops.ops.{_name} not supported: {_hint}"
-        blocked_import_messages[f"paddlefleet_ops.ops.{_name}"] = _msg
-        blocked_import_messages[f"paddlefleet.ops.{_name}"] = _msg
-
-    if blocked_import_messages:
-        sys.meta_path.insert(
-            0, HardwareIncompatibleBlocker(blocked_import_messages)
-        )
 
 
 def __getattr__(name):

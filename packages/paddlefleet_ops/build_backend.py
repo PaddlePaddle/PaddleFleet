@@ -21,6 +21,7 @@ from pathlib import Path
 
 import backends
 from build_utils import (
+    check_cuda_arch_list,
     check_patchelf_exists,
     check_submodule_updated,
     get_libs,
@@ -185,6 +186,7 @@ def prepare_metadata_for_build_editable(
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+    check_cuda_arch_list()
     # _clean_egg_info()  # Temporarily disabled - may cause issues with Paddle's CUDAExtension
     check_patchelf_exists()
     check_submodule_updated()
