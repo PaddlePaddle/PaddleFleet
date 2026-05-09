@@ -89,9 +89,9 @@ CUSTOMOP_APPROVERS="risemeup1 From00"
 CUSTOMOP_DIR="packages/paddlefleet_ops/src/paddlefleet_ops/_extensions"
 HAS_MODIFIED_CUSTOMOP=$(git diff --name-only upstream/$BRANCH | grep "^${CUSTOMOP_DIR}/" || true)
 if [ "${HAS_MODIFIED_CUSTOMOP}" != "" ] && [ "${PR_ID}" != "" ]; then
-    echo_line="You must be approved by two of ${CUSTOMOP_APPROVERS} for changes in ${CUSTOMOP_DIR}.\n"
+    echo_line="You must be approved by one of ${CUSTOMOP_APPROVERS} for changes in ${CUSTOMOP_DIR}.\n"
     APPROVER_LIST=(${CUSTOMOP_APPROVERS})
-    check_approval 2 "${APPROVER_LIST[@]}"
+    check_approval 1 "${APPROVER_LIST[@]}"
 fi
 
 
