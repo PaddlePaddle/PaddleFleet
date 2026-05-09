@@ -66,7 +66,6 @@ class Artifact:
 
     source_rel_path: str
     target_name: str
-    init_content: str | None = None
 
 
 class EcosystemLibrary:
@@ -172,11 +171,6 @@ class EcosystemLibrary:
                     cmd_str = " ".join(cmd)
                     logger.error(f"Failed to run {cmd_str}.")
                     raise
-
-            if artifact.init_content is not None:
-                init_file = dst / "__init__.py"
-                logger.info(f"Writing generated package init: {init_file}")
-                init_file.write_text(artifact.init_content)
 
 
 def check_submodule_updated():
