@@ -1885,27 +1885,6 @@ def _hybrid_ep_prepare_expert_counts(
     )
 
 
-def _hybrid_ep_actual_token_mask(manager):
-    actual_tokens_per_expert = manager.tokens_per_expert
-    padded_tokens_per_expert = manager.padded_tokens_per_expert
-    if actual_tokens_per_expert is None or padded_tokens_per_expert is None:
-        return None
-
-    actual_counts = actual_tokens_per_expert.astype("int64").tolist()
-    padded_counts = padded_tokens_per_expert.astype("int64").tolist()
-    mask_parts = []
-    for actual_count, padded_count in zip(actual_counts, padded_counts):
-        actual_count = int(actual_count)
-        padded_count = int(padded_count)
-        if actual_count > 0:
-            mask_parts.append(paddle.ones([actual_count], dtype="bool"))
-        if padded_count > actual_count:
-            mask_parts.append(paddle.zeros([padded_count - actual_count], dtype="bool"))
-    if not mask_parts:
-        return None
-    return paddle.concat(mask_parts, axis=0)
-
-
 def _pad_front_rows(tensor, target_shape):
     if tuple(tensor.shape) == tuple(target_shape):
         return tensor
@@ -1982,23 +1961,6 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         )
         hidden_states = hidden_states[:num_permuted_tokens]
         dispatched_probs = dispatched_probs[:num_permuted_tokens]
-        actual_token_mask = None
-        if not use_fp8_mlp:
-            actual_token_mask = _hybrid_ep_actual_token_mask(
-                custom_map.token_dispatcher._comm_manager
-            )
-            if actual_token_mask is not None:
-                actual_token_mask = actual_token_mask[:num_permuted_tokens]
-                hidden_states = paddle.where(
-                    actual_token_mask.unsqueeze(-1),
-                    hidden_states,
-                    paddle.zeros_like(hidden_states),
-                )
-                dispatched_probs = paddle.where(
-                    actual_token_mask,
-                    dispatched_probs,
-                    paddle.zeros_like(dispatched_probs),
-                )
         scale = None
         if fp8_dispatched_handle is not None:
             assert hidden_states.dtype == paddle.float8_e4m3fn
@@ -2017,31 +1979,15 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         ctx.original_probs_shape = original_probs_shape
         if is_first_fwd:
             node.clear_cached_tensors()
-        ctx.has_actual_token_mask = actual_token_mask is not None
-        cached_tensors = [*node.cached_tensors(), dispatched_probs]
-        if ctx.has_actual_token_mask:
-            cached_tensors.append(actual_token_mask)
-        ctx.save_for_backward(cached_tensors)
+        ctx.save_for_backward([*node.cached_tensors(), dispatched_probs])
         node.clear_cached_tensors()
         return out
 
     @staticmethod
     def backward(ctx, output_grad):
         (cached_tensors,) = ctx.saved_tensor()
-        if ctx.has_actual_token_mask:
-            dispatched_probs = cached_tensors[-2]
-            actual_token_mask = cached_tensors[-1]
-            ctx.node.set_cached_tensors(cached_tensors[:-2])
-        else:
-            dispatched_probs = cached_tensors[-1]
-            actual_token_mask = None
-            ctx.node.set_cached_tensors(cached_tensors[:-1])
-        if actual_token_mask is not None:
-            output_grad = paddle.where(
-                actual_token_mask.unsqueeze(-1),
-                output_grad,
-                paddle.zeros_like(output_grad),
-            )
+        dispatched_probs = cached_tensors[-1]
+        ctx.node.set_cached_tensors(cached_tensors[:-1])
         hidden_states_grad, dispatched_probs_grad = ctx.node.backward(
             output_grad, dispatched_probs
         )

@@ -351,7 +351,7 @@ class _HybridEPManager(_DispatchManager):
             num_of_experts_per_rank=self.num_local_experts,
             use_fp8=use_fp8,
             scaling_factor=scaling_factor,
-            pad_multiple=FP8_ALIGN,
+            pad_multiple=FP8_ALIGN if use_fp8 else None,
             num_permuted_tokens=num_permuted_tokens,
             non_blocking=True,
         )
