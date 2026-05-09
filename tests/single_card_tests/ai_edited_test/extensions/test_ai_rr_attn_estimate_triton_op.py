@@ -54,15 +54,6 @@ if not _triton_available:
     sys.modules.setdefault("triton", _mock_triton)
     sys.modules.setdefault("triton.language", _mock_tl)
 
-# Mock paddle.compat.use_torch_proxy_guard if it doesn't exist
-try:
-    import paddle
-
-    if not hasattr(paddle.compat, "use_torch_proxy_guard"):
-        paddle.compat.use_torch_proxy_guard = lambda: (lambda fn: fn)
-except Exception:
-    pass
-
 _SKIP_RR = False
 try:
     from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_func import (

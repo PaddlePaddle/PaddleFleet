@@ -67,102 +67,6 @@ class Artifact:
     target_name: str
 
 
-# def fix_flash_mask_imports(dst_dir: Path) -> None:
-#     """Fix flash_mask imports to use relative imports for nested package structure.
-
-#     flash_mask uses `from flash_mask.cute.xxx` and `import flash_mask.cute.xxx as xxx`
-#     imports, but when nested under paddlefleet_ops.ops.flash_mask, we need to use
-#     relative imports.
-#     """
-#     if not dst_dir.exists():
-#         return
-
-#     for py_file in dst_dir.rglob("*.py"):
-#         try:
-#             with open(py_file, "r", encoding="utf-8") as f:
-#                 content = f.read()
-
-#             original = content
-
-#             # For files in flash_mask/cute/: fix imports to use relative paths
-#             if "cute" in py_file.parts:
-#                 # `from flash_mask.cute.xxx` -> `from .xxx`
-#                 content = re.sub(
-#                     r"^from flash_mask\.cute\.",
-#                     "from .",
-#                     content,
-#                     flags=re.MULTILINE,
-#                 )
-#                 # `from flash_mask.cute import` -> `from . import`
-#                 content = re.sub(
-#                     r"^from flash_mask\.cute import",
-#                     "from . import",
-#                     content,
-#                     flags=re.MULTILINE,
-#                 )
-#                 # `import flash_mask.cute.xxx as xxx` -> `from . import xxx`
-#                 # This handles cases like: `import flash_mask.cute.utils as utils`
-#                 content = re.sub(
-#                     r"^import flash_mask\.cute\.(\w+) as (\w+)",
-#                     r"from . import \1 as \2",
-#                     content,
-#                     flags=re.MULTILINE,
-#                 )
-#                 # `import flash_mask.cute.xxx` -> `from . import xxx`
-#                 content = re.sub(
-#                     r"^import flash_mask\.cute\.(\w+)$",
-#                     r"from . import \1",
-#                     content,
-#                     flags=re.MULTILINE,
-#                 )
-
-#             if content != original:
-#                 with open(py_file, "w", encoding="utf-8") as f:
-#                     f.write(content)
-#                 logger.debug(f"Fixed imports in {py_file}")
-#         except Exception as e:
-#             logger.warning(f"Failed to fix imports in {py_file}: {e}")
-
-
-# def fix_deep_gemm_torch_import(dst_dir: Path) -> None:
-#     """Fix DeepGEMM torch import to use Paddle compatibility layer.
-
-#     DeepGEMM uses `import torch` which expects Paddle's torch compatibility layer.
-#     When running directly without the compatibility layer, this fails.
-#     """
-#     init_file = dst_dir / "__init__.py"
-#     if not init_file.exists():
-#         return
-
-#     try:
-#         with open(init_file, "r", encoding="utf-8") as f:
-#             content = f.read()
-
-#         original = content
-
-#         # Find the position after "import os" and "import subprocess"
-#         # and insert the paddle compatibility import
-#         lines = content.split("\n")
-
-#         # Find the import torch line
-#         for i, line in enumerate(lines):
-#             if line.strip() == "import torch" and i < len(lines) - 1:
-#                 # Add import paddle and enable compat before import torch
-#                 lines.insert(i, "import paddle")
-#                 lines.insert(i + 1, "paddle.enable_compat()")
-#                 lines.insert(i + 2, "")
-#                 break
-
-#         new_content = "\n".join(lines)
-
-#         if new_content != original:
-#             with open(init_file, "w", encoding="utf-8") as f:
-#                 f.write(new_content)
-#             logger.debug(f"Fixed torch import in {init_file}")
-#     except Exception as e:
-#         logger.warning(f"Failed to fix torch import in {init_file}: {e}")
-
-
 class EcosystemLibrary:
     """
     Represents an external ecosystem operator library.
@@ -252,17 +156,6 @@ class EcosystemLibrary:
                     )
                 else:
                     shutil.copy(src, dst)
-
-            # Fix flash_mask imports for nested package structure
-            # if (
-            #     self.name == "flash-attention"
-            #     and artifact.target_name == "flash_mask"
-            # ):
-            #     fix_flash_mask_imports(dst)
-
-            # # Fix DeepGEMM torch import to use Paddle compatibility layer
-            # if self.name == "DeepGEMM" and artifact.target_name == "deep_gemm":
-            #     fix_deep_gemm_torch_import(dst)
 
             if artifact.target_name == "deep_ep_cpp.so":
                 cmd = [

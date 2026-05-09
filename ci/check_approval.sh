@@ -107,6 +107,23 @@ while read -r status file; do
 done <<< "$files"
 
 
+PACKAGING_APPROVERS="risemeup1 SigureMo"
+PACKAGING_PATTERNS=(
+    "^packages/"
+    "^build_backend\.py$"
+    "^ops_required_version\.txt$"
+    "^pyproject\.toml$"
+)
+for PATTERN in "${PACKAGING_PATTERNS[@]}"; do
+    HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "${PATTERN}" || true)
+    if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
+        echo_line="You must be approved by one of ${PACKAGING_APPROVERS} for changes in packaging-related files (${PATTERN}).\n"
+        APPROVER_LIST=(${PACKAGING_APPROVERS})
+        check_approval 1 "${APPROVER_LIST[@]}"
+    fi
+done
+
+
 if [ -n "${echo_list}" ];then
   echo "****************"
   echo -e "${echo_list[@]}"
