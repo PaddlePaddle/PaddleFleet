@@ -19,7 +19,13 @@ import copy
 import random
 
 import torch
-from generators import (
+
+from paddlefleet.ops import deep_gemm
+from paddlefleet.ops.deep_gemm.testing import (
+    calc_diff,
+)
+
+from .generators import (
     enumerate_k_grouped_contiguous,
     enumerate_m_grouped_contiguous,
     enumerate_m_grouped_masked,
@@ -29,11 +35,6 @@ from generators import (
     generate_m_grouped_masked,
     generate_normal,
     get_arch_major,
-)
-
-from paddlefleet.ops import deep_gemm
-from paddlefleet.ops.deep_gemm.testing import (
-    calc_diff,
 )
 
 

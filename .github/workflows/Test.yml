@@ -84,7 +84,9 @@ jobs:
           export UV_HTTP_TIMEOUT=300
           git submodule update --init --recursive
           export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
-          uv build --wheel
+          uv build --wheel --package paddlefleet --out-dir dist --clear
+          uv build --wheel --package paddlefleet-ops --out-dir dist
+          ls -lh dist
           '
 
       - name: upload whl to BOS
@@ -98,10 +100,15 @@ jobs:
             mkdir bos
             tar xf bos_new.tar.gz -C bos
           fi
-          whl_file=$(ls paddlefleet*.whl)
-          mv ${whl_file} paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           target_path="paddle-github-action/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}"
-          python bos/BosClient.py paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl ${target_path}
+          ROOT_WHL=$(ls paddlefleet-*.whl | head -n1)
+          OPS_WHL=$(ls paddlefleet_ops-*.whl | head -n1)
+          ROOT_DST=paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          OPS_DST=paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          [ "${ROOT_WHL}" != "${ROOT_DST}" ] && cp "${ROOT_WHL}" "${ROOT_DST}"
+          [ "${OPS_WHL}" != "${OPS_DST}" ] && cp "${OPS_WHL}" "${OPS_DST}"
+          python bos/BosClient.py "${ROOT_DST}" ${target_path}
+          python bos/BosClient.py "${OPS_DST}" ${target_path}
           '
       - name: Terminate and delete the container
         if: ${{ always() }}
@@ -172,7 +179,9 @@ jobs:
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          pip install paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           '
 
@@ -256,7 +265,9 @@ jobs:
           git submodule update --init --recursive
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
+          pip install paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
@@ -351,7 +362,9 @@ jobs:
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          pip install paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
@@ -486,7 +499,9 @@ jobs:
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          pip install paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"
@@ -689,7 +704,9 @@ jobs:
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
           pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
+          pip install paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda129-Cudnn99-Trt105-Py310-Compile/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
           python -c "import paddle; print(paddle.version.commit)"

@@ -99,7 +99,9 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install nvidia-cutlass-dsl==4.2.1
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
@@ -178,7 +180,9 @@ jobs:
           git config pull.rebase false
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install nvidia-cutlass-dsl==4.2.1
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
@@ -276,7 +280,9 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install nvidia-cutlass-dsl==4.2.1
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -424,7 +430,9 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install nvidia-cutlass-dsl==4.2.1
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -692,7 +700,9 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install nvidia-cutlass-dsl==4.2.1
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '

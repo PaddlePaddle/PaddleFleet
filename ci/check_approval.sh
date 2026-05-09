@@ -86,7 +86,7 @@ done
 
 
 CUSTOMOP_APPROVERS="risemeup1 From00"
-CUSTOMOP_DIR="src/paddlefleet/_extensions"
+CUSTOMOP_DIR="packages/paddlefleet_ops/src/paddlefleet_ops/_extensions"
 HAS_MODIFIED_CUSTOMOP=$(git diff --name-only upstream/$BRANCH | grep "^${CUSTOMOP_DIR}/" || true)
 if [ "${HAS_MODIFIED_CUSTOMOP}" != "" ] && [ "${PR_ID}" != "" ]; then
     echo_line="You must be approved by two of ${CUSTOMOP_APPROVERS} for changes in ${CUSTOMOP_DIR}.\n"
@@ -105,6 +105,23 @@ while read -r status file; do
         check_approval 1 "${APPROVER_LIST[@]}"
     fi
 done <<< "$files"
+
+
+PACKAGING_APPROVERS="risemeup1 SigureMo"
+PACKAGING_PATTERNS=(
+    "^packages/"
+    "^build_backend\.py$"
+    "^ops_required_version\.txt$"
+    "^pyproject\.toml$"
+)
+for PATTERN in "${PACKAGING_PATTERNS[@]}"; do
+    HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "${PATTERN}" || true)
+    if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
+        echo_line="You must be approved by one of ${PACKAGING_APPROVERS} for changes in packaging-related files (${PATTERN}).\n"
+        APPROVER_LIST=(${PACKAGING_APPROVERS})
+        check_approval 1 "${APPROVER_LIST[@]}"
+    fi
+done
 
 
 if [ -n "${echo_list}" ];then

@@ -12,9 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .moe_topk_fusion import MoETopkFusion, routing_map_fusion_forward
-from .rms_norm_fusion import RMSNormFusionTriton
-from .sigmoid_gate_fusion import SigmoidGateFusionTriton
+"""
+paddlefleet.ops.triton_ops — compatibility shim.
+
+All Triton op implementations have been migrated to paddlefleet_ops.ops.triton_ops.
+This module re-exports everything from there so that existing code using
+`paddlefleet.ops.triton_ops` continues to work unchanged.
+
+NOTE: paddlefleet.ops replaces itself in sys.modules with paddlefleet_ops.ops,
+so Python's subpackage resolution for `paddlefleet.ops.triton_ops` automatically
+finds paddlefleet_ops/ops/triton_ops/ on the filesystem. This shim file exists
+only as documentation of the migration and is not actually loaded at runtime.
+"""
+
+from paddlefleet_ops.ops.triton_ops import (
+    MoETopkFusion,
+    RMSNormFusionTriton,
+    SigmoidGateFusionTriton,
+    routing_map_fusion_forward,
+)
 
 __all__ = [
     "RMSNormFusionTriton",

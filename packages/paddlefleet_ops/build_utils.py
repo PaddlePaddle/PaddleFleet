@@ -25,16 +25,18 @@ from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from pathlib import Path
 
-from packaging.version import Version
-
 import backends
+from packaging.version import Version
 
 logger = logging.getLogger(__name__)
 
+# packages/paddlefleet_ops/
+PKG_ROOT = Path(__file__).parent.resolve()
+# workspace root (packages/paddlefleet_ops/ → packages/ → workspace root)
+ROOT_DIR = PKG_ROOT.parent.parent.resolve()
 
-ROOT_DIR = Path(__file__).parent.resolve()
-OPS_DIR = ROOT_DIR / "src" / "paddlefleet" / "ops"
-THIRD_PARTY_INSTALL_TEMP = ROOT_DIR / "src" / "_third_party_install_temp"
+OPS_DIR = PKG_ROOT / "src" / "paddlefleet_ops" / "ops"
+THIRD_PARTY_INSTALL_TEMP = PKG_ROOT / "src" / "_third_party_install_temp"
 
 
 def remove_path(path: Path) -> None:
@@ -56,7 +58,7 @@ def create_symlink(src: Path, dst: Path) -> None:
 @dataclass
 class Artifact:
     """
-    Defines a mapping from a path in the installation directory to a target name in the ops directory.
+    Defines a mapping from a path in installation directory to a target name in ops directory.
 
     source_rel_path: Relative path from the library's installation directory (e.g., 'deep_gemm').
     target_name: Name of the symlink/directory to create in 'src/paddlefleet/ops' (e.g., 'deep_gemm').
@@ -70,7 +72,7 @@ class Artifact:
 class EcosystemLibrary:
     """
     Represents an external ecosystem operator library.
-    Encapsulates the logic for building and installing the library.
+    Encapsulates logic for building and installing library.
     """
 
     def __init__(
@@ -81,6 +83,7 @@ class EcosystemLibrary:
         extra_env: dict[str, str] | None = None,
     ):
         self.name = name
+        # source_rel_path is relative to workspace root (where third_party/ lives)
         self.source_dir = ROOT_DIR / source_rel_path
         # Install into a subdirectory named after the library
         self.install_dir = THIRD_PARTY_INSTALL_TEMP / name
@@ -88,8 +91,14 @@ class EcosystemLibrary:
         self._extra_env = extra_env or {}
 
     def build(self) -> None:
-        """Builds the library."""
+        """Builds the library unconditionally."""
         logger.info(f"Building ecosystem library: {self.name}")
+        # Clean any stale artifacts from a previous (possibly partial) build
+        # so that pip install does not warn about existing directories and
+        # leave inconsistent state.
+        if self.install_dir.exists():
+            logger.info(f"Removing stale install dir: {self.install_dir}")
+            shutil.rmtree(self.install_dir)
         self.install_dir.mkdir(parents=True, exist_ok=True)
 
         # Special pre-build step for DeepGEMM: link CUTLASS headers into deep_gemm/include
@@ -120,7 +129,6 @@ class EcosystemLibrary:
             "--no-deps",
             "--no-build-isolation",
             "--no-compile",
-            "--upgrade",
             "-v",
         ]
 
@@ -133,7 +141,7 @@ class EcosystemLibrary:
             raise
 
     def install(self, use_symlinks: bool = False) -> None:
-        """Installs artifacts to the ops directory via symlink or copy."""
+        """Installs artifacts to ops directory via symlink or copy."""
         for artifact in self.artifacts:
             # Artifact source path is relative to the installation directory
             src = self.install_dir / artifact.source_rel_path
@@ -197,6 +205,42 @@ def check_patchelf_exists():
             "\033[31m Please install 'patchelf' using your package manager (apt, yum, conda, uv, etc.) before proceeding.\033[0m"
         )
         sys.exit(1)
+
+
+_SUPPORTED_CUDA_ARCHS = {"8.0", "9.0", "10.0", "10.3"}
+
+
+def check_cuda_arch_list():
+    """Validate PADDLE_CUDA_ARCH_LIST early, before any compilation starts.
+
+    Called at the top of build_wheel so a bad value is caught immediately
+    rather than after DeepGEMM/DeepEP have already spent minutes compiling.
+    """
+    raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", "").strip()
+    if not raw:
+        return
+
+    tokens = [t.strip() for t in re.split(r"[;,]", raw) if t.strip()]
+    arch_pattern = re.compile(r"^\d+\.\d+$")
+    bad_format = [t for t in tokens if not arch_pattern.match(t)]
+    if bad_format:
+        raise ValueError(
+            f"\n\nInvalid PADDLE_CUDA_ARCH_LIST value: {raw!r}\n"
+            f"  Bad token(s): {bad_format}\n"
+            f"  Expected format: dot-separated X.Y values, semicolon- or comma-delimited.\n"
+            f'  Example: PADDLE_CUDA_ARCH_LIST="9.0" or "9.0;10.0" or "8.0,9.0"\n'
+            f"  Note: spaces are NOT valid separators.\n"
+            f"  Supported archs: {sorted(_SUPPORTED_CUDA_ARCHS)}"
+        )
+
+    unsupported = [t for t in tokens if t not in _SUPPORTED_CUDA_ARCHS]
+    if unsupported:
+        raise ValueError(
+            f"\n\nUnsupported arch(es) in PADDLE_CUDA_ARCH_LIST: {unsupported}\n"
+            f"  Full value: {raw!r}\n"
+            f"  Supported archs: {sorted(_SUPPORTED_CUDA_ARCHS)}\n"
+            f'  Example: PADDLE_CUDA_ARCH_LIST="9.0" or "9.0;10.0;10.3"'
+        )
 
 
 def get_cuda_version():
@@ -274,15 +318,30 @@ def get_special_build_deps():
 
 def get_libs():
     cuda_major, cuda_minor = get_cuda_version()
-    cuda_arch_list = (
+
+    # Allow CI or users to pin the arch list via PADDLE_CUDA_ARCH_LIST.
+    # Falls back to sensible defaults derived from the detected CUDA version:
+    #   < 12.8  → SM90 only (H800)
+    #   ≥ 12.8 / 13.x → SM90 + SM100 + SM103 (H800 + B100/B200)
+    _default_arch = (
         "9.0" if (cuda_major == 12 and cuda_minor < 8) else "9.0;10.0;10.3"
     )
+    _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _default_arch)
+    # Normalize: some callers use comma-separated (e.g. "8.0,9.0,10.0,10.3").
+    # Paddle's _get_cuda_arch_flags only accepts semicolon-separated values,
+    # and DeepEP only supports SM90/SM100/SM103 — drop anything outside that set.
+    _supported = {"9.0", "10.0", "10.3"}
+    _deep_ep_arch = (
+        ";".join(a for a in re.split(r"[;,]", _raw) if a.strip() in _supported)
+        or _default_arch
+    )
+
     LIBRARIES: list[EcosystemLibrary] = [
         EcosystemLibrary(
             name="DeepGEMM",
             source_rel_path="third_party/DeepGEMM",
             artifacts=[
-                # Updated paths to point to the installation directory
+                # Updated paths to point to installation directory
                 Artifact("deep_gemm", "deep_gemm"),
                 Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
             ],
@@ -294,9 +353,7 @@ def get_libs():
                 Artifact("deep_ep", "deep_ep"),
                 Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
             ],
-            extra_env={
-                "PADDLE_CUDA_ARCH_LIST": cuda_arch_list,
-            },
+            extra_env={"PADDLE_CUDA_ARCH_LIST": _deep_ep_arch},
         ),
         EcosystemLibrary(
             name="HybridEP",
@@ -307,7 +364,7 @@ def get_libs():
             ],
             extra_env={
                 "HYBRID_EP_MULTINODE": "1",
-                "PADDLE_CUDA_ARCH_LIST": cuda_arch_list,
+                "PADDLE_CUDA_ARCH_LIST": _deep_ep_arch,
             },
         ),
         EcosystemLibrary(

@@ -97,6 +97,7 @@ jobs:
             -e PIP_CACHE_DIR \
             -e UV_HTTP_TIMEOUT \
             -e PR_ID \
+            -e PADDLE_CUDA_ARCH_LIST="8.0;9.0;10.0;10.3" \
             -e COMMIT_ID \
             -e BRANCH \
             -e AK=paddle \
@@ -138,6 +139,7 @@ jobs:
           git submodule update --init --recursive
           export IS_NVIDIA=True
           uv build --wheel -v
+          uv build --wheel --package paddlefleet-ops -v
           '
 
       - name: Upload wheel
@@ -150,10 +152,11 @@ jobs:
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
-          fleet_whl=$(ls -t *.whl | head -1)
-          echo "fleet_whl=${fleet_whl}"
-          python ../bos/BosClient.py ${fleet_whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}
-          echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}/${fleet_whl}"
+          for whl in paddlefleet-*.whl paddlefleet_ops-*.whl; do
+            echo "Uploading ${whl}"
+            python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}
+            echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}/${whl}"
+          done
           '
 
       - name: Cleanup

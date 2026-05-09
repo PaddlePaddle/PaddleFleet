@@ -78,6 +78,7 @@ jobs:
             -e CACHE_DIR \
             -e PIP_CACHE_DIR \
             -e UV_HTTP_TIMEOUT \
+            -e PADDLE_CUDA_ARCH_LIST="8.0;9.0;10.0;10.3" \
             -e PR_ID \
             -e COMMIT_ID \
             -e BRANCH \
@@ -117,14 +118,26 @@ jobs:
           source /root/proxy
           git submodule update --init --recursive
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "branch" ]]; then
-            export PADDLEFLEET_VERSION=$(cat version.txt).post$(git log -1 --format=%cd --date=format:%Y%m%d)+$(git rev-parse --short=11 HEAD)
+            export PADDLEFLEET_VERSION=$(cat version.txt).post$(git log -1 --format=%cd --date=format:%Y%m%d)+${{ matrix.cuda.bos_CUDA }}.$(git rev-parse --short=11 HEAD)
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          uv build --wheel -v
+          # Enable ccache for C++/CUDA compilation if available in the image.
+          # CCACHE_DIR points to CFS so the cache persists across CI runs.
+          if command -v ccache &>/dev/null; then
+            export CCACHE_DIR=/home/.cache/ccache
+            export CCACHE_MAXSIZE=20G
+            mkdir -p "${CCACHE_DIR}"
+            export CC="ccache gcc"
+            export CXX="ccache g++"
+            ccache --zero-stats
+            echo "[build] ccache enabled, CCACHE_DIR=${CCACHE_DIR}"
+          fi
+          uv build --wheel --package paddlefleet --out-dir dist --clear -v
+          uv build --wheel --package paddlefleet-ops --out-dir dist -v
           '
 
       - name: Upload wheel
@@ -136,29 +149,42 @@ jobs:
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
-          git rev-parse HEAD > commitid
+          PY_VERSION="${{ matrix.python_version }}"
+          PY_VERSION_SHORT="${PY_VERSION//./}"
           if [[ "${{ github.event_name }}" != "push" ]]; then
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
+            # Upload both paddlefleet and paddlefleet_ops wheels
+            for whl in paddlefleet-*.whl paddlefleet_ops-*.whl; do
+              python ../bos/BosClient.py ${whl} paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
+            done
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
-            PY_VERSION="${{ matrix.python_version }}"
-            PY_VERSION_SHORT="${PY_VERSION//./}"
+            for whl in paddlefleet-*.whl paddlefleet_ops-*.whl; do
+              python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            done
+            # Rename to stable "latest" filenames for compatibility
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
-            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
+            for whl in *-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl; do
+              python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            done
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet
+            for whl in paddlefleet-*.whl paddlefleet_ops-*.whl; do
+              python ../bos/BosClient.py ${whl} paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet
+            done
           else
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
+            for whl in paddlefleet-*.whl paddlefleet_ops-*.whl; do
+              python ../bos/BosClient.py ${whl} paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
+            done
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
-            PY_VERSION="${{ matrix.python_version }}"
-            PY_VERSION_SHORT="${PY_VERSION//./}"
+            for whl in paddlefleet-*.whl paddlefleet_ops-*.whl; do
+              python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            done
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
-            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
+            for whl in *-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl; do
+              python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            done
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
