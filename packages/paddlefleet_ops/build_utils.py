@@ -229,20 +229,6 @@ class EcosystemLibrary:
         try:
             _env = os.environ.copy()
             _env.update(self._extra_env)
-            # Remove parent build backend paths from PYTHONPATH so that
-            # sub-package builds (quack, sonic-moe, etc.) can correctly
-            # locate their own build backend (e.g. setuptools.build_meta)
-            # instead of resolving against the paddlefleet_ops backend-path.
-            pythonpath = _env.get("PYTHONPATH", "")
-            cleaned = os.pathsep.join(
-                p
-                for p in pythonpath.split(os.pathsep)
-                if p and str(PKG_ROOT) not in p
-            )
-            if cleaned:
-                _env["PYTHONPATH"] = cleaned
-            else:
-                _env.pop("PYTHONPATH", None)
             subprocess.check_call(cmd, cwd=self.source_dir, env=_env)
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to build {self.name}: {e}")
