@@ -147,9 +147,9 @@ class ModelParallelConfig:
        be synchronized.
     """
 
-    deterministic_mode: bool = False
+    deterministic_mode: bool = True
     """If true, code that has deterministic execution will be chosen. This usually
-       means slower execution, but is good for debugging and testing. Defaults to False."""
+       means slower execution, but is good for debugging and testing. Defaults to True."""
 
     enable_autocast: bool = False
     """If true runs the forward step function inside paddle.amp.autocast context."""
