@@ -44,14 +44,11 @@ def is_git_repo():
 
 
 def get_git_commit_hash(cwd: Path | None) -> str:
-    try:
-        return (
-            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd)
-            .strip()
-            .decode("utf-8")
-        )
-    except Exception:
-        return "unknown"
+    return (
+        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd)
+        .strip()
+        .decode("utf-8")
+    )
 
 
 def _generate_version_info():
@@ -74,7 +71,43 @@ def _generate_version_info():
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
     else:
-        final_version = ops_req_file.read_text().strip()
+        # Generate version dynamically
+        # Read base version from version.txt
+        version_file = _workspace_root / "version.txt"
+        if not version_file.exists():
+            raise RuntimeError("version.txt not found in workspace root")
+        base_version = version_file.read_text().strip()
+
+        # Read build number from ops_required_version.txt
+        if not ops_req_file.exists():
+            raise RuntimeError(
+                "ops_required_version.txt not found in workspace root"
+            )
+        build_num = ops_req_file.read_text().strip()
+        if not build_num:
+            raise RuntimeError("ops_required_version.txt is empty")
+
+        # Determine suffix based on git branch
+        is_release_branch = False
+        # Get current branch name
+        branch = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=_workspace_root,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
+        # Check if branch starts with "release/"
+        is_release_branch = branch.startswith("release/")
+        logger.info(
+            f"Current branch: {branch}, is_release_branch: {is_release_branch}"
+        )
+
+        # Generate version with appropriate suffix
+        suffix = ".post" if is_release_branch else ".dev"
+        final_version = f"{base_version}{suffix}{build_num}"
 
     git_commit_hash = get_git_commit_hash(_workspace_root)
 

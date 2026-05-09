@@ -14,7 +14,7 @@
 
 [project]
 name = "paddlefleet"
-dynamic = ["version", "readme"]
+dynamic = ["version", "readme", "dependencies"]
 description = "Fleet Core - Core Functional Library for Large Scale Distributed Training"
 requires-python = ">=3.10"
 license = { text = "Apache 2.0" }
@@ -43,11 +43,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Typing :: Typed",
 ]
-dependencies = [
-    "colorlog>=6.10.1",
-    "paddlefleet-ops==0.3.0.dev2",
-]
-
 
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
@@ -68,6 +63,7 @@ include = ["paddlefleet*"]
 [tool.setuptools.dynamic]
 readme = { file = "README.md", content-type = "text/markdown" }
 version = { attr = "paddlefleet.version.__version__" }
+dependencies = { file = "requirements-build.txt" }
 
 [dependency-groups]
 test = [
@@ -260,21 +256,3 @@ known-first-party = ["paddlefleet"]
 [tool.ruff.lint.per-file-ignores]
 # Ignore for re-export in __init__ files
 "__init__.py" = ["PLC0414"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests", "packages"]
-addopts = "-v"
-# Ignore third_party and build directories
-norecursedirs = [
-    "third_party",
-    "build",
-    ".pytest_cache",
-    "packages/*/build",
-    "packages/*/_third_party_install_temp",
-    "packages/paddlefleet_ops/build",
-    "packages/*/src/_third_party_install_temp",
-]
-# Ignore test files in third_party submodules
-python_files = ["test_*.py", "*_test.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]

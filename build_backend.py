@@ -14,7 +14,7 @@
 
 """Lightweight PEP 517 build backend for the root paddlefleet package.
 
-Generates ``src/paddlefleet/version.py`` at build time (same pattern as
+Generates ``src/paddlefleet/_version.py`` at build time (same pattern as
 ``packages/paddlefleet_ops/build_backend.py``) and delegates every actual
 build hook to ``setuptools.build_meta``.
 
@@ -31,19 +31,10 @@ from datetime import datetime
 from pathlib import Path
 
 from setuptools import build_meta as orig  # type: ignore[import-untyped]
-from setuptools.dist import Distribution
 
 logger = logging.getLogger(__name__)
 
 _pkg_root = Path(__file__).parent.resolve()
-_ops_version_py = (
-    _pkg_root
-    / "packages"
-    / "paddlefleet_ops"
-    / "src"
-    / "paddlefleet_ops"
-    / "version.py"
-)
 
 
 def is_git_repo() -> bool:
@@ -62,38 +53,54 @@ def get_git_commit_hash(cwd: Path) -> str:
 
 
 def _get_ops_version() -> str | None:
-    """Read the required paddlefleet-ops version.
+    """Compute the paddlefleet-ops version matching the ops build backend logic.
 
-    Prefers ``ops_required_version.txt`` (updated by paddlefleet_ops build,
-    decouples build cadence) over reading the ops source version.py directly.
-    Falls back to the ops source tree when building both packages together in
-    the same workspace without a pre-existing ops_required_version.txt.
+    Uses PADDLEFLEET_VERSION env var if set (CI builds), otherwise computes
+    from version.txt (base) + ops_required_version.txt (build number) + branch.
+    Falls back to reading the ops source _version.py directly when building
+    both packages together in the same workspace.
     """
+    if os.environ.get("PADDLEFLEET_VERSION") is not None:
+        return os.environ["PADDLEFLEET_VERSION"]
+
+    version_file = _pkg_root / "version.txt"
     ops_req_file = _pkg_root / "ops_required_version.txt"
-    if ops_req_file.exists():
-        version = ops_req_file.read_text().strip()
-        if version:
-            return version
-    if not _ops_version_py.exists():
-        return None
-    globs: dict = {}
-    exec(_ops_version_py.read_text(), globs)
-    return globs.get("__version__")
+
+    if not version_file.exists() or not ops_req_file.exists():
+        raise RuntimeError("version.txt or ops_required_version.txt not found")
+    base_version = version_file.read_text().strip()
+    build_num = ops_req_file.read_text().strip()
+    if not base_version or not build_num:
+        raise RuntimeError("version.txt or ops_required_version.txt is empty")
+
+    is_release_branch = False
+    branch = (
+        subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=_pkg_root,
+            stderr=subprocess.DEVNULL,
+        )
+        .decode("utf-8")
+        .strip()
+    )
+    is_release_branch = branch.startswith("release/")
+    suffix = ".post" if is_release_branch else ".dev"
+    return f"{base_version}{suffix}{build_num}"
 
 
 def _generate_version_info() -> str:
-    """Generate ``src/paddlefleet/version.py`` with git metadata."""
+    """Generate ``src/paddlefleet/_version.py`` with git metadata."""
     version_file = _pkg_root / "version.txt"
     with open(version_file) as f:
         version = f.read().strip()
 
     git_commit_hash = get_git_commit_hash(_pkg_root)
 
-    version_py = _pkg_root / "src" / "paddlefleet" / "version.py"
+    version_py = _pkg_root / "src" / "paddlefleet" / "_version.py"
 
     # If file exists and not in git repo (installing from sdist), keep existing
     if version_py.exists() and not is_git_repo():
-        logger.info("version.py already exists (not in git repo), keeping it")
+        logger.info("_version.py already exists (not in git repo), keeping it")
         return version
 
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
@@ -101,6 +108,8 @@ def _generate_version_info() -> str:
     else:
         date_str = datetime.now().strftime("%Y%m%d")
         final_version = f"{version}.dev{date_str}"
+
+    ops_version = _get_ops_version() or "unknown"
 
     with open(version_py, "w") as f:
         f.write(
@@ -121,48 +130,43 @@ def _generate_version_info() -> str:
             '"""Auto-generated version info — do not edit."""\n'
             "\n"
             f'__version__ = "{final_version}"\n'
+            f'__ops_required_version__ = "{ops_version}"\n'
             f'commit = "{git_commit_hash}"\n'
         )
-    logger.info(f"Created version.py with version {final_version}")
+    logger.info(f"Created _version.py with version {final_version}")
     return final_version
 
 
-def _pin_ops_dependency() -> None:
-    """Replace the bare 'paddlefleet-ops' dependency with an exact version pin.
+def _generate_requirements_build() -> None:
+    """Generate requirements-build.txt with the pinned paddlefleet-ops version.
 
-    Patches setuptools' Distribution.finalize_options so that by the time
-    setuptools writes the wheel METADATA, install_requires already carries
-    the precise version (e.g. 'paddlefleet-ops==0.3.0.dev20260415').
-    Falls back silently to the bare name when the ops version is unavailable
-    (e.g. building paddlefleet alone from an sdist).
+    This file is referenced by [tool.setuptools.dynamic] in pyproject.toml.
+    Setuptools reads it natively to populate install_requires, avoiding
+    unreliable monkey-patching of Distribution internals.
     """
     ops_version = _get_ops_version()
     if ops_version is None:
         logger.warning(
-            "paddlefleet-ops version.py not found; "
+            "paddlefleet-ops version could not be determined; "
             "falling back to unpinned 'paddlefleet-ops' dependency."
         )
-        return
+        ops_dep = "paddlefleet-ops"
+    else:
+        ops_dep = f"paddlefleet-ops=={ops_version}"
+        logger.info(f"Pinning ops dependency: {ops_dep}")
 
-    pinned = f"paddlefleet-ops=={ops_version}"
-    logger.info(f"Pinning ops dependency: {pinned}")
+    dependencies = [
+        "colorlog>=6.10.1",
+        ops_dep,
+    ]
 
-    _orig_finalize = Distribution.finalize_options
-
-    def _patched_finalize(self):
-        _orig_finalize(self)
-        if self.install_requires:
-            self.install_requires = [
-                pinned if req.strip() == "paddlefleet-ops" else req
-                for req in self.install_requires
-            ]
-
-    Distribution.finalize_options = _patched_finalize
+    req_file = _pkg_root / "requirements-build.txt"
+    req_file.write_text("\n".join(dependencies) + "\n")
 
 
 # Run at import time so both wheel and editable builds pick up the patches.
 _generate_version_info()
-_pin_ops_dependency()
+_generate_requirements_build()
 
 
 # -- PEP 517 hooks (pure delegation to setuptools) --
