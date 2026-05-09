@@ -1938,6 +1938,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         use_bf16_gemm_weight_grad=False,
         fp8_dispatched_handle=None,
         is_first_fwd=False,
+        dw_p2p_overlap=False,
     ):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
@@ -1947,6 +1948,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             use_fp8_mlp=use_fp8_mlp,
             moe_deep_gemm=moe_deep_gemm,
             moe_grouped_gemm=moe_grouped_gemm,
+            dw_p2p_overlap=dw_p2p_overlap,
         )
         original_hidden_shape = tuple(hidden_states.shape)
         original_probs_shape = tuple(dispatched_probs.shape)

@@ -720,6 +720,7 @@ class MoELayer(nn.Layer):
             use_bf16_gemm_weight_grad=not self.fp8_wgrad,
             fp8_dispatched_handle=fp8_dispatched_handle,
             is_first_fwd=is_first_fwd,
+            dw_p2p_overlap=self.dw_p2p_overlap,
         )
 
     def dispatch_preprocess(self, args):
