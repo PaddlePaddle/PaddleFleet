@@ -141,7 +141,6 @@ jobs:
           export LD_LIBRARY_PATH=/opt/_internal/cpython-3.12.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-3.12.0/bin/:${PATH}
           export UV_PYTHON=3.12
-          export PADDLEFLEET_VERSION=0.0.0
           export IS_NVIDIA=True
           mkdir -p /root/.cache/pip
           pip cache dir
