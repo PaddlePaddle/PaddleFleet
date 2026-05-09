@@ -117,30 +117,13 @@ jobs:
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
           git submodule update --init --recursive
-          # Read ops_required_version from ops_required_version.txt
-          OPS_REQUIRED_VERSION=$(cat /workspace/packages/paddlefleet_ops/ops_required_version.txt | head -1 | tr -d "\n")
-          echo "Ops required version: ${OPS_REQUIRED_VERSION}"
-          # Determine suffix based on branch (release/** or not)
-          if [[ "${BRANCH}" == release/* ]]; then
-            VERSION_SUFFIX=".post${OPS_REQUIRED_VERSION}"
-          else
-            VERSION_SUFFIX=".dev${OPS_REQUIRED_VERSION}"
-          fi
-          echo "Version suffix: ${VERSION_SUFFIX}"
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "branch" ]]; then
-            export PADDLEFLEET_VERSION=$(cat version.txt).post${OPS_REQUIRED_VERSION}$(git log -1 --format=%cd --date=format:%Y%m%d)+${{ matrix.cuda.bos_CUDA }}.$(git rev-parse --short=11 HEAD)
-            export PADDLEFLEET_OPS_VERSION=$(cat version.txt).post${OPS_REQUIRED_VERSION}$(git log -1 --format=%cd --date=format:%Y%m%d)+${{ matrix.cuda.bos_CUDA }}.$(git rev-parse --short=11 HEAD)
+            export PADDLEFLEET_VERSION=$(cat version.txt).post$(git log -1 --format=%cd --date=format:%Y%m%d)+${{ matrix.cuda.bos_CUDA }}.$(git rev-parse --short=11 HEAD)
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
             export PADDLEFLEET_VERSION=$VERSION
-            export PADDLEFLEET_OPS_VERSION=$VERSION
-          else
-            export PADDLEFLEET_VERSION=$(cat version.txt).dev${OPS_REQUIRED_VERSION}
-            export PADDLEFLEET_OPS_VERSION=$(cat version.txt).dev${OPS_REQUIRED_VERSION}
           fi
-          echo "PADDLEFLEET_VERSION: ${PADDLEFLEET_VERSION}"
-          echo "PADDLEFLEET_OPS_VERSION: ${PADDLEFLEET_OPS_VERSION}"
           export IS_NVIDIA=True
           # Enable ccache for C++/CUDA compilation if available in the image.
           # CCACHE_DIR points to CFS so the cache persists across CI runs.
