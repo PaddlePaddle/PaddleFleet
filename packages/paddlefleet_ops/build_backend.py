@@ -68,7 +68,7 @@ def _generate_version_info():
     """Generate version info file from ops_required_version.txt.
 
     The version is developer-maintained in ops_required_version.txt
-    (e.g. 0.3.0.dev2, 0.3.0.dev3, ...).  Developers bump it manually
+    (e.g. 0.3.0.dev1, 0.3.0.dev2, ...).  Developers bump it manually
     whenever paddlefleet_ops code changes, as part of their PR.
     CI release builds may override via PADDLEFLEET_VERSION env var.
     """
