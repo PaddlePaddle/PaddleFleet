@@ -1,0 +1,352 @@
+name: Publish wheel nightly
+
+on:
+  push:
+    branches:
+      - 'release/**'
+      - 'develop'
+    tags:
+      - 'v*'
+
+
+permissions: read-all
+
+# concurrency:
+#   group: ${{ github.workflow }}-all-${{ github.sha }}-ops
+#   cancel-in-progress: true
+
+env:
+  PR_ID: 'ops'
+  COMMIT_ID: ${{ github.sha }}
+  BRANCH: ${{ github.ref_name }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check-packages-changes:
+    name: Check packages directory changes
+    runs-on: ubuntu-latest
+    outputs:
+      packages_changed: ${{ steps.check.outputs.packages_changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Check if packages directory changed
+        id: check
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "packages_changed=true" >> $GITHUB_OUTPUT
+          else
+            if git diff --name-only HEAD~1 HEAD -- packages/ | grep -q .; then
+              echo "packages_changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "packages_changed=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  upload-pr-ops:
+    name: Upload PR ops whl
+    needs: check-packages-changes
+    if: needs.check-packages-changes.outputs.packages_changed == 'true'
+    runs-on: ubuntu-latest
+    env:
+      AK: ${{ secrets.BOS_CREDENTIAL_AK }}
+      SK: ${{ secrets.BOS_CREDENTIAL_SK }}
+    steps:
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.10'
+
+      - name: Upload PR ops whl to paddle
+        run: |
+          set -x
+          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir bos
+          tar -xf bos_new.tar.gz -C bos
+          pip install bce-python-sdk==0.8.74
+          response=$(curl -L \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${{ github.token }}" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          https://api.github.com/repos/PaddlePaddle/PaddleFleet/commits/${{ github.sha }}/pulls)
+          pr_number=$(echo $response | jq -r '.[0].url' | awk -F'/' '{print $NF}')
+          pr_last_commit=$(echo $response | jq -r '.[0].head.sha')
+          mkdir fleet-312 && cd fleet-312
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddldfleet.tar.gz
+          tar -xf paddldfleet.tar.gz --strip-components=1
+          git config --global --add safe.directory .
+          cd dist
+          python ../../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/cu129/paddlefleet-ops
+          cd ../.. && mkdir fleet-310 && cd fleet-310
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet-310.tar.gz
+          tar -xf paddldfleet.tar.gz --strip-components=1
+          git config --global --add safe.directory .
+          cd dist
+          python ../../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/cu129/paddlefleet-ops
+
+  clone:
+    name: Clone PaddleFleet
+    needs: check-packages-changes
+    if: needs.check-packages-changes.outputs.packages_changed == 'true'
+    uses: ./.github/workflows/_clone.yml
+    with:
+      clone_dir: $BRANCH
+      ref: ${{ github.event.pull_request.base.ref }}
+
+  publish-ops-wheel:
+    name: Publish wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
+    needs: clone
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    runs-on:
+      group: GZ_BD-CPU
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ["3.10", "3.11", "3.12", "3.13"]
+        cuda:
+          - {CUDA_VERSION: CUDA12.6, IMAGE_TAG: cuda12.6-cudnn9.5-trt10.5-gcc11, bos_CUDA: cu126, CUDA_ARCH_LIST: "8.0;9.0"}
+          - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
+          - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
+    env:
+      TASK: PaddleFleet-nightly-${{ matrix.cuda.CUDA_VERSION }}
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
+      UV_HTTP_TIMEOUT: 600
+      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
+    steps:
+      - name: Check docker image and run container
+        run: |
+          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:${{ matrix.cuda.IMAGE_TAG }}"
+          docker pull $docker_image
+          container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
+          echo "container_name=${container_name}" >> ${{ github.env }}
+          docker run -d -t --name ${container_name} \
+            -v "/home/data/cfs:/home/data/cfs" \
+            -v "/home/data/cfs/.cache:/home/.cache" \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
+            -v ${{ github.workspace }}:/workspace \
+            -e no_proxy \
+            -e CACHE_DIR \
+            -e PIP_CACHE_DIR \
+            -e UV_HTTP_TIMEOUT \
+            -e PADDLE_CUDA_ARCH_LIST="${{ matrix.cuda.CUDA_ARCH_LIST }}" \
+            -e PR_ID \
+            -e COMMIT_ID \
+            -e BRANCH \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
+            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+            -e GITHUB_REPO_NAME=${{ github.repository }} \
+            -w /workspace --network=host $docker_image
+
+      - name: Download PaddleFleet
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          rm -rf * .[^.]*
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          source /root/proxy
+          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          echo "Extracting PaddleFleet.tar.gz"
+          tar -xf PaddleFleet.tar.gz --strip-components=1
+          rm PaddleFleet.tar.gz
+          git config --global --add safe.directory /workspace
+          sed -i "s#packages/nightly/cu129#packages/nightly/${{ matrix.cuda.bos_CUDA }}#g" pyproject.toml
+          cat pyproject.toml
+          mkdir -p /root/.cache/pip
+          pip cache dir
+          pip install --upgrade pip
+          pip install uv
+          python -m pip install bce-python-sdk==0.8.74
+          '
+
+      - name: Build wheel
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          export UV_PYTHON=${{ matrix.python_version }}
+          source /root/proxy
+          git submodule update --init --recursive
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+            VERSION="${TAG_NAME#v}"
+            export PADDLEFLEET_VERSION=$VERSION
+          fi
+          export IS_NVIDIA=True
+          # Enable ccache for C++/CUDA compilation if available in the image.
+          # CCACHE_DIR points to CFS so the cache persists across CI runs.
+          if command -v ccache &>/dev/null; then
+            export CCACHE_DIR=/home/.cache/ccache
+            export CCACHE_MAXSIZE=20G
+            mkdir -p "${CCACHE_DIR}"
+            export CC="ccache gcc"
+            export CXX="ccache g++"
+            ccache --zero-stats
+            echo "[build] ccache enabled, CCACHE_DIR=${CCACHE_DIR}"
+          fi
+          # uv build --wheel --package paddlefleet --out-dir dist --clear -v
+          uv build --wheel --package paddlefleet-ops --out-dir dist -v
+          '
+
+      - name: Upload wheel
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir bos
+          tar -xf bos_new.tar.gz -C bos
+          cd dist
+          PY_VERSION="${{ matrix.python_version }}"
+          PY_VERSION_SHORT="${PY_VERSION//./}"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+          else
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            export AK=paddle
+            export SK=paddle
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+          fi
+          curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          '
+
+      - name: Cleanup
+        if: ${{ always() }}
+        run: |
+          set +e
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker rm -f ${{ env.container_name }}
+
+  publish-ops-wheel-arm:
+    name: Publish arm wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
+    needs: clone
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    runs-on:
+      group: npu-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ["3.12"]
+        cuda:
+          - {CUDA_VERSION: CUDA13.0, bos_CUDA: cu130}
+    env:
+      TASK: PaddleFleet-nightly-arm-${{ matrix.cuda.CUDA_VERSION }}
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
+      UV_HTTP_TIMEOUT: 600
+      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
+    steps:
+      - name: Check docker image and run container
+        run: |
+          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev-arm-py312"
+          docker pull $docker_image
+          container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
+          echo "container_name=${container_name}" >> ${{ github.env }}
+          docker run -d -t --name ${container_name} \
+            -v "/home/data/cfs:/home/data/cfs" \
+            -v "/home/data/cfs/.cache:/home/.cache" \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
+            -v ${{ github.workspace }}:/workspace \
+            -e no_proxy \
+            -e CACHE_DIR \
+            -e PIP_CACHE_DIR \
+            -e UV_HTTP_TIMEOUT \
+            -e PR_ID \
+            -e COMMIT_ID \
+            -e BRANCH \
+            --shm-size 128G \
+            --ulimit core=-1 \
+            --cap-add SYS_ADMIN \
+            --privileged=true \
+            -v /ssd1:/ssd1 \
+            -v /ssd2:/ssd2 \
+            -v /ssd3:/ssd3 \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
+            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+            -e GITHUB_REPO_NAME=${{ github.repository }} \
+            -w /workspace --network=host $docker_image
+
+      - name: Install PaddleFleet
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          rm -rf * .[^.]*
+          source /root/proxy
+          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          echo "Extracting PaddleFleet.tar.gz"
+          tar -xf PaddleFleet.tar.gz --strip-components=1
+          rm PaddleFleet.tar.gz
+          git config --global --add safe.directory /workspace
+          sed -i "s#packages/nightly/cu129#packages/nightly/${{ matrix.cuda.bos_CUDA }}#g" pyproject.toml
+          cat pyproject.toml
+          mkdir -p /root/.cache/pip
+          pip cache dir
+          pip install --break-system-packages --upgrade pip
+          pip install --break-system-packages uv
+          python -m pip install --break-system-packages bce-python-sdk==0.8.74
+          '
+
+      - name: Build wheel
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          export UV_PYTHON=${{ matrix.python_version }}
+          source /root/proxy
+          git submodule update --init --recursive
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+            VERSION="${TAG_NAME#v}"
+            export PADDLEFLEET_VERSION=$VERSION
+          fi
+          export IS_NVIDIA=True
+          # Enable ccache for C++/CUDA compilation if available in the image.
+          # CCACHE_DIR points to CFS so the cache persists across CI runs.
+          if command -v ccache &>/dev/null; then
+            export CCACHE_DIR=/home/.cache/ccache
+            export CCACHE_MAXSIZE=20G
+            mkdir -p "${CCACHE_DIR}"
+            export CC="ccache gcc"
+            export CXX="ccache g++"
+            ccache --zero-stats
+            echo "[build] ccache enabled, CCACHE_DIR=${CCACHE_DIR}"
+          fi
+          uv build --wheel --package paddlefleet-ops -v --python /usr/bin/python
+          '
+
+      - name: Upload wheel
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir bos
+          tar -xf bos_new.tar.gz -C bos
+          cd dist
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+          else
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            export AK=paddle
+            export SK=paddle
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            PY_VERSION="${{ matrix.python_version }}"
+            PY_VERSION_SHORT="${PY_VERSION//./}"
+            mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl
+            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+          fi
+          curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          '
+
+      - name: Cleanup
+        if: ${{ always() }}
+        run: |
+          set +e
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker rm -f ${{ env.container_name }}
