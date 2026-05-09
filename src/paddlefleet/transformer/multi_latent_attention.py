@@ -15,11 +15,15 @@
 import math
 import os
 from dataclasses import dataclass
+from functools import partial
 from typing import NoReturn
 
 import paddle
 from paddle import Tensor
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
+from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
+    WeightGradStore,
+)
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.models.common.embeddings import (
@@ -151,6 +155,64 @@ class MLASelfAttentionSublayersSpec:
     core_attention: LayerSpec | type = None
     o_proj: LayerSpec | type = None
     gate_proj: LayerSpec | type = None
+
+
+class FP8OverlapProj(paddle.autograd.PyLayer):
+    """
+    Replaces RowParallelLinear (no bias, mp==1) with explicit split backward.
+    Defers dw computation via WeightGradStore to overlap with P2P communication.
+    Bit-exact with F.linear(x, weight) for arbitrary batch dimensions.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight):
+        ctx.save_for_backward(x, weight)
+        # Bit-exact with RowParallelLinear mp==1, no bias:
+        # F.linear(x, weight) = x @ weight, weight shape: [in, out]
+        return paddle.nn.functional.linear(x, weight)
+
+    @staticmethod
+    def backward(ctx, out_grad):
+        x, weight = ctx.saved_tensor()
+
+        def _compute_weight_grad(x, out_grad, weight):
+            with paddle.amp.auto_cast(False):
+                # Flatten all leading batch dims to 2D before matmul,
+                # so dw = x_2d.T @ out_grad_2d has shape [in, out] == weight.shape
+                x_2d = x.reshape([-1, x.shape[-1]])  # [B*S, in]
+                og_2d = out_grad.reshape([-1, out_grad.shape[-1]])  # [B*S, out]
+                w_grad = paddle.matmul(
+                    x_2d, og_2d, transpose_x=True
+                )  # [in, out]
+                # print("w_grad compute")
+
+            if hasattr(weight, "main_grad"):
+                if weight.main_grad is None:
+                    weight.main_grad = paddle.zeros(
+                        weight.shape, dtype=paddle.float32
+                    )
+                weight.main_grad.add_(w_grad)
+            else:
+                raise AssertionError("fp8 overlap need main_grad attribute")
+
+            if hasattr(weight, "_apply_backward_hook"):
+                weight._apply_backward_hook()
+
+        # dx = out_grad @ weight.T, weight: [in, out] -> [out, in]
+        dx = paddle.matmul(out_grad, weight, transpose_y=True)
+
+        # dw computation (deferred via WeightGradStore)
+        if not weight.stop_gradient:
+            # print("enter overlap weight grad")
+            WeightGradStore.enabled = True
+            WeightGradStore.put(
+                partial(
+                    _compute_weight_grad, x.detach(), out_grad.detach(), weight
+                )
+            )
+            WeightGradStore.enabled = False
+
+        return dx, None
 
 
 class MultiLatentAttention(Attention):
@@ -388,7 +450,13 @@ class MultiLatentAttention(Attention):
             else:
                 core_attn_out = self._gate(hidden_states, core_attn_out)
 
-        output, bias = self.o_proj(core_attn_out)
+        if getattr(self.config, "dw_p2p_overlap", False) and not getattr(
+            self.config, "use_bias", False
+        ):
+            output = FP8OverlapProj.apply(core_attn_out, self.o_proj.weight)
+            bias = None
+        else:
+            output, bias = self.o_proj(core_attn_out)
 
         if self.gated_attention and self.recompute_gated_attn:
             gate_recompute.discard_output_and_register_recompute(output)

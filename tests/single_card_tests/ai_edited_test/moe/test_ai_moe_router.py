@@ -420,7 +420,9 @@ class TestMoERouter(unittest.TestCase):
         from paddlefleet.transformer.moe.moe_router import FusedGateDetachMatmul
 
         x = paddle.randn([4, 64], dtype=paddle.float32)
-        w = paddle.randn([64, 4], dtype=paddle.float32)
+        # FusedGateDetachMatmul.forward does w = w.T internally, then F.linear(x, w.T).
+        # So w must be [E, D] (n_experts, hidden) to produce output [B, E].
+        w = paddle.randn([4, 64], dtype=paddle.float32)
         x.stop_gradient = False
         w.stop_gradient = False
         out = FusedGateDetachMatmul.apply(x, w)

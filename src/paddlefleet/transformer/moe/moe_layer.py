@@ -168,6 +168,7 @@ class MoELayer(nn.Layer):
         self.fp8 = config.fp8
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
+        self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
         self.moe_expert_fusion = config.moe_expert_fusion
         self.moe_subbatch_token_num_after_dispatch = (
@@ -677,6 +678,7 @@ class MoELayer(nn.Layer):
                     moe_expert_fusion=self.moe_expert_fusion,
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
+                    dw_p2p_overlap=self.dw_p2p_overlap,
                 )
 
         with profile("combine"):
@@ -813,6 +815,7 @@ class MoELayer(nn.Layer):
                     moe_expert_fusion=self.moe_expert_fusion,
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
+                    dw_p2p_overlap=self.dw_p2p_overlap,
                 )
             if is_first_fwd:
                 hidden_states.stop_gradient = False

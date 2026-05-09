@@ -17,6 +17,8 @@ import unittest
 import numpy as np
 import paddle
 
+from paddlefleet.transformer.moe.moe_router import _apply_routing_map_fusion
+
 
 def reference_topk(
     gate_probs,
@@ -221,6 +223,113 @@ class TestMoETopkFusionTriton(unittest.TestCase):
         paddle.disable_compat()
 
         self.assertEqual(triton_probs.dtype, paddle.bfloat16)
+
+
+def _router_branch_reference(gates, top_idx, input_ids_none_zero_mask):
+    mask = paddle.zeros_like(gates).put_along_axis(
+        top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
+    )
+    if input_ids_none_zero_mask is not None:
+        valid_mask = input_ids_none_zero_mask
+        mask = mask * valid_mask.cast(mask.dtype)
+        top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
+    return mask, top_idx
+
+
+class TestRoutingMapFusionRouterBranch(unittest.TestCase):
+    def setUp(self):
+        paddle.seed(2026)
+        self.seq_len = 1024
+        self.n_experts = 64
+        self.moe_k = 8
+
+    def _make_inputs(self, dtype="float32"):
+        gates = paddle.rand([self.seq_len, self.n_experts], dtype=dtype)
+        top_idx = paddle.randint(
+            0, self.n_experts, [self.seq_len, self.moe_k], dtype="int64"
+        )
+        return gates, top_idx
+
+    def test_equivalence_without_padding(self):
+        gates, top_idx = self._make_inputs("float32")
+
+        paddle.enable_compat(scope={"triton"}, silent=True)
+        fused_mask, fused_top_idx, dispatch_mask = _apply_routing_map_fusion(
+            gates, top_idx.clone(), None
+        )
+        paddle.disable_compat()
+        ref_mask, ref_top_idx = _router_branch_reference(
+            gates, top_idx.clone(), None
+        )
+
+        self.assertEqual(fused_mask.shape, [self.seq_len, self.n_experts])
+        self.assertEqual(dispatch_mask.shape, [self.n_experts])
+        np.testing.assert_array_equal(fused_mask.numpy(), ref_mask.numpy())
+        np.testing.assert_array_equal(
+            fused_top_idx.numpy(), ref_top_idx.numpy()
+        )
+        np.testing.assert_array_equal(
+            dispatch_mask.numpy(),
+            ref_mask.cast("int64").sum(axis=0).numpy(),
+        )
+
+    def test_equivalence_with_padding_mask(self):
+        gates, top_idx = self._make_inputs("float32")
+        padded = paddle.rand([self.seq_len], dtype="float32") <= 0.2
+        input_ids = paddle.where(
+            padded,
+            paddle.zeros([self.seq_len], dtype="int64"),
+            paddle.ones([self.seq_len], dtype="int64"),
+        )
+        valid_mask = (input_ids != 0).reshape([-1, 1]).cast("float32")
+
+        paddle.enable_compat(scope={"triton"}, silent=True)
+        fused_mask, fused_top_idx, fused_dispatch_mask = (
+            _apply_routing_map_fusion(
+                gates, top_idx.clone(), valid_mask, input_ids=input_ids
+            )
+        )
+        paddle.disable_compat()
+        ref_mask, ref_top_idx = _router_branch_reference(
+            gates, top_idx.clone(), valid_mask
+        )
+
+        np.testing.assert_array_equal(fused_mask.numpy(), ref_mask.numpy())
+        np.testing.assert_array_equal(
+            fused_top_idx.numpy(), ref_top_idx.numpy()
+        )
+        padded_rows = (valid_mask.squeeze(-1) == 0).numpy()
+        self.assertTrue((fused_top_idx.numpy()[padded_rows] == -1).all())
+        self.assertTrue((fused_mask.numpy()[padded_rows] == 0).all())
+        np.testing.assert_array_equal(
+            fused_dispatch_mask.numpy(),
+            ref_mask.cast("int64").sum(axis=0).numpy(),
+        )
+
+    def test_bfloat16_dtype(self):
+        gates, top_idx = self._make_inputs("bfloat16")
+
+        paddle.enable_compat(scope={"triton"}, silent=True)
+        fused_mask, fused_top_idx, fused_dispatch_mask = (
+            _apply_routing_map_fusion(gates, top_idx.clone(), None)
+        )
+        paddle.disable_compat()
+        ref_mask, ref_top_idx = _router_branch_reference(
+            gates, top_idx.clone(), None
+        )
+
+        self.assertEqual(fused_mask.dtype, paddle.bfloat16)
+        np.testing.assert_array_equal(
+            fused_mask.cast("float32").numpy(),
+            ref_mask.cast("float32").numpy(),
+        )
+        np.testing.assert_array_equal(
+            fused_top_idx.numpy(), ref_top_idx.numpy()
+        )
+        np.testing.assert_array_equal(
+            fused_dispatch_mask.numpy(),
+            ref_mask.cast("int64").sum(axis=0).numpy(),
+        )
 
 
 if __name__ == "__main__":
