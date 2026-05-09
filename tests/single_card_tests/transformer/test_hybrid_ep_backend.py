@@ -505,7 +505,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         dispatch_kwargs = buffer.dispatch_calls[-1]
         self.assertIs(dispatch_kwargs["routing_map"], routing_map)
         self.assertFalse(dispatch_kwargs["use_fp8"])
-        self.assertIsNone(dispatch_kwargs["pad_multiple"])
+        self.assertEqual(dispatch_kwargs["pad_multiple"], FP8_ALIGN)
         self.assertTrue(dispatch_kwargs["non_blocking"])
         self.assertIs(manager.padded_tokens_per_expert, padded_counts)
         self.assertEqual(manager.tokens_per_expert.numpy().tolist(), [1, 1])
