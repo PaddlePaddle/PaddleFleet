@@ -37,12 +37,11 @@ import numpy as np
 import paddle
 from paddle import nn
 
-if (
-    not paddle.device.is_compiled_with_cuda()
-    or paddle.device.cuda.get_device_capability()[0] != 10
-):
-    raise unittest.SkipTest("use_ue8m0 requires Blackwell GPU (SM100)")
-
+# if (
+#     not paddle.device.is_compiled_with_cuda()
+#     or paddle.device.cuda.get_device_capability()[0] != 10
+# ):
+#     raise unittest.SkipTest("use_ue8m0 requires Blackwell GPU (SM100)")
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
