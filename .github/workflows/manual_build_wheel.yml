@@ -138,7 +138,6 @@ jobs:
           source /root/proxy
           git submodule update --init --recursive
           export IS_NVIDIA=True
-          export PADDLEFLEET_VERSION=$(cat version.txt).post$(git log -1 --format=%cd --date=format:%Y%m%d)+${{ matrix.cuda.bos_CUDA }}.$(git rev-parse --short=11 HEAD)
           uv build --wheel -v
           uv build --wheel --package paddlefleet-ops -v
           '

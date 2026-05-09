@@ -91,6 +91,7 @@ jobs:
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
           uv build --wheel --package paddlefleet-ops --out-dir dist -v
           '
+      - name: Upload wheel (and update precision)
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
