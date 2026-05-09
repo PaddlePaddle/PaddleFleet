@@ -1,6 +1,9 @@
 name: CE-CUDA-CUDA-130-Dev
 
 on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [develop, release/**]
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
@@ -99,7 +102,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/12ca10680c66736949545edbce4fc3bc6db6f54e/cu130/paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl -O paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl
+          pip install paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
@@ -179,7 +183,8 @@ jobs:
           git config pull.rebase false
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/12ca10680c66736949545edbce4fc3bc6db6f54e/cu130/paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl -O paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl
+          pip install paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
@@ -278,7 +283,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/12ca10680c66736949545edbce4fc3bc6db6f54e/cu130/paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl -O paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl
+          pip install paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -427,7 +433,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/12ca10680c66736949545edbce4fc3bc6db6f54e/cu130/paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl -O paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl
+          pip install paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -696,7 +703,8 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          wget https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/12ca10680c66736949545edbce4fc3bc6db6f54e/cu130/paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl -O paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl
+          pip install paddlefleet_ops-0.3.0.dev1-cp312-cp312-linux_x86_64.whl --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
