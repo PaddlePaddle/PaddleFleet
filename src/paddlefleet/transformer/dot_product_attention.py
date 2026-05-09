@@ -46,6 +46,35 @@ from paddlefleet.transformer.utils import (
 from paddlefleet.utils import divide
 
 
+class _EagerQKScoresFn(paddle.autograd.PyLayer):
+    """Compute QK scores with baddbmm forward and explicit matmul backward."""
+
+    @staticmethod
+    def forward(ctx, query, key_t, scale):  # noqa: N805
+        matmul_input_buffer = paddle.empty(
+            (query.shape[0], query.shape[1], key_t.shape[2]),
+            dtype=query.dtype,
+        )
+        scores = paddle.baddbmm(
+            matmul_input_buffer,
+            query,
+            key_t,
+            beta=0.0,
+            alpha=scale,
+        )
+        ctx.save_for_backward(query, key_t)
+        ctx.scale = scale
+        return scores
+
+    @staticmethod
+    def backward(ctx, d_scores):  # noqa: N805
+        query, key_t = ctx.saved_tensor()
+        scale = ctx.scale
+        d_query = paddle.matmul(d_scores, key_t, transpose_y=True) * scale
+        d_key_t = paddle.matmul(query, d_scores, transpose_x=True) * scale
+        return d_query, d_key_t
+
+
 class DotProductAttention(FleetLayer):
     """
     Region where selective activation recomputation is applied.
@@ -450,20 +479,26 @@ class DotProductAttention(FleetLayer):
             output_size[0] * output_size[1], -1, output_size[3]
         )
 
-        # preallocting input tensor: [b * np, sq, sk]
-        matmul_input_buffer = paddle.empty(
-            (output_size[0] * output_size[1], output_size[2], output_size[3]),
-            query.dtype,
-        )
-
         # Raw attention scores. [b * np, sq, sk]
-        matmul_result = paddle.baddbmm(
-            matmul_input_buffer,
-            query,
-            key,
-            beta=0.0,
-            alpha=self.softmax_scale,
-        )
+        if use_eager:
+            matmul_result = _EagerQKScoresFn.apply(query, key, self.softmax_scale)
+        else:
+            # preallocating input tensor: [b * np, sq, sk]
+            matmul_input_buffer = paddle.empty(
+                (
+                    output_size[0] * output_size[1],
+                    output_size[2],
+                    output_size[3],
+                ),
+                query.dtype,
+            )
+            matmul_result = paddle.baddbmm(
+                matmul_input_buffer,
+                query,
+                key,
+                beta=0.0,
+                alpha=self.softmax_scale,
+            )
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.reshape(*output_size)
@@ -471,6 +506,25 @@ class DotProductAttention(FleetLayer):
         # ===========================
         # Attention probs and dropout
         # ===========================
+
+        if use_eager:
+            if hasattr(self.scale_mask_softmax, "softmax_in_fp32"):
+                self.scale_mask_softmax.softmax_in_fp32 = True
+            if hasattr(self.config, "attention_softmax_in_fp32"):
+                self.config.attention_softmax_in_fp32 = True
+            if hasattr(self.scale_mask_softmax, "input_in_bf16"):
+                if attention_scores.dtype == paddle.bfloat16:
+                    self.scale_mask_softmax.input_in_fp16 = False
+                    self.scale_mask_softmax.input_in_bf16 = True
+                    self.scale_mask_softmax.input_in_float16 = True
+                elif attention_scores.dtype == paddle.float16:
+                    self.scale_mask_softmax.input_in_fp16 = True
+                    self.scale_mask_softmax.input_in_bf16 = False
+                    self.scale_mask_softmax.input_in_float16 = True
+                else:
+                    self.scale_mask_softmax.input_in_fp16 = False
+                    self.scale_mask_softmax.input_in_bf16 = False
+                    self.scale_mask_softmax.input_in_float16 = False
 
         # attention scores and attention mask [b, np, sq, sk]
         attention_probs: Tensor = self.scale_mask_softmax(
