@@ -54,7 +54,7 @@ def get_git_commit_hash(cwd: Path | None) -> str:
         return "unknown"
 
 
-def version_info():
+def _generate_version_info():
     """Generate version info file from ops_required_version.txt.
 
     The version is developer-maintained in ops_required_version.txt
@@ -155,7 +155,7 @@ def version_info():
 
 
 # Generate version info as soon as this module is imported
-version_info()
+_generate_version_info()
 
 
 def _prepare_ecosystem(use_symlinks: bool):

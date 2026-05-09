@@ -35,14 +35,6 @@ from setuptools import build_meta as orig  # type: ignore[import-untyped]
 logger = logging.getLogger(__name__)
 
 _pkg_root = Path(__file__).parent.resolve()
-_ops_version_py = (
-    _pkg_root
-    / "packages"
-    / "paddlefleet_ops"
-    / "src"
-    / "paddlefleet_ops"
-    / "_version.py"
-)
 
 
 def is_git_repo() -> bool:
@@ -74,32 +66,26 @@ def _get_ops_version() -> str | None:
     version_file = _pkg_root / "version.txt"
     ops_req_file = _pkg_root / "ops_required_version.txt"
 
-    if version_file.exists() and ops_req_file.exists():
-        base_version = version_file.read_text().strip()
-        build_num = ops_req_file.read_text().strip()
-        if base_version and build_num:
-            is_release_branch = False
-            try:
-                branch = (
-                    subprocess.check_output(
-                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                        cwd=_pkg_root,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    .decode("utf-8")
-                    .strip()
-                )
-                is_release_branch = branch.startswith("release/")
-            except Exception:
-                pass
-            suffix = ".post" if is_release_branch else ".dev"
-            return f"{base_version}{suffix}{build_num}"
+    if not version_file.exists() or not ops_req_file.exists():
+        raise RuntimeError("version.txt or ops_required_version.txt not found")
+    base_version = version_file.read_text().strip()
+    build_num = ops_req_file.read_text().strip()
+    if not base_version or not build_num:
+        raise RuntimeError("version.txt or ops_required_version.txt is empty")
 
-    if not _ops_version_py.exists():
-        return None
-    globs: dict = {}
-    exec(_ops_version_py.read_text(), globs)
-    return globs.get("__version__")
+    is_release_branch = False
+    branch = (
+        subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=_pkg_root,
+            stderr=subprocess.DEVNULL,
+        )
+        .decode("utf-8")
+        .strip()
+    )
+    is_release_branch = branch.startswith("release/")
+    suffix = ".post" if is_release_branch else ".dev"
+    return f"{base_version}{suffix}{build_num}"
 
 
 def _generate_version_info() -> str:
