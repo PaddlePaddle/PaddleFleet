@@ -20,8 +20,6 @@ paddlefleet-*.whl
 test_log
 
 # Ignore files generated from `uv sync` for custom ops
-src/paddlefleet/_extensions/ops_pd_.so
-src/paddlefleet/_extensions/ops.py
 packages/paddlefleet_ops/src/paddlefleet_ops/_extensions/ops_pd_.so
 packages/paddlefleet_ops/src/paddlefleet_ops/_extensions/ops.py
 
