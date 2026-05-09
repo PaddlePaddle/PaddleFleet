@@ -585,7 +585,10 @@ class StandardMoERouter(nn.Layer):
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        topk_weight = scores.take_along_axis(topk_idx, axis=1)
+        row_idx = paddle.arange(bsz_seq_len, dtype=topk_idx.dtype).unsqueeze(-1)
+        row_idx = row_idx.expand(topk_idx.shape)
+        gather_idx = paddle.stack([row_idx, topk_idx], axis=-1)
+        topk_weight = paddle.gather_nd(scores, gather_idx)
 
         return topk_weight, topk_idx
 
