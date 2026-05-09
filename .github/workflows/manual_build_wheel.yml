@@ -112,7 +112,7 @@ jobs:
           git submodule update --init --recursive
           export IS_NVIDIA=True
           uv build --wheel -v
-          uv build --wheel --package paddlefleet-ops -v
+          # uv build --wheel --package paddlefleet-ops -v
           '
 
       - name: Upload wheel
