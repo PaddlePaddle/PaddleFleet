@@ -95,7 +95,7 @@ jobs:
       - name: Check if packages directory changed
         id: check
         run: |
-          git log
+          git  log
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "packages_changed=true" >> $GITHUB_OUTPUT
           else
