@@ -87,7 +87,15 @@ __all__ = [
 ]
 
 
-FP8_ALIGN = 128
+FP8_ALIGN = 1
+
+
+def moe_token_padding_alignment(
+    *, use_fp8_mlp: bool, moe_grouped_gemm: bool
+) -> int:
+    if not use_fp8_mlp and not moe_grouped_gemm:
+        return 1
+    return FP8_ALIGN
 
 
 def _get_fp8_weight_and_scale(weight, transpose=False):
@@ -348,6 +356,9 @@ class ExpertsGroupGemmContiguousNode:
         self.moe_deep_gemm = moe_deep_gemm
         self.moe_grouped_gemm = moe_grouped_gemm
         self.is_split_group_gemm = not moe_grouped_gemm
+        self.token_padding_alignment = moe_token_padding_alignment(
+            use_fp8_mlp=use_fp8_mlp, moe_grouped_gemm=moe_grouped_gemm
+        )
 
     def cached_tensors(self):
         """
@@ -1583,7 +1594,11 @@ class ExpertsGroupGemmContiguousNode:
                     grad_attr = weights[i].grad
 
                 if n > 0:
-                    n = (n + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
+                    n = (
+                        (n + self.token_padding_alignment - 1)
+                        // self.token_padding_alignment
+                        * self.token_padding_alignment
+                    )
                     end_idx = start_idx + n
                     paddle._C_ops.fused_linear_param_grad_add(
                         x._slice(start_idx, end_idx),
