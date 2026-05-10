@@ -61,7 +61,7 @@ except:
     fused_apply_mla_rope_for_q = None
 
 
-def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
+def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0, position_offset=0):
     """Apply RoPE using EC's complex multiplication method (no YaRN, no mscale).
 
     This exactly matches ErnieCore's compute_freqs_cis_mrope_and_apply_rotary_3d
@@ -73,6 +73,7 @@ def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
         k_pe: [B, S, 1, D] key positional embedding portion
         seq_len: sequence length
         rope_base: base frequency (default 1e6)
+        position_offset: starting position index for autoregressive decode
     """
     head_dim = q_pe.shape[-1]
     # inv_freq same as EC: 1 / (base^(arange(0, dim, 2) / dim))
@@ -80,8 +81,7 @@ def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
         rope_base
         ** (paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim))
     )
-    # position ids: [0, 1, ..., seq_len-1]
-    positions = paddle.arange(0, seq_len, dtype="float32")
+    positions = paddle.arange(position_offset, position_offset + seq_len, dtype="float32")
     # freqs_table: [S, D/2]
     freqs_table = paddle.outer(positions, freqs)
     # Expand for batch: [1, S, D/2]
@@ -337,6 +337,11 @@ class MultiLatentAttention(Attention):
             key = key.transpose([1, 0, 2, 3]).contiguous()
             value = value.transpose([1, 0, 2, 3]).contiguous()
 
+        # Extract inference kwargs to pass through to core_attention
+        past_key_values = kwargs.get("past_key_values")
+        layer_idx = kwargs.get("layer_idx")
+        use_cache = kwargs.get("use_cache", False)
+
         if self.recompute_core_attention and self.training:
             core_attn_out = recompute(
                 self.core_attention,
@@ -365,6 +370,9 @@ class MultiLatentAttention(Attention):
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention
                 and in_recompute,
+                past_key_values=past_key_values,
+                layer_idx=layer_idx,
+                use_cache=use_cache,
             )
 
         _log(core_attn_out, "core_attn_out", layer_num)
@@ -757,17 +765,18 @@ class MLASelfAttention(MultiLatentAttention):
                     q_len = q.size(0)
                 else:
                     q_len = q.size(1)
-                # rotary_pos_emb: squeeze [1, seq_len, 1, headdim]
+
+                # Determine RoPE start position from position_ids (for decode offset)
+                if position_ids is not None and position_ids.numel() == q_len:
+                    start_pos = int(position_ids.flatten()[0].item())
+                else:
+                    start_pos = 0
 
                 if (
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
                 ):
-                    # During training, the sequence length is always
-                    # the full rotary_pos_emb length, except for sequence packing + CP.
-                    # We need the full rotary_pos_emb to cover the full sequence,
-                    # so we do not shorten it here.
-                    rotary_pos_emb = rotary_pos_emb[:, 0:q_len]
+                    rotary_pos_emb = rotary_pos_emb[:, start_pos:start_pos + q_len]
 
                 # Replace paddle.split with zero-copy slice views.
                 q_no_pe = q[..., : self.config.qk_nope_head_dim]
@@ -801,7 +810,8 @@ class MLASelfAttention(MultiLatentAttention):
                         q_pos_emb,
                         k_pos_emb,
                         q_len,
-                        rope_base=self.config.rope_theta,  # Must match EC's config.rope_theta
+                        rope_base=self.config.rope_theta,
+                        position_offset=start_pos,
                     )
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)
