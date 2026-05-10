@@ -283,6 +283,7 @@ class MultiLatentAttention(Attention):
         packed_seq_params=None,
         in_recompute: bool = False,
         position_ids=None,
+        **kwargs,
     ):
         """Forward pass for multi-latent attention"""
         from paddlefleet.transformer.transformer_layer import TransformerLayer
