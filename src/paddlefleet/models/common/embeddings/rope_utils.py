@@ -325,6 +325,7 @@ def _apply_rotary_pos_emb_thd(
     sin: Tensor | None = None,
     mscale: float = 1.0,
     cp_group: Group = None,
+    sp_group: Group = None,
     position_ids: Tensor | None = None,
     apply_rope_fusion: bool = False,
     rotary_interleaved: bool = False,
