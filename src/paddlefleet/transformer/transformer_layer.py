@@ -461,6 +461,51 @@ class TransformerLayer(nn.Layer):
                 ]
                 dict_args["position_ids"] = decoder_ids
 
+            # process rotary_pos_emb: trim to main decoder sequence length
+            # With SP: rotary_pos_emb is [S, B, head_dim], seq is dim 0
+            # Without SP: rotary_pos_emb is [B, S, head_dim] or [1, S, 1, head_dim], seq is dim 1
+            # Compute main_seq_len from the split hidden_states (after AllGather for SP)
+            if self.config.sequence_parallel:
+                main_seq_len = (
+                    hidden_states.shape[0]
+                    * self.config.tensor_model_parallel_size
+                )
+            else:
+                main_seq_len = hidden_states.shape[1]
+            rotary_pos_emb_full = None
+            if (
+                "rotary_pos_emb" in dict_args.keys()
+                and dict_args["rotary_pos_emb"] is not None
+            ):
+                rotary_pos_emb_full = dict_args["rotary_pos_emb"]
+                if self.config.sequence_parallel:
+                    dict_args["rotary_pos_emb"] = rotary_pos_emb_full[
+                        :main_seq_len
+                    ]
+                else:
+                    dict_args["rotary_pos_emb"] = rotary_pos_emb_full[
+                        :, :main_seq_len
+                    ]
+            # rotary_pos_cos/sin are [B, S, head_dim] (not transposed)
+            rotary_pos_cos_full = None
+            if (
+                "rotary_pos_cos" in dict_args.keys()
+                and dict_args["rotary_pos_cos"] is not None
+            ):
+                rotary_pos_cos_full = dict_args["rotary_pos_cos"]
+                dict_args["rotary_pos_cos"] = rotary_pos_cos_full[
+                    :, :main_seq_len
+                ]
+            rotary_pos_sin_full = None
+            if (
+                "rotary_pos_sin" in dict_args.keys()
+                and dict_args["rotary_pos_sin"] is not None
+            ):
+                rotary_pos_sin_full = dict_args["rotary_pos_sin"]
+                dict_args["rotary_pos_sin"] = rotary_pos_sin_full[
+                    :, :main_seq_len
+                ]
+
             # process input_ids (for MoE padding mask): split into main and mtp parts
             mtp_input_ids = None
             if (
@@ -575,6 +620,14 @@ class TransformerLayer(nn.Layer):
                 )
                 dict_args["position_ids"] = position_ids
 
+            # Restore rotary_pos_emb/cos/sin to full length for next layer
+            if rotary_pos_emb_full is not None:
+                dict_args["rotary_pos_emb"] = rotary_pos_emb_full
+            if rotary_pos_cos_full is not None:
+                dict_args["rotary_pos_cos"] = rotary_pos_cos_full
+            if rotary_pos_sin_full is not None:
+                dict_args["rotary_pos_sin"] = rotary_pos_sin_full
+
             # Restore input_ids: concatenate main and mtp parts back
             if mtp_input_ids is not None and "input_ids" in dict_args.keys():
                 dict_args["input_ids"] = paddle.concat(
@@ -598,6 +651,9 @@ class TransformerLayer(nn.Layer):
                     attn_mask_startend_row_indices = dict_args[
                         "attn_mask_startend_row_indices"
                     ]
+                dict_args["attn_mask_startend_row_indices"] = (
+                    attn_mask_startend_row_indices
+                )
 
             # New dataflow (experimental_dataflow=True): mtp_startend_row_indices_all passes through
             # dict_args unchanged and will be consumed by MTP layer directly
