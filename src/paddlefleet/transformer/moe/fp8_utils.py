@@ -565,7 +565,15 @@ class ExpertsGroupGemmContiguousNode:
         fwd_down_bf16
         """
 
-        o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
+        x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
+        probs = unzipped_probs
+        if len(probs.shape) == 1:
+            probs = probs.unsqueeze(-1)
+        o2 = (
+            F.silu(x_glu.astype("float32"))
+            * x_linear.astype("float32")
+            * probs.astype("float32")
+        ).astype(o1.dtype)
 
         if clear_o1:
             o1._clear_to_zero_allocation()
@@ -705,7 +713,7 @@ class ExpertsGroupGemmContiguousNode:
                     ].contiguous()
                     expert_w2_i = expert_w2[i].T.contiguous()
                     do2_s_list.append(
-                        F.linear(x=unzipped_grad_i, weight=expert_w2_i)
+                        paddle.matmul(unzipped_grad_i, expert_w2_i)
                     )
                     start_idx = end_idx
                 do2_s = paddle.concat(do2_s_list, axis=0)
@@ -716,8 +724,32 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        o2_s = fused_swiglu_scale_forward(o1, unzipped_probs)
-        do1, probs_grad = fused_swiglu_scale_backward(o1, unzipped_probs, do2_s)
+        if not self.moe_grouped_gemm and numpy.prod(unzipped_grad.shape) != 0:
+            x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
+            probs_v = (
+                unzipped_probs
+                if unzipped_probs.ndim > 1
+                else unzipped_probs.unsqueeze(-1)
+            )
+            with paddle.enable_grad():
+                gate_g = x_glu.astype("float32").detach()
+                val_g = x_linear.astype("float32").detach()
+                scale_g = probs_v.astype("float32").detach()
+                gate_g.stop_gradient = False
+                val_g.stop_gradient = False
+                scale_g.stop_gradient = False
+                o2_f32 = F.silu(gate_g) * val_g * scale_g
+                paddle.autograd.backward([o2_f32], [do2_s.astype("float32").detach()])
+                d_gate_f32 = gate_g.grad
+                d_up_f32 = val_g.grad
+                d_scale_f32 = scale_g.grad.reshape(unzipped_probs.shape).astype("float32")
+
+            do1 = paddle.concat([d_gate_f32, d_up_f32], axis=-1).astype(o1.dtype)
+            o2_s = o2_f32.detach().astype(o1.dtype)
+            probs_grad = d_scale_f32.astype(unzipped_probs.dtype)
+        else:
+            o2_s = fused_swiglu_scale_forward(o1, unzipped_probs)
+            do1, probs_grad = fused_swiglu_scale_backward(o1, unzipped_probs, do2_s)
 
         return do1, o2_s, probs_grad
 
@@ -844,7 +876,7 @@ class ExpertsGroupGemmContiguousNode:
                     end_idx = start_idx + token_num
                     do1_i = do1[start_idx:end_idx].contiguous()
                     expert_w1_i = expert_w1[i].T.contiguous()
-                    dx_list.append(F.linear(x=do1_i, weight=expert_w1_i))
+                    dx_list.append(paddle.matmul(do1_i, expert_w1_i))
                     start_idx = end_idx
                 dx = paddle.concat(dx_list, axis=0)
         else:
