@@ -872,12 +872,3 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
-
-        if (
-            self.multi_latent_attention
-            and self.apply_rope_fusion
-            and self.rope_type != "yarn"
-        ):
-            raise ValueError(
-                "apply_rope_fusion for MLA only works with YARN RoPE."
-            )

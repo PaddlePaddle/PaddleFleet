@@ -41,7 +41,7 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.utils import get_pg_size
+from paddlefleet.utils import get_pg_rank, get_pg_size
 
 try:
     from paddlefleet.transformer.dot_product_attention import (
@@ -694,8 +694,11 @@ class MLASelfAttention(MultiLatentAttention):
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
             if self.config.apply_rope_fusion:
-                cp_rank = self.pg_collection.cp.rank()
-                cp_size = self.pg_collection.cp.size()
+                cp_size = get_pg_size(self.pg_collection.cp)
+                cp_rank = get_pg_rank(self.pg_collection.cp)
+                if self.config.rope_type == "rope":
+                    rotary_pos_cos = paddle.cos(rotary_pos_emb)
+                    rotary_pos_sin = paddle.sin(rotary_pos_emb)
                 query = fused_apply_mla_rope_for_q(
                     q,
                     rotary_pos_cos,

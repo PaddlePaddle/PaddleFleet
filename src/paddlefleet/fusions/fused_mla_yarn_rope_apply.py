@@ -255,6 +255,7 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
             rotary_interleaved: whether to apply RoPE interleaved, only supports False for now
         """
         assert not rotary_interleaved
+        q = q.contiguous().clone()
         batch_size = None
         max_seqlen = None
         seq_num = None
@@ -271,9 +272,6 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
             # non-leaf view, allowing inplace kernel modification when the input
             # requires gradient — consistent with the bshd path which uses
             # q.view(-1, nheads, headdim) to achieve the same effect.
-            q = q.reshape([-1, headdim]).reshape(
-                [total_seqlen, nheads, headdim]
-            )
         assert q.stride(-1) == 1
         assert cos.is_contiguous()
         assert sin.is_contiguous()
@@ -319,12 +317,13 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
                 or [total_seq_len, head_num, qk_head_dim + emb_dim] (thd)
         """
         cos, sin = ctx.saved_tensors
+        grad = grad.contiguous().clone()
         batch_size = None
         max_seqlen = None
         seq_num = None
         if ctx.cu_seqlens_q is None:
             batch_size, max_seqlen, nheads, headdim = grad.shape
-            grad = grad.contiguous().view(-1, nheads, headdim)
+            grad = grad.view(-1, nheads, headdim)
             total_seqlen = grad.shape[0]
         else:
             seq_num = len(ctx.cu_seqlens_q) - 1
@@ -703,8 +702,8 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         if cu_seqlens_kv is None:
             # bshd: [batch, seq, nhead, dim]
             batch_size, max_seqlen, nheads, headdim = kv.shape
-            kv = kv.view(-1, nheads, headdim)
-            k_pos_emb = k_pos_emb.view(-1, emb_dim)
+            kv = kv.contiguous().view(-1, nheads, headdim)
+            k_pos_emb = k_pos_emb.contiguous().view(-1, emb_dim)
             total_seqlen = kv.shape[0]
         else:
             # thd
