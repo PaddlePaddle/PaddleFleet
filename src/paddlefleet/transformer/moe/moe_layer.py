@@ -352,12 +352,12 @@ class MoELayer(nn.Layer):
             and self.config.recompute_modules is not None
             and "moe_gate_up" in self.config.recompute_modules
         )
-        self.recompute_moe_premute = getattr(
-            self.config, "recompute_moe_premute", False
+        self.recompute_moe_permute = getattr(
+            self.config, "recompute_moe_permute", False
         ) or (
             self.config.recompute_granularity == "selective"
             and self.config.recompute_modules is not None
-            and "moe_premute" in self.config.recompute_modules
+            and "moe_permute" in self.config.recompute_modules
         )
         self.use_auto_subbatch = getattr(
             self.config, "use_auto_subbatch", False
@@ -647,7 +647,7 @@ class MoELayer(nn.Layer):
                     moe_deep_gemm=self.moe_deep_gemm,
                     moe_grouped_gemm=self.moe_grouped_gemm,
                     recompute_moe_gate_up=self.recompute_moe_gate_up,
-                    recompute_moe_premute=self.recompute_moe_premute,
+                    recompute_moe_permute=self.recompute_moe_permute,
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     use_bf16_gemm_weight_grad=not self.fp8_wgrad,
                     use_auto_subbatch=self.use_auto_subbatch,
@@ -750,7 +750,7 @@ class MoELayer(nn.Layer):
                 moe_deep_gemm=self.moe_deep_gemm,
                 moe_grouped_gemm=self.moe_grouped_gemm,
                 recompute_moe_gate_up=self.recompute_moe_gate_up,
-                recompute_moe_premute=self.recompute_moe_premute,
+                recompute_moe_permute=self.recompute_moe_permute,
                 fp8_dispatched_handle=fp8_dispatched_handle,
                 use_bf16_gemm_weight_grad=not self.fp8_wgrad,
                 use_auto_subbatch=self.use_auto_subbatch,

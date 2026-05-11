@@ -34,13 +34,12 @@ try:
 except (ImportError, RuntimeError):
     pass
 
-# 优先使用 FusedQuantOps.fused_swiglu_probs_bwd（inplace，行为对齐）。
-# 若环境中没有 FusedQuantOps，则回退到 paddle.incubate 的 out-of-place 实现。
-# TODO: 迁移fused_swiglu_probs_bwd至paddlefleet.ops
+# 优先使用 fused_swiglu_probs_bwd（inplace）。
+# 若环境中没有，则回退到 paddle.incubate 的 out-of-place 实现。
 try:
-    import FusedQuantOps as _FQO
+    from paddlefleet.ops import fused_swiglu_probs_bwd
 
-    _fused_swiglu_probs_bwd = _FQO.fused_swiglu_probs_bwd
+    _fused_swiglu_probs_bwd = fused_swiglu_probs_bwd
     USE_INPLACE_SWIGLU_BWD = True
 except (ImportError, AttributeError):
     _fused_swiglu_probs_bwd = None
@@ -144,7 +143,6 @@ def fused_stack_quant_without_cache(
 ):
     use_pow2_scale = False
     if paddle.device.cuda.get_device_capability()[0] == 10:
-        # Blackwell GPUs require the use of pow2_scales quantization.
         use_pow2_scale = True
     if transpose:
         w, scale = fuse_stack_transpose_fp8_quant(
@@ -186,7 +184,6 @@ def tilewise_quant(x):
     """
     pow_2_scales = False
     if paddle.device.cuda.get_device_capability()[0] == 10:
-        # Blackwell GPUs require the use of pow2_scales quantization.
         pow_2_scales = True
     if x.shape[0] > 0:
         return paddle.incubate.nn.functional.fp8_quant_blockwise(
@@ -845,7 +842,7 @@ class ExpertsGroupGemmContiguousNode:
         with paddle.amp.auto_cast(False):
             if USE_INPLACE_SWIGLU_BWD:
                 # inplace，do1 复用 o1 的 GPU buffer（data_ptr 相同）。
-                # del o1 后 do1 仍持有引用，refcount 不归零，物理页不会被 VMM 提前回收。
+                # del o1 后 do1 仍持有引用，refcount 不归零，物理页不会被提前回收。
                 # 显存峰值：o1/do1(2H) + do2_s(H) + o2_s(H) = 4H（C 点），
                 #           do1(2H) + o2_s(H) + n2_s(2H) = 5H（D 点峰值）
                 do1, probs_grad, o2_s = _fused_swiglu_probs_bwd(
@@ -853,8 +850,7 @@ class ExpertsGroupGemmContiguousNode:
                 )
             else:
                 # out-of-place，do1 是全新分配的 buffer。
-                # del o1 必须推迟到 bwd_gate_up_input_fp8 的 synchronize 之后，
-                # 否则 GPU 异步读 o1 时物理页已被 VMM 回收（Bug 2）。
+                # del o1 推迟到 bwd_gate_up_input_fp8 之后，
                 # 显存峰值：o1(2H) + do2_s(H) + do1(2H) + o2_s(H) = 6H（C 点），
                 #           o1(2H) + do1(2H) + o2_s(H) + n2_s(2H) = 7H（D 点峰值）
                 do1, probs_grad, o2_s = (
@@ -1541,10 +1537,10 @@ class ExpertsGroupGemmContiguousNode:
             expert_w2, out_grad, o1, unzipped_probs, inplace_swiglu_prob=True
         )
         # del o1 时机：
-        #   inplace（USE_INPLACE_SWIGLU_BWD=True）：do1 与 o1 共用 buffer，refcount
-        #     不归零，立即 del 安全。
+        #   inplace（USE_INPLACE_SWIGLU_BWD=True）：do1 与 o1 共用 buffer（data_ptr
+        #     相同，不同 Python 对象），buffer 引用计数不归零，立即 del 安全。
         #   out-of-place（USE_INPLACE_SWIGLU_BWD=False）：do1 是独立 buffer，GPU 异步
-        #     kernel 仍在读 o1，必须等 bwd_gate_up_input_fp8 的 synchronize 后再 del。
+        #     kernel 仍在读 o1，必须等后续 GEMM 入队后再 del。
         if USE_INPLACE_SWIGLU_BWD:
             del o1
         self.o1 = None
@@ -1555,10 +1551,6 @@ class ExpertsGroupGemmContiguousNode:
                 self.bf16_weight_grad(do1, None, expert_w1, self.dw_p2p_overlap)
             else:
                 self.bwd_gate_up_weight(do1, None, expert_w1, clear_input=True)
-            # 不调用 _record_stream，直接 None。
-            # _record_stream 会触发 VMM 积极回收物理页，在 nparts loop 中
-            # slice 被释放后原始 input_fp8 的物理页可能被提前回收，
-            # 导致后续 npart 访问时 CUDA_ERROR_ILLEGAL_ADDRESS。
             self.input_fp8 = None
             self.input_scale = None
             self.input = None

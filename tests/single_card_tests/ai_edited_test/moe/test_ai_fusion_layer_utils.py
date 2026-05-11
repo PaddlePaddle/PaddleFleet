@@ -200,12 +200,12 @@ class TestFusionLayerUtils(unittest.TestCase):
 
         mock_custom_map = _make_mock_custom_map()
 
-        # recompute_moe_premute requires moe_expert_fusion=False
+        # recompute_moe_permute requires moe_expert_fusion=False
         with self.assertRaises(AssertionError):
             MlpNode(
                 mock_custom_map,
                 2,
-                recompute_moe_premute=True,
+                recompute_moe_permute=True,
                 recompute_moe_gate_up=True,
                 dequant_input=True,
                 moe_expert_fusion=True,

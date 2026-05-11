@@ -171,7 +171,7 @@ class TestSubbatch(unittest.TestCase):
             "recompute_moe_gate_up": True,
             "dequant_input": True,
             "moe_expert_fusion": True,
-            "recompute_moe_premute": False,
+            "recompute_moe_permute": False,
             "use_bf16_gemm_weight_grad": True,
             "fp8_dispatched_handle": {"scale": self.scale},
             "use_auto_subbatch": False,
@@ -228,7 +228,7 @@ class TestSubbatch(unittest.TestCase):
         # --- split_gemm + selective_recompute (普通 subbatch，非 auto_subbatch) ---
         kwargs = {
             "moe_expert_fusion": False,
-            "recompute_moe_premute": True,
+            "recompute_moe_permute": True,
             "recompute_moe_gate_up": True,
             "moe_subbatch_token_num_after_dispatch": 512,
         }
