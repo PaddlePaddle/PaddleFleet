@@ -322,6 +322,19 @@ jobs:
           cat dist/whl_names.txt
           '
 
+      - name: download ops whl from latest
+        if: needs.check-packages-changes.outputs.packages_changed != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
+          OPS_DST=paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
+          wget -q --no-proxy "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${BRANCH}/latest/cu129/${OPS_DST}" -O dist/${OPS_DST} || \
+          wget -q --no-proxy "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/develop/latest/cu129/paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl" -O dist/${OPS_DST}
+          echo "OPS_WHL=${OPS_DST}" >> dist/whl_names.txt
+          ls -lh dist
+          cat dist/whl_names.txt
+          '
+
       - name: Save wheel file names as outputs
         id: save_whl_names
         run: |

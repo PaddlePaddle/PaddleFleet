@@ -115,7 +115,7 @@ jobs:
           OPS_WHL=$(ls paddlefleet_ops-*.whl | head -n1)
           ROOT_DST=paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           OPS_DST=paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
-          [ "${ROOT_WHL}" != "${OPS_DST}" ] && cp "${ROOT_WHL}" "${ROOT_DST}"
+          [ "${ROOT_WHL}" != "${ROOT_DST}" ] && cp "${ROOT_WHL}" "${ROOT_DST}"
           [ "${OPS_WHL}" != "${OPS_DST}" ] && cp "${OPS_WHL}" "${OPS_DST}"
           python bos/BosClient.py "${ROOT_DST}" ${target_path}
           python bos/BosClient.py "${OPS_DST}" ${target_path}
