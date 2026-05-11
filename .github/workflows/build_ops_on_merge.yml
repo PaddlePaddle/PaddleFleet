@@ -167,6 +167,8 @@ jobs:
           mkdir -p bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
+          PY_VERSION="${{ matrix.python_version }}"
+          PY_VERSION_SHORT="${PY_VERSION//./}"
           for whl in paddlefleet_ops-*.whl; do
             python ../bos/BosClient.py ${whl} paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
           done
@@ -176,6 +178,9 @@ jobs:
           for whl in paddlefleet_ops-*.whl; do
             python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
           done
+          # Upload to latest/ with stable filename
+          mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
+          python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
 
