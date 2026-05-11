@@ -33,6 +33,19 @@ if not HAVE_TRITON:
     tl = MagicMock()
 
 
+def _get_block_h(nheads):
+    """Compute a fixed BLOCK_H based on nheads for deterministic results.
+
+    Picks the largest power-of-2 that divides nheads (capped at 128)
+    to maximize per-block parallelism while ensuring exact divisibility.
+    """
+    block_h = min(128, triton.next_power_of_2(nheads))
+    # Find largest power-of-2 <= block_h that divides nheads
+    while block_h > 1 and nheads % block_h != 0:
+        block_h //= 2
+    return block_h
+
+
 @triton.jit
 def _get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
     token_idx = -1
@@ -56,20 +69,6 @@ def _get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
     return token_idx
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "head_num"],
-    restore_value=["Q"],
-)
 @triton.jit
 def rotary_fwd_q_kernel(
     Q,
@@ -143,20 +142,6 @@ def rotary_fwd_q_kernel(
     tl.store(Q + x_right_off, x_right, mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "head_num"],
-    restore_value=["DO"],
-)
 @triton.jit
 def rotary_bwd_q_kernel(
     DO,
@@ -278,8 +263,12 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
         assert sin.is_contiguous()
         assert headdim == qk_head_dim + emb_dim
         assert emb_dim % 4 == 0
+        BLOCK_H = _get_block_h(nheads)
+        assert nheads % BLOCK_H == 0, (
+            f"head_num must be divisible by BLOCK_H ({BLOCK_H}), but got {nheads}"
+        )
 
-        grid = lambda META: (total_seqlen, triton.cdiv(nheads, META["BLOCK_H"]))
+        grid = (total_seqlen, triton.cdiv(nheads, BLOCK_H))
         rotary_fwd_q_kernel[grid](
             q,
             cos,
@@ -294,6 +283,7 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
             q.stride(1),
             cp_rank,
             cp_size,
+            BLOCK_H,
         )
         ctx.save_for_backward(cos, sin)
         ctx.qk_head_dim = qk_head_dim
@@ -304,6 +294,7 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
         ctx.cp_size = cp_size
         ctx.max_seqlen = max_seqlen
         ctx.batch_size = batch_size
+        ctx.block_h = BLOCK_H
         if cu_seqlens_q is None:
             q = q.view(batch_size, max_seqlen, nheads, headdim)
         return q
@@ -331,7 +322,8 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
             total_seqlen, nheads, headdim = grad.shape
         assert grad.stride(-1) == 1
 
-        grid = lambda META: (total_seqlen, triton.cdiv(nheads, META["BLOCK_H"]))
+        BLOCK_H = ctx.block_h
+        grid = (total_seqlen, triton.cdiv(nheads, BLOCK_H))
         rotary_bwd_q_kernel[grid](
             grad,
             cos,
@@ -346,6 +338,7 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
             grad.stride(1),
             ctx.cp_rank,
             ctx.cp_size,
+            BLOCK_H,
         )
         if ctx.cu_seqlens_q is None:
             grad = grad.view(batch_size, max_seqlen, nheads, headdim)
@@ -402,19 +395,6 @@ def fused_apply_mla_rope_for_q(
     )
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "k_dim", "v_dim", "head_num"],
-)
 @triton.jit
 def rotary_fwd_kv_kernel(
     KV,
@@ -525,19 +505,6 @@ def rotary_fwd_kv_kernel(
     tl.store(K_ptr + x_right_off, x_right, mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "k_dim", "v_dim", "head_num"],
-)
 @triton.jit
 def rotary_bwd_kv_kernel(
     dK,
@@ -716,11 +683,12 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         assert cos.is_contiguous()
         assert sin.is_contiguous()
         assert emb_dim % 4 == 0
+        BLOCK_H = _get_block_h(nheads)
 
         o_key = kv.new_empty(total_seqlen, nheads, emb_dim + k_dim)
         o_value = kv.new_empty(total_seqlen, nheads, v_dim)
 
-        grid = lambda META: (total_seqlen, triton.cdiv(nheads, META["BLOCK_H"]))
+        grid = (total_seqlen, triton.cdiv(nheads, BLOCK_H))
         rotary_fwd_kv_kernel[grid](
             kv,
             k_pos_emb,
@@ -744,6 +712,7 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
             o_value.stride(1),
             cp_rank,
             cp_size,
+            BLOCK_H,
         )
         ctx.save_for_backward(cos, sin)
         ctx.rotary_interleaved = rotary_interleaved
@@ -755,6 +724,7 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         ctx.cp_size = cp_size
         ctx.max_seqlen = max_seqlen
         ctx.batch_size = batch_size
+        ctx.block_h = BLOCK_H
         if cu_seqlens_kv is None:
             o_key = o_key.view(batch_size, max_seqlen, nheads, emb_dim + k_dim)
             o_value = o_value.view(batch_size, max_seqlen, nheads, v_dim)
@@ -791,7 +761,8 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         d_kv = dk.new_empty(total_seqlen, nheads, ctx.k_dim + ctx.v_dim)
         d_emb = dk.new_empty(total_seqlen, 1, ctx.emb_dim)
 
-        grid = lambda META: (total_seqlen, triton.cdiv(nheads, META["BLOCK_H"]))
+        BLOCK_H = ctx.block_h
+        grid = (total_seqlen, triton.cdiv(nheads, BLOCK_H))
         rotary_bwd_kv_kernel[grid](
             dk,
             dv,
@@ -815,6 +786,7 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
             d_emb.stride(0),
             ctx.cp_rank,
             ctx.cp_size,
+            BLOCK_H,
         )
         if ctx.cu_seqlens_kv is None:
             d_kv = d_kv.view(

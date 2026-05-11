@@ -697,12 +697,12 @@ class MLASelfAttention(MultiLatentAttention):
                 cp_size = get_pg_size(self.pg_collection.cp)
                 cp_rank = get_pg_rank(self.pg_collection.cp)
                 if self.config.rope_type == "rope":
-                    rotary_pos_cos = paddle.cos(rotary_pos_emb)
-                    rotary_pos_sin = paddle.sin(rotary_pos_emb)
+                    cos = paddle.cos(rotary_pos_emb)
+                    sin = paddle.sin(rotary_pos_emb)
                 query = fused_apply_mla_rope_for_q(
                     q,
-                    rotary_pos_cos,
-                    rotary_pos_sin,
+                    cos,
+                    sin,
                     self.config.qk_nope_head_dim,
                     self.config.qk_rope_head_dim,
                     cu_seqlens_q,
@@ -712,8 +712,8 @@ class MLASelfAttention(MultiLatentAttention):
                 key, value = fused_apply_mla_rope_for_kv(
                     kv,
                     k_pos_emb,
-                    rotary_pos_cos,
-                    rotary_pos_sin,
+                    cos,
+                    sin,
                     self.config.qk_rope_head_dim,
                     self.config.qk_nope_head_dim,
                     self.config.v_head_dim,
