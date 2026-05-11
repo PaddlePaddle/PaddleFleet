@@ -259,6 +259,7 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
         batch_size = None
         max_seqlen = None
         seq_num = None
+        assert cu_seqlens_q is None, "THD is not supported for rope fusion now."
         if cu_seqlens_q is None:
             # bshd: [batch, seq, nhead, dim]
             batch_size, max_seqlen, nheads, headdim = q.shape
