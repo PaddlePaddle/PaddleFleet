@@ -35,14 +35,6 @@ from setuptools import build_meta as orig  # type: ignore[import-untyped]
 logger = logging.getLogger(__name__)
 
 _pkg_root = Path(__file__).parent.resolve()
-_ops_version_py = (
-    _pkg_root
-    / "packages"
-    / "paddlefleet_ops"
-    / "src"
-    / "paddlefleet_ops"
-    / "version.py"
-)
 
 
 def is_git_repo() -> bool:
@@ -55,15 +47,6 @@ def get_git_commit_hash(cwd: Path) -> str:
         .strip()
         .decode("utf-8")
     )
-
-
-def _get_ops_version() -> str | None:
-    """Read the paddlefleet-ops version from the ops source tree."""
-    if not _ops_version_py.exists():
-        return None
-    globs: dict = {}
-    exec(_ops_version_py.read_text(), globs)
-    return globs.get("__version__")
 
 
 def _generate_version_info() -> str:
@@ -107,8 +90,6 @@ def _generate_version_info() -> str:
         else:
             final_version = f"{version}.dev{date_str}"
 
-    ops_version = _get_ops_version() or "unknown"
-
     with open(version_py, "w") as f:
         f.write(
             "# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.\n"
@@ -128,43 +109,14 @@ def _generate_version_info() -> str:
             '"""Auto-generated version info — do not edit."""\n'
             "\n"
             f'__version__ = "{final_version}"\n'
-            f'__ops_required_version__ = "{ops_version}"\n'
             f'commit = "{git_commit_hash}"\n'
         )
     logger.info(f"Created _version.py with version {final_version}")
     return final_version
 
 
-def _generate_requirements_build() -> None:
-    """Generate requirements-build.txt with the pinned paddlefleet-ops version.
-
-    This file is referenced by [tool.setuptools.dynamic] in pyproject.toml.
-    Setuptools reads it natively to populate install_requires, avoiding
-    unreliable monkey-patching of Distribution internals.
-    """
-    ops_version = _get_ops_version()
-    if ops_version is None:
-        logger.warning(
-            "paddlefleet-ops version could not be determined; "
-            "falling back to unpinned 'paddlefleet-ops' dependency."
-        )
-        ops_dep = "paddlefleet-ops"
-    else:
-        ops_dep = f"paddlefleet-ops=={ops_version}"
-        logger.info(f"Pinning ops dependency: {ops_dep}")
-
-    dependencies = [
-        "colorlog>=6.10.1",
-        ops_dep,
-    ]
-
-    req_file = _pkg_root / "requirements-build.txt"
-    req_file.write_text("\n".join(dependencies) + "\n")
-
-
 # Run at import time so both wheel and editable builds pick up the patches.
 _generate_version_info()
-_generate_requirements_build()
 
 
 # -- PEP 517 hooks (pure delegation to setuptools) --
