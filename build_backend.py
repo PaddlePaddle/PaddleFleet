@@ -107,7 +107,27 @@ def _generate_version_info() -> str:
         final_version = os.environ["PADDLEFLEET_VERSION"]
     else:
         date_str = datetime.now().strftime("%Y%m%d")
-        final_version = f"{version}.dev{date_str}"
+        branch = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=_pkg_root,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
+        if branch.startswith("release/"):
+            commit_short = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--short=11", "HEAD"],
+                    cwd=_pkg_root,
+                )
+                .strip()
+                .decode("utf-8")
+            )
+            final_version = f"{version}.post{date_str}+{commit_short}"
+        else:
+            final_version = f"{version}.dev{date_str}"
 
     ops_version = _get_ops_version() or "unknown"
 
