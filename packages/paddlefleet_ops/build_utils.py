@@ -350,18 +350,6 @@ def get_libs():
             extra_env={"PADDLE_CUDA_ARCH_LIST": _deep_ep_arch},
         ),
         EcosystemLibrary(
-            name="HybridEP",
-            source_rel_path="third_party/HybridEP",
-            artifacts=[
-                Artifact("deep_ep", "hybrid_ep"),
-                Artifact("hybrid_ep_cpp.so", "hybrid_ep_cpp.so"),
-            ],
-            extra_env={
-                "HYBRID_EP_MULTINODE": "1",
-                "PADDLE_CUDA_ARCH_LIST": _deep_ep_arch,
-            },
-        ),
-        EcosystemLibrary(
             name="flash-attention",
             source_rel_path="third_party/flash-attention/flashmask",
             artifacts=[
@@ -370,6 +358,21 @@ def get_libs():
             extra_env={"FLASHMASK_BUILD": "fa4"},
         ),
     ]
+    if (cuda_major, cuda_minor) >= (12, 9):
+        LIBRARIES.append(
+            EcosystemLibrary(
+                name="HybridEP",
+                source_rel_path="third_party/HybridEP",
+                artifacts=[
+                    Artifact("deep_ep", "hybrid_ep"),
+                    Artifact("hybrid_ep_cpp.so", "hybrid_ep_cpp.so"),
+                ],
+                extra_env={
+                    "HYBRID_EP_MULTINODE": "1",
+                    "PADDLE_CUDA_ARCH_LIST": _deep_ep_arch,
+                },
+            ),
+        )
     if sys.version_info >= (3, 12):
         LIBRARIES.append(
             EcosystemLibrary(
