@@ -509,7 +509,7 @@ class TransformerConfig(ModelParallelConfig):
     fp8_wgrad: bool = True
     """Whether to use fp8 wgrad."""
 
-    dw_p2p_overlap: bool = True
+    dw_p2p_overlap: bool = False
     """Whether to overlap p2p communication and matmul kernel in pp parallel on Blackwell."""
 
     ####################
