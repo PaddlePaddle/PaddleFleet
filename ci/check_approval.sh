@@ -111,7 +111,6 @@ PACKAGING_APPROVERS="risemeup1 SigureMo"
 PACKAGING_PATTERNS=(
     "^packages/"
     "^build_backend\.py$"
-    "^ops_required_version\.txt$"
     "^pyproject\.toml$"
 )
 for PATTERN in "${PACKAGING_PATTERNS[@]}"; do

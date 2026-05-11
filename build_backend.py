@@ -35,6 +35,14 @@ from setuptools import build_meta as orig  # type: ignore[import-untyped]
 logger = logging.getLogger(__name__)
 
 _pkg_root = Path(__file__).parent.resolve()
+_ops_version_py = (
+    _pkg_root
+    / "packages"
+    / "paddlefleet_ops"
+    / "src"
+    / "paddlefleet_ops"
+    / "version.py"
+)
 
 
 def is_git_repo() -> bool:
@@ -42,50 +50,20 @@ def is_git_repo() -> bool:
 
 
 def get_git_commit_hash(cwd: Path) -> str:
-    try:
-        return (
-            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd)
-            .strip()
-            .decode("utf-8")
-        )
-    except Exception:
-        return "unknown"
+    return (
+        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd)
+        .strip()
+        .decode("utf-8")
+    )
 
 
 def _get_ops_version() -> str | None:
-    """Compute the paddlefleet-ops version matching the ops build backend logic.
-
-    Uses PADDLEFLEET_VERSION env var if set (CI builds), otherwise computes
-    from version.txt (base) + ops_required_version.txt (build number) + branch.
-    Falls back to reading the ops source _version.py directly when building
-    both packages together in the same workspace.
-    """
-    if os.environ.get("PADDLEFLEET_VERSION") is not None:
-        return os.environ["PADDLEFLEET_VERSION"]
-
-    version_file = _pkg_root / "version.txt"
-    ops_req_file = _pkg_root / "ops_required_version.txt"
-
-    if not version_file.exists() or not ops_req_file.exists():
-        raise RuntimeError("version.txt or ops_required_version.txt not found")
-    base_version = version_file.read_text().strip()
-    build_num = ops_req_file.read_text().strip()
-    if not base_version or not build_num:
-        raise RuntimeError("version.txt or ops_required_version.txt is empty")
-
-    is_release_branch = False
-    branch = (
-        subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=_pkg_root,
-            stderr=subprocess.DEVNULL,
-        )
-        .decode("utf-8")
-        .strip()
-    )
-    is_release_branch = branch.startswith("release/")
-    suffix = ".post" if is_release_branch else ".dev"
-    return f"{base_version}{suffix}{build_num}"
+    """Read the paddlefleet-ops version from the ops source tree."""
+    if not _ops_version_py.exists():
+        return None
+    globs: dict = {}
+    exec(_ops_version_py.read_text(), globs)
+    return globs.get("__version__")
 
 
 def _generate_version_info() -> str:
