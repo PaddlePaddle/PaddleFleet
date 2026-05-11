@@ -261,8 +261,6 @@ class TestApplyMLARopeForQ(_BaseMLARopeTest):
 
         self.assertEqual(list(out.shape), [bs, seq, heads, head_dim])
         _allclose(out, ref, dtype, f"Q bshd fwd dtype={dtype}")
-        # np.testing.assert_equal(out.numpy(), ref.numpy(), err_msg=f"out={out._md5sum()} != ref={ref._md5sum()}")
-        # np.testing.assert_equal(out._md5sum(), ref._md5sum())
 
     def _run_thd_fwd(self, seq_lens, heads, qk_head_dim, emb_dim, dtype):
         total = sum(seq_lens)
@@ -309,76 +307,36 @@ class TestApplyMLARopeForQ(_BaseMLARopeTest):
         g_cu = paddle.grad([out_cu], [q_cu], [dout_cu])[0]
 
         _allclose(g_cu, g_ref, dtype, f"Q bshd bwd dtype={dtype}")
-        # np.testing.assert_equal(g_cu.numpy(), g_ref.numpy(), err_msg=f"out={g_cu.numpy()} != ref={g_ref.numpy()}")
-        # np.testing.assert_equal(g_cu._md5sum(), g_ref._md5sum())
 
     # ---- forward bshd ----
     def test_fwd_bshd_fp32(self):
         self._run_bshd_fwd(2, 64, 8, 128, 64, "float32")
 
-    # def test_fwd_bshd_bf16(self):
-    #     self._run_bshd_fwd(2, 64, 8, 128, 64, "bfloat16")
+    def test_fwd_bshd_bf16(self):
+        self._run_bshd_fwd(2, 64, 8, 128, 64, "bfloat16")
 
     def test_fwd_bshd_fp32_odd_heads(self):
         # head count not a power of two exercises BLOCK_H masking
         self._run_bshd_fwd(1, 32, 7, 64, 32, "float32")
 
-    # # ---- forward thd ----
-    # def test_fwd_thd_fp32(self):
-    #     self._run_thd_fwd([10, 17, 23], 4, 64, 32, "float32")
-
-    # def test_fwd_thd_bf16(self):
-    #     self._run_thd_fwd([10, 17, 23], 4, 64, 32, "bfloat16")
+    def test_fwd_bshd_non_pow2_dims(self):
+        # qk_head_dim=96 is not a power of two
+        self._run_bshd_fwd(1, 32, 8, 96, 64, "float32")
 
     # # ---- backward bshd ----
     def test_bwd_bshd_fp32(self):
         self._run_bshd_bwd(2, 32, 4, 64, 32, "float32")
 
-    # def test_bwd_bshd_bf16(self):
-    #     self._run_bshd_bwd(2, 32, 4, 64, 32, "bfloat16")
+    def test_bwd_bshd_bf16(self):
+        self._run_bshd_bwd(2, 32, 4, 64, 32, "bfloat16")
 
     def test_bwd_bshd_fp32_odd_heads(self):
         # head count not a power of two exercises BLOCK_H masking in backward
         self._run_bshd_bwd(1, 32, 7, 64, 32, "float32")
 
-    # # ---- backward thd ----
-    # def _run_thd_bwd(self, seq_lens, heads, qk_head_dim, emb_dim, dtype):
-    #     total = sum(seq_lens)
-    #     max_seq = max(seq_lens)
-    #     head_dim = qk_head_dim + emb_dim
-    #     np.random.seed(51)
-    #     q_np = np.random.randn(total, heads, head_dim).astype("float32")
-    #     dout_np = np.random.randn(total, heads, head_dim).astype("float32")
-    #     cos, sin = _make_cos_sin(max_seq, emb_dim, seed=52)
-    #     cu = paddle.to_tensor(
-    #         np.cumsum([0, *list(seq_lens)]).astype("int32"), place="gpu"
-    #     )
-
-    #     # Reference gradient via autograd on the pure-Paddle reference
-    #     q_ref = paddle.to_tensor(q_np, place="gpu").astype(dtype)
-    #     q_ref.stop_gradient = False
-    #     out_ref = apply_mla_rope_for_q_ref(
-    #         q_ref, cos, sin, qk_head_dim, emb_dim, cu
-    #     )
-    #     dout_ref = paddle.to_tensor(dout_np, place="gpu").astype(out_ref.dtype)
-    #     g_ref = paddle.grad([out_ref], [q_ref], [dout_ref])[0]
-
-    #     # Fused gradient (thd)
-    #     q_cu = paddle.to_tensor(q_np, place="gpu").astype(dtype)
-    #     q_cu.stop_gradient = False
-    #     out_cu = fused_apply_mla_rope_for_q(
-    #         q_cu, cos, sin, qk_head_dim, emb_dim, cu, 0, 1, False
-    #     )
-    #     dout_cu = paddle.to_tensor(dout_np, place="gpu").astype(out_cu.dtype)
-    #     g_cu = paddle.grad([out_cu], [q_cu], [dout_cu])[0]
-
-    #     _allclose(g_cu, g_ref, dtype, f"Q thd bwd dtype={dtype}")
-
-    # def test_bwd_thd_fp32(self):
-    #     self._run_thd_bwd([10, 17, 23], 4, 64, 32, "float32")
-
-    # def test_bwd_thd_bf16(self):
-    #     self._run_thd_bwd([10, 17, 23], 4, 64, 32, "bfloat16")
+    def test_bwd_bshd_non_pow2_dims(self):
+        # qk_head_dim=96 is not a power of two
+        self._run_bshd_bwd(1, 32, 8, 96, 32, "float32")
 
 
 # ---------------------------------------------------------------------------
@@ -406,8 +364,6 @@ class TestApplyMLARopeForKV(_BaseMLARopeTest):
         self.assertEqual(list(val_out.shape), [bs, seq, heads, v_dim])
         _allclose(key_out, key_ref, dtype, f"KV bshd fwd key dtype={dtype}")
         _allclose(val_out, val_ref, dtype, f"KV bshd fwd value dtype={dtype}")
-        # np.testing.assert_equal(key_out._md5sum(), key_ref._md5sum())
-        # np.testing.assert_equal(val_out._md5sum(), val_ref._md5sum())
 
     def _run_thd_fwd(self, seq_lens, heads, k_dim, v_dim, emb_dim, dtype):
         total = sum(seq_lens)
@@ -471,90 +427,35 @@ class TestApplyMLARopeForKV(_BaseMLARopeTest):
 
         _allclose(gkv_cu, gkv_ref, dtype, f"KV bshd bwd dkv dtype={dtype}")
         _allclose(gemb_cu, gemb_ref, dtype, f"KV bshd bwd demb dtype={dtype}")
-        # np.testing.assert_equal(gkv_cu._md5sum(), gkv_ref._md5sum())
-        # np.testing.assert_equal(gemb_cu._md5sum(), gemb_ref._md5sum())
 
     # ---- forward bshd ----
     def test_fwd_bshd_fp32(self):
         self._run_bshd_fwd(2, 32, 8, 128, 128, 64, "float32")
 
-    # def test_fwd_bshd_bf16(self):
-    #     self._run_bshd_fwd(2, 32, 8, 128, 128, 64, "bfloat16")
+    def test_fwd_bshd_bf16(self):
+        self._run_bshd_fwd(2, 32, 8, 128, 128, 64, "bfloat16")
 
     def test_fwd_bshd_fp32_odd_heads(self):
         self._run_bshd_fwd(1, 16, 5, 64, 64, 32, "float32")
 
-    # # ---- forward thd ----
-    # def test_fwd_thd_fp32(self):
-    #     self._run_thd_fwd([8, 13, 19], 4, 64, 64, 32, "float32")
-
-    # def test_fwd_thd_bf16(self):
-    #     self._run_thd_fwd([8, 13, 19], 4, 64, 64, 32, "bfloat16")
+    def test_fwd_bshd_non_pow2_dims(self):
+        # k_dim=96, v_dim=96 are not powers of two
+        self._run_bshd_fwd(1, 16, 8, 96, 96, 64, "float32")
 
     # ---- backward bshd ----
     def test_bwd_bshd_fp32(self):
         self._run_bshd_bwd(2, 16, 4, 64, 64, 32, "float32")
 
-    # def test_bwd_bshd_bf16(self):
-    #     self._run_bshd_bwd(2, 16, 4, 64, 64, 32, "bfloat16")
+    def test_bwd_bshd_bf16(self):
+        self._run_bshd_bwd(2, 16, 4, 64, 64, 32, "bfloat16")
 
     def test_bwd_bshd_fp32_odd_heads(self):
         # head count not a power of two exercises BLOCK_H masked-load in backward
         self._run_bshd_bwd(1, 16, 5, 64, 64, 32, "float32")
 
-    # # ---- backward thd ----
-    # def _run_thd_bwd(self, seq_lens, heads, k_dim, v_dim, emb_dim, dtype):
-    #     total = sum(seq_lens)
-    #     max_seq = max(seq_lens)
-    #     np.random.seed(61)
-    #     kv_np = np.random.randn(total, heads, k_dim + v_dim).astype("float32")
-    #     emb_np = np.random.randn(total, 1, emb_dim).astype("float32")
-    #     dkey_np = np.random.randn(total, heads, k_dim + emb_dim).astype(
-    #         "float32"
-    #     )
-    #     dval_np = np.random.randn(total, heads, v_dim).astype("float32")
-    #     cos, sin = _make_cos_sin(max_seq, emb_dim, seed=62)
-    #     cu = paddle.to_tensor(
-    #         np.cumsum([0, *list(seq_lens)]).astype("int32"), place="gpu"
-    #     )
-
-    #     def _make(xn, dt):
-    #         t = paddle.to_tensor(xn, place="gpu").astype(dt)
-    #         t.stop_gradient = False
-    #         return t
-
-    #     # Reference via autograd on pure-Paddle reference (thd)
-    #     kv_ref = _make(kv_np, dtype)
-    #     emb_ref = _make(emb_np, dtype)
-    #     key_ref, val_ref = apply_mla_rope_for_kv_ref(
-    #         kv_ref, emb_ref, cos, sin, emb_dim, k_dim, v_dim, cu
-    #     )
-    #     dkey_ref = paddle.to_tensor(dkey_np, place="gpu").astype(key_ref.dtype)
-    #     dval_ref = paddle.to_tensor(dval_np, place="gpu").astype(val_ref.dtype)
-    #     gkv_ref, gemb_ref = paddle.grad(
-    #         [key_ref, val_ref], [kv_ref, emb_ref], [dkey_ref, dval_ref]
-    #     )
-
-    #     # Fused thd
-    #     kv_cu = _make(kv_np, dtype)
-    #     emb_cu = _make(emb_np, dtype)
-    #     key_cu, val_cu = fused_apply_mla_rope_for_kv(
-    #         kv_cu, emb_cu, cos, sin, emb_dim, k_dim, v_dim, cu, 0, 1, False
-    #     )
-    #     dkey_cu = paddle.to_tensor(dkey_np, place="gpu").astype(key_cu.dtype)
-    #     dval_cu = paddle.to_tensor(dval_np, place="gpu").astype(val_cu.dtype)
-    #     gkv_cu, gemb_cu = paddle.grad(
-    #         [key_cu, val_cu], [kv_cu, emb_cu], [dkey_cu, dval_cu]
-    #     )
-
-    #     _allclose(gkv_cu, gkv_ref, dtype, f"KV thd bwd dkv dtype={dtype}")
-    #     _allclose(gemb_cu, gemb_ref, dtype, f"KV thd bwd demb dtype={dtype}")
-
-    # def test_bwd_thd_fp32(self):
-    #     self._run_thd_bwd([8, 13, 19], 4, 64, 64, 32, "float32")
-
-    # def test_bwd_thd_bf16(self):
-    #     self._run_thd_bwd([8, 13, 19], 4, 64, 64, 32, "bfloat16")
+    def test_bwd_bshd_non_pow2_dims(self):
+        # k_dim=96, v_dim=96 are not powers of two
+        self._run_bshd_bwd(1, 16, 8, 96, 96, 64, "float32")
 
 
 if __name__ == "__main__":

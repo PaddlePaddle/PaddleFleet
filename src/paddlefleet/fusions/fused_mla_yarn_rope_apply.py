@@ -420,6 +420,8 @@ def rotary_fwd_kv_kernel(
     cp_rank,
     cp_size,
     BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_V: tl.constexpr,
 ):
     """
     Triton kernel of the forward pass for applying YARN RoPE to MLA's key and value.
@@ -463,27 +465,25 @@ def rotary_fwd_kv_kernel(
 
     KV_ptr = KV + pid_m * stride_kv_seq + pid_head * BLOCK_H * stride_kv_nheads
     kv_off = tl.arange(0, BLOCK_H)[:, None] * stride_kv_nheads
-    mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
-    k_in_off = kv_off + tl.arange(0, k_dim)[None, :]
-    v_in_off = kv_off + k_dim + tl.arange(0, v_dim)[None, :]
-    k = tl.load(KV_ptr + k_in_off, mask=mask)
-    v = tl.load(KV_ptr + v_in_off, mask=mask)
+    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
+    k_range = tl.arange(0, BLOCK_K)[None, :]
+    v_range = tl.arange(0, BLOCK_V)[None, :]
+    k_valid = k_range < k_dim
+    v_valid = v_range < v_dim
+    k_in_off = kv_off + k_range
+    v_in_off = kv_off + k_dim + v_range
+    k = tl.load(KV_ptr + k_in_off, mask=head_mask & k_valid, other=0.0)
+    v = tl.load(KV_ptr + v_in_off, mask=head_mask & v_valid, other=0.0)
 
     K_ptr = O_KEY + pid_m * stride_k_seq + pid_head * BLOCK_H * stride_k_nheads
     V_ptr = (
         O_VALUE + pid_m * stride_v_seq + pid_head * BLOCK_H * stride_v_nheads
     )
 
-    k_out_off = (
-        tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads
-        + tl.arange(0, k_dim)[None, :]
-    )
-    v_out_off = (
-        tl.arange(0, BLOCK_H)[:, None] * stride_v_nheads
-        + tl.arange(0, v_dim)[None, :]
-    )
-    tl.store(K_ptr + k_out_off, k, mask=mask)
-    tl.store(V_ptr + v_out_off, v, mask=mask)
+    k_out_off = tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads + k_range
+    v_out_off = tl.arange(0, BLOCK_H)[:, None] * stride_v_nheads + v_range
+    tl.store(K_ptr + k_out_off, k, mask=head_mask & k_valid)
+    tl.store(V_ptr + v_out_off, v, mask=head_mask & v_valid)
 
     EMB = K_POS_EMB + pid_m * stride_emb_seq
     # x1 = t[..., 0::2], x2 = t[..., 1::2]
@@ -501,8 +501,8 @@ def rotary_fwd_kv_kernel(
         + tl.arange(0, emb_dim // 2)[None, :]
     )
     x_right_off = x_left_off + emb_dim // 2
-    tl.store(K_ptr + x_left_off, x_left, mask=mask)
-    tl.store(K_ptr + x_right_off, x_right, mask=mask)
+    tl.store(K_ptr + x_left_off, x_left, mask=head_mask)
+    tl.store(K_ptr + x_right_off, x_right, mask=head_mask)
 
 
 @triton.jit
@@ -530,6 +530,8 @@ def rotary_bwd_kv_kernel(
     cp_rank,
     cp_size,
     BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_V: tl.constexpr,
 ):
     """
     Triton kernel of the backward pass for applying YARN RoPE to MLA's key and value.
@@ -562,24 +564,22 @@ def rotary_bwd_kv_kernel(
         dKV + pid_m * stride_dkv_seq + pid_head * BLOCK_H * stride_dkv_nheads
     )
     dkv_off = tl.arange(0, BLOCK_H)[:, None] * stride_dkv_nheads
-    mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
-    dk_out_off = dkv_off + tl.arange(0, k_dim)[None, :]
-    dv_out_off = dkv_off + k_dim + tl.arange(0, v_dim)[None, :]
+    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
+    k_range = tl.arange(0, BLOCK_K)[None, :]
+    v_range = tl.arange(0, BLOCK_V)[None, :]
+    k_valid = k_range < k_dim
+    v_valid = v_range < v_dim
+    dk_out_off = dkv_off + k_range
+    dv_out_off = dkv_off + k_dim + v_range
 
     dK_ptr = dK + pid_m * stride_dk_seq + pid_head * BLOCK_H * stride_dk_nheads
     dV_ptr = dV + pid_m * stride_dv_seq + pid_head * BLOCK_H * stride_dv_nheads
-    dk_in_off = (
-        tl.arange(0, BLOCK_H)[:, None] * stride_dk_nheads
-        + tl.arange(0, k_dim)[None, :]
-    )
-    dv_in_off = (
-        tl.arange(0, BLOCK_H)[:, None] * stride_dv_nheads
-        + tl.arange(0, v_dim)[None, :]
-    )
-    dk = tl.load(dK_ptr + dk_in_off, mask=mask)
-    dv = tl.load(dV_ptr + dv_in_off, mask=mask)
-    tl.store(dKV_ptr + dk_out_off, dk, mask=mask)
-    tl.store(dKV_ptr + dv_out_off, dv, mask=mask)
+    dk_in_off = tl.arange(0, BLOCK_H)[:, None] * stride_dk_nheads + k_range
+    dv_in_off = tl.arange(0, BLOCK_H)[:, None] * stride_dv_nheads + v_range
+    dk = tl.load(dK_ptr + dk_in_off, mask=head_mask & k_valid, other=0.0)
+    dv = tl.load(dV_ptr + dv_in_off, mask=head_mask & v_valid, other=0.0)
+    tl.store(dKV_ptr + dk_out_off, dk, mask=head_mask & k_valid)
+    tl.store(dKV_ptr + dv_out_off, dv, mask=head_mask & v_valid)
 
     if pid_head == 0:
         x_left_accum = tl.zeros((BLOCK_H, emb_dim // 2), dtype=tl.float32)
@@ -684,6 +684,8 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         assert sin.is_contiguous()
         assert emb_dim % 4 == 0
         BLOCK_H = _get_block_h(nheads)
+        BLOCK_K = triton.next_power_of_2(k_dim)
+        BLOCK_V = triton.next_power_of_2(v_dim)
 
         o_key = kv.new_empty(total_seqlen, nheads, emb_dim + k_dim)
         o_value = kv.new_empty(total_seqlen, nheads, v_dim)
@@ -713,6 +715,8 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
             cp_rank,
             cp_size,
             BLOCK_H,
+            BLOCK_K,
+            BLOCK_V,
         )
         ctx.save_for_backward(cos, sin)
         ctx.rotary_interleaved = rotary_interleaved
@@ -762,6 +766,8 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
         d_emb = dk.new_empty(total_seqlen, 1, ctx.emb_dim)
 
         BLOCK_H = ctx.block_h
+        BLOCK_K = triton.next_power_of_2(ctx.k_dim)
+        BLOCK_V = triton.next_power_of_2(ctx.v_dim)
         grid = (total_seqlen, triton.cdiv(nheads, BLOCK_H))
         rotary_bwd_kv_kernel[grid](
             dk,
@@ -787,6 +793,8 @@ class ApplyMLARotaryEmbKV(paddle.autograd.PyLayer):
             ctx.cp_rank,
             ctx.cp_size,
             BLOCK_H,
+            BLOCK_K,
+            BLOCK_V,
         )
         if ctx.cu_seqlens_kv is None:
             d_kv = d_kv.view(
