@@ -13,7 +13,7 @@ permissions: read-all
 
 
 env:
-  PR_ID: 'ops'
+  PR_ID: '0'
   COMMIT_ID: ${{ github.sha }}
   BRANCH: ${{ github.ref_name }}
 
@@ -149,6 +149,7 @@ jobs:
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
+          set -e
           wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
