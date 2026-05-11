@@ -82,7 +82,7 @@ if paddle.is_compiled_with_cuda():
 
     SONIC_MOE_HINT = (
         "For developers: guard imports with `is_sonicmoe_available()` and only call `paddlefleet_ops.ops.sonicmoe` when flag branch enabled.\n"
-        "For users: set `using_sonic_moe=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability equal to 9.x to enable."
+        "For users: set `using_sonic_moe=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 10.0 (Blackwell) to enable."
     )
 else:
     DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
@@ -136,9 +136,9 @@ def _sonic_moe_requirement(
         )
     if _cuda_version < (12, 9):
         reasons.append(f"CUDA >= 12.9 required (current {_cuda_version_str})")
-    if not cuda_capability or cuda_capability[0] < 9:
+    if not cuda_capability or cuda_capability[0] < 10:
         reasons.append(
-            f"GPU compute capability equal to 9.x required (current {_capability_str})"
+            f"GPU compute capability >= 10.0 (Blackwell) required (current {_capability_str})"
         )
     reason = "; ".join(reasons) if reasons else "Runtime requirements not met."
     return _build_notice(lib_module, reason, hint_for_error=hint)
@@ -159,7 +159,7 @@ if paddle.is_compiled_with_cuda():
         _FLASH_MASK_AVAILABLE = True
     if (
         sys.version_info >= (3, 12)
-        and paddle.cuda.get_device_capability()[0] >= 9
+        and paddle.cuda.get_device_capability()[0] >= 10
         and _cuda_version >= (12, 9)
     ):
         _SONIC_MOE_AVAILABLE = True
