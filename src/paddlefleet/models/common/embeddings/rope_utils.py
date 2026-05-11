@@ -120,6 +120,7 @@ def _apply_rotary_pos_emb_bshd(
     high_precision_rope: bool = False,
     rope_theta: float = 10000.0,
     time_major: bool = False,
+    sp_group: Group = None,
 ) -> Tensor | tuple[Tensor, ...]:
     """Apply rotary positional embedding to input tensor T.
 
@@ -189,6 +190,31 @@ def _apply_rotary_pos_emb_bshd(
             )
 
     rot_dim = freqs.shape[-1]
+
+    # For Sequence Parallel: slice freqs to match sharded sequence length
+    # When SP is enabled, each rank processes only a subset of the full sequence.
+    # We need to slice freqs to corresponding positions for this rank.
+    if sp_group is not None and sp_group.nranks > 1 and not apply_rope_fusion:
+        sp_rank = sp_group.rank
+        sp_size = sp_group.nranks
+        # Determine sequence dimension based on time_major flag
+        if freqs.ndim == 2:
+            # freqs: [S, D] -> slice to [S_sp, D]
+            seq_len = freqs.shape[0]
+            seq_per_rank = seq_len // sp_size
+            freqs = freqs[sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank]
+        elif freqs.ndim == 3:
+            # freqs: [B, S, D] or [S, B, D] based on time_major
+            if time_major:
+                # freqs: [S, B, D] -> slice to [S_sp, B, D]
+                seq_len = freqs.shape[0]
+                seq_per_rank = seq_len // sp_size
+                freqs = freqs[sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :, :]
+            else:
+                # freqs: [B, S, D] -> slice to [B, S_sp, D]
+                seq_len = freqs.shape[1]
+                seq_per_rank = seq_len // sp_size
+                freqs = freqs[:, sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :]
 
     # For M-RoPE with sequence parallel, freqs may be [S, B, D] while t is [B, S, H, D].
     # When the first two dims are swapped (same product but different order), transpose
@@ -437,6 +463,7 @@ def apply_rotary_pos_emb(
     total_seq_len: int | None = None,
     mscale: float = 1.0,
     cp_group: Group = None,
+    sp_group: Group = None,
     position_ids: Tensor | None = None,
 ):
     """
@@ -471,6 +498,7 @@ def apply_rotary_pos_emb(
         "high_precision_rope": config.high_precision_rope,
         "rope_theta": config.rope_theta,
         "time_major": config.sequence_parallel,
+        "sp_group": sp_group,
     }
     if cu_seqlens is None:
         return _apply_rotary_pos_emb_bshd(
