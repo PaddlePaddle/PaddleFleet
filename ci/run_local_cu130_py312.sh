@@ -241,10 +241,8 @@ install_dependencies() {
 
     if [[ $install_mode == "dev" ]]; then
         # 安装 PaddleFleet
-        echo "安装 PaddleFleet..."
+        echo "安装 PaddleFleet ops..."
         python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-        # 安装 PaddleFleet Python
-        pip install -e . --no-build-isolation
         pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl  --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/
     elif [[ $install_mode == "release" ]]; then
         wget "${paddlefleet_url}/${fleet_wheel}" -O ${fleet_wheel}
@@ -252,10 +250,8 @@ install_dependencies() {
         rm -rf ./*
         pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
     else
-        echo "安装 PaddleFleet..."
+        echo "安装 PaddleFleet ops..."
         python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-        # 安装 PaddleFleet Python
-        pip install -e . --no-build-isolation
         echo "安装指定版本的 Paddle..."
         pip install ${PADDLE_URL} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     fi
@@ -315,6 +311,8 @@ if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
     if [ "$RUN_SINGLE_UNIT" = true ]; then
         echo ""
         echo "=== 开始单卡单元测试 ==="
+        # 安装 PaddleFleet Python
+        pip install -e . --no-build-isolation
         if bash ci/single_card_test.sh; then
             record_result "单卡单元测试" "PASS"
             echo -e "\033[32m✓ 单卡单元测试完成\033[0m"
@@ -327,6 +325,7 @@ if [ "$RUN_SINGLE_UNIT" = true ] || [ "$RUN_SINGLE_SONIC" = true ]; then
     # 运行 Sonic MoE 单卡测试
     if [ "$RUN_SINGLE_SONIC" = true ]; then
         echo ""
+        pip install -e . --no-build-isolation
         echo "=== 开始 Sonic MoE 单卡测试 ==="
         if bash ci/single_card_sonic.sh; then
             record_result "Sonic MoE 单卡测试" "PASS"
@@ -346,6 +345,7 @@ if [ "$RUN_MULTI_UNIT" = true ]; then
     echo ""
     echo "=== 开始多卡单元测试 ==="
     export work_dir=$(pwd)
+    pip install -e . --no-build-isolation
     if [ -f "ci/multi-card_test.sh" ]; then
         if bash ci/multi-card_test.sh; then
             record_result "多卡单元测试" "PASS"
@@ -371,6 +371,7 @@ if [ "$RUN_SINGLE_MODEL" = true ]; then
     fi
 
     echo ""
+    pip install -e . --no-build-isolation
     cd PaddleFormers
     pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     cd ..
@@ -458,6 +459,7 @@ fi
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
     export CACHE_DIR=/root/paddlejob/share-storage/gpfs/system-public/fleet-model-cache
+    pip install -e . --no-build-isolation
     cd PaddleFormers
     pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     cd ..
