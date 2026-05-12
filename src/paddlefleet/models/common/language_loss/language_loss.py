@@ -376,6 +376,12 @@ class LanguageLoss(FleetLayer):
 
     def _forward(self, logits: Tensor | tuple, labels: Tensor):
         if (
+            get_context_parallel_world_size() > 1
+            and self.config.experimental_dataflow
+        ):
+            # In EB data flow and CP size > 1, scatter labels to cp local
+            labels = ContextParallelScatterOp.apply(labels, axis=1)
+        if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules
         ):
@@ -412,9 +418,29 @@ class LanguageLoss(FleetLayer):
                         # Align with EB: compute per-token loss matrix and reduce
                         # with global sum/count instead of going through forward_impl
                         # which applies line-wise loss.
+
+                        if get_context_parallel_world_size() > 1:
+                            # In EB data flow and CP size > 1, since we do not use _forward
+                            # we need to scatter labels to cp local here.
+                            labels_cur_depth = ContextParallelScatterOp.apply(
+                                labels_cur_depth, axis=1
+                            )
+
                         loss_matrix_cur_depth = self.loss_func(
                             logits_cur_depth.cast("float32"), labels_cur_depth
                         )
+
+                        if get_context_parallel_world_size() > 1:
+                            # In EB data flow and CP size > 1, loss and labels need to be gathered back.
+                            loss_matrix_cur_depth = (
+                                ContextParallelGatherOp.apply(
+                                    loss_matrix_cur_depth, axis=1
+                                )
+                            )
+                            labels_cur_depth = ContextParallelGatherOp.apply(
+                                labels_cur_depth, axis=1
+                            )
+
                         lossmask_cur_depth = (
                             labels_cur_depth != self.ignored_index
                         ).cast(paddle.float32)
