@@ -529,10 +529,10 @@ class TransformerLayer(nn.Layer):
                 # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly
                 attn_mask_startend_row_indices_mtp = None
 
-        # --- Embedding Gating: store for use inside _forward_impl ---
+        # --- Embedding Gating: store for use AFTER recompute ---
         if self._is_last_decoder_layer:
             _emb = dict_args.pop("embedding_for_gating", None)
-            self._embedding_for_gating = _emb.detach() if _emb is not None else None
+            self._embedding_for_gating = _emb
 
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
@@ -584,6 +584,13 @@ class TransformerLayer(nn.Layer):
             output, context = outputs[0], outputs[1]
         else:
             output, context = outputs, None
+
+        # --- Embedding Gating: applied OUTSIDE recompute to avoid SliceGradNode clearing ---
+        if self._is_last_decoder_layer and self._embedding_for_gating is not None:
+            alpha = self.embedding_gate.alpha.astype(output.dtype)
+            output = alpha * output + (1.0 - alpha) * self._embedding_for_gating
+            logger.info(f"[EmbeddingGating] alpha={float(self.embedding_gate.alpha.item()):.8f}")
+            self._embedding_for_gating = None
 
         rst = OrderedDict()
         rst = {"hidden_states": output}
@@ -649,12 +656,6 @@ class TransformerLayer(nn.Layer):
         input_ids: Tensor | None = None,
         **kwargs,
     ):
-        # --- Embedding Gating: fuse initial embedding (accessed via self to work with recompute) ---
-        if self._is_last_decoder_layer and self._embedding_for_gating is not None:
-            alpha = self.embedding_gate.alpha.astype(hidden_states.dtype)
-            hidden_states = alpha * hidden_states + (1.0 - alpha) * self._embedding_for_gating
-            logger.info(f"[EmbeddingGating] alpha={float(self.embedding_gate.alpha.item()):.8f}")
-
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
         if self.config.block_attention_residuals:
             blocks = kwargs.get("blocks", [])

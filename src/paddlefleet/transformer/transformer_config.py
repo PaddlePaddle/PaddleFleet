@@ -90,7 +90,7 @@ class TransformerConfig(ModelParallelConfig):
     """When True, apply scalar gating to fuse initial embedding into the last decoder layer input.
     Formula: h_in^L = alpha * h_out^{L-1} + (1 - alpha) * e_0"""
 
-    embedding_gating_alpha_init: float = 0.95
+    embedding_gating_alpha_init: float = 1.0
     """Initial value of the embedding gating alpha parameter."""
 
     # Note: need to implement PipelineParallelLayerLayout and import
