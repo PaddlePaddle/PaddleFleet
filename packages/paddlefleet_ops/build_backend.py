@@ -62,6 +62,89 @@ def _get_current_branch(cwd: Path | None) -> str:
     )
 
 
+def _find_base_branch(cwd: Path) -> str:
+    """Determine the base branch (develop or release/*).
+
+    If the current branch IS develop or release/*, use it directly.
+    Otherwise, find the closest base branch by comparing merge-base timestamps.
+    Returns the branch name without remote prefix (e.g. "develop" or "release/0.2").
+    """
+    current = _get_current_branch(cwd)
+    if current == "develop" or current.startswith("release/"):
+        return current
+
+    raw = (
+        subprocess.check_output(
+            [
+                "git",
+                "branch",
+                "-r",
+                "--list",
+                "upstream/develop",
+                "upstream/release/*",
+                "origin/develop",
+                "origin/release/*",
+            ],
+            cwd=cwd,
+        )
+        .decode()
+        .strip()
+    )
+    candidates = [line.strip() for line in raw.splitlines() if line.strip()]
+
+    best_branch = candidates[0]
+    best_timestamp = 0
+    for branch in candidates:
+        merge_base = (
+            subprocess.check_output(
+                ["git", "merge-base", "HEAD", branch],
+                cwd=cwd,
+            )
+            .strip()
+            .decode()
+        )
+        ts = int(
+            subprocess.check_output(
+                ["git", "log", "-1", "--format=%ct", merge_base],
+                cwd=cwd,
+            )
+            .strip()
+            .decode()
+        )
+        if ts > best_timestamp:
+            best_timestamp = ts
+            best_branch = branch
+
+    for prefix in ("upstream/", "origin/"):
+        if best_branch.startswith(prefix):
+            return best_branch[len(prefix) :]
+    return best_branch
+
+
+def _get_last_packages_commit(cwd: Path, base_branch: str) -> str:
+    """Get the last commit on base_branch that modified the packages/ directory.
+
+    Tries upstream/<base_branch>, then origin/<base_branch>, then the local branch.
+    """
+    for ref in (
+        f"upstream/{base_branch}",
+        f"origin/{base_branch}",
+        base_branch,
+    ):
+        result = subprocess.run(
+            ["git", "log", ref, "-1", "--format=%H", "--", "packages/"],
+            cwd=cwd,
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            commit = result.stdout.strip().decode("utf-8")
+            if commit:
+                return commit
+    raise RuntimeError(
+        f"Cannot find any commit that modified packages/ on branch {base_branch}"
+    )
+
+
 def _generate_version_info():
     """Generate version info file from version.txt + git commit hash.
 
@@ -82,15 +165,20 @@ def _generate_version_info():
         final_version = os.environ["PADDLEFLEET_VERSION"]
     else:
         base_version = (_workspace_root / "version.txt").read_text().strip()
-        commit_short = get_git_commit_hash(_workspace_root)[:8]
+        base_branch = _find_base_branch(_workspace_root)
+        packages_commit = _get_last_packages_commit(
+            _workspace_root, base_branch
+        )
+        commit_short = packages_commit[:8]
         date_str = datetime.now().strftime("%Y%m%d")
-        branch = _get_current_branch(_workspace_root)
-        if branch.startswith("release/"):
+        if base_branch.startswith("release/"):
             final_version = f"{base_version}.post{date_str}+{commit_short}"
         else:
             final_version = f"{base_version}.dev{date_str}+{commit_short}"
 
-    git_commit_hash = get_git_commit_hash(_workspace_root)
+    git_commit_hash = _get_last_packages_commit(
+        _workspace_root, _find_base_branch(_workspace_root)
+    )
 
     with open(version_py, "w") as f:
         f.write(

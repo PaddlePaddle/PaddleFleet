@@ -60,5 +60,5 @@ version = { attr = "paddlefleet_ops.version.__version__" }
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "src/paddlefleet_ops/_extensions/*.cu" },
-    { file = "../../third_party/" },
+    { file = "third_party/" },
 ]

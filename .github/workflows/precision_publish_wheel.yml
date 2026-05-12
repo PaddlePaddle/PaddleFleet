@@ -78,16 +78,6 @@ jobs:
           source /root/proxy
           git submodule update --init --recursive
           export UV_PYTHON="3.10"
-          # Enable ccache if available; CCACHE_DIR on CFS persists across CI runs.
-          if command -v ccache &>/dev/null; then
-            export CCACHE_DIR=/root/.cache/ccache
-            export CCACHE_MAXSIZE=20G
-            mkdir -p "${CCACHE_DIR}"
-            export CC="ccache gcc"
-            export CXX="ccache g++"
-            ccache --zero-stats
-            echo "[build] ccache enabled, CCACHE_DIR=${CCACHE_DIR}"
-          fi
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
           uv build --wheel --package paddlefleet-ops --out-dir dist -v
           '
