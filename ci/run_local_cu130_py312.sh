@@ -37,7 +37,7 @@ RUN_SINGLE_SONIC=false
 RUN_MULTI_UNIT=false
 RUN_SINGLE_MODEL=false
 RUN_MULTI_MODEL=false
-install_mode=""
+install_mode="dev"
 
 # 默认模型测试
 SINGLE_MODEL_TESTS=()
@@ -241,8 +241,11 @@ install_dependencies() {
     if [[ $install_mode == "dev" ]]; then
         # 安装 PaddleFleet
         echo "安装 PaddleFleet..."
-        pip install --pre paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-        # 安装 Paddle
+        python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+        # 安装 PaddleFleet Python
+        cd PaddleFleet
+        pip install -e . --no-build-isolation
+        cd ..
         pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl  --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/
     else if [[ $install_mode == "release" ]]; then
         wget "${paddlefleet_url}/${fleet_wheel}" -O ${fleet_wheel}
@@ -250,15 +253,15 @@ install_dependencies() {
         rm -rf ./*
         pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
     else
+        echo "安装 PaddleFleet..."
+        python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+        # 安装 PaddleFleet Python
+        cd PaddleFleet
+        pip install -e . --no-build-isolation
+        cd ..
         echo "安装指定版本的 Paddle..."
         pip install ${PADDLE_URL} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     fi
-
-
-
-    # 安装 Paddle（会覆盖 PaddleFleet 自带的 Paddle）
-    echo "安装指定版本的 Paddle..."
-    pip install ${PADDLE_URL} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
 
     # 安装测试依赖
     pip install bce-python-sdk==0.8.74 wrapt matplotlib pytest parameterized
