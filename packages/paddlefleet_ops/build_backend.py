@@ -220,7 +220,6 @@ def prepare_metadata_for_build_editable(
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     check_cuda_arch_list()
-    # _clean_egg_info()  # Temporarily disabled - may cause issues with Paddle's CUDAExtension
     check_patchelf_exists()
     check_submodule_updated()
     _prepare_ecosystem(use_symlinks=False)
@@ -232,7 +231,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
 def build_editable(
     wheel_directory, config_settings=None, metadata_directory=None
 ):
-    # _clean_egg_info()  # Temporarily disabled - may cause issues with Paddle's CUDAExtension
+    check_cuda_arch_list()
     check_patchelf_exists()
     check_submodule_updated()
     _prepare_ecosystem(use_symlinks=True)
@@ -242,6 +241,11 @@ def build_editable(
 
 
 def build_sdist(sdist_directory, config_settings=None):
-    # _clean_egg_info()  # Temporarily disabled - may cause issues with Paddle's CUDAExtension
-    check_submodule_updated()
-    return orig.build_sdist(sdist_directory, config_settings)
+    raise RuntimeError(
+        "Currently, we don't support building sdist. Please use wheel. "
+        "Please re-build paddlefleet_ops with `--wheel` option. "
+        "For example, run `uv build --package paddlefleet_ops --wheel`."
+    )
+    # TODO(dev): Enable source distribution build when it's ready.
+    # check_submodule_updated()
+    # return orig.build_sdist(sdist_directory, config_settings)

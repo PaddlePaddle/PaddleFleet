@@ -237,6 +237,26 @@ def check_cuda_arch_list():
         )
 
 
+def _detect_local_gpu_arch():
+    """Auto-detect the compute capability of the first visible GPU via nvidia-smi.
+
+    Returns a string like '9.0', or None if detection fails.
+    DeepEP requires GPU compute capability >= 9.0 (SM90+).
+    """
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+        )
+        caps = {
+            line.strip() for line in out.decode().splitlines() if line.strip()
+        }
+        # Return the first available architecture (usually all GPUs are same)
+        return sorted(caps)[0] if caps else None
+    except Exception:
+        return None
+
+
 def get_cuda_version():
     nvcc_path = shutil.which("nvcc")
     if nvcc_path is None:
@@ -315,12 +335,31 @@ def get_libs():
 
     # Allow CI or users to pin the arch list via PADDLE_CUDA_ARCH_LIST.
     # Falls back to sensible defaults derived from the detected CUDA version:
-    #   < 12.8  → SM90 only (H800)
-    #   ≥ 12.8 / 13.x → SM90 + SM100 + SM103 (H800 + B100/B200)
+    #   < 12.8  → SM90 only
+    #   ≥ 12.8 / 13.x → SM90 + SM100 + SM103
     _default_arch = (
         "9.0" if (cuda_major == 12 and cuda_minor < 8) else "9.0;10.0;10.3"
     )
-    _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _default_arch)
+    print("[get_libs | _detect_local_gpu_arch]", _detect_local_gpu_arch())
+    print("[get_libs | _default_arch]", _default_arch)
+    # _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _detect_local_gpu_arch() or _default_arch)
+    # _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _default_arch)
+    _raw = (
+        os.environ.get("PADDLE_CUDA_ARCH_LIST")
+        or _detect_local_gpu_arch()
+        or _default_arch
+    )
+    print(
+        "[get_libs | os.environ.get('PADDLE_CUDA_ARCH_LIST']",
+        os.environ.get("PADDLE_CUDA_ARCH_LIST"),
+    )
+    print("[get_libs | _detect_local_gpu_arch()", _detect_local_gpu_arch())
+    print("[get_libs | _default_arch", _default_arch)
+    print(
+        "[get_libs | _detect_local_gpu_arch() or _default_arch",
+        _detect_local_gpu_arch() or _default_arch,
+    )
+    print("[get_libs | _raw]", _raw)
     # Normalize: some callers use comma-separated (e.g. "8.0,9.0,10.0,10.3").
     # Paddle's _get_cuda_arch_flags only accepts semicolon-separated values,
     # and DeepEP only supports SM90/SM100/SM103 — drop anything outside that set.
