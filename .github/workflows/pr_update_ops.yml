@@ -74,13 +74,13 @@ jobs:
           pr_number=$(echo $response | jq -r '.[0].url' | awk -F'/' '{print $NF}')
           pr_last_commit=$(echo $response | jq -r '.[0].head.sha')
           mkdir fleet-312 && cd fleet-312
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet.tar.gz
+          wget -q https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory .
           cd dist
           python ../../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/cu129/paddlefleet-ops
           cd ../.. && mkdir fleet-310 && cd fleet-310
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet-310.tar.gz
+          wget -q https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet-310.tar.gz
           tar -xf paddlefleet-310.tar.gz --strip-components=1
           git config --global --add safe.directory .
           cd dist
