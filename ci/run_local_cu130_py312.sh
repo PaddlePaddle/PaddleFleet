@@ -237,6 +237,7 @@ install_dependencies() {
     pip uninstall paddlefleet -y || true
     pip uninstall paddlepaddle-gpu -y || true
     pip uninstall paddleformers -y || true
+    pip uninstall paddlefleet-ops -y || true
 
     if [[ $install_mode == "dev" ]]; then
         # 安装 PaddleFleet
