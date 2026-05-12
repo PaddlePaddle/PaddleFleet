@@ -1632,14 +1632,24 @@ class ExpertsGroupGemmContiguousNode:
                         * self.token_padding_alignment
                     )
                     end_idx = start_idx + n
-                    paddle._C_ops.fused_linear_param_grad_add(
-                        x._slice(start_idx, end_idx),
-                        dy._slice(start_idx, end_idx),
-                        grad_attr,
-                        None,
-                        True,
-                        False,
-                    )
+                    if self.use_fp8_mlp:
+                        paddle._C_ops.fused_linear_param_grad_add(
+                            x._slice(start_idx, end_idx),
+                            dy._slice(start_idx, end_idx),
+                            grad_attr,
+                            None,
+                            True,
+                            False,
+                        )
+                    else:
+                        paddle._C_ops.fused_linear_param_grad_add(
+                            x._slice(start_idx, end_idx).astype("float32"),
+                            dy._slice(start_idx, end_idx).astype("float32"),
+                            grad_attr,
+                            None,
+                            True,
+                            False,
+                        )
                     start_idx = end_idx
 
                 if (
