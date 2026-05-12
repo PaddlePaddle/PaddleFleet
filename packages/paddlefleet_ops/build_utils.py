@@ -340,8 +340,6 @@ def get_libs():
     _default_arch = (
         "9.0" if (cuda_major == 12 and cuda_minor < 8) else "9.0;10.0;10.3"
     )
-    # _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _detect_local_gpu_arch() or _default_arch)
-    # _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _default_arch)
     _raw = (
         os.environ.get("PADDLE_CUDA_ARCH_LIST")
         or _detect_local_gpu_arch()
