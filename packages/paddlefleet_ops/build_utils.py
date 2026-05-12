@@ -252,7 +252,7 @@ def _detect_local_gpu_arch():
             line.strip() for line in out.decode().splitlines() if line.strip()
         }
         # Return the first available architecture (usually all GPUs are same)
-        return sorted(caps)[0] if caps else None
+        return caps[0] if caps else None
     except Exception:
         return None
 
