@@ -263,6 +263,8 @@ class ApplyMLARotaryEmbQ(paddle.autograd.PyLayer):
         assert sin.is_contiguous()
         assert headdim == qk_head_dim + emb_dim
         assert emb_dim % 4 == 0
+        assert cos.shape[-1] == emb_dim
+        assert sin.shape[-1] == emb_dim
         BLOCK_H = _get_block_h(nheads)
         assert nheads % BLOCK_H == 0, (
             f"head_num must be divisible by BLOCK_H ({BLOCK_H}), but got {nheads}"
