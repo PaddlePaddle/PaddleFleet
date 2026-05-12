@@ -345,10 +345,6 @@ def get_libs():
         or _detect_local_gpu_arch()
         or _default_arch
     )
-    print(
-        "[get_libs | os.environ.get('PADDLE_CUDA_ARCH_LIST']",
-        os.environ.get("PADDLE_CUDA_ARCH_LIST"),
-    )
     # Normalize: some callers use comma-separated (e.g. "8.0,9.0,10.0,10.3").
     # Paddle's _get_cuda_arch_flags only accepts semicolon-separated values,
     # and DeepEP only supports SM90/SM100/SM103 — drop anything outside that set.

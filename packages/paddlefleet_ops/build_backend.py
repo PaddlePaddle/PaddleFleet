@@ -242,7 +242,7 @@ def build_editable(
 
 def build_sdist(sdist_directory, config_settings=None):
     raise RuntimeError(
-        "Currently, we don't support building sdist. Please use wheel. "
+        "Currently, we don't support building sdist. "
         "Please re-build paddlefleet_ops with `--wheel` option. "
         "For example, run `uv build --package paddlefleet_ops --wheel`."
     )
