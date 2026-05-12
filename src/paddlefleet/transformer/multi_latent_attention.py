@@ -694,11 +694,27 @@ class MLASelfAttention(MultiLatentAttention):
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
             if self.config.apply_rope_fusion:
+                assert not self.config.sequence_parallel, (
+                    "sequence_parallel for apply_rope_fusion in mla is not supported yet."
+                )
+                assert cu_seqlens_q is None, (
+                    "thd for apply_rope_fusion in mla is not supported yet."
+                )
                 cp_size = get_pg_size(self.pg_collection.cp)
                 cp_rank = get_pg_rank(self.pg_collection.cp)
+                q_len = q.size(1)
+                if (
+                    packed_seq_params is None
+                    or self.config.context_parallel_size == 1
+                ):
+                    # During training, the sequence length is always
+                    # the full rotary_pos_emb length, except for sequence packing + CP.
+                    # We need the full rotary_pos_emb to cover the full sequence,
+                    # so we do not shorten it here.
+                    rotary_pos_emb = rotary_pos_emb[:, 0:q_len]
                 if self.config.rope_type == "rope":
-                    cos = paddle.cos(rotary_pos_emb)
-                    sin = paddle.sin(rotary_pos_emb)
+                    cos = paddle.cos(rotary_pos_emb).contiguous()
+                    sin = paddle.sin(rotary_pos_emb).contiguous()
                 query = fused_apply_mla_rope_for_q(
                     q,
                     cos,
