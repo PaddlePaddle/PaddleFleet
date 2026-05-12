@@ -14,9 +14,10 @@
 
 [project]
 name = "paddlefleet"
-dynamic = ["version", "readme", "dependencies"]
+dynamic = ["version", "readme"]
 description = "Fleet Core - Core Functional Library for Large Scale Distributed Training"
 requires-python = ">=3.10"
+dependencies = ["colorlog>=6.10.1", "paddlepaddle-gpu==3.4.0.post20260429+f2d27632b14"]
 license = { text = "Apache 2.0" }
 authors = [{ name = "PaddlePaddle", email = "Paddle-better@baidu.comm" }]
 maintainers = [{ name = "PaddlePaddle", email = "Paddle-better@baidu.com" }]
@@ -63,7 +64,6 @@ include = ["paddlefleet*"]
 [tool.setuptools.dynamic]
 readme = { file = "README.md", content-type = "text/markdown" }
 version = { attr = "paddlefleet._version.__version__" }
-dependencies = { file = "requirements-build.txt" }
 
 [dependency-groups]
 test = [
@@ -115,7 +115,7 @@ name = "paddlepaddle-xpu"
 url = "https://www.paddlepaddle.org.cn/packages/nightly/xpu-p800/"
 
 [tool.ruff]
-exclude = ["third_party"]
+exclude = ["packages/paddlefleet_ops/third_party"]
 line-length = 80
 target-version = "py310"
 

@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 import backends
@@ -51,65 +52,133 @@ def get_git_commit_hash(cwd: Path | None) -> str:
     )
 
 
-def _generate_version_info():
-    """Generate version info file from ops_required_version.txt.
+def _get_current_branch(cwd: Path | None) -> str:
+    return (
+        subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd
+        )
+        .strip()
+        .decode("utf-8")
+    )
 
-    The version is developer-maintained in ops_required_version.txt
-    (e.g. 0.3.0.dev1, 0.3.0.dev2, ...).  Developers bump it manually
-    whenever paddlefleet_ops code changes, as part of their PR.
+
+def _find_base_branch(cwd: Path) -> str:
+    """Determine the base branch (develop or release/*).
+
+    If the current branch IS develop or release/*, use it directly.
+    Otherwise, find the closest base branch by comparing merge-base timestamps.
+    Returns the branch name without remote prefix (e.g. "develop" or "release/0.2").
+    """
+    current = _get_current_branch(cwd)
+    if current == "develop" or current.startswith("release/"):
+        return current
+
+    raw = (
+        subprocess.check_output(
+            [
+                "git",
+                "branch",
+                "-r",
+                "--list",
+                "upstream/develop",
+                "upstream/release/*",
+                "origin/develop",
+                "origin/release/*",
+            ],
+            cwd=cwd,
+        )
+        .decode()
+        .strip()
+    )
+    candidates = [line.strip() for line in raw.splitlines() if line.strip()]
+
+    best_branch = candidates[0]
+    best_timestamp = 0
+    for branch in candidates:
+        merge_base = (
+            subprocess.check_output(
+                ["git", "merge-base", "HEAD", branch],
+                cwd=cwd,
+            )
+            .strip()
+            .decode()
+        )
+        ts = int(
+            subprocess.check_output(
+                ["git", "log", "-1", "--format=%ct", merge_base],
+                cwd=cwd,
+            )
+            .strip()
+            .decode()
+        )
+        if ts > best_timestamp:
+            best_timestamp = ts
+            best_branch = branch
+
+    for prefix in ("upstream/", "origin/"):
+        if best_branch.startswith(prefix):
+            return best_branch[len(prefix) :]
+    return best_branch
+
+
+def _get_last_packages_commit(cwd: Path, base_branch: str) -> str:
+    """Get the last commit on base_branch that modified the packages/ directory.
+
+    Tries upstream/<base_branch>, then origin/<base_branch>, then the local branch.
+    """
+    for ref in (
+        f"upstream/{base_branch}",
+        f"origin/{base_branch}",
+        base_branch,
+    ):
+        result = subprocess.run(
+            ["git", "log", ref, "-1", "--format=%H", "--", "packages/"],
+            cwd=cwd,
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            commit = result.stdout.strip().decode("utf-8")
+            if commit:
+                return commit
+    raise RuntimeError(
+        f"Cannot find any commit that modified packages/ on branch {base_branch}"
+    )
+
+
+def _generate_version_info():
+    """Generate version info file from version.txt + git commit hash.
+
     CI release builds may override via PADDLEFLEET_VERSION env var.
+    Otherwise the version is derived as:
+      - develop branch: <base_version>.dev<YYYYMMDD>+<commit_hash_8>
+      - release/* branch: <base_version>.post<YYYYMMDD>+<commit_hash_8>
     """
     version_py = _pkg_root / "src" / "paddlefleet_ops" / "version.py"
-    ops_req_file = _workspace_root / "ops_required_version.txt"
 
     if version_py.exists() and not is_git_repo():
         logger.info(
             "The version.py file already exists (not in git repo), keeping it"
         )
-        return ops_req_file.read_text().strip()
+        return
 
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
     else:
-        # Generate version dynamically
-        # Read base version from version.txt
-        version_file = _workspace_root / "version.txt"
-        if not version_file.exists():
-            raise RuntimeError("version.txt not found in workspace root")
-        base_version = version_file.read_text().strip()
-
-        # Read build number from ops_required_version.txt
-        if not ops_req_file.exists():
-            raise RuntimeError(
-                "ops_required_version.txt not found in workspace root"
-            )
-        build_num = ops_req_file.read_text().strip()
-        if not build_num:
-            raise RuntimeError("ops_required_version.txt is empty")
-
-        # Determine suffix based on git branch
-        is_release_branch = False
-        # Get current branch name
-        branch = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=_workspace_root,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode("utf-8")
-            .strip()
+        base_version = (_workspace_root / "version.txt").read_text().strip()
+        base_branch = _find_base_branch(_workspace_root)
+        packages_commit = _get_last_packages_commit(
+            _workspace_root, base_branch
         )
-        # Check if branch starts with "release/"
-        is_release_branch = branch.startswith("release/")
-        logger.info(
-            f"Current branch: {branch}, is_release_branch: {is_release_branch}"
-        )
+        commit_short = packages_commit[:8]
+        date_str = datetime.now().strftime("%Y%m%d")
+        if base_branch.startswith("release/"):
+            final_version = f"{base_version}.post{date_str}+{commit_short}"
+        else:
+            final_version = f"{base_version}.dev{date_str}+{commit_short}"
 
-        # Generate version with appropriate suffix
-        suffix = ".post" if is_release_branch else ".dev"
-        final_version = f"{base_version}{suffix}{build_num}"
-
-    git_commit_hash = get_git_commit_hash(_workspace_root)
+    git_commit_hash = _get_last_packages_commit(
+        _workspace_root, _find_base_branch(_workspace_root)
+    )
 
     with open(version_py, "w") as f:
         f.write(
