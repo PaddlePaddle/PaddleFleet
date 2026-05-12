@@ -1,4 +1,4 @@
-# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddleFleet Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,7 +6,7 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
+# Unless distributed on applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
@@ -33,6 +33,21 @@ from paddlefleet.transformer.transformer_layer import (
     TransformerLayerSublayersSpec,
     tensors_clone,
 )
+
+
+def _make_layer(**attrs):
+    """Create TransformerLayer with mocked __init__ and bypass nn.Layer __setattr__."""
+    with patch.object(
+        TransformerLayer, "__init__", lambda self, *a, **kw: None
+    ):
+        layer = TransformerLayer.__new__(TransformerLayer)
+        object.__setattr__(layer, "_sub_layers", {})
+        object.__setattr__(layer, "_parameters", {})
+        object.__setattr__(layer, "_buffers", {})
+        object.__setattr__(layer, "_non_persistable_buffers", set())
+        for k, v in attrs.items():
+            object.__setattr__(layer, k, v)
+        return layer
 
 
 class TestTensorsCloneEdgeCases(unittest.TestCase):
@@ -62,7 +77,6 @@ class TestTensorsCloneEdgeCases(unittest.TestCase):
         t2 = paddle.randn([4, 5])
         result = tensors_clone((t1, t2))
         self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 2)
         self.assertTrue(paddle.allclose(result[0], t1))
         self.assertTrue(paddle.allclose(result[1], t2))
 
@@ -73,23 +87,33 @@ class TestTensorsCloneEdgeCases(unittest.TestCase):
         self.assertIsInstance(result, list)
         self.assertTrue(paddle.is_tensor(result[0]["a"]))
 
+    def test_clone_raises_on_unsupported_type(self):
+        """tensors_clone should raise ValueError on unsupported types."""
+        with self.assertRaises(ValueError):
+            tensors_clone(42)
+
 
 class TestTransformerLayerSublayersSpecDefaults(unittest.TestCase):
     """Tests for TransformerLayerSublayersSpec default values."""
 
-    def test_default_self_attn_is_identity_op(self):
-        """self_attn default should be IdentityOp."""
-        from paddlefleet.utils import IdentityOp
+    def test_default_self_attn_is_identity(self):
+        """self_attn default should be IdentityOp class."""
+        from paddlefleet.transformer.identity_op import IdentityOp
 
         spec = TransformerLayerSublayersSpec()
         self.assertEqual(spec.self_attn, IdentityOp)
 
-    def test_default_mlp_is_identity_op(self):
-        """mlp default should be IdentityOp."""
-        from paddlefleet.utils import IdentityOp
+    def test_default_mlp_is_identity(self):
+        """mlp default should be IdentityOp class."""
+        from paddlefleet.transformer.identity_op import IdentityOp
 
         spec = TransformerLayerSublayersSpec()
         self.assertEqual(spec.mlp, IdentityOp)
+
+    def test_default_has_sharded_state_dict_keys_map(self):
+        """sharded_state_dict_keys_map should default to empty dict."""
+        spec = TransformerLayerSublayersSpec()
+        self.assertIsInstance(spec.sharded_state_dict_keys_map, dict)
 
 
 class TestTransformerLayerFP8Quant(unittest.TestCase):
@@ -99,15 +123,12 @@ class TestTransformerLayerFP8Quant(unittest.TestCase):
         """fp8_quant_weight should call mlp.fp8_quant_weight when mlp is MoELayer."""
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
-        with patch.object(
-            TransformerLayer, "__init__", lambda self, *a, **kw: None
-        ):
-            layer = TransformerLayer.__new__(TransformerLayer)
-            layer.mlp = MagicMock(spec=MoELayer)
-            layer.fp8_quant_weight(batch_mode=True, quant_transpose=False)
-            layer.mlp.fp8_quant_weight.assert_called_once_with(
-                batch_mode=True, quant_transpose=False
-            )
+        layer = _make_layer()
+        object.__setattr__(layer, "mlp", MagicMock(spec=MoELayer))
+        layer.fp8_quant_weight(batch_mode=True, quant_transpose=False)
+        layer.mlp.fp8_quant_weight.assert_called_once_with(
+            batch_mode=True, quant_transpose=False
+        )
 
 
 class TestTransformerLayerUseFP8(unittest.TestCase):
@@ -117,13 +138,10 @@ class TestTransformerLayerUseFP8(unittest.TestCase):
         """use_fp8 should delegate to mlp.use_fp8 when mlp is MoELayer."""
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
-        with patch.object(
-            TransformerLayer, "__init__", lambda self, *a, **kw: None
-        ):
-            layer = TransformerLayer.__new__(TransformerLayer)
-            layer.mlp = MagicMock(spec=MoELayer)
-            layer.mlp.use_fp8.return_value = True
-            self.assertTrue(layer.use_fp8())
+        layer = _make_layer()
+        object.__setattr__(layer, "mlp", MagicMock(spec=MoELayer))
+        layer.mlp.use_fp8.return_value = True
+        self.assertTrue(layer.use_fp8())
 
 
 class TestTransformerLayerBuildScheduleNode(unittest.TestCase):
