@@ -355,6 +355,20 @@ class GPTEmbedding(FleetLayer):
         rotary_pos_cos = None
         rotary_pos_sin = None
 
+        # For MTP mode: truncate position_ids to match the actual sequence length
+        # MTP reduces sequence length by num_nextn_predict_layers
+        mtp_position_ids = position_ids
+        if (
+            mtp_emb_res is not None
+            and position_ids is not None
+            and self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            # mtp_emb_res[0] has shape [B, seq_len - num_nextn_predict_layers, H]
+            actual_seq_len = mtp_emb_res[0].shape[1]
+            if position_ids.shape[1] > actual_seq_len:
+                mtp_position_ids = position_ids[:, :actual_seq_len]
+
         if (
             self.position_embedding_type == "rope"
             and self.rotary_pos_emb is not None
@@ -367,7 +381,7 @@ class GPTEmbedding(FleetLayer):
                 rotary_seq_len,
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
-                position_ids=position_ids,
+                position_ids=mtp_position_ids,
             )
         elif (
             self.position_embedding_type == "mrope"
