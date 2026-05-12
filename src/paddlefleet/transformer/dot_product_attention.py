@@ -562,6 +562,9 @@ class CPDotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
+        past_key_values=None,
+        layer_idx=None,
+        use_cache: bool = False,
     ):
         """Forward."""
         assert packed_seq_params is None, (
