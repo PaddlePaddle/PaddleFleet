@@ -340,8 +340,6 @@ def get_libs():
     _default_arch = (
         "9.0" if (cuda_major == 12 and cuda_minor < 8) else "9.0;10.0;10.3"
     )
-    print("[get_libs | _detect_local_gpu_arch]", _detect_local_gpu_arch())
-    print("[get_libs | _default_arch]", _default_arch)
     # _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _detect_local_gpu_arch() or _default_arch)
     # _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _default_arch)
     _raw = (
@@ -353,13 +351,6 @@ def get_libs():
         "[get_libs | os.environ.get('PADDLE_CUDA_ARCH_LIST']",
         os.environ.get("PADDLE_CUDA_ARCH_LIST"),
     )
-    print("[get_libs | _detect_local_gpu_arch()", _detect_local_gpu_arch())
-    print("[get_libs | _default_arch", _default_arch)
-    print(
-        "[get_libs | _detect_local_gpu_arch() or _default_arch",
-        _detect_local_gpu_arch() or _default_arch,
-    )
-    print("[get_libs | _raw]", _raw)
     # Normalize: some callers use comma-separated (e.g. "8.0,9.0,10.0,10.3").
     # Paddle's _get_cuda_arch_flags only accepts semicolon-separated values,
     # and DeepEP only supports SM90/SM100/SM103 — drop anything outside that set.
