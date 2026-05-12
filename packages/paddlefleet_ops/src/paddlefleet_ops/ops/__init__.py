@@ -154,7 +154,8 @@ if paddle.is_compiled_with_cuda():
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
         _DEEP_EP_AVAILABLE = True
-        _HYBRID_EP_AVAILABLE = True
+        if _cuda_version >= (12, 9):
+            _HYBRID_EP_AVAILABLE = True
     if paddle.cuda.get_device_capability()[0] == 10:
         _FLASH_MASK_AVAILABLE = True
     if (

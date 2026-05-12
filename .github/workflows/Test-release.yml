@@ -222,8 +222,8 @@ jobs:
             tar xf bos_new.tar.gz -C bos
           fi
           target_path="paddle-github-action/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}"
-          tar zcf paddldfleet-310.tar.gz paddle
-          python /bos/BosClient.py paddldfleet-310.tar.gz ${target_path}
+          tar zcf paddlefleet-310.tar.gz paddle
+          python /bos/BosClient.py paddlefleet-310.tar.gz ${target_path}
           '
       - name: Terminate and delete the container
         if: ${{ always() }}
@@ -348,8 +348,8 @@ jobs:
             tar xf bos_new.tar.gz -C bos
           fi
           target_path="paddle-github-action/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}"
-          tar zcf paddldfleet.tar.gz paddle
-          python /bos/BosClient.py paddldfleet.tar.gz ${target_path}
+          tar zcf paddlefleet.tar.gz paddle
+          python /bos/BosClient.py paddlefleet.tar.gz ${target_path}
           '
       - name: Terminate and delete the container
         if: ${{ always() }}
@@ -415,8 +415,8 @@ jobs:
           rm -rf * .[^.]*
           set -x
           source /root/proxy
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
-          tar -xf paddldfleet.tar.gz --strip-components=1
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib
@@ -521,8 +521,8 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           set -x
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
-          tar -xf paddldfleet.tar.gz --strip-components=1
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest
           if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
@@ -640,8 +640,8 @@ jobs:
           set -x
           source /root/proxy
           mkdir PaddleFleet && cd PaddleFleet
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
-          tar -xf paddldfleet.tar.gz --strip-components=1
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
@@ -833,8 +833,8 @@ jobs:
           set -x
           source /root/proxy
           mkdir PaddleFleet && cd PaddleFleet
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
-          tar -xf paddldfleet.tar.gz --strip-components=1
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
@@ -1178,8 +1178,8 @@ jobs:
           source /root/proxy
           set -x
           mkdir PaddleFleet && cd PaddleFleet
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddldfleet.tar.gz
-          tar -xf paddldfleet.tar.gz --strip-components=1
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt

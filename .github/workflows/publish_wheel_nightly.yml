@@ -113,15 +113,6 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          if command -v ccache &>/dev/null; then
-            export CCACHE_DIR=/home/.cache/ccache
-            export CCACHE_MAXSIZE=20G
-            mkdir -p "${CCACHE_DIR}"
-            export CC="ccache gcc"
-            export CXX="ccache g++"
-            ccache --zero-stats
-            echo "[build] ccache enabled, CCACHE_DIR=${CCACHE_DIR}"
-          fi
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
           '
 

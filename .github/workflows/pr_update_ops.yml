@@ -74,14 +74,14 @@ jobs:
           pr_number=$(echo $response | jq -r '.[0].url' | awk -F'/' '{print $NF}')
           pr_last_commit=$(echo $response | jq -r '.[0].head.sha')
           mkdir fleet-312 && cd fleet-312
-          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddldfleet.tar.gz
-          tar -xf paddldfleet.tar.gz --strip-components=1
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet.tar.gz
+          tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory .
           cd dist
           python ../../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/cu129/paddlefleet-ops
           cd ../.. && mkdir fleet-310 && cd fleet-310
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet-310.tar.gz
-          tar -xf paddldfleet.tar.gz --strip-components=1
+          tar -xf paddlefleet-310.tar.gz --strip-components=1
           git config --global --add safe.directory .
           cd dist
           python ../../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/cu129/paddlefleet-ops
@@ -179,15 +179,6 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          if command -v ccache &>/dev/null; then
-            export CCACHE_DIR=/home/.cache/ccache
-            export CCACHE_MAXSIZE=20G
-            mkdir -p "${CCACHE_DIR}"
-            export CC="ccache gcc"
-            export CXX="ccache g++"
-            ccache --zero-stats
-            echo "[build] ccache enabled, CCACHE_DIR=${CCACHE_DIR}"
-          fi
           uv build --wheel --package paddlefleet-ops --out-dir dist -v
           '
 
@@ -304,15 +295,6 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          if command -v ccache &>/dev/null; then
-            export CCACHE_DIR=/home/.cache/ccache
-            export CCACHE_MAXSIZE=20G
-            mkdir -p "${CCACHE_DIR}"
-            export CC="ccache gcc"
-            export CXX="ccache g++"
-            ccache --zero-stats
-            echo "[build] ccache enabled, CCACHE_DIR=${CCACHE_DIR}"
-          fi
           uv build --wheel --package paddlefleet-ops -v --python /usr/bin/python
           '
 
