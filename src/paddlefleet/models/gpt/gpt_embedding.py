@@ -450,6 +450,12 @@ class GPTEmbedding(FleetLayer):
             hidden_states_concat = paddle.concat(mtp_emb_res)
             preproc_output["hidden_states"] = hidden_states_concat
 
+        if getattr(self.config, 'use_embedding_gating', False):
+            if mtp_emb_res is not None:
+                preproc_output["embedding_for_gating"] = mtp_emb_res[0]
+            else:
+                preproc_output["embedding_for_gating"] = decoder_input
+
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:
                 preproc_output.pop(key)
