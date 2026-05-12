@@ -689,6 +689,9 @@ class TestQwen3_5Model(unittest.TestCase):
         vision_model = vision_config.provide()
 
         # Step 2: Create language_config and GPTModel
+        # head_dim = VL_LM_HIDDEN_SIZE // NUM_HEADS = 24
+        # mrope_section: [T, H, W] sections for interleaved MRoPE
+        # Sum of sections should equal head_dim // 2 = 12
         language_config = GPTConfig(
             num_hidden_layers=VL_NUM_LM_LAYERS,
             hidden_size=VL_LM_HIDDEN_SIZE,
@@ -702,7 +705,7 @@ class TestQwen3_5Model(unittest.TestCase):
             apply_rope_fusion=False,
             vocab_size=VL_VOCAB_SIZE,
             max_sequence_length=1024,
-            position_embedding_type="rope",
+            position_embedding_type="mrope",
             rotary_percent=1.0,
             rotary_base=10000,
             rope_scaling=False,
@@ -711,6 +714,8 @@ class TestQwen3_5Model(unittest.TestCase):
             layer_types=["full_attention", "linear_attention"],
             gated_attention=True,
         )
+        # Set mrope_section after creation since GPTConfig doesn't define this field
+        language_config.mrope_section = [8, 2, 2]
         self.language_config = language_config
         self.language_config.model_type = "qwen3_5"
 
