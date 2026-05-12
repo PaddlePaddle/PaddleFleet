@@ -353,6 +353,7 @@ class Attention(FleetLayer, ABC):
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
         in_recompute: bool = False,
+        sink: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """
         Perform a forward pass through the attention layer.
@@ -565,6 +566,7 @@ class Attention(FleetLayer, ABC):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention,
+                sink=sink,
             )
         else:
             # Static batching attention kernel.
@@ -579,6 +581,7 @@ class Attention(FleetLayer, ABC):
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention
                 and in_recompute,
+                sink=sink,
             )
         # =================
         # Output. [b, sq, h]

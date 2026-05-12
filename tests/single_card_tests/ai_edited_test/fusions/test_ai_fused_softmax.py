@@ -65,44 +65,35 @@ class TestSoftmaxOneForward(unittest.TestCase):
         np_dim = 4
         layer = SoftmaxOne(denominator_offset=paddle.to_tensor([1.0] * np_dim))
         x = paddle.randn([2, np_dim, 8, 16])
-        try:
-            result = layer(x)
-            self.assertEqual(result.shape, [2, np_dim, 8, 16])
-        except TypeError:
-            # paddle.softmax(qk, axis=-1) uses compat API which rejects 'axis'
-            # in this Paddle version; source code needs paddle.nn.functional.softmax
-            self.skipTest(
-                "paddle.softmax compat API does not accept 'axis' in this version"
-            )
+        result = layer(x)
+        self.assertEqual(result.shape, [2, np_dim, 8, 16])
 
     def test_output_sums_approximately_one(self):
-        """Test that output rows sum approximately to 1."""
+        """Row sum of SoftmaxOne output equals 1 - P(sink); strictly < 1 when
+        sink logit is finite (attention-sink semantics: the sink column absorbs
+        some probability mass and is then dropped)."""
         np_dim = 1
-        layer = SoftmaxOne(denominator_offset=paddle.to_tensor([1.0] * np_dim))
+        sink_val = 1.0
+        layer = SoftmaxOne(
+            denominator_offset=paddle.to_tensor([sink_val] * np_dim)
+        )
         x = paddle.randn([1, np_dim, 1, 8])
-        try:
-            result = layer(x)
-            row_sum = result.sum(axis=-1)
-            np.testing.assert_allclose(
-                row_sum.numpy(), np.ones([1, np_dim, 1]), atol=1e-5
-            )
-        except TypeError:
-            self.skipTest(
-                "paddle.softmax compat API does not accept 'axis' in this version"
-            )
+        result = layer(x)
+        row_sum = result.sum(axis=-1)
+
+        # row_sum = Σ exp(x) / (Σ exp(x) + exp(sink)) = sigmoid(logsumexp(x) - sink)
+        expected = paddle.nn.functional.sigmoid(
+            paddle.logsumexp(x, axis=-1) - sink_val
+        ).numpy()
+        np.testing.assert_allclose(row_sum.numpy(), expected, atol=1e-5)
 
     def test_output_positive(self):
         """Test that output values are non-negative."""
         np_dim = 4
         layer = SoftmaxOne(denominator_offset=paddle.to_tensor([1.0] * np_dim))
         x = paddle.randn([2, np_dim, 8, 16])
-        try:
-            result = layer(x)
-            self.assertTrue((result >= 0).all())
-        except TypeError:
-            self.skipTest(
-                "paddle.softmax compat API does not accept 'axis' in this version"
-            )
+        result = layer(x)
+        self.assertTrue((result >= 0).all())
 
 
 class TestFusedScaleMaskSoftmaxInit(unittest.TestCase):
@@ -262,14 +253,9 @@ class TestFusedScaleMaskSoftmaxWithSoftmaxOffset(unittest.TestCase):
         x = paddle.randn([2, np_dim, 8, 16])
         # softmax_offset must have shape [np] for SoftmaxOne to work with 4D input
         offset = paddle.to_tensor([1.0] * np_dim)
-        try:
-            result = layer(x, None, softmax_offset=offset)
-            self.assertEqual(result.shape, [2, np_dim, 8, 16])
-        except TypeError:
-            # paddle.softmax compat API does not accept 'axis' in this version
-            self.skipTest(
-                "paddle.softmax compat API does not accept 'axis' in this version"
-            )
+
+        result = layer(x, None, softmax_offset=offset)
+        self.assertEqual(result.shape, [2, np_dim, 8, 16])
 
 
 if __name__ == "__main__":
