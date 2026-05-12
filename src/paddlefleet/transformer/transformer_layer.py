@@ -404,6 +404,28 @@ class TransformerLayer(nn.Layer):
             )
             self.attn_res_block_size = self.config.attn_res_block_size
 
+        # [Layer 11: Embedding Gating] Scalar gate for last decoder layer
+        self.use_embedding_gating = getattr(self.config, 'use_embedding_gating', False)
+        num_empty = getattr(self.config, 'num_empty_layers_add_in_head', 0) or 0
+        self._is_last_decoder_layer = (
+            self.use_embedding_gating
+            and self.layer_number == num_empty + self.config.num_hidden_layers - 1
+        )
+        if self._is_last_decoder_layer:
+            alpha_init = getattr(self.config, 'embedding_gating_alpha_init', 0.95)
+            self.embedding_gate = nn.Layer()
+            self.embedding_gate._cast_to_low_precision = False
+            self.embedding_gate.alpha = paddle.create_parameter(
+                shape=[1],
+                dtype='float32',
+                default_initializer=paddle.nn.initializer.Constant(alpha_init),
+            )
+            self._embedding_for_gating = None
+            logger.info(
+                f"[EmbeddingGating] Enabled on layer {self.layer_number} "
+                f"(last decoder layer). alpha_init={alpha_init}"
+            )
+
     def build_schedule_node(self):
         return TransformerLayerNode(
             self,
@@ -552,6 +574,11 @@ class TransformerLayer(nn.Layer):
                 # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly
                 attn_mask_startend_row_indices_mtp = None
 
+        # --- Embedding Gating: store for use inside _forward_impl ---
+        if self._is_last_decoder_layer:
+            _emb = dict_args.pop("embedding_for_gating", None)
+            self._embedding_for_gating = _emb.detach() if _emb is not None else None
+
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
 
@@ -678,6 +705,12 @@ class TransformerLayer(nn.Layer):
         input_ids: Tensor | None = None,
         **kwargs,
     ):
+        # --- Embedding Gating: fuse initial embedding (accessed via self to work with recompute) ---
+        if self._is_last_decoder_layer and self._embedding_for_gating is not None:
+            alpha = self.embedding_gate.alpha.astype(hidden_states.dtype)
+            hidden_states = alpha * hidden_states + (1.0 - alpha) * self._embedding_for_gating
+            logger.info(f"[EmbeddingGating] alpha={float(self.embedding_gate.alpha.item()):.8f}")
+
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
         if self.config.block_attention_residuals:
             blocks = kwargs.get("blocks", [])

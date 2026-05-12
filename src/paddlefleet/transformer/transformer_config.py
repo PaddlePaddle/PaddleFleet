@@ -86,6 +86,13 @@ class TransformerConfig(ModelParallelConfig):
         ..., Decoder, Dcoder, EmptyLayer, EmptyLayer
     0 implies equal layer division across PP ranks."""
 
+    use_embedding_gating: bool = False
+    """When True, apply scalar gating to fuse initial embedding into the last decoder layer input.
+    Formula: h_in^L = alpha * h_out^{L-1} + (1 - alpha) * e_0"""
+
+    embedding_gating_alpha_init: float = 0.95
+    """Initial value of the embedding gating alpha parameter."""
+
     # Note: need to implement PipelineParallelLayerLayout and import
     # pipeline_model_parallel_layout: str | list | PipelineParallelLayerLayout = None
     pipeline_model_parallel_layout: str | list = None
