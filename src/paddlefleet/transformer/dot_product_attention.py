@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+import warnings
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -140,6 +141,24 @@ class DotProductAttention(FleetLayer):
         else:
             sliding_window = None
 
+        # Save on self so forward() can forward it into flash kernels. This is
+        # what makes `mtp_window_size` actually take effect for MTP layers: the
+        # MTP config has sliding_window=(N, 0), and the flashmask calls below
+        # now receive window_size=(N, 0).
+        self.sliding_window = sliding_window
+        if sliding_window is not None:
+            # Grep-friendly tag: "[SWA-KERNEL-CONFIRM]". Prints once per layer
+            # that actually activates sliding-window attention at the kernel
+            # call site (flashmask with window_size=...). Uses print (not
+            # warnings.warn) so that it is not suppressed by Paddle/Fleet
+            # warnings filters and always lands in nohup.out.
+            print(
+                f"[SWA-KERNEL-CONFIRM] layer_number={layer_number} "
+                f"sliding_window={sliding_window} will be forwarded to flash "
+                f"kernels via window_size",
+                flush=True,
+            )
+
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
             input_in_fp16=self.config.fp16,
             input_in_bf16=self.config.bf16,
@@ -209,17 +228,31 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=0.0,
                 causal=False,  # EC uses causal=False with 2-col startend_row_indices
+                window_size=self.sliding_window,
             )
         else:
             # simple causal path — no document boundaries
-            attn_output, _ = flash_attention(
-                query.astype(value.dtype),
-                key.astype(value.dtype),
-                value,
-                dropout=0.0,
-                causal=True,
-                return_softmax=False,
-            )
+            if self.sliding_window is not None:
+                # flash_attention facade does not forward window_size; route
+                # to flashmask with no document boundaries so SWA is applied.
+                attn_output = flashmask_attention(
+                    query.astype(value.dtype),
+                    key.astype(value.dtype),
+                    value,
+                    startend_row_indices=None,
+                    dropout=0.0,
+                    causal=True,
+                    window_size=self.sliding_window,
+                )
+            else:
+                attn_output, _ = flash_attention(
+                    query.astype(value.dtype),
+                    key.astype(value.dtype),
+                    value,
+                    dropout=0.0,
+                    causal=True,
+                    return_softmax=False,
+                )
 
         attn_output = attn_output.reshape([bsz, q_len, -1])
         return attn_output
@@ -309,6 +342,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=False,
+                window_size=self.sliding_window,
             )
             attn_output = attn_output.reshape([bsz, q_len, -1])
             return attn_output
@@ -322,6 +356,21 @@ class DotProductAttention(FleetLayer):
             # is_causal is True in default
             # training is True in default
             # Default values above maybe changed in the future
+            if self.sliding_window is not None:
+                # SDPA has no SWA option; route through flashmask with no
+                # document boundaries so window_size is honored.
+                attn_output = flashmask_attention(
+                    query,
+                    key,
+                    value,
+                    startend_row_indices=None,
+                    dropout=self.config.attention_dropout,
+                    causal=True,
+                    window_size=self.sliding_window,
+                )
+                attn_output = attn_output.reshape([bsz, q_len, -1])
+                return attn_output
+
             attn_output = paddle.nn.functional.scaled_dot_product_attention(
                 query,
                 key,
@@ -383,6 +432,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=(attn_mask_type == AttnMaskType.causal),
+                window_size=self.sliding_window,
             )
 
             if need_value_padding:
@@ -544,6 +594,25 @@ class CPDotProductAttention(FleetLayer):
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
         self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
+
+        # Sliding-window attention is not yet supported on the context-parallel
+        # path: `flashmask_attention_cp` / `FlashMaskContextParallel` do not
+        # accept a `window_size` argument, and the DualChunkSwap query reorder
+        # used by the CP kernel would make a naive (left, right) window produce
+        # incorrect masks. Fail loud here instead of silently ignoring
+        # `mtp_window_size` / backbone `sliding_window` so users don't think
+        # SWA is active when it isn't. Set config.sliding_window=None (e.g.
+        # unset `mtp_window_size` for MTP) if you need CP>1.
+        cp_sliding_window = getattr(self.config, "sliding_window", None)
+        if cp_sliding_window is not None:
+            raise NotImplementedError(
+                f"[SWA-CP-UNSUPPORTED] layer_number={layer_number} "
+                f"sliding_window={cp_sliding_window} was requested but "
+                f"CPDotProductAttention (context_parallel_size>1) has no "
+                f"kernel-level SWA support. Either disable sliding window "
+                f"(set mtp_window_size=None / sliding_window=None) or run "
+                f"with context_parallel_size=1."
+            )
 
     def forward(
         self,

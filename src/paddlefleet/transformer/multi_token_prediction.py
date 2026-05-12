@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import copy
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -318,7 +319,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         )
         self.transformer_layer = build_spec_layer(
             self.sublayers_spec.transformer_layer,
-            config=self.config,
+            config=self._build_mtp_transformer_config(),
         )
         if not self.config.gpt_model_use_experimental_version:
             self.norm = build_spec_layer(
@@ -329,6 +330,41 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         self.offload_context = nullcontext()
+
+    def _build_mtp_transformer_config(self):
+        """Build a TransformerConfig for the MTP transformer layer.
+
+        Semantics of `mtp_window_size` on the shared config:
+          - None -> MTP uses global attention (sliding_window=None), independent of the
+            backbone's sliding_window setting.
+          - int  -> MTP uses causal sliding window attention with the given size,
+            i.e. sliding_window=(mtp_window_size, 0).
+        """
+        mtp_window_size = getattr(self.config, "mtp_window_size", None)
+        mtp_config = copy.copy(self.config)
+        if mtp_window_size is None:
+            mtp_config.sliding_window = None
+        else:
+            mtp_config.sliding_window = (int(mtp_window_size), 0)
+        # Force-enable SWA on every MTP layer regardless of the backbone's
+        # skip pattern. Without this, `is_layer_window_attention` inside
+        # `DotProductAttention.__init__` can decide this MTP layer falls on a
+        # "skip" slot (e.g. when backbone has window_attn_skip_freq set) and
+        # silently drop mtp_window_size.
+        mtp_config.window_attn_skip_freq = None
+        # Visible banner so operators can grep the training log to confirm MTP
+        # sliding-window attention is actually configured as expected.
+        # Grep-friendly tag: "[MTP-SWA-CONFIRM]".
+        warnings.warn(
+            f"[MTP-SWA-CONFIRM] layer_number={self.layer_number} "
+            f"mtp_window_size={mtp_window_size} -> "
+            f"mtp_config.sliding_window={mtp_config.sliding_window} "
+            f"mtp_config.window_attn_skip_freq={mtp_config.window_attn_skip_freq} "
+            f"(backbone.sliding_window={getattr(self.config, 'sliding_window', None)}, "
+            f"backbone.window_attn_skip_freq="
+            f"{getattr(self.config, 'window_attn_skip_freq', None)})"
+        )
+        return mtp_config
 
     def _concat_embeddings(
         self,

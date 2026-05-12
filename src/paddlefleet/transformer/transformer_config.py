@@ -197,6 +197,13 @@ class TransformerConfig(ModelParallelConfig):
     """If not None, then will use sliding window attention. The size of the window is specified by
     the numbers inside the tuple; -1 is special value meaning "infinite window size"."""
 
+    mtp_window_size: int = None
+    """Sliding window size used only by MTP (multi-token prediction) layers.
+    - If None: MTP layers use global attention (sliding_window=None), regardless of the backbone.
+    - If int: MTP layers use causal sliding window attention with size mtp_window_size
+      (equivalent to sliding_window=(mtp_window_size, 0)). The backbone's sliding_window is
+      unaffected."""
+
     window_attn_skip_freq: int | list[int] = None
     """Frequency of full attention layers among sliding window attention layers. Accepts either:
     - An integer N: Represents a (N-1):1 ratio, one full attention layer after (N-1) SWA layers.
