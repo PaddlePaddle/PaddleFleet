@@ -131,7 +131,7 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
     )
     input_ids = data[:, :-1]
     labels = data[:, 1:]
-    position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
+    position_ids = paddle.to_tensor(input_ids, dtype=paddle.int64).repeat(
         (batch_size, 1)
     )
 
@@ -172,7 +172,7 @@ def run_tp_sp(
     )
     input_ids = data[:, :-1]
     labels = data[:, 1:]
-    position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
+    position_ids = paddle.to_tensor(input_ids, dtype=paddle.int64).repeat(
         (batch_size, 1)
     )
 
