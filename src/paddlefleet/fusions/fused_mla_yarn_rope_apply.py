@@ -12,25 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
-from unittest.mock import MagicMock
-
 import paddle
 
-try:
-    import triton
-    import triton.language as tl
+from paddlefleet.ops.triton_ops.utils import is_torch_compat_available
 
-    HAVE_TRITON = True
-except ImportError:
-    HAVE_TRITON = False
+if is_torch_compat_available():
+    paddle.enable_compat(scope={"triton"})
 
-if not HAVE_TRITON:
-    triton = MagicMock()
-    triton.jit = contextlib.nullcontext()
-    triton.autotune = contextlib.nullcontext()
-    triton.heuristics = contextlib.nullcontext()
-    tl = MagicMock()
+import triton
+import triton.language as tl
 
 
 def _get_block_h(nheads):
