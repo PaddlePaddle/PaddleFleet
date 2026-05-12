@@ -156,9 +156,8 @@ def run_pp(
     )
     input_ids = data[:, :-1]
     labels = data[:, 1:]
-    position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
-        (micro_batch_size, 1)
-    )
+    seq_with_mtp = seq_len + MTP_DEGREE
+    position_ids = paddle.arange(seq_with_mtp, dtype=paddle.int64).unsqueeze(0).expand([micro_batch_size, -1])
 
     inputs = (
         {
