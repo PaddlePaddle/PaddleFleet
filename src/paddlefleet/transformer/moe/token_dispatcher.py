@@ -376,6 +376,7 @@ class _HybridEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         return self.dispatch_overlap(
             hidden_states,

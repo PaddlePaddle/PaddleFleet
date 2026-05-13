@@ -15,10 +15,16 @@
 from .moe_topk_fusion import MoETopkFusion, routing_map_fusion_forward
 from .rms_norm_fusion import RMSNormFusionTriton
 from .sigmoid_gate_fusion import SigmoidGateFusionTriton
+from .ue8m0_scale_transpose_fusion import (
+    FuseStackUe8m0ScaleTransposeTriton,
+    fuse_stack_ue8m0_scale_transpose,
+)
 
 __all__ = [
     "RMSNormFusionTriton",
     "MoETopkFusion",
     "routing_map_fusion_forward",
     "SigmoidGateFusionTriton",
+    "FuseStackUe8m0ScaleTransposeTriton",
+    "fuse_stack_ue8m0_scale_transpose",
 ]
