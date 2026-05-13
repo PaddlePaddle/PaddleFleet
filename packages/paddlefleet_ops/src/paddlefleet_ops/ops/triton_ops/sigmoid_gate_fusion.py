@@ -23,7 +23,7 @@ Features:
 
 import paddle
 
-from paddlefleet.ops.triton_ops.utils import is_torch_compat_available
+from .utils import enable_compat_on_triton_kernel, is_torch_compat_available
 
 if is_torch_compat_available():
     paddle.enable_compat(scope={"triton"})
@@ -43,6 +43,7 @@ def _sigmoid_precise(x):
     return libdevice.div_rn(1.0, 1.0 + exp_neg)
 
 
+@enable_compat_on_triton_kernel
 @triton.jit
 def fused_sigmoid_gate_fwd_kernel(
     attn_out_ptr,
@@ -66,6 +67,7 @@ def fused_sigmoid_gate_fwd_kernel(
     tl.store(out_ptr + offsets, out, mask=mask)
 
 
+@enable_compat_on_triton_kernel
 @triton.jit
 def fused_sigmoid_gate_bwd_kernel(
     out_grad_ptr,

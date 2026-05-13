@@ -17,16 +17,16 @@ from functools import partial
 
 import paddle
 
-from paddlefleet.ops import is_flash_mask_available
+from . import is_flash_mask_available
 
 if is_flash_mask_available():
     try:
-        from paddlefleet.ops.flash_mask import (
+        from .flash_mask import (
             flash_attention as _flash_attention,
             flashmask_attention as _flashmask_attention,
         )
     except (ImportError, ModuleNotFoundError):
-        from paddlefleet.ops.flash_mask.cute.interface import (
+        from .flash_mask.cute.interface import (
             flash_attention as _flash_attention,
             flashmask_attention as _flashmask_attention,
         )

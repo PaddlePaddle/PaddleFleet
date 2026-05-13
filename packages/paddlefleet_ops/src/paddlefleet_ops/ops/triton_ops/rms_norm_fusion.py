@@ -23,7 +23,7 @@ Features:
 
 import paddle
 
-from paddlefleet.ops.triton_ops.utils import is_torch_compat_available
+from .utils import enable_compat_on_triton_kernel, is_torch_compat_available
 
 if is_torch_compat_available():
     paddle.enable_compat(scope={"triton"})
@@ -32,6 +32,7 @@ import triton
 import triton.language as tl
 
 
+@enable_compat_on_triton_kernel
 @triton.jit
 def rms_norm_fwd_kernel(
     X_ptr,
@@ -69,6 +70,7 @@ def rms_norm_fwd_kernel(
         tl.store(Invvar_ptr + row_idx, invvar)
 
 
+@enable_compat_on_triton_kernel
 @triton.jit
 def rms_norm_bwd_dx_kernel(
     DY_ptr,  # grad [n1, n2]
@@ -129,6 +131,7 @@ def rms_norm_bwd_dx_kernel(
     tl.store(PartDW_ptr + pid * BLOCK_N2 + cols, part_dw, mask=mask)
 
 
+@enable_compat_on_triton_kernel
 @triton.jit
 def rms_norm_bwd_dw_partial_kernel(
     PartDW_ptr,  # [NUM_PARTS, BLOCK_N2] input
@@ -153,6 +156,7 @@ def rms_norm_bwd_dw_partial_kernel(
     tl.store(TmpDW_ptr + pid * BLOCK_N2 + cols, acc, mask=mask)
 
 
+@enable_compat_on_triton_kernel
 @triton.jit
 def rms_norm_bwd_dw_final_kernel(
     TmpDW_ptr,  # [NUM_REDUCE, BLOCK_N2] input

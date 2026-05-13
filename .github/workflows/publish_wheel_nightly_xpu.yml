@@ -76,7 +76,7 @@ jobs:
             -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
             -e GITHUB_REPO_NAME=${{ github.repository }} \
-            -w /workspace --network=host $docker_image
+            -w /workspace --network=host $docker_image sleep infinity
 
       - name: Install PaddleFleet
         run: |

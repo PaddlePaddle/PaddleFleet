@@ -19,7 +19,7 @@ import paddle
 import paddle.nn.functional as F
 import triton
 import triton.language as tl
-from paddle.compat import use_torch_proxy_guard
+from paddle import use_compat_guard
 
 from .utils import find_blocks_chunked
 
@@ -665,9 +665,7 @@ def xattn_estimate(
             )
         assert reshaped_key.shape[-2] == k_reshaped_seq_len
 
-    proxy_guard = (
-        use_torch_proxy_guard(silent=True) if use_triton else nullcontext()
-    )
+    proxy_guard = use_compat_guard(silent=True) if use_triton else nullcontext()
     with proxy_guard:
         for chunk_idx in range(q_chunk_num):
             if use_triton:

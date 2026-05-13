@@ -44,24 +44,17 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
 Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 [build-system]
-requires = ["setuptools>=66.1.0", "pip", "wheel"]
+requires = ["setuptools>=66.1.0"]
 build-backend = "build_backend"
 backend-path = ["."]
 
 [tool.setuptools]
-include-package-data = true
-
-[tool.setuptools.package-data]
-"paddlefleet.ops" = ["*", "**/*"]
-
-[tool.setuptools.exclude-package-data]
-"paddlefleet.ops" = ["*.pyc", "**/*.pyc", "__pycache__/*", "**/__pycache__/*"]
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -69,7 +62,8 @@ include = ["paddlefleet*"]
 
 [tool.setuptools.dynamic]
 readme = { file = "README.md", content-type = "text/markdown" }
-version = { attr = "paddlefleet.version.__version__" }
+version = { attr = "paddlefleet._version.__version__" }
+dependencies = { file = "requirements-build.txt" }
 
 [dependency-groups]
 test = [
@@ -96,14 +90,16 @@ ci = [
 default-groups = ["build", "test"]
 link-mode = "copy"
 index-strategy = "unsafe-best-match"
-cache-keys = [{ file = "pyproject.toml" }, { file = "src/paddlefleet/_extensions/*.cu" }, { file = "third_party/" }]
 
+[tool.uv.workspace]
+members = ["packages/*"]
 
 [tool.uv.sources]
-paddlepaddle-gpu = {index = "paddlepaddle-gpu"}
-paddlepaddle-xpu = {index = "paddlepaddle-xpu"}
-paddle-nvidia-nvshmem-cu12 = {index = "paddlepaddle-gpu"}
-paddle-nvidia-nvshmem-cu13 = {index = "paddlepaddle-cu13"}
+paddlefleet-ops = { workspace = true }
+paddlepaddle-gpu = { index = "paddlepaddle-gpu" }
+paddlepaddle-xpu = { index = "paddlepaddle-xpu" }
+paddle-nvidia-nvshmem-cu12 = { index = "paddlepaddle-gpu" }
+paddle-nvidia-nvshmem-cu13 = { index = "paddlepaddle-cu13" }
 
 
 [[tool.uv.index]]

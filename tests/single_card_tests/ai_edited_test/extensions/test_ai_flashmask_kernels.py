@@ -60,7 +60,7 @@ class TestCheckDenseContainsPartialStride(unittest.TestCase):
 
     def test_is_jit_function(self):
         """Test that check_dense_contains_partial_stride is a jit function."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             check_dense_contains_partial_stride,
         )
 
@@ -68,7 +68,7 @@ class TestCheckDenseContainsPartialStride(unittest.TestCase):
 
     def test_is_importable(self):
         """Test check_dense_contains_partial_stride can be imported."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             check_dense_contains_partial_stride,
         )
 
@@ -76,7 +76,7 @@ class TestCheckDenseContainsPartialStride(unittest.TestCase):
 
     def test_kernel_signature(self):
         """Test that the kernel accepts expected parameters."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             check_dense_contains_partial_stride,
         )
 
@@ -93,7 +93,7 @@ class TestGemmFuseSoftmaxCausal(unittest.TestCase):
 
     def test_is_jit_function(self):
         """Test that gemm_fuse_softmax_causal is a jit function."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             gemm_fuse_softmax_causal,
         )
 
@@ -101,7 +101,7 @@ class TestGemmFuseSoftmaxCausal(unittest.TestCase):
 
     def test_is_importable(self):
         """Test gemm_fuse_softmax_causal can be imported."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             gemm_fuse_softmax_causal,
         )
 
@@ -109,7 +109,7 @@ class TestGemmFuseSoftmaxCausal(unittest.TestCase):
 
     def test_kernel_name(self):
         """Test kernel has the correct name."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             gemm_fuse_softmax_causal,
         )
 
@@ -123,7 +123,7 @@ class TestGemmFuseSoftmaxNonCausal(unittest.TestCase):
 
     def test_is_jit_function(self):
         """Test that gemm_fuse_softmax_non_causal is a jit function."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             gemm_fuse_softmax_non_causal,
         )
 
@@ -131,7 +131,7 @@ class TestGemmFuseSoftmaxNonCausal(unittest.TestCase):
 
     def test_is_importable(self):
         """Test gemm_fuse_softmax_non_causal can be imported."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             gemm_fuse_softmax_non_causal,
         )
 
@@ -139,7 +139,7 @@ class TestGemmFuseSoftmaxNonCausal(unittest.TestCase):
 
     def test_kernel_name(self):
         """Test kernel has the correct name."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             gemm_fuse_softmax_non_causal,
         )
 
@@ -154,7 +154,7 @@ class TestCausalVsNonCausalKernels(unittest.TestCase):
 
     def test_both_kernels_exist(self):
         """Test that both causal and non-causal kernels are available."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             gemm_fuse_softmax_causal,
             gemm_fuse_softmax_non_causal,
         )
@@ -164,7 +164,7 @@ class TestCausalVsNonCausalKernels(unittest.TestCase):
 
     def test_kernels_are_distinct(self):
         """Test that causal and non-causal kernels are different functions."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             gemm_fuse_softmax_causal,
             gemm_fuse_softmax_non_causal,
         )
@@ -180,7 +180,7 @@ class TestTritonKernelImports(unittest.TestCase):
 
     def test_all_kernels_importable(self):
         """Test all expected kernels can be imported."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             check_dense_contains_partial_stride,
             flashmask_apply,
             gemm_fuse_softmax_causal,
@@ -198,7 +198,7 @@ class TestTritonKernelImports(unittest.TestCase):
 
     def test_module_level_functions(self):
         """Test that module-level helper functions are importable."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             RawPtrs,
             StrideMaxMinPtrs,
             _extract_raw_ptrs,

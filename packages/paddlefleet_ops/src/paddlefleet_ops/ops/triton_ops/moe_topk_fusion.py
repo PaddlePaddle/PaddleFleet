@@ -32,7 +32,7 @@ import paddle
 import triton
 import triton.language as tl
 
-from paddlefleet.ops.triton_ops.utils import enable_compat_on_triton_kernel
+from .utils import enable_compat_on_triton_kernel
 
 
 @enable_compat_on_triton_kernel

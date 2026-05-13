@@ -37,11 +37,6 @@ import numpy as np
 import paddle
 from paddle import nn
 
-# if (
-#     not paddle.device.is_compiled_with_cuda()
-#     or paddle.device.cuda.get_device_capability()[0] != 10
-# ):
-#     raise unittest.SkipTest("use_ue8m0 requires Blackwell GPU (SM100)")
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -409,6 +404,11 @@ class TestUe8m0CodePaths(unittest.TestCase):
     #   fusion_layer_utils - FusionMoePyLayer.forward with use_ue8m0=True
     # ---------------------------------------------------------------
     def test_moe_fusion_with_ue8m0_grouped_gemm(self):
+        if (
+            not paddle.device.is_compiled_with_cuda()
+            or paddle.device.cuda.get_device_capability()[0] != 10
+        ):
+            raise unittest.SkipTest("use_ue8m0 requires Blackwell GPU (SM100)")
         """Test FusionMoePyLayer with use_ue8m0=True, grouped_gemm + deep_gemm."""
         moe_layer = self._create_moe_layer(moe_deep_gemm=True)
         moe_layer.clear_main_grad()
@@ -508,6 +508,12 @@ class TestUe8m0CodePaths(unittest.TestCase):
         self.assertEqual(list(gemm_out.shape), [128, self.hidden_size])
 
     def test_fp8_grouped_ue8m0_manual_branches(self):
+        if (
+            not paddle.device.is_compiled_with_cuda()
+            or paddle.device.cuda.get_device_capability()[0] != 10
+        ):
+            raise unittest.SkipTest("use_ue8m0 requires Blackwell GPU (SM100)")
+
         node, moe_layer = self._make_node(use_ue8m0=True, moe_grouped_gemm=True)
         o1 = paddle.randn(
             [self.seq_len, self.intermediate_size * 2], dtype=paddle.bfloat16
@@ -625,6 +631,11 @@ class TestUe8m0CodePaths(unittest.TestCase):
         self.assertIsNotNone(w1.grad)
 
     def test_moe_layer_init_ue8m0_assert_branch(self):
+        if (
+            not paddle.device.is_compiled_with_cuda()
+            or paddle.device.cuda.get_device_capability()[0] != 10
+        ):
+            raise unittest.SkipTest("use_ue8m0 requires Blackwell GPU (SM100)")
         from types import SimpleNamespace
 
         import paddle.nn.functional as F

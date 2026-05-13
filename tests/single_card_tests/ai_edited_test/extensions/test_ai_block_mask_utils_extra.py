@@ -58,8 +58,7 @@ if not _triton_available:
 
 
 import paddle
-
-from paddlefleet._extensions.flashmask.block_mask_utils import (
+from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
     _is_block_fully_masked,
     _is_block_partially_masked,
     _load_bounds,
@@ -82,7 +81,7 @@ class TestFindBlocksToppReshape(unittest.TestCase):
         """Test find_blocks_topp with 2D input [B, N]."""
         x = paddle.randn([4, 16], dtype="float32")
         with mock.patch(
-            "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+            "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
         ) as mock_kernel:
             find_blocks_topp(x, p=0.5)
             grid = mock_kernel.call_args[0][0]
@@ -97,7 +96,7 @@ class TestFindBlocksToppReshape(unittest.TestCase):
         """Test find_blocks_topp with 4D input [B, H, M, N]."""
         x = paddle.randn([2, 3, 5, 16], dtype="float32")
         with mock.patch(
-            "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+            "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
         ) as mock_kernel:
             result = find_blocks_topp(x, p=0.5)
             grid = mock_kernel.call_args[0][0]
@@ -113,7 +112,7 @@ class TestFindBlocksToppReshape(unittest.TestCase):
         shape = [2, 4, 8, 32]
         x = paddle.randn(shape, dtype="float32")
         with mock.patch(
-            "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+            "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
         ):
             result = find_blocks_topp(x, p=0.9)
             self.assertEqual(list(result.shape), shape)
@@ -126,7 +125,7 @@ class TestFindBlocksToppReshape(unittest.TestCase):
         """Test that input is made contiguous before processing."""
         x = paddle.randn([2, 3, 4, 8], dtype="float32").transpose(0, 2)
         with mock.patch(
-            "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+            "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
         ) as mock_kernel:
             find_blocks_topp(x, p=0.5)
             # After reshape(-1, n) the number of rows should be correct
@@ -141,7 +140,7 @@ class TestFindBlocksToppReshape(unittest.TestCase):
         """Test that block_size is the next power of 2 of n."""
         x = paddle.randn([1, 10], dtype="float32")
         with mock.patch(
-            "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+            "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
         ) as mock_kernel:
             find_blocks_topp(x, p=0.5)
             # n=10, next_power_of_2(10) = 16
@@ -155,7 +154,7 @@ class TestFindBlocksToppReshape(unittest.TestCase):
         """Test block_size when n is already a power of 2."""
         x = paddle.randn([1, 32], dtype="float32")
         with mock.patch(
-            "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+            "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
         ) as mock_kernel:
             find_blocks_topp(x, p=0.5)
             kwargs = mock_kernel.call_args[1]
@@ -168,7 +167,7 @@ class TestFindBlocksToppReshape(unittest.TestCase):
         """Test that num_dims is log2 of block_size."""
         x = paddle.randn([1, 10], dtype="float32")
         with mock.patch(
-            "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+            "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
         ) as mock_kernel:
             find_blocks_topp(x, p=0.5)
             # n=10, block_size=16, num_dims=4
@@ -182,7 +181,7 @@ class TestFindBlocksToppReshape(unittest.TestCase):
         """Test that threshold p is correctly passed to the kernel."""
         x = paddle.randn([1, 8], dtype="float32")
         with mock.patch(
-            "paddlefleet._extensions.flashmask.block_mask_utils.top_p_kernel"
+            "paddlefleet_ops._extensions.flashmask.block_mask_utils.top_p_kernel"
         ) as mock_kernel:
             find_blocks_topp(x, p=0.75)
             call_args = mock_kernel.call_args[0]
