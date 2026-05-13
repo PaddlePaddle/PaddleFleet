@@ -36,7 +36,7 @@ jobs:
       commit: ${{ inputs.commit }}
 
   publish-wheel:
-    name: Publish wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
+    name: Manual build fleet (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
     needs: clone
     if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
@@ -48,7 +48,7 @@ jobs:
         cuda:
           - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
     env:
-      TASK: PaddleFleet-nightly
+      TASK: PaddleFleet-manual
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
       UV_HTTP_TIMEOUT: 600
