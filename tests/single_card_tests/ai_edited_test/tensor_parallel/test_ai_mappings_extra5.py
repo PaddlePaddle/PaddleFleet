@@ -39,6 +39,11 @@ from paddlefleet.tensor_parallel.mappings import (
 )
 
 
+def _tensors_equal(a, b):
+    """Helper to compare paddle tensors for equality."""
+    return bool(paddle.equal(a, b).numpy().all())
+
+
 class TestHelperFunctionsWithSingleGPU(unittest.TestCase):
     """Tests for high-level helper functions with single GPU."""
 
@@ -52,7 +57,7 @@ class TestHelperFunctionsWithSingleGPU(unittest.TestCase):
         mock_get_group.return_value = mock_group
         x = paddle.randn([4, 8])
         result = copy_to_tensor_model_parallel_region(x)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
     @patch(
         "paddlefleet.tensor_parallel.mappings.get_tensor_model_parallel_group_if_none"
@@ -66,7 +71,7 @@ class TestHelperFunctionsWithSingleGPU(unittest.TestCase):
         mock_get_group.return_value = mock_group
         x = paddle.randn([4, 8])
         result = reduce_from_tensor_model_parallel_region(x)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
     @patch(
         "paddlefleet.tensor_parallel.mappings.get_tensor_model_parallel_group_if_none"
@@ -81,7 +86,7 @@ class TestHelperFunctionsWithSingleGPU(unittest.TestCase):
         mock_get_group.return_value = mock_group
         x = paddle.randn([4, 8])
         result = scatter_to_tensor_model_parallel_region(x)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
     @patch(
         "paddlefleet.tensor_parallel.mappings.get_tensor_model_parallel_group_if_none"
@@ -95,7 +100,7 @@ class TestHelperFunctionsWithSingleGPU(unittest.TestCase):
         mock_get_group.return_value = mock_group
         x = paddle.randn([4, 8])
         result = gather_from_tensor_model_parallel_region(x)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
     @patch(
         "paddlefleet.tensor_parallel.mappings.get_tensor_model_parallel_group_if_none"
@@ -107,7 +112,7 @@ class TestHelperFunctionsWithSingleGPU(unittest.TestCase):
         mock_get_group.return_value = mock_group
         x = paddle.randn([4, 8])
         result = scatter_to_sequence_parallel_region(x)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
     @patch(
         "paddlefleet.tensor_parallel.mappings.get_tensor_model_parallel_group_if_none"
@@ -119,7 +124,7 @@ class TestHelperFunctionsWithSingleGPU(unittest.TestCase):
         mock_get_group.return_value = mock_group
         x = paddle.randn([4, 8])
         result = gather_from_sequence_parallel_region(x)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
 
 class TestScatterToSequenceParallelRegionBackward(unittest.TestCase):
@@ -131,7 +136,7 @@ class TestScatterToSequenceParallelRegionBackward(unittest.TestCase):
         ctx.group = None
         grad = paddle.randn([4, 8])
         result = _ScatterToSequenceParallelRegion.backward(ctx, grad)
-        self.assertTrue(paddle.equal(result, grad))
+        self.assertTrue(_tensors_equal(result, grad))
 
 
 class TestGatherFromSequenceParallelRegionBackward(unittest.TestCase):
@@ -143,7 +148,7 @@ class TestGatherFromSequenceParallelRegionBackward(unittest.TestCase):
         ctx.group = None
         grad = paddle.randn([4, 8])
         result = _GatherFromSequenceParallelRegion.backward(ctx, grad)
-        self.assertTrue(paddle.equal(result, grad))
+        self.assertTrue(_tensors_equal(result, grad))
 
 
 if __name__ == "__main__":

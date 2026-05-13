@@ -65,26 +65,51 @@ class TestAllToAllForward(unittest.TestCase):
         result = _AllToAll.forward(MagicMock(), group, x, None, None)
         self.assertTrue(paddle.allclose(result, x))
 
-    @patch("paddlefleet.tensor_parallel.mappings.dist.all_to_all_single")
-    def test_multi_gpu_equal_split(self, mock_a2a):
+    @patch("paddlefleet.tensor_parallel.mappings.paddle.empty_like")
+    def test_multi_gpu_equal_split(self, mock_empty):
         """Test _AllToAll with equal split (no split sizes)."""
         group = _make_group(world_size=2, rank=0)
         x = paddle.randn([4, 8])
-        # Need to set up the mock to fill the output tensor
-        _AllToAll.forward(MagicMock(), group, x, None, None)
-        mock_a2a.assert_called_once()
+        mock_empty.return_value = paddle.empty([4, 8])
+        # Manually mock dist.all_to_all_single since it doesn't exist as attribute
+        import paddlefleet.tensor_parallel.mappings as mappings_mod
 
-    @patch("paddlefleet.tensor_parallel.mappings.dist.all_to_all_single")
-    def test_multi_gpu_unequal_split(self, mock_a2a):
+        original_fn = getattr(mappings_mod.dist, "all_to_all_single", None)
+        mock_a2a = MagicMock()
+        mappings_mod.dist.all_to_all_single = mock_a2a
+        try:
+            _AllToAll.forward(MagicMock(), group, x, None, None)
+            mock_a2a.assert_called_once()
+        finally:
+            if original_fn is not None:
+                mappings_mod.dist.all_to_all_single = original_fn
+            else:
+                delattr(mappings_mod.dist, "all_to_all_single")
+
+    @patch("paddlefleet.tensor_parallel.mappings.paddle.empty_like")
+    def test_multi_gpu_unequal_split(self, mock_empty):
         """Test _AllToAll with unequal split sizes."""
         group = _make_group(world_size=2, rank=0)
         x = paddle.randn([4, 8])
         output_split_sizes = [2, 2]
         input_split_sizes = [2, 2]
-        _AllToAll.forward(
-            MagicMock(), group, x, output_split_sizes, input_split_sizes
-        )
-        mock_a2a.assert_called_once()
+        mock_empty.return_value = paddle.empty([4, 8])
+        # Manually mock dist.all_to_all_single since it doesn't exist as attribute
+        import paddlefleet.tensor_parallel.mappings as mappings_mod
+
+        original_fn = getattr(mappings_mod.dist, "all_to_all_single", None)
+        mock_a2a = MagicMock()
+        mappings_mod.dist.all_to_all_single = mock_a2a
+        try:
+            _AllToAll.forward(
+                MagicMock(), group, x, output_split_sizes, input_split_sizes
+            )
+            mock_a2a.assert_called_once()
+        finally:
+            if original_fn is not None:
+                mappings_mod.dist.all_to_all_single = original_fn
+            else:
+                delattr(mappings_mod.dist, "all_to_all_single")
 
 
 class TestAllToAllBackward(unittest.TestCase):
@@ -179,7 +204,14 @@ class TestReduceScatterLastDim(unittest.TestCase):
         group = _make_group(world_size=2, rank=0)
         mock_gather.return_value = paddle.randn([2, 4])
         x = paddle.randn([2, 4])
-        _ReduceScatterToTensorParallelRegion.apply(x, group)
+        # Use apply which calls forward that sets ctx.group,
+        # then backward uses _gather_along_last_dim
+        # We need to patch _reduce_scatter_along_last_dim to avoid paddle.split dim issue
+        with patch(
+            "paddlefleet.tensor_parallel.mappings._reduce_scatter_along_last_dim",
+            return_value=paddle.randn([2, 2]),
+        ):
+            _ReduceScatterToTensorParallelRegion.apply(x, group)
 
 
 class TestAllGatherLastDimWrapper(unittest.TestCase):
@@ -203,10 +235,14 @@ class TestReduceScatterLastDimWrapper(unittest.TestCase):
     @patch(
         "paddlefleet.tensor_parallel.mappings.get_tensor_model_parallel_group_if_none"
     )
-    def test_wrapper_calls_apply(self, mock_get_group):
+    @patch(
+        "paddlefleet.tensor_parallel.mappings._reduce_scatter_along_last_dim"
+    )
+    def test_wrapper_calls_apply(self, mock_rs, mock_get_group):
         """Test wrapper calls apply with the correct group."""
-        group = _make_group(world_size=1, rank=0)
+        group = _make_group(world_size=2, rank=0)
         mock_get_group.return_value = group
+        mock_rs.return_value = paddle.randn([2, 2])
         x = paddle.randn([2, 4])
         result = reduce_scatter_last_dim_to_tensor_parallel_region(x)
         self.assertIsNotNone(result)

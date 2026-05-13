@@ -33,8 +33,8 @@ import unittest
 def _setup_triton_mock():
     """Create a mock triton module so we can import without GPU."""
     triton_mock = types.ModuleType("triton")
-    triton_mock.jit = (
-        lambda fn=None, **kwargs: (lambda f: f) if fn is None else fn
+    triton_mock.jit = lambda fn=None, **kwargs: (
+        (lambda f: f) if fn is None else fn
     )
     triton_mock.language = types.ModuleType("triton.language")
     triton_mock.language.constexpr = None

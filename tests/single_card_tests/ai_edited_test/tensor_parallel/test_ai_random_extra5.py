@@ -91,15 +91,12 @@ class TestCudaRNGStatesTrackerInference(unittest.TestCase):
             # Add should not raise
             _CUDA_RNG_STATE_TRACKER.add("test", 42)
 
-    @patch(
-        "paddlefleet.tensor_parallel.random._CUDA_RNG_STATE_TRACKER_INITIALIZED",
-        True,
-    )
     def test_inference_tracker_fork_is_nullcontext(self):
         """Inference tracker fork should return nullcontext."""
         import contextlib
 
-        initialize_rng_tracker(inference_rng_tracker=True)
+        # Force reset to ensure we get a fresh inference tracker
+        initialize_rng_tracker(inference_rng_tracker=True, force_reset=True)
         from paddlefleet.tensor_parallel.random import _CUDA_RNG_STATE_TRACKER
 
         if _CUDA_RNG_STATE_TRACKER is not None:

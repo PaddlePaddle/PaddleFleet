@@ -28,7 +28,6 @@ from unittest.mock import MagicMock, patch
 
 from paddlefleet.transformer.transformer_encoder import (
     TransformerEncoder,
-    build_overlapped_nodes,
 )
 
 
@@ -65,9 +64,7 @@ class TestTransformerEncoderGetLayerDescListPrefix(unittest.TestCase):
         # Avoid LayerDesc calling issubclass on MagicMock
         with patch("paddlefleet.transformer.transformer_encoder.LayerDesc"):
             encoder.get_layer_desc_list(mock_spec)
-        self.assertTrue(
-            any("language_model" in p for p in recorded_prefixes)
-        )
+        self.assertTrue(any("language_model" in p for p in recorded_prefixes))
 
     def test_model_prefix_used_when_modal_none(self):
         """When modal is None, name_prefix should start with 'model'."""

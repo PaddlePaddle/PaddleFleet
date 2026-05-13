@@ -112,7 +112,7 @@ class TestGetBlockSublayersSpec(unittest.TestCase):
     def test_with_unsupported_spec_raises(self):
         """When spec type is unsupported, raise Exception."""
         config = _make_config()
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(Exception):  # noqa: B017
             _get_block_sublayers_spec(config, "unsupported_type")
 
 

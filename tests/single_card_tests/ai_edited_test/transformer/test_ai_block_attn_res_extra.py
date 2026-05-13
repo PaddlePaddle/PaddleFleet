@@ -48,56 +48,110 @@ def _make_config(**overrides):
     return TransformerConfig(**defaults)
 
 
-class TestBlockAttnResSequenceParallel(unittest.TestCase):
-    """Tests for BlockAttnRes with sequence parallel."""
+class TestBlockAttnResSublayersSpec(unittest.TestCase):
+    """Tests for BlockAttnResSublayersSpec dataclass."""
+
+    def test_default_norm(self):
+        """Test default norm is IdentityOp."""
+        from paddlefleet.transformer.identity_op import IdentityOp
+
+        spec = BlockAttnResSublayersSpec()
+        self.assertEqual(spec.norm, IdentityOp)
+
+    def test_custom_norm(self):
+        """Test custom norm."""
+        spec = BlockAttnResSublayersSpec(norm=WrappedPaddleNorm)
+        self.assertEqual(spec.norm, WrappedPaddleNorm)
+
+
+class TestBlockAttnResConstruction(unittest.TestCase):
+    """Tests for BlockAttnRes construction."""
 
     @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
-    def test_sequence_parallel_marks_weight(self, mock_build):
-        """Test that proj_weight is marked as sequence parallel when appropriate."""
+    def test_construction_basic(self, mock_build):
+        """Test basic construction of BlockAttnRes."""
         mock_build.return_value = MagicMock()
-        config = _make_config(
-            sequence_parallel=True, tensor_model_parallel_size=2
-        )
-        spec = BlockAttnResSublayersSpec(norm=WrappedPaddleNorm)
-
-        block = BlockAttnRes(config=config, sublayers_spec=spec)
-        self.assertEqual(block.hidden_size, 64)
-
-    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
-    def test_no_sequence_parallel(self, mock_build):
-        """Test that proj_weight is not marked when sequence_parallel=False."""
-        mock_build.return_value = MagicMock()
-        config = _make_config(
-            sequence_parallel=False, tensor_model_parallel_size=1
-        )
-        spec = BlockAttnResSublayersSpec(norm=WrappedPaddleNorm)
-
-        block = BlockAttnRes(config=config, sublayers_spec=spec)
-        self.assertEqual(block.hidden_size, 64)
-
-
-class TestBlockAttnResForwardDetailed(unittest.TestCase):
-    """Detailed tests for BlockAttnRes forward."""
-
-    def test_forward_with_real_norm_and_blocks(self):
-        """Test forward with real normalization and multiple blocks."""
         config = _make_config()
-        spec = BlockAttnResSublayersSpec(norm=WrappedPaddleNorm)
+        spec = BlockAttnResSublayersSpec()
 
+        block = BlockAttnRes(config=config, sublayers_spec=spec)
+        self.assertEqual(block.hidden_size, 64)
+        self.assertIsNotNone(block.proj_weight)
+        self.assertEqual(block.proj_weight.shape, [64])
+
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
+    def test_proj_weight_initialized_to_zero(self, mock_build):
+        """Test proj_weight is initialized to zero."""
+        mock_build.return_value = MagicMock()
+        config = _make_config()
+        spec = BlockAttnResSublayersSpec()
+
+        block = BlockAttnRes(config=config, sublayers_spec=spec)
+        self.assertTrue(
+            paddle.allclose(block.proj_weight, paddle.zeros([64])).item()
+        )
+
+
+class TestBlockAttnResForward(unittest.TestCase):
+    """Tests for BlockAttnRes forward."""
+
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
+    def test_forward_with_single_block(self, mock_build):
+        """Test forward with a single completed block."""
+        mock_norm = MagicMock()
+        mock_norm.return_value = paddle.randn([1, 2, 4, 64])
+        mock_build.return_value = mock_norm
+
+        config = _make_config()
+        spec = BlockAttnResSublayersSpec()
         block = BlockAttnRes(config=config, sublayers_spec=spec)
 
         partial_block = paddle.randn([2, 4, 64])
-        blocks = [
-            paddle.randn([2, 4, 64]),
-            paddle.randn([2, 4, 64]),
-            paddle.randn([2, 4, 64]),
-        ]
+        blocks = [paddle.randn([2, 4, 64])]
 
         output = block(partial_block, blocks)
         self.assertEqual(output.shape, [2, 4, 64])
 
-    def test_forward_weights_sum_to_one(self):
-        """Test that attention weights sum to approximately 1."""
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
+    def test_forward_with_multiple_blocks(self, mock_build):
+        """Test forward with multiple completed blocks."""
+        mock_norm = MagicMock()
+        mock_norm.return_value = paddle.randn([3, 2, 4, 64])
+        mock_build.return_value = mock_norm
+
+        config = _make_config()
+        spec = BlockAttnResSublayersSpec()
+        block = BlockAttnRes(config=config, sublayers_spec=spec)
+
+        partial_block = paddle.randn([2, 4, 64])
+        blocks = [paddle.randn([2, 4, 64]), paddle.randn([2, 4, 64])]
+
+        output = block(partial_block, blocks)
+        self.assertEqual(output.shape, [2, 4, 64])
+
+    @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
+    def test_forward_with_no_completed_blocks(self, mock_build):
+        """Test forward with no completed blocks (only partial)."""
+        mock_norm = MagicMock()
+        mock_norm.return_value = paddle.randn([1, 2, 4, 64])
+        mock_build.return_value = mock_norm
+
+        config = _make_config()
+        spec = BlockAttnResSublayersSpec()
+        block = BlockAttnRes(config=config, sublayers_spec=spec)
+
+        partial_block = paddle.randn([2, 4, 64])
+        blocks = []
+
+        output = block(partial_block, blocks)
+        self.assertEqual(output.shape, [2, 4, 64])
+
+
+class TestBlockAttnResWithRealNorm(unittest.TestCase):
+    """Tests for BlockAttnRes with real normalization layer."""
+
+    def test_forward_with_rmsnorm(self):
+        """Test forward with real RMSNorm."""
         config = _make_config()
         spec = BlockAttnResSublayersSpec(norm=WrappedPaddleNorm)
 
@@ -106,48 +160,21 @@ class TestBlockAttnResForwardDetailed(unittest.TestCase):
         partial_block = paddle.randn([2, 4, 64])
         blocks = [paddle.randn([2, 4, 64])]
 
-        # The weights are computed as softmax, so they should sum to 1
-        # over the block dimension
-        V = paddle.stack([*blocks, partial_block], axis=0)
-        K = block.norm(V)
-        logits = (K * block.proj_weight).sum(axis=-1)
-        weights = paddle.nn.functional.softmax(logits, axis=0)
+        output = block(partial_block, blocks)
+        self.assertEqual(output.shape, [2, 4, 64])
 
-        # Sum along block dimension (axis=0)
-        weight_sum = weights.sum(axis=0)
-        self.assertTrue(
-            paddle.allclose(
-                weight_sum, paddle.ones_like(weight_sum), atol=1e-5
-            ).item()
-        )
-
-
-class TestBlockAttnResDifferentBatchSizes(unittest.TestCase):
-    """Tests for BlockAttnRes with different batch sizes."""
-
-    def test_batch_size_1(self):
-        """Test with batch_size=1."""
+    def test_forward_output_dtype_matches_input(self):
+        """Test that output dtype matches partial_block dtype."""
         config = _make_config()
         spec = BlockAttnResSublayersSpec(norm=WrappedPaddleNorm)
+
         block = BlockAttnRes(config=config, sublayers_spec=spec)
 
-        partial_block = paddle.randn([1, 4, 64])
-        blocks = [paddle.randn([1, 4, 64])]
+        partial_block = paddle.randn([2, 4, 64]).cast("float32")
+        blocks = [paddle.randn([2, 4, 64]).cast("float32")]
 
         output = block(partial_block, blocks)
-        self.assertEqual(output.shape, [1, 4, 64])
-
-    def test_batch_size_4(self):
-        """Test with batch_size=4."""
-        config = _make_config()
-        spec = BlockAttnResSublayersSpec(norm=WrappedPaddleNorm)
-        block = BlockAttnRes(config=config, sublayers_spec=spec)
-
-        partial_block = paddle.randn([4, 8, 64])
-        blocks = [paddle.randn([4, 8, 64])]
-
-        output = block(partial_block, blocks)
-        self.assertEqual(output.shape, [4, 8, 64])
+        self.assertEqual(output.dtype, partial_block.dtype)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddleFleet Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,7 +6,8 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless distributed on the License is distributed on an "AS IS" BASIS,
+# Unless distributed on applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
@@ -38,6 +39,11 @@ from paddlefleet.tensor_parallel.mappings import (
 )
 
 
+def _tensors_equal(a, b):
+    """Helper to compare paddle tensors for equality."""
+    return bool(paddle.equal(a, b).numpy().all())
+
+
 class TestReduceFunction(unittest.TestCase):
     """Tests for _reduce helper function."""
 
@@ -47,7 +53,7 @@ class TestReduceFunction(unittest.TestCase):
         mock_group.world_size = 1
         x = paddle.randn([4, 8])
         result = _reduce(x, mock_group)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
     def test_raises_when_group_is_none(self):
         """Should raise AssertionError when group is None."""
@@ -64,7 +70,7 @@ class TestGatherAlongFirstDimSingleGPU(unittest.TestCase):
         mock_group.world_size = 1
         x = paddle.randn([4, 8])
         result = _gather_along_first_dim(x, mock_group)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
     def test_raises_when_group_is_none(self):
         """Should raise AssertionError when group is None."""
@@ -81,7 +87,7 @@ class TestGatherAlongLastDimSingleGPU(unittest.TestCase):
         mock_group.world_size = 1
         x = paddle.randn([4, 8])
         result = _gather_along_last_dim(x, mock_group)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
 
 class TestReduceScatterAlongFirstDimSingleGPU(unittest.TestCase):
@@ -93,20 +99,15 @@ class TestReduceScatterAlongFirstDimSingleGPU(unittest.TestCase):
         mock_group.world_size = 1
         x = paddle.randn([4, 8])
         result = _reduce_scatter_along_first_dim(x, mock_group)
-        self.assertTrue(paddle.equal(result, x))
+        self.assertTrue(_tensors_equal(result, x))
 
 
 class TestReduceScatterAlongLastDim(unittest.TestCase):
-    """Tests for _reduce_scatter_along_last_dim."""
+    """Tests for _reduce_scatter_along_last_dim shape calculation."""
 
-    def test_returns_correct_shape_for_divisible_input(self):
-        """Should produce output with correct shape when last dim is divisible."""
-        # This test only checks shape calculation, not the actual communication
-        mock_group = MagicMock()
-        mock_group.world_size = 2
-        # Last dim is 8, divisible by world_size=2
+    def test_shape_divisibility_check(self):
+        """Last dim should be divisible by world_size for reduce_scatter."""
         x = paddle.randn([4, 8])
-        # This would fail in actual communication, so we just test the shape logic
         target_shape = list(x.shape)
         self.assertEqual(target_shape[-1] % 2, 0)
         expected_last_dim = target_shape[-1] // 2
@@ -118,9 +119,10 @@ class TestAllGatherFromTensorParallelRegion(unittest.TestCase):
 
     def test_forward_with_none_group(self):
         """Forward with None group should return input."""
+        ctx = MagicMock()
         x = paddle.randn([4, 8])
-        result = _AllGatherFromTensorParallelRegion.forward(None, x, None)
-        self.assertTrue(paddle.equal(result, x))
+        result = _AllGatherFromTensorParallelRegion.forward(ctx, x, None)
+        self.assertTrue(_tensors_equal(result, x))
 
 
 class TestReduceScatterToTensorParallelRegion(unittest.TestCase):
@@ -128,9 +130,10 @@ class TestReduceScatterToTensorParallelRegion(unittest.TestCase):
 
     def test_forward_with_none_group(self):
         """Forward with None group should return input."""
+        ctx = MagicMock()
         x = paddle.randn([4, 8])
-        result = _ReduceScatterToTensorParallelRegion.forward(None, x, None)
-        self.assertTrue(paddle.equal(result, x))
+        result = _ReduceScatterToTensorParallelRegion.forward(ctx, x, None)
+        self.assertTrue(_tensors_equal(result, x))
 
 
 class TestAllToAllSingleGPU(unittest.TestCase):
@@ -138,11 +141,12 @@ class TestAllToAllSingleGPU(unittest.TestCase):
 
     def test_returns_input_when_world_size_1(self):
         """Should return input when world_size is 1."""
+        ctx = MagicMock()
         mock_group = MagicMock()
         mock_group.world_size = 1
         x = paddle.randn([4, 8])
-        result = _AllToAll.forward(None, mock_group, x, None, None)
-        self.assertTrue(paddle.equal(result, x))
+        result = _AllToAll.forward(ctx, mock_group, x, None, None)
+        self.assertTrue(_tensors_equal(result, x))
 
 
 if __name__ == "__main__":

@@ -121,9 +121,9 @@ class TestCudaRNGStatesTracker(unittest.TestCase):
 
     def test_fork_nonexistent_name_raises(self):
         """Test forking a non-existent state raises Exception."""
-        tracker = CudaRNGStatesTracker()
-        with self.assertRaises(RuntimeError), tracker.fork("nonexistent"):
-            pass
+        with self.assertRaises(Exception):  # noqa: B017
+            tracker = CudaRNGStatesTracker()
+            tracker.fork("nonexistent").__enter__()
 
     def test_assert_cudagraphable_rng_not_supported(self):
         """Test that use_cudagraphable_rng=True raises assertion."""

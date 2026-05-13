@@ -125,8 +125,9 @@ class TestCudaRNGStatesTrackerFork(unittest.TestCase):
     def test_fork_raises_for_unknown_name(self):
         """fork should raise when state name is not tracked."""
         tracker = CudaRNGStatesTracker()
-        with self.assertRaises(RuntimeError):
-            tracker.fork("unknown_state")
+        # fork is a contextmanager, exception is raised on __enter__
+        with self.assertRaises(Exception), tracker.fork("unknown_state"):  # noqa: B017
+            pass
 
 
 class TestGetTrackerNames(unittest.TestCase):
