@@ -100,7 +100,7 @@ def sample_with_top_k(logits, top_k):
     # Sample from filtered distribution
     probs = F.softmax(logits)
     sampled = paddle.multinomial(probs)
-    return sampled.unsqueeze(-1)
+    return sampled
 
 
 def sample_with_top_p(logits, top_p):
@@ -118,7 +118,8 @@ def sample_with_top_p(logits, top_p):
         Sampled token ids with shape [batch_size, 1]
     """
     # Sort logits in descending order
-    sorted_logits, sorted_indices = paddle.sort(logits, descending=True, axis=-1)
+    sorted_indices = paddle.argsort(logits, descending=True, axis=-1)
+    sorted_logits = paddle.gather(logits, sorted_indices, axis=-1)
 
     # Calculate cumulative probabilities
     sorted_probs = F.softmax(sorted_logits)
@@ -166,10 +167,6 @@ def sample_with_top_p(logits, top_p):
     probs = F.softmax(filtered_logits)
     sampled = paddle.multinomial(probs)
 
-    # Get actual token ids from sorted indices
-    sampled_expanded = sampled.unsqueeze(-1)
-    batch_indices = paddle.arange(batch_size).unsqueeze(-1)
-    gather_indices = paddle.stack([batch_indices, sampled.squeeze(-1)], axis=-1)
-    actual_samples = paddle.gather_nd(sorted_indices, gather_indices)
-
-    return actual_samples.unsqueeze(-1)
+    # sampled is already in the original vocabulary index space,
+    # no need to remap through sorted_indices
+    return sampled.unsqueeze(-1)

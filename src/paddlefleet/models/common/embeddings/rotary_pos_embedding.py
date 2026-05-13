@@ -160,6 +160,8 @@ class RotaryEmbedding(nn.Layer):
             elif position_ids.ndim == 2:
                 # Take first batch, assuming all batches have same position_ids
                 seq = position_ids[0].astype(self.inv_freq.dtype)
+                # Add batch dimension back to preserve broadcastability
+                seq = seq.unsqueeze(0).expand([position_ids.shape[0], -1])
             else:
                 # For 3D position_ids (M-RoPE), this function should not be called
                 # Fall back to max_seq_len to avoid cryptic errors

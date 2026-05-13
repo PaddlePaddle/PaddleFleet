@@ -26,31 +26,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 import paddle
 import unittest
 
-
-# Import DynamicKVCache directly from the file
-class DynamicKVCache:
-    """HF-style dynamic KV cache: per-layer tensors grow by concat."""
-
-    def __init__(self, num_layers: int):
-        self.k = [None] * num_layers
-        self.v = [None] * num_layers
-
-    def get_seq_len(self, layer_idx: int = 0) -> int:
-        return 0 if self.k[layer_idx] is None else self.k[layer_idx].shape[1]
-
-    def update(self, k_new: paddle.Tensor, v_new: paddle.Tensor, layer_idx: int):
-        if self.k[layer_idx] is None:
-            self.k[layer_idx] = k_new
-            self.v[layer_idx] = v_new
-        else:
-            self.k[layer_idx] = paddle.concat([self.k[layer_idx], k_new], axis=1)
-            self.v[layer_idx] = paddle.concat([self.v[layer_idx], v_new], axis=1)
-        return self.k[layer_idx], self.v[layer_idx]
-
-    def reset(self) -> None:
-        for i in range(len(self.k)):
-            self.k[i] = None
-            self.v[i] = None
+# Import actual DynamicKVCache from paddlefleet.generation
+from paddlefleet.generation.greedy_generator import DynamicKVCache
 
 
 class TestDynamicKVCache(unittest.TestCase):

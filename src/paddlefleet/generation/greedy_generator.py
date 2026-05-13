@@ -119,7 +119,11 @@ class GreedyGenerator:
 
         self.model = fleet_model
         num_layers = cfg.num_hidden_layers
-        self.cache = DynamicKVCache(num_layers=num_layers)
+        # Account for empty layers in head/tail that offset layer_number
+        num_empty_layers_add_in_head = getattr(cfg, "num_empty_layers_add_in_head", 0)
+        num_empty_layers_add_in_tail = getattr(cfg, "num_empty_layers_add_in_tail", 0)
+        total_layers = num_layers + num_empty_layers_add_in_head + num_empty_layers_add_in_tail
+        self.cache = DynamicKVCache(num_layers=total_layers)
 
     @paddle.no_grad()
     def generate(

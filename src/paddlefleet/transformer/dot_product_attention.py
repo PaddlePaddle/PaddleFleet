@@ -324,7 +324,8 @@ class DotProductAttention(FleetLayer):
             if use_cache and past_key_values is not None:
                 key, value = past_key_values.update(key, value, layer_idx)
                 is_causal = (query.shape[1] > 1)
-                attn_mask_kv = None
+                # Keep attention_mask for prefill to prevent attending to padding tokens
+                attn_mask_kv = attention_mask
             else:
                 is_causal = True
                 attn_mask_kv = attention_mask
