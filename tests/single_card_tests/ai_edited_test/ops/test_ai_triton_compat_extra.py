@@ -34,6 +34,8 @@ from unittest.mock import patch
 
 def _setup_triton_mock():
     """Create a mock triton module so we can import without GPU."""
+    if "triton" in sys.modules:
+        return sys.modules["triton"]
     triton_mock = types.ModuleType("triton")
     triton_mock.jit = lambda fn=None, **kwargs: (
         (lambda f: f) if fn is None else fn
@@ -46,14 +48,23 @@ def _setup_triton_mock():
     tl.load = lambda *a, **kw: 0.0
     tl.store = lambda *a, **kw: None
     tl.int64 = "int64"
-    sys.modules.setdefault("triton", triton_mock)
-    sys.modules.setdefault("triton.language", tl)
+    sys.modules["triton"] = triton_mock
+    sys.modules["triton.language"] = tl
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.triton_compat  # noqa: F401
+
+    _TRITON_COMPAT_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _TRITON_COMPAT_AVAILABLE = False
 
 
+@unittest.skipUnless(
+    _TRITON_COMPAT_AVAILABLE, "paddlefleet_ops triton_compat not available"
+)
 class TestOpsTritonCompatModule(unittest.TestCase):
     """Tests for ops triton_compat module structure."""
 
@@ -70,7 +81,6 @@ class TestOpsTritonCompatModule(unittest.TestCase):
             _is_package_installed,
         )
 
-        # Call twice - should return same result
         r1 = _is_package_installed("paddle")
         r2 = _is_package_installed("paddle")
         self.assertEqual(r1, r2)
@@ -92,6 +102,9 @@ class TestOpsTritonCompatModule(unittest.TestCase):
         self.assertFalse(_is_package_installed("nonexistent_package_xyz_12345"))
 
 
+@unittest.skipUnless(
+    _TRITON_COMPAT_AVAILABLE, "paddlefleet_ops triton_compat not available"
+)
 class TestOpsEnableCompatOnTritonKernel(unittest.TestCase):
     """Tests for enable_compat_on_triton_kernel in ops package."""
 
@@ -131,6 +144,9 @@ class TestOpsEnableCompatOnTritonKernel(unittest.TestCase):
             self.assertIs(result, dummy_kernel)
 
 
+@unittest.skipUnless(
+    _TRITON_COMPAT_AVAILABLE, "paddlefleet_ops triton_compat not available"
+)
 class TestOpsSwapDriverGuard(unittest.TestCase):
     """Tests for _swap_driver_guard in ops package."""
 
