@@ -298,6 +298,7 @@ class _HybridEPManager(_DispatchManager):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         del async_finish
         self.token_indices = token_indices
