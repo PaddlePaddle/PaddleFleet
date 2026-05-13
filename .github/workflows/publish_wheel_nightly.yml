@@ -129,7 +129,7 @@ jobs:
           PY_VERSION_SHORT="${PY_VERSION//./}"
           if [[ "${{ github.event_name }}" != "push" ]]; then
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu126/paddlefleet
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu129/paddlefleet
+            python ../bos/BosClient.py  paddlefleet-*.whl paddle-whl/nightly/cu129/paddlefleet
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu130/paddlefleet
             export AK=paddle
             export SK=paddle
