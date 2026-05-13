@@ -433,7 +433,7 @@ jobs:
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
@@ -537,8 +537,8 @@ jobs:
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "paddle commit:"
@@ -657,8 +657,8 @@ jobs:
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
@@ -850,8 +850,8 @@ jobs:
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
@@ -1195,8 +1195,8 @@ jobs:
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
