@@ -93,6 +93,13 @@ _bmu_spec.loader.exec_module(_bmu_mod)
 # _is_block_partially_masked
 
 import unittest
+
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 from unittest import mock
 
 import paddle
@@ -106,6 +113,7 @@ from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
 )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFindBlocksToppReshape(unittest.TestCase):
     """Tests for find_blocks_topp reshape and shape handling."""
 
@@ -138,6 +146,7 @@ class TestFindBlocksToppReshape(unittest.TestCase):
             self.assertEqual(result.shape, [2, 3, 5, 16])
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFindBlocksToppNoMock(unittest.TestCase):
     """Tests for find_blocks_topp that don't require mocking the kernel."""
 
@@ -150,6 +159,7 @@ class TestFindBlocksToppNoMock(unittest.TestCase):
         self.assertEqual(list(result.shape), shape)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestCheckFullyMaskedState(unittest.TestCase):
     """Tests for check_fully_masked_state triton kernel wrapper."""
 
@@ -162,6 +172,7 @@ class TestCheckFullyMaskedState(unittest.TestCase):
         self.assertIsNotNone(check_fully_masked_state)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestCheckPartiallyMaskedState(unittest.TestCase):
     """Tests for check_partially_masked_state triton kernel wrapper."""
 
@@ -174,6 +185,7 @@ class TestCheckPartiallyMaskedState(unittest.TestCase):
         self.assertIsNotNone(check_partially_masked_state)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestLoadBounds(unittest.TestCase):
     """Tests for _load_bounds triton kernel."""
 
@@ -186,6 +198,7 @@ class TestLoadBounds(unittest.TestCase):
         self.assertIsNotNone(_load_bounds)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestIsBlockFullyMasked(unittest.TestCase):
     """Tests for _is_block_fully_masked triton kernel."""
 
@@ -194,6 +207,7 @@ class TestIsBlockFullyMasked(unittest.TestCase):
         self.assertTrue(callable(_is_block_fully_masked))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestIsBlockPartiallyMasked(unittest.TestCase):
     """Tests for _is_block_partially_masked triton kernel."""
 

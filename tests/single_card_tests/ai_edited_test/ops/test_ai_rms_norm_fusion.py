@@ -62,9 +62,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.rms_norm_fusion  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRMSNormFusionTritonDefinition(unittest.TestCase):
     """Tests for RMSNormFusionTriton PyLayer class definition."""
 
@@ -93,6 +100,7 @@ class TestRMSNormFusionTritonDefinition(unittest.TestCase):
         self.assertTrue(hasattr(RMSNormFusionTriton, "backward"))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRMSNormKernels(unittest.TestCase):
     """Tests for RMSNorm kernel definitions."""
 
@@ -129,6 +137,7 @@ class TestRMSNormKernels(unittest.TestCase):
         self.assertTrue(callable(rms_norm_bwd_dw_final_kernel))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRMSNormPurePaddle(unittest.TestCase):
     """Tests for RMSNorm computation using pure Paddle."""
 

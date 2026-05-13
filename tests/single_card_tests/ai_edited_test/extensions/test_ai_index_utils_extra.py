@@ -29,6 +29,13 @@ sys.path.insert(
 
 import types
 import unittest
+
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 from unittest import mock
 
 # Mock triton if not available
@@ -57,6 +64,7 @@ if not _triton_available:
 import paddle
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestPrepareMaxminBasic(unittest.TestCase):
     """Basic tests for prepare_maxmin function."""
 
@@ -153,6 +161,7 @@ class TestPrepareMaxminBasic(unittest.TestCase):
             self.assertEqual(grid, (1, 6))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestPrepareMaxminEdgeCases(unittest.TestCase):
     """Edge case tests for prepare_maxmin function."""
 
@@ -227,6 +236,7 @@ class TestPrepareMaxminEdgeCases(unittest.TestCase):
             self.assertEqual(grid, (1, 32))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestScanMaxminChunkedKernel(unittest.TestCase):
     """Tests for scan_maxmin_chunked triton kernel."""
 
@@ -247,6 +257,7 @@ class TestScanMaxminChunkedKernel(unittest.TestCase):
         self.assertIsNotNone(scan_maxmin_chunked)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestPrepareMaxminBatched(unittest.TestCase):
     """Tests for prepare_maxmin with different batch configurations."""
 

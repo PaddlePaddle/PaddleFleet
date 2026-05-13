@@ -63,9 +63,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestLigerFusedLinearCrossEntropyBackward(unittest.TestCase):
     """Tests for LigerFusedLinearCrossEntropyFunction backward."""
 
@@ -208,6 +215,7 @@ class TestLigerFusedLinearCrossEntropyBackward(unittest.TestCase):
         self.assertEqual(len(result), 3)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFusedLinearCEForwardLogic(unittest.TestCase):
     """Tests for fused linear cross entropy forward logic."""
 

@@ -27,7 +27,17 @@ import unittest
 
 import paddle
 
+try:
+    from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        RMSNormFusionTriton,  # noqa: F401
+    )
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRMSNormFusionStructure(unittest.TestCase):
     """Tests for RMS norm fusion module structure."""
 

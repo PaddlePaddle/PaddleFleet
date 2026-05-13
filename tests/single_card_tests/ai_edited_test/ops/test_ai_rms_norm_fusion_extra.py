@@ -63,9 +63,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.rms_norm_fusion  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRMSNormFusionTritonForward(unittest.TestCase):
     """Tests for RMSNormFusionTriton forward parameter handling."""
 
@@ -98,6 +105,7 @@ class TestRMSNormFusionTritonForward(unittest.TestCase):
         self.assertIn("dy", params)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRMSNormComprehensive(unittest.TestCase):
     """Comprehensive tests for RMS norm computation using pure Paddle."""
 

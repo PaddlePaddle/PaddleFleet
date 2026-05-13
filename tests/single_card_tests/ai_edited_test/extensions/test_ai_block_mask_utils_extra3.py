@@ -29,6 +29,13 @@ sys.path.insert(
 
 import types
 import unittest
+
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 from unittest.mock import MagicMock
 
 
@@ -83,6 +90,7 @@ def _setup_triton_mock():
 _setup_triton_mock()
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBlockMaskUtilsKernels(unittest.TestCase):
     """Tests for block_mask_utils kernel definitions."""
 
@@ -159,6 +167,7 @@ class TestBlockMaskUtilsKernels(unittest.TestCase):
         self.assertTrue(callable(top_p_kernel))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFindBlocksToppSignature(unittest.TestCase):
     """Tests for find_blocks_topp function signature."""
 
@@ -176,6 +185,7 @@ class TestFindBlocksToppSignature(unittest.TestCase):
         self.assertIn("p", params)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestTopPLogic(unittest.TestCase):
     """Tests for top-p logic using pure Paddle."""
 

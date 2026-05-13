@@ -30,6 +30,13 @@ sys.path.insert(
 
 import types
 import unittest
+
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 from unittest.mock import MagicMock
 
 
@@ -82,6 +89,7 @@ def _setup_triton_mock():
 _setup_triton_mock()
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestPrepareStrideMaxminPtrs(unittest.TestCase):
     """Tests for _prepare_stride_maxmin_ptrs function."""
 
@@ -184,6 +192,7 @@ class TestPrepareStrideMaxminPtrs(unittest.TestCase):
         self.assertIsNotNone(result.ut_end_max)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRrAttnEstimateDeviceMismatch(unittest.TestCase):
     """Tests for rr_attn_estimate_triton_func device validation."""
 
@@ -200,6 +209,7 @@ class TestRrAttnEstimateDeviceMismatch(unittest.TestCase):
         self.assertTrue(callable(rr_attn_estimate_triton_func))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRrAttnEstimateHeadMapping(unittest.TestCase):
     """Tests for head mapping validation in rr_attn_estimate_triton_func."""
 

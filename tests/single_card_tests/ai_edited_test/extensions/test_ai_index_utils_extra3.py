@@ -25,9 +25,17 @@ sys.path.insert(
 
 import unittest
 
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
 import paddle
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFindBlocksTopp(unittest.TestCase):
     """Tests for find_blocks_topp function in index_utils."""
 

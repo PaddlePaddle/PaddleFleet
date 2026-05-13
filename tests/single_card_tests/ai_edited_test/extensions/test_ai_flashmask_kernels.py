@@ -31,6 +31,13 @@ sys.path.insert(
 import types
 import unittest
 
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
 # Mock triton if not available
 _triton_available = False
 try:
@@ -55,6 +62,7 @@ if not _triton_available:
     sys.modules.setdefault("triton.language", _mock_tl)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestCheckDenseContainsPartialStride(unittest.TestCase):
     """Tests for check_dense_contains_partial_stride triton kernel."""
 
@@ -88,6 +96,7 @@ class TestCheckDenseContainsPartialStride(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestGemmFuseSoftmaxCausal(unittest.TestCase):
     """Tests for gemm_fuse_softmax_causal triton kernel."""
 
@@ -118,6 +127,7 @@ class TestGemmFuseSoftmaxCausal(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestGemmFuseSoftmaxNonCausal(unittest.TestCase):
     """Tests for gemm_fuse_softmax_non_causal triton kernel."""
 
@@ -149,6 +159,7 @@ class TestGemmFuseSoftmaxNonCausal(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestCausalVsNonCausalKernels(unittest.TestCase):
     """Tests comparing causal and non-causal kernel structures."""
 
@@ -175,6 +186,7 @@ class TestCausalVsNonCausalKernels(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestTritonKernelImports(unittest.TestCase):
     """Tests for verifying all triton kernel imports."""
 

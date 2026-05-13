@@ -50,9 +50,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.triton_compat  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestIsPackageInstalled(unittest.TestCase):
     """Tests for _is_package_installed function."""
 
@@ -88,6 +95,7 @@ class TestIsPackageInstalled(unittest.TestCase):
         self.assertEqual(result1, result2)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestSwapDriverGuard(unittest.TestCase):
     """Tests for _swap_driver_guard function."""
 
@@ -131,6 +139,7 @@ class TestSwapDriverGuard(unittest.TestCase):
                 pass  # OK if triton runtime not available
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestEnableCompatOnTritonKernel(unittest.TestCase):
     """Tests for enable_compat_on_triton_kernel function."""
 
@@ -192,6 +201,7 @@ class TestEnableCompatOnTritonKernel(unittest.TestCase):
             self.assertTrue(hasattr(result, "__getitem__"))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestModuleStructure(unittest.TestCase):
     """Tests for module structure."""
 

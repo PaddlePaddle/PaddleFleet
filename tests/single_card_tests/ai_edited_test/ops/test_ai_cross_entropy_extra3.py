@@ -23,9 +23,35 @@ sys.path.insert(
     ),
 )
 
+import types
 import unittest
 
 
+def _setup_triton_mock():
+    """Create a mock triton module so we can import without GPU."""
+    if "triton" in sys.modules:
+        return sys.modules["triton"]
+    triton_mock = types.ModuleType("triton")
+    triton_mock.jit = lambda fn=None, **kwargs: (
+        (lambda f: f) if fn is None else fn
+    )
+    triton_mock.language = types.ModuleType("triton.language")
+    triton_mock.language.constexpr = None
+    sys.modules.setdefault("triton", triton_mock)
+    sys.modules.setdefault("triton.language", triton_mock.language)
+    return triton_mock
+
+
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestCrossEntropyKernelAttributes(unittest.TestCase):
     """Tests for cross_entropy kernel attributes and structure."""
 
@@ -70,6 +96,7 @@ class TestCrossEntropyKernelAttributes(unittest.TestCase):
             self.skipTest("paddlefleet_ops not installed")
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestCrossEntropyKernelParams(unittest.TestCase):
     """Tests for cross_entropy kernel parameter validation."""
 

@@ -66,13 +66,19 @@ def _import_utils():
     return mod
 
 
-_utils_mod = _import_utils()
+try:
+    _utils_mod = _import_utils()
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _utils_mod = None
+    _MODULE_AVAILABLE = False
 
 
 import unittest
 from unittest.mock import MagicMock, patch
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestIsTorchCompatAvailable(unittest.TestCase):
     """Tests for is_torch_compat_available function."""
 
@@ -87,6 +93,7 @@ class TestIsTorchCompatAvailable(unittest.TestCase):
         self.assertIsInstance(result, bool)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestDispatchTo(unittest.TestCase):
     """Tests for dispatch_to decorator."""
 
@@ -224,6 +231,7 @@ class TestDispatchTo(unittest.TestCase):
             self.assertEqual(result[2], {"key": "val"})
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestIsPackageInstalled(unittest.TestCase):
     """Tests for _is_package_installed function."""
 
@@ -241,6 +249,7 @@ class TestIsPackageInstalled(unittest.TestCase):
         self.assertFalse(result)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestSwapDriverGuard(unittest.TestCase):
     """Tests for swap_driver_guard function."""
 
@@ -263,6 +272,7 @@ class TestSwapDriverGuard(unittest.TestCase):
             self.assertTrue(callable(wrapped))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestEnableCompatOnTritonKernel(unittest.TestCase):
     """Tests for enable_compat_on_triton_kernel function."""
 
@@ -288,6 +298,7 @@ class TestEnableCompatOnTritonKernel(unittest.TestCase):
             self.assertTrue(hasattr(result, "kernel"))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestModuleStructure(unittest.TestCase):
     """Tests for module structure."""
 

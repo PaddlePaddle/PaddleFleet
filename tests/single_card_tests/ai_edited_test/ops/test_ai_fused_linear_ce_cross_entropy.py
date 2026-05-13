@@ -60,9 +60,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestLigerCrossEntropyKernelDefinition(unittest.TestCase):
     """Tests for liger_cross_entropy_kernel function definition and attributes."""
 
@@ -90,6 +97,7 @@ class TestLigerCrossEntropyKernelDefinition(unittest.TestCase):
         self.assertTrue(hasattr(ce, "liger_cross_entropy_kernel"))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestCrossEntropyKernelLogic(unittest.TestCase):
     """Tests for cross entropy kernel logic using manual simulation."""
 

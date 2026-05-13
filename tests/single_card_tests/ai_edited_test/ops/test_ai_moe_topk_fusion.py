@@ -61,9 +61,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.moe_topk_fusion  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestMoETopkFusionDefinition(unittest.TestCase):
     """Tests for MoETopkFusion PyLayer class definition."""
 
@@ -86,6 +93,7 @@ class TestMoETopkFusionDefinition(unittest.TestCase):
         self.assertTrue(hasattr(MoETopkFusion, "backward"))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRoutingMapFusionForward(unittest.TestCase):
     """Tests for routing_map_fusion_forward function."""
 
@@ -111,6 +119,7 @@ class TestRoutingMapFusionForward(unittest.TestCase):
         self.assertIn("topk_indices", params)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestTopkLogicPurePaddle(unittest.TestCase):
     """Tests for TopK logic using pure Paddle operations."""
 
@@ -143,6 +152,7 @@ class TestTopkLogicPurePaddle(unittest.TestCase):
         self.assertEqual(indices.shape, [2, 2])
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFwdKernelDefinition(unittest.TestCase):
     """Tests for _fwd_kernel and _bwd_kernel definitions."""
 

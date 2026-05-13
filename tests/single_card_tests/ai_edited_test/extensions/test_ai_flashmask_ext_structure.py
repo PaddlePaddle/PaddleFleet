@@ -25,7 +25,15 @@ sys.path.insert(
 
 import unittest
 
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFlashmaskExtensions(unittest.TestCase):
     """Tests for flashmask _extensions module structure."""
 

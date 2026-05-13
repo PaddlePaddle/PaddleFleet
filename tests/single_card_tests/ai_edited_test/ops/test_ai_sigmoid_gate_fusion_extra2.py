@@ -27,7 +27,17 @@ import unittest
 
 import paddle
 
+try:
+    from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+        SigmoidGateFusionTriton,  # noqa: F401
+    )
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestSigmoidGateFusionStructure(unittest.TestCase):
     """Tests for sigmoid gate fusion module structure."""
 

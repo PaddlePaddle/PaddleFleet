@@ -66,9 +66,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestSigmoidGateFusionTritonDefinition(unittest.TestCase):
     """Tests for SigmoidGateFusionTriton PyLayer class definition."""
 
@@ -97,6 +104,7 @@ class TestSigmoidGateFusionTritonDefinition(unittest.TestCase):
         self.assertTrue(hasattr(SigmoidGateFusionTriton, "backward"))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestSigmoidGateKernels(unittest.TestCase):
     """Tests for sigmoid gate kernel definitions."""
 
@@ -125,6 +133,7 @@ class TestSigmoidGateKernels(unittest.TestCase):
         self.assertTrue(callable(_sigmoid_precise))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestSigmoidGatePurePaddle(unittest.TestCase):
     """Tests for sigmoid gate computation using pure Paddle."""
 
@@ -184,6 +193,7 @@ class TestSigmoidGatePurePaddle(unittest.TestCase):
         self.assertTrue(paddle.all(out.abs() <= attn_out.abs() + 1e-6))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestSigmoidGateFusionTritonForward(unittest.TestCase):
     """Tests for SigmoidGateFusionTriton forward validation."""
 

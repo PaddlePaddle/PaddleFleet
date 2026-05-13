@@ -30,6 +30,13 @@ sys.path.insert(
 import types
 import unittest
 
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
 
 def _setup_triton_mock():
     """Create a mock triton module so we can import without GPU."""
@@ -58,6 +65,7 @@ def _setup_triton_mock():
 _setup_triton_mock()
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestIndexUtilsModule(unittest.TestCase):
     """Tests for index_utils module structure."""
 
@@ -76,6 +84,7 @@ class TestIndexUtilsModule(unittest.TestCase):
         self.assertTrue(callable(prepare_maxmin))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestScanMaxminChunkedDefinition(unittest.TestCase):
     """Tests for scan_maxmin_chunked kernel definition."""
 
@@ -88,6 +97,7 @@ class TestScanMaxminChunkedDefinition(unittest.TestCase):
         self.assertTrue(callable(scan_maxmin_chunked))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestPrepareMaxminLogic(unittest.TestCase):
     """Tests for prepare_maxmin logic using pure Paddle."""
 

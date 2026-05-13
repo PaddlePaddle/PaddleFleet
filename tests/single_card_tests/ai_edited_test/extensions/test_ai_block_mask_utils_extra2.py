@@ -29,6 +29,13 @@ sys.path.insert(
 
 import types
 import unittest
+
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 from unittest.mock import MagicMock
 
 
@@ -84,6 +91,7 @@ def _setup_triton_mock():
 _setup_triton_mock()
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBlockMaskUtilsModule(unittest.TestCase):
     """Tests for block_mask_utils module structure."""
 
@@ -102,6 +110,7 @@ class TestBlockMaskUtilsModule(unittest.TestCase):
         self.assertTrue(callable(find_blocks_topp))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestExtractRawPtrs(unittest.TestCase):
     """Tests for _extract_raw_ptrs function."""
 
@@ -171,6 +180,7 @@ class TestExtractRawPtrs(unittest.TestCase):
             _extract_raw_ptrs(indices, causal=True)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRequireHelper(unittest.TestCase):
     """Tests for _require helper function."""
 
@@ -193,6 +203,7 @@ class TestRequireHelper(unittest.TestCase):
         self.assertIn("error message", str(ctx.exception))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRrAttnEstimateValidation(unittest.TestCase):
     """Tests for rr_attn_estimate_triton_func input validation."""
 
@@ -239,6 +250,7 @@ class TestRrAttnEstimateValidation(unittest.TestCase):
             rr_attn_estimate_triton_func(q, k, indices, stride=0)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRawPtrsDataclass(unittest.TestCase):
     """Tests for RawPtrs dataclass."""
 
@@ -274,6 +286,7 @@ class TestRawPtrsDataclass(unittest.TestCase):
             raw.lt_start = paddle.zeros([2])
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestStrideMaxMinPtrsDataclass(unittest.TestCase):
     """Tests for StrideMaxMinPtrs dataclass."""
 

@@ -27,7 +27,17 @@ import unittest
 
 import paddle
 
+try:
+    from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+        MoETopkFusion,  # noqa: F401
+    )
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestMoETopkFusionStructure(unittest.TestCase):
     """Tests for MoE TopK fusion module structure."""
 

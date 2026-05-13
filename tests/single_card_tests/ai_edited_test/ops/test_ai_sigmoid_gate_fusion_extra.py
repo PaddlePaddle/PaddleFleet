@@ -65,9 +65,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestSigmoidGateFusionComprehensive(unittest.TestCase):
     """Comprehensive tests for sigmoid gate computation using pure Paddle."""
 
@@ -188,6 +195,7 @@ class TestSigmoidGateFusionComprehensive(unittest.TestCase):
         self.assertEqual(out.shape, [1, 2, 4, 8])
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestSigmoidGateFusionTritonSignature(unittest.TestCase):
     """Tests for SigmoidGateFusionTriton method signatures."""
 

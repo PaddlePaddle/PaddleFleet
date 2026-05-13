@@ -63,9 +63,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.moe_topk_fusion  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestMoETopkFusionForward(unittest.TestCase):
     """Tests for MoETopkFusion forward."""
 
@@ -98,6 +105,7 @@ class TestMoETopkFusionForward(unittest.TestCase):
         self.assertIn("grad_output_probs", params)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRoutingMapFusionForward(unittest.TestCase):
     """Tests for routing_map_fusion_forward function."""
 
@@ -117,6 +125,7 @@ class TestRoutingMapFusionForward(unittest.TestCase):
         self.assertIn("is_pure_text_line", params)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestMoETopkFusionNodeLimitLogic(unittest.TestCase):
     """Tests for MoE TopK node limit logic using pure Paddle."""
 

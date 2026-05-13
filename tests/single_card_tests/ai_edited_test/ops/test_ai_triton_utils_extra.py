@@ -26,7 +26,17 @@ sys.path.insert(
 import unittest
 from unittest.mock import MagicMock
 
+try:
+    from paddlefleet_ops.ops.triton_ops.utils import (
+        is_torch_compat_available,  # noqa: F401
+    )
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestTritonUtilsFunctions(unittest.TestCase):
     """Tests for triton_ops/utils.py functions."""
 

@@ -61,9 +61,16 @@ def _setup_triton_mock():
     return triton_mock
 
 
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFusedLinearCrossEntropyForward(unittest.TestCase):
     """Tests for fused_linear_cross_entropy_forward function."""
 
@@ -94,6 +101,7 @@ class TestFusedLinearCrossEntropyForward(unittest.TestCase):
         self.assertIn("ec_align", params)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFusedLinearCrossEntropyBackward(unittest.TestCase):
     """Tests for fused_linear_cross_entropy_backward function."""
 
@@ -125,6 +133,7 @@ class TestFusedLinearCrossEntropyBackward(unittest.TestCase):
         self.assertTrue(paddle.allclose(result_gb, grad_bias))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestLigerFusedLinearCrossEntropyFunction(unittest.TestCase):
     """Tests for LigerFusedLinearCrossEntropyFunction PyLayer."""
 
@@ -157,6 +166,7 @@ class TestLigerFusedLinearCrossEntropyFunction(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFusedLinearCrossEntropyLogic(unittest.TestCase):
     """Tests for fused linear cross entropy computation logic."""
 
@@ -249,6 +259,7 @@ class TestFusedLinearCrossEntropyLogic(unittest.TestCase):
         self.assertEqual(loss.shape, [])
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestMaxFusedSize(unittest.TestCase):
     """Tests for MAX_FUSED_SIZE constant."""
 

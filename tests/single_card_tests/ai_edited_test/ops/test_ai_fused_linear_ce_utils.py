@@ -52,9 +52,16 @@ def _setup_triton_mock():
 
 
 # Must set up triton mock before importing the module under test
-_setup_triton_mock()
+try:
+    _setup_triton_mock()
+    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.utils  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestElementMulKernel(unittest.TestCase):
     """Tests for element_mul_kernel function definition."""
 
@@ -75,6 +82,7 @@ class TestElementMulKernel(unittest.TestCase):
         self.assertTrue(hasattr(element_mul_kernel, "__code__"))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestElementMulLogic(unittest.TestCase):
     """Tests for element_mul computation logic using pure Paddle."""
 

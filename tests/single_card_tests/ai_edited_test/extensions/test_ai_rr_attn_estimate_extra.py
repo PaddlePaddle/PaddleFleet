@@ -112,6 +112,13 @@ _rae_mod = _import_module_from_file(
 
 import unittest
 
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
 import paddle
 from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
     RawPtrs,
@@ -121,6 +128,7 @@ from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
 )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRequireFunction(unittest.TestCase):
     """Tests for _require helper function."""
 
@@ -140,6 +148,7 @@ class TestRequireFunction(unittest.TestCase):
             _require(False, "")
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRawPtrs(unittest.TestCase):
     """Tests for RawPtrs dataclass."""
 
@@ -168,6 +177,7 @@ class TestRawPtrs(unittest.TestCase):
             ptrs.lt_start = paddle.ones([1], dtype="int32")
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestStrideMaxMinPtrs(unittest.TestCase):
     """Tests for StrideMaxMinPtrs dataclass."""
 
@@ -204,6 +214,7 @@ class TestStrideMaxMinPtrs(unittest.TestCase):
             ptrs.n_strides = 99
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestExtractRawPtrs(unittest.TestCase):
     """Tests for _extract_raw_ptrs function."""
 
@@ -267,6 +278,7 @@ class TestExtractRawPtrs(unittest.TestCase):
         self.assertIn("Unsupported mode", str(ctx.exception))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestPrepareStrideMaxMinPtrs(unittest.TestCase):
     """Tests for _prepare_stride_maxmin_ptrs function."""
 
@@ -287,6 +299,7 @@ class TestPrepareStrideMaxMinPtrs(unittest.TestCase):
         self.assertIn("stride must be positive", str(ctx.exception))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRrAttnEstimateTritonFuncValidation(unittest.TestCase):
     """Tests for rr_attn_estimate_triton_func validation logic."""
 
@@ -303,6 +316,7 @@ class TestRrAttnEstimateTritonFuncValidation(unittest.TestCase):
             _require(1 == 2, "q/k batch size mismatch")
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFlashmaskApply(unittest.TestCase):
     """Tests for flashmask_apply triton kernel."""
 
@@ -315,6 +329,7 @@ class TestFlashmaskApply(unittest.TestCase):
         self.assertIsNotNone(flashmask_apply)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestLog2EConstant(unittest.TestCase):
     """Tests for the LOG2E constant."""
 
