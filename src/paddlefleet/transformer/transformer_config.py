@@ -309,6 +309,9 @@ class TransformerConfig(ModelParallelConfig):
     apply_rope_fusion: bool = False
     """If True, use fused RoPE kernel."""
 
+    sigmoid_gate_fusion: bool = False
+    """If True, use Triton fused sigmoid gate kernel."""
+
     ####################
     # activation recomputation
     ####################
@@ -368,7 +371,7 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
-    Options are 'allgather','alltoall' and 'deepep'."""
+    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -509,6 +512,8 @@ class TransformerConfig(ModelParallelConfig):
     use_ue8m0: bool = False
     """Whether to use UE8M0 (microscaling FP8 with unsigned exponent) for MoE computation.
     UE8M0 uses integer32 scales with pow2 quantization and requires Blackwell GPU (SM100)."""
+    dw_p2p_overlap: bool = False
+    """Whether to overlap p2p communication and matmul kernel in pp parallel on Blackwell."""
 
     ####################
     # initialization
@@ -702,6 +707,12 @@ class TransformerConfig(ModelParallelConfig):
 
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
+
+    moe_topk_fusion: bool = False
+    """If True, use Triton fused MoE TopK kernel for expert selection."""
+
+    routing_map_fusion: bool = False
+    """If True, use Triton fused routing map kernel for MoE routing."""
 
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {

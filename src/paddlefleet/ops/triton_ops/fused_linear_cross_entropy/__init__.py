@@ -27,10 +27,8 @@ paddlefleet.ops.triton_ops.fused_linear_cross_entropy
 
 from .fused_linear_cross_entropy import (
     LigerFusedLinearCrossEntropyFunction,
-    LigerFusedLinearCrossEntropyLoss,
 )
 
 __all__ = [
     "LigerFusedLinearCrossEntropyFunction",
-    "LigerFusedLinearCrossEntropyLoss",
 ]

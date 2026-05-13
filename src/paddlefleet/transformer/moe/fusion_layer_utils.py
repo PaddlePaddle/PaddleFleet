@@ -265,6 +265,7 @@ class MlpNode:
         use_auto_subbatch=False,
         moe_subbatch_diag=False,
         use_ue8m0=False,
+        dw_p2p_overlap=False,
     ):
         """
         Constructor
@@ -331,6 +332,7 @@ class MlpNode:
                     use_fp8_mlp=use_fp8_mlp,
                     moe_deep_gemm=moe_deep_gemm,
                     moe_grouped_gemm=moe_grouped_gemm,
+                    dw_p2p_overlap=dw_p2p_overlap,
                 )
                 for expert_id in range(len(custom_map.experts))
             ]
@@ -346,6 +348,7 @@ class MlpNode:
                 moe_deep_gemm=moe_deep_gemm,
                 moe_grouped_gemm=moe_grouped_gemm,
                 use_ue8m0=use_ue8m0,
+                dw_p2p_overlap=dw_p2p_overlap,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -644,8 +647,7 @@ class MlpNode:
             None,
             unzipped_probs,
             [padding_token_per_experts],
-            tokens_per_expert,
-            unzipped_out,
+            output=unzipped_out,
         )
 
         # recompute_moe_premute 场景下，forward 完成后释放 input_fp8
@@ -1083,7 +1085,6 @@ class MlpNode:
                 unzipped_tokens,
                 unzipped_probs,
                 self.padding_token_per_experts,
-                self.tokens_per_expert,
                 output=expert_unzipped_out,
                 scale=unzipped_scale,
             )
@@ -1532,7 +1533,6 @@ class MlpNode:
             dispatched_probs,
             fill_output=self.moe_expert_fusion,
         )
-
         if not self.moe_expert_fusion:
             # 路径 2：逐专家 gather → 逐专家 GEMM → scatter-add
             expected_output_dtype = (
@@ -1613,7 +1613,6 @@ class MlpNode:
                 unzipped_tokens,
                 unzipped_probs,
                 self.padding_token_per_experts,
-                self.tokens_per_expert,
                 output=unzipped_tokens,
                 scale=unzipped_scale,  # maybe None
             )
@@ -1800,6 +1799,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         use_auto_subbatch=False,
         moe_subbatch_diag=False,
         use_ue8m0=False,
+        dw_p2p_overlap=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -1828,6 +1828,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             use_auto_subbatch=use_auto_subbatch,
             moe_subbatch_diag=moe_subbatch_diag,
             use_ue8m0=use_ue8m0,
+            dw_p2p_overlap=dw_p2p_overlap,
         )
 
         if fp8_dispatched_handle is not None:
@@ -1869,3 +1870,141 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             output_grad
         )
         return hidden_states_grad, dispatched_probs_grad, None
+
+
+def _hybrid_ep_prepare_expert_counts(
+    custom_map,
+    use_fp8_mlp,
+    moe_grouped_gemm,
+):
+    manager = custom_map.token_dispatcher._comm_manager
+    padded_tokens_per_expert = manager.padded_tokens_per_expert
+    assert padded_tokens_per_expert is not None, (
+        "HybridEP manager must populate padded_tokens_per_expert before "
+        "HybridEPMoePyLayer runs."
+    )
+    padded_tokens_per_expert_tensor = padded_tokens_per_expert.astype("int64")
+
+    if not use_fp8_mlp or not moe_grouped_gemm:
+        padded_tokens_per_expert_list = padded_tokens_per_expert_tensor.tolist()
+        return padded_tokens_per_expert_list, sum(padded_tokens_per_expert_list)
+    return padded_tokens_per_expert_tensor, paddle.sum(
+        padded_tokens_per_expert_tensor
+    )
+
+
+def _pad_front_rows(tensor, target_shape):
+    if tuple(tensor.shape) == tuple(target_shape):
+        return tensor
+    padded_tensor = paddle.zeros(target_shape, dtype=tensor.dtype)
+    padded_tensor[: tensor.shape[0]] = tensor
+    return padded_tensor
+
+
+def _restore_hybrid_ep_prob_grad_shape(
+    dispatched_probs_grad,
+    original_probs_shape,
+):
+    assert len(original_probs_shape) == 1, (
+        "HybridEP dispatched_probs is expected to stay 1D on the public "
+        f"contract, got original shape {original_probs_shape}"
+    )
+
+    if (
+        len(dispatched_probs_grad.shape) == 2
+        and dispatched_probs_grad.shape[-1] == 1
+    ):
+        dispatched_probs_grad = dispatched_probs_grad.squeeze(-1)
+    assert len(dispatched_probs_grad.shape) == 1, (
+        "HybridEP probs grad must normalize back to 1D, "
+        f"got shape {tuple(dispatched_probs_grad.shape)}"
+    )
+
+    return _pad_front_rows(dispatched_probs_grad, original_probs_shape)
+
+
+class HybridEPMoePyLayer(paddle.autograd.PyLayer):
+    """
+    Expert compute for HybridEP's permuted dispatch contract.
+
+    HybridEP dispatch_with_permute already produces expert-contiguous tokens, so
+    this layer intentionally skips FusionMoePyLayer's unzip/zip stages and only
+    reuses the grouped expert GEMM node for both bf16 and fp8.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        hidden_states,
+        dispatched_probs,
+        custom_map,
+        use_fp8_mlp=True,
+        moe_deep_gemm=True,
+        moe_grouped_gemm=False,
+        recompute_moe_gate_up=False,
+        use_bf16_gemm_weight_grad=False,
+        fp8_dispatched_handle=None,
+        is_first_fwd=False,
+        dw_p2p_overlap=False,
+    ):
+        node = ExpertsGroupGemmContiguousNode(
+            custom_map,
+            recompute_moe_gate_up=recompute_moe_gate_up,
+            dequant_input=True,
+            use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
+            use_fp8_mlp=use_fp8_mlp,
+            moe_deep_gemm=moe_deep_gemm,
+            moe_grouped_gemm=moe_grouped_gemm,
+            dw_p2p_overlap=dw_p2p_overlap,
+        )
+        original_hidden_shape = tuple(hidden_states.shape)
+        original_probs_shape = tuple(dispatched_probs.shape)
+        (
+            padded_tokens_per_expert,
+            num_permuted_tokens,
+        ) = _hybrid_ep_prepare_expert_counts(
+            custom_map,
+            use_fp8_mlp,
+            moe_grouped_gemm,
+        )
+        hidden_states = hidden_states[:num_permuted_tokens]
+        dispatched_probs = dispatched_probs[:num_permuted_tokens]
+        scale = None
+        if fp8_dispatched_handle is not None:
+            assert hidden_states.dtype == paddle.float8_e4m3fn
+            scale = fp8_dispatched_handle["scale"][:num_permuted_tokens]
+
+        out = node.forward(
+            hidden_states,
+            dispatched_probs,
+            padded_tokens_per_expert,
+            scale=scale,
+        )
+        out.stop_gradient = False
+
+        ctx.node = node
+        ctx.original_hidden_shape = original_hidden_shape
+        ctx.original_probs_shape = original_probs_shape
+        if is_first_fwd:
+            node.clear_cached_tensors()
+        ctx.save_for_backward([*node.cached_tensors(), dispatched_probs])
+        node.clear_cached_tensors()
+        return out
+
+    @staticmethod
+    def backward(ctx, output_grad):
+        (cached_tensors,) = ctx.saved_tensor()
+        dispatched_probs = cached_tensors[-1]
+        ctx.node.set_cached_tensors(cached_tensors[:-1])
+        hidden_states_grad, dispatched_probs_grad = ctx.node.backward(
+            output_grad, dispatched_probs
+        )
+        ctx.node.reset_state()
+        hidden_states_grad = _pad_front_rows(
+            hidden_states_grad, ctx.original_hidden_shape
+        )
+        dispatched_probs_grad = _restore_hybrid_ep_prob_grad_shape(
+            dispatched_probs_grad,
+            ctx.original_probs_shape,
+        )
+        return hidden_states_grad, dispatched_probs_grad

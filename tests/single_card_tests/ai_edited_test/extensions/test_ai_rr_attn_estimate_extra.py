@@ -57,8 +57,7 @@ if not _triton_available:
     sys.modules.setdefault("triton.language", _mock_tl)
 
 import paddle
-
-from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
     RawPtrs,
     StrideMaxMinPtrs,
     _require,
@@ -154,7 +153,7 @@ class TestExtractRawPtrs(unittest.TestCase):
 
     def test_extract_raw_ptrs_mode1(self):
         """Test _extract_raw_ptrs with mode=1."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             _extract_raw_ptrs,
         )
 
@@ -165,7 +164,7 @@ class TestExtractRawPtrs(unittest.TestCase):
 
     def test_extract_raw_ptrs_mode2_causal(self):
         """Test _extract_raw_ptrs with mode=2, causal=True."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             _extract_raw_ptrs,
         )
 
@@ -177,7 +176,7 @@ class TestExtractRawPtrs(unittest.TestCase):
 
     def test_extract_raw_ptrs_mode2_noncausal(self):
         """Test _extract_raw_ptrs with mode=2, causal=False."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             _extract_raw_ptrs,
         )
 
@@ -188,7 +187,7 @@ class TestExtractRawPtrs(unittest.TestCase):
 
     def test_extract_raw_ptrs_mode4(self):
         """Test _extract_raw_ptrs with mode=4."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             _extract_raw_ptrs,
         )
 
@@ -202,7 +201,7 @@ class TestExtractRawPtrs(unittest.TestCase):
 
     def test_extract_raw_ptrs_invalid_mode(self):
         """Test _extract_raw_ptrs raises on invalid mode."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             _extract_raw_ptrs,
         )
 
@@ -223,7 +222,7 @@ class TestPrepareStrideMaxMinPtrs(unittest.TestCase):
     )
     def test_prepare_stride_maxmin_ptrs_basic(self):
         """Test basic _prepare_stride_maxmin_ptrs."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             _prepare_stride_maxmin_ptrs,
         )
 
@@ -234,7 +233,7 @@ class TestPrepareStrideMaxMinPtrs(unittest.TestCase):
             ut_end=paddle.randint(0, 100, [2, 3, 128]),
         )
         with mock.patch(
-            "paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op.prepare_maxmin",
+            "paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op.prepare_maxmin",
             return_value=(
                 paddle.randint(0, 100, [2, 3, 16], dtype="int32"),
                 paddle.randint(0, 100, [2, 3, 16], dtype="int32"),
@@ -247,7 +246,7 @@ class TestPrepareStrideMaxMinPtrs(unittest.TestCase):
 
     def test_prepare_stride_maxmin_ptrs_stride_validation(self):
         """Test stride validation in _prepare_stride_maxmin_ptrs."""
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             _prepare_stride_maxmin_ptrs,
         )
 
@@ -306,7 +305,7 @@ class TestLog2EConstant(unittest.TestCase):
         """Test LOG2E constant correctness."""
         import math
 
-        from paddlefleet._extensions.flashmask.rr_attn_estimate_triton_op import (
+        from paddlefleet_ops._extensions.flashmask.rr_attn_estimate_triton_op import (
             LOG2E,
         )
 

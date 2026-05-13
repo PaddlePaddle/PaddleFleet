@@ -223,6 +223,9 @@ class LanguageLoss(FleetLayer):
                 self.ignored_index,
                 "none",
                 self.config.fused_linear_ce_loss_chunk,
+                getattr(
+                    self.config, "gpt_model_use_experimental_version", False
+                ),
             )
             # Reshape back to [B, S] so downstream CP gather / lossmask
             # handling matches the non-fused path exactly.
@@ -431,7 +434,6 @@ class LanguageLoss(FleetLayer):
                             labels_cur_depth,
                         )
                     mtp_loss.append(loss_cur_depth)
-                    paddle.device.cuda.empty_cache()
             else:
                 lm_loss = self._forward(logits[0], lm_labels)
                 if get_tensor_model_parallel_world_size() > 1:
@@ -652,7 +654,6 @@ class MTPLanguageLoss(LanguageLoss):
                 labels_cur_depth,
             )
             mtp_loss.append(loss_cur_depth)
-            paddle.device.cuda.empty_cache()
 
         dict_args.pop("mtp_logits")
         dict_args["mtp_loss"] = mtp_loss

@@ -119,10 +119,8 @@ def get_attention_spec(
 
     # Triton-optimized RMSNorm only for self_attention QK norm (head_dim=128)
     # MLA uses larger latent_dim (1536) which exceeds Triton kernel limit (≤1024)
-    use_triton_qk_norm = (
-        attention_layer_type == "self_attention"
-        and config.normalization == "RMSNorm"
-        and getattr(config, "qk_norm_fusion", False)
+    use_triton_qk_norm = config.normalization == "RMSNorm" and getattr(
+        config, "qk_norm_fusion", False
     )
     if use_triton_qk_norm:
         from paddlefleet.transformer.paddle_norm import WrappedRMSNormTriton
@@ -176,10 +174,10 @@ def get_attention_spec(
         )
     elif attention_layer_type == "multi_latent_attention":
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-        # Decide attention class: DSA variant if index_n_heads is configured
+        # Decide attention class: DSA variant if dsa_index_n_heads is configured
         use_dsa = (
             config is not None
-            and getattr(config, "index_n_heads", None) is not None
+            and getattr(config, "dsa_index_n_heads", None) is not None
         )
         attn_cls = MLASelfAttentionWithDSA if use_dsa else MLASelfAttention
         # Gated attention
