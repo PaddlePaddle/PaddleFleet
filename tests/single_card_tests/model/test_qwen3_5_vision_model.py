@@ -457,6 +457,27 @@ class Qwen3_5Model(FleetLayer):
             self.rope_deltas = rope_deltas
             return position_ids
 
+        # Handle text-only case: generate 3D position_ids with identical values across all three dimensions
+        if input_ids is not None and (image_grid_thw is None and video_grid_thw is None):
+            batch_size, seq_length = input_ids.shape
+            if attention_mask is not None:
+                position_ids = attention_mask.astype("int64").cumsum(-1) - 1
+                position_ids = paddle.where(
+                    attention_mask == 0,
+                    paddle.zeros_like(position_ids),
+                    position_ids,
+                )
+                position_ids = position_ids.reshape([1, batch_size, -1]).tile(
+                    [3, 1, 1]
+                )
+            else:
+                position_ids = (
+                    paddle.arange(seq_length)
+                    .reshape([1, 1, -1])
+                    .expand([3, batch_size, -1])
+                )
+            return position_ids
+
         if self.rope_deltas is not None and inputs_embeds is not None:
             batch_size, seq_length, _ = inputs_embeds.shape
             if attention_mask is not None:
