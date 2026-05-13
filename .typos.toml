@@ -1,6 +1,6 @@
 [files]
 extend-exclude = [
-    "third_party/",
+    "packages/paddlefleet_ops/third_party/",
     "src/_third_party_install_temp/",
     "packages/paddlefleet_ops/src/_third_party_install_temp/",
 ]

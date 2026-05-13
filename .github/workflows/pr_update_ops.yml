@@ -274,6 +274,7 @@ jobs:
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
           git config --global --add safe.directory /workspace
+          git submodule foreach --recursive "git config --global --add safe.directory \$toplevel/\$sm_path"
           sed -i "s#packages/nightly/cu129#packages/nightly/${{ matrix.cuda.bos_CUDA }}#g" pyproject.toml
           cat pyproject.toml
           mkdir -p /root/.cache/pip

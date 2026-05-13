@@ -322,6 +322,18 @@ jobs:
           cat dist/whl_names.txt
           '
 
+      - name: download ops whl from latest
+        if: needs.check-packages-changes.outputs.packages_changed != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
+          OPS_DST=paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
+          wget -q --no-proxy "https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/latest/cu129/${OPS_DST}" -O dist/${OPS_DST}
+          echo "OPS_WHL=${OPS_DST}" >> dist/whl_names.txt
+          ls -lh dist
+          cat dist/whl_names.txt
+          '
+
       - name: Save wheel file names as outputs
         id: save_whl_names
         run: |
@@ -420,8 +432,8 @@ jobs:
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
