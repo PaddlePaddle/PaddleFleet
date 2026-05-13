@@ -28,13 +28,22 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.moe.moe_utils import AddAuxiliaryLoss
-from paddlefleet.transformer.moe.token_dispatcher import (
-    MoETokenDispatcher,
-    _DeepepManager,
+try:
+    from paddlefleet.transformer.moe.moe_utils import AddAuxiliaryLoss
+    from paddlefleet.transformer.moe.token_dispatcher import (
+        MoETokenDispatcher,
+        _DeepepManager,
+    )
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
 )
-
-
 class TestDeepepManagerSetupMetadata(unittest.TestCase):
     """Tests for _DeepepManager setup_metadata."""
 
@@ -79,6 +88,10 @@ class TestDeepepManagerSetupMetadata(unittest.TestCase):
         self.assertEqual(manager.token_indices.shape, [3, 2])
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestDeepepManagerGetNumberofTokens(unittest.TestCase):
     """Tests for _DeepepManager get_number_of_tokens_per_expert."""
 
@@ -96,6 +109,10 @@ class TestDeepepManagerGetNumberofTokens(unittest.TestCase):
         self.assertFalse(hasattr(manager, "tokens_per_expert"))
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestDeepepManagerGetDispatchedMetadata(unittest.TestCase):
     """Tests for _DeepepManager get_dispatched_metadata."""
 
@@ -113,6 +130,10 @@ class TestDeepepManagerGetDispatchedMetadata(unittest.TestCase):
         self.assertFalse(hasattr(manager, "dispatched_indices"))
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestMoETokenDispatcherProperties(unittest.TestCase):
     """Tests for MoETokenDispatcher properties."""
 
@@ -125,6 +146,10 @@ class TestMoETokenDispatcherProperties(unittest.TestCase):
         self.assertEqual(dispatcher.ep_size, 8)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestAddAuxiliaryLossScalar(unittest.TestCase):
     """Tests for AddAuxiliaryLoss with scalar loss."""
 

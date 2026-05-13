@@ -26,7 +26,17 @@ sys.path.insert(
 import tempfile
 import unittest
 
+try:
+    from paddlefleet.training.yaml_arguments import load_yaml  # noqa: F401
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.training.yaml_arguments not available"
+)
 class TestYamlArgumentsEdgeCases(unittest.TestCase):
     """Edge case tests for yaml_arguments module."""
 

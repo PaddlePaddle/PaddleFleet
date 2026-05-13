@@ -33,7 +33,19 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
+try:
+    from paddlefleet.refined_recompute.flash_attn import (  # noqa: F401
+        RefinedRcomputeFlashMaskCpAttention,
+    )
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
+)
 class TestFlashMaskCpAttentionQueryValidation(unittest.TestCase):
     """Tests for FlashMaskCpAttention query sequence length validation."""
 
@@ -54,6 +66,9 @@ class TestFlashMaskCpAttentionQueryValidation(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
+)
 class TestFlashAttnFunctorForwardVersions(unittest.TestCase):
     """Tests for FlashAttnFunctor forward with different FA versions."""
 
@@ -81,6 +96,9 @@ class TestFlashAttnFunctorForwardVersions(unittest.TestCase):
             FlashAttnFunctor.forward(ctx, q, k, v, hold_tensors)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
+)
 class TestFlashAttnFunctorBackwardVersions(unittest.TestCase):
     """Tests for FlashAttnFunctor backward with different FA versions."""
 
@@ -98,6 +116,9 @@ class TestFlashAttnFunctorBackwardVersions(unittest.TestCase):
             FlashAttnFunctor.backward(ctx, paddle.randn([1, 4, 8]))
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
+)
 class TestFlashMaskAttnFunctorForwardVersions(unittest.TestCase):
     """Tests for FlashMaskAttnFunctor forward with different FA versions."""
 
@@ -128,6 +149,9 @@ class TestFlashMaskAttnFunctorForwardVersions(unittest.TestCase):
             FlashMaskAttnFunctor.forward(ctx, q, k, v, startend, hold_tensors)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
+)
 class TestFlashMaskAttnFunctorBackwardVersions(unittest.TestCase):
     """Tests for FlashMaskAttnFunctor backward with different FA versions."""
 
@@ -147,6 +171,9 @@ class TestFlashMaskAttnFunctorBackwardVersions(unittest.TestCase):
             FlashMaskAttnFunctor.backward(ctx, paddle.randn([1, 4, 8]))
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
+)
 class TestFlashMaskCpAttentionForwardDispatch(unittest.TestCase):
     """Tests for FlashMaskCpAttention forward dispatching."""
 

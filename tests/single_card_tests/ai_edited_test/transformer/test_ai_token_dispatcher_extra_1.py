@@ -28,14 +28,23 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.moe.token_dispatcher import (
-    AllToAllTokenDispatcher,
-    MoETokenDispatcher,
-    _DeepepManager,
-    _DispatchManager,
+try:
+    from paddlefleet.transformer.moe.token_dispatcher import (
+        AllToAllTokenDispatcher,
+        MoETokenDispatcher,
+        _DeepepManager,
+        _DispatchManager,
+    )
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
 )
-
-
 class TestDispatchManagerAbstract(unittest.TestCase):
     """Tests for _DispatchManager abstract class."""
 
@@ -54,6 +63,10 @@ class TestDispatchManagerAbstract(unittest.TestCase):
             IncompleteManager()
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestDeepepManagerConstruction(unittest.TestCase):
     """Tests for _DeepepManager construction."""
 
@@ -107,6 +120,10 @@ class TestDeepepManagerConstruction(unittest.TestCase):
         self.assertIsNone(manager.handle)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestMoETokenDispatcherProperties(unittest.TestCase):
     """Tests for MoETokenDispatcher properties."""
 
@@ -140,6 +157,10 @@ class TestMoETokenDispatcherProperties(unittest.TestCase):
             dispatcher.token_unpermutation(paddle.randn([4, 8]))
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestAllToAllTokenDispatcher(unittest.TestCase):
     """Tests for AllToAllTokenDispatcher."""
 

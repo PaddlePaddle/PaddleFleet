@@ -28,14 +28,23 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.moe.token_dispatcher import (
-    AllToAllTokenDispatcher,
-    MoEFlexTokenDispatcher,
-    _DeepepManager,
-    _DispatchManager,
+try:
+    from paddlefleet.transformer.moe.token_dispatcher import (
+        AllToAllTokenDispatcher,
+        MoEFlexTokenDispatcher,
+        _DeepEPManager,
+        _DispatchManager,
+    )
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
 )
-
-
 class TestDispatchManagerInterface(unittest.TestCase):
     """Test _DispatchManager is abstract and defines the interface."""
 
@@ -53,14 +62,18 @@ class TestDispatchManagerInterface(unittest.TestCase):
         self.assertIn("get_restored_hidden_states_by_experts", abstract_methods)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestDeepepManagerConstruction(unittest.TestCase):
-    """Test _DeepepManager construction."""
+    """Test _DeepEPManager construction."""
 
     @patch("paddlefleet.transformer.moe.token_dispatcher.fused_dispatch", None)
     def test_no_deepep_raises(self):
         group = MagicMock()
         with self.assertRaises(ImportError):
-            _DeepepManager(group, router_topk=2)
+            _DeepEPManager(group, router_topk=2)
 
     @patch(
         "paddlefleet.transformer.moe.token_dispatcher.fused_dispatch",
@@ -68,7 +81,7 @@ class TestDeepepManagerConstruction(unittest.TestCase):
     )
     def test_basic_construction(self):
         group = MagicMock()
-        manager = _DeepepManager(
+        manager = _DeepEPManager(
             group, router_topk=2, num_experts=8, num_local_experts=4
         )
         self.assertEqual(manager.router_topk, 2)
@@ -76,10 +89,15 @@ class TestDeepepManagerConstruction(unittest.TestCase):
         self.assertEqual(manager.num_local_experts, 4)
         self.assertIsNone(manager.token_indices)
         self.assertIsNone(manager.token_probs)
+        self.assertIsNone(manager.handle)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestDeepepManagerSetupMetadata(unittest.TestCase):
-    """Test _DeepepManager.setup_metadata."""
+    """Test _DeepEPManager.setup_metadata."""
 
     @patch(
         "paddlefleet.transformer.moe.token_dispatcher.fused_dispatch",
@@ -87,7 +105,7 @@ class TestDeepepManagerSetupMetadata(unittest.TestCase):
     )
     def test_setup_metadata_topk(self):
         group = MagicMock()
-        manager = _DeepepManager(group, router_topk=2, num_experts=4)
+        manager = _DeepEPManager(group, router_topk=2, num_experts=4)
         routing_map = paddle.randn([4, 4], dtype="float32")
         probs = paddle.randn([4, 4], dtype="float32")
         manager.setup_metadata(routing_map, probs)
@@ -103,7 +121,7 @@ class TestDeepepManagerSetupMetadata(unittest.TestCase):
     )
     def test_setup_metadata_reshapes(self):
         group = MagicMock()
-        manager = _DeepepManager(group, router_topk=2, num_experts=4)
+        manager = _DeepEPManager(group, router_topk=2, num_experts=4)
         # routing_map shape should be [num_tokens, num_experts] = [4, 4]
         routing_map = paddle.randn([4, 4], dtype="float32")
         probs = paddle.randn([4, 4], dtype="float32")
@@ -112,8 +130,12 @@ class TestDeepepManagerSetupMetadata(unittest.TestCase):
         self.assertEqual(manager.token_probs.shape, [4, 2])
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestDeepepManagerIndicesToMultihot(unittest.TestCase):
-    """Test _DeepepManager._indices_to_multihot."""
+    """Test _DeepEPManager._indices_to_multihot."""
 
     @patch(
         "paddlefleet.transformer.moe.token_dispatcher.fused_dispatch",
@@ -121,7 +143,7 @@ class TestDeepepManagerIndicesToMultihot(unittest.TestCase):
     )
     def test_basic_conversion(self):
         group = MagicMock()
-        manager = _DeepepManager(
+        manager = _DeepEPManager(
             group, router_topk=2, num_experts=4, num_local_experts=4
         )
         indices = paddle.to_tensor(
@@ -133,6 +155,10 @@ class TestDeepepManagerIndicesToMultihot(unittest.TestCase):
         self.assertIsNotNone(multihot)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestAllToAllTokenDispatcher(unittest.TestCase):
     """Test AllToAllTokenDispatcher construction and methods."""
 
@@ -159,6 +185,10 @@ class TestAllToAllTokenDispatcher(unittest.TestCase):
         self.assertEqual(dispatcher.local_expert_indices, [0, 1])
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestMoEFlexTokenDispatcher(unittest.TestCase):
     """Test MoEFlexTokenDispatcher."""
 

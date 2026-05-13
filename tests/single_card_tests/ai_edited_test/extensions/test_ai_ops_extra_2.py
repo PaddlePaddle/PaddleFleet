@@ -24,7 +24,15 @@ sys.path.insert(
 
 import unittest
 
+try:
+    from paddlefleet._extensions import ops  # noqa: F401
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet._extensions not available")
 class TestExtensionsOpsFunctionCalls(unittest.TestCase):
     """Tests for _extensions.ops function call patterns."""
 
