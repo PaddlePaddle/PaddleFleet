@@ -1,0 +1,192 @@
+name: Build Ops on Merge
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'packages/**'
+
+concurrency:
+  group: build-ops-on-merge
+  cancel-in-progress: false
+
+permissions: read-all
+
+env:
+  COMMIT_ID: ${{ github.sha }}
+  BRANCH: ${{ github.ref_name }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  promote-latest:
+    name: Promote ops wheel to latest
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Extract PR number from merge commit
+        id: pr
+        run: |
+          MSG=$(git log -1 --pretty=%s)
+          PR_NUM=$(echo "$MSG" | grep -oP '\(#\K[0-9]+(?=\))' | tail -1)
+          if [ -z "$PR_NUM" ]; then
+            echo "::warning::Could not extract PR number from commit message: ${MSG}"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "pr_number=${PR_NUM}" >> $GITHUB_OUTPUT
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get PR head SHA
+        if: steps.pr.outputs.skip != 'true'
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HEAD_SHA=$(gh pr view ${{ steps.pr.outputs.pr_number }} --json headRefOid -q .headRefOid)
+          echo "head_sha=${HEAD_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Download ops whl from PR path and upload to latest
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          AK: ${{ secrets.BOS_CREDENTIAL_AK }}
+          SK: ${{ secrets.BOS_CREDENTIAL_SK }}
+        run: |
+          pip install bce-python-sdk==0.8.74
+          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir -p bos && tar -xf bos_new.tar.gz -C bos
+
+          PR_ID=${{ steps.pr.outputs.pr_number }}
+          HEAD_SHA=${{ steps.sha.outputs.head_sha }}
+
+          # Download from PR CI upload path (uses public AK/SK)
+          wget -q --no-proxy \
+            "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${HEAD_SHA}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl" \
+            -O paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl
+
+          # Upload to latest/ directory
+          python bos/BosClient.py paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl \
+            paddle-github-action/PaddleFleet/${BRANCH}/latest/cu129
+
+  build-ops-wheel:
+    name: Build ops wheel (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
+    if: github.repository == 'PaddlePaddle/PaddleFleet' && github.actor != 'github-actions[bot]'
+    runs-on:
+      group: GZ_BD-CPU
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python_version: "3.10"
+            cuda: {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129}
+          - python_version: "3.12"
+            cuda: {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
+    env:
+      TASK: PaddleFleet-ops-merge-${{ matrix.cuda.CUDA_VERSION }}
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
+      UV_HTTP_TIMEOUT: 600
+      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
+    steps:
+      - name: Check docker image and run container
+        run: |
+          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:${{ matrix.cuda.IMAGE_TAG }}"
+          docker pull $docker_image
+          container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
+          echo "container_name=${container_name}" >> ${{ github.env }}
+          docker run -d -t --name ${container_name} \
+            -v "/home/data/cfs:/home/data/cfs" \
+            -v "/home/data/cfs/.cache:/home/.cache" \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
+            -v ${{ github.workspace }}:/workspace \
+            -e no_proxy \
+            -e CACHE_DIR \
+            -e PIP_CACHE_DIR \
+            -e UV_HTTP_TIMEOUT \
+            -e PADDLE_CUDA_ARCH_LIST="8.0;9.0;10.0;10.3" \
+            -e COMMIT_ID \
+            -e BRANCH \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
+            -w /workspace --network=host $docker_image
+
+      - name: Install dependencies and build ops wheel
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          export UV_PYTHON=${{ matrix.python_version }}
+          source /root/proxy
+          rm -rf * .[^.]*
+          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/0/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate || {
+            echo "Tar not found, cloning from git"
+            git clone --depth=1 -b ${BRANCH} https://github.com/PaddlePaddle/PaddleFleet.git .
+          }
+          if [ -f PaddleFleet.tar.gz ]; then
+            tar -xf PaddleFleet.tar.gz --strip-components=1
+            rm PaddleFleet.tar.gz
+          fi
+          git config --global --add safe.directory /workspace
+          pip install --upgrade pip
+          pip install uv
+          git submodule update --init --recursive
+          export IS_NVIDIA=True
+          if command -v ccache &>/dev/null; then
+            export CCACHE_DIR=/home/.cache/ccache
+            export CCACHE_MAXSIZE=20G
+            mkdir -p "${CCACHE_DIR}"
+            export CC="ccache gcc"
+            export CXX="ccache g++"
+            ccache --zero-stats
+          fi
+          COMMIT_SHORT=${COMMIT_ID:0:8}
+          BASE_VERSION=$(cat version.txt | tr -d "[:space:]")
+          DATE_STR=$(date +%Y%m%d)
+          if [[ "${BRANCH}" == release/* ]]; then
+            export PADDLEFLEET_VERSION="${BASE_VERSION}.post${DATE_STR}+${COMMIT_SHORT}"
+          else
+            export PADDLEFLEET_VERSION="${BASE_VERSION}.dev${DATE_STR}+${COMMIT_SHORT}"
+          fi
+          uv build --wheel --package paddlefleet-ops --out-dir dist -v
+          '
+
+      - name: Upload wheel to BOS
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          python -m pip install bce-python-sdk==0.8.74
+          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir -p bos
+          tar -xf bos_new.tar.gz -C bos
+          cd dist
+          PY_VERSION="${{ matrix.python_version }}"
+          PY_VERSION_SHORT="${PY_VERSION//./}"
+          for whl in paddlefleet_ops-*.whl; do
+            python ../bos/BosClient.py ${whl} paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
+          done
+          # Also upload to commit-level path
+          export AK=paddle
+          export SK=paddle
+          for whl in paddlefleet_ops-*.whl; do
+            python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+          done
+          # Upload to latest/ with stable filename
+          mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
+          python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+          curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          '
+
+      - name: Cleanup
+        if: ${{ always() }}
+        run: |
+          set +e
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker rm -f ${{ env.container_name }}

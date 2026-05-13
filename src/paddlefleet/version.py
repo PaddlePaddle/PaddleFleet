@@ -14,48 +14,10 @@
 
 try:
     from ._version import (
-        __ops_required_version__ as __ops_required_version__,
         __version__ as __version__,
         commit as commit,
     )
 except:
-
-    def _get_required_ops_version_from_source() -> str | None:
-        """Get the paddlefleet-ops version that this paddlefleet requires."""
-        # Source mode (PYTHONPATH): compute from version.txt + ops_required_version.txt
-        import subprocess
-        from pathlib import Path
-
-        workspace_root = Path(__file__).parent.parent.parent.resolve()
-        version_file = workspace_root / "version.txt"
-        ops_req_file = workspace_root / "ops_required_version.txt"
-
-        if not version_file.exists() or not ops_req_file.exists():
-            raise RuntimeError(
-                "version.txt or ops_required_version.txt not found in workspace root"
-            )
-
-        base_version = version_file.read_text().strip()
-        build_num = ops_req_file.read_text().strip()
-        if not base_version or not build_num:
-            raise RuntimeError(
-                "version.txt or ops_required_version.txt is empty"
-            )
-
-        is_release_branch = False
-        branch = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=workspace_root,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode("utf-8")
-            .strip()
-        )
-        is_release_branch = branch.startswith("release/")
-
-        suffix = ".post" if is_release_branch else ".dev"
-        return f"{base_version}{suffix}{build_num}"
 
     def _get_version_from_source():
         from datetime import datetime
@@ -86,6 +48,5 @@ except:
             .strip()
         )
 
-    __ops_required_version__ = _get_required_ops_version_from_source()
     __version__ = _get_version_from_source()
     commit = _get_commit_from_source()
