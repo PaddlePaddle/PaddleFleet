@@ -146,6 +146,9 @@ class DotProductAttention(FleetLayer):
         # MTP config has sliding_window=(N, 0), and the flashmask calls below
         # now receive window_size=(N, 0).
         self.sliding_window = sliding_window
+        # Marker set by MTP's _build_mtp_transformer_config on the cloned
+        # config; used to gate SWA-startend suppression to MTP layers only.
+        self._is_mtp_layer = getattr(config, "is_mtp_layer", False)
         if sliding_window is not None:
             # Grep-friendly tag: "[SWA-KERNEL-CONFIRM]". Prints once per layer
             # that actually activates sliding-window attention at the kernel
@@ -221,11 +224,29 @@ class DotProductAttention(FleetLayer):
             else:
                 flashmask_attention_func = flashmask_attention
 
+            _swa_active = self.sliding_window is not None
+            _suppress = _swa_active and self._is_mtp_layer
+            _startend = (
+                None if _suppress else attn_mask_startend_row_indices
+            )
+            if (
+                _suppress
+                and attn_mask_startend_row_indices is not None
+                and not getattr(self, "_swa_boundary_warned", False)
+            ):
+                print(
+                    f"[SWA-BOUNDARY-SUPPRESS] layer_number={self.layer_number} "
+                    f"sliding_window={self.sliding_window} path=ec_compatible "
+                    f"- dropping startend_row_indices (kernel rejects both; "
+                    f"SWA bounds cross-doc bleed to window size)",
+                    flush=True,
+                )
+                self._swa_boundary_warned = True
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
                 value,
-                startend_row_indices=attn_mask_startend_row_indices,
+                startend_row_indices=_startend,
                 dropout=0.0,
                 causal=False,  # EC uses causal=False with 2-col startend_row_indices
                 window_size=self.sliding_window,
@@ -335,11 +356,29 @@ class DotProductAttention(FleetLayer):
             else:
                 flashmask_attention_func = flashmask_attention
 
+            _swa_active = self.sliding_window is not None
+            _suppress = _swa_active and self._is_mtp_layer
+            _startend = (
+                None if _suppress else attn_mask_startend_row_indices
+            )
+            if (
+                _suppress
+                and attn_mask_startend_row_indices is not None
+                and not getattr(self, "_swa_boundary_warned", False)
+            ):
+                print(
+                    f"[SWA-BOUNDARY-SUPPRESS] layer_number={self.layer_number} "
+                    f"sliding_window={self.sliding_window} path=packed_seq "
+                    f"- dropping startend_row_indices (kernel rejects both; "
+                    f"SWA bounds cross-doc bleed to window size)",
+                    flush=True,
+                )
+                self._swa_boundary_warned = True
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
                 value.astype(value.dtype),
-                startend_row_indices=attn_mask_startend_row_indices,
+                startend_row_indices=_startend,
                 dropout=self.config.attention_dropout,
                 causal=False,
                 window_size=self.sliding_window,
@@ -425,11 +464,29 @@ class DotProductAttention(FleetLayer):
             else:
                 value_padded = value
 
+            _swa_active = self.sliding_window is not None
+            _suppress = _swa_active and self._is_mtp_layer
+            _startend = (
+                None if _suppress else attn_mask_startend_row_indices
+            )
+            if (
+                _suppress
+                and attn_mask_startend_row_indices is not None
+                and not getattr(self, "_swa_boundary_warned", False)
+            ):
+                print(
+                    f"[SWA-BOUNDARY-SUPPRESS] layer_number={self.layer_number} "
+                    f"sliding_window={self.sliding_window} path=flashmask "
+                    f"- dropping startend_row_indices (kernel rejects both; "
+                    f"SWA bounds cross-doc bleed to window size)",
+                    flush=True,
+                )
+                self._swa_boundary_warned = True
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
                 value_padded.astype(value.dtype),
-                startend_row_indices=attn_mask_startend_row_indices,
+                startend_row_indices=_startend,
                 dropout=self.config.attention_dropout,
                 causal=(attn_mask_type == AttnMaskType.causal),
                 window_size=self.sliding_window,
