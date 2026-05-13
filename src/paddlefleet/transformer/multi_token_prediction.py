@@ -352,6 +352,26 @@ class MultiTokenPredictionLayer(FleetLayer):
         # "skip" slot (e.g. when backbone has window_attn_skip_freq set) and
         # silently drop mtp_window_size.
         mtp_config.window_attn_skip_freq = None
+        # Marker read by DotProductAttention to gate SWA-startend suppression
+        # to MTP layers only (main-model layers should never drop document
+        # boundaries even if they happen to use SWA).
+        mtp_config.is_mtp_layer = True
+        # Override the spec-captured backbone config on the transformer_layer
+        # LayerSpec so TransformerLayer.__init__ sees mtp_config (with
+        # sliding_window=(mtp_window_size, 0)) instead of the backbone config.
+        # Necessary because in this Paddle version LayerSpec.build() merges
+        # `extra_kwargs` with precedence over kwargs passed to
+        # build_spec_layer, so passing `config=mtp_config` to
+        # build_spec_layer(transformer_layer_spec, ...) alone does NOT
+        # override the spec's captured backbone config. The inner MLA /
+        # core_attention specs do not bake a config, so once the outer
+        # TransformerLayer sees mtp_config, it propagates correctly down
+        # to DotProductAttention and `[SWA-KERNEL-CONFIRM]` fires.
+        tl_spec = self.sublayers_spec.transformer_layer
+        if hasattr(tl_spec, "extra_kwargs") and isinstance(
+            tl_spec.extra_kwargs, dict
+        ):
+            tl_spec.extra_kwargs["config"] = mtp_config
         # Visible banner so operators can grep the training log to confirm MTP
         # sliding-window attention is actually configured as expected.
         # Grep-friendly tag: "[MTP-SWA-CONFIRM]".
