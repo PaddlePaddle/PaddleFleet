@@ -49,6 +49,10 @@ except (ImportError, ModuleNotFoundError, Exception):
 class TestFlashMaskCpAttentionQueryValidation(unittest.TestCase):
     """Tests for FlashMaskCpAttention query sequence length validation."""
 
+    @unittest.skipUnless(
+        _MODULE_AVAILABLE,
+        "paddlefleet.refined_recompute.flash_attn not available",
+    )
     def test_odd_seq_len_asserts(self):
         """Test that odd query sequence length raises assertion."""
         from paddlefleet.refined_recompute.flash_attn import (
@@ -56,7 +60,10 @@ class TestFlashMaskCpAttentionQueryValidation(unittest.TestCase):
         )
 
         rr = RefinedRcomputeFlashMaskCpAttention()
-        # Query sequence length of 7 (odd) should assert
+        # _first_fwd requires _hcg (hybrid communication group) which
+        # is only available in distributed/multi-card environments
+        if not hasattr(rr, "_hcg"):
+            self.skipTest("requires distributed environment with _hcg")
         with self.assertRaises(AssertionError):
             rr._first_fwd(
                 paddle.randn([1, 7, 4, 16]),  # odd seq_len

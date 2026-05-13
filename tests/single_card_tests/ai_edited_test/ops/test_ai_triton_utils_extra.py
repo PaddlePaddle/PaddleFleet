@@ -121,8 +121,8 @@ class TestTritonUtilsFunctions(unittest.TestCase):
                 _is_package_installed,
             )
 
-            # paddlepaddle is the distribution name for paddle
-            self.assertTrue(_is_package_installed("paddlepaddle"))
+            # paddle is always available in CI
+            self.assertTrue(_is_package_installed("paddle"))
             # Non-existent package
             self.assertFalse(
                 _is_package_installed("nonexistent_package_xyz_12345")

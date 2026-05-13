@@ -139,6 +139,7 @@ class TestExtensionsOpsModule(unittest.TestCase):
         self.assertTrue(hasattr(ops, "fuse_weighted_swiglu_fp8_quant"))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet._extensions not available")
 class TestExtensionsOpsFunctionSignatures(unittest.TestCase):
     """Tests for ops function signatures and basic properties."""
 
@@ -173,6 +174,7 @@ class TestExtensionsOpsFunctionSignatures(unittest.TestCase):
         self.assertTrue(callable(count_cumsum))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet._extensions not available")
 class TestExtensionsOpsBootstrap(unittest.TestCase):
     """Tests for the bootstrap mechanism of _extensions.ops."""
 

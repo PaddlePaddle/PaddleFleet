@@ -122,6 +122,7 @@ class TestExtensionsOpsFunctionCalls(unittest.TestCase):
         self.assertTrue(len(params) >= 4)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet._extensions not available")
 class TestExtensionsOpsUnifiedDecorator(unittest.TestCase):
     """Tests that ops functions are decorated with @unified."""
 
@@ -139,6 +140,7 @@ class TestExtensionsOpsUnifiedDecorator(unittest.TestCase):
         self.assertTrue(callable(filter_scores))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet._extensions not available")
 class TestExtensionsInitModule(unittest.TestCase):
     """Tests for paddlefleet._extensions.__init__ module."""
 
