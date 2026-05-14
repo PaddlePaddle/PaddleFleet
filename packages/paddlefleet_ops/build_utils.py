@@ -80,16 +80,14 @@ class EcosystemLibrary:
         source_rel_path: str,
         artifacts: list[Artifact],
         extra_env: dict[str, str] | None = None,
-        include_dirs: list[str] | None = None,
     ):
         self.name = name
-        # source_rel_path is relative to PKG_ROOT (where third_party/ lives)
-        self.source_dir = PKG_ROOT / source_rel_path
+        # source_rel_path is relative to workspace root (where third_party/ lives)
+        self.source_dir = ROOT_DIR / source_rel_path
         # Install into a subdirectory named after the library
         self.install_dir = THIRD_PARTY_INSTALL_TEMP / name
         self.artifacts = artifacts
         self._extra_env = extra_env or {}
-        self._include_dirs = include_dirs or []
 
     def build(self) -> None:
         """Builds the library unconditionally."""
@@ -136,16 +134,6 @@ class EcosystemLibrary:
         try:
             _env = os.environ.copy()
             _env.update(self._extra_env)
-            if self._include_dirs:
-                abs_dirs = [
-                    str(self.source_dir / d) for d in self._include_dirs
-                ]
-                extra = os.pathsep.join(abs_dirs)
-                for var in ("C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
-                    existing = _env.get(var, "")
-                    _env[var] = (
-                        f"{extra}{os.pathsep}{existing}" if existing else extra
-                    )
             subprocess.check_call(cmd, cwd=self.source_dir, env=_env)
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to build {self.name}: {e}")
@@ -188,12 +176,12 @@ class EcosystemLibrary:
 def check_submodule_updated():
     if backends.IS_NVIDIA:
         if not (
-            (PKG_ROOT / "third_party" / "DeepGEMM" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "DeepEP" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "HybridEP" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "quack" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "sonic-moe" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "flash-attention" / ".git").exists()
+            (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "HybridEP" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
+            and (ROOT_DIR / "third_party" / "flash-attention" / ".git").exists()
         ):
             logger.error(
                 "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
@@ -305,7 +293,7 @@ def get_special_build_deps():
         major = sys.version_info.major
         minor = sys.version_info.minor
         deps = [
-            "paddlepaddle-gpu>=3.4.0.dev20260415",
+            "paddlepaddle_gpu==3.4.0.post20260429+f2d27632b14",
         ]
         # for deep_ep build
         if platform.machine() == "aarch64":
@@ -375,11 +363,6 @@ def get_libs():
                 Artifact("deep_gemm", "deep_gemm"),
                 Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
             ],
-            include_dirs=[
-                "deep_gemm/include",
-                "third-party/cutlass/include",
-                "third-party/fmt/include",
-            ],
         ),
         EcosystemLibrary(
             name="DeepEP",
@@ -389,7 +372,6 @@ def get_libs():
                 Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
             ],
             extra_env={"PADDLE_CUDA_ARCH_LIST": _deep_ep_arch},
-            include_dirs=["csrc/"],
         ),
         EcosystemLibrary(
             name="flash-attention",
@@ -398,11 +380,6 @@ def get_libs():
                 Artifact("flash_mask", "flash_mask"),
             ],
             extra_env={"FLASHMASK_BUILD": "fa4"},
-            include_dirs=[
-                "flash_mask/flashmask_attention_v3/csrc",
-                "flash_mask/flashmask_attention_v3",
-                "flash_mask/flashmask_attention_v3/cutlass/include",
-            ],
         ),
     ]
     if (cuda_major, cuda_minor) >= (12, 9):
