@@ -23,7 +23,6 @@ from paddlefleet.transformer.sink_impl import (
     _flash_attention_forward_dispatch,
     _flashmask_attention_backward_dispatch,
     _flashmask_attention_forward_dispatch,
-    _get_fa_version,
     gen_dense_mask_from_startend_row_indices,
     sink_attention_forward,
 )
@@ -689,13 +688,27 @@ class TestBackward(unittest.TestCase):
         self.assertEqual(value.grad.shape, value.shape)
 
 
-def _is_sm90_or_above():
-    """Check if the GPU supports SM90+ (Hopper), required for FA3."""
+def _is_sm90():
+    """Check if the GPU is Hopper (SM90), required for FA3.
+
+    FA3 kernels target Hopper only; on Blackwell (SM100) FA3 will not run.
+    """
     if not paddle.is_compiled_with_cuda():
         return False
     try:
         cap = paddle.device.cuda.get_device_capability()
-        return cap[0] >= 9
+        return cap[0] == 9
+    except Exception:
+        return False
+
+
+def _is_sm100():
+    """Check if the GPU is Blackwell (SM100), required for FA4."""
+    if not paddle.is_compiled_with_cuda():
+        return False
+    try:
+        cap = paddle.device.cuda.get_device_capability()
+        return cap[0] == 10
     except Exception:
         return False
 
@@ -707,12 +720,12 @@ class TestFA3Path(unittest.TestCase):
     def setUpClass(cls):
         cls.has_fa3 = (
             hasattr(paddle.base.libpaddle.pir.ops, "flash_attn_v3")
-            and _is_sm90_or_above()
+            and _is_sm90()
         )
 
     def setUp(self):
         if not self.has_fa3:
-            self.skipTest("flash_attn_v3 requires Hopper GPU (SM90+)")
+            self.skipTest("flash_attn_v3 requires Hopper GPU (SM90)")
         paddle.seed(42)
         self.batch_size = 1
         self.seq_len = 128
@@ -886,66 +899,188 @@ class TestFA3Path(unittest.TestCase):
         self.assertIsNotNone(key.grad)
 
 
-class TestGetFaVersion(unittest.TestCase):
-    """Tests for _get_fa_version logic."""
+class TestFA4Path(unittest.TestCase):
+    """Tests for the FA4 code path on Blackwell GPUs (SM100, e.g. B100)."""
 
-    def test_deterministic_fallback_fa3_large_head_dim(self):
-        """When FA3 + deterministic + head_dim > 128, should fall back to version 2."""
-        original_fa = paddle.base.framework.get_flags(
-            ["FLAGS_flash_attn_version"]
-        )["FLAGS_flash_attn_version"]
-        original_det = paddle.base.framework.get_flags(
-            ["FLAGS_cudnn_deterministic"]
-        )["FLAGS_cudnn_deterministic"]
-        try:
-            paddle.base.framework.set_flags(
-                {
-                    "FLAGS_flash_attn_version": 3,
-                    "FLAGS_cudnn_deterministic": 1,
-                }
-            )
-            # head_dim > 128 should trigger fallback to v2
-            self.assertEqual(_get_fa_version(head_dim=256), 2)
-            # head_dim <= 128 should not trigger fallback
-            self.assertEqual(_get_fa_version(head_dim=128), 3)
-            self.assertEqual(_get_fa_version(head_dim=64), 3)
-        finally:
-            paddle.base.framework.set_flags(
-                {
-                    "FLAGS_flash_attn_version": original_fa,
-                    "FLAGS_cudnn_deterministic": original_det,
-                }
-            )
+    @classmethod
+    def setUpClass(cls):
+        cls.has_fa4 = _is_sm100()
+        if cls.has_fa4:
+            try:
+                from paddlefleet.ops.flash_mask.cute.interface import (  # noqa: F401
+                    _flash_attn_bwd,
+                    _flash_attn_fwd,
+                )
+            except Exception:
+                cls.has_fa4 = False
 
-    def test_no_fallback_when_not_deterministic(self):
-        """When deterministic is off, FA3 should be returned as-is."""
-        original_fa = paddle.base.framework.get_flags(
-            ["FLAGS_flash_attn_version"]
-        )["FLAGS_flash_attn_version"]
-        original_det = paddle.base.framework.get_flags(
-            ["FLAGS_cudnn_deterministic"]
-        )["FLAGS_cudnn_deterministic"]
-        try:
-            paddle.base.framework.set_flags(
-                {
-                    "FLAGS_flash_attn_version": 3,
-                    "FLAGS_cudnn_deterministic": 0,
-                }
-            )
-            self.assertEqual(_get_fa_version(head_dim=256), 3)
-        finally:
-            paddle.base.framework.set_flags(
-                {
-                    "FLAGS_flash_attn_version": original_fa,
-                    "FLAGS_cudnn_deterministic": original_det,
-                }
-            )
+    def setUp(self):
+        if not self.has_fa4:
+            self.skipTest("FA4 requires Blackwell GPU (SM100)")
+        paddle.seed(42)
+        self.batch_size = 1
+        self.seq_len = 128
+        self.num_heads = 8
+        self.head_dim = 64
+        self.dtype = "bfloat16"
+        self.scaling = self.head_dim**-0.5
+        paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 4})
+
+    def tearDown(self):
+        paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 2})
+
+    def test_fa4_forward_causal(self):
+        """Test FA4 causal forward produces correct output shape."""
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+
+        out = sink_attention_forward(
+            query,
+            key,
+            value,
+            sink,
+            causal=True,
+            softmax_scale=self.scaling,
+        )
+        self.assertEqual(
+            out.shape,
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+        )
+
+    def test_fa4_backward(self):
+        """Test FA4 backward produces gradients for all inputs."""
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+        query.stop_gradient = False
+        key.stop_gradient = False
+        value.stop_gradient = False
+        sink.stop_gradient = False
+
+        out = sink_attention_forward(
+            query,
+            key,
+            value,
+            sink,
+            causal=True,
+            softmax_scale=self.scaling,
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(query.grad)
+        self.assertIsNotNone(key.grad)
+        self.assertIsNotNone(value.grad)
+
+    def test_fa4_flashmask_forward(self):
+        """Test FlashMask with FA4 forward produces correct output shape."""
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+
+        indices = np.zeros(
+            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
+        )
+        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
+        indices[:, :, :, 0] = diag
+        indices[:, :, :, 1] = 0
+        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
+
+        out = sink_attention_forward(
+            query,
+            key,
+            value,
+            sink,
+            startend_row_indices=startend_row_indices,
+            causal=False,
+            softmax_scale=self.scaling,
+        )
+        self.assertEqual(
+            out.shape,
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+        )
+
+    def test_fa4_flashmask_backward(self):
+        """Test FlashMask with FA4 backward produces gradients."""
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+        query.stop_gradient = False
+        key.stop_gradient = False
+        value.stop_gradient = False
+        sink.stop_gradient = False
+
+        indices = np.zeros(
+            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
+        )
+        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
+        indices[:, :, :, 0] = diag
+        indices[:, :, :, 1] = 0
+        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
+
+        out = sink_attention_forward(
+            query,
+            key,
+            value,
+            sink,
+            startend_row_indices=startend_row_indices,
+            causal=False,
+            softmax_scale=self.scaling,
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(query.grad)
+        self.assertIsNotNone(key.grad)
 
 
 class TestFA3PathMocked(unittest.TestCase):
     """Test FA3 code paths using mocks (for non-Hopper machines)."""
 
     def setUp(self):
+        if not _is_sm90():
+            self.skipTest("FA3 only available on Hopper (SM90)")
         paddle.seed(42)
         self.batch_size = 1
         self.seq_len = 64

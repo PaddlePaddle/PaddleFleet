@@ -178,7 +178,8 @@ class DotProductAttention(FleetLayer):
                 ),
             )
             if config.perform_initialization:
-                self.softmax_offset = config.init_method(self.softmax_offset)
+                # in-place init
+                config.init_method(self.softmax_offset)
         else:
             raise ValueError("Softmax type not supported")
         self.rr_flashmask_attention_func = rr_flashmask_attention()
@@ -188,7 +189,6 @@ class DotProductAttention(FleetLayer):
         query,
         key,
         value,
-        sink,
         *,
         attention_mask=None,
         startend_row_indices=None,
@@ -200,7 +200,7 @@ class DotProductAttention(FleetLayer):
             query.astype(value.dtype),
             key.astype(value.dtype),
             value.astype(value.dtype),
-            sink,
+            self.softmax_offset,
             attention_mask=attention_mask,
             startend_row_indices=startend_row_indices,
             dropout_p=self.config.attention_dropout,
@@ -262,7 +262,6 @@ class DotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
-        sink: Tensor | None = None,
     ):
         """Forward."""
         assert attention_bias is None, (
@@ -275,13 +274,6 @@ class DotProductAttention(FleetLayer):
         v_head_dim = value.shape[-1]
 
         use_eager = self.config._attn_implementation == "eager"
-
-        if sink is not None and self.softmax_offset is not None:
-            raise ValueError(
-                "sink (forward arg) conflicts with softmax_offset "
-                f"(softmax_type={self.config.softmax_type!r}); "
-                "both map to the same SoftmaxOne mechanism. Choose one."
-            )
 
         if use_eager and packed_seq_params is not None:
             raise ValueError(
@@ -322,14 +314,13 @@ class DotProductAttention(FleetLayer):
                     .unsqueeze(0)
                 )  # [1, 1, seq_len, 4]
 
-            if sink is not None:
+            if self.softmax_offset is not None:
                 # causal=False because 4-bound startend_row_indices already
                 # encodes the full bidirectional mask (SWA / non-causal FlashMask).
                 return self._sink_forward(
                     query,
                     key,
                     value,
-                    sink,
                     startend_row_indices=attn_mask_startend_row_indices,
                     causal=False,
                 )
@@ -363,12 +354,11 @@ class DotProductAttention(FleetLayer):
             # is_causal is True in default
             # training is True in default
             # Default values above maybe changed in the future
-            if sink is not None:
+            if self.softmax_offset is not None:
                 return self._sink_forward(
                     query,
                     key,
                     value,
-                    sink,
                     attention_mask=attention_mask,
                     causal=True,
                 )
@@ -397,12 +387,11 @@ class DotProductAttention(FleetLayer):
         ):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
-            if sink is not None:
+            if self.softmax_offset is not None:
                 return self._sink_forward(
                     query,
                     key,
                     value,
-                    sink,
                     startend_row_indices=attn_mask_startend_row_indices,
                     causal=(attn_mask_type == AttnMaskType.causal),
                 )
@@ -524,13 +513,10 @@ class DotProductAttention(FleetLayer):
         # ===========================
 
         # attention scores and attention mask [b, np, sq, sk]
-        # softmax_offset and external sink both drive the same SoftmaxOne path
-        # (concat sink logit -> softmax -> drop sink column). The conflict
-        # between them is rejected at the top of forward().
         attention_probs: Tensor = self.scale_mask_softmax(
             attention_scores,
             attention_mask,
-            sink if sink is not None else self.softmax_offset,
+            self.softmax_offset,
         )
 
         # This is actually dropping out entire tokens to attend to, which might
@@ -622,12 +608,8 @@ class CPDotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
-        sink: Tensor | None = None,
     ):
         """Forward."""
-        assert sink is None, (
-            "sink is not supported by CPDotProductAttention yet."
-        )
         assert packed_seq_params is None, (
             "Packed sequence is not supported by CPDotProductAttention now."
         )

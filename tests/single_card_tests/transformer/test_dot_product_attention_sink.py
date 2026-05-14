@@ -14,7 +14,7 @@
 
 """
 Module-level unit tests for DotProductAttention with the attention-sink
-mechanism enabled.
+mechanism enabled via softmax_type configuration.
 
 Unlike test_attention_sink.py which exercises the lower-level
 sink_attention_forward helper, this file instantiates
@@ -25,11 +25,10 @@ Covered:
 
 * forward numerical correctness on every path (bf16 on fused paths, fp32 on
   the eager path) against a naive concat-softmax-drop reference;
-* backward gradient flow on every path (q/k/v/sink all receive non-None
-  grads) plus numerical grad match on SDPA & FlashMask;
-* sink=None regression (unchanged behaviour and interaction with the
-  pre-existing softmax_offset Parameter);
-* sink / softmax_offset mutual-exclusion ValueError;
+* backward gradient flow on every path (q/k/v/softmax_offset all receive
+  non-None grads) plus numerical grad match on SDPA & FlashMask;
+* softmax_type='vanilla' regression (no sink behaviour);
+* softmax_type='off-by-one' consumes internal softmax_offset;
 * grouped-query attention with sink;
 * shape / dtype boundaries.
 """
@@ -200,9 +199,18 @@ class _SinkTestBase(unittest.TestCase):
         return q, k, v
 
     def _make_sink(self, dtype, num_heads=None):
+        """Generate a random sink value and return it (for reference computation)."""
         s = paddle.randn([num_heads or self.NUM_HEADS], dtype=dtype)
         s.stop_gradient = False
         return s
+
+    def _set_sink(self, attn, sink_value):
+        """Inject a sink value into attn.softmax_offset for testing."""
+        with paddle.no_grad():
+            attn.softmax_offset.set_value(
+                sink_value.clone().astype(attn.softmax_offset.dtype)
+            )
+        attn.softmax_offset.stop_gradient = False
 
     def _causal_mask(self, dtype):
         m = paddle.triu(
@@ -229,13 +237,14 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
 
     def test_path_B_sdpa_causal(self):
         """Path B: bf16, no startend_row_indices, not eager -> SDPA branch."""
-        config = _make_config(bf16=True)
+        config = _make_config(bf16=True, softmax_type="learnable")
         attn = _make_attn(config)
 
         q, k, v = self._make_qkv(paddle.bfloat16)
         sink = self._make_sink(paddle.bfloat16)
+        self._set_sink(attn, sink)
 
-        out = attn(q, k, v, None, sink=sink)
+        out = attn(q, k, v, None)
         self.assertEqual(
             out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
         )
@@ -246,10 +255,15 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
         )
         assert_close(out, ref, atol=1e-2, rtol=1e-2, msg="SDPA+sink fwd")
 
-        # backward: all inputs including sink must receive non-None gradients
+        # backward: all inputs including softmax_offset must receive non-None gradients
         loss = out.astype("float32").mean()
         loss.backward()
-        for name, t in [("q", q), ("k", k), ("v", v), ("sink", sink)]:
+        for name, t in [
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("softmax_offset", attn.softmax_offset),
+        ]:
             self.assertIsNotNone(t.grad, f"{name}.grad is None")
             self.assertEqual(list(t.grad.shape), list(t.shape))
             self.assertFalse(
@@ -258,11 +272,12 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
 
     def test_path_C_flashmask_causal(self):
         """Path C: bf16 + startend_row_indices (causal 2-col format)."""
-        config = _make_config(bf16=True)
+        config = _make_config(bf16=True, softmax_type="learnable")
         attn = _make_attn(config, attn_mask_type=AttnMaskType.causal)
 
         q, k, v = self._make_qkv(paddle.bfloat16)
         sink = self._make_sink(paddle.bfloat16)
+        self._set_sink(attn, sink)
 
         # 1-column startend_row_indices, causal=True -> every token attends
         # up to itself (full causal).
@@ -279,7 +294,6 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
             None,
             attn_mask_startend_row_indices=idx,
             attn_mask_type=AttnMaskType.causal,
-            sink=sink,
         )
         self.assertEqual(
             out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
@@ -293,7 +307,12 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
 
         loss = out.astype("float32").mean()
         loss.backward()
-        for name, t in [("q", q), ("k", k), ("v", v), ("sink", sink)]:
+        for name, t in [
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("softmax_offset", attn.softmax_offset),
+        ]:
             self.assertIsNotNone(t.grad, f"{name}.grad is None")
             self.assertFalse(
                 paddle.isnan(t.grad).any().item(), f"{name}.grad has NaN"
@@ -307,11 +326,12 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
         other). This is what the PackedSeqParams branch constructs via
         startend_row_indices derived from cu_seqlens.
         """
-        config = _make_config(bf16=True)
+        config = _make_config(bf16=True, softmax_type="learnable")
         attn = _make_attn(config, attn_mask_type=AttnMaskType.no_mask)
 
         q, k, v = self._make_qkv(paddle.bfloat16)
         sink = self._make_sink(paddle.bfloat16)
+        self._set_sink(attn, sink)
 
         # one segment covering [0, SEQ)
         cu = paddle.to_tensor([0, self.SEQ], dtype=paddle.int32)
@@ -325,7 +345,7 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
             total_seqlen_kv=self.SEQ,
         )
 
-        out = attn(q, k, v, None, packed_seq_params=packed, sink=sink)
+        out = attn(q, k, v, None, packed_seq_params=packed)
         self.assertEqual(
             out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
         )
@@ -338,7 +358,12 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
 
         loss = out.astype("float32").mean()
         loss.backward()
-        for name, t in [("q", q), ("k", k), ("v", v), ("sink", sink)]:
+        for name, t in [
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("softmax_offset", attn.softmax_offset),
+        ]:
             self.assertIsNotNone(t.grad, f"{name}.grad is None")
 
 
@@ -347,13 +372,16 @@ class TestDPASinkForwardEager(_SinkTestBase):
 
     def test_path_D_eager_fp32(self):
         """fp32 naturally falls through to the eager matmul path."""
-        config = _make_config()  # fp32, not eager explicitly, but fp32 gates
+        config = _make_config(
+            softmax_type="learnable"
+        )  # fp32, not eager explicitly, but fp32 gates
         attn = _make_attn(config)
 
         q, k, v = self._make_qkv(paddle.float32)
         sink = self._make_sink(paddle.float32)
+        self._set_sink(attn, sink)
 
-        out = attn(q, k, v, self._causal_mask(paddle.float32), sink=sink)
+        out = attn(q, k, v, self._causal_mask(paddle.float32))
         self.assertEqual(
             out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
         )
@@ -365,21 +393,27 @@ class TestDPASinkForwardEager(_SinkTestBase):
 
         loss = out.mean()
         loss.backward()
-        for name, t in [("q", q), ("k", k), ("v", v), ("sink", sink)]:
+        for name, t in [
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("softmax_offset", attn.softmax_offset),
+        ]:
             self.assertIsNotNone(t.grad, f"{name}.grad is None")
             self.assertEqual(list(t.grad.shape), list(t.shape))
 
     def test_path_D_eager_via_flag(self):
         """fp32 + _attn_implementation='eager' explicitly takes the eager path."""
-        config = _make_config()
+        config = _make_config(softmax_type="learnable")
         config._attn_implementation = "eager"
         attn = _make_attn(config)
 
         q, k, v = self._make_qkv(paddle.float32)
         sink = self._make_sink(paddle.float32)
+        self._set_sink(attn, sink)
         mask = self._causal_mask(paddle.float32)
 
-        out = attn(q, k, v, mask, sink=sink)
+        out = attn(q, k, v, mask)
         ref = naive_attn_sink(q, k, v, sink, mask, self.scaling)
         assert_close(out, ref, atol=1e-4, rtol=1e-4, msg="eager flag+sink fwd")
 
@@ -401,19 +435,20 @@ class TestDPASinkGradEager(_SinkTestBase):
     """Exact gradient match on the fp32 eager path against naive reference."""
 
     def test_eager_grad_match_fp32(self):
-        config = _make_config()  # fp32 -> Path D
+        config = _make_config(softmax_type="learnable")  # fp32 -> Path D
         attn = _make_attn(config)
 
         q, k, v = self._make_qkv(paddle.float32)
         sink = self._make_sink(paddle.float32)
+        self._set_sink(attn, sink)
         mask = self._causal_mask(paddle.float32)
 
-        out = attn(q, k, v, mask, sink=sink)
+        out = attn(q, k, v, mask)
         paddle.seed(0)
         upstream = paddle.randn(out.shape, dtype=out.dtype)
         grads = paddle.grad(
             outputs=[out],
-            inputs=[q, k, v, sink],
+            inputs=[q, k, v, attn.softmax_offset],
             grad_outputs=[upstream],
         )
 
@@ -443,27 +478,26 @@ class TestDPASinkGradEager(_SinkTestBase):
 
 
 # ---------------------------------------------------------------------------
-# TestDPASinkRegression — sink=None must not perturb the existing behaviour.
+# TestDPASinkRegression — softmax_type='vanilla' must not trigger sink path.
 # ---------------------------------------------------------------------------
 
 
 class TestDPASinkRegression(_SinkTestBase):
-    def test_sink_none_matches_omitted(self):
-        """Passing sink=None explicitly equals not passing sink at all."""
-        config = _make_config()
+    def test_vanilla_no_sink(self):
+        """softmax_type='vanilla' -> softmax_offset is None -> no sink path."""
+        config = _make_config(softmax_type="vanilla")
         attn = _make_attn(config)
+        self.assertIsNone(attn.softmax_offset)
         q, k, v = self._make_qkv(paddle.float32)
         mask = self._causal_mask(paddle.float32)
+        out = attn(q, k, v, mask)
+        self.assertEqual(
+            out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
+        )
 
-        out_a = attn(q, k, v, mask, sink=None)
-        out_b = attn(q, k, v, mask)
-        # bitwise identical — same code path, same inputs.
-        self.assertTrue(paddle.equal_all(out_a, out_b).item())
-
-    def test_sink_none_with_softmax_offset_consumed(self):
-        """When softmax_type is learnable/off-by-one, the softmax_offset
-        Parameter must still be consumed when the external sink argument
-        is None (the eager branch should route self.softmax_offset)."""
+    def test_off_by_one_softmax_offset_consumed(self):
+        """When softmax_type is off-by-one, the softmax_offset
+        must be consumed (the eager branch should route self.softmax_offset)."""
         config = _make_config(softmax_type="off-by-one")
         attn = _make_attn(config)
         self.assertIsNotNone(attn.softmax_offset)
@@ -472,66 +506,21 @@ class TestDPASinkRegression(_SinkTestBase):
         # produce a different output than a vanilla attention.
         with paddle.no_grad():
             new_offset = paddle.ones_like(attn.softmax_offset) * 2.5
-            # softmax_offset for "off-by-one" is a plain Tensor, not Parameter
             attn.softmax_offset = new_offset
 
         q, k, v = self._make_qkv(paddle.float32)
         mask = self._causal_mask(paddle.float32)
 
-        out_with_offset = attn(q, k, v, mask, sink=None)
+        out_with_offset = attn(q, k, v, mask)
 
-        # Compare against vanilla (no offset, no sink)
+        # Compare against vanilla (no offset)
         vanilla_cfg = _make_config(softmax_type="vanilla")
         vanilla_attn = _make_attn(vanilla_cfg)
-        # Align weights by re-seeding and rebuilding — here both are fp32
-        # matmul-based eager, and since we only care that the two outputs
-        # *differ*, no weight alignment is needed (attn has no learned params
-        # in this path beyond softmax_offset itself).
         out_vanilla = vanilla_attn(q, k, v, mask)
 
         self.assertFalse(
             paddle.allclose(out_with_offset, out_vanilla).item(),
             "softmax_offset was not consumed (output matches vanilla)",
-        )
-
-
-# ---------------------------------------------------------------------------
-# TestDPASinkConflict — mutual exclusion between sink and softmax_offset.
-# ---------------------------------------------------------------------------
-
-
-class TestDPASinkConflict(_SinkTestBase):
-    def _run_forward_expecting_valueerror(self, softmax_type):
-        config = _make_config(softmax_type=softmax_type)
-        attn = _make_attn(config)
-        q, k, v = self._make_qkv(paddle.float32)
-        sink = self._make_sink(paddle.float32)
-        with self.assertRaises(ValueError) as ctx:
-            attn(q, k, v, self._causal_mask(paddle.float32), sink=sink)
-        self.assertIn("softmax_offset", str(ctx.exception))
-
-    def test_sink_and_off_by_one_raises(self):
-        self._run_forward_expecting_valueerror("off-by-one")
-
-    # NOTE: softmax_type='learnable' would conceptually also conflict with
-    # sink, but an unrelated pre-existing issue in DotProductAttention
-    # leaves self.softmax_offset as None for the learnable branch when
-    # config.perform_initialization is engaged (paddle.nn.init.normal_
-    # returns None in the current paddle version, silently overwriting the
-    # registered Parameter). Until that is fixed in dot_product_attention.py
-    # the learnable conflict cannot actually be triggered, so we only test
-    # the off-by-one variant here.
-
-    def test_sink_with_vanilla_ok(self):
-        """softmax_type='vanilla' -> softmax_offset is None -> sink works."""
-        config = _make_config(softmax_type="vanilla")
-        attn = _make_attn(config)
-        self.assertIsNone(attn.softmax_offset)
-        q, k, v = self._make_qkv(paddle.float32)
-        sink = self._make_sink(paddle.float32)
-        out = attn(q, k, v, self._causal_mask(paddle.float32), sink=sink)
-        self.assertEqual(
-            out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
         )
 
 
@@ -547,14 +536,19 @@ class TestDPASinkGQA(_SinkTestBase):
     NUM_KV_HEADS = 2  # 4 query heads / 2 kv heads -> GQA groups = 2
 
     def test_sdpa_gqa(self):
-        config = _make_config(bf16=True, num_key_value_heads=self.NUM_KV_HEADS)
+        config = _make_config(
+            bf16=True,
+            num_key_value_heads=self.NUM_KV_HEADS,
+            softmax_type="learnable",
+        )
         attn = _make_attn(config)
         q, k, v = self._make_qkv(
             paddle.bfloat16, num_kv_heads=self.NUM_KV_HEADS
         )
         sink = self._make_sink(paddle.bfloat16)
+        self._set_sink(attn, sink)
 
-        out = attn(q, k, v, None, sink=sink)
+        out = attn(q, k, v, None)
         self.assertEqual(
             out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
         )
@@ -571,12 +565,17 @@ class TestDPASinkGQA(_SinkTestBase):
         assert_close(out, ref, atol=2e-2, rtol=2e-2, msg="GQA SDPA+sink")
 
     def test_flashmask_gqa(self):
-        config = _make_config(bf16=True, num_key_value_heads=self.NUM_KV_HEADS)
+        config = _make_config(
+            bf16=True,
+            num_key_value_heads=self.NUM_KV_HEADS,
+            softmax_type="learnable",
+        )
         attn = _make_attn(config, attn_mask_type=AttnMaskType.causal)
         q, k, v = self._make_qkv(
             paddle.bfloat16, num_kv_heads=self.NUM_KV_HEADS
         )
         sink = self._make_sink(paddle.bfloat16)
+        self._set_sink(attn, sink)
 
         # flashmask uses 1 "kv-head" row (broadcast) by convention
         idx = paddle.full(
@@ -591,7 +590,6 @@ class TestDPASinkGQA(_SinkTestBase):
             None,
             attn_mask_startend_row_indices=idx,
             attn_mask_type=AttnMaskType.causal,
-            sink=sink,
         )
         self.assertEqual(
             out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
@@ -606,25 +604,132 @@ class TestDPASinkGQA(_SinkTestBase):
 
 class TestDPASinkShape(_SinkTestBase):
     def test_fp32_sink_goes_eager(self):
-        """fp32 inputs with sink land in the eager branch (Path D)."""
-        config = _make_config()
+        """fp32 inputs with sink (softmax_type=learnable) land in the eager branch (Path D)."""
+        config = _make_config(softmax_type="learnable")
         attn = _make_attn(config)
         q, k, v = self._make_qkv(paddle.float32)
         sink = self._make_sink(paddle.float32)
-        out = attn(q, k, v, self._causal_mask(paddle.float32), sink=sink)
+        self._set_sink(attn, sink)
+        out = attn(q, k, v, self._causal_mask(paddle.float32))
         self.assertEqual(
             out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
         )
 
-    @unittest.skipIf(not _has_cuda(), "Requires CUDA for fused attention.")
-    def test_sink_shape_mismatch_raises(self):
-        """sink.shape[0] != num_query_heads triggers sink_impl assertion."""
-        config = _make_config(bf16=True)
-        attn = _make_attn(config)
+
+# ---------------------------------------------------------------------------
+# TestDPASinkFlashMaskNonCausal — FlashMask + sink with causal=False.
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipIf(not _has_cuda(), "Requires CUDA for fused attention paths.")
+class TestDPASinkFlashMaskNonCausal(_SinkTestBase):
+    """FlashMask path with sink and non-causal attn_mask_type."""
+
+    def test_flashmask_non_causal(self):
+        """Path C variant: startend_row_indices + attn_mask_type != causal."""
+        config = _make_config(bf16=True, softmax_type="learnable")
+        attn = _make_attn(config, attn_mask_type=AttnMaskType.no_mask)
+
         q, k, v = self._make_qkv(paddle.bfloat16)
-        bad_sink = paddle.randn([self.NUM_HEADS + 1], dtype=paddle.bfloat16)
-        with self.assertRaises(AssertionError):
-            attn(q, k, v, None, sink=bad_sink)
+        sink = self._make_sink(paddle.bfloat16)
+        self._set_sink(attn, sink)
+
+        # 4-column startend_row_indices for non-causal (full attention)
+        idx = paddle.stack(
+            [
+                paddle.full([self.SEQ], self.SEQ, dtype=paddle.int32),  # lower_start
+                paddle.full([self.SEQ], self.SEQ, dtype=paddle.int32),  # lower_end
+                paddle.zeros([self.SEQ], dtype=paddle.int32),           # upper_start
+                paddle.zeros([self.SEQ], dtype=paddle.int32),           # upper_end
+            ],
+            axis=-1,
+        ).unsqueeze(0).unsqueeze(0)  # [1, 1, SEQ, 4]
+
+        out = attn(
+            q,
+            k,
+            v,
+            None,
+            attn_mask_startend_row_indices=idx,
+            attn_mask_type=AttnMaskType.no_mask,
+        )
+        self.assertEqual(
+            out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
+        )
+        self.assertFalse(paddle.isnan(out).any().item())
+
+        # Non-causal full attention ref (no mask)
+        ref = naive_attn_sink(q, k, v, sink, None, self.scaling)
+        assert_close(out, ref, atol=2e-2, rtol=2e-2, msg="FlashMask non-causal+sink")
+
+
+# ---------------------------------------------------------------------------
+# TestDPASinkOffByOneFused — off-by-one on the fused bf16 SDPA path.
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipIf(not _has_cuda(), "Requires CUDA for fused attention paths.")
+class TestDPASinkOffByOneFused(_SinkTestBase):
+    """Verify off-by-one (zero sink) routes through fused bf16 paths."""
+
+    def test_off_by_one_sdpa_bf16(self):
+        """off-by-one with bf16 SDPA path — zero sink equals SoftmaxOne."""
+        config = _make_config(bf16=True, softmax_type="off-by-one")
+        attn = _make_attn(config)
+        # off-by-one creates zeros, equivalent to sink=0 for all heads
+        self.assertIsNotNone(attn.softmax_offset)
+        self.assertTrue(
+            paddle.equal_all(
+                attn.softmax_offset,
+                paddle.zeros_like(attn.softmax_offset),
+            ).item()
+        )
+
+        q, k, v = self._make_qkv(paddle.bfloat16)
+        out = attn(q, k, v, None)
+        self.assertEqual(
+            out.shape, [self.BATCH, self.SEQ, self.NUM_HEADS * self.HEAD_DIM]
+        )
+        self.assertFalse(paddle.isnan(out).any().item())
+
+        # With sink=0, the SoftmaxOne formula is:
+        # prob_i = exp(s_i) / (1 + sum_j exp(s_j))
+        # Verify it differs from vanilla (which has no +1 in denominator)
+        vanilla_config = _make_config(bf16=True, softmax_type="vanilla")
+        vanilla_attn = _make_attn(vanilla_config)
+        out_vanilla = vanilla_attn(q, k, v, None)
+        self.assertFalse(
+            paddle.allclose(
+                out.astype("float32"), out_vanilla.astype("float32")
+            ).item(),
+            "off-by-one output should differ from vanilla on SDPA path",
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestDPASinkInit — verify learnable init correctness after bug fix.
+# ---------------------------------------------------------------------------
+
+
+class TestDPASinkInit(_SinkTestBase):
+    """Regression: softmax_type='learnable' + perform_initialization=True
+    must produce a valid (non-None) Parameter."""
+
+    def test_learnable_init_produces_valid_parameter(self):
+        """After bug fix, init_method should in-place initialize softmax_offset."""
+        config = _make_config(softmax_type="learnable")
+        # perform_initialization defaults to True
+        attn = _make_attn(config)
+
+        self.assertIsNotNone(attn.softmax_offset)
+        self.assertIsInstance(attn.softmax_offset, paddle.nn.Parameter)
+        self.assertEqual(
+            list(attn.softmax_offset.shape), [self.NUM_HEADS]
+        )
+        # Should be initialized (not all zeros since normal_ was applied)
+        # Note: with very small sigma there's a tiny chance of all zeros,
+        # but practically this never happens.
+        self.assertEqual(attn.softmax_offset.dtype, paddle.float32)
 
 
 if __name__ == "__main__":

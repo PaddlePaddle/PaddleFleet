@@ -18,6 +18,15 @@ from paddle.autograd.py_layer import PyLayer
 
 _C_ops = paddle._C_ops
 
+if paddle.cuda.get_device_capability()[0] == 10:
+    from paddlefleet.ops.flash_mask.cute.flashmask_utils import (
+        FlashMaskInfoPaddle,
+    )
+    from paddlefleet.ops.flash_mask.cute.interface import (
+        _flash_attn_bwd,
+        _flash_attn_fwd,
+    )
+
 
 def gen_dense_mask_from_startend_row_indices(
     attn_mask_startend_row_indices: paddle.Tensor,
@@ -225,6 +234,20 @@ def _flash_attention_forward_dispatch(
         assert attention_mask is None, (
             "FA3 do not support dense mask(attention_mask)"
         )
+    elif fa_version == 4:
+        out, lse = _flash_attn_fwd(
+            query,
+            key,
+            value,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            return_lse=True,
+            startend_row_indices=None,
+            pack_gqa=False,
+        )
+        assert attention_mask is None, (
+            "FA4 do not support dense mask(attention_mask)"
+        )
     else:
         raise ValueError(f"Unsupported FlashAttention version: {fa_version}")
 
@@ -289,6 +312,26 @@ def _flash_attention_backward_dispatch(
         assert attention_mask is None, (
             "FA3 do not support dense mask(attention_mask)"
         )
+    elif fa_version == 4:
+        grad_q, grad_k, grad_v = _flash_attn_bwd(
+            query,
+            key,
+            value,
+            output,
+            grad_output,
+            lse,
+            None,  # flashmask_info, startend_row_indices is not None
+            softmax_scale=softmax_scale,
+            causal=causal,
+            deterministic=bool(
+                paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+                    "FLAGS_cudnn_deterministic"
+                ]
+            ),
+        )
+        assert attention_mask is None, (
+            "FA4 do not support dense mask(attention_mask)"
+        )
     else:
         raise ValueError(f"Unsupported FlashAttention version: {fa_version}")
 
@@ -329,7 +372,7 @@ def _flashmask_attention_forward_dispatch(
             return_softmax_lse=True,
             training=training,
         )
-    else:
+    elif fa_version == 3:
         output, log_sum_exp = paddle.nn.functional.flashmask_attention(
             query,
             key,
@@ -341,6 +384,19 @@ def _flashmask_attention_forward_dispatch(
             return_softmax_lse=True,
             training=training,
         )
+    elif fa_version == 4:
+        output, log_sum_exp = _flash_attn_fwd(
+            query,
+            key,
+            value,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            return_lse=True,
+            startend_row_indices=startend_row_indices,
+            pack_gqa=False,
+        )
+    else:
+        raise ValueError(f"Unsupported FlashAttention version: {fa_version}")
 
     return output, log_sum_exp
 
@@ -402,6 +458,30 @@ def _flashmask_attention_backward_dispatch(
             raise AssertionError(
                 "flashmask_attention_v2_grad is not supported, may be due to paddle version"
             )
+    elif fa_version == 4:
+        if startend_row_indices is not None:
+            flashmask_info = FlashMaskInfoPaddle(
+                startend_row_indices=startend_row_indices,
+                is_causal=causal,
+            )
+        else:
+            flashmask_info = None
+        grad_q, grad_k, grad_v = _flash_attn_bwd(
+            query,
+            key,
+            value,
+            output,
+            grad_output,
+            lse,
+            flashmask_info,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            deterministic=bool(
+                paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+                    "FLAGS_cudnn_deterministic"
+                ]
+            ),
+        )
     else:
         raise ValueError(f"Unsupported FlashAttention version: {fa_version}")
 
