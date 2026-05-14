@@ -293,7 +293,7 @@ def get_special_build_deps():
         major = sys.version_info.major
         minor = sys.version_info.minor
         deps = [
-            "paddlepaddle_gpu==3.4.0.post20260429+f2d27632b14",
+            "paddlepaddle_gpu==3.4.0.post20260513+216842f7e89",
         ]
         # for deep_ep build
         if platform.machine() == "aarch64":
