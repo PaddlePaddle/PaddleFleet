@@ -56,6 +56,39 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+import paddle.nn.functional as F
+
+
+class SigmoidGate(nn.Layer):
+    """Per-token sigmoid gate for embedding fusion with full matrix.
+
+    Formula: gate = sigmoid(W @ e)
+    Output: h_out = h_in + h_in * gate
+
+    Args:
+        hidden_size: Hidden dimension of the model
+        zero_init: If True, initialize W to zero for gate ≈ 0.5
+    """
+
+    def __init__(self, hidden_size: int, zero_init: bool = True):
+        super().__init__()
+        self.W = nn.Linear(hidden_size, hidden_size, bias_attr=False)
+        self._cast_to_low_precision = False
+
+        if zero_init:
+            nn.initializer.Constant(0.0)(self.W.weight)
+
+    def forward(self, embedding: paddle.Tensor) -> paddle.Tensor:
+        """Compute gate values from embedding.
+
+        Args:
+            embedding: [B, S, H] or [S, B, H]
+
+        Returns:
+            gate: Same shape as embedding, values in [0, 1]
+        """
+        return F.sigmoid(self.W(embedding))
+
 
 def tensors_clone(outputs):
     """
@@ -404,7 +437,7 @@ class TransformerLayer(nn.Layer):
             )
             self.attn_res_block_size = self.config.attn_res_block_size
 
-        # [Layer 11: Embedding Gating] Scalar gate for last decoder layer
+        # [Layer 11: Embedding Gating] Sigmoid gate for last decoder layer
         self.use_embedding_gating = getattr(self.config, 'use_embedding_gating', False)
         num_empty = getattr(self.config, 'num_empty_layers_add_in_head', 0) or 0
         self._is_last_decoder_layer = (
@@ -412,24 +445,13 @@ class TransformerLayer(nn.Layer):
             and self.layer_number == num_empty + self.config.num_hidden_layers - 1
         )
         if self._is_last_decoder_layer:
-            alpha_init = getattr(self.config, 'embedding_gating_alpha_init', 1.05)
-            beta_init = getattr(self.config, 'embedding_gating_beta_init', 0.05)
-            self.embedding_gate = nn.Layer()
-            self.embedding_gate._cast_to_low_precision = False
-            self.embedding_gate.alpha = paddle.create_parameter(
-                shape=[1],
-                dtype='float32',
-                default_initializer=paddle.nn.initializer.Constant(alpha_init),
-            )
-            self.embedding_gate.beta = paddle.create_parameter(
-                shape=[1],
-                dtype='float32',
-                default_initializer=paddle.nn.initializer.Constant(beta_init),
-            )
+            zero_init = getattr(self.config, 'embedding_gating_gate_zero_init', True)
+            hidden_size = self.config.hidden_size
+            self.embedding_gate = SigmoidGate(hidden_size, zero_init)
             self._embedding_for_gating = None
             logger.info(
-                f"[EmbeddingGating(nanochat-like)] Enabled on layer {self.layer_number} "
-                f"alpha_init={alpha_init}, beta_init={beta_init}"
+                f"[EmbeddingGating(Sigmoid)] Enabled on layer {self.layer_number}. "
+                f"hidden_size={hidden_size}, zero_init={zero_init}"
             )
 
     def build_schedule_node(self):
@@ -638,12 +660,13 @@ class TransformerLayer(nn.Layer):
 
         # --- Embedding Gating: applied OUTSIDE recompute to avoid SliceGradNode clearing ---
         if self._is_last_decoder_layer and self._embedding_for_gating is not None:
-            alpha = self.embedding_gate.alpha.astype(output.dtype)
-            beta = self.embedding_gate.beta.astype(output.dtype)
-            output = alpha * output + beta * self._embedding_for_gating
+            dtype = output.dtype
+            emb = self._embedding_for_gating.astype(dtype)
+            gate = self.embedding_gate(emb)
+            output = output + output * gate
             logger.info(
-                f"[EmbeddingGating(nanochat-like)] alpha={float(self.embedding_gate.alpha.item()):.16f},"
-                f" beta={float(self.embedding_gate.beta.item()):.16f}"
+                f"[EmbeddingGating] gate_mean={float(gate.mean()):.6f}, "
+                f"gate_std={float(gate.std()):.6f}"
             )
             self._embedding_for_gating = None
 
