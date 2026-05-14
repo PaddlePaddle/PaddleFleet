@@ -50,6 +50,3 @@ packages/paddlefleet_ops/src/paddlefleet_ops/ops/quack
 # Both version.py files are auto-generated at build time by build_backend.py.
 packages/paddlefleet_ops/src/paddlefleet_ops/version.py
 src/paddlefleet/_version.py
-
-# Generated at build time by build_backend.py for dynamic dependencies
-requirements-build.txt

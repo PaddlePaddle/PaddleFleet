@@ -222,11 +222,14 @@ def _safe_load_ecosystem_lib(
             patch_module_namespace(lib_name, "paddlefleet_ops.ops.")
             if extra_libs_name:
                 for extra_lib in extra_libs_name:
-                    clean_module_namespace(extra_lib)
+                    if extra_lib != "quack":
+                        clean_module_namespace(extra_lib)
             module_globals[lib_name] = module
             logger.info(f"Successfully loaded ecosystem library: {lib_name}")
         except ImportError as e:
-            logger.warning(f"Ecosystem library '{lib_name}' not found: {e}")
+            raise ImportError(
+                f"Failed to import ecosystem library '{lib_name}': {e}"
+            ) from e
 
 
 import_custom_ops(

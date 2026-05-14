@@ -1,18 +1,18 @@
 [submodule "third_party/DeepGEMM"]
-	path = third_party/DeepGEMM
+	path = packages/paddlefleet_ops/third_party/DeepGEMM
 	url = https://github.com/PFCCLab/DeepGEMM.git
 [submodule "third_party/DeepEP"]
-	path = third_party/DeepEP
+	path = packages/paddlefleet_ops/third_party/DeepEP
 	url = https://github.com/PFCCLab/DeepEP.git
 [submodule "third_party/quack"]
-	path = third_party/quack
+	path = packages/paddlefleet_ops/third_party/quack
 	url = https://github.com/PFCCLab/quack.git
 [submodule "third_party/sonic-moe"]
-	path = third_party/sonic-moe
+	path = packages/paddlefleet_ops/third_party/sonic-moe
 	url = https://github.com/PFCCLab/supersonic-moe.git
 [submodule "third_party/flash-attention"]
-	path = third_party/flash-attention
+	path = packages/paddlefleet_ops/third_party/flash-attention
 	url = https://github.com/PaddlePaddle/flash-attention.git
 [submodule "third_party/HybridEP"]
-	path = third_party/HybridEP
+	path = packages/paddlefleet_ops/third_party/HybridEP
 	url = https://github.com/PFCCLab/DeepEP.git

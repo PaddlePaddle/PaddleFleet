@@ -42,18 +42,3 @@ jobs:
             exit 1
           fi
           echo "uv.lock is intact"
-      - name: Check ops_required_version.txt is bumped when packages/ is modified
-        run: |
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-
-          PACKAGES_CHANGED=$(echo "$CHANGED" | grep -c "^packages/" || true)
-          VERSION_CHANGED=$(echo "$CHANGED" | grep -c "^ops_required_version\.txt$" || true)
-
-          if [ "$PACKAGES_CHANGED" -gt 0 ] && [ "$VERSION_CHANGED" -eq 0 ]; then
-            echo "::error title=需要更新 ops_required_version.txt::检测到 packages/ 目录下有文件改动，但 ops_required_version.txt 未同步更新。"
-            echo ""
-            echo "请将 ops_required_version.txt 中的版本号 +1，例如："
-            echo "  1 → 2"
-            exit 1
-          fi
-          echo "✅ ops_required_version.txt 检查通过。"

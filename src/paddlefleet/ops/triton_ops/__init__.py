@@ -26,9 +26,11 @@ only as documentation of the migration and is not actually loaded at runtime.
 """
 
 from paddlefleet_ops.ops.triton_ops import (
+    FuseStackUe8m0ScaleTransposeTriton,
     MoETopkFusion,
     RMSNormFusionTriton,
     SigmoidGateFusionTriton,
+    fuse_stack_ue8m0_scale_transpose,
     routing_map_fusion_forward,
 )
 
@@ -37,4 +39,6 @@ __all__ = [
     "MoETopkFusion",
     "routing_map_fusion_forward",
     "SigmoidGateFusionTriton",
+    "FuseStackUe8m0ScaleTransposeTriton",
+    "fuse_stack_ue8m0_scale_transpose",
 ]

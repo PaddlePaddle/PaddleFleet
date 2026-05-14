@@ -298,6 +298,7 @@ class _HybridEPManager(_DispatchManager):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         del async_finish
         self.token_indices = token_indices
@@ -376,6 +377,7 @@ class _HybridEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         return self.dispatch_overlap(
             hidden_states,
@@ -501,6 +503,7 @@ class _DeepEPManager(_DispatchManager):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -510,6 +513,7 @@ class _DeepEPManager(_DispatchManager):
             self.group,
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
+            use_ue8m0=use_ue8m0,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -523,6 +527,7 @@ class _DeepEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -533,6 +538,7 @@ class _DeepEPManager(_DispatchManager):
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
+            use_ue8m0=use_ue8m0,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -756,6 +762,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ):
         return self._comm_manager.dispatch_overlap(
             hidden_states,
@@ -763,6 +770,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             token_weights,
             fp8_dispatch,
             async_finish,
+            use_ue8m0=use_ue8m0,
         )
 
     def token_dispatch(
@@ -770,9 +778,10 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ):
         return self._comm_manager.dispatch(
-            hidden_states, fp8_dispatch, async_finish
+            hidden_states, fp8_dispatch, async_finish, use_ue8m0=use_ue8m0
         )
 
     def dispatch_postprocess(
@@ -946,6 +955,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         permutated_local_input_tokens: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
         global_input_tokens = _AllToAll.apply(
