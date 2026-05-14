@@ -412,7 +412,8 @@ class TransformerLayer(nn.Layer):
             and self.layer_number == num_empty + self.config.num_hidden_layers - 1
         )
         if self._is_last_decoder_layer:
-            alpha_init = getattr(self.config, 'embedding_gating_alpha_init', 0.95)
+            alpha_init = getattr(self.config, 'embedding_gating_alpha_init', 1.05)
+            beta_init = getattr(self.config, 'embedding_gating_beta_init', 0.05)
             self.embedding_gate = nn.Layer()
             self.embedding_gate._cast_to_low_precision = False
             self.embedding_gate.alpha = paddle.create_parameter(
@@ -420,10 +421,15 @@ class TransformerLayer(nn.Layer):
                 dtype='float32',
                 default_initializer=paddle.nn.initializer.Constant(alpha_init),
             )
+            self.embedding_gate.beta = paddle.create_parameter(
+                shape=[1],
+                dtype='float32',
+                default_initializer=paddle.nn.initializer.Constant(beta_init),
+            )
             self._embedding_for_gating = None
             logger.info(
-                f"[EmbeddingGating] Enabled on layer {self.layer_number} "
-                f"(last decoder layer). alpha_init={alpha_init}"
+                f"[EmbeddingGating(nanochat-like)] Enabled on layer {self.layer_number} "
+                f"alpha_init={alpha_init}, beta_init={beta_init}"
             )
 
     def build_schedule_node(self):
@@ -588,8 +594,12 @@ class TransformerLayer(nn.Layer):
         # --- Embedding Gating: applied OUTSIDE recompute to avoid SliceGradNode clearing ---
         if self._is_last_decoder_layer and self._embedding_for_gating is not None:
             alpha = self.embedding_gate.alpha.astype(output.dtype)
-            output = alpha * output + (1.0 - alpha) * self._embedding_for_gating
-            logger.info(f"[EmbeddingGating] alpha={float(self.embedding_gate.alpha.item()):.8f}")
+            beta = self.embedding_gate.beta.astype(output.dtype)
+            output = alpha * output + beta * self._embedding_for_gating
+            logger.info(
+                f"[EmbeddingGating(nanochat-like)] alpha={float(self.embedding_gate.alpha.item()):.16f},"
+                f" beta={float(self.embedding_gate.beta.item()):.16f}"
+            )
             self._embedding_for_gating = None
 
         rst = OrderedDict()
