@@ -216,6 +216,12 @@ class MultiLatentAttention(Attention):
                 "'rope' and 'yarn'"
             )
 
+        # MLA produces keys/values that already have num_attention_heads heads
+        # (via k_pos_emb.expand in get_query_key_value_tensors).  Prevent the
+        # DotProductAttention baddbmm path from doing an extra repeat_interleave
+        # that would double-expand the key and break head-dim alignment.
+        self.num_query_groups_per_partition = self.num_attention_heads_per_partition
+
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
             config=self.config,
@@ -776,7 +782,24 @@ class MLASelfAttention(MultiLatentAttention):
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
                 ):
-                    rotary_pos_emb = rotary_pos_emb[:, start_pos:start_pos + q_len]
+                    if rotary_pos_emb.shape[1] >= start_pos + q_len:
+                        rotary_pos_emb = rotary_pos_emb[:, start_pos:start_pos + q_len]
+                    else:
+                        # During inference with KV cache, rotary_pos_emb was
+                        # computed for the current input length only, but
+                        # position_ids indicate we need embeddings at start_pos.
+                        # Recompute with the correct offset.
+                        if self.config.rope_type == "rope":
+                            rotary_pos_emb = self.rotary_pos_emb(
+                                q_len, offset=start_pos, packed_seq=packed_seq
+                            )
+                        else:
+                            # mscale is constant for Yarn (depends only on
+                            # model hyper-params), so we can safely drop the
+                            # recomputed value and keep the outer-scope one.
+                            rotary_pos_emb, _ = self.rotary_pos_emb(
+                                q_len, offset=start_pos, packed_seq=packed_seq
+                            )
 
                 # Replace paddle.split with zero-copy slice views.
                 q_no_pe = q[..., : self.config.qk_nope_head_dim]
