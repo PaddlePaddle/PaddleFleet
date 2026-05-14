@@ -18,7 +18,15 @@ import numpy as np
 import paddle
 from paddle import nn
 
-from paddlefleet.transformer.sink_impl import sink_attention_forward
+from paddlefleet.transformer.sink_impl import (
+    gen_dense_mask_from_startend_row_indices,
+    sink_attention_forward,
+    _get_fa_version,
+    _flash_attention_forward_dispatch,
+    _flash_attention_backward_dispatch,
+    _flashmask_attention_forward_dispatch,
+    _flashmask_attention_backward_dispatch,
+)
 
 
 def eager_attention_forward(module, query, key, value, scaling, **kwargs):
@@ -155,6 +163,83 @@ def flashmask_to_densemask(
 
     # The final mask shape is [B, H, S, S] to match the attention weights matrix.
     return m
+
+
+class TestGenDenseMask(unittest.TestCase):
+    """Tests for gen_dense_mask_from_startend_row_indices."""
+
+    def test_causal_1_bound(self):
+        """Test causal mask with single start bound (ndim=3 input)."""
+        batch, num_head, seq_len = 1, 2, 8
+        # Create startend_row_indices with shape [B, H, S] (ndim=3)
+        indices = paddle.zeros([batch, num_head, seq_len], dtype="int32")
+        # Set start indices at or below diagonal
+        for j in range(seq_len):
+            indices[:, :, j] = j
+
+        mask = gen_dense_mask_from_startend_row_indices(
+            indices, dtype=paddle.float32
+        )
+        self.assertEqual(mask.shape, [batch, num_head, seq_len, seq_len])
+        # For causal with start at diagonal, should be a standard causal mask
+        # Check that upper triangle is masked (negative values)
+        for i in range(seq_len):
+            for j in range(i + 1, seq_len):
+                self.assertTrue(mask[0, 0, i, j].item() < 0)
+
+    def test_causal_2_bounds(self):
+        """Test causal mask with start and end bounds."""
+        batch, num_head, seq_len = 1, 2, 8
+        # Shape [B, H, S, 2]: start and end
+        indices = paddle.zeros([batch, num_head, seq_len, 2], dtype="int32")
+        for j in range(seq_len):
+            indices[:, :, j, 0] = j  # start at diagonal
+            indices[:, :, j, 1] = min(j + 3, seq_len)  # end 3 after
+
+        mask = gen_dense_mask_from_startend_row_indices(
+            indices, dtype=paddle.float32, is_causal=True
+        )
+        self.assertEqual(mask.shape, [batch, num_head, seq_len, seq_len])
+
+    def test_non_causal_2_bounds(self):
+        """Test non-causal mask with 2 bounds (down_start + up_end)."""
+        batch, num_head, seq_len = 1, 2, 8
+        # Shape [B, H, S, 2]: down_start and up_end
+        indices = paddle.zeros([batch, num_head, seq_len, 2], dtype="int32")
+        for j in range(seq_len):
+            indices[:, :, j, 0] = max(0, j - 2)  # down_start
+            indices[:, :, j, 1] = max(0, j - 1)  # up_end
+
+        mask = gen_dense_mask_from_startend_row_indices(
+            indices, dtype=paddle.float32, is_causal=False
+        )
+        self.assertEqual(mask.shape, [batch, num_head, seq_len, seq_len])
+
+    def test_non_causal_4_bounds(self):
+        """Test non-causal mask with 4 bounds."""
+        batch, num_head, seq_len = 1, 2, 8
+        # Shape [B, H, S, 4]: down_start, down_end, up_start, up_end
+        indices = paddle.zeros([batch, num_head, seq_len, 4], dtype="int32")
+        for j in range(seq_len):
+            indices[:, :, j, 0] = j  # down_start
+            indices[:, :, j, 1] = min(j + 2, seq_len)  # down_end
+            indices[:, :, j, 2] = max(0, j - 2)  # up_start
+            indices[:, :, j, 3] = j  # up_end
+
+        mask = gen_dense_mask_from_startend_row_indices(
+            indices, dtype=paddle.float32, is_causal=False
+        )
+        self.assertEqual(mask.shape, [batch, num_head, seq_len, seq_len])
+
+    def test_raises_without_is_causal(self):
+        """Test that ValueError is raised when is_causal is not specified and can't be inferred."""
+        batch, num_head, seq_len = 1, 2, 8
+        # 2 bounds could be causal or non-causal, so is_causal must be given
+        indices = paddle.zeros([batch, num_head, seq_len, 2], dtype="int32")
+        with self.assertRaises(ValueError):
+            gen_dense_mask_from_startend_row_indices(
+                indices, dtype=paddle.float32
+            )
 
 
 class TestAttentionInterface(unittest.TestCase):
@@ -440,6 +525,697 @@ class TestAttentionInterface(unittest.TestCase):
 
         # Compare the results
         self.assert_tensor_close(flashmask_output, eager_output_flashmask)
+
+
+class TestBackward(unittest.TestCase):
+    """Tests for backward pass through FlashMaskSinkPyLayer."""
+
+    def setUp(self):
+        paddle.seed(42)
+        self.batch_size = 1
+        self.seq_len = 128
+        self.num_heads = 8
+        self.head_dim = 64
+        self.dtype = "bfloat16"
+        self.scaling = self.head_dim**-0.5
+
+    def _make_tensors(self, num_kv_heads=None, stop_gradient_sink=False):
+        """Create tensors with gradients enabled."""
+        if num_kv_heads is None:
+            num_kv_heads = self.num_heads
+
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, num_kv_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, num_kv_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+
+        query.stop_gradient = False
+        key.stop_gradient = False
+        value.stop_gradient = False
+        sink.stop_gradient = stop_gradient_sink
+
+        return query, key, value, sink
+
+    def test_backward_causal_mha(self):
+        """Test backward pass with causal MHA (covers FA backward dispatch, LSE compat, dtype cast)."""
+        query, key, value, sink = self._make_tensors()
+
+        out = sink_attention_forward(
+            query, key, value, sink,
+            causal=True,
+            softmax_scale=self.scaling,
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(query.grad)
+        self.assertIsNotNone(key.grad)
+        self.assertIsNotNone(value.grad)
+        self.assertIsNotNone(sink.grad)
+        self.assertEqual(query.grad.shape, query.shape)
+        self.assertEqual(key.grad.shape, key.shape)
+        self.assertEqual(value.grad.shape, value.shape)
+
+    def test_backward_sink_stop_gradient(self):
+        """Test backward when sink has stop_gradient=True returns None for sink grad."""
+        query, key, value, sink = self._make_tensors(stop_gradient_sink=True)
+
+        out = sink_attention_forward(
+            query, key, value, sink,
+            causal=True,
+            softmax_scale=self.scaling,
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(query.grad)
+        self.assertIsNotNone(key.grad)
+        self.assertIsNotNone(value.grad)
+        # sink should have no gradient since stop_gradient=True
+        self.assertIsNone(sink.grad)
+
+    def test_backward_flashmask(self):
+        """Test backward with FlashMask path (covers flashmask backward dispatch)."""
+        query, key, value, sink = self._make_tensors()
+
+        # Generate non-causal flashmask indices
+        indices = np.zeros(
+            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
+        )
+        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
+        indices[:, :, :, 0] = diag  # down_start at diagonal
+        indices[:, :, :, 1] = 0  # up_end at 0
+        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
+
+        out = sink_attention_forward(
+            query, key, value, sink,
+            startend_row_indices=startend_row_indices,
+            causal=False,
+            softmax_scale=self.scaling,
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(query.grad)
+        self.assertIsNotNone(key.grad)
+        self.assertIsNotNone(value.grad)
+        self.assertIsNotNone(sink.grad)
+
+    def test_backward_flashmask_sink_stop_gradient(self):
+        """Test backward FlashMask path with sink stop_gradient=True."""
+        query, key, value, sink = self._make_tensors(stop_gradient_sink=True)
+
+        indices = np.zeros(
+            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
+        )
+        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
+        indices[:, :, :, 0] = diag
+        indices[:, :, :, 1] = 0
+        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
+
+        out = sink_attention_forward(
+            query, key, value, sink,
+            startend_row_indices=startend_row_indices,
+            causal=False,
+            softmax_scale=self.scaling,
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(query.grad)
+        self.assertIsNone(sink.grad)
+
+    def test_backward_gqa(self):
+        """Test backward with GQA (num_q_heads > num_kv_heads) computes correct grad shapes."""
+        num_kv_heads = self.num_heads // 4  # 2 KV heads for 8 Q heads
+        query, key, value, sink = self._make_tensors(num_kv_heads=num_kv_heads)
+
+        out = sink_attention_forward(
+            query, key, value, sink,
+            causal=True,
+            softmax_scale=self.scaling,
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(query.grad)
+        self.assertIsNotNone(key.grad)
+        self.assertIsNotNone(value.grad)
+        self.assertEqual(key.grad.shape, key.shape)
+        self.assertEqual(value.grad.shape, value.shape)
+
+
+def _is_sm90_or_above():
+    """Check if the GPU supports SM90+ (Hopper), required for FA3."""
+    if not paddle.is_compiled_with_cuda():
+        return False
+    try:
+        cap = paddle.device.cuda.get_device_capability()
+        return cap[0] >= 9
+    except Exception:
+        return False
+
+
+class TestFA3Path(unittest.TestCase):
+    """Tests for the FA3 code path on Hopper GPUs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.has_fa3 = (
+            hasattr(paddle.base.libpaddle.pir.ops, "flash_attn_v3")
+            and _is_sm90_or_above()
+        )
+
+    def setUp(self):
+        if not self.has_fa3:
+            self.skipTest("flash_attn_v3 requires Hopper GPU (SM90+)")
+        paddle.seed(42)
+        self.batch_size = 1
+        self.seq_len = 128
+        self.num_heads = 8
+        self.head_dim = 64
+        self.dtype = "bfloat16"
+        self.scaling = self.head_dim**-0.5
+        # Set FA version to 3
+        paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
+
+    def tearDown(self):
+        # Restore default
+        paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 2})
+
+    def test_fa3_forward_causal(self):
+        """Test FA3 causal forward produces correct output shape."""
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+
+        out = sink_attention_forward(
+            query, key, value, sink,
+            causal=True,
+            softmax_scale=self.scaling,
+        )
+        self.assertEqual(
+            out.shape,
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+        )
+
+    def test_fa3_backward(self):
+        """Test FA3 backward produces gradients for all inputs."""
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+        query.stop_gradient = False
+        key.stop_gradient = False
+        value.stop_gradient = False
+        sink.stop_gradient = False
+
+        out = sink_attention_forward(
+            query, key, value, sink,
+            causal=True,
+            softmax_scale=self.scaling,
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(query.grad)
+        self.assertIsNotNone(key.grad)
+        self.assertIsNotNone(value.grad)
+
+    def test_fa3_flashmask_forward(self):
+        """Test FlashMask with FA3 forward produces correct output shape."""
+        has_flashmask_v2 = hasattr(
+            paddle.base.libpaddle.pir.ops, "flashmask_attention_v2"
+        ) or hasattr(
+            paddle.nn.functional, "flashmask_attention"
+        )
+        if not has_flashmask_v2:
+            self.skipTest("flashmask_attention not available for FA3")
+
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+
+        # Non-causal flashmask indices
+        indices = np.zeros(
+            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
+        )
+        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
+        indices[:, :, :, 0] = diag
+        indices[:, :, :, 1] = 0
+        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
+
+        out = sink_attention_forward(
+            query, key, value, sink,
+            startend_row_indices=startend_row_indices,
+            causal=False,
+            softmax_scale=self.scaling,
+        )
+        self.assertEqual(
+            out.shape,
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+        )
+
+    def test_fa3_flashmask_backward(self):
+        """Test FlashMask with FA3 backward produces gradients."""
+        has_flashmask_v2_grad = hasattr(
+            paddle.base.libpaddle.pir.ops, "flashmask_attention_v2_grad"
+        )
+        if not has_flashmask_v2_grad:
+            self.skipTest("flashmask_attention_v2_grad not available")
+
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+        query.stop_gradient = False
+        key.stop_gradient = False
+        value.stop_gradient = False
+        sink.stop_gradient = False
+
+        indices = np.zeros(
+            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
+        )
+        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
+        indices[:, :, :, 0] = diag
+        indices[:, :, :, 1] = 0
+        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
+
+        out = sink_attention_forward(
+            query, key, value, sink,
+            startend_row_indices=startend_row_indices,
+            causal=False,
+            softmax_scale=self.scaling,
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(query.grad)
+        self.assertIsNotNone(key.grad)
+
+
+class TestGetFaVersion(unittest.TestCase):
+    """Tests for _get_fa_version logic."""
+
+    def test_deterministic_fallback_fa3_large_head_dim(self):
+        """When FA3 + deterministic + head_dim > 128, should fall back to version 2."""
+        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        original_det = paddle.base.framework.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ]
+        try:
+            paddle.base.framework.set_flags({
+                "FLAGS_flash_attn_version": 3,
+                "FLAGS_cudnn_deterministic": 1,
+            })
+            # head_dim > 128 should trigger fallback to v2
+            self.assertEqual(_get_fa_version(head_dim=256), 2)
+            # head_dim <= 128 should not trigger fallback
+            self.assertEqual(_get_fa_version(head_dim=128), 3)
+            self.assertEqual(_get_fa_version(head_dim=64), 3)
+        finally:
+            paddle.base.framework.set_flags({
+                "FLAGS_flash_attn_version": original_fa,
+                "FLAGS_cudnn_deterministic": original_det,
+            })
+
+    def test_no_fallback_when_not_deterministic(self):
+        """When deterministic is off, FA3 should be returned as-is."""
+        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        original_det = paddle.base.framework.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ]
+        try:
+            paddle.base.framework.set_flags({
+                "FLAGS_flash_attn_version": 3,
+                "FLAGS_cudnn_deterministic": 0,
+            })
+            self.assertEqual(_get_fa_version(head_dim=256), 3)
+        finally:
+            paddle.base.framework.set_flags({
+                "FLAGS_flash_attn_version": original_fa,
+                "FLAGS_cudnn_deterministic": original_det,
+            })
+
+
+class TestFA3PathMocked(unittest.TestCase):
+    """Test FA3 code paths using mocks (for non-Hopper machines)."""
+
+    def setUp(self):
+        paddle.seed(42)
+        self.batch_size = 1
+        self.seq_len = 64
+        self.num_heads = 4
+        self.head_dim = 64
+        self.dtype = "bfloat16"
+        self.scaling = self.head_dim**-0.5
+
+    def test_fa3_forward_dispatch(self):
+        """Test FA3 forward path by mocking _C_ops.flash_attn_v3."""
+        from unittest.mock import patch
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+
+        # Create mock output tensors
+        mock_out = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        mock_lse = paddle.rand(
+            [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
+        )
+
+        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        try:
+            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
+            with patch.object(
+                paddle._C_ops, "flash_attn_v3", return_value=(mock_out, mock_lse)
+            ):
+                out, lse = _flash_attention_forward_dispatch(
+                    query, key, value, causal=True, softmax_scale=self.scaling
+                )
+                self.assertEqual(out.shape, mock_out.shape)
+                self.assertEqual(lse.shape, mock_lse.shape)
+        finally:
+            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": original_fa})
+
+    def test_fa3_backward_dispatch(self):
+        """Test FA3 backward path by mocking _C_ops.flash_attn_v3_grad."""
+        from unittest.mock import patch
+
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        output = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        lse = paddle.rand(
+            [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
+        )
+        grad_output = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+
+        mock_grad_q = paddle.rand_like(query)
+        mock_grad_k = paddle.rand_like(key)
+        mock_grad_v = paddle.rand_like(value)
+
+        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        try:
+            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
+            with patch.object(
+                paddle._C_ops,
+                "flash_attn_v3_grad",
+                return_value=(mock_grad_q, mock_grad_k, mock_grad_v),
+            ):
+                grad_q, grad_k, grad_v = _flash_attention_backward_dispatch(
+                    grad_output, query, key, value, output, lse,
+                    causal=True, softmax_scale=self.scaling,
+                )
+                self.assertEqual(grad_q.shape, query.shape)
+                self.assertEqual(grad_k.shape, key.shape)
+                self.assertEqual(grad_v.shape, value.shape)
+        finally:
+            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": original_fa})
+
+    def test_fa3_flashmask_forward_dispatch(self):
+        """Test FlashMask with FA3 forward produces correct output shape."""
+        from unittest.mock import patch
+
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+
+        indices = np.zeros(
+            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
+        )
+        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
+        indices[:, :, :, 0] = diag
+        indices[:, :, :, 1] = 0
+        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
+
+        mock_out = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        mock_lse = paddle.rand(
+            [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
+        )
+
+        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        try:
+            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
+            with patch(
+                "paddle.nn.functional.flashmask_attention",
+                return_value=(mock_out, mock_lse),
+            ):
+                out, lse = _flashmask_attention_forward_dispatch(
+                    query, key, value, startend_row_indices,
+                    causal=False, softmax_scale=self.scaling,
+                )
+                self.assertEqual(out.shape, mock_out.shape)
+        finally:
+            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": original_fa})
+
+    def test_fa3_flashmask_backward_dispatch(self):
+        """Test FlashMask FA3 backward dispatch via mock."""
+        from unittest.mock import patch
+
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        output = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        lse = paddle.rand(
+            [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
+        )
+        grad_output = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+
+        indices = np.zeros(
+            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
+        )
+        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
+        indices[:, :, :, 0] = diag
+        indices[:, :, :, 1] = 0
+        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
+
+        mock_grad_q = paddle.rand_like(query)
+        mock_grad_k = paddle.rand_like(key)
+        mock_grad_v = paddle.rand_like(value)
+
+        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        try:
+            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
+            with patch.object(
+                paddle._C_ops,
+                "flashmask_attention_v2_grad",
+                return_value=(mock_grad_q, mock_grad_k, mock_grad_v),
+            ):
+                grad_q, grad_k, grad_v = _flashmask_attention_backward_dispatch(
+                    grad_output, query, key, value, output, lse,
+                    startend_row_indices, causal=False, softmax_scale=self.scaling,
+                )
+                self.assertEqual(grad_q.shape, query.shape)
+        finally:
+            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": original_fa})
+
+
+class TestLSEShapeCompat(unittest.TestCase):
+    """Test LSE shape compatibility when kernel returns rounded sequence length."""
+
+    def test_lse_rounded_shape(self):
+        """Test that rounded LSE shape is handled correctly in forward."""
+        from unittest.mock import patch
+
+        paddle.seed(42)
+        batch, seq, heads, dim = 1, 100, 4, 64
+        dtype = "bfloat16"
+
+        query = paddle.rand([batch, seq, heads, dim], dtype=dtype)
+        key = paddle.rand([batch, seq, heads, dim], dtype=dtype)
+        value = paddle.rand([batch, seq, heads, dim], dtype=dtype)
+        sink = paddle.rand([heads], dtype=dtype)
+
+        # Mock _flash_attention_forward_dispatch to return a rounded LSE
+        mock_out = paddle.rand([batch, seq, heads, dim], dtype=dtype)
+        # Simulate a rounded LSE (e.g., 128 instead of 100)
+        rounded_seq = 128
+        mock_lse = paddle.rand([batch, heads, rounded_seq], dtype="float32")
+
+        with patch(
+            "paddlefleet.transformer.sink_impl._flash_attention_forward_dispatch",
+            return_value=(mock_out, mock_lse),
+        ):
+            out = sink_attention_forward(
+                query, key, value, sink, causal=True, softmax_scale=dim**-0.5
+            )
+            self.assertEqual(out.shape, [batch, seq, heads, dim])
+
+
+class TestFlashMaskSoftmaxScaleWarning(unittest.TestCase):
+    """Test that FlashMask v1 (FA2) prints warning for custom softmax_scale."""
+
+    def setUp(self):
+        paddle.seed(42)
+        self.batch_size = 1
+        self.seq_len = 128
+        self.num_heads = 8
+        self.head_dim = 64
+        self.dtype = "bfloat16"
+        # Ensure FA version is 2
+        paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 2})
+
+    def tearDown(self):
+        paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 2})
+
+    def test_custom_softmax_scale_warning(self):
+        """Test that custom softmax_scale triggers warning in FlashMask FA2 path."""
+        import io
+        import sys
+
+        query = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        key = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        value = paddle.rand(
+            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
+            dtype=self.dtype,
+        )
+        sink = paddle.rand([self.num_heads], dtype=self.dtype)
+
+        # Non-causal flashmask indices
+        indices = np.zeros(
+            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
+        )
+        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
+        indices[:, :, :, 0] = diag
+        indices[:, :, :, 1] = 0
+        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
+
+        # Use a non-default softmax_scale to trigger the warning
+        custom_scale = 0.5  # Different from 1/sqrt(head_dim)
+
+        captured = io.StringIO()
+        sys.stdout = captured
+        try:
+            out = sink_attention_forward(
+                query, key, value, sink,
+                startend_row_indices=startend_row_indices,
+                causal=False,
+                softmax_scale=custom_scale,
+            )
+        finally:
+            sys.stdout = sys.__stdout__
+
+        output = captured.getvalue()
+        self.assertIn("FlashMask v1 doesn't support custom softmax_scale", output)
 
 
 # Standard entry point to run the tests when the script is executed directly

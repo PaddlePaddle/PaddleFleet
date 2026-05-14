@@ -134,15 +134,22 @@ def _repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
     )
 
 
-def _get_fa_version():
+def _get_fa_version(head_dim: int = 0):
     """Get the FlashAttention version based on environment flags."""
-    if paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-        "FLAGS_cudnn_deterministic"
-    ]:
+    if "xpu" in paddle.get_device():
         return 2
-    return paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
         "FLAGS_flash_attn_version"
     ]
+    if (
+        fa_version == 3
+        and paddle.base.framework.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ]
+        and head_dim > 128
+    ):
+        return 2
+    return fa_version
 
 
 def _flash_attention_forward_dispatch(
@@ -168,7 +175,7 @@ def _flash_attention_forward_dispatch(
         f"FlashAttention requires equal sequence lengths: seq_k={seq_k}, seq_v={seq_v}"
     )
 
-    fa_version = _get_fa_version()
+    fa_version = _get_fa_version(query.shape[-1])
 
     if fa_version == 2:
         softmax_scale = softmax_scale or 1.0 / (query.shape[-1] ** 0.5)
@@ -238,7 +245,7 @@ def _flash_attention_backward_dispatch(
     softmax_scale=None,
 ):
     """Dispatch FlashAttention backward based on version."""
-    fa_version = _get_fa_version()
+    fa_version = _get_fa_version(query.shape[-1])
 
     if fa_version == 2:
         seed_offset = paddle.zeros(shape=[2], dtype="int64")
@@ -302,7 +309,7 @@ def _flashmask_attention_forward_dispatch(
     """Dispatch FlashMask attention forward. Only FlashMask v1 doesn't support
     custom softmax_scale.
     """
-    fa_version = _get_fa_version()
+    fa_version = _get_fa_version(query.shape[-1])
 
     if fa_version == 2:
         if softmax_scale is not None and softmax_scale != 1.0 / (
@@ -352,7 +359,7 @@ def _flashmask_attention_backward_dispatch(
     softmax_scale=None,
 ):
     """Dispatch FlashMask attention backward based on version."""
-    fa_version = _get_fa_version()
+    fa_version = _get_fa_version(query.shape[-1])
     if fa_version == 2:
         seed_offset = paddle.zeros(shape=[2], dtype="int64")
         if hasattr(paddle.base.libpaddle.pir.ops, "flashmask_attention_grad"):
