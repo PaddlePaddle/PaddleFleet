@@ -19,13 +19,13 @@ import paddle
 from paddle import nn
 
 from paddlefleet.transformer.sink_impl import (
+    _flash_attention_backward_dispatch,
+    _flash_attention_forward_dispatch,
+    _flashmask_attention_backward_dispatch,
+    _flashmask_attention_forward_dispatch,
+    _get_fa_version,
     gen_dense_mask_from_startend_row_indices,
     sink_attention_forward,
-    _get_fa_version,
-    _flash_attention_forward_dispatch,
-    _flash_attention_backward_dispatch,
-    _flashmask_attention_forward_dispatch,
-    _flashmask_attention_backward_dispatch,
 )
 
 
@@ -570,7 +570,10 @@ class TestBackward(unittest.TestCase):
         query, key, value, sink = self._make_tensors()
 
         out = sink_attention_forward(
-            query, key, value, sink,
+            query,
+            key,
+            value,
+            sink,
             causal=True,
             softmax_scale=self.scaling,
         )
@@ -590,7 +593,10 @@ class TestBackward(unittest.TestCase):
         query, key, value, sink = self._make_tensors(stop_gradient_sink=True)
 
         out = sink_attention_forward(
-            query, key, value, sink,
+            query,
+            key,
+            value,
+            sink,
             causal=True,
             softmax_scale=self.scaling,
         )
@@ -617,7 +623,10 @@ class TestBackward(unittest.TestCase):
         startend_row_indices = paddle.to_tensor(indices, dtype="int32")
 
         out = sink_attention_forward(
-            query, key, value, sink,
+            query,
+            key,
+            value,
+            sink,
             startend_row_indices=startend_row_indices,
             causal=False,
             softmax_scale=self.scaling,
@@ -643,7 +652,10 @@ class TestBackward(unittest.TestCase):
         startend_row_indices = paddle.to_tensor(indices, dtype="int32")
 
         out = sink_attention_forward(
-            query, key, value, sink,
+            query,
+            key,
+            value,
+            sink,
             startend_row_indices=startend_row_indices,
             causal=False,
             softmax_scale=self.scaling,
@@ -660,7 +672,10 @@ class TestBackward(unittest.TestCase):
         query, key, value, sink = self._make_tensors(num_kv_heads=num_kv_heads)
 
         out = sink_attention_forward(
-            query, key, value, sink,
+            query,
+            key,
+            value,
+            sink,
             causal=True,
             softmax_scale=self.scaling,
         )
@@ -729,7 +744,10 @@ class TestFA3Path(unittest.TestCase):
         sink = paddle.rand([self.num_heads], dtype=self.dtype)
 
         out = sink_attention_forward(
-            query, key, value, sink,
+            query,
+            key,
+            value,
+            sink,
             causal=True,
             softmax_scale=self.scaling,
         )
@@ -759,7 +777,10 @@ class TestFA3Path(unittest.TestCase):
         sink.stop_gradient = False
 
         out = sink_attention_forward(
-            query, key, value, sink,
+            query,
+            key,
+            value,
+            sink,
             causal=True,
             softmax_scale=self.scaling,
         )
@@ -774,9 +795,7 @@ class TestFA3Path(unittest.TestCase):
         """Test FlashMask with FA3 forward produces correct output shape."""
         has_flashmask_v2 = hasattr(
             paddle.base.libpaddle.pir.ops, "flashmask_attention_v2"
-        ) or hasattr(
-            paddle.nn.functional, "flashmask_attention"
-        )
+        ) or hasattr(paddle.nn.functional, "flashmask_attention")
         if not has_flashmask_v2:
             self.skipTest("flashmask_attention not available for FA3")
 
@@ -804,7 +823,10 @@ class TestFA3Path(unittest.TestCase):
         startend_row_indices = paddle.to_tensor(indices, dtype="int32")
 
         out = sink_attention_forward(
-            query, key, value, sink,
+            query,
+            key,
+            value,
+            sink,
             startend_row_indices=startend_row_indices,
             causal=False,
             softmax_scale=self.scaling,
@@ -849,7 +871,10 @@ class TestFA3Path(unittest.TestCase):
         startend_row_indices = paddle.to_tensor(indices, dtype="int32")
 
         out = sink_attention_forward(
-            query, key, value, sink,
+            query,
+            key,
+            value,
+            sink,
             startend_row_indices=startend_row_indices,
             causal=False,
             softmax_scale=self.scaling,
@@ -866,47 +891,55 @@ class TestGetFaVersion(unittest.TestCase):
 
     def test_deterministic_fallback_fa3_large_head_dim(self):
         """When FA3 + deterministic + head_dim > 128, should fall back to version 2."""
-        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-            "FLAGS_flash_attn_version"
-        ]
-        original_det = paddle.base.framework.get_flags(["FLAGS_cudnn_deterministic"])[
-            "FLAGS_cudnn_deterministic"
-        ]
+        original_fa = paddle.base.framework.get_flags(
+            ["FLAGS_flash_attn_version"]
+        )["FLAGS_flash_attn_version"]
+        original_det = paddle.base.framework.get_flags(
+            ["FLAGS_cudnn_deterministic"]
+        )["FLAGS_cudnn_deterministic"]
         try:
-            paddle.base.framework.set_flags({
-                "FLAGS_flash_attn_version": 3,
-                "FLAGS_cudnn_deterministic": 1,
-            })
+            paddle.base.framework.set_flags(
+                {
+                    "FLAGS_flash_attn_version": 3,
+                    "FLAGS_cudnn_deterministic": 1,
+                }
+            )
             # head_dim > 128 should trigger fallback to v2
             self.assertEqual(_get_fa_version(head_dim=256), 2)
             # head_dim <= 128 should not trigger fallback
             self.assertEqual(_get_fa_version(head_dim=128), 3)
             self.assertEqual(_get_fa_version(head_dim=64), 3)
         finally:
-            paddle.base.framework.set_flags({
-                "FLAGS_flash_attn_version": original_fa,
-                "FLAGS_cudnn_deterministic": original_det,
-            })
+            paddle.base.framework.set_flags(
+                {
+                    "FLAGS_flash_attn_version": original_fa,
+                    "FLAGS_cudnn_deterministic": original_det,
+                }
+            )
 
     def test_no_fallback_when_not_deterministic(self):
         """When deterministic is off, FA3 should be returned as-is."""
-        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-            "FLAGS_flash_attn_version"
-        ]
-        original_det = paddle.base.framework.get_flags(["FLAGS_cudnn_deterministic"])[
-            "FLAGS_cudnn_deterministic"
-        ]
+        original_fa = paddle.base.framework.get_flags(
+            ["FLAGS_flash_attn_version"]
+        )["FLAGS_flash_attn_version"]
+        original_det = paddle.base.framework.get_flags(
+            ["FLAGS_cudnn_deterministic"]
+        )["FLAGS_cudnn_deterministic"]
         try:
-            paddle.base.framework.set_flags({
-                "FLAGS_flash_attn_version": 3,
-                "FLAGS_cudnn_deterministic": 0,
-            })
+            paddle.base.framework.set_flags(
+                {
+                    "FLAGS_flash_attn_version": 3,
+                    "FLAGS_cudnn_deterministic": 0,
+                }
+            )
             self.assertEqual(_get_fa_version(head_dim=256), 3)
         finally:
-            paddle.base.framework.set_flags({
-                "FLAGS_flash_attn_version": original_fa,
-                "FLAGS_cudnn_deterministic": original_det,
-            })
+            paddle.base.framework.set_flags(
+                {
+                    "FLAGS_flash_attn_version": original_fa,
+                    "FLAGS_cudnn_deterministic": original_det,
+                }
+            )
 
 
 class TestFA3PathMocked(unittest.TestCase):
@@ -924,6 +957,7 @@ class TestFA3PathMocked(unittest.TestCase):
     def test_fa3_forward_dispatch(self):
         """Test FA3 forward path by mocking _C_ops.flash_attn_v3."""
         from unittest.mock import patch
+
         query = paddle.rand(
             [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
             dtype=self.dtype,
@@ -946,13 +980,15 @@ class TestFA3PathMocked(unittest.TestCase):
             [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
         )
 
-        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-            "FLAGS_flash_attn_version"
-        ]
+        original_fa = paddle.base.framework.get_flags(
+            ["FLAGS_flash_attn_version"]
+        )["FLAGS_flash_attn_version"]
         try:
             paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
             with patch.object(
-                paddle._C_ops, "flash_attn_v3", return_value=(mock_out, mock_lse)
+                paddle._C_ops,
+                "flash_attn_v3",
+                return_value=(mock_out, mock_lse),
             ):
                 out, lse = _flash_attention_forward_dispatch(
                     query, key, value, causal=True, softmax_scale=self.scaling
@@ -960,7 +996,9 @@ class TestFA3PathMocked(unittest.TestCase):
                 self.assertEqual(out.shape, mock_out.shape)
                 self.assertEqual(lse.shape, mock_lse.shape)
         finally:
-            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": original_fa})
+            paddle.base.framework.set_flags(
+                {"FLAGS_flash_attn_version": original_fa}
+            )
 
     def test_fa3_backward_dispatch(self):
         """Test FA3 backward path by mocking _C_ops.flash_attn_v3_grad."""
@@ -994,9 +1032,9 @@ class TestFA3PathMocked(unittest.TestCase):
         mock_grad_k = paddle.rand_like(key)
         mock_grad_v = paddle.rand_like(value)
 
-        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-            "FLAGS_flash_attn_version"
-        ]
+        original_fa = paddle.base.framework.get_flags(
+            ["FLAGS_flash_attn_version"]
+        )["FLAGS_flash_attn_version"]
         try:
             paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
             with patch.object(
@@ -1005,14 +1043,22 @@ class TestFA3PathMocked(unittest.TestCase):
                 return_value=(mock_grad_q, mock_grad_k, mock_grad_v),
             ):
                 grad_q, grad_k, grad_v = _flash_attention_backward_dispatch(
-                    grad_output, query, key, value, output, lse,
-                    causal=True, softmax_scale=self.scaling,
+                    grad_output,
+                    query,
+                    key,
+                    value,
+                    output,
+                    lse,
+                    causal=True,
+                    softmax_scale=self.scaling,
                 )
                 self.assertEqual(grad_q.shape, query.shape)
                 self.assertEqual(grad_k.shape, key.shape)
                 self.assertEqual(grad_v.shape, value.shape)
         finally:
-            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": original_fa})
+            paddle.base.framework.set_flags(
+                {"FLAGS_flash_attn_version": original_fa}
+            )
 
     def test_fa3_flashmask_forward_dispatch(self):
         """Test FlashMask with FA3 forward produces correct output shape."""
@@ -1047,9 +1093,9 @@ class TestFA3PathMocked(unittest.TestCase):
             [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
         )
 
-        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-            "FLAGS_flash_attn_version"
-        ]
+        original_fa = paddle.base.framework.get_flags(
+            ["FLAGS_flash_attn_version"]
+        )["FLAGS_flash_attn_version"]
         try:
             paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
             with patch(
@@ -1057,12 +1103,18 @@ class TestFA3PathMocked(unittest.TestCase):
                 return_value=(mock_out, mock_lse),
             ):
                 out, lse = _flashmask_attention_forward_dispatch(
-                    query, key, value, startend_row_indices,
-                    causal=False, softmax_scale=self.scaling,
+                    query,
+                    key,
+                    value,
+                    startend_row_indices,
+                    causal=False,
+                    softmax_scale=self.scaling,
                 )
                 self.assertEqual(out.shape, mock_out.shape)
         finally:
-            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": original_fa})
+            paddle.base.framework.set_flags(
+                {"FLAGS_flash_attn_version": original_fa}
+            )
 
     def test_fa3_flashmask_backward_dispatch(self):
         """Test FlashMask FA3 backward dispatch via mock."""
@@ -1104,9 +1156,9 @@ class TestFA3PathMocked(unittest.TestCase):
         mock_grad_k = paddle.rand_like(key)
         mock_grad_v = paddle.rand_like(value)
 
-        original_fa = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-            "FLAGS_flash_attn_version"
-        ]
+        original_fa = paddle.base.framework.get_flags(
+            ["FLAGS_flash_attn_version"]
+        )["FLAGS_flash_attn_version"]
         try:
             paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
             with patch.object(
@@ -1115,12 +1167,21 @@ class TestFA3PathMocked(unittest.TestCase):
                 return_value=(mock_grad_q, mock_grad_k, mock_grad_v),
             ):
                 grad_q, grad_k, grad_v = _flashmask_attention_backward_dispatch(
-                    grad_output, query, key, value, output, lse,
-                    startend_row_indices, causal=False, softmax_scale=self.scaling,
+                    grad_output,
+                    query,
+                    key,
+                    value,
+                    output,
+                    lse,
+                    startend_row_indices,
+                    causal=False,
+                    softmax_scale=self.scaling,
                 )
                 self.assertEqual(grad_q.shape, query.shape)
         finally:
-            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": original_fa})
+            paddle.base.framework.set_flags(
+                {"FLAGS_flash_attn_version": original_fa}
+            )
 
 
 class TestLSEShapeCompat(unittest.TestCase):
@@ -1206,7 +1267,10 @@ class TestFlashMaskSoftmaxScaleWarning(unittest.TestCase):
         sys.stdout = captured
         try:
             out = sink_attention_forward(
-                query, key, value, sink,
+                query,
+                key,
+                value,
+                sink,
                 startend_row_indices=startend_row_indices,
                 causal=False,
                 softmax_scale=custom_scale,
@@ -1215,7 +1279,9 @@ class TestFlashMaskSoftmaxScaleWarning(unittest.TestCase):
             sys.stdout = sys.__stdout__
 
         output = captured.getvalue()
-        self.assertIn("FlashMask v1 doesn't support custom softmax_scale", output)
+        self.assertIn(
+            "FlashMask v1 doesn't support custom softmax_scale", output
+        )
 
 
 # Standard entry point to run the tests when the script is executed directly

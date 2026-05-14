@@ -323,6 +323,8 @@ class DotProductAttention(FleetLayer):
                 )  # [1, 1, seq_len, 4]
 
             if sink is not None:
+                # causal=False because 4-bound startend_row_indices already
+                # encodes the full bidirectional mask (SWA / non-causal FlashMask).
                 return self._sink_forward(
                     query,
                     key,

@@ -13,7 +13,6 @@
 # limitations under the License.
 
 
-import numpy as np
 import paddle
 from paddle.autograd.py_layer import PyLayer
 
@@ -510,9 +509,7 @@ class FlashMaskSinkPyLayer(PyLayer):
 
         # Compat with old LSE shape (seqlen_q_rounded)
         if lse_original.shape[-1] != seq_len:
-            new_shape = (lse_original.shape[0], lse_original.shape[1], seq_len)
-            num = np.prod(lse_original.shape[:2]) * seq_len
-            lse_original = lse_original.flatten()[:num].reshape(new_shape)
+            lse_original = lse_original[:, :, :seq_len]
 
         lse_transposed = lse_original.transpose(perm=[0, 2, 1]).unsqueeze(-1)
         sink_reshaped = sink.reshape(shape=[1, 1, -1, 1])
@@ -627,6 +624,8 @@ class FlashMaskSinkPyLayer(PyLayer):
         grad_sink_temp = -paddle.sum(g_ell, axis=1)
         grad_sink = grad_sink_temp.sum(axis=0)
 
+        # Extra forward pass to compute mu_k = softmax(Q @ K^T) @ K, which is
+        # required for the sink gradient. This adds ~1x forward cost to backward.
         if startend_row_indices is None:
             mu_k, lse_k = _flash_attention_forward_dispatch(
                 query,
