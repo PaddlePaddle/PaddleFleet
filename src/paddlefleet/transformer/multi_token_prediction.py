@@ -312,7 +312,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
-            bias=False,
+            bias=True,
             skip_bias_add=False,
             is_expert=False,
         )

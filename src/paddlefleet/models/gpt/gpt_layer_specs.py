@@ -140,6 +140,7 @@ def get_attention_spec(
                 qkv_proj=backend.column_parallel_linear(),
                 core_attention=backend.core_attention(),
                 o_proj=backend.row_parallel_linear(),
+                gate_proj=backend.column_parallel_linear(),
                 q_norm=(
                     L2Norm
                     if qk_l2_norm

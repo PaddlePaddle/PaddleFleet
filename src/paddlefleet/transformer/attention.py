@@ -173,6 +173,7 @@ class SelfAttentionSublayersSpec:
     o_proj: LayerSpec | type = None
     q_norm: LayerSpec | type = None
     k_norm: LayerSpec | type = None
+    gate_proj: LayerSpec | type = None
 
 
 @dataclass
@@ -653,8 +654,19 @@ class SelfAttention(Attention):
             sublayers_spec.qkv_proj,
             self.config.hidden_size,
             self.query_projection_size
-            + 2 * self.kv_projection_size
-            + gate_projection_size,
+            + 2 * self.kv_projection_size,
+            config=self.config,
+            init_method=self.config.init_method,
+            gather_output=False,
+            bias=self.config.use_bias or self.config.attention_bias,
+            skip_bias_add=False,
+            is_expert=False,
+            tp_group=self.pg_collection.tp,
+        )
+        self.gate_proj = build_spec_layer(
+            sublayers_spec.gate_proj,
+            self.config.hidden_size,
+            gate_projection_size,
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -717,14 +729,14 @@ class SelfAttention(Attention):
         """
         # Attention heads [b, sq, h] --> [b, sq, ng * group_dim]
         mixed_qkv, _ = self.qkv_proj(hidden_states)
-
+        gate = self.gate_proj(hidden_states) if self.gated_attention else None
         heads_per_group = (
             self.num_attention_heads_per_partition
             // self.num_query_groups_per_partition
         )
         q_dim = heads_per_group * self.hidden_size_per_attention_head
 
-        if self.gated_attention:
+        if False:
             # Per group: Q + Gate + K + V
             group_dim = (
                 heads_per_group * 2 + 2
@@ -743,7 +755,7 @@ class SelfAttention(Attention):
         )
         mixed_qkv = mixed_qkv.reshape(*new_tensor_shape)
 
-        if self.gated_attention:
+        if False:
             split_arg_list = [
                 q_dim,
                 q_dim,
@@ -763,7 +775,7 @@ class SelfAttention(Attention):
 
         parts = paddle.split(mixed_qkv, split_arg_list, axis=3)
 
-        if self.gated_attention:
+        if False:
             query, gate, key, value = parts
         else:
             query, key, value = parts
