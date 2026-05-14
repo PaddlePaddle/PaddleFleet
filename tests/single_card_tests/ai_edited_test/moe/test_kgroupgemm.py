@@ -17,8 +17,8 @@
 Single-card unit tests for k-grouped gemm (moe_deep_gemm + fp8) functionality.
 
 Tests cover the following code changes in the kgroupgemm-debug branch:
-  1. __init__: condition change from `not moe_grouped_gemm or use_fp8_mlp`
-     to `not moe_grouped_gemm or (use_fp8_mlp and not moe_deep_gemm)`
+  1. __init__: condition change from `not moe_expert_fusion or use_fp8_mlp`
+     to `not moe_expert_fusion or (use_fp8_mlp and not moe_deep_gemm)`
   2. fwd_gate_up_fp8 / fwd_down_fp8: offline_quant handling for grouped_gemm_experts
   3. bwd_down_input_fp8 / bwd_gate_up_input_fp8: offline_quant + local_expert_num
   4. forward: condition change to access grouped_gemm_experts with fp8+deep_gemm
@@ -278,11 +278,10 @@ class TestKGroupGemm(unittest.TestCase):
         """Run forward+backward and collect outputs."""
         params = {
             "use_fp8_mlp": True,
-            "moe_grouped_gemm": True,
+            "moe_expert_fusion": True,
             "moe_deep_gemm": True,
             "recompute_moe_gate_up": True,
             "dequant_input": True,
-            "moe_expert_fusion": True,
             "recompute_moe_premute": False,
             "use_bf16_gemm_weight_grad": True,
             "fp8_dispatched_handle": {"scale": self.scale},
@@ -309,12 +308,12 @@ class TestKGroupGemm(unittest.TestCase):
 
     # ---------------------------------------------------------------
     # Test 1: __init__ condition change
-    # Old: if not moe_grouped_gemm or use_fp8_mlp
-    # New: if not moe_grouped_gemm or (use_fp8_mlp and not moe_deep_gemm)
+    # Old: if not moe_expert_fusion or use_fp8_mlp
+    # New: if not moe_expert_fusion or (use_fp8_mlp and not moe_deep_gemm)
     # ---------------------------------------------------------------
     def test_init_condition_grouped_gemm_experts(self):
         """
-        Test __init__ condition: when moe_grouped_gemm=True and use_fp8_mlp=True
+        Test __init__ condition: when moe_expert_fusion=True and use_fp8_mlp=True
         and moe_deep_gemm=True, ExpertsGroupGemmContiguousNode should use
         grouped_gemm_experts instead of experts.
         """
@@ -324,13 +323,13 @@ class TestKGroupGemm(unittest.TestCase):
 
         moe_layer = self._create_moe_layer(moe_deep_gemm=True)
 
-        # New condition: moe_grouped_gemm=True, use_fp8_mlp=True, moe_deep_gemm=True
+        # New condition: moe_expert_fusion=True, use_fp8_mlp=True, moe_deep_gemm=True
         # should use grouped_gemm_experts (THE KEY NEW CODE PATH)
         node = ExpertsGroupGemmContiguousNode(
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
         )
         self.assertTrue(hasattr(node, "grouped_gemm_experts"))
         self.assertFalse(hasattr(node, "experts"))
@@ -338,13 +337,13 @@ class TestKGroupGemm(unittest.TestCase):
             "[PASS] test_init_condition: grouped_gemm_experts for fp8+deep_gemm"
         )
 
-        # Old condition: moe_grouped_gemm=True, use_fp8_mlp=True, moe_deep_gemm=False
+        # Old condition: moe_expert_fusion=True, use_fp8_mlp=True, moe_deep_gemm=False
         # should use experts (backward compat)
         node_old = ExpertsGroupGemmContiguousNode(
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=False,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
         )
         self.assertTrue(hasattr(node_old, "experts"))
         self.assertFalse(hasattr(node_old, "grouped_gemm_experts"))
@@ -352,13 +351,13 @@ class TestKGroupGemm(unittest.TestCase):
             "[PASS] test_init_condition: experts for fp8 without deep_gemm (backward compat)"
         )
 
-        # Condition: moe_grouped_gemm=True, use_fp8_mlp=False, moe_deep_gemm=True
+        # Condition: moe_expert_fusion=True, use_fp8_mlp=False, moe_deep_gemm=True
         # should use grouped_gemm_experts (bf16 deep_gemm path, unchanged)
         node_bf16 = ExpertsGroupGemmContiguousNode(
             moe_layer,
             use_fp8_mlp=False,
             moe_deep_gemm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
         )
         self.assertTrue(hasattr(node_bf16, "grouped_gemm_experts"))
         self.assertFalse(hasattr(node_bf16, "experts"))
@@ -366,12 +365,12 @@ class TestKGroupGemm(unittest.TestCase):
             "[PASS] test_init_condition: grouped_gemm_experts for bf16+deep_gemm"
         )
 
-        # Condition: moe_grouped_gemm=False -> always use experts
+        # Condition: moe_expert_fusion=False -> always use experts
         node_no_grouped = ExpertsGroupGemmContiguousNode(
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         self.assertTrue(hasattr(node_no_grouped, "experts"))
         self.assertFalse(hasattr(node_no_grouped, "grouped_gemm_experts"))
@@ -379,13 +378,13 @@ class TestKGroupGemm(unittest.TestCase):
 
     # ---------------------------------------------------------------
     # Test 2: forward condition change
-    # Old: if self.moe_grouped_gemm and not self.use_fp8_mlp
-    # New: if self.moe_grouped_gemm and (not self.use_fp8_mlp or self.moe_deep_gemm)
+    # Old: if self.moe_expert_fusion and not self.use_fp8_mlp
+    # New: if self.moe_expert_fusion and (not self.use_fp8_mlp or self.moe_deep_gemm)
     # ---------------------------------------------------------------
     def test_forward_uses_grouped_gemm_experts(self):
         """
         Test that forward() accesses grouped_gemm_experts.weight1/weight2
-        when moe_grouped_gemm=True and (not use_fp8_mlp or moe_deep_gemm).
+        when moe_expert_fusion=True and (not use_fp8_mlp or moe_deep_gemm).
         """
         from paddlefleet.transformer.moe.fp8_utils import (
             ExpertsGroupGemmContiguousNode,
@@ -397,7 +396,7 @@ class TestKGroupGemm(unittest.TestCase):
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
         )
         self.assertTrue(hasattr(node, "grouped_gemm_experts"))
         w1 = node.grouped_gemm_experts.weight1
@@ -428,7 +427,7 @@ class TestKGroupGemm(unittest.TestCase):
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
         )
         # When hasattr(self, "grouped_gemm_experts"), weights are 3D tensors
         self.assertTrue(hasattr(node, "grouped_gemm_experts"))
@@ -444,7 +443,7 @@ class TestKGroupGemm(unittest.TestCase):
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=False,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
         )
         self.assertTrue(hasattr(node_old, "experts"))
         self.assertFalse(hasattr(node_old, "grouped_gemm_experts"))
@@ -471,7 +470,7 @@ class TestKGroupGemm(unittest.TestCase):
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             use_bf16_gemm_weight_grad=True,
         )
         node.tokens_per_expert = self.tokens_per_expert
@@ -511,7 +510,7 @@ class TestKGroupGemm(unittest.TestCase):
         out = self.run_moe_layer(
             moe_layer,
             use_fp8_mlp=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_deep_gemm=True,
         )
 
@@ -536,7 +535,7 @@ class TestKGroupGemm(unittest.TestCase):
         out = self.run_moe_layer(
             moe_layer,
             use_fp8_mlp=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_deep_gemm=True,
         )
 
@@ -557,7 +556,7 @@ class TestKGroupGemm(unittest.TestCase):
         out = self.run_moe_layer(
             moe_layer,
             use_fp8_mlp=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_deep_gemm=True,
             recompute_moe_gate_up=False,
         )
@@ -578,7 +577,7 @@ class TestKGroupGemm(unittest.TestCase):
         out = self.run_moe_layer(
             moe_layer,
             use_fp8_mlp=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_deep_gemm=False,
         )
 
@@ -697,7 +696,7 @@ class TestKGroupGemm(unittest.TestCase):
         out_no_offline = self.run_moe_layer(
             moe_layer,
             use_fp8_mlp=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_deep_gemm=True,
         )
 
@@ -710,7 +709,7 @@ class TestKGroupGemm(unittest.TestCase):
         out_with_offline = self.run_moe_layer(
             moe_layer2,
             use_fp8_mlp=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_deep_gemm=True,
         )
 
@@ -727,8 +726,8 @@ class TestKGroupGemm(unittest.TestCase):
     def test_bf16_weight_grad_condition(self):
         """
         Test bf16_weight_grad condition change:
-        Old: if self.moe_grouped_gemm and not self.use_fp8_mlp
-        New: if self.moe_grouped_gemm and (not self.use_fp8_mlp or self.moe_deep_gemm)
+        Old: if self.moe_expert_fusion and not self.use_fp8_mlp
+        New: if self.moe_expert_fusion and (not self.use_fp8_mlp or self.moe_deep_gemm)
 
         When use_fp8_mlp=True and moe_deep_gemm=True, the new code enters
         the grouped gemm path ("enter k_groupgemm v1") instead of the old
@@ -744,13 +743,13 @@ class TestKGroupGemm(unittest.TestCase):
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             use_bf16_gemm_weight_grad=True,
         )
-        # The condition: moe_grouped_gemm and (not use_fp8_mlp or moe_deep_gemm)
+        # The condition: moe_expert_fusion and (not use_fp8_mlp or moe_deep_gemm)
         # = True and (False or True) = True
         # -> enters k_grouped_bf16_gemm_tn_contiguous path
-        self.assertTrue(node.moe_grouped_gemm)
+        self.assertTrue(node.moe_expert_fusion)
         self.assertTrue(node.moe_deep_gemm)
         self.assertTrue(node.use_bf16_gemm_weight_grad)
         print(
@@ -762,13 +761,13 @@ class TestKGroupGemm(unittest.TestCase):
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=False,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             use_bf16_gemm_weight_grad=True,
         )
-        # The condition: moe_grouped_gemm and (not use_fp8_mlp or moe_deep_gemm)
+        # The condition: moe_expert_fusion and (not use_fp8_mlp or moe_deep_gemm)
         # = True and (False or False) = False
         # -> enters per-expert loop ("enter not k_groupgemm")
-        self.assertTrue(node_no_deep.moe_grouped_gemm)
+        self.assertTrue(node_no_deep.moe_expert_fusion)
         self.assertFalse(node_no_deep.moe_deep_gemm)
         print(
             "[PASS] test_bf16_weight_grad_condition: fp8 without deep_gemm enters per-expert loop"
@@ -781,7 +780,7 @@ class TestKGroupGemm(unittest.TestCase):
     def test_backward_zero_token_grouped_gemm_experts(self):
         """
         Test that backward with zero tokens handles grouped_gemm_experts
-        when moe_grouped_gemm=True and (not use_fp8_mlp or moe_deep_gemm).
+        when moe_expert_fusion=True and (not use_fp8_mlp or moe_deep_gemm).
         """
         from paddlefleet.transformer.moe.fp8_utils import (
             ExpertsGroupGemmContiguousNode,
@@ -793,7 +792,7 @@ class TestKGroupGemm(unittest.TestCase):
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
         )
         node.tokens_per_expert = [0] * self.n_routed_experts
 
@@ -831,7 +830,7 @@ class TestKGroupGemm(unittest.TestCase):
             moe_layer,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
         )
         node.tokens_per_expert = self.tokens_per_expert
 

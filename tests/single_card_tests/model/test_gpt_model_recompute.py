@@ -81,6 +81,7 @@ class TestGPTModel(unittest.TestCase):
             vocab_size=100,
             max_sequence_length=64,
             num_attention_heads=4,
+            moe_expert_fusion=False,
             intermediate_size=1024,
             normalization="RMSNorm",
             hidden_dropout_prob=0.0,

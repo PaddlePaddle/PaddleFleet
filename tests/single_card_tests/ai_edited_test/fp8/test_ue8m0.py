@@ -18,7 +18,7 @@ Single-card unit tests for use_ue8m0 code coverage.
 
 Tests cover the following use_ue8m0 code paths:
   1. fused_stack_quant_without_cache with use_ue8m0=True (transpose=False/True)
-  2. FusionMoePyLayer with use_ue8m0=True + moe_grouped_gemm=True + deepep gemm path
+  2. FusionMoePyLayer with use_ue8m0=True + moe_expert_fusion=True + deepep gemm path
   3. MoELayer.fp8_quant_weight with use_ue8m0=True (stub-based, transpose True/False)
 
 Run with:
@@ -254,7 +254,7 @@ class TestUe8m0CodePaths(unittest.TestCase):
         self.indices = paddle.to_tensor(indices_np)
         self.tokens_per_expert = tokens_per_expert
 
-    def _make_node(self, use_ue8m0=True, moe_grouped_gemm=True):
+    def _make_node(self, use_ue8m0=True, moe_expert_fusion=True):
         from paddlefleet.transformer.moe.fp8_utils import (
             ExpertsGroupGemmContiguousNode,
         )
@@ -267,7 +267,7 @@ class TestUe8m0CodePaths(unittest.TestCase):
             use_bf16_gemm_weight_grad=True,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
-            moe_grouped_gemm=moe_grouped_gemm,
+            moe_expert_fusion=moe_expert_fusion,
             use_ue8m0=use_ue8m0,
         )
         node.tokens_per_expert = [self.seq_len]
@@ -327,7 +327,6 @@ class TestUe8m0CodePaths(unittest.TestCase):
         """Run forward+backward and collect outputs."""
         params = {
             "use_fp8_mlp": True,
-            "moe_grouped_gemm": True,
             "moe_deep_gemm": True,
             "recompute_moe_gate_up": True,
             "dequant_input": True,
@@ -397,9 +396,9 @@ class TestUe8m0CodePaths(unittest.TestCase):
     # Covers:
     #   fp8_utils - fwd_gate_up_fp8 deepep gemm use_ue8m0=True (line 571)
     #   fp8_utils - fwd_down_fp8 deepep gemm use_ue8m0=True (line 720)
-    #   fp8_utils - bwd_down_input_fp8 use_ue8m0=True + moe_grouped_gemm (line 841)
+    #   fp8_utils - bwd_down_input_fp8 use_ue8m0=True + moe_expert_fusion (line 841)
     #   fp8_utils - bwd_down_input_fp8 deepep gemm use_ue8m0=True (line 879)
-    #   fp8_utils - bwd_gate_up_input_fp8 use_ue8m0=True + moe_grouped_gemm (1006)
+    #   fp8_utils - bwd_gate_up_input_fp8 use_ue8m0=True + moe_expert_fusion (1006)
     #   fp8_utils - bwd_gate_up_input_fp8 deepep gemm use_ue8m0=True (1048)
     #   fusion_layer_utils - FusionMoePyLayer.forward with use_ue8m0=True
     # ---------------------------------------------------------------
@@ -417,7 +416,7 @@ class TestUe8m0CodePaths(unittest.TestCase):
         out = self.run_moe_layer(
             moe_layer,
             use_fp8_mlp=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_deep_gemm=True,
             use_ue8m0=True,
         )
@@ -514,7 +513,9 @@ class TestUe8m0CodePaths(unittest.TestCase):
         ):
             raise unittest.SkipTest("use_ue8m0 requires Blackwell GPU (SM100)")
 
-        node, moe_layer = self._make_node(use_ue8m0=True, moe_grouped_gemm=True)
+        node, moe_layer = self._make_node(
+            use_ue8m0=True, moe_expert_fusion=True
+        )
         o1 = paddle.randn(
             [self.seq_len, self.intermediate_size * 2], dtype=paddle.bfloat16
         )
@@ -585,11 +586,13 @@ class TestUe8m0CodePaths(unittest.TestCase):
         self.assertEqual(
             list(o2_s.shape), [self.seq_len, self.intermediate_size]
         )
+        print("probs_grad:", probs_grad)
+        print("dx:", dx)
         self.assertEqual(list(probs_grad.shape), [self.seq_len])
         self.assertEqual(list(dx.shape), [self.seq_len, self.hidden_size])
 
     def test_fp8_weight_grad_without_main_grad_branches(self):
-        node, _ = self._make_node(use_ue8m0=True, moe_grouped_gemm=True)
+        node, _ = self._make_node(use_ue8m0=True, moe_expert_fusion=True)
         do3 = paddle.randn(
             [self.seq_len, self.hidden_size], dtype=paddle.bfloat16
         )
@@ -653,7 +656,7 @@ class TestUe8m0CodePaths(unittest.TestCase):
             num_experts_per_tok=1,
             moe_intermediate_size=512,
             moe_token_dispatcher_type="deepep",
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
             moe_use_fusion_node=True,
             use_ue8m0=True,
             fp8=None,

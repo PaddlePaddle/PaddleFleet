@@ -92,7 +92,7 @@ class TestHybridEPFusion(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_token_dispatcher_type="hybridep",
             moe_shared_expert_overlap=True,
             norm_topk_prob=False,

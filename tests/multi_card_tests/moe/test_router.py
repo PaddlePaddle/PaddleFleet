@@ -76,7 +76,7 @@ class TestTop2Router(unittest.TestCase):
         transformer_layer_spec = get_gpt_layer_local_spec(
             cls.transformer_config,
             num_experts=cls.n_routed_experts,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         cls.sequential_mlp = MoELayer(
             cls.transformer_config,

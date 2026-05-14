@@ -436,7 +436,7 @@ class TransformerConfig(ModelParallelConfig):
     moe_dequant_input: bool = False
     """Whether to dequantize input."""
 
-    moe_expert_fusion: bool = True
+    moe_expert_fusion: bool = False
     """Whether to fuse experts."""
 
     moe_subbatch_token_num_before_dispatch: int | None = None
@@ -453,9 +453,6 @@ class TransformerConfig(ModelParallelConfig):
     """When True, print auto_subbatch diagnostic info (path, subbatch_rows, zip_unzip_fusion)
     after each forward/backward pass. Useful for debugging memory behavior."""
 
-    moe_grouped_gemm: bool = False
-    """Whether to use grouped gemm."""
-
     router_z_loss_coef: float = None
     """Scaling coefficient for z-loss. Default is None."""
 
@@ -471,9 +468,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
-    moe_deep_gemm: bool = False
+    moe_deep_gemm: bool = True
     """Whether to use DeepGEMM for the bf16 grouped-gemm MoE path. This option only takes effect when
-    ``moe_grouped_gemm=True`` and fp8 is disabled, it is ignored when fp8 is enabled."""
+    ``moe_expert_fusion=True`` and fp8 is disabled, it is ignored when fp8 is enabled."""
 
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""

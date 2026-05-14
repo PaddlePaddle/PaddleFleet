@@ -333,9 +333,9 @@ class ExpertsGroupGemmContiguousNode:
         use_bf16_gemm_weight_grad=False,
         use_fp8_mlp=True,
         moe_deep_gemm=False,
-        moe_grouped_gemm=False,
         use_ue8m0=False,
         dw_p2p_overlap=False,
+        moe_expert_fusion=False,
     ):
         """
             Initializes the experts group gemm contiguous node.
@@ -346,7 +346,12 @@ class ExpertsGroupGemmContiguousNode:
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
         """
-        if not moe_grouped_gemm or (use_fp8_mlp and not moe_deep_gemm):
+        # 两条路径：
+        #   split path (self.experts): 权重为 list，支持 auto_subbatch 逐专家 fallback
+        #     条件: moe_expert_fusion=False, 或 use_fp8_mlp=True & moe_deep_gemm=False
+        #   grouped path (self.grouped_gemm_experts): 权重为 stacked tensor，走批量 gemm
+        #     条件: moe_expert_fusion=True & (use_fp8_mlp=False 或 moe_deep_gemm=True)
+        if not moe_expert_fusion or (use_fp8_mlp and not moe_deep_gemm):
             if expert_id is None:
                 self.experts = custom_map.experts
             else:
@@ -375,10 +380,10 @@ class ExpertsGroupGemmContiguousNode:
         self.use_bf16_gemm_weight_grad = use_bf16_gemm_weight_grad
         self.use_fp8_mlp = use_fp8_mlp
         self.moe_deep_gemm = moe_deep_gemm
-        self.moe_grouped_gemm = moe_grouped_gemm
-        self.is_split_group_gemm = not moe_grouped_gemm
         self.use_ue8m0 = use_ue8m0
+        self.is_split_group_gemm = not moe_expert_fusion
         self.dw_p2p_overlap = dw_p2p_overlap
+        self.moe_expert_fusion = moe_expert_fusion
 
     def cached_tensors(self):
         """
@@ -453,7 +458,7 @@ class ExpertsGroupGemmContiguousNode:
             assert self.input is not None
             x = self.input
         if numpy.prod(x.shape) != 0:
-            if self.moe_grouped_gemm:
+            if self.moe_expert_fusion:
                 if self.moe_deep_gemm:
                     o1 = paddle.zeros(
                         [x.shape[0], expert_w1.shape[2]], dtype="bfloat16"
@@ -485,7 +490,7 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 o1 = paddle.concat(expert_output_list, axis=0)
         else:
-            if self.moe_grouped_gemm:
+            if self.moe_expert_fusion:
                 o1 = paddle.empty(
                     [x.shape[0], expert_w1.shape[2]], dtype=expert_w1[0].dtype
                 )
@@ -520,7 +525,7 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, n] = [m_sum, k] * [num_groups, k, n] (m_sum = sum(tokens_per_expert))
         """
 
-        if self.moe_grouped_gemm:
+        if self.moe_expert_fusion:
             self.m_indices = self.gen_m_indices(tokens_per_expert)
         # concat w1, shape is [num_groups, n, k]
 
@@ -578,7 +583,7 @@ class ExpertsGroupGemmContiguousNode:
             [x_fp8.shape[0], w1_t_quant.shape[1]], dtype=expert_w1[0].dtype
         )
         if numpy.prod(x_fp8.shape) != 0:
-            if not self.moe_grouped_gemm:
+            if not self.moe_expert_fusion:
                 split_group_gemm(
                     x_fp8,
                     x_scale,
@@ -625,7 +630,7 @@ class ExpertsGroupGemmContiguousNode:
 
         # down proj
         if numpy.prod(o2.shape) != 0:
-            if self.moe_grouped_gemm:
+            if self.moe_expert_fusion:
                 if self.moe_deep_gemm:
                     o3 = paddle.zeros(
                         [o2.shape[0], expert_w2.shape[2]], dtype="bfloat16"
@@ -657,7 +662,7 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 o3 = paddle.concat(expert_output_list, axis=0)
         else:
-            if self.moe_grouped_gemm:
+            if self.moe_expert_fusion:
                 o3_shape = [o2.shape[0], expert_w2.shape[2]]
             else:
                 o3_shape = [o2.shape[0], expert_w2[0].shape[1]]
@@ -727,7 +732,7 @@ class ExpertsGroupGemmContiguousNode:
         else:
             o3 = paddle.empty(o3_shape, dtype=o1.dtype)
         if numpy.prod(o2_fp8.shape) != 0:
-            if not self.moe_grouped_gemm:
+            if not self.moe_expert_fusion:
                 split_group_gemm(
                     o2_fp8,
                     o2_scale,
@@ -757,7 +762,7 @@ class ExpertsGroupGemmContiguousNode:
         bwd_down_input_bf16
         """
         if numpy.prod(unzipped_grad.shape) != 0:
-            if self.moe_grouped_gemm and not self.use_fp8_mlp:
+            if self.moe_expert_fusion and not self.use_fp8_mlp:
                 if self.moe_deep_gemm:
                     do2_s = paddle.zeros(
                         [unzipped_grad.shape[0], expert_w2.shape[1]],
@@ -793,7 +798,7 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 do2_s = paddle.concat(do2_s_list, axis=0)
         else:
-            if self.moe_grouped_gemm and not self.use_fp8_mlp:
+            if self.moe_expert_fusion and not self.use_fp8_mlp:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2.shape[1]]
             else:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
@@ -859,7 +864,7 @@ class ExpertsGroupGemmContiguousNode:
             )
 
         # compute gemm
-        if self.use_ue8m0 and self.moe_grouped_gemm:
+        if self.use_ue8m0 and self.moe_expert_fusion:
             unzipped_grad_fp8, unzipped_grad_scale = (
                 paddle.incubate.nn.functional.fp8_quant_blockwise(
                     unzipped_grad,
@@ -886,7 +891,7 @@ class ExpertsGroupGemmContiguousNode:
             dtype=unzipped_grad.dtype,
         )
         if numpy.prod(unzipped_grad_fp8.shape) != 0:
-            if not self.moe_grouped_gemm:
+            if not self.moe_expert_fusion:
                 split_group_gemm(
                     unzipped_grad_fp8,
                     unzipped_grad_scale,
@@ -942,7 +947,7 @@ class ExpertsGroupGemmContiguousNode:
         bwd_gate_up_input_bf16
         """
         if numpy.prod(do1.shape) != 0:
-            if self.moe_grouped_gemm and not self.use_fp8_mlp:
+            if self.moe_expert_fusion and not self.use_fp8_mlp:
                 if self.moe_deep_gemm:
                     dx = paddle.zeros(
                         [do1.shape[0], expert_w1.shape[1]],
@@ -974,7 +979,7 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 dx = paddle.concat(dx_list, axis=0)
         else:
-            if self.moe_grouped_gemm and not self.use_fp8_mlp:
+            if self.moe_expert_fusion and not self.use_fp8_mlp:
                 dx_shape = [do1.shape[0], expert_w1.shape[1]]
             else:
                 dx_shape = [do1.shape[0], expert_w1[0].shape[0]]
@@ -1019,7 +1024,7 @@ class ExpertsGroupGemmContiguousNode:
         )
 
         # quant do1
-        if self.use_ue8m0 and self.moe_grouped_gemm:
+        if self.use_ue8m0 and self.moe_expert_fusion:
             do1_fp8, do1_scale = (
                 paddle.incubate.nn.functional.fp8_quant_blockwise(
                     do1,
@@ -1049,7 +1054,7 @@ class ExpertsGroupGemmContiguousNode:
             assert dx.shape == dx_shape, f"{dx.shape} vs {dx_shape}"
             dx.zero_()
         if numpy.prod(do1_fp8.shape) != 0:
-            if not self.moe_grouped_gemm:
+            if not self.moe_expert_fusion:
                 split_group_gemm(
                     do1_fp8,
                     do1_scale,
@@ -1263,7 +1268,7 @@ class ExpertsGroupGemmContiguousNode:
             o3 = paddle.zeros(shape, dtype=dtype)
             return o3
         # get w1/w2
-        if self.moe_grouped_gemm and (
+        if self.moe_expert_fusion and (
             not self.use_fp8_mlp or self.moe_deep_gemm
         ):
             expert_w1 = self.grouped_gemm_experts.weight1
@@ -1329,7 +1334,7 @@ class ExpertsGroupGemmContiguousNode:
             probs_grad = paddle.zeros_like(unzipped_probs)
 
             if not (
-                self.moe_grouped_gemm
+                self.moe_expert_fusion
                 and (not self.use_fp8_mlp or self.moe_deep_gemm)
             ):
                 for expert in self.experts:
@@ -1543,7 +1548,7 @@ class ExpertsGroupGemmContiguousNode:
         # Detect LoRA on grouped_gemm_experts
         _ge = (
             getattr(self, "grouped_gemm_experts", None)
-            if self.moe_grouped_gemm
+            if self.moe_expert_fusion
             else None
         )
         _has_lora = (
@@ -1553,7 +1558,7 @@ class ExpertsGroupGemmContiguousNode:
             and not getattr(_ge, "merged", False)
         )
 
-        if self.moe_grouped_gemm and not self.use_fp8_mlp:
+        if self.moe_expert_fusion and not self.use_fp8_mlp:
             if _has_lora:
                 expert_w1 = _ge.weight1 + _ge.get_delta_weight(
                     _ge.weight1_lora_A, _ge.weight1_lora_B
@@ -1585,7 +1590,7 @@ class ExpertsGroupGemmContiguousNode:
         self.o1 = None
 
         # dw1 / lora grads for w1
-        if _has_lora and self.moe_grouped_gemm:
+        if _has_lora and self.moe_expert_fusion:
             # compute dw_eff into a temporary tensor instead of accumulating to frozen weight
             if self.input is not None:
                 _input = self.input
@@ -1608,7 +1613,7 @@ class ExpertsGroupGemmContiguousNode:
             self.input = None
 
         # dw2 / lora grads for w2
-        if _has_lora and self.moe_grouped_gemm:
+        if _has_lora and self.moe_expert_fusion:
             if o2_s is not None and o2_s.shape[0] > 0:
                 dw2 = paddle.incubate.nn.functional.batched_gemm(
                     o2_s, out_grad, self.tokens_per_expert, trans_lhs=True
@@ -1745,7 +1750,10 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 x = self.input
 
-        if self.moe_grouped_gemm and (
+        # grouped path: weights 是 stacked tensor，用 grouped/batched gemm 计算 weight_grad
+        # 条件须与 __init__ 一致，否则 split path 下 weights 是 list 会报错
+        # TODO: auto_subbatch 支持 grouped 模式后应该优化判断条件
+        if self.moe_expert_fusion and (
             not self.use_fp8_mlp or self.moe_deep_gemm
         ):
 
@@ -1819,6 +1827,9 @@ class ExpertsGroupGemmContiguousNode:
                         )
 
                 else:
+                    assert not self.use_fp8_mlp, (
+                        "batched_gemm is not supported when use_fp8_mlp=True"
+                    )
                     weights_res = paddle.incubate.nn.functional.batched_gemm(
                         x,
                         dy,
@@ -1868,6 +1879,9 @@ class ExpertsGroupGemmContiguousNode:
                             p2p_overlap,
                         )
                 else:
+                    assert not self.use_fp8_mlp, (
+                        "batched_gemm is not supported when use_fp8_mlp=True"
+                    )
                     weights_res = paddle.incubate.nn.functional.batched_gemm(
                         x,
                         dy,
@@ -1882,6 +1896,7 @@ class ExpertsGroupGemmContiguousNode:
                     ):
                         weights._apply_backward_hook()
         else:
+            # split path: weights 是 list，逐专家计算 weight_grad (支持 auto_subbatch fallback)
             start_idx = 0
             for i, n in enumerate(self.tokens_per_expert):
                 if hasattr(weights[i], "main_grad"):

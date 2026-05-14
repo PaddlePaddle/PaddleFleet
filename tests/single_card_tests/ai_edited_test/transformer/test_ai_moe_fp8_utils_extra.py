@@ -172,7 +172,7 @@ class TestExpertsGroupGemmContiguousNode(unittest.TestCase):
         custom_map.grouped_gemm_experts = MagicMock()
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             use_fp8_mlp=False,
         )
         self.assertTrue(hasattr(node, "grouped_gemm_experts"))

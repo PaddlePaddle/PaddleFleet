@@ -210,7 +210,7 @@ def get_attention_spec(
 def get_gpt_layer_local_spec(
     config: TransformerConfig | None = None,
     num_experts: int | None = None,
-    moe_grouped_gemm: bool | None = False,
+    moe_expert_fusion: bool | None = False,
     use_qk_norm: bool | None = False,
     multi_latent_attention: bool | None = False,
     normalization: str | None = None,
@@ -224,7 +224,7 @@ def get_gpt_layer_local_spec(
 
     Args:
         num_experts (int, optional): Number of experts. Defaults to None.
-        moe_grouped_gemm (bool, optional): To use Grouped GEMM. Defaults to False.
+        moe_expert_fusion (bool, optional): To use Grouped GEMM. Defaults to False.
         use_qk_norm (bool, optional): To use layernorm for queries/keys. Defaults to False.
         fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
         qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
@@ -247,7 +247,7 @@ def get_gpt_layer_local_spec(
     mlp = get_mlp_layer_spec_for_backend(
         backend=backend,
         num_experts=num_experts,
-        moe_grouped_gemm=moe_grouped_gemm,
+        moe_expert_fusion=moe_expert_fusion,
     )
 
     block_attn_res = IdentityOp
@@ -310,7 +310,7 @@ def get_gpt_layer_local_spec(
 def get_mlp_layer_spec_for_backend(
     backend: BackendSpecProvider,
     num_experts: int | None = None,
-    moe_grouped_gemm: bool | None = False,
+    moe_expert_fusion: bool | None = False,
 ) -> LayerSpec:
     """Helper function to get layer spec for MLP/MoE"""
 
@@ -337,7 +337,7 @@ def get_mlp_layer_spec_for_backend(
         return get_moe_layer_spec_for_backend(
             backend=backend,
             num_experts=num_experts,
-            moe_grouped_gemm=moe_grouped_gemm,
+            moe_expert_fusion=moe_expert_fusion,
         )
 
 
@@ -351,7 +351,7 @@ def get_gpt_decoder_layers_spec(
         get_gpt_layer_local_spec,
         config=config,
         num_experts=None,
-        moe_grouped_gemm=False,
+        moe_expert_fusion=False,
         use_qk_norm=config.use_qk_norm,
         multi_latent_attention=config.multi_latent_attention,
         normalization=normalization,
@@ -362,7 +362,7 @@ def get_gpt_decoder_layers_spec(
         get_gpt_layer_local_spec,
         config=config,
         num_experts=config.n_routed_experts,
-        moe_grouped_gemm=config.moe_grouped_gemm,
+        moe_expert_fusion=config.moe_expert_fusion,
         use_qk_norm=config.use_qk_norm,
         multi_latent_attention=config.multi_latent_attention,
         normalization=normalization,
@@ -434,7 +434,7 @@ def get_gpt_mtp_layers_spec_for_backend(
         transformer_layer_spec = get_gpt_layer_local_spec(
             config=config,
             num_experts=None,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
             use_qk_norm=config.use_qk_norm,
             multi_latent_attention=config.multi_latent_attention,
             normalization=config.normalization,

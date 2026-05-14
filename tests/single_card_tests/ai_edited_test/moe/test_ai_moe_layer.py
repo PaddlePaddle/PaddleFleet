@@ -51,7 +51,7 @@ def _make_moe_config(**overrides):
         "tensor_model_parallel_size": 1,
         "moe_token_dispatcher_type": "alltoall",
         "moe_use_fusion_node": False,
-        "moe_grouped_gemm": False,
+        "moe_expert_fusion": False,
         "moe_ep_barrier": True,
         "fp8": None,
         "fp8_wgrad": True,

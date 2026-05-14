@@ -60,7 +60,7 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
             num_experts_per_tok=1,
             moe_intermediate_size=INTERMEDIATE,
             moe_token_dispatcher_type="alltoall",
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
             moe_use_fusion_node=True,
             fp8=None,
             gated_linear_unit=True,
