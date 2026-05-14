@@ -18,6 +18,8 @@ log
 ducc_storage/
 paddlefleet-*.whl
 test_log
+.ninja_log
+.claude
 
 # Ignore files generated from `uv sync` for custom ops
 packages/paddlefleet_ops/src/paddlefleet_ops/_extensions/ops_pd_.so

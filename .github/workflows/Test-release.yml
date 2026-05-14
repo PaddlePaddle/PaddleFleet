@@ -188,7 +188,8 @@ jobs:
           export UV_PYTHON=3.10
           export IS_NVIDIA=True
           export UV_HTTP_TIMEOUT=300
-          uv build --wheel --package paddlefleet-ops --out-dir dist -v
+          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           OPS_WHL=$(ls dist/paddlefleet_ops-*.whl | head -n1)
           echo "OPS_WHL=$(basename $OPS_WHL)" >> dist/whl_names.txt
           ls -lh dist
@@ -315,7 +316,8 @@ jobs:
           export UV_PYTHON=3.12
           export IS_NVIDIA=True
           export UV_HTTP_TIMEOUT=300
-          uv build --wheel --package paddlefleet-ops --out-dir dist -v
+          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           OPS_WHL=$(ls dist/paddlefleet_ops-*.whl | head -n1)
           echo "OPS_WHL=$(basename $OPS_WHL)" >> dist/whl_names.txt
           ls -lh dist

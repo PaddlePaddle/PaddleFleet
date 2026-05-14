@@ -304,9 +304,7 @@ def get_special_build_deps():
         cuda_major, cuda_minor = get_cuda_version()
         major = sys.version_info.major
         minor = sys.version_info.minor
-        deps = [
-            "paddlepaddle-gpu>=3.4.0.dev20260415",
-        ]
+        deps = []
         # for deep_ep build
         if platform.machine() == "aarch64":
             deps.append("nvidia-nvshmem-cu13>=3.3.9,<3.5")
