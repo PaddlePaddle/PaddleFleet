@@ -87,16 +87,12 @@ class TransformerConfig(ModelParallelConfig):
     0 implies equal layer division across PP ranks."""
 
     use_embedding_gating: bool = False
-    """When True, apply scalar gating to fuse initial embedding into the last decoder layer input.
-    Formula: h_in^L = alpha * h_out^{L-1} + beta * e_0
-    reference for Nanochat: https://github.com/karpathy/nanochat/blob/master/nanochat/gpt.py
-    """
+    """When True, apply sigmoid gating to fuse initial embedding into the last decoder layer output.
+    Formula: h_out = h_in + h_in * sigmoid(W @ e), where W is a learnable matrix of shape [hidden_size, hidden_size]."""
 
-    embedding_gating_alpha_init: float = 1.05
-    """Initial value of the embedding gating alpha parameter."""
-
-    embedding_gating_beta_init: float = 0.05
-    """Initial value of the embedding gating beta parameter."""
+    embedding_gating_gate_zero_init: bool = True
+    """If True, initialize gate weight matrix W to zero so gate = sigmoid(0) ≈ 0.5 initially.
+    This minimizes disruption at the start of training."""
 
     # Note: need to implement PipelineParallelLayerLayout and import
     # pipeline_model_parallel_layout: str | list | PipelineParallelLayerLayout = None
