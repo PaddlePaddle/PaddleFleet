@@ -141,7 +141,6 @@ jobs:
           export IS_NVIDIA=True
           uv build --wheel -v
           pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
-          rm dist/paddlefleet-*.whl
           uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           '
 
@@ -155,7 +154,7 @@ jobs:
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
-          for whl in paddlefleet-*.whl; do
+          for whl in paddlefleet-*.whl paddlefleet_ops-*.whl; do
             echo "Uploading ${whl}"
             python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}
             echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}/${whl}"
