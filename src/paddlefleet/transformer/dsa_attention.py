@@ -493,7 +493,7 @@ def _compute_dsa_indexer_loss(
             row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [b, sq]
             attn_row_mask = row_valid.reshape([b, 1, sq, 1])
             idx_row_mask = row_valid.reshape([b, sq, 1])
-        
+
         attention_scores = paddle.where(
             attn_row_mask, attention_scores, paddle.zeros_like(attention_scores)
         )
