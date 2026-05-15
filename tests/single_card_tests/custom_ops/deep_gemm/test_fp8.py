@@ -19,7 +19,15 @@ import copy
 import random
 
 import torch
-from generators import (
+
+from paddlefleet.ops import deep_gemm
+from paddlefleet.ops.deep_gemm.testing import (
+    calc_diff,
+    get_arch_major,
+    ignore_env,
+)
+
+from .generators import (
     KernelType,
     enumerate_k_grouped_contiguous,
     enumerate_m_grouped_contiguous,
@@ -30,13 +38,6 @@ from generators import (
     generate_m_grouped_masked,
     generate_normal,
     get_ue8m0_usage,
-)
-
-from paddlefleet.ops import deep_gemm
-from paddlefleet.ops.deep_gemm.testing import (
-    calc_diff,
-    get_arch_major,
-    ignore_env,
 )
 
 

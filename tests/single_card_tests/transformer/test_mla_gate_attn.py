@@ -249,6 +249,41 @@ class TestMLAGatedForward(unittest.TestCase):
         for param in attn.gate_proj.parameters():
             self.assertIsNotNone(param.grad)
 
+    def test_forward_backward_with_gate_recompute(self):
+        attn = _build_mla(
+            gated_attention=True,
+            sigmoid_gate_fusion=True,
+            recompute_granularity="selective",
+            recompute_modules=["gated_attn"],
+        )
+        attn.train()
+        attn_ref = _build_mla(gated_attention=True)
+        attn_ref.train()
+
+        x = paddle.randn([2, 4, 128])
+        x.stop_gradient = False
+
+        mem0 = paddle.device.memory_allocated()
+        out, _ = attn(x, attention_mask=None)
+        mem1 = paddle.device.memory_allocated()
+        out_ref, _ = attn_ref(x, attention_mask=None)
+        mem2 = paddle.device.memory_allocated()
+
+        # Recomputing gate avoids storing sigmoid_out and mul_out, so the
+        # memory usage should be reduced by both sizes.
+        sigmoid_out_size = out.size * out.itemsize
+        mul_out_size = sigmoid_out_size
+        self.assertGreaterEqual(
+            (mem2 - mem1) - (mem1 - mem0),
+            sigmoid_out_size + mul_out_size,
+        )
+
+        loss = out.sum()
+        loss.backward()
+        self.assertIsNotNone(x.grad)
+        for param in attn.gate_proj.parameters():
+            self.assertIsNotNone(param.grad)
+
 
 class TestGetAttentionSpecGate(unittest.TestCase):
     def _make_mock_config(self, gated=False):

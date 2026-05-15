@@ -240,6 +240,27 @@ class TestLatentMoEInit(unittest.TestCase):
                     )
                 break  # Only check the first present expert
 
+    def test_latent_moe_shared_experts_use_original_hidden_size(self):
+        """shared_experts must use original hidden_size, not moe_latent_size."""
+        config = _make_moe_config(
+            use_latent_moe=True,
+            moe_latent_size=32,
+            n_shared_experts=2,
+        )
+        layer = self._run_init(config)
+        # shared_experts should NOT be affected by latent MoE
+        # It must still use hidden_size=64, not moe_latent_size=32
+        self.assertIsNotNone(layer.shared_experts)
+        # Check that shared_experts operates on hidden_size=64
+        for sub in layer.shared_experts.sublayers():
+            if isinstance(sub, (nn.Linear, paddle.nn.Linear)):
+                self.assertEqual(
+                    sub.weight.shape[1],
+                    64,
+                    "shared_experts input must equal hidden_size=64, not moe_latent_size=32",
+                )
+                break
+
 
 # ---------------------------------------------------------------------------
 # 3. dispatch_preprocess – latent projection before token dispatch

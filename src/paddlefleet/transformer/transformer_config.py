@@ -158,6 +158,9 @@ class TransformerConfig(ModelParallelConfig):
     _attn_implementation: str = "default"
     """Attention implementation to use."""
 
+    flashmask_use_varlen: bool = False
+    """If True, convert flashmask to varlen in attention."""
+
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""
@@ -306,6 +309,9 @@ class TransformerConfig(ModelParallelConfig):
     apply_rope_fusion: bool = False
     """If True, use fused RoPE kernel."""
 
+    sigmoid_gate_fusion: bool = False
+    """If True, use Triton fused sigmoid gate kernel."""
+
     ####################
     # activation recomputation
     ####################
@@ -365,7 +371,7 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
-    Options are 'allgather','alltoall' and 'deepep'."""
+    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -503,6 +509,12 @@ class TransformerConfig(ModelParallelConfig):
     fp8_wgrad: bool = True
     """Whether to use fp8 wgrad."""
 
+    dw_p2p_overlap: bool = False
+    """Whether to overlap p2p communication and matmul kernel in pp parallel on Blackwell."""
+
+    use_ue8m0: bool = False
+    """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
+
     ####################
     # initialization
     ####################
@@ -620,6 +632,15 @@ class TransformerConfig(ModelParallelConfig):
     loss_subbatch_sequence_length: int = -1
     """Sequence length of subbatch for loss computation."""
 
+    fused_linear_ce_loss_chunk: int = 0
+    """Enable fused linear + cross-entropy loss when > 0.
+
+    When set to a positive integer N, LM head skips materializing the full
+    [B, S, V] logits tensor and instead passes (hidden_states, weight, bias)
+    to LanguageLoss, which dispatches to LigerFusedLinearCrossEntropyFunction
+    with num_chunks=N. Only compatible with tensor_model_parallel_size == 1
+    (or parallel_output disabled)."""
+
     # cache_mla_latents: bool = False
 
     ####################
@@ -686,6 +707,12 @@ class TransformerConfig(ModelParallelConfig):
 
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
+
+    moe_topk_fusion: bool = False
+    """If True, use Triton fused MoE TopK kernel for expert selection."""
+
+    routing_map_fusion: bool = False
+    """If True, use Triton fused routing map kernel for MoE routing."""
 
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
