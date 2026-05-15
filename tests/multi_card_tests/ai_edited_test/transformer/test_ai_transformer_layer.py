@@ -149,9 +149,10 @@ class TestTransformerLayerBasic(unittest.TestCase):
         hidden_states = paddle.randn(
             [2, 8, self.hidden_size], dtype=paddle.float32
         )
-        attention_mask = None
-        output = self.transformer_layer(hidden_states, attention_mask)
-        self.assertEqual(output.shape, [2, 8, self.hidden_size])
+        result = self.transformer_layer({"hidden_states": hidden_states})
+        self.assertEqual(
+            result["hidden_states"].shape, [2, 8, self.hidden_size]
+        )
 
     @_requires_gpu_compute
     def test_forward_with_attention_mask(self):
@@ -162,8 +163,12 @@ class TestTransformerLayerBasic(unittest.TestCase):
         attention_mask = paddle.triu(
             paddle.full([8, 8], float("-inf"), dtype=paddle.float32), diagonal=1
         )
-        output = self.transformer_layer(hidden_states, attention_mask)
-        self.assertEqual(output.shape, [2, 8, self.hidden_size])
+        result = self.transformer_layer(
+            {"hidden_states": hidden_states, "attention_mask": attention_mask}
+        )
+        self.assertEqual(
+            result["hidden_states"].shape, [2, 8, self.hidden_size]
+        )
 
 
 class TestTransformerLayerWithMoe(unittest.TestCase):
@@ -213,18 +218,24 @@ class TestTransformerLayerWithMoe(unittest.TestCase):
         hidden_states = paddle.randn(
             [2, 8, self.hidden_size], dtype=paddle.float32
         )
-        output = self.transformer_layer(hidden_states, None)
-        self.assertEqual(output.shape, [2, 8, self.hidden_size])
+        result = self.transformer_layer({"hidden_states": hidden_states})
+        self.assertEqual(
+            result["hidden_states"].shape, [2, 8, self.hidden_size]
+        )
 
     @_requires_gpu_compute
     def test_forward_moe_with_labels(self):
-        """Test transformer layer with MoE and labels for aux loss."""
+        """Test transformer layer with MoE and input_ids for aux loss."""
         hidden_states = paddle.randn(
             [2, 8, self.hidden_size], dtype=paddle.float32
         )
-        labels = paddle.randint(0, 100, [2, 8])
-        output = self.transformer_layer(hidden_states, None, labels=labels)
-        self.assertEqual(output.shape, [2, 8, self.hidden_size])
+        input_ids = paddle.randint(0, 100, [2, 8])
+        result = self.transformer_layer(
+            {"hidden_states": hidden_states, "input_ids": input_ids}
+        )
+        self.assertEqual(
+            result["hidden_states"].shape, [2, 8, self.hidden_size]
+        )
 
 
 if __name__ == "__main__":

@@ -153,7 +153,7 @@ class TestMoELayerForward(unittest.TestCase):
             hidden_states = paddle.randn(
                 [2, 8, self.hidden_size], dtype=paddle.float32
             )
-            output = self.moe_layer(hidden_states)
+            output, _ = self.moe_layer(hidden_states)
             self.assertEqual(output.shape, [2, 8, self.hidden_size])
 
     @_requires_gpu_compute
@@ -163,8 +163,7 @@ class TestMoELayerForward(unittest.TestCase):
             hidden_states = paddle.randn(
                 [2, 8, self.hidden_size], dtype=paddle.float32
             )
-            labels = paddle.randint(0, 100, [2, 8])
-            output, _ = self.moe_layer(hidden_states, labels)
+            output, _ = self.moe_layer(hidden_states)
             self.assertEqual(output.shape, [2, 8, self.hidden_size])
 
 
@@ -206,16 +205,21 @@ class TestMoEGateRouter(unittest.TestCase):
 
     @_requires_gpu_compute
     def test_gate_output_shape(self):
-        """Test gate produces (logits, topk_indices, topk_weights)."""
+        """Test gate produces correct output with 8-tuple."""
         with paddle.no_grad():
             hidden_states = paddle.randn(
                 [2, 8, self.hidden_size], dtype=paddle.float32
             )
             self.gate.moe_router_score_function = "softmax"
-            logits, indices, weights = self.gate(hidden_states)
-            self.assertEqual(logits.shape[0], 2)
-            self.assertEqual(indices.shape[1], self.config.num_experts_per_tok)
-            self.assertEqual(weights.shape, indices.shape)
+            result = self.gate(hidden_states)
+            # TopKRouter returns 8-tuple: (capacity, topk_weights, topk_indices, probs, mask, priorities, aux_loss, z_loss)
+            self.assertEqual(len(result), 8)
+            topk_weights = result[1]
+            topk_indices = result[2]
+            self.assertEqual(
+                topk_weights.shape[1], self.config.num_experts_per_tok
+            )
+            self.assertEqual(topk_weights.shape, topk_indices.shape)
 
     @_requires_gpu_compute
     def test_gate_sigmoid_score_function(self):
@@ -225,8 +229,12 @@ class TestMoEGateRouter(unittest.TestCase):
                 [2, 8, self.hidden_size], dtype=paddle.float32
             )
             self.gate.moe_router_score_function = "sigmoid"
-            logits, indices, weights = self.gate(hidden_states)
-            self.assertEqual(weights.shape, indices.shape)
+            result = self.gate(hidden_states)
+            # TopKRouter returns 8-tuple
+            self.assertEqual(len(result), 8)
+            topk_weights = result[1]
+            topk_indices = result[2]
+            self.assertEqual(topk_weights.shape, topk_indices.shape)
 
 
 class TestMoEConfigVariants(unittest.TestCase):
@@ -276,7 +284,7 @@ class TestMoEConfigVariants(unittest.TestCase):
             hidden = paddle.randn(
                 [2, 4, self.hidden_size], dtype=paddle.float32
             )
-            output = moe_layer(hidden)
+            output, _ = moe_layer(hidden)
             self.assertEqual(output.shape, [2, 4, self.hidden_size])
 
 
