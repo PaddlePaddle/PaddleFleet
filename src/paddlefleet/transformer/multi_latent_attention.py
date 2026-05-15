@@ -656,7 +656,12 @@ class MLASelfAttention(MultiLatentAttention):
         # =========================================
 
         def qkv_up_proj_and_rope_apply(
-            q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
         ):
             """
             Apply the up projection and RoPE to the query and key.
@@ -715,6 +720,9 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.rope_type == "rope":
                     cos = paddle.cos(rotary_pos_emb).contiguous()
                     sin = paddle.sin(rotary_pos_emb).contiguous()
+                else:
+                    cos = rotary_pos_cos
+                    sin = rotary_pos_sin
                 query = fused_apply_mla_rope_for_q(
                     q,
                     cos,
@@ -840,7 +848,12 @@ class MLASelfAttention(MultiLatentAttention):
             return query, key, value
 
         query, key, value = qkv_up_proj_and_rope_apply(
-            q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
         )
 
         return query, key, value, q_compressed, kv_compressed
