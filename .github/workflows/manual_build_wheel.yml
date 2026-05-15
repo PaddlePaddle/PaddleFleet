@@ -125,8 +125,8 @@ jobs:
           cd dist
           for whl in paddlefleet-*.whl; do
             echo "Uploading ${whl}"
-            python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}
-            echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}/${whl}"
+            python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/
+            echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${whl}"
           done
           '
 

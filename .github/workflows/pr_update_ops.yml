@@ -113,7 +113,7 @@ jobs:
           - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
           - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
     env:
-      TASK: PR-PaddleFleet-ops-${{ matrix.cuda.CUDA_VERSION }}
+      TASK: PR-PaddleFleet-ops-${{ matrix.cuda.CUDA_VERSION }}-${{ matrix.python_version }}
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
       UV_HTTP_TIMEOUT: 600
@@ -185,6 +185,140 @@ jobs:
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
           pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           rm dist/paddlefleet-*.whl
+          pip install packaging "setuptools>=66.1.0" wheel
+          if [[ ${{ matrix.cuda.bos_CUDA }} == "cu129" ]]; then
+            pip install "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          elif [[ ${{ matrix.cuda.bos_CUDA }} == "cu130" ]]; then
+            pip install "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+          else
+            pip install "nvidia-nvshmem-cu12>=3.3.9,<3.5"
+          fi
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
+          '
+
+      - name: Upload wheel
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir bos
+          tar -xf bos_new.tar.gz -C bos
+          cd dist
+          PY_VERSION="${{ matrix.python_version }}"
+          PY_VERSION_SHORT="${PY_VERSION//./}"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+          else
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            if [[ ${{ matrix.cuda.bos_CUDA }} == cu129 ]]; then
+              if [[ ${{ matrix.python_version }} == 3.10 || ${{ matrix.python_version }} == 3.12 ]]; then
+                cp paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
+                python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
+                rm paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
+              fi
+            fi
+            export AK=paddle
+            export SK=paddle
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+          fi
+          curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          '
+
+      - name: Cleanup
+        if: ${{ always() }}
+        run: |
+          set +e
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker rm -f ${{ env.container_name }}
+
+  publish-ops-wheel-paddle-dev:
+    name: PR merge update ops on paddle-dev (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
+    needs: clone
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    runs-on:
+      group: GZ_BD-CPU
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ["3.10", "3.11", "3.12", "3.13"]
+        cuda:
+          - {CUDA_VERSION: CUDA12.6, IMAGE_TAG: cuda12.6-cudnn9.5-trt10.5-gcc11, bos_CUDA: cu126, CUDA_ARCH_LIST: "8.0;9.0"}
+          - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
+          - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
+    env:
+      TASK: PR-PaddleFleet-ops-${{ matrix.cuda.CUDA_VERSION }}-${{ matrix.python_version }}
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
+      UV_HTTP_TIMEOUT: 600
+      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
+    steps:
+      - name: Check docker image and run container
+        run: |
+          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:${{ matrix.cuda.IMAGE_TAG }}"
+          docker pull $docker_image
+          container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
+          echo "container_name=${container_name}" >> ${{ github.env }}
+          docker run -d -t --name ${container_name} \
+            -v "/home/data/cfs:/home/data/cfs" \
+            -v "/home/data/cfs/.cache:/home/.cache" \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
+            -v ${{ github.workspace }}:/workspace \
+            -e no_proxy \
+            -e CACHE_DIR \
+            -e PIP_CACHE_DIR \
+            -e UV_HTTP_TIMEOUT \
+            -e PADDLE_CUDA_ARCH_LIST="${{ matrix.cuda.CUDA_ARCH_LIST }}" \
+            -e PR_ID \
+            -e COMMIT_ID \
+            -e BRANCH \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
+            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+            -e GITHUB_REPO_NAME=${{ github.repository }} \
+            -w /workspace --network=host $docker_image
+
+      - name: Download PaddleFleet
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          rm -rf * .[^.]*
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          source /root/proxy
+          set -e
+          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          echo "Extracting PaddleFleet.tar.gz"
+          tar -xf PaddleFleet.tar.gz --strip-components=1
+          rm PaddleFleet.tar.gz
+          git config --global --add safe.directory /workspace
+          git submodule foreach --recursive "git config --global --add safe.directory \$toplevel/\$sm_path"
+          sed -i "s#packages/nightly/cu129#packages/nightly/${{ matrix.cuda.bos_CUDA }}#g" pyproject.toml
+          cat pyproject.toml
+          mkdir -p /root/.cache/pip
+          pip cache dir
+          pip install --upgrade pip
+          pip install uv
+          python -m pip install bce-python-sdk==0.8.74
+          '
+
+      - name: Build wheel
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
+          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          export UV_PYTHON=${{ matrix.python_version }}
+          source /root/proxy
+          git submodule update --init --recursive
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+            VERSION="${TAG_NAME#v}"
+            export PADDLEFLEET_VERSION=$VERSION
+          fi
+          export IS_NVIDIA=True
+          python -m pip install --pre paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           pip install packaging "setuptools>=66.1.0" wheel
           if [[ ${{ matrix.cuda.bos_CUDA }} == "cu129" ]]; then
             pip install "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/

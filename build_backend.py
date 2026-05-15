@@ -77,18 +77,18 @@ def _generate_version_info() -> str:
             .decode("utf-8")
             .strip()
         )
-        if branch.startswith("release/"):
-            commit_short = (
-                subprocess.check_output(
-                    ["git", "rev-parse", "--short=11", "HEAD"],
-                    cwd=_pkg_root,
-                )
-                .strip()
-                .decode("utf-8")
+        commit_short = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short=11", "HEAD"],
+                cwd=_pkg_root,
             )
+            .strip()
+            .decode("utf-8")
+        )
+        if branch.startswith("release/"):
             final_version = f"{version}.post{date_str}+{commit_short}"
         else:
-            final_version = f"{version}.dev{date_str}"
+            final_version = f"{version}.dev{date_str}+{commit_short}"
 
     with open(version_py, "w") as f:
         f.write(
