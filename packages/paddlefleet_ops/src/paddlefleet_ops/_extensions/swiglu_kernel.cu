@@ -32,6 +32,11 @@ __device__ __forceinline__ float precise_sigmoid(T x) {
 constexpr int kSwiGLUBackBlockSize = 256;
 
 inline bool ShouldUseInt64Index(int64_t rows, int64_t row_stride) {
+  // This predicate protects Y/DX offsets:
+  //   row * row_stride + col
+  // The G offset uses row * hidden_size + col. For fused_swiglu_bwd,
+  // row_stride is 2 * hidden_size after shape checks, so any int32-safe Y/DX
+  // offset range also bounds the G offset range.
   return rows >=
          static_cast<int64_t>(std::numeric_limits<int>::max()) / row_stride;
 }
