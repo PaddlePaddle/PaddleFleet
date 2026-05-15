@@ -36,6 +36,7 @@ def init_inference_fleet(ep_degree: int = 1) -> None:
             paddle.distributed.init_parallel_env()
     else:
         # Single GPU: still set device
-        gpu_id = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0"))
+        # Handle multi-GPU CUDA_VISIBLE_DEVICES like "0,1,2,3" by taking first device
+        gpu_id = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
         place = paddle.CUDAPlace(gpu_id)
         paddle.set_device(place)
