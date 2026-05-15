@@ -42,12 +42,19 @@ except Exception:
 # fp8.linear does `from paddlefleet.ops import deep_gemm` at module level.
 if not _DEEP_GEMM_AVAILABLE:
     # Ensure paddlefleet.ops exists and has a deep_gemm attribute
-    if "paddlefleet.ops" in sys.modules:
-        if not hasattr(sys.modules["paddlefleet.ops"], "deep_gemm"):
+    # Use try/except because paddlefleet.ops.__getattr__ raises RuntimeError
+    # for unsupported modules
+    try:
+        ops_mod = sys.modules.get("paddlefleet.ops")
+        if ops_mod is None:
+            ops_mod = types.ModuleType("paddlefleet.ops")
+            sys.modules["paddlefleet.ops"] = ops_mod
+        # Check if deep_gemm already exists without triggering __getattr__
+        if "deep_gemm" not in dir(ops_mod):
             mock_dg = MagicMock()
             mock_dg.fp8_gemm_nt = MagicMock()
-            sys.modules["paddlefleet.ops"].deep_gemm = mock_dg
-    else:
+            ops_mod.deep_gemm = mock_dg
+    except (RuntimeError, AttributeError):
         ops_mod = types.ModuleType("paddlefleet.ops")
         mock_dg = MagicMock()
         mock_dg.fp8_gemm_nt = MagicMock()

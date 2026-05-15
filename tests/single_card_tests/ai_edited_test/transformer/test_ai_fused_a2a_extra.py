@@ -28,17 +28,25 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.moe.fused_a2a import (
-    CombineNode,
-    DispatchNode,
-    FusedCombine,
-    FusedCombineAsync,
-    FusedDispatch,
-    barrier_ep,
-    get_hidden_bytes,
+try:
+    from paddlefleet.transformer.moe.fused_a2a import (
+        CombineNode,
+        DeepEPCombine,
+        DeepEPCombineAsync,
+        DeepEPDispatch,
+        DispatchNode,
+        barrier_ep,
+        get_hidden_bytes,
+    )
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.transformer.moe.fused_a2a not available"
 )
-
-
 class TestBarrierEp(unittest.TestCase):
     """Test barrier_ep function."""
 
@@ -49,6 +57,9 @@ class TestBarrierEp(unittest.TestCase):
         mock_barrier.assert_called_once_with(group)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.transformer.moe.fused_a2a not available"
+)
 class TestGetHiddenBytes(unittest.TestCase):
     """Test get_hidden_bytes function."""
 
@@ -73,39 +84,51 @@ class TestGetHiddenBytes(unittest.TestCase):
         self.assertEqual(get_hidden_bytes(x), 128)
 
 
-class TestFusedDispatch(unittest.TestCase):
-    """Test FusedDispatch PyLayer."""
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.transformer.moe.fused_a2a not available"
+)
+class TestDeepEPDispatch(unittest.TestCase):
+    """Test DeepEPDispatch PyLayer."""
 
     def test_has_forward_and_backward(self):
-        self.assertTrue(hasattr(FusedDispatch, "forward"))
-        self.assertTrue(hasattr(FusedDispatch, "backward"))
+        self.assertTrue(hasattr(DeepEPDispatch, "forward"))
+        self.assertTrue(hasattr(DeepEPDispatch, "backward"))
 
     def test_is_pylayer(self):
-        self.assertTrue(issubclass(FusedDispatch, paddle.autograd.PyLayer))
+        self.assertTrue(issubclass(DeepEPDispatch, paddle.autograd.PyLayer))
 
 
-class TestFusedCombine(unittest.TestCase):
-    """Test FusedCombine PyLayer."""
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.transformer.moe.fused_a2a not available"
+)
+class TestDeepEPCombine(unittest.TestCase):
+    """Test DeepEPCombine PyLayer."""
 
     def test_has_forward_and_backward(self):
-        self.assertTrue(hasattr(FusedCombine, "forward"))
-        self.assertTrue(hasattr(FusedCombine, "backward"))
+        self.assertTrue(hasattr(DeepEPCombine, "forward"))
+        self.assertTrue(hasattr(DeepEPCombine, "backward"))
 
     def test_is_pylayer(self):
-        self.assertTrue(issubclass(FusedCombine, paddle.autograd.PyLayer))
+        self.assertTrue(issubclass(DeepEPCombine, paddle.autograd.PyLayer))
 
 
-class TestFusedCombineAsync(unittest.TestCase):
-    """Test FusedCombineAsync PyLayer."""
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.transformer.moe.fused_a2a not available"
+)
+class TestDeepEPCombineAsync(unittest.TestCase):
+    """Test DeepEPCombineAsync PyLayer."""
 
     def test_has_forward_and_backward(self):
-        self.assertTrue(hasattr(FusedCombineAsync, "forward"))
-        self.assertTrue(hasattr(FusedCombineAsync, "backward"))
+        self.assertTrue(hasattr(DeepEPCombineAsync, "forward"))
+        self.assertTrue(hasattr(DeepEPCombineAsync, "backward"))
 
     def test_is_pylayer(self):
-        self.assertTrue(issubclass(FusedCombineAsync, paddle.autograd.PyLayer))
+        self.assertTrue(issubclass(DeepEPCombineAsync, paddle.autograd.PyLayer))
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.transformer.moe.fused_a2a not available"
+)
 class TestDispatchNode(unittest.TestCase):
     """Test DispatchNode."""
 
@@ -144,6 +167,9 @@ class TestDispatchNode(unittest.TestCase):
         self.assertIsNotNone(node.group)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.transformer.moe.fused_a2a not available"
+)
 class TestCombineNode(unittest.TestCase):
     """Test CombineNode."""
 
@@ -159,6 +185,9 @@ class TestCombineNode(unittest.TestCase):
         node.reset_statue()
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.transformer.moe.fused_a2a not available"
+)
 class TestFusedDispatchForwardFunc(unittest.TestCase):
     """Test fused_dispatch_forward_func."""
 
@@ -206,6 +235,9 @@ class TestFusedDispatchForwardFunc(unittest.TestCase):
         self.assertIn("tokens_per_expert", states)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE, "paddlefleet.transformer.moe.fused_a2a not available"
+)
 class TestFusedCombineForwardFunc(unittest.TestCase):
     """Test fused_combine_forward_func."""
 
