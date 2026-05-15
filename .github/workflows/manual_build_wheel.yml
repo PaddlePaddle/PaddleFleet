@@ -34,6 +34,7 @@ jobs:
       clone_dir: manual
       ref: ${{ inputs.commit }}
       commit: ${{ inputs.commit }}
+      submodules: 'false'
 
   publish-wheel:
     name: Manual build fleet (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
