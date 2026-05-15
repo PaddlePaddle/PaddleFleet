@@ -185,7 +185,7 @@ jobs:
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
           pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           rm dist/paddlefleet-*.whl
-          pip install packaging setuptools>=66.1.0 wheel
+          pip install packaging "setuptools>=66.1.0" wheel
           uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           '
 
@@ -310,7 +310,8 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          uv build --wheel --package paddlefleet-ops -v --python /usr/bin/python
+          pip install packaging "setuptools>=66.1.0" wheel
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v --python /usr/bin/python
           '
 
       - name: Upload wheel

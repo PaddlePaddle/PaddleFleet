@@ -141,7 +141,7 @@ jobs:
           export IS_NVIDIA=True
           uv build --wheel -v
           pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
-          pip install packaging setuptools>=66.1.0 wheel
+          pip install packaging "setuptools>=66.1.0" wheel
           uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           '
 
