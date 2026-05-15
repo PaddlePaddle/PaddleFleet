@@ -49,4 +49,33 @@ __all__ = [
     "__package_name__",
     "__repository_url__",
     "__version__",
+    "__ops_version__",
 ]
+
+# Check paddlefleet_ops version consistency at runtime
+
+import paddlefleet_ops
+
+__ops_version__ = paddlefleet_ops.__version__
+__ops_required_version__ = version.__ops_required_version__
+if __ops_version__ != __ops_required_version__:
+    cuda_index = "cu129"
+    try:
+        import paddle
+
+        cuda_major_minor = paddle.version.cuda_version().replace(".", "")
+        if cuda_major_minor in ("126", "129", "130"):
+            cuda_index = f"cu{cuda_major_minor}"
+    except Exception:
+        pass
+
+    index_url = (
+        f"https://www.paddlepaddle.org.cn/packages/nightly/{cuda_index}/"
+    )
+    raise ImportError(
+        f"paddlefleet_ops version mismatch! "
+        f"Required: {__ops_required_version__}, Installed: {__ops_version__}.\n"
+        f"Please install paddlefleet-ops=={__ops_required_version__} "
+        f"with: pip install paddlefleet-ops=={__ops_required_version__} "
+        f"--index-url={index_url}"
+    )
