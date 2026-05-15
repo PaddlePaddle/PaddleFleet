@@ -121,6 +121,7 @@ def _requires_nccl(test_func):
 class TestColumnParallelLinear(unittest.TestCase):
     """Test ColumnParallelLinear layer."""
 
+    @_requires_nccl
     def test_forward_shape(self):
         """Test ColumnParallelLinear splits weight columns across TP ranks."""
         hidden_size = 16
