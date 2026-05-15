@@ -55,15 +55,6 @@ try:
 except Exception:
     CPDotProductAttention = None
 
-try:
-    from paddlefleet.fusions.fused_mla_yarn_rope_apply import (
-        fused_apply_mla_rope_for_kv,
-        fused_apply_mla_rope_for_q,
-    )
-except:
-    fused_apply_mla_rope_for_kv = None
-    fused_apply_mla_rope_for_q = None
-
 
 def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
     """Apply RoPE using EC's complex multiplication method (no YaRN, no mscale).
@@ -638,6 +629,11 @@ class MLASelfAttention(MultiLatentAttention):
                     )
                 )
                 rotary_pos_emb = None
+                from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+                    fused_apply_mla_rope_for_kv,
+                    fused_apply_mla_rope_for_q,
+                )
+
                 assert (
                     fused_apply_mla_rope_for_q is not None
                     and fused_apply_mla_rope_for_kv is not None
@@ -796,6 +792,11 @@ class MLASelfAttention(MultiLatentAttention):
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
             if self.config.apply_rope_fusion:
+                from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+                    fused_apply_mla_rope_for_kv,
+                    fused_apply_mla_rope_for_q,
+                )
+
                 assert not self.config.sequence_parallel, (
                     "sequence_parallel for apply_rope_fusion in mla is not supported yet."
                 )

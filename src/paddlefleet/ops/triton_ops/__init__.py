@@ -31,6 +31,8 @@ from paddlefleet_ops.ops.triton_ops import (
     RMSNormFusionTriton,
     SigmoidGateFusionTriton,
     fuse_stack_ue8m0_scale_transpose,
+    fused_apply_mla_rope_for_kv,
+    fused_apply_mla_rope_for_q,
     routing_map_fusion_forward,
 )
 
@@ -41,4 +43,6 @@ __all__ = [
     "SigmoidGateFusionTriton",
     "FuseStackUe8m0ScaleTransposeTriton",
     "fuse_stack_ue8m0_scale_transpose",
+    "fused_apply_mla_rope_for_kv",
+    "fused_apply_mla_rope_for_q",
 ]

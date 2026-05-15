@@ -45,14 +45,6 @@ try:
 except ImportError:
     HAS_TRITON = False
 
-paddle.disable_compat()
-
-if HAS_TRITON:
-    from paddlefleet.fusions.fused_mla_yarn_rope_apply import (
-        fused_apply_mla_rope_for_kv,
-        fused_apply_mla_rope_for_q,
-    )
-
 
 # Tolerances: RoPE uses a few fused multiply-adds + trig lookups, so the
 # numeric budget is similar to apply_rotary_pos_emb_vision tests.
@@ -262,6 +254,10 @@ class TestApplyMLARopeForQ(_BaseMLARopeTest):
         cos, sin = _make_cos_sin(seq, emb_dim, seed=7)
 
         q_in = q.clone().detach()
+        from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+            fused_apply_mla_rope_for_q,
+        )
+
         out = fused_apply_mla_rope_for_q(
             q_in, cos, sin, qk_head_dim, emb_dim, None, 0, 1, False
         )
@@ -283,6 +279,10 @@ class TestApplyMLARopeForQ(_BaseMLARopeTest):
         )
 
         q_in = q.clone().detach()
+        from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+            fused_apply_mla_rope_for_q,
+        )
+
         out = fused_apply_mla_rope_for_q(
             q_in, cos, sin, qk_head_dim, emb_dim, cu, 0, 1, False
         )
@@ -310,6 +310,10 @@ class TestApplyMLARopeForQ(_BaseMLARopeTest):
         # Fused gradient (bshd)
         q_cu = paddle.to_tensor(q_np, place="gpu").astype(dtype)
         q_cu.stop_gradient = False
+        from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+            fused_apply_mla_rope_for_q,
+        )
+
         out_cu = fused_apply_mla_rope_for_q(
             q_cu, cos, sin, qk_head_dim, emb_dim, None, 0, 1, False
         )
@@ -361,6 +365,10 @@ class TestApplyMLARopeForKV(_BaseMLARopeTest):
         k_pos_emb = _rand([bs, seq, 1, emb_dim], dtype, seed=22)
         cos, sin = _make_cos_sin(seq, emb_dim, seed=23)
 
+        from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+            fused_apply_mla_rope_for_kv,
+        )
+
         key_out, val_out = fused_apply_mla_rope_for_kv(
             kv, k_pos_emb, cos, sin, emb_dim, k_dim, v_dim, None, 0, 1, False
         )
@@ -383,6 +391,10 @@ class TestApplyMLARopeForKV(_BaseMLARopeTest):
         cos, sin = _make_cos_sin(max_seq, emb_dim, seed=33)
         cu = paddle.to_tensor(
             np.cumsum([0, *list(seq_lens)]).astype("int32"), place="gpu"
+        )
+
+        from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+            fused_apply_mla_rope_for_kv,
         )
 
         key_out, val_out = fused_apply_mla_rope_for_kv(
@@ -426,6 +438,10 @@ class TestApplyMLARopeForKV(_BaseMLARopeTest):
         # Fused bshd
         kv_cu = _make(kv_np, dtype)
         emb_cu = _make(emb_np, dtype)
+        from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+            fused_apply_mla_rope_for_kv,
+        )
+
         key_cu, val_cu = fused_apply_mla_rope_for_kv(
             kv_cu, emb_cu, cos, sin, emb_dim, k_dim, v_dim, None, 0, 1, False
         )
