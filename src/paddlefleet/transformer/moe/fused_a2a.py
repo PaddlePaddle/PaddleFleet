@@ -18,7 +18,6 @@ import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
-
 from paddlefleet_ops import is_deep_ep_available, is_hybrid_ep_available
 
 from .fp8_utils import FP8_ALIGN

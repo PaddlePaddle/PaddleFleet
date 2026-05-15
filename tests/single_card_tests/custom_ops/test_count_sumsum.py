@@ -16,7 +16,6 @@ import unittest
 
 import numpy as np
 import paddle
-
 from paddlefleet_ops import count_cumsum
 
 

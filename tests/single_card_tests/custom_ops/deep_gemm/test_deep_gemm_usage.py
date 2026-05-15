@@ -17,7 +17,6 @@
 import unittest
 
 import paddle
-
 from paddlefleet_ops import deep_gemm
 
 

@@ -16,9 +16,8 @@ import random
 from collections.abc import Callable
 
 import paddle
-from parameterized import parameterized
-
 from paddlefleet_ops.sonicmoe import count_cumsum
+from parameterized import parameterized
 
 from .commons_test import TestCommons
 

@@ -17,8 +17,8 @@ import copy
 import logging
 
 import paddle
-
 import paddlefleet_ops
+
 from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
 from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant

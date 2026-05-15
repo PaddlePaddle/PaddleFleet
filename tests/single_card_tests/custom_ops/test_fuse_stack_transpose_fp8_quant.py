@@ -22,7 +22,6 @@ M, K, N = 4096, 7168, 4096
 DTYPE_PD = paddle.bfloat16
 
 import paddle
-
 from paddlefleet_ops import fuse_stack_fp8_quant, fuse_stack_transpose_fp8_quant
 
 

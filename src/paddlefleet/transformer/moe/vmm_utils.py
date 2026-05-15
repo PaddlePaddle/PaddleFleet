@@ -15,9 +15,8 @@
 """VMM (Virtual Memory Management) utility functions for auto subbatch."""
 
 import paddle
-from paddle.device.cuda.memory_analyzer import GB, MemoryAnalysisTool
-
 import paddlefleet_ops
+from paddle.device.cuda.memory_analyzer import GB, MemoryAnalysisTool
 
 
 def vmm_free_and_growable_block_info() -> list[tuple[int, int]]:
