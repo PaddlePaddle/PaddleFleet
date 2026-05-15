@@ -38,7 +38,7 @@ import unittest
 
 import numpy as np
 import paddle
-from paddlefleet_ops.ops import fused_apply_rotary_pos_emb_vision
+from paddlefleet_ops import fused_apply_rotary_pos_emb_vision
 
 #   float32  : 1e-6  (CUDA device cosf/sinf vs Paddle API can differ by ±1 ULP
 #                     of float32 ≈ 1.19e-7; worst-case accumulation → ~4.8e-7)

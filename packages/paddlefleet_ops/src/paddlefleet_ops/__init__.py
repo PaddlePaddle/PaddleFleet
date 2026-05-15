@@ -157,7 +157,7 @@ if paddle.is_compiled_with_cuda():
         _DEEP_EP_AVAILABLE = True
         if _cuda_version >= (12, 9):
             _HYBRID_EP_AVAILABLE = True
-    if paddle.cuda.get_device_capability()[0] == 10:
+    if paddle.cuda.get_device_capability()[0] >= 10:
         _FLASH_MASK_AVAILABLE = True
     if (
         sys.version_info >= (3, 12)
@@ -191,7 +191,7 @@ def is_flash_mask_available():
 
 
 def _try_load_nvshmem(ops_dir: Path):
-    third_party_temp_dir = ops_dir.parent.parent / "_third_party_install_temp"
+    third_party_temp_dir = ops_dir.parent / "_third_party_install_temp"
     if third_party_temp_dir.exists():
         try:
             nvshmem_spec = importlib.util.find_spec("nvidia.nvshmem")
