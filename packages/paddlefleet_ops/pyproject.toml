@@ -36,7 +36,7 @@ classifiers = [
 Homepage = "https://github.com/PaddlePaddle/PaddleFleet"
 
 [build-system]
-requires = ["setuptools>=66.1.0", "pip", "wheel"]
+requires = ["setuptools>=66.1.0", "pip", "wheel", "packaging"]
 build-backend = "build_backend"
 backend-path = ["."]
 
