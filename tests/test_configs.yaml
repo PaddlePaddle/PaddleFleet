@@ -43,6 +43,39 @@ tests:
   - test_case: [tests/multi_card_tests/moe/test_shared_expert_gated.py]
     products:
       - num_gpus: 4
+  # ai_edited_test: tensor_parallel (Pattern A/B, TP=4 sharding=2 -> 8 GPUs)
+  - test_case: [tests/multi_card_tests/ai_edited_test/tensor_parallel/test_ai_tp_layers_mappings.py]
+    products:
+      - num_gpus: 4
+  - test_case: [tests/multi_card_tests/ai_edited_test/tensor_parallel/test_ai_parallel_state.py]
+    products:
+      - num_gpus: 4
+  # ai_edited_test: pipeline_parallel (Pattern C, PP=4)
+  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_forward_backward_overlap.py]
+    products:
+      - num_gpus: 4
+  # ai_edited_test: transformer (Pattern D, TP=4 sharding=2 -> 8 GPUs)
+  - test_case: [tests/multi_card_tests/ai_edited_test/transformer/test_ai_transformer_layer.py]
+    products:
+      - num_gpus: 8
+  - test_case: [tests/multi_card_tests/ai_edited_test/transformer/test_ai_transformer_encoder_pp.py]
+    products:
+      - num_gpus: 4
+  # ai_edited_test: moe (Pattern D, TP=4 sharding=2 -> 8 GPUs)
+  - test_case: [tests/multi_card_tests/ai_edited_test/moe/test_ai_moe_layer.py]
+    products:
+      - num_gpus: 8
+  - test_case: [tests/multi_card_tests/ai_edited_test/moe/test_ai_moe_utils.py]
+    products:
+      - num_gpus: 8
+  # ai_edited_test: models (Pattern C, PP=4)
+  - test_case: [tests/multi_card_tests/ai_edited_test/models/test_ai_gpt_model_pp.py]
+    products:
+      - num_gpus: 4
+  - test_case: [tests/multi_card_tests/ai_edited_test/models/test_ai_moe_pp.py]
+    products:
+      - num_gpus: 4
+  # default fallback for remaining multi_card_tests
   - test_case: [tests/multi_card_tests/pipeline_parallel/*.py]
     products:
       - num_gpus: 2
