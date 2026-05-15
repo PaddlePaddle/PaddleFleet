@@ -63,12 +63,11 @@ def _get_window_topk_idxs_cached(
     For each position i, returns indices of the last window_size tokens.
     Uses -1 for invalid (out-of-range) positions.
     """
-    positions = paddle.arange(seqlen).unsqueeze(1)  # [seqlen, 1]
-    offsets = paddle.arange(window_size).unsqueeze(0)  # [1, window_size]
-    # window covers [i - window_size + 1, i]
-    indices = positions - window_size + 1 + offsets  # [seqlen, window_size]
-    indices = paddle.where(indices >= 0, indices, paddle.full_like(indices, -1))
-    return indices
+    base = paddle.arange(seqlen).unsqueeze(1)  # [seqlen, 1]
+    offsets = paddle.arange(window_size)  # [window_size]
+    matrix = paddle.clip(base - window_size + 1, min=0) + offsets
+    matrix = paddle.where(matrix > base, paddle.full_like(matrix, -1), matrix)
+    return matrix
 
 
 def get_window_topk_idxs(
@@ -76,40 +75,31 @@ def get_window_topk_idxs(
 ) -> Tensor:
     """Get sliding window indices expanded to batch: [b, seqlen, window_size]."""
     indices = _get_window_topk_idxs_cached(window_size, seqlen, "gpu")
-    return indices.unsqueeze(0).expand([batch_size, seqlen, window_size])
+    return indices.unsqueeze(0).expand([batch_size, -1, -1])
 
 
 @functools.lru_cache(maxsize=8)
 def _get_compress_topk_idxs_cached(
     ratio: int, seqlen: int, offset: int, device_str: str
 ) -> Tensor:
-    """Compute compressed position indices [seqlen, seqlen // ratio].
+    """Compute all-compressed-positions indices for a single sequence (cached).
 
-    For each query position i, the valid compressed positions are those
-    representing tokens strictly before position i. Adds offset so indices
-    point into the concatenated kv_full tensor.
+    Returns:
+        indices: [seqlen, seqlen // ratio] int tensor, -1 for future positions.
     """
     n_compressed = seqlen // ratio
-    positions = paddle.arange(1, seqlen + 1).unsqueeze(1)  # [seqlen, 1]
-    compressed_ids = paddle.arange(n_compressed).unsqueeze(
-        0
-    )  # [1, n_compressed]
-    # A compressed position c is valid if c < position // ratio
-    valid = compressed_ids < (positions // ratio)
-    indices = paddle.where(
-        valid,
-        compressed_ids + offset,
-        paddle.full_like(compressed_ids, -1),
-    )
-    return indices
+    matrix = paddle.arange(n_compressed).repeat([seqlen, 1])
+    mask = matrix >= paddle.arange(1, seqlen + 1).unsqueeze(1) // ratio
+    matrix = paddle.where(mask, paddle.full_like(matrix, -1), matrix + offset)
+    return matrix
 
 
 def get_compress_topk_idxs(
     ratio: int, batch_size: int, seqlen: int, offset: int, device=None
 ) -> Tensor:
     """Get compressed indices expanded to batch: [b, seqlen, seqlen // ratio]."""
-    indices = _get_compress_topk_idxs_cached(ratio, seqlen, offset, "gpu")
-    return indices.unsqueeze(0).expand([batch_size, seqlen, -1])
+    matrix = _get_compress_topk_idxs_cached(ratio, seqlen, offset, "gpu")
+    return matrix.unsqueeze(0).expand([batch_size, -1, -1])
 
 
 # ---------------------------------------------------------------------------
@@ -200,23 +190,22 @@ def unfused_compressed_sparse_attn(
     topk = topk_indices.shape[-1]
 
     # Clamp negative indices to 0 for gathering, mask them later
-    safe_indices = paddle.clip(topk_indices, min=0)  # [b, sq, topk]
+    safe_indices = paddle.clip(topk_indices, min=0).cast(
+        paddle.int64
+    )  # [b, sq, topk]
+    safe_indices_exp = safe_indices.unsqueeze(-1).expand(
+        [-1, -1, -1, hn]
+    )  # [b, sq, topk, hn]
 
     # Gather KV at selected positions: [b, n_kv, hn] -> [b, sq, topk, hn]
-    # Expand indices for gather: [b, sq, topk] -> [b, sq*topk, hn]
-    gather_idx = safe_indices.reshape([b, sq * topk, 1]).expand(
-        [b, sq * topk, hn]
-    )
-    kv_gathered = paddle.take_along_axis(kv_full, gather_idx, axis=1).reshape(
-        [b, sq, topk, hn]
+    kv_gathered = paddle.gather(
+        kv_full.unsqueeze(1).expand([-1, sq, -1, -1]),
+        dim=2,
+        index=safe_indices_exp,
     )
 
     # Compute attention scores: [b, np, sq, topk]
     q = query.transpose([0, 2, 1, 3])  # [b, np, sq, hn]
-    kv_g = kv_gathered.transpose(
-        [0, 2, 1, 3]
-    )  # [b, topk, sq, hn] -> need [b, sq, topk, hn]
-    # Actually: q=[b,np,sq,hn], kv_gathered=[b,sq,topk,hn]
     # scores = einsum("bnsh,bskh->bnsk", q, kv_gathered)
     scores = (
         paddle.einsum(
@@ -227,9 +216,7 @@ def unfused_compressed_sparse_attn(
 
     # Mask invalid positions (topk_indices < 0) with -inf
     invalid_mask = (topk_indices < 0).unsqueeze(1)  # [b, 1, sq, topk]
-    scores = paddle.where(
-        invalid_mask, paddle.full_like(scores, float("-inf")), scores
-    )
+    scores = scores.masked_fill(invalid_mask, float("-inf"))
 
     # Softmax with attention sink
     # sink: [np] -> [1, np, 1, 1]

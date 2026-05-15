@@ -610,18 +610,29 @@ def _compute_dsa_indexer_loss(
     if causal_mask_override is not None:
         if causal_mask.ndim == 2:
             row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [sq]
-            row_valid = row_valid.reshape([1, 1, sq, 1])
+            attn_row_mask = row_valid.reshape([1, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([1, sq, 1])
         else:
             row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [b, sq]
-            row_valid = row_valid.reshape([b, 1, sq, 1])
+            attn_row_mask = row_valid.reshape([b, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([b, sq, 1])
+
         attention_scores = paddle.where(
-            row_valid, attention_scores, paddle.zeros_like(attention_scores)
+            attn_row_mask, attention_scores, paddle.zeros_like(attention_scores)
+        )
+        index_scores = paddle.where(
+            idx_row_mask, index_scores, paddle.zeros_like(index_scores)
         )
 
     # [b, np, sq, sk] -> [b, np, sq, sk]
     attention_scores = F.softmax(attention_scores, axis=-1, dtype="float32")
     # [b, sq, sk] -> [b, sq, sk]
     index_scores = F.softmax(index_scores, axis=-1, dtype="float32")
+
+    # Zero out invalid rows after softmax so they contribute nothing to loss
+    if causal_mask_override is not None:
+        attention_scores = attention_scores * attn_row_mask.cast("float32")
+        index_scores = index_scores * idx_row_mask.cast("float32")
 
     # Sum attention scores across heads: [b, np, sq, sk] -> [b, sq, sk]
     attention_scores = attention_scores.sum(axis=1)
@@ -632,7 +643,7 @@ def _compute_dsa_indexer_loss(
     # L1 normalize target on the last dimension
     attention_scores = attention_scores / attention_scores.sum(
         axis=-1, keepdim=True
-    )
+    ).clip(min=1e-10)
 
     # KL divergence: KL(target || index) = target * log(target / index)
     kl_per_element = attention_scores * (
@@ -727,6 +738,24 @@ def _bwd_fused_indexer_loss(
         attention_scores = attention_scores + index_mask.reshape([b, 1, sq, sk])
         index_scores = index_scores + index_mask
 
+    # Handle fully-masked rows (all -inf) to prevent NaN in softmax
+    if causal_mask_override is not None:
+        if causal_mask.ndim == 2:
+            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [sq]
+            attn_row_mask = row_valid.reshape([1, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([1, sq, 1])
+        else:
+            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [b, sq]
+            attn_row_mask = row_valid.reshape([b, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([b, sq, 1])
+
+        attention_scores = paddle.where(
+            attn_row_mask, attention_scores, paddle.zeros_like(attention_scores)
+        )
+        index_scores = paddle.where(
+            idx_row_mask, index_scores, paddle.zeros_like(index_scores)
+        )
+
     # Compute softmax for both
     attention_scores_softmax = F.softmax(
         attention_scores, axis=-1, dtype="float32"
@@ -735,6 +764,15 @@ def _bwd_fused_indexer_loss(
 
     index_scores_softmax = F.softmax(index_scores, axis=-1, dtype="float32")
     del index_scores
+
+    # Zero out invalid rows after softmax so they contribute nothing to gradients
+    if causal_mask_override is not None:
+        attention_scores_softmax = (
+            attention_scores_softmax * attn_row_mask.cast("float32")
+        )
+        index_scores_softmax = index_scores_softmax * idx_row_mask.cast(
+            "float32"
+        )
 
     # Sum attention scores across heads: [b, np, sq, sk] -> [b, sq, sk]
     attention_scores_sum = attention_scores_softmax.sum(axis=1)
@@ -747,7 +785,8 @@ def _bwd_fused_indexer_loss(
 
     # L1 normalize
     attention_scores_normalized = (
-        attention_scores_sum / attention_scores_sum.sum(axis=-1, keepdim=True)
+        attention_scores_sum
+        / attention_scores_sum.sum(axis=-1, keepdim=True).clip(min=1e-10)
     )
     del attention_scores_sum
 
