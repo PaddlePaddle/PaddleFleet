@@ -898,6 +898,7 @@ class TestMoELayerFp8QuantWeightBranches(unittest.TestCase):
         obj = _Stub()
         obj.moe_use_fusion_node = True  # pass the guard
         obj.fp8 = "e4m3"  # pass the guard
+        obj.use_ue8m0 = False
         obj.grouped_gemm_experts = self._make_grouped_experts()
 
         # Call the real method as an unbound function on the stub
@@ -946,6 +947,7 @@ class TestMoELayerFp8QuantWeightBranches(unittest.TestCase):
         obj = _Stub()
         obj.moe_use_fusion_node = True
         obj.fp8 = "e4m3"
+        obj.use_ue8m0 = False
         obj.grouped_gemm_experts = self._make_grouped_experts()
 
         MoELayer.fp8_quant_weight(obj, batch_mode=True, quant_transpose=False)

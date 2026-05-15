@@ -371,7 +371,7 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
-    Options are 'allgather','alltoall' and 'deepep'."""
+    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -508,6 +508,12 @@ class TransformerConfig(ModelParallelConfig):
 
     fp8_wgrad: bool = True
     """Whether to use fp8 wgrad."""
+
+    dw_p2p_overlap: bool = False
+    """Whether to overlap p2p communication and matmul kernel in pp parallel on Blackwell."""
+
+    use_ue8m0: bool = False
+    """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
 
     ####################
     # initialization

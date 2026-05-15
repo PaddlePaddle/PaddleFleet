@@ -434,7 +434,6 @@ class LanguageLoss(FleetLayer):
                             labels_cur_depth,
                         )
                     mtp_loss.append(loss_cur_depth)
-                    paddle.device.cuda.empty_cache()
             else:
                 lm_loss = self._forward(logits[0], lm_labels)
                 if get_tensor_model_parallel_world_size() > 1:
@@ -655,7 +654,6 @@ class MTPLanguageLoss(LanguageLoss):
                 labels_cur_depth,
             )
             mtp_loss.append(loss_cur_depth)
-            paddle.device.cuda.empty_cache()
 
         dict_args.pop("mtp_logits")
         dict_args["mtp_loss"] = mtp_loss

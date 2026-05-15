@@ -21,7 +21,7 @@ import paddle
 import paddle.nn.functional as F
 import triton
 import triton.language as tl
-from paddle.compat import use_torch_proxy_guard
+from paddle import use_compat_guard
 
 
 @dataclass(frozen=True)
@@ -1431,7 +1431,7 @@ def rr_attn_estimate_triton_func(
     )
 
     scale = LOG2E / math.sqrt(head_dim) / stride
-    with use_torch_proxy_guard(silent=True):
+    with use_compat_guard(silent=True):
         if _is_trivial_nomask(startend_row_indices, q_len, causal):
             mask_ctx = None
             n_strides = triton.cdiv(kv_len, stride)
