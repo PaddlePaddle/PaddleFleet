@@ -90,6 +90,99 @@ class SigmoidGate(nn.Layer):
         return F.sigmoid(self.W(embedding))
 
 
+class PerLayerGate(nn.Layer):
+    """Per-layer embedding gate for conditioning transformer layers.
+
+    Matches Gemma 4 PLE DecoderLayer architecture:
+    - gate = act_fn(per_layer_input_gate(hidden))  # [B, S, per_layer_dim]
+    - inject = gate * per_layer_input              # element-wise
+    - output = per_layer_projection(inject)        # project back to hidden_dim
+    - output = post_per_layer_input_norm(output)   # RMSNorm on hidden_dim
+    - return hidden + output                       # residual
+
+    Args:
+        hidden_size: Model hidden dimension
+        per_layer_dim: Dimension of per-layer embedding
+        init_zero: If True, initialize gate weights to zero (for stable resume from non-PLE ckpt)
+        config: TransformerConfig
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        per_layer_dim: int,
+        init_zero: bool = True,
+        config: "TransformerConfig" = None,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.per_layer_dim = per_layer_dim
+
+        # Gate projection: hidden -> per_layer_dim (Gemma4: per_layer_input_gate)
+        self.gate_proj = nn.Linear(hidden_size, per_layer_dim, bias_attr=False)
+
+        # Output projection: per_layer_dim -> hidden (Gemma4: per_layer_projection)
+        self.out_proj = nn.Linear(per_layer_dim, hidden_size, bias_attr=False)
+
+        # Activation function: match Gemma4 config.hidden_activation
+        # Gemma4 uses gelu_pytorch_tanh; we use the model's hidden_act
+        act_fn = getattr(config, 'hidden_act', F.silu) if config else F.silu
+        if callable(act_fn):
+            self.act_fn = act_fn
+        else:
+            self.act_fn = F.silu
+
+        # Post-projection RMSNorm on hidden_size (Gemma4: post_per_layer_input_norm)
+        eps = config.rms_norm_eps if config else 1e-5
+        self._rms_norm_eps = eps
+        self.post_norm_weight = paddle.create_parameter(
+            shape=[hidden_size],
+            dtype=paddle.get_default_dtype(),
+            default_initializer=nn.initializer.Constant(1.0),
+        )
+
+        self._cast_to_low_precision = False
+
+        # Zero initialization for stable resume from non-PLE checkpoint
+        if init_zero:
+            nn.initializer.Constant(0.0)(self.gate_proj.weight)
+            nn.initializer.Constant(0.0)(self.out_proj.weight)
+
+    def forward(
+        self,
+        hidden_states: paddle.Tensor,
+        per_layer_input: paddle.Tensor,
+    ) -> paddle.Tensor:
+        """Apply per-layer gating.
+
+        Args:
+            hidden_states: [B, S, H] or [S, B, H]
+            per_layer_input: [B, S, D] or [S, B, D]
+
+        Returns:
+            output: Same shape as hidden_states
+        """
+        residual = hidden_states
+
+        # Compute gate: [B, S, D]
+        gate = self.act_fn(self.gate_proj(hidden_states))
+
+        # Element-wise multiplication with per-layer input
+        inject = gate * per_layer_input
+
+        # Project back to hidden dim: [B, S, H]
+        output = self.out_proj(inject)
+
+        # RMSNorm (Gemma4: post_per_layer_input_norm)
+        norm_weight = self.post_norm_weight
+        if output.dtype != norm_weight.dtype:
+            norm_weight = norm_weight.cast(output.dtype)
+        output = F.rms_norm(output, output.shape[-1:], norm_weight, self._rms_norm_eps)
+
+        # Residual connection
+        return residual + output
+
+
 def tensors_clone(outputs):
     """
     The tensors required for recompute_forward need to be cloned to prevent them from being released prematurely and becoming inaccessible.
@@ -437,21 +530,22 @@ class TransformerLayer(nn.Layer):
             )
             self.attn_res_block_size = self.config.attn_res_block_size
 
-        # [Layer 11: Embedding Gating] Sigmoid gate for last decoder layer
-        self.use_embedding_gating = getattr(self.config, 'use_embedding_gating', False)
-        num_empty = getattr(self.config, 'num_empty_layers_add_in_head', 0) or 0
-        self._is_last_decoder_layer = (
-            self.use_embedding_gating
-            and self.layer_number == num_empty + self.config.num_hidden_layers - 1
-        )
-        if self._is_last_decoder_layer:
-            zero_init = getattr(self.config, 'embedding_gating_gate_zero_init', True)
-            hidden_size = self.config.hidden_size
-            self.embedding_gate = SigmoidGate(hidden_size, zero_init)
-            self._embedding_for_gating = None
+        # ============ Per-Layer Embeddings (PLE) ============
+        self.use_per_layer_embeddings = getattr(self.config, 'use_per_layer_embeddings', False)
+        if self.use_per_layer_embeddings:
+            per_layer_dim = getattr(self.config, 'per_layer_dim', 256)
+            init_zero = getattr(self.config, 'per_layer_gate_init_zero', True)
+
+            self.per_layer_gate = PerLayerGate(
+                hidden_size=self.config.hidden_size,
+                per_layer_dim=per_layer_dim,
+                init_zero=init_zero,
+                config=self.config,
+            )
+            self._per_layer_dim = per_layer_dim
             logger.info(
-                f"[EmbeddingGating(Sigmoid)] Enabled on layer {self.layer_number}. "
-                f"hidden_size={hidden_size}, zero_init={zero_init}"
+                f"[PLE] Layer {self.layer_number}: PerLayerGate enabled, "
+                f"per_layer_dim={per_layer_dim}, init_zero={init_zero}"
             )
 
     def build_schedule_node(self):
@@ -557,10 +651,23 @@ class TransformerLayer(nn.Layer):
                 # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly
                 attn_mask_startend_row_indices_mtp = None
 
-        # --- Embedding Gating: store for use AFTER recompute ---
-        if self._is_last_decoder_layer:
-            _emb = dict_args.pop("embedding_for_gating", None)
-            self._embedding_for_gating = _emb
+        # ============ Per-Layer Embeddings (PLE): extract per-layer input for this layer ============
+        per_layer_input = None
+        if self.use_per_layer_embeddings:
+            ple_inputs = dict_args.get("per_layer_inputs", None)
+            if ple_inputs is not None:
+                # ple_inputs shape: [B, S, L, D] or [S, B, L, D]
+                # Extract slice for this layer: [B, S, D] or [S, B, D]
+                layer_idx = self.layer_number
+                per_layer_input = ple_inputs[:, :, layer_idx, :]
+                # When MTP is active, hidden_states has been trimmed to main_seq_len,
+                # but per_layer_inputs still has the full seq length. Trim to match.
+                if mtp_input is not None:
+                    main_seq_len = dict_args["hidden_states"].shape[0 if self.config.sequence_parallel else 1]
+                    if self.config.sequence_parallel:
+                        per_layer_input = per_layer_input[:main_seq_len]
+                    else:
+                        per_layer_input = per_layer_input[:, :main_seq_len]
 
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
@@ -604,26 +711,17 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 input_ids=input_ids,
+                per_layer_input=per_layer_input.clone()
+                if per_layer_input is not None
+                else None,
             )
         else:
-            outputs = self._forward_impl(**dict_args)
+            outputs = self._forward_impl(per_layer_input=per_layer_input, **dict_args)
 
         if isinstance(outputs, tuple):
             output, context = outputs[0], outputs[1]
         else:
             output, context = outputs, None
-
-        # --- Embedding Gating: applied OUTSIDE recompute to avoid SliceGradNode clearing ---
-        if self._is_last_decoder_layer and self._embedding_for_gating is not None:
-            dtype = output.dtype
-            emb = self._embedding_for_gating.astype(dtype)
-            gate = self.embedding_gate(emb)
-            output = output + output * gate
-            logger.info(
-                f"[EmbeddingGating] gate_mean={float(gate.mean()):.6f}, "
-                f"gate_std={float(gate.std()):.6f}"
-            )
-            self._embedding_for_gating = None
 
         rst = OrderedDict()
         rst = {"hidden_states": output}
@@ -687,6 +785,7 @@ class TransformerLayer(nn.Layer):
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         input_ids: Tensor | None = None,
+        per_layer_input: Tensor | None = None,
         **kwargs,
     ):
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
@@ -771,6 +870,11 @@ class TransformerLayer(nn.Layer):
             with profile(timer_name):
                 output = self._forward_mlp(hidden_states, input_ids=input_ids)
             self._log_md5(output, "layer_output", self.layer_number)
+
+        # ============ Apply PLE gating inside recompute boundary ============
+        if self.use_per_layer_embeddings and per_layer_input is not None:
+            output = self.per_layer_gate(output, per_layer_input)
+
         if context is not None:
             return output, context
         return output

@@ -86,13 +86,26 @@ class TransformerConfig(ModelParallelConfig):
         ..., Decoder, Dcoder, EmptyLayer, EmptyLayer
     0 implies equal layer division across PP ranks."""
 
-    use_embedding_gating: bool = False
-    """When True, apply sigmoid gating to fuse initial embedding into the last decoder layer output.
-    Formula: h_out = h_in + h_in * sigmoid(W @ e), where W is a learnable matrix of shape [hidden_size, hidden_size]."""
+    use_per_layer_embeddings: bool = False
+    """When True, apply Per-Layer Embeddings (PLE) conditioning at every transformer layer.
+    Based on Gemma 4 architecture: each layer receives a learned per-layer embedding signal
+    derived from token identity and projected initial embedding."""
 
-    embedding_gating_gate_zero_init: bool = True
-    """If True, initialize gate weight matrix W to zero so gate = sigmoid(0) ≈ 0.5 initially.
+    per_layer_dim: int = 256
+    """Dimension of per-layer embeddings. Controls the size of the conditioning signal
+    injected at each layer. Larger values increase model capacity but also memory usage.
+    Gemma 4 E2B uses ~305, we recommend 256 for balance."""
+
+    per_layer_embedding_init_std: float | None = None
+    """Standard deviation for initializing per-layer embedding table.
+    If None, uses embedding_init_method_std."""
+
+    per_layer_gate_init_zero: bool = True
+    """If True, initialize gate projection weights to zero so initial gate ≈ 0.
     This minimizes disruption at the start of training."""
+
+    per_layer_projection_norm: bool = True
+    """Whether to apply RMSNorm to the projected per-layer inputs before gate injection."""
 
     # Note: need to implement PipelineParallelLayerLayout and import
     # pipeline_model_parallel_layout: str | list | PipelineParallelLayerLayout = None
