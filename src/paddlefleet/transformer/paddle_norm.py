@@ -73,6 +73,9 @@ class RMSNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
+        # Ensure hidden_states dtype matches weight dtype for rms_norm
+        if hidden_states.dtype != self.weight.dtype:
+            hidden_states = hidden_states.astype(self.weight.dtype)
         rms_norm_out = rms_norm(
             hidden_states,
             hidden_states.shape[-1:],

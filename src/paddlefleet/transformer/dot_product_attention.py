@@ -77,6 +77,8 @@ class DotProductAttention(FleetLayer):
         softmax_scale: float | None = None,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
+        k_channels: int | None = None,
+        v_channels: int | None = None,
         **kwargs,
     ):
         super().__init__(config=config)
@@ -91,7 +93,12 @@ class DotProductAttention(FleetLayer):
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
 
-        projection_size = self.config.head_dim * self.config.num_attention_heads
+        # For MLA, k_channels and v_channels may differ from config.head_dim
+        # Default to config.head_dim if not provided (standard attention)
+        self.k_channels = k_channels if k_channels is not None else self.config.head_dim
+        self.v_channels = v_channels if v_channels is not None else self.config.head_dim
+
+        projection_size = self.k_channels * self.config.num_attention_heads
 
         # Per attention head and per partition values.
         if pg_collection is None:
@@ -518,9 +525,10 @@ class DotProductAttention(FleetLayer):
         context = context.transpose([0, 2, 1, 3]).contiguous()
 
         # [b, sq, np, hn] --> [b, sq, hp]
+        # For MLA, use v_channels for output dimension (may differ from k_channels)
         new_context_shape = (
             *context.shape[:-2],
-            self.hidden_size_per_partition,
+            self.hidden_size_per_partition // self.k_channels * self.v_channels,
         )
         context = context.reshape(*new_context_shape)
 

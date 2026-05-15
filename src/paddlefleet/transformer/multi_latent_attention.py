@@ -216,12 +216,6 @@ class MultiLatentAttention(Attention):
                 "'rope' and 'yarn'"
             )
 
-        # MLA produces keys/values that already have num_attention_heads heads
-        # (via k_pos_emb.expand in get_query_key_value_tensors).  Prevent the
-        # DotProductAttention baddbmm path from doing an extra repeat_interleave
-        # that would double-expand the key and break head-dim alignment.
-        self.num_query_groups_per_partition = self.num_attention_heads_per_partition
-
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
             config=self.config,
@@ -513,7 +507,7 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_b_proj = build_spec_layer(
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
-            self.config.num_attention_heads
+            self.num_query_groups_per_partition
             * (self.config.qk_nope_head_dim + self.config.v_head_dim),
             config=self.config,
             init_method=self.config.init_method,
@@ -727,12 +721,20 @@ class MLASelfAttention(MultiLatentAttention):
             # kv: [num_tokens, n * (qk_nope_head_dim + v_head_dim)]
             kv, _ = self.kv_b_proj(kv_compressed)
 
+            # Debug: print kv shape
+            # if self.layer_number == 0:
+            #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after kv_b_proj: {kv.shape}", flush=True)
+
             # kv: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
+            # For GQA, kv_b_proj outputs num_query_groups (num_key_value_heads)
             kv = kv.view(
                 *kv.size()[:-1],
-                self.num_attention_heads_per_partition,
+                self.num_query_groups_per_partition,
                 self.config.qk_nope_head_dim + self.config.v_head_dim,
             )
+
+            # if self.layer_number == 0:
+            #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after view: {kv.shape}", flush=True)
 
             # [num_tokens, qk_rope_head_dim] -> [num_tokens, 1, qk_rope_head_dim]
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
@@ -866,16 +868,20 @@ class MLASelfAttention(MultiLatentAttention):
                 query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
 
                 # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
+                # For GQA, use num_query_groups for key expansion
                 if k_pos_emb.ndim == 4:
                     k_pos_emb = k_pos_emb.expand(
-                        -1, -1, self.num_attention_heads_per_partition, -1
+                        -1, -1, self.num_query_groups_per_partition, -1
                     )
                 else:
                     assert k_pos_emb.ndim == 3
                     k_pos_emb = k_pos_emb.expand(
-                        -1, self.num_attention_heads_per_partition, -1
+                        -1, self.num_query_groups_per_partition, -1
                     )
                 key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
+
+            # if self.layer_number == 0:
+            #     print(f"[DEBUG MLA layer {self.layer_number}] key final shape: {key.shape}, head_dim={key.shape[-1]}", flush=True)
 
             query = query.contiguous()
             key = key.contiguous()
