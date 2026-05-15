@@ -62,7 +62,13 @@ class DynamicKVCache:
         self.v: list[Optional[paddle.Tensor]] = [None] * num_layers
 
     def get_seq_len(self, layer_idx: int = 0) -> int:
-        return 0 if self.k[layer_idx] is None else self.k[layer_idx].shape[1]
+        if self.k[layer_idx] is not None:
+            return self.k[layer_idx].shape[1]
+        # Fallback: find first non-empty layer
+        for k in self.k:
+            if k is not None:
+                return k.shape[1]
+        return 0
 
     def update(self, k_new: paddle.Tensor, v_new: paddle.Tensor, layer_idx: int):
         if self.k[layer_idx] is None:

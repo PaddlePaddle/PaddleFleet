@@ -55,7 +55,7 @@ def apply_repetition_penalty(logits, input_ids, penalty):
     # Apply penalty: divide positive logits, multiply negative logits
     # We only apply to tokens that actually appeared
     affected_logits = paddle.where(
-        mask.unsqueeze(-1).expand_as(logits),
+        mask,  # [batch_size, vocab_size] - no unsqueeze needed
         paddle.where(
             logits > 0,
             logits / penalty,
@@ -83,7 +83,7 @@ def sample_with_top_k(logits, top_k):
     if top_k >= logits.shape[-1]:
         # No filtering needed
         probs = F.softmax(logits)
-        return paddle.multinomial(probs).unsqueeze(-1)
+        return paddle.multinomial(probs)  # [batch_size, 1]
 
     # Get top-k logits and their threshold
     top_k_logits, _ = paddle.topk(logits, k=top_k, axis=-1)
@@ -100,7 +100,7 @@ def sample_with_top_k(logits, top_k):
     # Sample from filtered distribution
     probs = F.softmax(logits)
     sampled = paddle.multinomial(probs)
-    return sampled
+    return sampled  # [batch_size, 1]
 
 
 def sample_with_top_p(logits, top_p):
@@ -117,9 +117,14 @@ def sample_with_top_p(logits, top_p):
     Returns:
         Sampled token ids with shape [batch_size, 1]
     """
+    batch_size, vocab_size = logits.shape
+
     # Sort logits in descending order
     sorted_indices = paddle.argsort(logits, descending=True, axis=-1)
-    sorted_logits = paddle.gather(logits, sorted_indices, axis=-1)
+    # Use gather_nd instead of gather (Paddle's gather has index shape restrictions)
+    batch_indices = paddle.arange(batch_size).unsqueeze(-1).expand([-1, vocab_size])
+    indices = paddle.stack([batch_indices, sorted_indices], axis=-1)
+    sorted_logits = paddle.gather_nd(logits, indices)
 
     # Calculate cumulative probabilities
     sorted_probs = F.softmax(sorted_logits)
@@ -147,14 +152,14 @@ def sample_with_top_p(logits, top_p):
     )
 
     # Scatter the filter mask back to original order
-    batch_size, vocab_size = logits.shape
-    batch_indices = paddle.arange(batch_size).unsqueeze(-1).expand([-1, vocab_size])
-    indices = paddle.stack([batch_indices, sorted_indices], axis=-1)
+    # Flatten indices and filter_mask for scatter_nd
+    flat_indices = indices.reshape([-1, 2])
+    flat_filter = filter_mask.reshape([-1]).astype("int32")
     scattered_filter = paddle.scatter_nd(
-        paddle.zeros([batch_size, vocab_size], dtype="bool"),
-        indices,
-        filter_mask,
-    )
+        flat_indices,
+        flat_filter,
+        [batch_size, vocab_size],
+    ).astype("bool")
 
     # Apply filter: set filtered logits to -inf
     filtered_logits = paddle.where(
@@ -169,4 +174,4 @@ def sample_with_top_p(logits, top_p):
 
     # sampled is already in the original vocabulary index space,
     # no need to remap through sorted_indices
-    return sampled.unsqueeze(-1)
+    return sampled  # [batch_size, 1]

@@ -708,6 +708,7 @@ class TransformerLayer(nn.Layer):
                     attention_bias=attention_bias,
                     packed_seq_params=packed_seq_params,
                     block_attention_residuals=True,
+                    in_recompute=self.full_recompute,
                     **kwargs,
                 )
 
