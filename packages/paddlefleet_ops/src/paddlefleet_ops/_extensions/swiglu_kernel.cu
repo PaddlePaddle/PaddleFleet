@@ -32,21 +32,8 @@ __device__ __forceinline__ float precise_sigmoid(T x) {
 constexpr int kSwiGLUBackBlockSize = 256;
 
 inline bool ShouldUseInt64Index(int64_t rows, int64_t row_stride) {
-  // Each Y/DX element is addressed as row * row_stride + logical_col.
-  // y2 uses logical_col = hidden_size + col, so the largest logical_col
-  // touched by a packed vector is row_stride - 1.
-  // The int path also passes row_stride as int, so row_stride itself must fit.
-  // Use int64_t if row_stride cannot fit, or if max offset exceeds INT_MAX:
-  //   (rows - 1) * row_stride + (row_stride - 1) > INT_MAX
-  // which is equivalent to rows * row_stride > INT_MAX + 1.
-  const int64_t int_max = static_cast<int64_t>(std::numeric_limits<int>::max());
-  if (row_stride > int_max) {
-    return true;
-  }
-
-  const int64_t int32_offset_count =
-      static_cast<int64_t>(std::numeric_limits<int>::max()) + 1;
-  return rows > int32_offset_count / row_stride;
+  return rows >=
+         static_cast<int64_t>(std::numeric_limits<int>::max()) / row_stride;
 }
 
 inline void CheckSwiGLUBackShape(const paddle::Tensor& g,
