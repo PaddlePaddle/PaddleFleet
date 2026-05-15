@@ -105,7 +105,7 @@ def _make_moe_sublayers():
 
 def _setup_moe_mocks(
     mock_utils,
-    mock_paddlefleet,
+    mock_paddlefleet_ops,
     mock_version,
     mock_expert,
     mock_shared,
@@ -115,7 +115,7 @@ def _setup_moe_mocks(
     """Common mock setup for MoELayer tests."""
     mock_utils.get_pg_size.return_value = ep_size
     mock_utils.get_pg_rank.return_value = ep_rank
-    mock_paddlefleet.ops.is_sonic_moe_available.return_value = False
+    mock_paddlefleet_ops.is_sonic_moe_available.return_value = False
     mock_version.cuda.return_value = "12.2"
     mock_expert.return_value = paddle.nn.Layer()
     mock_shared.return_value = paddle.nn.Layer()
@@ -134,17 +134,17 @@ class TestMoELayerInitExpertParallelParse(unittest.TestCase):
     """Tests for _init_expert_parallel internals."""
 
     @patch("paddlefleet.transformer.moe.moe_layer.paddle.version")
-    @patch("paddlefleet.transformer.moe.moe_layer.paddlefleet")
+    @patch("paddlefleet.transformer.moe.moe_layer.paddlefleet_ops")
     @patch("paddlefleet.transformer.moe.moe_layer.utils")
     def test_num_experts_less_than_ep_raises(
-        self, mock_utils, mock_paddlefleet, mock_version
+        self, mock_utils, mock_paddlefleet_ops, mock_version
     ):
         """Test that num_experts < expert_model_parallel_size raises."""
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         mock_utils.get_pg_size.return_value = 4
         mock_utils.get_pg_rank.return_value = 0
-        mock_paddlefleet.ops.is_sonic_moe_available.return_value = False
+        mock_paddlefleet_ops.is_sonic_moe_available.return_value = False
         mock_version.cuda.return_value = "12.2"
 
         config = _make_moe_config(
@@ -158,17 +158,17 @@ class TestMoELayerInitExpertParallelParse(unittest.TestCase):
             MoELayer(config, sublayers=sublayers, pg_collection=pg_collection)
 
     @patch("paddlefleet.transformer.moe.moe_layer.paddle.version")
-    @patch("paddlefleet.transformer.moe.moe_layer.paddlefleet")
+    @patch("paddlefleet.transformer.moe.moe_layer.paddlefleet_ops")
     @patch("paddlefleet.transformer.moe.moe_layer.utils")
     def test_num_experts_not_divisible_by_ep_raises(
-        self, mock_utils, mock_paddlefleet, mock_version
+        self, mock_utils, mock_paddlefleet_ops, mock_version
     ):
         """Test that num_experts % expert_model_parallel_size != 0 raises."""
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         mock_utils.get_pg_size.return_value = 3
         mock_utils.get_pg_rank.return_value = 0
-        mock_paddlefleet.ops.is_sonic_moe_available.return_value = False
+        mock_paddlefleet_ops.is_sonic_moe_available.return_value = False
         mock_version.cuda.return_value = "12.2"
 
         config = _make_moe_config(

@@ -20,8 +20,8 @@ import random
 
 import torch
 
-from paddlefleet.ops import deep_gemm
-from paddlefleet.ops.deep_gemm.testing import (
+from paddlefleet_ops import deep_gemm
+from paddlefleet_ops.deep_gemm.testing import (
     calc_diff,
 )
 

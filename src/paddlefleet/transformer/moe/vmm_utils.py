@@ -17,7 +17,7 @@
 import paddle
 from paddle.device.cuda.memory_analyzer import GB, MemoryAnalysisTool
 
-import paddlefleet
+import paddlefleet_ops
 
 
 def vmm_free_and_growable_block_info() -> list[tuple[int, int]]:
@@ -176,7 +176,7 @@ def tokens_zip_unique_add_with_subbatch(
     tokens_zip_unique_add_with_subbatch
     """
     if subbatch_rows is None or subbatch_rows <= 0 or zipped_rows <= 0:
-        return paddlefleet.ops.tokens_zip_unique_add(
+        return paddlefleet_ops.tokens_zip_unique_add(
             zipped, unzipped, index_unzipped, zipped_rows
         )
     else:
@@ -196,7 +196,7 @@ def tokens_zip_unique_add_with_subbatch(
                 ]
             else:
                 zipped = paddle.split(zipped, rows, axis=0)
-        return paddlefleet.ops.tokens_zip_unique_add_subbatch(
+        return paddlefleet_ops.tokens_zip_unique_add_subbatch(
             zipped, unzipped, index_unzipped, zipped_rows, subbatch_rows
         )
 
@@ -216,6 +216,6 @@ def merge_subbatch_cast(x, dtype):
             x = x[0]
             return x.cast(dtype) if x.dtype != dtype else x
         else:
-            return paddlefleet.ops.merge_subbatch_cast(x, dtype)
+            return paddlefleet_ops.merge_subbatch_cast(x, dtype)
     else:
         return x.cast(dtype) if x.dtype != dtype else x

@@ -45,7 +45,7 @@ HAVE_HYBRID_EP = False
 HYBRID_EP_LOAD_CACHED_KERNELS = True
 
 try:
-    from paddlefleet.ops import is_hybrid_ep_available
+    from paddlefleet_ops import is_hybrid_ep_available
 
     HAVE_HYBRID_EP = is_hybrid_ep_available()
 except ImportError:

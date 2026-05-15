@@ -32,7 +32,7 @@ from paddle import Tensor
 
 from paddlefleet.context_parallel_utils import flashmask_attention_cp
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
-from paddlefleet.ops.flash_mask_facade import (
+from paddlefleet_ops.flash_mask_facade import (
     flash_attention,
     flashmask_attention,
 )

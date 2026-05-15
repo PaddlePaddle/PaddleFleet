@@ -468,7 +468,7 @@ class MultiLatentAttention(Attention):
     def _gate(self, hidden_states, core_attn_out):
         gate, _ = self.gate_proj(hidden_states)
         if self.config.sigmoid_gate_fusion:
-            from paddlefleet.ops.triton_ops import SigmoidGateFusionTriton
+            from paddlefleet.triton_ops import SigmoidGateFusionTriton
 
             core_attn_out = SigmoidGateFusionTriton.apply(core_attn_out, gate)
         else:

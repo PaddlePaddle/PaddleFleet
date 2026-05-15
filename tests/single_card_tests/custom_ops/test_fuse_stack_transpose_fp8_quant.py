@@ -23,7 +23,7 @@ DTYPE_PD = paddle.bfloat16
 
 import paddle
 
-from paddlefleet.ops import fuse_stack_fp8_quant, fuse_stack_transpose_fp8_quant
+from paddlefleet_ops import fuse_stack_fp8_quant, fuse_stack_transpose_fp8_quant
 
 
 def ceil_div(x: int, y: int) -> int:

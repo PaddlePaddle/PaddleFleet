@@ -32,34 +32,34 @@ import paddle
 
 # Check if deep_gemm is available (requires GPU compute capability >= 9.0)
 try:
-    from paddlefleet.ops import is_deep_gemm_available
+    from paddlefleet_ops import is_deep_gemm_available
 
     _DEEP_GEMM_AVAILABLE = is_deep_gemm_available()
 except Exception:
     _DEEP_GEMM_AVAILABLE = False
 
 # Mock deep_gemm if not available so that paddlefleet.fp8.linear can import.
-# fp8.linear does `from paddlefleet.ops import deep_gemm` at module level.
+# fp8.linear does `from paddlefleet_ops import deep_gemm` at module level.
 if not _DEEP_GEMM_AVAILABLE:
-    # Ensure paddlefleet.ops exists and has a deep_gemm attribute
-    # Use try/except because paddlefleet.ops.__getattr__ raises RuntimeError
+    # Ensure paddlefleet_ops exists and has a deep_gemm attribute
+    # Use try/except because paddlefleet_ops.__getattr__ raises RuntimeError
     # for unsupported modules
     try:
-        ops_mod = sys.modules.get("paddlefleet.ops")
+        ops_mod = sys.modules.get("paddlefleet_ops")
         if ops_mod is None:
-            ops_mod = types.ModuleType("paddlefleet.ops")
-            sys.modules["paddlefleet.ops"] = ops_mod
+            ops_mod = types.ModuleType("paddlefleet_ops")
+            sys.modules["paddlefleet_ops"] = ops_mod
         # Check if deep_gemm already exists without triggering __getattr__
         if "deep_gemm" not in dir(ops_mod):
             mock_dg = MagicMock()
             mock_dg.fp8_gemm_nt = MagicMock()
             ops_mod.deep_gemm = mock_dg
     except (RuntimeError, AttributeError):
-        ops_mod = types.ModuleType("paddlefleet.ops")
+        ops_mod = types.ModuleType("paddlefleet_ops")
         mock_dg = MagicMock()
         mock_dg.fp8_gemm_nt = MagicMock()
         ops_mod.deep_gemm = mock_dg
-        sys.modules["paddlefleet.ops"] = ops_mod
+        sys.modules["paddlefleet_ops"] = ops_mod
 
     # Clear any cached fp8 modules so they re-import with the mock
     for _key in list(sys.modules.keys()):
