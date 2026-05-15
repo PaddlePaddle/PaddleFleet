@@ -175,6 +175,9 @@ class TransformerConfig(ModelParallelConfig):
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
     MLP layer)."""
 
+    moe_routed_expert_use_bias: bool | None = None
+    """Override whether routed MoE expert MLP layers include bias terms. If None, use use_bias."""
+
     attention_bias: bool = False
     """Include a bias term in QKV projections."""
 
