@@ -174,7 +174,7 @@ class EcosystemLibrary:
                 cmd = [
                     "patchelf",
                     "--add-rpath",
-                    "$ORIGIN/../../nvidia/nvshmem/lib",
+                    "$ORIGIN/../nvidia/nvshmem/lib",
                     dst,
                 ]
                 try:
