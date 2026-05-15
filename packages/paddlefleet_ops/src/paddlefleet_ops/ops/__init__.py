@@ -226,10 +226,9 @@ def _safe_load_ecosystem_lib(
                         clean_module_namespace(extra_lib)
             module_globals[lib_name] = module
             logger.info(f"Successfully loaded ecosystem library: {lib_name}")
-        except ImportError as e:
-            raise ImportError(
-                f"Failed to import ecosystem library '{lib_name}': {e}"
-            ) from e
+        except ImportError:
+            # Log warning instead of raising - ecosystem lib may not be installed
+            logger.warning(f"Ecosystem library '{lib_name}' not available, skipping...")
 
 
 import_custom_ops(
@@ -244,6 +243,10 @@ if paddle.is_compiled_with_cuda():
     if is_deep_gemm_available():
         paddle.enable_compat(scope={"deep_gemm", "triton"}, silent=True)
         _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
+        # Update flag based on actual import success
+        if "deep_gemm" not in globals():
+            logger.warning("deep_gemm module failed to load, disabling deep_gemm support")
+            globals()["_DEEP_GEMM_AVAILABLE"] = False
     else:
         warning, error = _hopper_requirement(
             "paddlefleet_ops.ops.deep_gemm", hint=DEEP_GEMM_HINT
@@ -255,6 +258,10 @@ if paddle.is_compiled_with_cuda():
         # Loading libnvshmem_host.so.* first when use editable install
         _try_load_nvshmem(ops_dir)
         _safe_load_ecosystem_lib("deep_ep", ops_dir, globals())
+        # Update flag based on actual import success
+        if "deep_ep" not in globals():
+            logger.warning("deep_ep module failed to load, disabling deep_ep support")
+            globals()["_DEEP_EP_AVAILABLE"] = False
     else:
         warning, error = _hopper_requirement(
             "paddlefleet_ops.ops.deep_ep", hint=DEEP_EP_HINT
@@ -265,6 +272,10 @@ if paddle.is_compiled_with_cuda():
     if is_hybrid_ep_available():
         paddle.enable_compat(scope={"hybrid_ep"}, silent=True)
         _safe_load_ecosystem_lib("hybrid_ep", ops_dir, globals())
+        # Update flag based on actual import success
+        if "hybrid_ep" not in globals():
+            logger.warning("hybrid_ep module failed to load, disabling hybrid_ep support")
+            globals()["_HYBRID_EP_AVAILABLE"] = False
     else:
         warning, error = _hopper_requirement(
             "paddlefleet_ops.ops.hybrid_ep", hint=HYBRID_EP_HINT
@@ -275,6 +286,10 @@ if paddle.is_compiled_with_cuda():
     if is_sonic_moe_available():
         paddle.enable_compat(scope={"sonicmoe", "quack", "triton"}, silent=True)
         _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
+        # Update flag based on actual import success
+        if "sonicmoe" not in globals():
+            logger.warning("sonicmoe module failed to load, disabling sonicmoe support")
+            globals()["_SONIC_MOE_AVAILABLE"] = False
     else:
         warning, error = _sonic_moe_requirement(
             "paddlefleet_ops.ops.sonicmoe", hint=SONIC_MOE_HINT
@@ -284,6 +299,10 @@ if paddle.is_compiled_with_cuda():
 
     if is_flash_mask_available():
         _safe_load_ecosystem_lib("flash_mask", ops_dir, globals())
+        # Update flag based on actual import success
+        if "flash_mask" not in globals():
+            logger.warning("flash_mask module failed to load, disabling flash_mask support")
+            globals()["_FLASH_MASK_AVAILABLE"] = False
     else:
         warning, error = _blackwell_requirement(
             "paddlefleet_ops.ops.flash_mask", hint=FLASH_MASK_HINT
