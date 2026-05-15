@@ -68,7 +68,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion  # noqa: F401
+    import paddlefleet.triton_ops.sigmoid_gate_fusion  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -81,7 +81,7 @@ class TestSigmoidGateFusionTritonDefinition(unittest.TestCase):
 
     def test_class_exists(self):
         """Test that SigmoidGateFusionTriton class can be imported."""
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             SigmoidGateFusionTriton,
         )
 
@@ -89,7 +89,7 @@ class TestSigmoidGateFusionTritonDefinition(unittest.TestCase):
 
     def test_has_forward(self):
         """Test that SigmoidGateFusionTriton has forward method."""
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             SigmoidGateFusionTriton,
         )
 
@@ -97,7 +97,7 @@ class TestSigmoidGateFusionTritonDefinition(unittest.TestCase):
 
     def test_has_backward(self):
         """Test that SigmoidGateFusionTriton has backward method."""
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             SigmoidGateFusionTriton,
         )
 
@@ -110,7 +110,7 @@ class TestSigmoidGateKernels(unittest.TestCase):
 
     def test_fwd_kernel_callable(self):
         """Test fused_sigmoid_gate_fwd_kernel is callable."""
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             fused_sigmoid_gate_fwd_kernel,
         )
 
@@ -118,7 +118,7 @@ class TestSigmoidGateKernels(unittest.TestCase):
 
     def test_bwd_kernel_callable(self):
         """Test fused_sigmoid_gate_bwd_kernel is callable."""
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             fused_sigmoid_gate_bwd_kernel,
         )
 
@@ -126,7 +126,7 @@ class TestSigmoidGateKernels(unittest.TestCase):
 
     def test_sigmoid_precise_callable(self):
         """Test _sigmoid_precise is callable."""
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             _sigmoid_precise,
         )
 
@@ -200,7 +200,8 @@ class TestSigmoidGateFusionTritonForward(unittest.TestCase):
     def test_shape_mismatch_asserts(self):
         """Test that forward asserts when shapes don't match."""
         import paddle
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             SigmoidGateFusionTriton,
         )
 
@@ -213,7 +214,8 @@ class TestSigmoidGateFusionTritonForward(unittest.TestCase):
     def test_dtype_mismatch_asserts(self):
         """Test that forward asserts when dtypes don't match."""
         import paddle
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             SigmoidGateFusionTriton,
         )
 
@@ -226,7 +228,8 @@ class TestSigmoidGateFusionTritonForward(unittest.TestCase):
     def test_unsupported_dtype_asserts(self):
         """Test that forward asserts for unsupported dtype."""
         import paddle
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             SigmoidGateFusionTriton,
         )
 

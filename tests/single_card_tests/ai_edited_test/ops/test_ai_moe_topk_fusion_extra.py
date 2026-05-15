@@ -65,7 +65,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.moe_topk_fusion  # noqa: F401
+    import paddlefleet.triton_ops.moe_topk_fusion  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -80,7 +80,7 @@ class TestMoETopkFusionForward(unittest.TestCase):
         """Test forward has expected parameter names."""
         import inspect
 
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import MoETopkFusion
+        from paddlefleet.triton_ops.moe_topk_fusion import MoETopkFusion
 
         sig = inspect.signature(MoETopkFusion.forward)
         params = list(sig.parameters.keys())
@@ -97,7 +97,7 @@ class TestMoETopkFusionForward(unittest.TestCase):
         """Test backward has expected parameter names."""
         import inspect
 
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import MoETopkFusion
+        from paddlefleet.triton_ops.moe_topk_fusion import MoETopkFusion
 
         sig = inspect.signature(MoETopkFusion.backward)
         params = list(sig.parameters.keys())
@@ -113,7 +113,7 @@ class TestRoutingMapFusionForward(unittest.TestCase):
         """Test function has expected parameters."""
         import inspect
 
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+        from paddlefleet.triton_ops.moe_topk_fusion import (
             routing_map_fusion_forward,
         )
 
