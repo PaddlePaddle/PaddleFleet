@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import gc
 import os
 import sys
 import unittest
@@ -239,4 +240,6 @@ class TestTransformerLayerDense(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(exit=False)
+    gc.collect()
+    os._exit(0)

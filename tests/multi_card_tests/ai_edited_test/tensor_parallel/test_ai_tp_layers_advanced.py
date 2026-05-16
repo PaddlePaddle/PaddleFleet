@@ -35,9 +35,6 @@ from paddlefleet.tensor_parallel.layers import (
     RowParallelLinear,
     VocabParallelEmbedding,
 )
-from paddlefleet.tensor_parallel.mappings import (
-    scatter_to_tensor_model_parallel_region,
-)
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -238,9 +235,8 @@ class TestColumnAndRowParallelEndToEnd(unittest.TestCase):
         input_tensor = paddle.randn([4, hidden_size], dtype="float32")
         input_tensor.stop_gradient = False
 
-        # Parallel path: scatter -> column -> row
-        scattered_input = scatter_to_tensor_model_parallel_region(input_tensor)
-        col_output = col(scattered_input)
+        # Parallel path: column -> row (ColumnParallel handles splitting internally)
+        col_output = col(input_tensor)
         col_output = _unpack_output(col_output)
         row_output = row(col_output)
         row_output = _unpack_output(row_output)

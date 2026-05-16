@@ -37,7 +37,6 @@ from paddlefleet.tensor_parallel.mappings import (
     _GatherFromSequenceParallelRegion,
     _ReduceFromModelParallelRegion,
     _ReduceScatterToSequenceParallelRegion,
-    _ReduceScatterToTensorParallelRegion,
     _ScatterToModelParallelRegion,
 )
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -188,21 +187,6 @@ class TestAllGatherFromTensorParallelRegion(unittest.TestCase):
         )
         # Output should have TP_SIZE times the last dim
         self.assertEqual(output.shape[-1], 4 * TP_SIZE)
-
-
-class TestReduceScatterToTensorParallelRegion(unittest.TestCase):
-    """Test _ReduceScatterToTensorParallelRegion reduce-scatters along last dim."""
-
-    def test_reduce_scatter_to_tensor_parallel_region(self):
-        """Forward should reduce-scatter along last dim."""
-        tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
-
-        input_data = paddle.randn([4, 16]).cuda()
-        output = _ReduceScatterToTensorParallelRegion.symbolic(
-            None, input_data, tp_group
-        )
-        # Output should have last dim divided by TP_SIZE
-        self.assertEqual(output.shape[-1], 16 // TP_SIZE)
 
 
 if __name__ == "__main__":

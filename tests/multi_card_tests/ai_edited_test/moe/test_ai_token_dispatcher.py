@@ -158,6 +158,10 @@ class TestTokenDispatcher(unittest.TestCase):
             cls.config = _build_moe_config()
             cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
             cls.ep_group = cls.pg_collection.ep
+            if cls.ep_group is None:
+                raise unittest.SkipTest("EP group not available")
+        except unittest.SkipTest:
+            raise
         except Exception:
             raise unittest.SkipTest("Fleet initialization failed")
 
