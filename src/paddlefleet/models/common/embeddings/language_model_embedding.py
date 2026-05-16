@@ -27,6 +27,7 @@ from paddle import Tensor
 
 from paddlefleet import tensor_parallel
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.paddle_norm import RMSNorm
 from paddlefleet.utils import get_tensor_model_parallel_group_if_none
 
 logger = logging.getLogger(__name__)
@@ -132,49 +133,44 @@ class LanguageModelEmbedding(FleetLayer):
             self.config, 'use_per_layer_embeddings', False
         )
         if self.use_per_layer_embeddings:
-            num_layers = self.config.num_hidden_layers
+            num_selected = self.config._ple_num_selected_layers
             per_layer_dim = getattr(self.config, 'per_layer_dim', 256)
 
-            # Per-layer embedding table: [vocab_size, num_layers * per_layer_dim]
-            # Output is scaled by sqrt(per_layer_dim) to match Gemma4 ScaledWordEmbedding
+            # PLE embedding table: [vocab_size, num_selected * per_layer_dim]
             self.embed_tokens_per_layer = tensor_parallel.VocabParallelEmbedding(
                 num_embeddings=vocab_size,
-                embedding_dim=num_layers * per_layer_dim,
+                embedding_dim=num_selected * per_layer_dim,
                 init_method=self.config.embedding_init_method,
-                reduce_scatter_embeddings=False,  # No scatter for PLE
+                reduce_scatter_embeddings=False,
                 config=self.config,
                 tp_group=self.tp_group,
             )
-            # Gemma4: embed_scale = per_layer_dim ** 0.5
             self._ple_embed_scale = per_layer_dim ** 0.5
 
-            # Project main embedding to per-layer space: H -> L*D
+            # Projection: H → num_selected * D
             self.per_layer_model_projection = paddle.nn.Linear(
                 self.config.hidden_size,
-                num_layers * per_layer_dim,
+                num_selected * per_layer_dim,
                 bias_attr=False,
             )
-            # Gemma4: per_layer_model_projection_scale = hidden_size ** -0.5
-            self._ple_proj_scale = self.config.hidden_size ** -0.5
 
-            # RMSNorm on per_layer_dim (applied per-layer after reshape)
-            # Gemma4: per_layer_projection_norm = RMSNorm(per_layer_dim)
-            self._ple_norm_weight = paddle.create_parameter(
-                shape=[per_layer_dim],
-                dtype=paddle.get_default_dtype(),
-                default_initializer=paddle.nn.initializer.Constant(1.0),
+            # Req 1: configurable projection scale
+            _use_proj_scale = getattr(self.config, 'per_layer_projection_scale', False)
+            self._ple_proj_scale = self.config.hidden_size ** -0.5 if _use_proj_scale else 1.0
+
+            # Req 2: Official RMSNorm (replaces manual _ple_norm_weight + F.rms_norm)
+            self.per_layer_projection_norm = RMSNorm(
+                config=self.config,
+                normalized_shape=per_layer_dim,
             )
-            self._ple_norm_eps = self.config.rms_norm_eps
 
-            # Gemma4: per_layer_input_scale = 2.0 ** -0.5
             self._ple_input_scale = 2.0 ** -0.5
-
             self._per_layer_dim = per_layer_dim
-            self._num_layers = num_layers
+            self._num_selected_layers = num_selected
 
             logger.info(
-                f"[Gemma 4 PLE] Enabled: per_layer_dim={per_layer_dim}, "
-                f"num_layers={num_layers}, vocab_size={vocab_size}"
+                f"[PLE] Enabled: per_layer_dim={per_layer_dim}, "
+                f"num_selected_layers={num_selected}, vocab_size={vocab_size}"
             )
 
     @property
@@ -294,31 +290,21 @@ class LanguageModelEmbedding(FleetLayer):
 
     def _compute_per_layer_inputs(self, input_ids, embeddings):
         """Compute PLE per-layer inputs (called inside recompute boundary)."""
-        import paddle.nn.functional as F_emb
-
         batch_size, seq_len = input_ids.shape
 
         # 1. Token-identity component: lookup + scale by sqrt(per_layer_dim)
         ple_lookup = self.embed_tokens_per_layer(input_ids) * self._ple_embed_scale
-        # Reshape to [B, S, L, D]
         ple_lookup = ple_lookup.reshape(
-            [batch_size, seq_len, self._num_layers, self._per_layer_dim]
+            [batch_size, seq_len, self._num_selected_layers, self._per_layer_dim]
         )
 
-        # 2. Context-aware component: project + scale by 1/sqrt(hidden_size)
+        # 2. Context-aware component: project + scale
         ple_projection = self.per_layer_model_projection(embeddings) * self._ple_proj_scale
-        # Reshape to [B, S, L, D]
         ple_projection = ple_projection.reshape(
-            [batch_size, seq_len, self._num_layers, self._per_layer_dim]
+            [batch_size, seq_len, self._num_selected_layers, self._per_layer_dim]
         )
-        # RMSNorm on last dim (per_layer_dim), applied to projection only
-        _norm_w = self._ple_norm_weight
-        if ple_projection.dtype != _norm_w.dtype:
-            _norm_w = _norm_w.cast(ple_projection.dtype)
-        ple_projection = F_emb.rms_norm(
-            ple_projection, ple_projection.shape[-1:],
-            _norm_w, self._ple_norm_eps
-        )
+        # Official RMSNorm
+        ple_projection = self.per_layer_projection_norm(ple_projection)
 
         # 3. Combine: (projection + token_emb) * 1/sqrt(2)
         return (ple_projection + ple_lookup) * self._ple_input_scale
