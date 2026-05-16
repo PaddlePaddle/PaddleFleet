@@ -266,7 +266,7 @@ if paddle.is_compiled_with_cuda():
 
     if is_hybrid_ep_available():
         paddle.enable_compat(scope={"hybrid_ep"}, silent=True)
-        os.environ.setdefault("HYBRID_EP_SKIP_DEEP_EP", "1")
+        os.environ["HYBRID_EP_SKIP_DEEP_EP"] = "1"
         _safe_load_ecosystem_lib("hybrid_ep", ops_dir, globals())
     else:
         warning, error = _hopper_requirement(
