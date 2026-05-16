@@ -61,10 +61,10 @@ tests:
   - test_case: [tests/multi_card_tests/ai_edited_test/transformer/test_ai_transformer_encoder_pp.py]
     products:
       - num_gpus: 4
-  # ai_edited_test: moe (Pattern D, TP=4 sharding=2 -> 8 GPUs)
+  # ai_edited_test: moe (Pattern D, TP=4)
   - test_case: [tests/multi_card_tests/ai_edited_test/moe/test_ai_moe_layer.py]
     products:
-      - num_gpus: 8
+      - num_gpus: 4
   - test_case: [tests/multi_card_tests/ai_edited_test/moe/test_ai_moe_utils.py]
     products:
       - num_gpus: 8

@@ -148,7 +148,7 @@ class TestLanguageLoss(unittest.TestCase):
     @_requires_gpu_compute
     def test_language_loss_creation(self):
         """Test LanguageLoss layer creation."""
-        loss_fn = LanguageLoss()
+        loss_fn = LanguageLoss(config=self.config)
         self.assertIsNotNone(loss_fn)
 
     @_requires_gpu_compute
@@ -164,7 +164,7 @@ class TestLanguageLoss(unittest.TestCase):
         labels = paddle.randint(
             0, vocab_size, [batch_size, seq_len], dtype="int64"
         )
-        loss_fn = LanguageLoss()
+        loss_fn = LanguageLoss(config=self.config)
         loss = loss_fn(logits, labels)
         self.assertIsNotNone(loss)
 
@@ -182,7 +182,7 @@ class TestLanguageLoss(unittest.TestCase):
         labels = paddle.randint(
             0, vocab_size, [batch_size, seq_len], dtype="int64"
         )
-        loss_fn = LanguageLoss()
+        loss_fn = LanguageLoss(config=self.config)
         loss = loss_fn(logits, labels)
         loss.sum().backward()
         self.assertIsNotNone(logits.grad)

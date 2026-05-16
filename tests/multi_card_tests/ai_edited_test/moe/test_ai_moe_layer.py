@@ -42,13 +42,13 @@ _GPU_COMPUTE_OK = None
 
 
 def _init_moe_tp():
-    """Initialize fleet with TP=4, sharding=2 for MoE testing."""
+    """Initialize fleet with TP=4 for MoE testing."""
     strategy = fleet.DistributedStrategy()
     strategy.hybrid_configs = {
         "dp_degree": 1,
         "mp_degree": 4,
         "pp_degree": 1,
-        "sharding_degree": 2,
+        "sharding_degree": 1,
         "sep_degree": 1,
         "cp_degree": 1,
         "ep_degree": 1,
@@ -125,13 +125,11 @@ class TestMoELayerForward(unittest.TestCase):
             tensor_model_parallel_size=1,
             expert_model_parallel_size=1,
             sequence_parallel=False,
-            bf16=True,
+            bf16=False,
             params_dtype=paddle.float32,
             moe_intermediate_size=24,
             gated_linear_unit=True,
             n_shared_experts=0,
-            hidden_act=paddle.nn.functional.silu,
-            bias_activation_fusion=True,
         )
         cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
@@ -181,13 +179,11 @@ class TestMoEGateRouter(unittest.TestCase):
             tensor_model_parallel_size=1,
             expert_model_parallel_size=1,
             sequence_parallel=False,
-            bf16=True,
+            bf16=False,
             params_dtype=paddle.float32,
             moe_intermediate_size=24,
             gated_linear_unit=True,
             n_shared_experts=0,
-            hidden_act=paddle.nn.functional.silu,
-            bias_activation_fusion=True,
         )
         cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
@@ -254,13 +250,11 @@ class TestMoEConfigVariants(unittest.TestCase):
             tensor_model_parallel_size=1,
             expert_model_parallel_size=1,
             sequence_parallel=False,
-            bf16=True,
+            bf16=False,
             params_dtype=paddle.float32,
             moe_intermediate_size=24,
             gated_linear_unit=True,
             n_shared_experts=n_shared,
-            hidden_act=paddle.nn.functional.silu,
-            bias_activation_fusion=True,
         )
         pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 

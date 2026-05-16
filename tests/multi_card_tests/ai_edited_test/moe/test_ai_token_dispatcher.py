@@ -143,6 +143,8 @@ def setUpModule():
     """Initialize fleet once for all tests in this module."""
     global WORLD_SIZE
     WORLD_SIZE = dist.get_world_size()
+    if WORLD_SIZE < EP_DEGREE:
+        return
     _init_fleet()
 
 
@@ -151,6 +153,10 @@ class TestTokenDispatcher(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        if WORLD_SIZE is not None and WORLD_SIZE < EP_DEGREE:
+            raise unittest.SkipTest(
+                f"Need at least {EP_DEGREE} GPUs, got {WORLD_SIZE}"
+            )
         cls.config = _build_moe_config()
         cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         cls.ep_group = cls.pg_collection.ep

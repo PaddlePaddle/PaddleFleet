@@ -39,8 +39,8 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_tensor_model_parallel_region,
 )
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.tensor_parallel.transformer_config import TransformerConfig
 from paddlefleet.training.initialize import initialize_fleet
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 TP_SIZE = None
 

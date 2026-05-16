@@ -37,6 +37,7 @@ from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
+EP_DEGREE = 4
 SEED = 55
 WORLD_SIZE = None
 _GPU_COMPUTE_OK = None
@@ -93,6 +94,8 @@ def setUpModule():
     global WORLD_SIZE
     WORLD_SIZE = dist.get_world_size()
     _set_seed(SEED)
+    if WORLD_SIZE < EP_DEGREE:
+        return
     _init_fleet_ep4()
     model_parallel_cuda_manual_seed(SEED)
 
@@ -166,6 +169,10 @@ class TestTransformerLayerMoE(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        if WORLD_SIZE is not None and WORLD_SIZE < EP_DEGREE:
+            raise unittest.SkipTest(
+                f"Need at least {EP_DEGREE} GPUs, got {WORLD_SIZE}"
+            )
         cls.hidden_size = 64
         cls.n_experts = 4
         cls.config = _build_moe_config()

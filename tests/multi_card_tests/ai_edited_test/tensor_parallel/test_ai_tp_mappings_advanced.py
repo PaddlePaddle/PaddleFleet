@@ -16,8 +16,10 @@ import os
 import sys
 import unittest
 
+import numpy as np
 import paddle
 import paddle.distributed as dist
+from paddle.distributed import fleet
 
 sys.path.insert(
     0,
@@ -38,10 +40,45 @@ from paddlefleet.tensor_parallel.mappings import (
     _ReduceScatterToTensorParallelRegion,
     _ScatterToModelParallelRegion,
 )
+from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
+from paddlefleet.training.initialize import initialize_fleet
 from paddlefleet.utils import get_tensor_model_parallel_group_if_none
 
 TP_SIZE = 4
-_initialized = False
+
+
+def _init_fleet_tp():
+    """Initialize fleet with TP=4, DP=1, PP=1."""
+    strategy = fleet.DistributedStrategy()
+    strategy.hybrid_configs = {
+        "dp_degree": 1,
+        "mp_degree": TP_SIZE,
+        "pp_degree": 1,
+        "sharding_degree": 1,
+        "sep_degree": 1,
+        "cp_degree": 1,
+        "ep_degree": 1,
+        "moe_sharding_degree": 1,
+        "order": [
+            "sharding",
+            "moe_sharding",
+            "pp",
+            "sep",
+            "cp",
+            "dp",
+            "ep",
+            "mp",
+        ],
+    }
+    initialize_fleet(strategy=strategy)
+
+
+def setUpModule():
+    """Initialize fleet once for all tests in this module (TP=4)."""
+    _init_fleet_tp()
+    np.random.seed(42)
+    paddle.seed(42)
+    model_parallel_cuda_manual_seed(42)
 
 
 class TestGatherFromModelParallelRegionBasic(unittest.TestCase):
@@ -260,9 +297,4 @@ class TestReduceScatterToTensorParallelRegion(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
-
-    Utils.initialize_model_parallel(
-        tensor_parallel_size=TP_SIZE, pipeline_parallel_size=1
-    )
     unittest.main()
