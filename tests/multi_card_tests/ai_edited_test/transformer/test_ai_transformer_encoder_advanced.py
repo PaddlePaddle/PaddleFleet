@@ -205,15 +205,11 @@ class TestBuildOverlappedNodes(unittest.TestCase):
         fwd_chunk = ScheduleChunk([node_a])
         bwd_chunk = ScheduleChunk([node_b])
 
-        (
-            fwd_pre,
-            bwd_pre,
-            overlap,
-            fwd_post,
-            bwd_post,
-        ) = build_overlapped_nodes(fwd_chunk, bwd_chunk)
+        result = build_overlapped_nodes(fwd_chunk, bwd_chunk)
 
-        self.assertIsNotNone(overlap)
+        # build_overlapped_nodes returns 5-tuple
+        self.assertEqual(len(result), 5)
+        self.assertIsNotNone(result[2])  # overlap node
 
 
 if __name__ == "__main__":
