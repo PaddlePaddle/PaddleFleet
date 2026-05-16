@@ -117,7 +117,7 @@ def _build_transformer_config(**overrides):
     defaults = dict(  # noqa: C408
         hidden_size=64,
         num_attention_heads=4,
-        num_layers=2,
+        num_hidden_layers=2,
         intermediate_size=128,
         use_cpu_initialization=True,
         tensor_model_parallel_size=1,

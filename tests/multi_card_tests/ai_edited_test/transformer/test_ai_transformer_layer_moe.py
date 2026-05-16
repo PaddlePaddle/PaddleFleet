@@ -62,17 +62,17 @@ def _check_gpu_compute():
     return _GPU_COMPUTE_OK
 
 
-def _init_fleet_ep2_dp2():
-    """Initialize fleet with EP=2, DP=2 for transformer layer MoE testing."""
+def _init_fleet_ep4():
+    """Initialize fleet with EP=4, DP=1 for transformer layer MoE testing."""
     strategy = fleet.DistributedStrategy()
     strategy.hybrid_configs = {
-        "dp_degree": 2,
+        "dp_degree": 1,
         "mp_degree": 1,
         "pp_degree": 1,
         "sharding_degree": 1,
         "sep_degree": 1,
         "cp_degree": 1,
-        "ep_degree": 2,
+        "ep_degree": 4,
         "moe_sharding_degree": 1,
         "order": [
             "sharding",
@@ -93,7 +93,7 @@ def setUpModule():
     global WORLD_SIZE
     WORLD_SIZE = dist.get_world_size()
     _set_seed(SEED)
-    _init_fleet_ep2_dp2()
+    _init_fleet_ep4()
     model_parallel_cuda_manual_seed(SEED)
 
 
@@ -120,7 +120,7 @@ def _build_moe_config(**overrides):
         use_cpu_initialization=True,
         num_experts_per_tok=2,
         tensor_model_parallel_size=1,
-        expert_model_parallel_size=2,
+        expert_model_parallel_size=4,
         sequence_parallel=False,
         bf16=False,
         params_dtype=paddle.float32,

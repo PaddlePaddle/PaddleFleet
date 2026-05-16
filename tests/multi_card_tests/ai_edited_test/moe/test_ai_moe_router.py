@@ -111,36 +111,39 @@ def _build_router_config(**overrides):
     return TransformerConfig(**defaults)
 
 
+def setUpModule():
+    """Initialize fleet once for all tests in this module (MP=4)."""
+    strategy = fleet.DistributedStrategy()
+    strategy.hybrid_configs = {
+        "dp_degree": 1,
+        "mp_degree": MP_DEGREE,
+        "pp_degree": 1,
+        "sharding_degree": 1,
+        "sep_degree": 1,
+        "cp_degree": 1,
+        "ep_degree": 1,
+        "moe_sharding_degree": 1,
+        "order": [
+            "sharding",
+            "moe_sharding",
+            "pp",
+            "sep",
+            "cp",
+            "dp",
+            "ep",
+            "mp",
+        ],
+    }
+    initialize_fleet(strategy=strategy)
+    model_parallel_cuda_manual_seed(SEED)
+
+
 class TestTopKRouter(unittest.TestCase):
     """Test TopKRouter creation and forward."""
 
     @classmethod
     def setUpClass(cls):
-        strategy = fleet.DistributedStrategy()
-        strategy.hybrid_configs = {
-            "dp_degree": 1,
-            "mp_degree": MP_DEGREE,
-            "pp_degree": 1,
-            "sharding_degree": 1,
-            "sep_degree": 1,
-            "cp_degree": 1,
-            "ep_degree": 1,
-            "moe_sharding_degree": 1,
-            "order": [
-                "sharding",
-                "moe_sharding",
-                "pp",
-                "sep",
-                "cp",
-                "dp",
-                "ep",
-                "mp",
-            ],
-        }
-        initialize_fleet(strategy=strategy)
         _set_seed(SEED)
-        model_parallel_cuda_manual_seed(SEED)
-
         cls.config = _build_router_config()
         cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
@@ -180,31 +183,7 @@ class TestStandardMoERouter(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        strategy = fleet.DistributedStrategy()
-        strategy.hybrid_configs = {
-            "dp_degree": 1,
-            "mp_degree": MP_DEGREE,
-            "pp_degree": 1,
-            "sharding_degree": 1,
-            "sep_degree": 1,
-            "cp_degree": 1,
-            "ep_degree": 1,
-            "moe_sharding_degree": 1,
-            "order": [
-                "sharding",
-                "moe_sharding",
-                "pp",
-                "sep",
-                "cp",
-                "dp",
-                "ep",
-                "mp",
-            ],
-        }
-        initialize_fleet(strategy=strategy)
-        _set_seed(SEED)
-        model_parallel_cuda_manual_seed(SEED)
-
+        _set_seed(SEED + 1)
         cls.config = _build_router_config()
         cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 

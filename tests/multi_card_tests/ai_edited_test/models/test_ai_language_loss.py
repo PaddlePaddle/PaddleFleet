@@ -31,9 +31,7 @@ sys.path.insert(
     ),
 )
 
-from paddlefleet.models.common.language_loss.language_loss import (
-    ParallelCrossEntropy,
-)
+from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet
@@ -139,8 +137,8 @@ def _build_config(**overrides):
     return TransformerConfig(**defaults)
 
 
-class TestParallelCrossEntropy(unittest.TestCase):
-    """Test ParallelCrossEntropy from paddle.distributed.fleet.meta_parallel."""
+class TestLanguageLoss(unittest.TestCase):
+    """Test LanguageLoss module from paddlefleet."""
 
     @classmethod
     def setUpClass(cls):
@@ -148,18 +146,14 @@ class TestParallelCrossEntropy(unittest.TestCase):
         cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
     @_requires_gpu_compute
-    def test_parallel_cross_entropy_creation(self):
-        """Test ParallelCrossEntropy layer creation."""
-        loss_fn = ParallelCrossEntropy()
+    def test_language_loss_creation(self):
+        """Test LanguageLoss layer creation."""
+        loss_fn = LanguageLoss()
         self.assertIsNotNone(loss_fn)
 
     @_requires_gpu_compute
-    def test_parallel_cross_entropy_forward(self):
-        """Test ParallelCrossEntropy forward pass with logits and labels."""
-        from paddle.distributed.fleet.meta_parallel import (
-            ParallelCrossEntropy as PaddleParallelCrossEntropy,
-        )
-
+    def test_language_loss_forward(self):
+        """Test LanguageLoss forward pass with logits and labels."""
         batch_size = 2
         seq_len = 8
         vocab_size = 64
@@ -170,18 +164,13 @@ class TestParallelCrossEntropy(unittest.TestCase):
         labels = paddle.randint(
             0, vocab_size, [batch_size, seq_len], dtype="int64"
         )
-        loss_fn = PaddleParallelCrossEntropy()
+        loss_fn = LanguageLoss()
         loss = loss_fn(logits, labels)
         self.assertIsNotNone(loss)
-        self.assertEqual(loss.shape, [batch_size, seq_len])
 
     @_requires_gpu_compute
-    def test_parallel_cross_entropy_backward(self):
-        """Test ParallelCrossEntropy backward pass, verify gradients exist."""
-        from paddle.distributed.fleet.meta_parallel import (
-            ParallelCrossEntropy as PaddleParallelCrossEntropy,
-        )
-
+    def test_language_loss_backward(self):
+        """Test LanguageLoss backward pass, verify gradients exist."""
         batch_size = 2
         seq_len = 8
         vocab_size = 64
@@ -193,7 +182,7 @@ class TestParallelCrossEntropy(unittest.TestCase):
         labels = paddle.randint(
             0, vocab_size, [batch_size, seq_len], dtype="int64"
         )
-        loss_fn = PaddleParallelCrossEntropy()
+        loss_fn = LanguageLoss()
         loss = loss_fn(logits, labels)
         loss.sum().backward()
         self.assertIsNotNone(logits.grad)

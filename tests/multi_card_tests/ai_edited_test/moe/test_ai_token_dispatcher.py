@@ -19,6 +19,7 @@ import unittest
 
 import numpy as np
 import paddle
+import paddle.distributed as dist
 from paddle.distributed import fleet
 
 sys.path.insert(
@@ -82,6 +83,34 @@ def _requires_gpu_compute(test_func):
     return wrapper
 
 
+def _init_fleet():
+    """Initialize fleet with EP=4, MP=1, DP=1, PP=1, sharding=1."""
+    strategy = fleet.DistributedStrategy()
+    strategy.hybrid_configs = {
+        "dp_degree": 1,
+        "mp_degree": 1,
+        "pp_degree": 1,
+        "sharding_degree": 1,
+        "sep_degree": 1,
+        "cp_degree": 1,
+        "ep_degree": EP_DEGREE,
+        "moe_sharding_degree": 1,
+        "order": [
+            "sharding",
+            "moe_sharding",
+            "pp",
+            "sep",
+            "cp",
+            "dp",
+            "ep",
+            "mp",
+        ],
+    }
+    initialize_fleet(strategy=strategy)
+    _set_seed(SEED)
+    model_parallel_cuda_manual_seed(SEED)
+
+
 def _build_moe_config(**overrides):
     defaults = dict(  # noqa: C408
         hidden_size=64,
@@ -110,36 +139,18 @@ def _build_moe_config(**overrides):
     return TransformerConfig(**defaults)
 
 
+def setUpModule():
+    """Initialize fleet once for all tests in this module."""
+    global WORLD_SIZE
+    WORLD_SIZE = dist.get_world_size()
+    _init_fleet()
+
+
 class TestTokenDispatcher(unittest.TestCase):
     """Test token dispatcher creation and comm manager type."""
 
     @classmethod
     def setUpClass(cls):
-        strategy = fleet.DistributedStrategy()
-        strategy.hybrid_configs = {
-            "dp_degree": 1,
-            "mp_degree": 1,
-            "pp_degree": 1,
-            "sharding_degree": 1,
-            "sep_degree": 1,
-            "cp_degree": 1,
-            "ep_degree": EP_DEGREE,
-            "moe_sharding_degree": 1,
-            "order": [
-                "sharding",
-                "moe_sharding",
-                "pp",
-                "sep",
-                "cp",
-                "dp",
-                "ep",
-                "mp",
-            ],
-        }
-        initialize_fleet(strategy=strategy)
-        _set_seed(SEED)
-        model_parallel_cuda_manual_seed(SEED)
-
         cls.config = _build_moe_config()
         cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         cls.ep_group = cls.pg_collection.ep
