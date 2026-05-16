@@ -414,6 +414,7 @@ def get_libs():
                 ],
                 extra_env={
                     "HYBRID_EP_MULTINODE": "1",
+                    "HYBRID_EP_SKIP_DEEP_EP": "1",
                     "PADDLE_CUDA_ARCH_LIST": _deep_ep_arch,
                 },
             ),
