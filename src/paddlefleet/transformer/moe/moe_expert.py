@@ -131,6 +131,17 @@ class GroupedMLPExpert(FleetLayer):
     Executes multiple experts in parallel using only expert parallelism.
     """
 
+    @staticmethod
+    def _split_to_sonic_interleaved(weight):
+        # make the weight tensor of sonicmoe consistent
+        # with the original GroupedGEMM weight.
+        gate, up = paddle.chunk(weight, 2, axis=-1)
+        gate = gate.transpose([0, 2, 1])
+        up = up.transpose([0, 2, 1])
+        return paddle.stack([gate, up], axis=2).reshape(
+            [weight.shape[0], -1, weight.shape[1]]
+        )
+
     def __init__(
         self,
         num_local_experts: int,
@@ -144,6 +155,10 @@ class GroupedMLPExpert(FleetLayer):
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
         self.using_sonic_moe = self.config.using_sonic_moe
+        if self.using_sonic_moe:
+            assert config.gated_linear_unit is True, (
+                "Sonic MoE must use SwiGLU, i.e. set gated_linear_unit=True."
+            )
         assert not config.use_bias, (
             "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
         )
@@ -185,6 +200,16 @@ class GroupedMLPExpert(FleetLayer):
         fc2_input_size = self.config.moe_intermediate_size
 
         dtype = "bfloat16"
+        baseline_w1_shape = [
+            self.num_local_experts,
+            self.config.hidden_size,
+            fc1_output_size,
+        ]
+        baseline_w2_shape = [
+            self.num_local_experts,
+            fc2_input_size,
+            self.config.hidden_size,
+        ]
         if self.using_sonic_moe:
             w1_shape = [
                 self.num_local_experts,
@@ -197,16 +222,8 @@ class GroupedMLPExpert(FleetLayer):
                 fc2_input_size,
             ]
         else:
-            w1_shape = [
-                self.num_local_experts,
-                self.config.hidden_size,
-                fc1_output_size,
-            ]
-            w2_shape = [
-                self.num_local_experts,
-                fc2_input_size,
-                self.config.hidden_size,
-            ]
+            w1_shape = baseline_w1_shape
+            w2_shape = baseline_w2_shape
 
         rng_ctx = (
             get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name())
@@ -215,20 +232,49 @@ class GroupedMLPExpert(FleetLayer):
         )
 
         with rng_ctx:
-            self.weight1 = paddle.create_parameter(
-                shape=w1_shape,
-                dtype=dtype,
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
-            self.weight2 = paddle.create_parameter(
-                shape=w2_shape,
-                dtype=dtype,
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
-            # Use config.init_method / config.output_layer_init_method
-            # which are functions that take a tensor and initialize it in-place.
-            self.config.init_method(self.weight1)
-            self.config.output_layer_init_method(self.weight2)
+            if self.using_sonic_moe:
+                # NOTE: make the initial weight of sonicmoe consistent with
+                # the original GroupedGEMM implementation for fair comparison.
+                baseline_weight1 = paddle.zeros(
+                    shape=baseline_w1_shape,
+                    dtype=dtype,
+                )
+                self.config.init_method(baseline_weight1)
+                baseline_weight2 = paddle.zeros(
+                    shape=baseline_w2_shape,
+                    dtype=dtype,
+                )
+                self.config.output_layer_init_method(baseline_weight2)
+                self.weight1 = paddle.create_parameter(
+                    shape=w1_shape,
+                    dtype=dtype,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
+                )
+                self.weight2 = paddle.create_parameter(
+                    shape=w2_shape,
+                    dtype=dtype,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
+                )
+                self.weight1.set_value(
+                    self._split_to_sonic_interleaved(baseline_weight1)
+                )
+                self.weight2.set_value(baseline_weight2.transpose([0, 2, 1]))
+            else:
+                self.weight1 = paddle.create_parameter(
+                    shape=w1_shape,
+                    dtype=dtype,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
+                )
+                self.weight2 = paddle.create_parameter(
+                    shape=w2_shape,
+                    dtype=dtype,
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
+                )
+                # Use config.init_method / config.output_layer_init_method
+                # which are functions that take a tensor and initialize it in-place.
+                self.config.init_method(self.weight1)
+                self.config.output_layer_init_method(self.weight2)
+
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 
