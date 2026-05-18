@@ -485,6 +485,12 @@ class TransformerConfig(ModelParallelConfig):
     moe_latent_size: int | None = None
     """The latent dimension size for latent MoE. Only used when use_latent_moe is True."""
 
+    moe_n_heads: int = 1
+    """Number of heads for Multi-Head LatentMoE. Each head operates on an independent
+    head_dim = moe_latent_size // moe_n_heads slice and routes tokens separately.
+    Requires moe_latent_size % moe_n_heads == 0. Default 1 means standard single-head
+    latent MoE (no multi-head splitting). Only used when use_latent_moe is True."""
+
     ##################
     # Context Parallel
     ##################
