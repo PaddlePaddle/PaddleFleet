@@ -146,13 +146,19 @@ class GPTEmbedding(FleetLayer):
         # Per-depth MTP input_ids for MoE routing in MTP layers.
         # Shape: [B, num_mtp, max_seq] when MTP is enabled, None otherwise.
         mtp_input_ids_for_moe_mask = None
+        per_layer_inputs = None  # PLE: per-layer embedding inputs
         if decoder_input is None:
-            decoder_input = self.embedding(
+            embedding_output = self.embedding(
                 input_ids=input_ids,
                 position_ids=None
                 if self.multimodal_embedding
                 else position_ids,
             )
+            # Handle PLE output (returns tuple when enabled)
+            if getattr(self.config, 'use_per_layer_embeddings', False):
+                decoder_input, per_layer_inputs = embedding_output
+            else:
+                decoder_input = embedding_output
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
             if (
                 self.config.expert_model_parallel_size > 1
@@ -449,6 +455,17 @@ class GPTEmbedding(FleetLayer):
             assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
             hidden_states_concat = paddle.concat(mtp_emb_res)
             preproc_output["hidden_states"] = hidden_states_concat
+
+        # ============ Per-Layer Embeddings (PLE) ============
+        if per_layer_inputs is not None:
+            # Skip multimodal positions: set PLE to 0 for multimodal tokens
+            if visual_pos_masks is not None:
+                # visual_pos_masks: [B, S] bool
+                visual_pos_mask = visual_pos_masks.unsqueeze(-1)  # [B, S, 1]
+                visual_pos_mask = visual_pos_mask.astype(per_layer_inputs.dtype)
+                # Set multimodal positions to 0
+                per_layer_inputs = per_layer_inputs * (1.0 - visual_pos_mask)
+            preproc_output["per_layer_inputs"] = per_layer_inputs
 
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:

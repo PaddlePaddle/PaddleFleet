@@ -86,6 +86,36 @@ class TransformerConfig(ModelParallelConfig):
         ..., Decoder, Dcoder, EmptyLayer, EmptyLayer
     0 implies equal layer division across PP ranks."""
 
+    use_per_layer_embeddings: bool = False
+    """When True, apply Per-Layer Embeddings (PLE) conditioning at every transformer layer.
+    Based on Gemma 4 architecture: each layer receives a learned per-layer embedding signal
+    derived from token identity and projected initial embedding."""
+
+    per_layer_dim: int = 256
+    """Dimension of per-layer embeddings. Controls the size of the conditioning signal
+    injected at each layer. Larger values increase model capacity but also memory usage.
+    Gemma 4 E2B uses ~305, we recommend 256 for balance."""
+
+    per_layer_embedding_init_std: float | None = None
+    """Standard deviation for initializing per-layer embedding table.
+    If None, uses embedding_init_method_std."""
+
+    per_layer_gate_init_zero: bool = False
+    """If True, initialize gate projection weights to zero so initial gate ≈ 0.
+    This minimizes disruption at the start of training."""
+
+    per_layer_projection_norm: bool = True
+    """Whether to apply RMSNorm to the projected per-layer inputs before gate injection."""
+
+    per_layer_projection_scale: bool = False
+    """Whether to apply 1/sqrt(hidden_size) scaling to the PLE projection output.
+    When False, no scaling is applied to the projection."""
+
+    per_layer_selected_layers: list | None = None
+    """Which decoder layers receive PLE conditioning.
+    Convention: 1-indexed positive, Python-style negative, [0] or None = all layers.
+    Examples: [1] = first layer, [-1] = last layer, [1,2] = first two, [-3,-1] = 3rd-last and last."""
+
     # Note: need to implement PipelineParallelLayerLayout and import
     # pipeline_model_parallel_layout: str | list | PipelineParallelLayerLayout = None
     pipeline_model_parallel_layout: str | list = None
@@ -908,3 +938,27 @@ class TransformerConfig(ModelParallelConfig):
             raise ValueError(
                 "apply_rope_fusion for MLA only works with YARN RoPE."
             )
+
+        # Resolve per_layer_selected_layers → 0-indexed set
+        if getattr(self, 'use_per_layer_embeddings', False):
+            raw = getattr(self, 'per_layer_selected_layers', None)
+            if raw is None or (isinstance(raw, list) and 0 in raw):
+                self._ple_resolved_layer_indices = set(range(self.num_hidden_layers))
+            else:
+                resolved = set()
+                for idx in raw:
+                    if idx > 0:
+                        resolved.add(idx - 1)
+                    elif idx < 0:
+                        resolved.add(self.num_hidden_layers + idx)
+                for r in resolved:
+                    assert 0 <= r < self.num_hidden_layers, (
+                        f"per_layer_selected_layers: resolved index {r} out of range [0, {self.num_hidden_layers})"
+                    )
+                self._ple_resolved_layer_indices = resolved
+            self._ple_num_selected_layers = len(self._ple_resolved_layer_indices)
+            self._ple_sorted_layer_indices = sorted(self._ple_resolved_layer_indices)
+        else:
+            self._ple_resolved_layer_indices = set()
+            self._ple_num_selected_layers = 0
+            self._ple_sorted_layer_indices = []
