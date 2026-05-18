@@ -120,6 +120,10 @@ class TestHybridEPFusion(unittest.TestCase):
         moe_layer = self._build_moe_layer(config)
         self.assertTrue(moe_layer.use_hybrid_ep_backend)
         self.assertFalse(moe_layer.moe_shared_expert_overlap)
+        self.assertEqual(
+            moe_layer.token_dispatcher._comm_manager.hybrid_ep_config,
+            config.hybrid_ep_config,
+        )
 
         input_data = paddle.randn(
             4, 64, config.hidden_size, dtype=paddle.bfloat16
