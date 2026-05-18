@@ -18,15 +18,14 @@ import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
-
-from paddlefleet.ops import is_deep_ep_available, is_hybrid_ep_available
+from paddlefleet_ops import is_deep_ep_available, is_hybrid_ep_available
 
 from .fp8_utils import FP8_ALIGN
 from .moe_utils import manual_backward
 
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():
-        from paddlefleet.ops import deep_ep
+        from paddlefleet_ops import deep_ep
     else:
         from paddle.distributed.communication import deep_ep
 
@@ -35,7 +34,7 @@ else:
     HAVE_DEEP_EP = False
 
 if is_hybrid_ep_available():
-    from paddlefleet.ops import hybrid_ep
+    from paddlefleet_ops import hybrid_ep
 
     HAVE_HYBRID_EP = True
 else:

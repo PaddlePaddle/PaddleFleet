@@ -18,7 +18,7 @@ import numpy as np
 import paddle
 import paddle.nn.functional as F
 
-from paddlefleet.ops.triton_ops import SigmoidGateFusionTriton
+from paddlefleet.triton_ops import SigmoidGateFusionTriton
 
 
 class TestSigmoidGateFusionTriton(unittest.TestCase):

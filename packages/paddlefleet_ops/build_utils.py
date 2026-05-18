@@ -35,7 +35,7 @@ PKG_ROOT = Path(__file__).parent.resolve()
 # workspace root (packages/paddlefleet_ops/ → packages/ → workspace root)
 ROOT_DIR = PKG_ROOT.parent.parent.resolve()
 
-OPS_DIR = PKG_ROOT / "src" / "paddlefleet_ops" / "ops"
+OPS_DIR = PKG_ROOT / "src" / "paddlefleet_ops"
 THIRD_PARTY_INSTALL_TEMP = PKG_ROOT / "src" / "_third_party_install_temp"
 
 
@@ -174,7 +174,7 @@ class EcosystemLibrary:
                 cmd = [
                     "patchelf",
                     "--add-rpath",
-                    "$ORIGIN/../../nvidia/nvshmem/lib",
+                    "$ORIGIN/../nvidia/nvshmem/lib",
                     dst,
                 ]
                 try:
@@ -304,9 +304,7 @@ def get_special_build_deps():
         cuda_major, cuda_minor = get_cuda_version()
         major = sys.version_info.major
         minor = sys.version_info.minor
-        deps = [
-            "paddlepaddle-gpu>=3.4.0.dev20260415",
-        ]
+        deps = []
         # for deep_ep build
         if platform.machine() == "aarch64":
             deps.append("nvidia-nvshmem-cu13>=3.3.9,<3.5")
@@ -416,6 +414,7 @@ def get_libs():
                 ],
                 extra_env={
                     "HYBRID_EP_MULTINODE": "1",
+                    "HYBRID_EP_SKIP_DEEP_EP": "1",
                     "PADDLE_CUDA_ARCH_LIST": _deep_ep_arch,
                 },
             ),

@@ -29,13 +29,13 @@ logger = logging.getLogger(__name__)
 
 import paddle
 from paddle import Tensor
-
-from paddlefleet.context_parallel_utils import flashmask_attention_cp
-from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
-from paddlefleet.ops.flash_mask_facade import (
+from paddlefleet_ops.flash_mask_facade import (
     flash_attention,
     flashmask_attention,
 )
+
+from paddlefleet.context_parallel_utils import flashmask_attention_cp
+from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.refined_recompute import (

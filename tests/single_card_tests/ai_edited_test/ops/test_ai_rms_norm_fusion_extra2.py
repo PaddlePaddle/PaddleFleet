@@ -28,7 +28,7 @@ import unittest
 import paddle
 
 try:
-    from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+    from paddlefleet.triton_ops.rms_norm_fusion import (
         RMSNormFusionTriton,  # noqa: F401
     )
 
@@ -44,7 +44,7 @@ class TestRMSNormFusionStructure(unittest.TestCase):
     def test_rms_norm_fusion_import(self):
         """Test RMSNormFusionTriton can be imported."""
         try:
-            from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+            from paddlefleet.triton_ops.rms_norm_fusion import (
                 RMSNormFusionTriton,
             )
 
@@ -55,7 +55,7 @@ class TestRMSNormFusionStructure(unittest.TestCase):
     def test_rms_norm_is_pylayer(self):
         """Test RMSNormFusionTriton is a PyLayer subclass."""
         try:
-            from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+            from paddlefleet.triton_ops.rms_norm_fusion import (
                 RMSNormFusionTriton,
             )
 
@@ -68,7 +68,7 @@ class TestRMSNormFusionStructure(unittest.TestCase):
     def test_rms_norm_has_forward(self):
         """Test RMSNormFusionTriton has forward static method."""
         try:
-            from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+            from paddlefleet.triton_ops.rms_norm_fusion import (
                 RMSNormFusionTriton,
             )
 
@@ -79,7 +79,7 @@ class TestRMSNormFusionStructure(unittest.TestCase):
     def test_rms_norm_has_backward(self):
         """Test RMSNormFusionTriton has backward static method."""
         try:
-            from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+            from paddlefleet.triton_ops.rms_norm_fusion import (
                 RMSNormFusionTriton,
             )
 
@@ -90,7 +90,7 @@ class TestRMSNormFusionStructure(unittest.TestCase):
     def test_fwd_kernel_exists(self):
         """Test rms_norm_fwd_kernel is defined."""
         try:
-            from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+            from paddlefleet.triton_ops.rms_norm_fusion import (
                 rms_norm_fwd_kernel,
             )
 
@@ -101,7 +101,7 @@ class TestRMSNormFusionStructure(unittest.TestCase):
     def test_bwd_dx_kernel_exists(self):
         """Test rms_norm_bwd_dx_kernel is defined."""
         try:
-            from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+            from paddlefleet.triton_ops.rms_norm_fusion import (
                 rms_norm_bwd_dx_kernel,
             )
 
@@ -112,7 +112,7 @@ class TestRMSNormFusionStructure(unittest.TestCase):
     def test_bwd_dw_partial_kernel_exists(self):
         """Test rms_norm_bwd_dw_partial_kernel is defined."""
         try:
-            from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+            from paddlefleet.triton_ops.rms_norm_fusion import (
                 rms_norm_bwd_dw_partial_kernel,
             )
 
@@ -123,7 +123,7 @@ class TestRMSNormFusionStructure(unittest.TestCase):
     def test_bwd_dw_final_kernel_exists(self):
         """Test rms_norm_bwd_dw_final_kernel is defined."""
         try:
-            from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+            from paddlefleet.triton_ops.rms_norm_fusion import (
                 rms_norm_bwd_dw_final_kernel,
             )
 

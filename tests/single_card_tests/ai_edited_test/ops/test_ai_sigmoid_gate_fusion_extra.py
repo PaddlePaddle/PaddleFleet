@@ -67,7 +67,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion  # noqa: F401
+    import paddlefleet.triton_ops.sigmoid_gate_fusion  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -203,7 +203,7 @@ class TestSigmoidGateFusionTritonSignature(unittest.TestCase):
         """Test forward method signature."""
         import inspect
 
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             SigmoidGateFusionTriton,
         )
 
@@ -217,7 +217,7 @@ class TestSigmoidGateFusionTritonSignature(unittest.TestCase):
         """Test backward method signature."""
         import inspect
 
-        from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+        from paddlefleet.triton_ops.sigmoid_gate_fusion import (
             SigmoidGateFusionTriton,
         )
 

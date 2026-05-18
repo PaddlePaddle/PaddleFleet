@@ -17,8 +17,8 @@ import copy
 import logging
 
 import paddle
+import paddlefleet_ops
 
-import paddlefleet
 from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
 from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant
@@ -527,7 +527,7 @@ class MlpNode:
             expert_out,
             expert_out_scale,
             expert_unzipped_idx,
-        ) = paddlefleet.ops.tokens_unzip_gather(
+        ) = paddlefleet_ops.tokens_unzip_gather(
             hs_2d_dispatched,
             hs_2d_dispatched_scale,
             zipped_expertwise_rowmap,
@@ -1401,7 +1401,7 @@ class MlpNode:
                         expert_unzipped_grad,
                         _,
                         unzipped_grad_idx,
-                    ) = paddlefleet.ops.tokens_unzip_gather(
+                    ) = paddlefleet_ops.tokens_unzip_gather(
                         hidden_states_out_grad,
                         None,
                         self.unzip_node.zipped_expertwise_rowmap,
@@ -1479,7 +1479,7 @@ class MlpNode:
                 output, hidden_states_out_grad.dtype
             )
             del output
-            dispatched_probs_grad = paddlefleet.ops.tokens_zip_prob(
+            dispatched_probs_grad = paddlefleet_ops.tokens_zip_prob(
                 probs_grad_list,
                 self.unzip_node.zipped_expertwise_rowmap,
                 self.dispatched_indices,
@@ -1685,7 +1685,7 @@ class MlpNode:
                     expert_unzipped_grad,
                     _,
                     unzipped_grad_idx,
-                ) = paddlefleet.ops.tokens_unzip_gather(
+                ) = paddlefleet_ops.tokens_unzip_gather(
                     hidden_states_out_grad,
                     None,
                     self.unzip_node.zipped_expertwise_rowmap,
@@ -1737,7 +1737,7 @@ class MlpNode:
             )
             del output
 
-            dispatched_probs_grad = paddlefleet.ops.tokens_zip_prob(
+            dispatched_probs_grad = paddlefleet_ops.tokens_zip_prob(
                 probs_grad_list,
                 self.unzip_node.zipped_expertwise_rowmap,
                 self.dispatched_indices,

@@ -20,9 +20,9 @@ import paddle
 import paddle.nn.functional as F
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
+from paddlefleet_ops import is_hybrid_ep_available
 
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
-from paddlefleet.ops import is_hybrid_ep_available
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet

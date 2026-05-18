@@ -20,9 +20,8 @@ import random
 from collections.abc import Generator
 
 import torch
-
-from paddlefleet.ops.deep_gemm.testing import get_arch_major
-from paddlefleet.ops.deep_gemm.utils import (
+from paddlefleet_ops.deep_gemm.testing import get_arch_major
+from paddlefleet_ops.deep_gemm.utils import (
     align,
     ceil_div,
     get_mk_alignment_for_contiguous_layout,

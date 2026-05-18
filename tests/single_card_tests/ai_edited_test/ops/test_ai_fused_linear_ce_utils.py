@@ -54,7 +54,7 @@ def _setup_triton_mock():
 # Must set up triton mock before importing the module under test
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.utils  # noqa: F401
+    import paddlefleet.triton_ops.fused_linear_cross_entropy.utils  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -67,7 +67,7 @@ class TestElementMulKernel(unittest.TestCase):
 
     def test_kernel_is_callable(self):
         """Test that element_mul_kernel is callable (mocked triton.jit)."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.utils import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.utils import (
             element_mul_kernel,
         )
 
@@ -75,7 +75,7 @@ class TestElementMulKernel(unittest.TestCase):
 
     def test_kernel_has_code_attribute(self):
         """Test that the kernel has __code__ (is a real function)."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.utils import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.utils import (
             element_mul_kernel,
         )
 

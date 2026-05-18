@@ -30,8 +30,8 @@ from paddle.distributed.fleet.meta_parallel import (
     build_spec_layer,
 )
 from paddle.distributed.fleet.utils import recompute
+from paddlefleet_ops import is_deep_ep_available
 
-from paddlefleet.ops import is_deep_ep_available
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     need_full_recompute,
@@ -46,7 +46,7 @@ from paddlefleet.utils import log_single_rank
 
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():
-        from paddlefleet.ops import deep_ep
+        from paddlefleet_ops import deep_ep
     else:
         from paddle.distributed.communication import deep_ep
 

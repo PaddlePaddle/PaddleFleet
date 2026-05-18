@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from . import (
-    ops as ops,
     parallel_state as parallel_state,
     training as training,
     version as version,
@@ -39,7 +38,6 @@ from paddle.distributed.fleet.meta_parallel import build_spec_layer as build_lay
 mpu = parallel_state
 
 __all__ = [
-    "ops",
     "training",
     "parallel_state",
     "Timers",

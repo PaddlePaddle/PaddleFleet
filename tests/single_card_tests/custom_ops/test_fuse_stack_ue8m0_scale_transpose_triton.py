@@ -17,9 +17,9 @@ import unittest
 import numpy as np
 import paddle
 from paddle.base import core
+from paddlefleet_ops import fuse_stack_fp8_quant, fuse_stack_transpose_fp8_quant
 
-from paddlefleet.ops import fuse_stack_fp8_quant, fuse_stack_transpose_fp8_quant
-from paddlefleet.ops.triton_ops import fuse_stack_ue8m0_scale_transpose
+from paddlefleet.triton_ops import fuse_stack_ue8m0_scale_transpose
 
 
 class TestFuseStackUe8m0ScaleTransposeTriton(unittest.TestCase):

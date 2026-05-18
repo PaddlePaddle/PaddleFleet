@@ -38,7 +38,7 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
         if not core.is_compiled_with_cuda():
             self.skipTest("CUDA required")
         try:
-            from paddlefleet.ops import (
+            from paddlefleet_ops import (
                 fuse_stack_fp8_quant,
                 fuse_stack_transpose_fp8_quant,
             )
@@ -46,7 +46,7 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
             self.assertTrue(callable(fuse_stack_fp8_quant))
             self.assertTrue(callable(fuse_stack_transpose_fp8_quant))
         except (ImportError, RuntimeError):
-            self.skipTest("paddlefleet.ops not available")
+            self.skipTest("paddlefleet_ops not available")
         model_parallel_cuda_manual_seed(1234, tp_rank=0, ep_rank=0, etp_rank=0)
 
     def _make_layer(self):

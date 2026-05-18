@@ -35,30 +35,30 @@ class TestOpsImport(unittest.TestCase):
 
     def setUp(self):
         try:
-            import paddlefleet.ops
+            import paddlefleet_ops
 
-            self.ops = paddlefleet.ops
+            self.ops = paddlefleet_ops
         except Exception as e:
-            self.fail(f"Failed to import paddlefleet.ops: {e}")
+            self.fail(f"Failed to import paddlefleet_ops: {e}")
 
     def test_import_ops(self):
-        self.assertIsNotNone(self.ops, "Failed to import paddlefleet.ops")
+        self.assertIsNotNone(self.ops, "Failed to import paddlefleet_ops")
 
     def test_ops_submodule_availability(self):
         if self.ops is None:
             self.skipTest(
-                "paddlefleet.ops not available. Skipping op availability tests."
+                "paddlefleet_ops not available. Skipping op availability tests."
             )
         else:
             self.assertIsNotNone(
                 self.ops,
-                "paddlefleet.ops is None, expected it to be loaded.",
+                "paddlefleet_ops is None, expected it to be loaded.",
             )
 
     def test_tokens_ops_availability(self):
         if self.ops is None:
             self.skipTest(
-                "paddlefleet.ops not available. Skipping tokens_ ops availability tests."
+                "paddlefleet_ops not available. Skipping tokens_ ops availability tests."
             )
             return
 
@@ -69,41 +69,41 @@ class TestOpsImport(unittest.TestCase):
 
         if missing_ops:
             self.fail(
-                f"The following operators are missing from paddlefleet.ops "
+                f"The following operators are missing from paddlefleet_ops "
                 f"(C++ extension likely not compiled correctly or is outdated): {', '.join(missing_ops)}"
             )
 
 
 class TestDeepGEMMImport(unittest.TestCase):
     def test_deep_gemm_import(self):
-        import paddlefleet
-        from paddlefleet.ops.deep_gemm import (  # noqa: F401
+        import paddlefleet_ops
+        from paddlefleet_ops.deep_gemm import (  # noqa: F401
             cublaslt_gemm_tn,
             set_num_sms,
         )
 
-        print(paddlefleet.ops.deep_gemm)
+        print(paddlefleet_ops.deep_gemm)
 
     def test_error_import(self):
         with self.assertRaises(ImportError):
-            from paddlefleet.ops.deep_gemm import xxxx  # noqa: F401
+            from paddlefleet_ops.deep_gemm import xxxx  # noqa: F401
 
 
 class TestDeepEPImport(unittest.TestCase):
     def test_deep_gemm_import(self):
-        import paddlefleet
-        from paddlefleet.ops.deep_ep import (  # noqa: F401
+        import paddlefleet_ops
+        from paddlefleet_ops.deep_ep import (  # noqa: F401
             Buffer,
             Config,
             EventOverlap,
             topk_idx_t,
         )
 
-        print(paddlefleet.ops.deep_ep)
+        print(paddlefleet_ops.deep_ep)
 
     def test_error_import(self):
         with self.assertRaises(ImportError):
-            from paddlefleet.ops.deep_ep import xxxx  # noqa: F401
+            from paddlefleet_ops.deep_ep import xxxx  # noqa: F401
 
 
 if __name__ == "__main__":

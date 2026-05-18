@@ -55,7 +55,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.triton_compat  # noqa: F401
+    import paddlefleet.triton_ops.triton_compat  # noqa: F401
 
     _TRITON_COMPAT_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -70,14 +70,14 @@ class TestOpsTritonCompatModule(unittest.TestCase):
 
     def test_module_imports(self):
         """Test that the module can be imported."""
-        import paddlefleet_ops.ops.triton_ops.triton_compat as tc
+        import paddlefleet.triton_ops.triton_compat as tc
 
         self.assertTrue(hasattr(tc, "_is_package_installed"))
         self.assertTrue(hasattr(tc, "enable_compat_on_triton_kernel"))
 
     def test_is_package_installed_cached(self):
         """Test _is_package_installed is cached."""
-        from paddlefleet_ops.ops.triton_ops.triton_compat import (
+        from paddlefleet.triton_ops.triton_compat import (
             _is_package_installed,
         )
 
@@ -87,7 +87,7 @@ class TestOpsTritonCompatModule(unittest.TestCase):
 
     def test_installed_package(self):
         """Test _is_package_installed returns True for paddle."""
-        from paddlefleet_ops.ops.triton_ops.triton_compat import (
+        from paddlefleet.triton_ops.triton_compat import (
             _is_package_installed,
         )
 
@@ -95,7 +95,7 @@ class TestOpsTritonCompatModule(unittest.TestCase):
 
     def test_not_installed_package(self):
         """Test _is_package_installed returns False for fake package."""
-        from paddlefleet_ops.ops.triton_ops.triton_compat import (
+        from paddlefleet.triton_ops.triton_compat import (
             _is_package_installed,
         )
 
@@ -110,7 +110,7 @@ class TestOpsEnableCompatOnTritonKernel(unittest.TestCase):
 
     def test_returns_kernel_when_torch_not_installed(self):
         """Test kernel returned as-is when torch not installed."""
-        from paddlefleet_ops.ops.triton_ops.triton_compat import (
+        from paddlefleet.triton_ops.triton_compat import (
             enable_compat_on_triton_kernel,
         )
 
@@ -118,7 +118,7 @@ class TestOpsEnableCompatOnTritonKernel(unittest.TestCase):
             pass
 
         with patch(
-            "paddlefleet_ops.ops.triton_ops.triton_compat._is_package_installed",
+            "paddlefleet.triton_ops.triton_compat._is_package_installed",
             return_value=False,
         ):
             result = enable_compat_on_triton_kernel(dummy_kernel)
@@ -126,7 +126,7 @@ class TestOpsEnableCompatOnTritonKernel(unittest.TestCase):
 
     def test_returns_kernel_when_no_cuda(self):
         """Test kernel returned as-is when no CUDA."""
-        from paddlefleet_ops.ops.triton_ops.triton_compat import (
+        from paddlefleet.triton_ops.triton_compat import (
             enable_compat_on_triton_kernel,
         )
 
@@ -135,7 +135,7 @@ class TestOpsEnableCompatOnTritonKernel(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet_ops.ops.triton_ops.triton_compat._is_package_installed",
+                "paddlefleet.triton_ops.triton_compat._is_package_installed",
                 return_value=True,
             ),
             patch("paddle.is_compiled_with_cuda", return_value=False),
@@ -152,7 +152,7 @@ class TestOpsSwapDriverGuard(unittest.TestCase):
 
     def test_wraps_function(self):
         """Test _swap_driver_guard wraps a function."""
-        from paddlefleet_ops.ops.triton_ops.triton_compat import (
+        from paddlefleet.triton_ops.triton_compat import (
             _swap_driver_guard,
         )
 

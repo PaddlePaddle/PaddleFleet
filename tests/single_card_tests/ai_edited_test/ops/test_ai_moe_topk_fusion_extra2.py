@@ -28,7 +28,7 @@ import unittest
 import paddle
 
 try:
-    from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+    from paddlefleet.triton_ops.moe_topk_fusion import (
         MoETopkFusion,  # noqa: F401
     )
 
@@ -44,7 +44,7 @@ class TestMoETopkFusionStructure(unittest.TestCase):
     def test_moe_topk_fusion_import(self):
         """Test MoETopkFusion class can be imported."""
         try:
-            from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+            from paddlefleet.triton_ops.moe_topk_fusion import (
                 MoETopkFusion,
             )
 
@@ -55,7 +55,7 @@ class TestMoETopkFusionStructure(unittest.TestCase):
     def test_moe_topk_fusion_is_pylayer(self):
         """Test MoETopkFusion is a PyLayer subclass."""
         try:
-            from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+            from paddlefleet.triton_ops.moe_topk_fusion import (
                 MoETopkFusion,
             )
 
@@ -66,7 +66,7 @@ class TestMoETopkFusionStructure(unittest.TestCase):
     def test_moe_topk_fusion_has_forward(self):
         """Test MoETopkFusion has forward static method."""
         try:
-            from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+            from paddlefleet.triton_ops.moe_topk_fusion import (
                 MoETopkFusion,
             )
 
@@ -78,7 +78,7 @@ class TestMoETopkFusionStructure(unittest.TestCase):
     def test_moe_topk_fusion_has_backward(self):
         """Test MoETopkFusion has backward static method."""
         try:
-            from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+            from paddlefleet.triton_ops.moe_topk_fusion import (
                 MoETopkFusion,
             )
 
@@ -90,7 +90,7 @@ class TestMoETopkFusionStructure(unittest.TestCase):
     def test_routing_map_fusion_forward_exists(self):
         """Test routing_map_fusion_forward function exists."""
         try:
-            from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+            from paddlefleet.triton_ops.moe_topk_fusion import (
                 routing_map_fusion_forward,
             )
 
@@ -103,7 +103,7 @@ class TestMoETopkFusionStructure(unittest.TestCase):
         try:
             import inspect
 
-            from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+            from paddlefleet.triton_ops.moe_topk_fusion import (
                 routing_map_fusion_forward,
             )
 
@@ -117,7 +117,7 @@ class TestMoETopkFusionStructure(unittest.TestCase):
     def test_fwd_kernel_exists(self):
         """Test _fwd_kernel is defined in module."""
         try:
-            from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+            from paddlefleet.triton_ops.moe_topk_fusion import (
                 _fwd_kernel,
             )
 
@@ -128,7 +128,7 @@ class TestMoETopkFusionStructure(unittest.TestCase):
     def test_bwd_kernel_exists(self):
         """Test _bwd_kernel is defined in module."""
         try:
-            from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+            from paddlefleet.triton_ops.moe_topk_fusion import (
                 _bwd_kernel,
             )
 

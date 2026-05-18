@@ -74,7 +74,7 @@ class TestFusedSwigluScaleForward(unittest.TestCase):
         mock_result = paddle.randn([4, 4], dtype="float32")
         with mock.patch("paddle.is_compiled_with_cuda", return_value=True):  # noqa: SIM117
             with mock.patch(
-                "paddlefleet.ops.fused_swiglu_scale",
+                "paddlefleet_ops.fused_swiglu_scale",
                 return_value=mock_result,
             ) as mock_op:
                 result = fused_swiglu_scale_forward(x, scale)
@@ -169,7 +169,7 @@ class TestFusedSwigluScaleBackward(unittest.TestCase):
 
         with mock.patch("paddle.is_compiled_with_cuda", return_value=True):  # noqa: SIM117
             with mock.patch(
-                "paddlefleet.ops.fused_swiglu_scale_bwd",
+                "paddlefleet_ops.fused_swiglu_scale_bwd",
                 return_value=(mock_dx, mock_ds),
             ) as mock_op:
                 d_x, d_scale = fused_swiglu_scale_backward(x, scale, out_grad)

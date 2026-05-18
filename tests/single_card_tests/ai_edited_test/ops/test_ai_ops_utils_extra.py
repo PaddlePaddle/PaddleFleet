@@ -49,7 +49,7 @@ _utils_path = os.path.join(
 def _import_utils():
     """Import triton_ops.utils directly by loading the file."""
     spec = importlib.util.spec_from_file_location(
-        "paddlefleet_ops.ops.triton_ops.utils", _utils_path
+        "paddlefleet.triton_ops.utils", _utils_path
     )
     mod = importlib.util.module_from_spec(spec)
     # Register minimal parent packages so relative imports don't fail
@@ -58,10 +58,10 @@ def _import_utils():
     if "paddlefleet_ops.ops" not in sys.modules:
         ops_mod = types.ModuleType("paddlefleet_ops.ops")
         sys.modules["paddlefleet_ops.ops"] = ops_mod
-    if "paddlefleet_ops.ops.triton_ops" not in sys.modules:
-        triton_mod = types.ModuleType("paddlefleet_ops.ops.triton_ops")
-        sys.modules["paddlefleet_ops.ops.triton_ops"] = triton_mod
-    sys.modules["paddlefleet_ops.ops.triton_ops.utils"] = mod
+    if "paddlefleet.triton_ops" not in sys.modules:
+        triton_mod = types.ModuleType("paddlefleet.triton_ops")
+        sys.modules["paddlefleet.triton_ops"] = triton_mod
+    sys.modules["paddlefleet.triton_ops.utils"] = mod
     spec.loader.exec_module(mod)
     return mod
 

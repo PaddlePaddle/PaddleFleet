@@ -62,7 +62,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy  # noqa: F401
+    import paddlefleet.triton_ops.fused_linear_cross_entropy.cross_entropy  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -75,7 +75,7 @@ class TestLigerCrossEntropyKernelDefinition(unittest.TestCase):
 
     def test_kernel_is_callable(self):
         """Test that liger_cross_entropy_kernel is callable (mocked triton.jit)."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.cross_entropy import (
             liger_cross_entropy_kernel,
         )
 
@@ -83,7 +83,7 @@ class TestLigerCrossEntropyKernelDefinition(unittest.TestCase):
 
     def test_kernel_has_expected_params(self):
         """Test that the kernel function has expected parameter names."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.cross_entropy import (
             liger_cross_entropy_kernel,
         )
 
@@ -92,7 +92,7 @@ class TestLigerCrossEntropyKernelDefinition(unittest.TestCase):
 
     def test_module_imports(self):
         """Test that the module can be imported."""
-        import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy as ce
+        import paddlefleet.triton_ops.fused_linear_cross_entropy.cross_entropy as ce
 
         self.assertTrue(hasattr(ce, "liger_cross_entropy_kernel"))
 

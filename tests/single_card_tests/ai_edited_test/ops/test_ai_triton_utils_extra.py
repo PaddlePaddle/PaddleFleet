@@ -27,7 +27,7 @@ import unittest
 from unittest.mock import MagicMock
 
 try:
-    from paddlefleet_ops.ops.triton_ops.utils import (
+    from paddlefleet.triton_ops.utils import (
         is_torch_compat_available,  # noqa: F401
     )
 
@@ -43,7 +43,7 @@ class TestTritonUtilsFunctions(unittest.TestCase):
     def test_is_torch_compat_available_returns_bool(self):
         """Test is_torch_compat_available returns a bool."""
         try:
-            from paddlefleet_ops.ops.triton_ops.utils import (
+            from paddlefleet.triton_ops.utils import (
                 is_torch_compat_available,
             )
 
@@ -55,7 +55,7 @@ class TestTritonUtilsFunctions(unittest.TestCase):
     def test_is_torch_compat_available_type(self):
         """Test is_torch_compat_available returns boolean."""
         try:
-            from paddlefleet_ops.ops.triton_ops.utils import (
+            from paddlefleet.triton_ops.utils import (
                 is_torch_compat_available,
             )
 
@@ -67,7 +67,7 @@ class TestTritonUtilsFunctions(unittest.TestCase):
     def test_dispatch_to_decorator(self):
         """Test dispatch_to creates a decorator."""
         try:
-            from paddlefleet_ops.ops.triton_ops.utils import dispatch_to
+            from paddlefleet.triton_ops.utils import dispatch_to
 
             mock_dispatch = MagicMock(return_value="dispatched")
             cond = lambda *a, **kw: True
@@ -85,7 +85,7 @@ class TestTritonUtilsFunctions(unittest.TestCase):
     def test_dispatch_to_fallback(self):
         """Test dispatch_to falls back to original function when cond is False."""
         try:
-            from paddlefleet_ops.ops.triton_ops.utils import dispatch_to
+            from paddlefleet.triton_ops.utils import dispatch_to
 
             mock_dispatch = MagicMock(return_value="dispatched")
             cond = lambda *a, **kw: False
@@ -102,7 +102,7 @@ class TestTritonUtilsFunctions(unittest.TestCase):
     def test_dispatch_to_preserves_original(self):
         """Test dispatch_to preserves original function in __original_fn__."""
         try:
-            from paddlefleet_ops.ops.triton_ops.utils import dispatch_to
+            from paddlefleet.triton_ops.utils import dispatch_to
 
             mock_dispatch = MagicMock(return_value="dispatched")
 
@@ -117,7 +117,7 @@ class TestTritonUtilsFunctions(unittest.TestCase):
     def test_is_package_installed(self):
         """Test _is_package_installed checks package availability."""
         try:
-            from paddlefleet_ops.ops.triton_ops.utils import (
+            from paddlefleet.triton_ops.utils import (
                 _is_package_installed,
             )
 
@@ -132,7 +132,7 @@ class TestTritonUtilsFunctions(unittest.TestCase):
     def test_swap_driver_guard(self):
         """Test swap_driver_guard wraps a function."""
         try:
-            from paddlefleet_ops.ops.triton_ops.utils import swap_driver_guard
+            from paddlefleet.triton_ops.utils import swap_driver_guard
 
             def my_func():
                 return 42
@@ -145,7 +145,7 @@ class TestTritonUtilsFunctions(unittest.TestCase):
     def test_enable_compat_on_triton_kernel(self):
         """Test enable_compat_on_triton_kernel wraps a kernel."""
         try:
-            from paddlefleet_ops.ops.triton_ops.utils import (
+            from paddlefleet.triton_ops.utils import (
                 enable_compat_on_triton_kernel,
             )
 

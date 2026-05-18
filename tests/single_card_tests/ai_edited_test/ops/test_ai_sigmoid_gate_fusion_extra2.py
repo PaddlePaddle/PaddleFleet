@@ -28,7 +28,7 @@ import unittest
 import paddle
 
 try:
-    from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+    from paddlefleet.triton_ops.sigmoid_gate_fusion import (
         SigmoidGateFusionTriton,  # noqa: F401
     )
 
@@ -44,7 +44,7 @@ class TestSigmoidGateFusionStructure(unittest.TestCase):
     def test_sigmoid_gate_fusion_import(self):
         """Test SigmoidGateFusionTriton can be imported."""
         try:
-            from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+            from paddlefleet.triton_ops.sigmoid_gate_fusion import (
                 SigmoidGateFusionTriton,
             )
 
@@ -55,7 +55,7 @@ class TestSigmoidGateFusionStructure(unittest.TestCase):
     def test_sigmoid_gate_is_pylayer(self):
         """Test SigmoidGateFusionTriton is a PyLayer subclass."""
         try:
-            from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+            from paddlefleet.triton_ops.sigmoid_gate_fusion import (
                 SigmoidGateFusionTriton,
             )
 
@@ -68,7 +68,7 @@ class TestSigmoidGateFusionStructure(unittest.TestCase):
     def test_fwd_kernel_exists(self):
         """Test fused_sigmoid_gate_fwd_kernel exists."""
         try:
-            from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+            from paddlefleet.triton_ops.sigmoid_gate_fusion import (
                 fused_sigmoid_gate_fwd_kernel,
             )
 
@@ -79,7 +79,7 @@ class TestSigmoidGateFusionStructure(unittest.TestCase):
     def test_bwd_kernel_exists(self):
         """Test fused_sigmoid_gate_bwd_kernel exists."""
         try:
-            from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+            from paddlefleet.triton_ops.sigmoid_gate_fusion import (
                 fused_sigmoid_gate_bwd_kernel,
             )
 
@@ -90,7 +90,7 @@ class TestSigmoidGateFusionStructure(unittest.TestCase):
     def test_sigmoid_precise_exists(self):
         """Test _sigmoid_precise helper exists."""
         try:
-            from paddlefleet_ops.ops.triton_ops.sigmoid_gate_fusion import (
+            from paddlefleet.triton_ops.sigmoid_gate_fusion import (
                 _sigmoid_precise,
             )
 

@@ -66,83 +66,34 @@ def _find_base_branch(cwd: Path) -> str:
     """Determine the base branch (develop or release/*).
 
     If the current branch IS develop or release/*, use it directly.
-    Otherwise, find the closest base branch by comparing merge-base timestamps.
+    Otherwise, default to 'develop'.
     Returns the branch name without remote prefix (e.g. "develop" or "release/0.2").
     """
     current = _get_current_branch(cwd)
     if current == "develop" or current.startswith("release/"):
         return current
 
-    raw = (
-        subprocess.check_output(
-            [
-                "git",
-                "branch",
-                "-r",
-                "--list",
-                "upstream/develop",
-                "upstream/release/*",
-                "origin/develop",
-                "origin/release/*",
-            ],
-            cwd=cwd,
-        )
-        .decode()
-        .strip()
-    )
-    candidates = [line.strip() for line in raw.splitlines() if line.strip()]
-
-    best_branch = candidates[0]
-    best_timestamp = 0
-    for branch in candidates:
-        merge_base = (
-            subprocess.check_output(
-                ["git", "merge-base", "HEAD", branch],
-                cwd=cwd,
-            )
-            .strip()
-            .decode()
-        )
-        ts = int(
-            subprocess.check_output(
-                ["git", "log", "-1", "--format=%ct", merge_base],
-                cwd=cwd,
-            )
-            .strip()
-            .decode()
-        )
-        if ts > best_timestamp:
-            best_timestamp = ts
-            best_branch = branch
-
-    for prefix in ("upstream/", "origin/"):
-        if best_branch.startswith(prefix):
-            return best_branch[len(prefix) :]
-    return best_branch
+    # Default to develop for non-base branches
+    return "develop"
 
 
 def _get_last_packages_commit(cwd: Path, base_branch: str) -> str:
-    """Get the last commit on base_branch that modified the packages/ directory.
+    """Get the last commit that modified the packages/ directory based on current state.
 
-    Tries upstream/<base_branch>, then origin/<base_branch>, then the local branch.
+    Always searches from the current branch or HEAD (detached), never uses other branches.
+    base_branch is only used to determine version suffix (dev/post), not for search.
     """
-    for ref in (
-        f"upstream/{base_branch}",
-        f"origin/{base_branch}",
-        base_branch,
-    ):
-        result = subprocess.run(
-            ["git", "log", ref, "-1", "--format=%H", "--", "packages/"],
-            cwd=cwd,
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            commit = result.stdout.strip().decode("utf-8")
-            if commit:
-                return commit
-    raise RuntimeError(
-        f"Cannot find any commit that modified packages/ on branch {base_branch}"
+    current = _get_current_branch(cwd)
+
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%H", "--", "packages/"],
+        cwd=cwd,
+        capture_output=True,
     )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().decode()
+
+    raise RuntimeError("Cannot find any commit that modified packages/")
 
 
 def _generate_version_info():
