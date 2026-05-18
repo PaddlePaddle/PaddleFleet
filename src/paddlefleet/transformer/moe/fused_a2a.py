@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
@@ -132,11 +130,7 @@ def get_buffer(group: Group, hidden_bytes: int):
         or _buffer.num_nvl_bytes < num_nvl_bytes
         or _buffer.num_rdma_bytes < num_rdma_bytes
     ):
-        kwargs = {}
-        num_qps_per_rank = os.getenv("DEEPEP_NUM_QPS_PER_RANK")
-        if num_qps_per_rank is not None:
-            kwargs["num_qps_per_rank"] = int(num_qps_per_rank)
-        _buffer = deep_ep.Buffer(group, num_nvl_bytes, num_rdma_bytes, **kwargs)
+        _buffer = deep_ep.Buffer(group, num_nvl_bytes, num_rdma_bytes)
     return _buffer
 
 
