@@ -67,13 +67,9 @@ def get_hidden_bytes(x: paddle.Tensor) -> int:
     return x.shape[1] * max(x.element_size(), 2)
 
 
-def configure_deepep_buffer(
-    num_sms=None,
-    dispatch_config=None,
-    combine_config=None,
-):
+def configure_buffer(num_sms=None, dispatch_config=None, combine_config=None):
     """
-    Configure the runtime parameters for DeepEP kernels.
+    Configure the runtime parameters for deep_ep kernels.
     Must be called before calling get_buffer() to take effect.
 
     Args:

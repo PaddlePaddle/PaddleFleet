@@ -40,7 +40,7 @@ from paddlefleet import utils
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
-from .fused_a2a import configure_deepep_buffer
+from .fused_a2a import configure_buffer
 from .fusion_layer_utils import FusionMoePyLayer, HybridEPMoePyLayer
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
 from .moe_router import TopKRouter
@@ -354,7 +354,7 @@ class MoELayer(nn.Layer):
                     and getattr(config, "deepep_buffer_configs", None)
                     is not None
                 ):
-                    configure_deepep_buffer(**config.deepep_buffer_configs)
+                    configure_buffer(**config.deepep_buffer_configs)
             elif self.moe_token_dispatcher_type == "alltoall":
                 local_expert_indices = list(
                     range(
