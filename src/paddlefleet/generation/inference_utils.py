@@ -38,5 +38,4 @@ def init_inference_fleet(ep_degree: int = 1) -> None:
         # Single GPU: still set device
         # Handle multi-GPU CUDA_VISIBLE_DEVICES like "0,1,2,3" by taking first device
         gpu_id = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
-        place = paddle.CUDAPlace(gpu_id)
-        paddle.set_device(place)
+        paddle.set_device(f"cuda:{gpu_id}")
