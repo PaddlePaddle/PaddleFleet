@@ -809,7 +809,7 @@ class MLASelfAttention(MultiLatentAttention):
                 if (
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
-                ):
+                ) and self.config.rope_type == "rope":
                     # During training, the sequence length is always
                     # the full rotary_pos_emb length, except for sequence packing + CP.
                     # We need the full rotary_pos_emb to cover the full sequence,
