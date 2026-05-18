@@ -142,13 +142,13 @@ def reset_hybrid_ep_buffer():
 
 
 def _need_new_hybrid_ep_buffer(
-    group,
-    hidden_dim,
-    max_num_of_tokens_per_rank,
-    num_local_experts,
-    num_sms_dispatch_api,
-    num_sms_combine_api,
-    num_sms_preprocessing_api,
+    group: Group,
+    hidden_dim: int,
+    max_num_of_tokens_per_rank: int,
+    num_local_experts: int,
+    num_sms_dispatch_api: int | None,
+    num_sms_combine_api: int | None,
+    num_sms_preprocessing_api: int | None,
 ):
     if _hybrid_ep_buffer is None:
         return True
@@ -182,10 +182,10 @@ def get_hybrid_ep_buffer(
     max_num_of_tokens_per_rank: int,
     num_local_experts: int,
     load_cached_kernels: bool = True,
-    num_sms=None,
-    num_sms_dispatch=None,
-    num_sms_combine=None,
-    num_sms_preprocessing=None,
+    num_sms: int | None = None,
+    num_sms_dispatch: int | None = None,
+    num_sms_combine: int | None = None,
+    num_sms_preprocessing: int | None = None,
 ):
     """Get or create the shared HybridEP communication buffer."""
     global _hybrid_ep_buffer
