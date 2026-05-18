@@ -458,6 +458,37 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             [4, 8],
         )
 
+    def test_hybrid_ep_buffer_rebuild_check_respects_explicit_sms(self):
+        group = _HybridEPGroup(nranks=2)
+        fused_a2a._hybrid_ep_buffer = _ConstructedHybridEPBuffer(
+            group=group,
+            hidden_dim=8,
+            max_num_of_tokens_per_rank=4,
+            num_local_experts=2,
+            use_fp8=False,
+            num_sms_dispatch_api=8,
+            num_sms_combine_api=16,
+            num_sms_preprocessing_api=32,
+        )
+
+        self.assertFalse(
+            fused_a2a._need_new_hybrid_ep_buffer(group, 8, 4, 2, 8, 16, 32)
+        )
+        self.assertTrue(
+            fused_a2a._need_new_hybrid_ep_buffer(group, 8, 4, 2, 9, 16, 32)
+        )
+        self.assertTrue(
+            fused_a2a._need_new_hybrid_ep_buffer(group, 8, 4, 2, 8, 17, 32)
+        )
+        self.assertTrue(
+            fused_a2a._need_new_hybrid_ep_buffer(group, 8, 4, 2, 8, 16, 33)
+        )
+        self.assertFalse(
+            fused_a2a._need_new_hybrid_ep_buffer(
+                group, 8, 4, 2, None, None, None
+            )
+        )
+
     def test_dispatch_with_permute_uses_hybrid_ep_runtime_contract(self):
         routing_map = paddle.to_tensor(
             [[True, False], [False, True]], dtype="bool"
