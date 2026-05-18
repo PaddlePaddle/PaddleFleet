@@ -89,7 +89,9 @@ def _new_hybrid_manager(**overrides):
         "router_topk": overrides.pop("router_topk", 2),
         "num_experts": overrides.pop("num_experts", 4),
         "num_local_experts": overrides.pop("num_local_experts", 2),
-        "hybrid_ep_config": overrides.pop("hybrid_ep_config", None),
+        "hybridep_buffer_configs": overrides.pop(
+            "hybridep_buffer_configs", None
+        ),
     }
     manager = _HybridEPManager(**init_kwargs)
     for key, value in overrides.items():

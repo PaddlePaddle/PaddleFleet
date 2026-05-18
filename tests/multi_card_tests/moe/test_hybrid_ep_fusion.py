@@ -98,7 +98,7 @@ class TestHybridEPFusion(unittest.TestCase):
             norm_topk_prob=False,
             bias_activation_fusion=True,
         )
-        config.hybrid_ep_config = {
+        config.hybridep_buffer_configs = {
             "num_sms_dispatch_api": 8,
             "num_sms_combine_api": 8,
             "num_sms_preprocessing_api": 8,
@@ -121,8 +121,8 @@ class TestHybridEPFusion(unittest.TestCase):
         self.assertTrue(moe_layer.use_hybrid_ep_backend)
         self.assertFalse(moe_layer.moe_shared_expert_overlap)
         self.assertEqual(
-            moe_layer.token_dispatcher._comm_manager.hybrid_ep_config,
-            config.hybrid_ep_config,
+            moe_layer.token_dispatcher._comm_manager.hybridep_buffer_configs,
+            config.hybridep_buffer_configs,
         )
 
         input_data = paddle.randn(

@@ -347,7 +347,9 @@ class MoELayer(nn.Layer):
                     self.moe_group,
                     self.moe_ep_barrier,
                     dispatcher_type=self.moe_token_dispatcher_type,
-                    hybrid_ep_config=getattr(config, "hybrid_ep_config", None),
+                    hybridep_buffer_configs=getattr(
+                        config, "hybridep_buffer_configs", None
+                    ),
                 )
                 if (
                     self.moe_token_dispatcher_type == "deepep"
