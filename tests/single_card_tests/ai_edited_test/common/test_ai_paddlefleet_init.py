@@ -41,7 +41,6 @@ class TestPaddleFleetInit(unittest.TestCase):
         from paddlefleet import __all__
 
         expected_exports = [
-            "ops",
             "training",
             "parallel_state",
             "Timers",

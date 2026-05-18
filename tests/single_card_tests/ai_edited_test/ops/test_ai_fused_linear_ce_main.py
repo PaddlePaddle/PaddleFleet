@@ -63,7 +63,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy  # noqa: F401
+    import paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -76,7 +76,7 @@ class TestFusedLinearCrossEntropyForward(unittest.TestCase):
 
     def test_function_is_callable(self):
         """Test that fused_linear_cross_entropy_forward is callable."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             fused_linear_cross_entropy_forward,
         )
 
@@ -86,7 +86,7 @@ class TestFusedLinearCrossEntropyForward(unittest.TestCase):
         """Test function has expected parameters."""
         import inspect
 
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             fused_linear_cross_entropy_forward,
         )
 
@@ -107,7 +107,7 @@ class TestFusedLinearCrossEntropyBackward(unittest.TestCase):
 
     def test_function_is_callable(self):
         """Test that fused_linear_cross_entropy_backward is callable."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             fused_linear_cross_entropy_backward,
         )
 
@@ -116,7 +116,8 @@ class TestFusedLinearCrossEntropyBackward(unittest.TestCase):
     def test_backward_identity_grad_output(self):
         """Test backward returns unchanged grads when grad_output is 1.0."""
         import paddle
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             fused_linear_cross_entropy_backward,
         )
 
@@ -139,7 +140,7 @@ class TestLigerFusedLinearCrossEntropyFunction(unittest.TestCase):
 
     def test_class_exists(self):
         """Test that LigerFusedLinearCrossEntropyFunction can be imported."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             LigerFusedLinearCrossEntropyFunction,
         )
 
@@ -147,7 +148,7 @@ class TestLigerFusedLinearCrossEntropyFunction(unittest.TestCase):
 
     def test_has_forward(self):
         """Test that the class has forward method."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             LigerFusedLinearCrossEntropyFunction,
         )
 
@@ -157,7 +158,7 @@ class TestLigerFusedLinearCrossEntropyFunction(unittest.TestCase):
 
     def test_has_backward(self):
         """Test that the class has backward method."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             LigerFusedLinearCrossEntropyFunction,
         )
 
@@ -265,7 +266,7 @@ class TestMaxFusedSize(unittest.TestCase):
 
     def test_max_fused_size_value(self):
         """Test MAX_FUSED_SIZE is defined correctly."""
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             MAX_FUSED_SIZE,
         )
 

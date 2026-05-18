@@ -35,7 +35,7 @@ PKG_ROOT = Path(__file__).parent.resolve()
 # workspace root (packages/paddlefleet_ops/ → packages/ → workspace root)
 ROOT_DIR = PKG_ROOT.parent.parent.resolve()
 
-OPS_DIR = PKG_ROOT / "src" / "paddlefleet_ops" / "ops"
+OPS_DIR = PKG_ROOT / "src" / "paddlefleet_ops"
 THIRD_PARTY_INSTALL_TEMP = PKG_ROOT / "src" / "_third_party_install_temp"
 
 
@@ -174,7 +174,7 @@ class EcosystemLibrary:
                 cmd = [
                     "patchelf",
                     "--add-rpath",
-                    "$ORIGIN/../../nvidia/nvshmem/lib",
+                    "$ORIGIN/../nvidia/nvshmem/lib",
                     dst,
                 ]
                 try:

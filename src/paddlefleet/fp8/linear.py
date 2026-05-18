@@ -15,8 +15,8 @@
 
 import paddle
 from paddle.nn.parameter import Parameter
+from paddlefleet_ops import deep_gemm
 
-from paddlefleet.ops import deep_gemm
 from paddlefleet.tensor_parallel import ColumnParallelLinear
 
 from .quantization import get_quant_func

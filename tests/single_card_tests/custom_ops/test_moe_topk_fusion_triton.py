@@ -109,7 +109,7 @@ class TestMoETopkFusionTriton(unittest.TestCase):
 
         # Triton
         paddle.enable_compat(scope={"triton"}, silent=True)
-        from paddlefleet.ops.triton_ops import MoETopkFusion
+        from paddlefleet.triton_ops import MoETopkFusion
 
         triton_probs, triton_indices = MoETopkFusion.apply(
             gate_probs, probs_for_choice, self.moe_k, False, 1, 1, True
@@ -134,7 +134,7 @@ class TestMoETopkFusionTriton(unittest.TestCase):
 
         # Triton
         paddle.enable_compat(scope={"triton"}, silent=True)
-        from paddlefleet.ops.triton_ops import MoETopkFusion
+        from paddlefleet.triton_ops import MoETopkFusion
 
         triton_probs, triton_indices = MoETopkFusion.apply(
             gate_probs,
@@ -167,7 +167,7 @@ class TestMoETopkFusionTriton(unittest.TestCase):
         probs_for_choice = gate_probs.clone().detach()
 
         paddle.enable_compat(scope={"triton"}, silent=True)
-        from paddlefleet.ops.triton_ops import MoETopkFusion
+        from paddlefleet.triton_ops import MoETopkFusion
 
         triton_probs, triton_indices = MoETopkFusion.apply(
             gate_probs, probs_for_choice, self.moe_k, False, 1, 1, True
@@ -193,7 +193,7 @@ class TestMoETopkFusionTriton(unittest.TestCase):
         )
 
         paddle.enable_compat(scope={"triton"}, silent=True)
-        from paddlefleet.ops.triton_ops import routing_map_fusion_forward
+        from paddlefleet.triton_ops import routing_map_fusion_forward
 
         routing_map, topk_out, dispatch_mask = routing_map_fusion_forward(
             gate_probs, topk_indices, input_ids=None, is_pure_text_line=None
@@ -215,7 +215,7 @@ class TestMoETopkFusionTriton(unittest.TestCase):
         probs_for_choice = gate_probs.clone()
 
         paddle.enable_compat(scope={"triton"}, silent=True)
-        from paddlefleet.ops.triton_ops import MoETopkFusion
+        from paddlefleet.triton_ops import MoETopkFusion
 
         triton_probs, triton_indices = MoETopkFusion.apply(
             gate_probs, probs_for_choice, self.moe_k, False, 1, 1, True

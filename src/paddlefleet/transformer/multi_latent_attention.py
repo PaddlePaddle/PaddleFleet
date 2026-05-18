@@ -459,7 +459,7 @@ class MultiLatentAttention(Attention):
     def _gate(self, hidden_states, core_attn_out):
         gate, _ = self.gate_proj(hidden_states)
         if self.config.sigmoid_gate_fusion:
-            from paddlefleet.ops.triton_ops import SigmoidGateFusionTriton
+            from paddlefleet.triton_ops import SigmoidGateFusionTriton
 
             core_attn_out = SigmoidGateFusionTriton.apply(core_attn_out, gate)
         else:
@@ -629,7 +629,7 @@ class MLASelfAttention(MultiLatentAttention):
                     )
                 )
                 rotary_pos_emb = None
-                from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+                from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
                     fused_apply_mla_rope_for_q,
                 )
@@ -792,7 +792,7 @@ class MLASelfAttention(MultiLatentAttention):
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
             if self.config.apply_rope_fusion:
-                from paddlefleet_ops.ops.triton_ops.fused_mla_yarn_rope_apply import (
+                from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
                     fused_apply_mla_rope_for_q,
                 )

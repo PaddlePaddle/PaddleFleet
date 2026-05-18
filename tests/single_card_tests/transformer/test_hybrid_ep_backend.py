@@ -193,8 +193,8 @@ def _bind_buffer(manager, buffer):
 
 class TestHybridEPBackendSelection(unittest.TestCase):
     def test_deep_ep_and_hybrid_ep_imports_are_separate(self):
-        from paddlefleet import ops
-        from paddlefleet.ops import deep_ep, hybrid_ep
+        import paddlefleet_ops as ops
+        from paddlefleet_ops import deep_ep, hybrid_ep
 
         self.assertIn("hybrid_ep", ops.__dict__)
         self.assertTrue(hasattr(deep_ep, "Buffer"))

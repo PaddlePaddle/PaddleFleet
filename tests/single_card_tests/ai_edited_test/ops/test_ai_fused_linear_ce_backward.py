@@ -65,7 +65,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy  # noqa: F401
+    import paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -79,7 +79,8 @@ class TestLigerFusedLinearCrossEntropyBackward(unittest.TestCase):
     def test_backward_with_main_grad_ec_align(self):
         """Test backward with ec_align mode and main_grad."""
         import paddle
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             LigerFusedLinearCrossEntropyFunction,
         )
 
@@ -108,7 +109,8 @@ class TestLigerFusedLinearCrossEntropyBackward(unittest.TestCase):
     def test_backward_with_main_grad_no_ec_align(self):
         """Test backward without ec_align mode and main_grad."""
         import paddle
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             LigerFusedLinearCrossEntropyFunction,
         )
 
@@ -139,7 +141,8 @@ class TestLigerFusedLinearCrossEntropyBackward(unittest.TestCase):
     def test_backward_with_main_grad_none(self):
         """Test backward when main_grad is None."""
         import paddle
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             LigerFusedLinearCrossEntropyFunction,
         )
 
@@ -168,7 +171,8 @@ class TestLigerFusedLinearCrossEntropyBackward(unittest.TestCase):
     def test_backward_with_bias(self):
         """Test backward returns grad_bias when has_bias is True."""
         import paddle
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             LigerFusedLinearCrossEntropyFunction,
         )
 
@@ -193,7 +197,8 @@ class TestLigerFusedLinearCrossEntropyBackward(unittest.TestCase):
     def test_backward_without_bias(self):
         """Test backward returns 3 elements when has_bias is False."""
         import paddle
-        from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
+
+        from paddlefleet.triton_ops.fused_linear_cross_entropy.fused_linear_cross_entropy import (
             LigerFusedLinearCrossEntropyFunction,
         )
 

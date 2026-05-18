@@ -17,7 +17,7 @@ name = "paddlefleet"
 dynamic = ["version", "readme"]
 description = "Fleet Core - Core Functional Library for Large Scale Distributed Training"
 requires-python = ">=3.10"
-dependencies = ["colorlog>=6.10.1", "paddlepaddle-gpu==3.4.0.post20260514+38bb5555a0a"]
+dependencies = ["colorlog>=6.10.1", "paddlepaddle-gpu==3.4.0.post20260516+4ac25762b0d"]
 license = { text = "Apache 2.0" }
 authors = [{ name = "PaddlePaddle", email = "Paddle-better@baidu.comm" }]
 maintainers = [{ name = "PaddlePaddle", email = "Paddle-better@baidu.com" }]

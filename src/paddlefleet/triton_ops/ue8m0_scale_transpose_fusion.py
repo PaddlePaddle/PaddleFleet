@@ -16,7 +16,7 @@
 
 import paddle
 
-from paddlefleet.ops.triton_ops.utils import is_torch_compat_available
+from paddlefleet.triton_ops.utils import is_torch_compat_available
 
 if is_torch_compat_available():
     paddle.enable_compat(scope={"triton"})

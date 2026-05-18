@@ -34,7 +34,7 @@ _SKIP_FP8 = True  # DeepGEMM not available on CI GPU
 # Tests for src/paddlefleet/fp8/quantization.py and src/paddlefleet/fp8/linear.py
 # Additional tests for get_quant_func, is_fp8_tensor, FP8Gemm, FP8Linear
 #
-# NOTE: On GPUs with compute capability < 9.0, paddlefleet.ops.deep_gemm
+# NOTE: On GPUs with compute capability < 9.0, paddlefleet_ops.deep_gemm
 # is blocked. We patch ops.__getattr__ before any fp8 imports to allow
 # the modules to load.
 
@@ -44,8 +44,8 @@ import paddle
 
 
 def _patch_deep_gemm():
-    """Patch paddlefleet.ops.__getattr__ to allow deep_gemm imports."""
-    from paddlefleet import ops
+    """Patch paddlefleet_ops.__getattr__ to allow deep_gemm imports."""
+    import paddlefleet_ops as ops
 
     fake_deep_gemm = types.ModuleType("deep_gemm")
     fake_deep_gemm.fp8_gemm_nt = mock.MagicMock()
@@ -61,7 +61,7 @@ def _patch_deep_gemm():
 
 
 def _restore_deep_gemm(ops, original_getattr):
-    """Restore original paddlefleet.ops.__getattr__."""
+    """Restore original paddlefleet_ops.__getattr__."""
     ops.__getattr__ = original_getattr
 
 

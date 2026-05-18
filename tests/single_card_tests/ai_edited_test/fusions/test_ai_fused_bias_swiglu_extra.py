@@ -48,7 +48,7 @@ class TestSwigluBackward(unittest.TestCase):
         mock_result = paddle.randn([4, 8])
         with mock.patch("paddle.is_compiled_with_cuda", return_value=True):  # noqa: SIM117
             with mock.patch(
-                "paddlefleet.ops.fused_swiglu_bwd",
+                "paddlefleet_ops.fused_swiglu_bwd",
                 return_value=mock_result,
             ) as mock_op:
                 result = swiglu_back(g, y)
@@ -79,7 +79,7 @@ class TestBiasSwigluBack(unittest.TestCase):
 
         with mock.patch("paddle.is_compiled_with_cuda", return_value=True):  # noqa: SIM117
             with mock.patch(
-                "paddlefleet.ops.fused_swiglu_bwd",
+                "paddlefleet_ops.fused_swiglu_bwd",
                 return_value=paddle.randn([4, 8]),
             ) as mock_op:
                 bias_swiglu_back(g, y, bias)
@@ -131,7 +131,7 @@ class TestWeightedSwigluBack(unittest.TestCase):
 
         with mock.patch("paddle.is_compiled_with_cuda", return_value=True):  # noqa: SIM117
             with mock.patch(
-                "paddlefleet.ops.fused_swiglu_bwd",
+                "paddlefleet_ops.fused_swiglu_bwd",
                 return_value=paddle.randn([4, 8]),
             ):
                 input_grad, weights_grad = weighted_swiglu_back(g, y, weights)

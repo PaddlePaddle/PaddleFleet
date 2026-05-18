@@ -25,7 +25,7 @@ from paddlefleet.fusions.fused_swiglu_scale import (
 )
 
 try:
-    from paddlefleet.ops import (
+    from paddlefleet_ops import (
         deep_gemm as paddlefleet_deep_gemm,
         fuse_stack_fp8_quant,
         fuse_stack_transpose_fp8_quant,
@@ -36,7 +36,7 @@ except (ImportError, RuntimeError):
 
 # 优先使用 FusedQuantOps.fused_swiglu_probs_bwd（inplace，行为对齐）。
 # 若环境中没有 FusedQuantOps，则回退到 paddle.incubate 的 out-of-place 实现。
-# TODO: 迁移fused_swiglu_probs_bwd至paddlefleet.ops
+# TODO: 迁移fused_swiglu_probs_bwd至paddlefleet_ops
 try:
     import FusedQuantOps as _FQO
 
@@ -73,7 +73,7 @@ except ImportError:
 
 
 try:
-    from paddlefleet.ops import deep_gemm
+    from paddlefleet_ops import deep_gemm
 except:
     pass
 

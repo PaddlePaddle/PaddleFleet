@@ -22,14 +22,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
+import paddlefleet_ops
 from paddle import framework, nn
 from paddle.autograd import PyLayer
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
     ScatterOp,
 )
-
-import paddlefleet
 
 if TYPE_CHECKING:
     from paddle.distributed.fleet.meta_parallel import LayerSpec
@@ -80,9 +79,9 @@ def _log_moe_md5(tensor, name, layer_idx=None):
         )
 
 
-if paddlefleet.ops.is_sonic_moe_available():
-    from paddlefleet.ops.sonicmoe.enums import ActivationType
-    from paddlefleet.ops.sonicmoe.functional import (
+if paddlefleet_ops.is_sonic_moe_available():
+    from paddlefleet_ops.sonicmoe.enums import ActivationType
+    from paddlefleet_ops.sonicmoe.functional import (
         _DownProjection,
         _UpProjection,
     )
@@ -176,9 +175,9 @@ class MoELayer(nn.Layer):
             config.moe_subbatch_token_num_after_dispatch
         )
         if self.using_sonic_moe:
-            assert paddlefleet.ops.is_sonic_moe_available(), (
-                paddlefleet.ops.blocked_import_messages[
-                    "paddlefleet.ops.sonicmoe"
+            assert paddlefleet_ops.is_sonic_moe_available(), (
+                paddlefleet_ops.blocked_import_messages[
+                    "paddlefleet_ops.sonicmoe"
                 ]
             )
         self.router_aux_loss_coef = config.router_aux_loss_coef
@@ -1172,7 +1171,7 @@ class MoELayer(nn.Layer):
                 weight_obj.fp8_weight_stacked_transpose = None
                 weight_obj.fp8_scale_stacked_transpose = None
                 if self.use_ue8m0:
-                    from paddlefleet.ops.triton_ops import (
+                    from paddlefleet.triton_ops import (
                         fuse_stack_ue8m0_scale_transpose,
                     )
 

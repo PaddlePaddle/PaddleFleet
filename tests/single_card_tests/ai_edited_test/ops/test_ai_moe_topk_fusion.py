@@ -63,7 +63,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.moe_topk_fusion  # noqa: F401
+    import paddlefleet.triton_ops.moe_topk_fusion  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -76,19 +76,19 @@ class TestMoETopkFusionDefinition(unittest.TestCase):
 
     def test_moe_topk_fusion_class_exists(self):
         """Test that MoETopkFusion class can be imported."""
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import MoETopkFusion
+        from paddlefleet.triton_ops.moe_topk_fusion import MoETopkFusion
 
         self.assertTrue(callable(MoETopkFusion))
 
     def test_moe_topk_fusion_has_forward(self):
         """Test that MoETopkFusion has forward method."""
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import MoETopkFusion
+        from paddlefleet.triton_ops.moe_topk_fusion import MoETopkFusion
 
         self.assertTrue(hasattr(MoETopkFusion, "forward"))
 
     def test_moe_topk_fusion_has_backward(self):
         """Test that MoETopkFusion has backward method."""
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import MoETopkFusion
+        from paddlefleet.triton_ops.moe_topk_fusion import MoETopkFusion
 
         self.assertTrue(hasattr(MoETopkFusion, "backward"))
 
@@ -99,7 +99,7 @@ class TestRoutingMapFusionForward(unittest.TestCase):
 
     def test_function_is_callable(self):
         """Test that routing_map_fusion_forward is callable."""
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+        from paddlefleet.triton_ops.moe_topk_fusion import (
             routing_map_fusion_forward,
         )
 
@@ -109,7 +109,7 @@ class TestRoutingMapFusionForward(unittest.TestCase):
         """Test routing_map_fusion_forward has expected parameters."""
         import inspect
 
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+        from paddlefleet.triton_ops.moe_topk_fusion import (
             routing_map_fusion_forward,
         )
 
@@ -158,19 +158,19 @@ class TestFwdKernelDefinition(unittest.TestCase):
 
     def test_fwd_kernel_callable(self):
         """Test _fwd_kernel is callable."""
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import _fwd_kernel
+        from paddlefleet.triton_ops.moe_topk_fusion import _fwd_kernel
 
         self.assertTrue(callable(_fwd_kernel))
 
     def test_bwd_kernel_callable(self):
         """Test _bwd_kernel is callable."""
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import _bwd_kernel
+        from paddlefleet.triton_ops.moe_topk_fusion import _bwd_kernel
 
         self.assertTrue(callable(_bwd_kernel))
 
     def test_routing_map_fwd_kernel_callable(self):
         """Test _routing_map_fwd_kernel is callable."""
-        from paddlefleet_ops.ops.triton_ops.moe_topk_fusion import (
+        from paddlefleet.triton_ops.moe_topk_fusion import (
             _routing_map_fwd_kernel,
         )
 

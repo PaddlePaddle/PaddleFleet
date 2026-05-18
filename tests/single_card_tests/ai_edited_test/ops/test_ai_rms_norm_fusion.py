@@ -64,7 +64,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.rms_norm_fusion  # noqa: F401
+    import paddlefleet.triton_ops.rms_norm_fusion  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -77,7 +77,7 @@ class TestRMSNormFusionTritonDefinition(unittest.TestCase):
 
     def test_class_exists(self):
         """Test that RMSNormFusionTriton class can be imported."""
-        from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             RMSNormFusionTriton,
         )
 
@@ -85,7 +85,7 @@ class TestRMSNormFusionTritonDefinition(unittest.TestCase):
 
     def test_has_forward(self):
         """Test that RMSNormFusionTriton has forward method."""
-        from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             RMSNormFusionTriton,
         )
 
@@ -93,7 +93,7 @@ class TestRMSNormFusionTritonDefinition(unittest.TestCase):
 
     def test_has_backward(self):
         """Test that RMSNormFusionTriton has backward method."""
-        from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             RMSNormFusionTriton,
         )
 
@@ -106,7 +106,7 @@ class TestRMSNormKernels(unittest.TestCase):
 
     def test_fwd_kernel_callable(self):
         """Test rms_norm_fwd_kernel is callable."""
-        from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             rms_norm_fwd_kernel,
         )
 
@@ -114,7 +114,7 @@ class TestRMSNormKernels(unittest.TestCase):
 
     def test_bwd_dx_kernel_callable(self):
         """Test rms_norm_bwd_dx_kernel is callable."""
-        from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             rms_norm_bwd_dx_kernel,
         )
 
@@ -122,7 +122,7 @@ class TestRMSNormKernels(unittest.TestCase):
 
     def test_bwd_dw_partial_kernel_callable(self):
         """Test rms_norm_bwd_dw_partial_kernel is callable."""
-        from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             rms_norm_bwd_dw_partial_kernel,
         )
 
@@ -130,7 +130,7 @@ class TestRMSNormKernels(unittest.TestCase):
 
     def test_bwd_dw_final_kernel_callable(self):
         """Test rms_norm_bwd_dw_final_kernel is callable."""
-        from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             rms_norm_bwd_dw_final_kernel,
         )
 

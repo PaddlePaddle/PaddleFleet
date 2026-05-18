@@ -65,7 +65,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.rms_norm_fusion  # noqa: F401
+    import paddlefleet.triton_ops.rms_norm_fusion  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -80,7 +80,7 @@ class TestRMSNormFusionTritonForward(unittest.TestCase):
         """Test forward has expected parameters."""
         import inspect
 
-        from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             RMSNormFusionTriton,
         )
 
@@ -95,7 +95,7 @@ class TestRMSNormFusionTritonForward(unittest.TestCase):
         """Test backward has expected parameters."""
         import inspect
 
-        from paddlefleet_ops.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             RMSNormFusionTriton,
         )
 

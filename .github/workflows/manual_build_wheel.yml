@@ -34,6 +34,7 @@ jobs:
       clone_dir: manual
       ref: ${{ inputs.commit }}
       commit: ${{ inputs.commit }}
+      submodules: 'false'
 
   publish-wheel:
     name: Manual build fleet (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
@@ -125,8 +126,8 @@ jobs:
           cd dist
           for whl in paddlefleet-*.whl; do
             echo "Uploading ${whl}"
-            python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}
-            echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}/${whl}"
+            python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/
+            echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${whl}"
           done
           '
 

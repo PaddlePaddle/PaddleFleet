@@ -472,7 +472,7 @@ class TestUe8m0CodePaths(unittest.TestCase):
         )
 
     def test_triton_scale_transpose_zero_and_launch_branches(self):
-        from paddlefleet.ops.triton_ops import fuse_stack_ue8m0_scale_transpose
+        from paddlefleet.triton_ops import fuse_stack_ue8m0_scale_transpose
 
         zero_scale = paddle.empty([0, 1], dtype=paddle.int32)
         zero_out = fuse_stack_ue8m0_scale_transpose(zero_scale, 0, 512, 512)

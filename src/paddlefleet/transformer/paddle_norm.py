@@ -156,7 +156,7 @@ class RMSNormTriton(RMSNorm):
     """Wrapper for triton RMSNorm, used for fused QK norm."""
 
     def forward(self, hidden_states: Tensor):
-        from paddlefleet.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             RMSNormFusionTriton,
         )
 

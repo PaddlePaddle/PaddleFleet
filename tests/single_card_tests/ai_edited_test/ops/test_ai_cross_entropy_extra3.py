@@ -44,7 +44,7 @@ def _setup_triton_mock():
 
 try:
     _setup_triton_mock()
-    import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy  # noqa: F401
+    import paddlefleet.triton_ops.fused_linear_cross_entropy.cross_entropy  # noqa: F401
 
     _MODULE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError, Exception):
@@ -58,7 +58,7 @@ class TestCrossEntropyKernelAttributes(unittest.TestCase):
     def test_liger_cross_entropy_kernel_exists(self):
         """Test that the cross entropy kernel can be imported."""
         try:
-            from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy import (
+            from paddlefleet.triton_ops.fused_linear_cross_entropy.cross_entropy import (
                 liger_cross_entropy_kernel,
             )
 
@@ -69,7 +69,7 @@ class TestCrossEntropyKernelAttributes(unittest.TestCase):
     def test_cross_entropy_module_has_kernel(self):
         """Test module structure contains the expected kernel."""
         try:
-            import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy as ce_mod
+            import paddlefleet.triton_ops.fused_linear_cross_entropy.cross_entropy as ce_mod
 
             self.assertTrue(hasattr(ce_mod, "liger_cross_entropy_kernel"))
         except ImportError:
@@ -87,7 +87,7 @@ class TestCrossEntropyKernelAttributes(unittest.TestCase):
     def test_cross_entropy_uses_triton_compat(self):
         """Test that cross_entropy module uses enable_compat_on_triton_kernel."""
         try:
-            from paddlefleet_ops.ops.triton_ops.utils import (
+            from paddlefleet.triton_ops.utils import (
                 enable_compat_on_triton_kernel,
             )
 
@@ -107,7 +107,7 @@ class TestCrossEntropyKernelParams(unittest.TestCase):
 
             if importlib.util.find_spec("triton") is None:
                 self.skipTest("triton not available")
-            from paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy.cross_entropy import (
+            from paddlefleet.triton_ops.fused_linear_cross_entropy.cross_entropy import (
                 liger_cross_entropy_kernel,
             )
 
@@ -119,7 +119,7 @@ class TestCrossEntropyKernelParams(unittest.TestCase):
     def test_fused_linear_ce_module_has_init(self):
         """Test that the parent module can be imported."""
         try:
-            import paddlefleet_ops.ops.triton_ops.fused_linear_cross_entropy as flce
+            import paddlefleet.triton_ops.fused_linear_cross_entropy as flce
 
             self.assertIsNotNone(flce)
         except ImportError:

@@ -110,7 +110,7 @@ def _make_moe_sublayers():
 
 def _mock_moe_deps(
     mock_utils,
-    mock_paddlefleet,
+    mock_paddlefleet_ops,
     mock_version,
     mock_expert,
     mock_shared_expert=None,
@@ -118,7 +118,7 @@ def _mock_moe_deps(
     """Common mock setup for MoELayer tests."""
     mock_utils.get_pg_size.return_value = 1
     mock_utils.get_pg_rank.return_value = 0
-    mock_paddlefleet.ops.is_sonic_moe_available.return_value = False
+    mock_paddlefleet_ops.is_sonic_moe_available.return_value = False
     mock_version.cuda.return_value = "12.2"
     # Return a real paddle.nn.Layer so nn.LayerList accepts it
     mock_expert.return_value = paddle.nn.Layer()

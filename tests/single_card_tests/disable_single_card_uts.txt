@@ -5,3 +5,5 @@ test_moe.py
 test_count_cumsum.py
 test_rr_attn_estimate_triton_op.py
 test_layers.py
+test_sigmoid_gate_fusion_triton.py
+test_ai_sigmoid_gate_fusion.py
