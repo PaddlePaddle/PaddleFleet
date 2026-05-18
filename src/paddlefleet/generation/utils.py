@@ -134,19 +134,11 @@ def sample_with_top_p(logits, top_p):
     filter_mask = cumulative_probs > top_p
 
     # Shift filter by 1 position (from Megatron implementation)
-    # This ensures at least one token is kept
+    # This ensures at least one token is kept and the first token is never filtered
     filter_mask = paddle.concat(
         [
             paddle.zeros([filter_mask.shape[0], 1], dtype="bool"),
             filter_mask[:, :-1],
-        ],
-        axis=-1,
-    )
-    # Ensure first token is never filtered
-    filter_mask = paddle.concat(
-        [
-            paddle.zeros([filter_mask.shape[0], 1], dtype=filter_mask.dtype),
-            filter_mask[:, 1:],
         ],
         axis=-1,
     )

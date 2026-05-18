@@ -61,7 +61,7 @@ class GenerationConfig:
     bos_token_id: Optional[int] = None
 
     # Advanced features (reserved for V2)
-    use_cache: bool = False
+    use_cache: bool = True
     stop_words: Optional[List[str]] = None
     streamer: Optional[Any] = None
 

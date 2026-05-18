@@ -39,11 +39,57 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import paddle
 
+if TYPE_CHECKING:
+    from paddlefleet.models.gpt.gpt_model import GPTModel
+
 logger = logging.getLogger(__name__)
+
+
+def _apply_repetition_penalty(
+    logits: paddle.Tensor, input_ids: paddle.Tensor, penalty: float
+) -> paddle.Tensor:
+    """Apply repetition penalty to logits.
+
+    Tokens with positive logits are divided by penalty,
+    tokens with negative logits are multiplied by penalty.
+    """
+    if penalty == 1.0:
+        return logits
+
+    batch_size, seq_len = input_ids.shape
+    vocab_size = logits.shape[-1]
+
+    # Create mask for tokens that appeared in input_ids using scatter
+    # This is more efficient than the loop version
+    token_mask = paddle.zeros([batch_size, vocab_size], dtype="float32")
+    
+    # Flatten input_ids and create batch indices
+    flat_input_ids = input_ids.reshape([-1])  # [batch_size * seq_len]
+    batch_indices = paddle.arange(batch_size, dtype="int64").unsqueeze(-1)
+    batch_indices = batch_indices.expand([batch_size, seq_len]).reshape([-1])  # [batch_size * seq_len]
+    
+    # Create indices for scatter
+    scatter_indices = paddle.stack([batch_indices, flat_input_ids], axis=-1)  # [batch_size * seq_len, 2]
+    
+    # Scatter 1.0 to mark appeared tokens
+    token_mask = paddle.scatter_nd(
+        scatter_indices,
+        paddle.ones([batch_size * seq_len], dtype="float32"),
+        [batch_size, vocab_size],
+    )
+
+    # Apply penalty: divide positive, multiply negative
+    mask = token_mask > 0
+    logits = paddle.where(
+        mask,
+        paddle.where(logits > 0, logits / penalty, logits * penalty),
+        logits,
+    )
+    return logits
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +149,7 @@ class GreedyGenerator:
                            eos_token_id=tok.eos_token_id)
     """
 
-    def __init__(self, fleet_model):
+    def __init__(self, fleet_model: "GPTModel"):
         cfg = fleet_model.config
 
         if getattr(cfg, "sequence_parallel", False):
@@ -137,6 +183,7 @@ class GreedyGenerator:
         input_ids: paddle.Tensor,
         max_new_tokens: int,
         eos_token_id: Optional[int] = None,
+        repetition_penalty: float = 1.0,
     ) -> paddle.Tensor:
         """Run greedy auto-regressive decoding.
 
@@ -145,6 +192,8 @@ class GreedyGenerator:
             max_new_tokens: Maximum number of new tokens to generate.
             eos_token_id: Stop generation when this token is produced (all
                 batches must be done).
+            repetition_penalty: Penalty for repeated tokens (1.0 = no penalty,
+                >1.0 = discourage repetition). Default: 1.0.
 
         Returns:
             Tensor of shape ``[B, L + num_generated]`` containing the
@@ -156,6 +205,7 @@ class GreedyGenerator:
         self.model.eval()
 
         bsz, prompt_len = input_ids.shape
+        generated = input_ids.clone()
 
         with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
             # ---- Prefill ----
@@ -170,12 +220,14 @@ class GreedyGenerator:
                 "past_key_values": self.cache,
                 "use_cache": True,
             })
+            # Apply repetition penalty to prefill output
+            logits = _apply_repetition_penalty(logits, generated, repetition_penalty)
             next_tok = logits[:, -1].argmax(axis=-1, keepdim=True)
-            out_tokens = [next_tok]
+            generated = paddle.concat([generated, next_tok], axis=1)
 
             # ---- Decode ----
             done = paddle.zeros([bsz, 1], dtype="bool")
-            for _ in range(max_new_tokens - 1):
+            for step in range(max_new_tokens - 1):
                 cur_len = self.cache.get_seq_len()
                 position_ids = paddle.full([bsz, 1], cur_len, dtype="int64")
                 logits = self.model({
@@ -184,11 +236,13 @@ class GreedyGenerator:
                     "past_key_values": self.cache,
                     "use_cache": True,
                 })
+                # Apply repetition penalty
+                logits = _apply_repetition_penalty(logits, generated, repetition_penalty)
                 next_tok = logits[:, -1].argmax(axis=-1, keepdim=True)
-                out_tokens.append(next_tok)
+                generated = paddle.concat([generated, next_tok], axis=1)
                 if eos_token_id is not None:
                     done = done | (next_tok == eos_token_id)
                     if done.all().item():
                         break
 
-        return paddle.concat([input_ids] + out_tokens, axis=1)
+        return generated
