@@ -608,6 +608,10 @@ class MoELayer(nn.Layer):
                     dispatched_hidden_states,
                     dispatched_indices,
                     dispatched_probs,
+                    self.num_experts_per_tok,
+                    self.num_experts_per_device,
+                    self.grouped_gemm_experts.weight1,
+                    self.grouped_gemm_experts.weight2,
                     use_fp8,
                 )
             else:
@@ -747,6 +751,20 @@ class MoELayer(nn.Layer):
                     dispatched_probs,
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     is_first_fwd=is_first_fwd,
+                )
+            elif self.using_sonic_moe:
+                use_fp8 = self.fp8 is not None
+                hidden_states = run_sonic_moe(
+                    dispatched_hidden_states,
+                    dispatched_indices.clone()
+                    if is_first_fwd
+                    else dispatched_indices,
+                    dispatched_probs,
+                    self.num_experts_per_tok,
+                    self.num_experts_per_device,
+                    self.grouped_gemm_experts.weight1,
+                    self.grouped_gemm_experts.weight2,
+                    use_fp8,
                 )
             else:
                 hidden_states = FusionMoePyLayer.apply(

@@ -1,0 +1,380 @@
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+import random
+import subprocess
+import sys
+import unittest
+
+import numpy as np
+import paddle
+
+paddle.compat.enable_torch_proxy(
+    scope={"sonicmoe", "paddlefleet_ops.sonicmoe", "quack", "triton"},
+    silent=True,
+)
+import paddle.nn.functional as F
+import paddlefleet_ops
+from paddle.distributed import fleet
+
+# from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
+from paddle.distributed.fleet.utils import mix_precision_utils
+from paddlefleet_ops.utils import get_cuda_version
+
+# from tests.unit_tests.test_utilities import Utils
+import paddlefleet.parallel_state as ps
+from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.transformer.moe.moe_layer import MoELayer
+from paddlefleet.transformer.transformer_config import TransformerConfig
+
+if paddlefleet_ops.is_sonic_moe_available():
+    from paddlefleet_ops.sonicmoe.functional import (
+        clear_all_fp8_weight_caches,
+    )
+
+# ── Prevent duplicate custom-op registration ──────────────────────────
+# We import sonicmoe through paddlefleet_ops.sonicmoe; keep top-level
+# aliases so late `import sonicmoe.*` resolves to the same module objects.
+for _key in list(sys.modules):
+    if _key.startswith("paddlefleet_ops.sonicmoe"):
+        _alias = _key.replace("paddlefleet_ops.sonicmoe", "sonicmoe", 1)
+        sys.modules.setdefault(_alias, sys.modules[_key])
+
+
+def get_gpu_models_via_nvidia_smi():
+    try:
+        output = subprocess.check_output(
+            "nvidia-smi --query-gpu=name --format=csv,noheader", shell=True
+        )
+        models = output.decode().strip().replace("NVIDIA", "")
+        return models
+    except Exception as e:
+        return ["Unknown"]
+
+
+def judge_machine_type():
+    if not paddle.is_compiled_with_cuda():
+        return "No CUDA GPU"
+    models = get_gpu_models_via_nvidia_smi()
+    for model in models:
+        name = model.upper()
+        if "V" in name:
+            return "V"
+        elif "H" in name:
+            return "H"
+
+
+result = judge_machine_type()
+print("你的机器类型是：", result)
+version, cuda_minor = get_cuda_version()
+print("CUDA version:", version)
+
+
+def calc_diff(x: paddle.Tensor, y: paddle.Tensor):
+    x, y = x.double(), y.double()
+    denominator = (x * x + y * y).sum()
+    if denominator.item() == 0:
+        return 0.0
+    sim = 2 * (x * y).sum() / denominator
+    return (1 - sim).item()
+
+
+# ── Module-level fleet initialization (only once) ─────────────────────
+_strategy = fleet.DistributedStrategy()
+_strategy.hybrid_configs = {
+    "dp_degree": 1,
+    "mp_degree": 1,
+    "pp_degree": 1,
+    "sharding_degree": 1,
+    "sep_degree": 1,
+    "cp_degree": 1,
+    "ep_degree": 1,
+    "moe_sharding_degree": 1,
+    "order": [
+        "sharding",
+        "moe_sharding",
+        "pp",
+        "sep",
+        "cp",
+        "dp",
+        "ep",
+        "mp",
+    ],
+}
+fleet.init(is_collective=True, strategy=_strategy)
+_hcg = fleet.get_hybrid_communicate_group()
+ps.initialize_model_parallel(_hcg)
+
+
+@unittest.skipUnless(
+    paddlefleet_ops.is_sonic_moe_available(),
+    "Sonic-MoE not available (requires Python>=3.12, CUDA>=12.9, SM>=90)",
+)
+class TestSonicMoELayerPrecision(unittest.TestCase):
+    """Precision comparison at the MoELayer level:
+    baseline grouped_gemm vs BF16 sonic-moe vs FP8 sonic-moe.
+    """
+
+    def setUp(self):
+        self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+
+        self.seed = 46
+        self.hidden_size = 256
+        self.n_routed_experts = 8
+        self.acc_steps = 1
+
+    def _build_transformer_config(self, using_sonic_moe=False, fp8=None):
+        return TransformerConfig(
+            hidden_size=self.hidden_size,
+            num_attention_heads=4,
+            n_routed_experts=self.n_routed_experts,
+            use_cpu_initialization=False,
+            num_experts_per_tok=2,
+            tensor_model_parallel_size=1,
+            expert_model_parallel_size=1,
+            sequence_parallel=False,
+            bf16=True,
+            params_dtype=paddle.bfloat16,
+            moe_intermediate_size=512,
+            gated_linear_unit=True,
+            n_shared_experts=0,
+            hidden_act=F.silu,
+            moe_grouped_gemm=True,
+            bias_activation_fusion=True,
+            moe_token_dispatcher_type="alltoall",
+            moe_use_fusion_node=True,
+            using_sonic_moe=using_sonic_moe,
+            fp8=fp8,
+            fp8_wgrad=True,
+        )
+
+    def _build_moe_layer(self, using_sonic_moe=False, fp8=None):
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+        paddle.seed(self.seed)
+        transformer_config = self._build_transformer_config(
+            using_sonic_moe=using_sonic_moe, fp8=fp8
+        )
+        transformer_layer_spec = get_gpt_layer_local_spec(
+            transformer_config,
+            num_experts=self.n_routed_experts,
+        )
+
+        moe_layer = MoELayer(
+            transformer_config,
+            transformer_layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
+            self.pg_collection,
+        )
+        # pipe = NoPipelineParallel(model, self.strategy)
+        amp_moe_layer = paddle.amp.decorate(
+            models=moe_layer,
+            level="O2",
+            dtype="bfloat16",
+            master_grad=True,
+            master_weight=True,
+        )
+        mix_precision_utils.MixPrecisionLayer(amp_moe_layer, dtype="bfloat16")
+
+        return amp_moe_layer, moe_layer
+
+    @staticmethod
+    def _sonic_interleaved_to_split_grad(grad):
+        grad = grad.reshape([grad.shape[0], -1, 2, grad.shape[2]])
+        gate = grad[:, :, 0, :].transpose([0, 2, 1])
+        up = grad[:, :, 1, :].transpose([0, 2, 1])
+        return paddle.concat([gate, up], axis=-1)
+
+    @classmethod
+    def _aligned_grad_for_compare(
+        cls, name, grad, transpose_grouped_gemm=False
+    ):
+        if not transpose_grouped_gemm:
+            return grad
+        if "grouped_gemm_experts.weight1" in name:
+            return cls._sonic_interleaved_to_split_grad(grad)
+        if "grouped_gemm_experts.weight2" in name:
+            return grad.transpose([0, 2, 1])
+        return grad
+
+    @staticmethod
+    def _collect_grads(layer):
+        grads = {}
+        for name, param in layer.named_parameters():
+            grad = getattr(param, "main_grad", None)
+            if grad is None:
+                grad = param.grad
+            if grad is not None:
+                grads[name] = grad.detach().clone()
+        return grads
+
+    @staticmethod
+    def _clear_grads(layer):
+        for _, param in layer.named_parameters():
+            if hasattr(param, "main_grad") and param.main_grad is not None:
+                param.main_grad.zero_()
+            if param.grad is not None:
+                param.grad.zero_()
+
+    def _run_forward_backward(self, moe_layer, input_data):
+        """Run single forward + backward and return (output, loss, input_grad, grads)."""
+        hidden_states = input_data.detach().clone()
+        hidden_states.stop_gradient = False
+        with paddle.amp.auto_cast(level="O2", dtype="bfloat16"):
+            output = moe_layer(hidden_states)[0]
+            loss = output.sum()
+        loss.backward()
+        return (
+            output.detach().clone(),
+            loss.item(),
+            hidden_states.grad.detach().clone(),
+            self._collect_grads(moe_layer),
+        )
+
+    def _run_accumulated_forward_backward(self, moe_layer, input_data_list):
+        self._clear_grads(moe_layer)
+        losses = []
+        output = None
+        for input_data in input_data_list:
+            hidden_states = input_data.detach().clone()
+            hidden_states.stop_gradient = False
+            with paddle.amp.auto_cast(level="O2", dtype="bfloat16"):
+                output = moe_layer(hidden_states)[0]
+                loss = output.sum()
+            loss.backward()
+            losses.append(loss.item())
+        return (
+            losses[-1],
+            output.detach().clone(),
+            self._collect_grads(moe_layer),
+        )
+
+    def test_moe_layer_precision(self):
+        """Test MoELayer forward/backward: baseline vs BF16 sonic-moe vs FP8 sonic-moe."""
+        moe_layer_base, _ = self._build_moe_layer(using_sonic_moe=False)
+        moe_layer_sonic_bf16, _ = self._build_moe_layer(using_sonic_moe=True)
+        moe_layer_sonic_fp8, _ = self._build_moe_layer(
+            using_sonic_moe=True, fp8="e4m3"
+        )
+
+        input_data_list = []
+        for step_idx in range(self.acc_steps):
+            paddle.seed(self.seed + step_idx)
+            data = paddle.randn(
+                [2, 64, self.hidden_size], dtype=paddle.bfloat16
+            )
+            input_data_list.append(data)
+
+        loss_base, output_base, grads_base = (
+            self._run_accumulated_forward_backward(
+                moe_layer_base, input_data_list
+            )
+        )
+        loss_bf16, output_bf16, grads_bf16 = (
+            self._run_accumulated_forward_backward(
+                moe_layer_sonic_bf16, input_data_list
+            )
+        )
+        loss_fp8, output_fp8, grads_fp8 = (
+            self._run_accumulated_forward_backward(
+                moe_layer_sonic_fp8, input_data_list
+            )
+        )
+        clear_all_fp8_weight_caches()
+
+        bf16_loss_rtol = 1e-2
+        bf16_loss_atol = 1e-5
+        adiff = abs(loss_bf16 - loss_base)
+        rdiff = adiff / max(abs(loss_base), 1e-12)
+        print(
+            f"BF16 vs Baseline final loss relative diff = {rdiff:.6e}, "
+            f"absolute diff = {adiff:.6e}"
+        )
+        self.assertTrue(
+            adiff < bf16_loss_atol or rdiff < bf16_loss_rtol,
+            f"BF16 sonic-moe loss deviates too much from baseline "
+            f"(baseline={loss_base}, bf16={loss_bf16}, "
+            f"adiff={adiff:.6e}, rdiff={rdiff:.6e})",
+        )
+
+        output_diff = calc_diff(output_bf16, output_base)
+        print(f"BF16 vs Baseline final output diff = {output_diff:.6e}")
+        self.assertLess(output_diff, 1e-4, "BF16 final output diff too large")
+
+        common_bf16_grads = set(grads_base) & set(grads_bf16)
+        self.assertTrue(
+            common_bf16_grads,
+            "No common BF16 accumulated grad tensors found",
+        )
+        for name in sorted(common_bf16_grads):
+            g0 = grads_base[name]
+            g1 = self._aligned_grad_for_compare(
+                name, grads_bf16[name], transpose_grouped_gemm=True
+            )
+            diff = calc_diff(g0, g1)
+            print(
+                f"BF16 vs Baseline accumulated grad diff = "
+                f"{diff:.6e} for {name}"
+            )
+            self.assertLess(
+                diff,
+                1e-4,
+                f"BF16 accumulated grad diff too large for {name}: "
+                f"diff={diff:.6e}",
+            )
+
+        fp8_loss_rtol = 1e-2
+        fp8_loss_atol = 1e-4
+        adiff = abs(loss_fp8 - loss_bf16)
+        rdiff = adiff / max(abs(loss_bf16), 1e-12)
+        print(
+            f"FP8 vs BF16 final loss relative diff = {rdiff:.6e}, "
+            f"absolute diff = {adiff:.6e}"
+        )
+        self.assertTrue(
+            adiff < fp8_loss_atol or rdiff < fp8_loss_rtol,
+            f"FP8 sonic-moe loss deviates too much from BF16 "
+            f"(bf16={loss_bf16}, fp8={loss_fp8}, "
+            f"adiff={adiff:.6e}, rdiff={rdiff:.6e})",
+        )
+
+        fp8_tol = 5e-3
+        output_diff = calc_diff(output_fp8, output_bf16)
+        print(f"FP8 vs BF16 final output diff = {output_diff:.6e}")
+        self.assertLess(output_diff, fp8_tol, "FP8 final output diff too large")
+
+        common_fp8_grads = set(grads_bf16) & set(grads_fp8)
+        self.assertTrue(
+            common_fp8_grads,
+            "No common FP8 accumulated grad tensors found",
+        )
+        fp8_grad_tol = 5e-3
+        for name in sorted(common_fp8_grads):
+            g1 = grads_bf16[name]
+            g2 = grads_fp8[name]
+            diff = calc_diff(g1, g2)
+            print(f"FP8 vs BF16 accumulated grad diff = {diff:.6e} for {name}")
+            self.assertLess(
+                diff,
+                fp8_grad_tol,
+                f"FP8 accumulated grad diff too large for {name}: "
+                f"diff={diff:.6e}, tol={fp8_grad_tol}",
+            )
+
+        print("Final loss, output and parameter gradient checks passed!")
+
+
+if __name__ == "__main__":
+    unittest.main()

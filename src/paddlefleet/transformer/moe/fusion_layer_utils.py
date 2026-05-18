@@ -29,20 +29,20 @@ from .vmm_utils import (
     tokens_zip_unique_add_with_subbatch,
 )
 
-if paddlefleet.ops.is_sonic_moe_available():
-    from paddlefleet.ops.sonicmoe.enums import ActivationType
-    from paddlefleet.ops.sonicmoe.ernie_compat.deepep_metadata import (
+if paddlefleet_ops.is_sonic_moe_available():
+    from paddlefleet_ops.sonicmoe.enums import ActivationType
+    from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
         deepep_topk_to_sonic_metadata,
     )
-    from paddlefleet.ops.sonicmoe.ernie_compat.mlp_node_v2 import (
+    from paddlefleet_ops.sonicmoe.ernie_compat.mlp_node_v2 import (
         _differentiable_router_scores,
     )
-    from paddlefleet.ops.sonicmoe.functional import (
+    from paddlefleet_ops.sonicmoe.functional import (
         _DownProjection,
         _refresh_fp8_config,
         _UpProjection,
     )
-    from paddlefleet.ops.sonicmoe.functional.utils import enable_fp8
+    from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
 
 logger = logging.getLogger(__name__)
 
@@ -2070,6 +2070,15 @@ def run_sonic_moe(
         E,
         score_src_idx=_score_src_idx,
     )
+    # _DownProjection.backward unconditionally returns ds for topk_scores
+    # (since stop_gradient is unreliable inside .apply()), so the outer
+    # tensor passed to .apply() must have stop_gradient=False; otherwise
+    # Paddle's GradNodePyLayer raises "should return None at position 3".
+    # This branch triggers when _differentiable_router_scores returns a
+    # detached tensor (e.g. TK==0 early return, or torch.cat dropping the
+    # autograd link in some Paddle versions) — observed deterministically
+    # at the first microbatch where one expert receives no tokens.
+    # scores_for_down.stop_gradient = False
 
     # FP8 path: use sonicmoe's optimized FP8 GEMM kernels.
     # Scores are applied AFTER the down-projection inside

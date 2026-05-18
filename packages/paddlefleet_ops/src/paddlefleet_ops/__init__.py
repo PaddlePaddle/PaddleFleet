@@ -274,8 +274,27 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet_ops.hybrid_ep"] = error
 
     if is_sonic_moe_available():
-        paddle.enable_compat(scope={"sonicmoe", "quack", "triton"}, silent=True)
+        # NOTE: must include "paddlefleet_ops.sonicmoe" in scope — the C++ ops
+        # in sonicmoe/jit.py are invoked from caller module
+        # `paddlefleet_ops.sonicmoe.jit`, and torch_proxy matches scope by the
+        # caller's real dotted name (sys.modules aliasing below does NOT change
+        # __name__). Without this, paddle tensors are not auto-converted to
+        # at::Tensor at the pybind11 boundary, raising "incompatible function
+        # arguments" when sonic_moe runs from frameworks (e.g. PaddleFormers
+        # training) that don't enable_torch_proxy themselves.
+        paddle.enable_compat(
+            scope={"sonicmoe", "paddlefleet_ops.sonicmoe", "quack", "triton"},
+            silent=True,
+        )
         _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
+        # Keep top-level `sonicmoe.*` imports working when only
+        # `paddlefleet_ops.sonicmoe` is available in editable mode.
+        for _name, _module in list(sys.modules.items()):
+            if _name == "paddlefleet_ops.sonicmoe" or _name.startswith(
+                "paddlefleet_ops.sonicmoe."
+            ):
+                _alias = _name.replace("paddlefleet_ops.", "", 1)
+                sys.modules.setdefault(_alias, _module)
     else:
         warning, error = _sonic_moe_requirement(
             "paddlefleet_ops.sonicmoe", hint=SONIC_MOE_HINT
