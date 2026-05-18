@@ -19,8 +19,7 @@ import paddle
 import paddle.nn.functional as F
 from paddle import base
 from paddle.base import core
-
-from paddlefleet.ops import fused_swiglu_bwd
+from paddlefleet_ops import fused_swiglu_bwd
 
 
 class TestFusedSwiGLUBack(unittest.TestCase):

@@ -44,6 +44,10 @@ jobs:
       group: GZ_BD-CPU
     env:
       TASK: fleet-ci-build-whl-${{ github.event.pull_request.number }}
+      CCACHE_DIR: "/home/data/shared/.ccache/l1" # L1 cache on machine shared dir
+      CCACHE_SECONDARY_STORAGE: "file:///home/data/cfs/.ccache/l2" # L2 cache on cfs
+      CCACHE_MAXSIZE: 50G
+      CCACHE_LIMIT_MULTIPLE: 0.8
     steps:
       - name: Check docker image and run container
         run: |
@@ -53,6 +57,7 @@ jobs:
           docker run -d -t --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
             -v "/home/data/cfs:/home/data/cfs" \
+            -v "/home/data/shared:/home/data/shared" \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
@@ -62,6 +67,10 @@ jobs:
             -e ci_scripts \
             -e no_proxy \
             -e CI_name \
+            -e CCACHE_DIR \
+            -e CCACHE_SECONDARY_STORAGE \
+            -e CCACHE_MAXSIZE \
+            -e CCACHE_LIMIT_MULTIPLE \
             -w /paddle --network host ${docker_image}
 
       - name: uv build whl
@@ -84,8 +93,18 @@ jobs:
           export UV_HTTP_TIMEOUT=300
           git submodule update --init --recursive
           export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH
+
+          # Check if packages/ is modified in this PR
+          PACKAGES_CHANGED=$(git diff --name-only origin/${BRANCH}...HEAD | grep "^packages/" || true)
+          if [ -n "$PACKAGES_CHANGED" ]; then
+            echo "packages/ changed, building paddlefleet-ops from source"
+            uv build --wheel --package paddlefleet-ops --out-dir dist
+          else
+            echo "packages/ not changed, downloading paddlefleet-ops from latest/"
+            wget -q --no-proxy "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${BRANCH}/latest/cu129/paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl" -O dist/paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl
+          fi
+
           uv build --wheel --package paddlefleet --out-dir dist --clear
-          uv build --wheel --package paddlefleet-ops --out-dir dist
           ls -lh dist
           '
 

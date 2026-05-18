@@ -25,12 +25,12 @@ from paddle.distributed import fleet
 
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
+from paddlefleet_ops.utils import get_cuda_version
 
 # from tests.unit_tests.test_utilities import Utils
 import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.ops.utils import get_cuda_version
 
 
 def get_gpu_models_via_nvidia_smi():

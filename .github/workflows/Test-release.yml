@@ -119,6 +119,10 @@ jobs:
       TASK: fleet-ci-paddle-release-build-whl-${{ github.event.pull_request.number }}
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
+      CCACHE_DIR: "/home/data/shared/.ccache/l1" # L1 cache on machine shared dir
+      CCACHE_SECONDARY_STORAGE: "file:///home/data/cfs/.ccache/l2" # L2 cache on cfs
+      CCACHE_MAXSIZE: 50G
+      CCACHE_LIMIT_MULTIPLE: 0.8
       UV_HTTP_TIMEOUT: 600
       no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
     steps:
@@ -130,12 +134,17 @@ jobs:
           docker run -d -t --name ${container_name} \
             -v "/home/data/cfs:/home/data/cfs" \
             -v "/home/data/cfs/.cache:/home/.cache" \
+            -v "/home/data/shared:/home/data/shared" \
             -v ${{ github.workspace }}/../../..:/root \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
             -v ${{ github.workspace }}:/paddle \
             -e no_proxy \
             -e CACHE_DIR \
             -e PIP_CACHE_DIR \
+            -e CCACHE_DIR \
+            -e CCACHE_SECONDARY_STORAGE \
+            -e CCACHE_MAXSIZE \
+            -e CCACHE_LIMIT_MULTIPLE \
             -e UV_HTTP_TIMEOUT \
             -e PR_ID \
             -e COMMIT_ID \
@@ -188,7 +197,9 @@ jobs:
           export UV_PYTHON=3.10
           export IS_NVIDIA=True
           export UV_HTTP_TIMEOUT=300
-          uv build --wheel --package paddlefleet-ops --out-dir dist -v
+          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install packaging "setuptools>=66.1.0" wheel "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           OPS_WHL=$(ls dist/paddlefleet_ops-*.whl | head -n1)
           echo "OPS_WHL=$(basename $OPS_WHL)" >> dist/whl_names.txt
           ls -lh dist
@@ -245,6 +256,10 @@ jobs:
       TASK: fleet-ci-paddle-release-build-whl-${{ github.event.pull_request.number }}
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
+      CCACHE_DIR: "/home/data/shared/.ccache/l1" # L1 cache on machine shared dir
+      CCACHE_SECONDARY_STORAGE: "file:///home/data/cfs/.ccache/l2" # L2 cache on cfs
+      CCACHE_MAXSIZE: 50G
+      CCACHE_LIMIT_MULTIPLE: 0.8
       UV_HTTP_TIMEOUT: 600
       no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
     steps:
@@ -256,12 +271,17 @@ jobs:
           docker run -d -t --name ${container_name} \
             -v "/home/data/cfs:/home/data/cfs" \
             -v "/home/data/cfs/.cache:/home/.cache" \
+            -v "/home/data/shared:/home/data/shared" \
             -v ${{ github.workspace }}/../../..:/root \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
             -v ${{ github.workspace }}:/paddle \
             -e no_proxy \
             -e CACHE_DIR \
             -e PIP_CACHE_DIR \
+            -e CCACHE_DIR \
+            -e CCACHE_SECONDARY_STORAGE \
+            -e CCACHE_MAXSIZE \
+            -e CCACHE_LIMIT_MULTIPLE \
             -e UV_HTTP_TIMEOUT \
             -e PR_ID \
             -e COMMIT_ID \
@@ -315,9 +335,23 @@ jobs:
           export UV_PYTHON=3.12
           export IS_NVIDIA=True
           export UV_HTTP_TIMEOUT=300
-          uv build --wheel --package paddlefleet-ops --out-dir dist -v
+          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install packaging "setuptools>=66.1.0" wheel "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           OPS_WHL=$(ls dist/paddlefleet_ops-*.whl | head -n1)
           echo "OPS_WHL=$(basename $OPS_WHL)" >> dist/whl_names.txt
+          ls -lh dist
+          cat dist/whl_names.txt
+          '
+
+      - name: download ops whl from latest
+        if: needs.check-packages-changes.outputs.packages_changed != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          set -x
+          OPS_DST=paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
+          wget -q --no-proxy "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlefleet-ops/${OPS_DST}" -O dist/${OPS_DST}
+          echo "OPS_WHL=${OPS_DST}" >> dist/whl_names.txt
           ls -lh dist
           cat dist/whl_names.txt
           '
@@ -415,13 +449,13 @@ jobs:
           rm -rf * .[^.]*
           set -x
           source /root/proxy
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
@@ -521,12 +555,12 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           set -x
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "paddle commit:"
@@ -640,13 +674,13 @@ jobs:
           set -x
           source /root/proxy
           mkdir PaddleFleet && cd PaddleFleet
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
@@ -833,13 +867,13 @@ jobs:
           set -x
           source /root/proxy
           mkdir PaddleFleet && cd PaddleFleet
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
@@ -1183,8 +1217,8 @@ jobs:
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          if [ -n "${{ needs.build_whl.outputs.ops_whl_name }}" ]; then pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/; fi
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"

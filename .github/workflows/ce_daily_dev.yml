@@ -163,7 +163,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation
+          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
@@ -343,7 +343,7 @@ jobs:
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation
+          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
@@ -517,7 +517,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation
+          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -781,7 +781,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/$CUDA_VERSION/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation
+          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -1297,7 +1297,7 @@ jobs:
           pip uninstall paddlefleet -y
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation
+          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -1673,8 +1673,8 @@ jobs:
                 if wget "${base_url}/${filepath}" -O "$filename" --no-proxy -q; then
                     echo "Downloaded: $filename from $task_name"
                     sed -i "s|<source></source>|<source>paddlefleet</source>|" "$filename"
-                    sed -i "s|/root/miniconda/envs/python3.12/lib/python3.12/site-packages/|src/|" "$filename"
-                    sed -i "s|.root.miniconda.envs.python3.12.lib.python3.12.site-packages|src|" "$filename"
+                    sed -i "s|PaddleFleet/src/|src/|" "$filename"
+                    sed -i "s|PaddleFleet.src|src|" "$filename"
                 else
                     echo "Warning: Failed to download ${filepath} from ${task_name}"
                     echo "$task_name" >> failed_tasks.txt

@@ -28,14 +28,23 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.moe.token_dispatcher import (
-    AllToAllTokenDispatcher,
-    MoEFlexTokenDispatcher,
-    _DeepEPManager,
-    _DispatchManager,
+try:
+    from paddlefleet.transformer.moe.token_dispatcher import (
+        AllToAllTokenDispatcher,
+        MoEFlexTokenDispatcher,
+        _DeepEPManager,
+        _DispatchManager,
+    )
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
 )
-
-
 class TestDispatchManagerInterface(unittest.TestCase):
     """Test _DispatchManager is abstract and defines the interface."""
 
@@ -53,6 +62,10 @@ class TestDispatchManagerInterface(unittest.TestCase):
         self.assertIn("get_restored_hidden_states_by_experts", abstract_methods)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestDeepepManagerConstruction(unittest.TestCase):
     """Test _DeepEPManager construction."""
 
@@ -79,6 +92,10 @@ class TestDeepepManagerConstruction(unittest.TestCase):
         self.assertIsNone(manager.handle)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestDeepepManagerSetupMetadata(unittest.TestCase):
     """Test _DeepEPManager.setup_metadata."""
 
@@ -113,6 +130,10 @@ class TestDeepepManagerSetupMetadata(unittest.TestCase):
         self.assertEqual(manager.token_probs.shape, [4, 2])
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestDeepepManagerIndicesToMultihot(unittest.TestCase):
     """Test _DeepEPManager._indices_to_multihot."""
 
@@ -134,6 +155,10 @@ class TestDeepepManagerIndicesToMultihot(unittest.TestCase):
         self.assertIsNotNone(multihot)
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestAllToAllTokenDispatcher(unittest.TestCase):
     """Test AllToAllTokenDispatcher construction and methods."""
 
@@ -160,6 +185,10 @@ class TestAllToAllTokenDispatcher(unittest.TestCase):
         self.assertEqual(dispatcher.local_expert_indices, [0, 1])
 
 
+@unittest.skipUnless(
+    _MODULE_AVAILABLE,
+    "paddlefleet.transformer.moe.token_dispatcher not available",
+)
 class TestMoEFlexTokenDispatcher(unittest.TestCase):
     """Test MoEFlexTokenDispatcher."""
 

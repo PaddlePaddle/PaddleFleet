@@ -29,6 +29,13 @@ sys.path.insert(
 
 import types
 import unittest
+
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 from unittest import mock
 
 # Mock triton and triton.language if not available
@@ -48,13 +55,14 @@ if not _triton_available:
         fn if fn is not None else lambda f: f
     )
     _mock_triton.cdiv = lambda a, b: (a + b - 1) // b
-    _mock_triton.next_power_of_2 = (
-        lambda n: 1 << (n - 1).bit_length() if n > 0 else 1
+    _mock_triton.next_power_of_2 = lambda n: (
+        1 << (n - 1).bit_length() if n > 0 else 1
     )
     sys.modules.setdefault("triton", _mock_triton)
     sys.modules.setdefault("triton.language", _mock_tl)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFindBlocksTopp(unittest.TestCase):
     """Tests for find_blocks_topp function."""
 
@@ -113,6 +121,7 @@ class TestFindBlocksTopp(unittest.TestCase):
             self.assertEqual(result.shape, [1, 1, 2, 1])
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBlockMaskUtilsImports(unittest.TestCase):
     """Test that triton jit functions exist."""
 
@@ -189,6 +198,7 @@ class TestBlockMaskUtilsImports(unittest.TestCase):
         self.assertIsNotNone(top_p_kernel)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBlockMaskUtilsUsedByTritonOp(unittest.TestCase):
     """Test that functions used by rr_attn_estimate_triton_op are importable."""
 

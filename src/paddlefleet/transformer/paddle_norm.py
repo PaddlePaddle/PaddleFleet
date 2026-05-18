@@ -125,13 +125,14 @@ class LayerNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
-        return layer_norm(
+        output = layer_norm(
             hidden_states,
             normalized_shape=self.normalized_shape,
             weight=self.weight,
             bias=self.bias,
             epsilon=self.variance_epsilon,
         )
+        return output.astype(self.weight.dtype)
 
     def enable_sequence_parallel(self):
         mark_as_sequence_parallel_parameter(self.weight)
@@ -155,7 +156,7 @@ class RMSNormTriton(RMSNorm):
     """Wrapper for triton RMSNorm, used for fused QK norm."""
 
     def forward(self, hidden_states: Tensor):
-        from paddlefleet.ops.triton_ops.rms_norm_fusion import (
+        from paddlefleet.triton_ops.rms_norm_fusion import (
             RMSNormFusionTriton,
         )
 

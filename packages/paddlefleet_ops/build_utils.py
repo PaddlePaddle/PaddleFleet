@@ -35,7 +35,7 @@ PKG_ROOT = Path(__file__).parent.resolve()
 # workspace root (packages/paddlefleet_ops/ → packages/ → workspace root)
 ROOT_DIR = PKG_ROOT.parent.parent.resolve()
 
-OPS_DIR = PKG_ROOT / "src" / "paddlefleet_ops" / "ops"
+OPS_DIR = PKG_ROOT / "src" / "paddlefleet_ops"
 THIRD_PARTY_INSTALL_TEMP = PKG_ROOT / "src" / "_third_party_install_temp"
 
 
@@ -80,14 +80,16 @@ class EcosystemLibrary:
         source_rel_path: str,
         artifacts: list[Artifact],
         extra_env: dict[str, str] | None = None,
+        include_dirs: list[str] | None = None,
     ):
         self.name = name
-        # source_rel_path is relative to workspace root (where third_party/ lives)
-        self.source_dir = ROOT_DIR / source_rel_path
+        # source_rel_path is relative to PKG_ROOT (where third_party/ lives)
+        self.source_dir = PKG_ROOT / source_rel_path
         # Install into a subdirectory named after the library
         self.install_dir = THIRD_PARTY_INSTALL_TEMP / name
         self.artifacts = artifacts
         self._extra_env = extra_env or {}
+        self._include_dirs = include_dirs or []
 
     def build(self) -> None:
         """Builds the library unconditionally."""
@@ -134,6 +136,16 @@ class EcosystemLibrary:
         try:
             _env = os.environ.copy()
             _env.update(self._extra_env)
+            if self._include_dirs:
+                abs_dirs = [
+                    str(self.source_dir / d) for d in self._include_dirs
+                ]
+                extra = os.pathsep.join(abs_dirs)
+                for var in ("C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+                    existing = _env.get(var, "")
+                    _env[var] = (
+                        f"{extra}{os.pathsep}{existing}" if existing else extra
+                    )
             subprocess.check_call(cmd, cwd=self.source_dir, env=_env)
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to build {self.name}: {e}")
@@ -162,7 +174,7 @@ class EcosystemLibrary:
                 cmd = [
                     "patchelf",
                     "--add-rpath",
-                    "$ORIGIN/../../nvidia/nvshmem/lib",
+                    "$ORIGIN/../nvidia/nvshmem/lib",
                     dst,
                 ]
                 try:
@@ -176,12 +188,12 @@ class EcosystemLibrary:
 def check_submodule_updated():
     if backends.IS_NVIDIA:
         if not (
-            (ROOT_DIR / "third_party" / "DeepGEMM" / ".git").exists()
-            and (ROOT_DIR / "third_party" / "DeepEP" / ".git").exists()
-            and (ROOT_DIR / "third_party" / "HybridEP" / ".git").exists()
-            and (ROOT_DIR / "third_party" / "quack" / ".git").exists()
-            and (ROOT_DIR / "third_party" / "sonic-moe" / ".git").exists()
-            and (ROOT_DIR / "third_party" / "flash-attention" / ".git").exists()
+            (PKG_ROOT / "third_party" / "DeepGEMM" / ".git").exists()
+            and (PKG_ROOT / "third_party" / "DeepEP" / ".git").exists()
+            and (PKG_ROOT / "third_party" / "HybridEP" / ".git").exists()
+            and (PKG_ROOT / "third_party" / "quack" / ".git").exists()
+            and (PKG_ROOT / "third_party" / "sonic-moe" / ".git").exists()
+            and (PKG_ROOT / "third_party" / "flash-attention" / ".git").exists()
         ):
             logger.error(
                 "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
@@ -237,6 +249,26 @@ def check_cuda_arch_list():
         )
 
 
+def _detect_local_gpu_arch():
+    """Auto-detect the compute capability of the first visible GPU via nvidia-smi.
+
+    Returns a string like '9.0', or None if detection fails.
+    DeepEP requires GPU compute capability >= 9.0 (SM90+).
+    """
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+        )
+        caps = {
+            line.strip() for line in out.decode().splitlines() if line.strip()
+        }
+        # Return the first available architecture (usually all GPUs are same)
+        return caps[0] if caps else None
+    except Exception:
+        return None
+
+
 def get_cuda_version():
     nvcc_path = shutil.which("nvcc")
     if nvcc_path is None:
@@ -272,9 +304,7 @@ def get_special_build_deps():
         cuda_major, cuda_minor = get_cuda_version()
         major = sys.version_info.major
         minor = sys.version_info.minor
-        deps = [
-            "paddlepaddle_gpu==3.4.0.post20260429+f2d27632b14",
-        ]
+        deps = []
         # for deep_ep build
         if platform.machine() == "aarch64":
             deps.append("nvidia-nvshmem-cu13>=3.3.9,<3.5")
@@ -315,12 +345,16 @@ def get_libs():
 
     # Allow CI or users to pin the arch list via PADDLE_CUDA_ARCH_LIST.
     # Falls back to sensible defaults derived from the detected CUDA version:
-    #   < 12.8  → SM90 only (H800)
-    #   ≥ 12.8 / 13.x → SM90 + SM100 + SM103 (H800 + B100/B200)
+    #   < 12.8  → SM90 only
+    #   ≥ 12.8 / 13.x → SM90 + SM100 + SM103
     _default_arch = (
         "9.0" if (cuda_major == 12 and cuda_minor < 8) else "9.0;10.0;10.3"
     )
-    _raw = os.environ.get("PADDLE_CUDA_ARCH_LIST", _default_arch)
+    _raw = (
+        os.environ.get("PADDLE_CUDA_ARCH_LIST")
+        or _detect_local_gpu_arch()
+        or _default_arch
+    )
     # Normalize: some callers use comma-separated (e.g. "8.0,9.0,10.0,10.3").
     # Paddle's _get_cuda_arch_flags only accepts semicolon-separated values,
     # and DeepEP only supports SM90/SM100/SM103 — drop anything outside that set.
@@ -339,6 +373,11 @@ def get_libs():
                 Artifact("deep_gemm", "deep_gemm"),
                 Artifact("deep_gemm_cpp", "deep_gemm_cpp"),
             ],
+            include_dirs=[
+                "deep_gemm/include",
+                "third-party/cutlass/include",
+                "third-party/fmt/include",
+            ],
         ),
         EcosystemLibrary(
             name="DeepEP",
@@ -348,6 +387,7 @@ def get_libs():
                 Artifact("deep_ep_cpp.so", "deep_ep_cpp.so"),
             ],
             extra_env={"PADDLE_CUDA_ARCH_LIST": _deep_ep_arch},
+            include_dirs=["csrc/"],
         ),
         EcosystemLibrary(
             name="flash-attention",
@@ -356,6 +396,11 @@ def get_libs():
                 Artifact("flash_mask", "flash_mask"),
             ],
             extra_env={"FLASHMASK_BUILD": "fa4"},
+            include_dirs=[
+                "flash_mask/flashmask_attention_v3/csrc",
+                "flash_mask/flashmask_attention_v3",
+                "flash_mask/flashmask_attention_v3/cutlass/include",
+            ],
         ),
     ]
     if (cuda_major, cuda_minor) >= (12, 9):
@@ -369,6 +414,7 @@ def get_libs():
                 ],
                 extra_env={
                     "HYBRID_EP_MULTINODE": "1",
+                    "HYBRID_EP_SKIP_DEEP_EP": "1",
                     "PADDLE_CUDA_ARCH_LIST": _deep_ep_arch,
                 },
             ),

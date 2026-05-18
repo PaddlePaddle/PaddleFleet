@@ -30,6 +30,13 @@ sys.path.insert(
 import types
 import unittest
 
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
 # Mock triton and triton.language if not available, so the module can be imported.
 _triton_available = False
 try:
@@ -48,8 +55,8 @@ if not _triton_available:
         fn if fn is not None else lambda f: f
     )
     _mock_triton.cdiv = lambda a, b: (a + b - 1) // b
-    _mock_triton.next_power_of_2 = (
-        lambda n: 1 << (n - 1).bit_length() if n > 0 else 1
+    _mock_triton.next_power_of_2 = lambda n: (
+        1 << (n - 1).bit_length() if n > 0 else 1
     )
     sys.modules.setdefault("triton", _mock_triton)
     sys.modules.setdefault("triton.language", _mock_tl)
@@ -69,34 +76,42 @@ except (ImportError, ModuleNotFoundError):
 
 
 @unittest.skipIf(not _SKIP_RR, "rr_attn_estimate_triton_func not compiled")
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRequire(unittest.TestCase):
     """Tests for _require helper."""
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestExtractRawPtrs(unittest.TestCase):
     """Tests for _extract_raw_ptrs function."""
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRawPtrs(unittest.TestCase):
     """Tests for RawPtrs dataclass."""
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestStrideMaxMinPtrs(unittest.TestCase):
     """Tests for StrideMaxMinPtrs dataclass."""
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestPrepareStrideMaxMinPtrs(unittest.TestCase):
     """Tests for _prepare_stride_maxmin_ptrs function."""
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestRrAttnEstimateTritonFunc(unittest.TestCase):
     """Tests for rr_attn_estimate_triton_func."""
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestLog2E(unittest.TestCase):
     """Tests for LOG2E constant."""
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestFlashmaskInit(unittest.TestCase):
     """Tests for flashmask __init__.py."""
 

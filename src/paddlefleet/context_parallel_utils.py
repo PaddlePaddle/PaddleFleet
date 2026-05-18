@@ -21,10 +21,10 @@ from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
 
 if paddle.cuda.get_device_capability()[0] == 10:
-    from paddlefleet.ops.flash_mask.cute.flashmask_utils import (
+    from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
         FlashMaskInfoPaddle,
     )
-    from paddlefleet.ops.flash_mask.cute.interface import (
+    from paddlefleet_ops.flash_mask.cute.interface import (
         _flash_attn_bwd,
         _flash_attn_fwd,
     )

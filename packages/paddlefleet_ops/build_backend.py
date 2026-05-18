@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 import backends
@@ -51,65 +52,84 @@ def get_git_commit_hash(cwd: Path | None) -> str:
     )
 
 
-def _generate_version_info():
-    """Generate version info file from ops_required_version.txt.
+def _get_current_branch(cwd: Path | None) -> str:
+    return (
+        subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd
+        )
+        .strip()
+        .decode("utf-8")
+    )
 
-    The version is developer-maintained in ops_required_version.txt
-    (e.g. 0.3.0.dev1, 0.3.0.dev2, ...).  Developers bump it manually
-    whenever paddlefleet_ops code changes, as part of their PR.
+
+def _find_base_branch(cwd: Path) -> str:
+    """Determine the base branch (develop or release/*).
+
+    If the current branch IS develop or release/*, use it directly.
+    Otherwise, default to 'develop'.
+    Returns the branch name without remote prefix (e.g. "develop" or "release/0.2").
+    """
+    current = _get_current_branch(cwd)
+    if current == "develop" or current.startswith("release/"):
+        return current
+
+    # Default to develop for non-base branches
+    return "develop"
+
+
+def _get_last_packages_commit(cwd: Path, base_branch: str) -> str:
+    """Get the last commit that modified the packages/ directory based on current state.
+
+    Always searches from the current branch or HEAD (detached), never uses other branches.
+    base_branch is only used to determine version suffix (dev/post), not for search.
+    """
+    current = _get_current_branch(cwd)
+
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%H", "--", "packages/"],
+        cwd=cwd,
+        capture_output=True,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().decode()
+
+    raise RuntimeError("Cannot find any commit that modified packages/")
+
+
+def _generate_version_info():
+    """Generate version info file from version.txt + git commit hash.
+
     CI release builds may override via PADDLEFLEET_VERSION env var.
+    Otherwise the version is derived as:
+      - develop branch: <base_version>.dev<YYYYMMDD>+<commit_hash_8>
+      - release/* branch: <base_version>.post<YYYYMMDD>+<commit_hash_8>
     """
     version_py = _pkg_root / "src" / "paddlefleet_ops" / "version.py"
-    ops_req_file = _workspace_root / "ops_required_version.txt"
 
     if version_py.exists() and not is_git_repo():
         logger.info(
             "The version.py file already exists (not in git repo), keeping it"
         )
-        return ops_req_file.read_text().strip()
+        return
 
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
     else:
-        # Generate version dynamically
-        # Read base version from version.txt
-        version_file = _workspace_root / "version.txt"
-        if not version_file.exists():
-            raise RuntimeError("version.txt not found in workspace root")
-        base_version = version_file.read_text().strip()
-
-        # Read build number from ops_required_version.txt
-        if not ops_req_file.exists():
-            raise RuntimeError(
-                "ops_required_version.txt not found in workspace root"
-            )
-        build_num = ops_req_file.read_text().strip()
-        if not build_num:
-            raise RuntimeError("ops_required_version.txt is empty")
-
-        # Determine suffix based on git branch
-        is_release_branch = False
-        # Get current branch name
-        branch = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=_workspace_root,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode("utf-8")
-            .strip()
+        base_version = (_workspace_root / "version.txt").read_text().strip()
+        base_branch = _find_base_branch(_workspace_root)
+        packages_commit = _get_last_packages_commit(
+            _workspace_root, base_branch
         )
-        # Check if branch starts with "release/"
-        is_release_branch = branch.startswith("release/")
-        logger.info(
-            f"Current branch: {branch}, is_release_branch: {is_release_branch}"
-        )
+        commit_short = packages_commit[:8]
+        date_str = datetime.now().strftime("%Y%m%d")
+        if base_branch.startswith("release/"):
+            final_version = f"{base_version}.post{date_str}+{commit_short}"
+        else:
+            final_version = f"{base_version}.dev{date_str}+{commit_short}"
 
-        # Generate version with appropriate suffix
-        suffix = ".post" if is_release_branch else ".dev"
-        final_version = f"{base_version}{suffix}{build_num}"
-
-    git_commit_hash = get_git_commit_hash(_workspace_root)
+    git_commit_hash = _get_last_packages_commit(
+        _workspace_root, _find_base_branch(_workspace_root)
+    )
 
     with open(version_py, "w") as f:
         f.write(
@@ -220,7 +240,6 @@ def prepare_metadata_for_build_editable(
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     check_cuda_arch_list()
-    # _clean_egg_info()  # Temporarily disabled - may cause issues with Paddle's CUDAExtension
     check_patchelf_exists()
     check_submodule_updated()
     _prepare_ecosystem(use_symlinks=False)
@@ -232,7 +251,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
 def build_editable(
     wheel_directory, config_settings=None, metadata_directory=None
 ):
-    # _clean_egg_info()  # Temporarily disabled - may cause issues with Paddle's CUDAExtension
+    check_cuda_arch_list()
     check_patchelf_exists()
     check_submodule_updated()
     _prepare_ecosystem(use_symlinks=True)
@@ -242,6 +261,11 @@ def build_editable(
 
 
 def build_sdist(sdist_directory, config_settings=None):
-    # _clean_egg_info()  # Temporarily disabled - may cause issues with Paddle's CUDAExtension
-    check_submodule_updated()
-    return orig.build_sdist(sdist_directory, config_settings)
+    raise RuntimeError(
+        "Currently, we don't support building sdist. "
+        "Please re-build paddlefleet_ops with `--wheel` option. "
+        "For example, run `uv build --package paddlefleet_ops --wheel`."
+    )
+    # TODO(dev): Enable source distribution build when it's ready.
+    # check_submodule_updated()
+    # return orig.build_sdist(sdist_directory, config_settings)

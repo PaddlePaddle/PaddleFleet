@@ -22,7 +22,7 @@ from paddle import base
 from paddle.base import core
 
 # from paddlefleet_ops._extensions.flashmask import (
-from paddlefleet.ops import (
+from paddlefleet_ops import (
     rr_attn_estimate_triton_func,
 )
 

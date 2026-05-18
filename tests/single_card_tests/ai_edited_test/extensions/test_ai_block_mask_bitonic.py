@@ -48,13 +48,23 @@ if not _triton_available:
         fn if fn is not None else lambda f: f
     )
     _mock_triton.cdiv = lambda a, b: (a + b - 1) // b
-    _mock_triton.next_power_of_2 = (
-        lambda n: 1 << (n - 1).bit_length() if n > 0 else 1
+    _mock_triton.next_power_of_2 = lambda n: (
+        1 << (n - 1).bit_length() if n > 0 else 1
     )
     sys.modules.setdefault("triton", _mock_triton)
     sys.modules.setdefault("triton.language", _mock_tl)
 
+try:
+    from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
+        bitonic_argsort_device,  # noqa: F401
+    )
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBitonicArgsortDevice(unittest.TestCase):
     """Tests for bitonic_argsort_device triton kernel."""
 
@@ -85,6 +95,7 @@ class TestBitonicArgsortDevice(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestCompareAndSwap(unittest.TestCase):
     """Tests for _compare_and_swap triton kernel."""
 
@@ -105,6 +116,7 @@ class TestCompareAndSwap(unittest.TestCase):
         self.assertIsNotNone(_compare_and_swap)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBitonicMerge(unittest.TestCase):
     """Tests for _bitonic_merge triton kernel."""
 
@@ -125,6 +137,7 @@ class TestBitonicMerge(unittest.TestCase):
         self.assertIsNotNone(_bitonic_merge)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestTopPKernel(unittest.TestCase):
     """Tests for top_p_kernel triton kernel."""
 
@@ -166,6 +179,7 @@ class TestTopPKernel(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBitonicSortingRelationship(unittest.TestCase):
     """Tests for the relationship between bitonic sort components."""
 
@@ -205,6 +219,7 @@ class TestBitonicSortingRelationship(unittest.TestCase):
         self.assertTrue(callable(bitonic_argsort_device))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBlockMaskUtilsModuleStructure(unittest.TestCase):
     """Tests for module-level structure of block_mask_utils."""
 

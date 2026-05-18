@@ -30,7 +30,7 @@ from paddle.incubate.nn.functional import (
 
 if paddle.is_compiled_with_cuda():
     try:
-        from paddlefleet.ops import fused_apply_rotary_pos_emb_vision
+        from paddlefleet_ops import fused_apply_rotary_pos_emb_vision
     except ImportError:
         logging.getLogger(__name__).warning(
             "Failed to import optional CUDA op "

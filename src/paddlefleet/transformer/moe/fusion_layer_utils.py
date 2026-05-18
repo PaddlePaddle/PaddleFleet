@@ -17,8 +17,8 @@ import copy
 import logging
 
 import paddle
+import paddlefleet_ops
 
-import paddlefleet
 from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
 from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant
@@ -106,6 +106,9 @@ class UnZipNode:
             hidden_states, scale = hs_2d_dispatched, None
 
         with paddle.amp.auto_cast(False):
+            using_ue8m0_scale = (
+                scale is not None and scale.dtype == paddle.int32
+            )
             (
                 unzipped_tokens,
                 zipped_expertwise_rowmap,
@@ -120,6 +123,7 @@ class UnZipNode:
                 tokens_per_expert=tokens_per_expert,
                 padding_alignment=FP8_ALIGN,
                 do_gather=fill_output,
+                using_ue8m0_scale=using_ue8m0_scale,
             )
 
         if scale is None:
@@ -261,6 +265,7 @@ class MlpNode:
         moe_grouped_gemm=False,
         use_auto_subbatch=False,
         moe_subbatch_diag=False,
+        use_ue8m0=False,
         dw_p2p_overlap=False,
     ):
         """
@@ -328,6 +333,7 @@ class MlpNode:
                     use_fp8_mlp=use_fp8_mlp,
                     moe_deep_gemm=moe_deep_gemm,
                     moe_grouped_gemm=moe_grouped_gemm,
+                    use_ue8m0=use_ue8m0,
                     dw_p2p_overlap=dw_p2p_overlap,
                 )
                 for expert_id in range(len(custom_map.experts))
@@ -342,6 +348,7 @@ class MlpNode:
                 use_fp8_mlp=use_fp8_mlp,
                 moe_deep_gemm=moe_deep_gemm,
                 moe_grouped_gemm=moe_grouped_gemm,
+                use_ue8m0=use_ue8m0,
                 dw_p2p_overlap=dw_p2p_overlap,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
@@ -520,7 +527,7 @@ class MlpNode:
             expert_out,
             expert_out_scale,
             expert_unzipped_idx,
-        ) = paddlefleet.ops.tokens_unzip_gather(
+        ) = paddlefleet_ops.tokens_unzip_gather(
             hs_2d_dispatched,
             hs_2d_dispatched_scale,
             zipped_expertwise_rowmap,
@@ -1394,7 +1401,7 @@ class MlpNode:
                         expert_unzipped_grad,
                         _,
                         unzipped_grad_idx,
-                    ) = paddlefleet.ops.tokens_unzip_gather(
+                    ) = paddlefleet_ops.tokens_unzip_gather(
                         hidden_states_out_grad,
                         None,
                         self.unzip_node.zipped_expertwise_rowmap,
@@ -1472,7 +1479,7 @@ class MlpNode:
                 output, hidden_states_out_grad.dtype
             )
             del output
-            dispatched_probs_grad = paddlefleet.ops.tokens_zip_prob(
+            dispatched_probs_grad = paddlefleet_ops.tokens_zip_prob(
                 probs_grad_list,
                 self.unzip_node.zipped_expertwise_rowmap,
                 self.dispatched_indices,
@@ -1678,7 +1685,7 @@ class MlpNode:
                     expert_unzipped_grad,
                     _,
                     unzipped_grad_idx,
-                ) = paddlefleet.ops.tokens_unzip_gather(
+                ) = paddlefleet_ops.tokens_unzip_gather(
                     hidden_states_out_grad,
                     None,
                     self.unzip_node.zipped_expertwise_rowmap,
@@ -1730,7 +1737,7 @@ class MlpNode:
             )
             del output
 
-            dispatched_probs_grad = paddlefleet.ops.tokens_zip_prob(
+            dispatched_probs_grad = paddlefleet_ops.tokens_zip_prob(
                 probs_grad_list,
                 self.unzip_node.zipped_expertwise_rowmap,
                 self.dispatched_indices,
@@ -1792,6 +1799,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         fp8_dispatched_handle=None,
         use_auto_subbatch=False,
         moe_subbatch_diag=False,
+        use_ue8m0=False,
         dw_p2p_overlap=False,
     ):
         """
@@ -1820,6 +1828,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             moe_grouped_gemm=moe_grouped_gemm,
             use_auto_subbatch=use_auto_subbatch,
             moe_subbatch_diag=moe_subbatch_diag,
+            use_ue8m0=use_ue8m0,
             dw_p2p_overlap=dw_p2p_overlap,
         )
 
