@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Re-export from Paddle for backward compatibility (PaddleFormers imports these from paddlefleet)
+
 from . import (
     parallel_state as parallel_state,
     training as training,
@@ -30,10 +32,6 @@ from .package_info import (
     __version__,
 )
 from .timers import Timers
-
-# Re-export from Paddle for backward compatibility (PaddleFormers imports these from paddlefleet)
-from paddle.distributed.fleet.meta_parallel import LayerSpec
-from paddle.distributed.fleet.meta_parallel import build_spec_layer as build_layer
 
 mpu = parallel_state
 

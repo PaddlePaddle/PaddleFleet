@@ -209,12 +209,16 @@ def _apply_rotary_pos_emb_bshd(
                 # freqs: [S, B, D] -> slice to [S_sp, B, D]
                 seq_len = freqs.shape[0]
                 seq_per_rank = seq_len // sp_size
-                freqs = freqs[sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :, :]
+                freqs = freqs[
+                    sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :, :
+                ]
             else:
                 # freqs: [B, S, D] -> slice to [B, S_sp, D]
                 seq_len = freqs.shape[1]
                 seq_per_rank = seq_len // sp_size
-                freqs = freqs[:, sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :]
+                freqs = freqs[
+                    :, sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :
+                ]
 
     # For M-RoPE with sequence parallel, freqs may be [S, B, D] while t is [B, S, H, D].
     # When the first two dims are swapped (same product but different order), transpose

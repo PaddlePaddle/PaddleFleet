@@ -163,9 +163,14 @@ class RotaryEmbedding(nn.Layer):
             else:
                 # For 3D position_ids (M-RoPE), this function should not be called
                 # Fall back to max_seq_len to avoid cryptic errors
-                seq = paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
+                seq = (
+                    paddle.arange(max_seq_len).astype(self.inv_freq.dtype)
+                    + offset
+                )
         else:
-            seq = paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
+            seq = (
+                paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
+            )
 
         if self.seq_len_interpolation_factor is not None:
             seq *= 1 / self.seq_len_interpolation_factor

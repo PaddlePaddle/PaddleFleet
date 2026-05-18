@@ -458,7 +458,9 @@ class Qwen3_5Model(FleetLayer):
             return position_ids
 
         # Handle text-only case: generate 3D position_ids with identical values across all three dimensions
-        if input_ids is not None and (image_grid_thw is None and video_grid_thw is None):
+        if input_ids is not None and (
+            image_grid_thw is None and video_grid_thw is None
+        ):
             batch_size, seq_length = input_ids.shape
             if attention_mask is not None:
                 position_ids = attention_mask.astype("int64").cumsum(-1) - 1

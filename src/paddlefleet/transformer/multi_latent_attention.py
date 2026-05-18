@@ -65,7 +65,9 @@ except:
     fused_apply_mla_rope_for_q = None
 
 
-def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0, position_offset=0):
+def _ec_compatible_rope_apply(
+    q_pe, k_pe, seq_len, rope_base=1000000.0, position_offset=0
+):
     """Apply RoPE using EC's complex multiplication method (no YaRN, no mscale).
 
     This exactly matches ErnieCore's compute_freqs_cis_mrope_and_apply_rotary_3d
@@ -85,7 +87,9 @@ def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0, position
         rope_base
         ** (paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim))
     )
-    positions = paddle.arange(position_offset, position_offset + seq_len, dtype="float32")
+    positions = paddle.arange(
+        position_offset, position_offset + seq_len, dtype="float32"
+    )
     # freqs_table: [S, D/2]
     freqs_table = paddle.outer(positions, freqs)
     # Expand for batch: [1, S, D/2]
@@ -853,7 +857,9 @@ class MLASelfAttention(MultiLatentAttention):
                     or self.config.context_parallel_size == 1
                 ):
                     if rotary_pos_emb.shape[1] >= start_pos + q_len:
-                        rotary_pos_emb = rotary_pos_emb[:, start_pos:start_pos + q_len]
+                        rotary_pos_emb = rotary_pos_emb[
+                            :, start_pos : start_pos + q_len
+                        ]
                     else:
                         # During inference with KV cache, rotary_pos_emb was
                         # computed for the current input length only, but
@@ -930,7 +936,7 @@ class MLASelfAttention(MultiLatentAttention):
                         cu_seqlens=cu_seqlens_kv,
                         mscale=mscale,
                         cp_group=self.pg_collection.cp,
-                        sp_group=getattr(self.pg_collection, 'sp', None),
+                        sp_group=getattr(self.pg_collection, "sp", None),
                     )
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]

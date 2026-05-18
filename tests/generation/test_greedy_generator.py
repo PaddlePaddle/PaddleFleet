@@ -17,14 +17,15 @@ Unit tests for generation module components.
 This test file imports only the necessary components without full paddlefleet.
 """
 
-import sys
 import os
+import sys
 
 # Add src to path for direct import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+
+import unittest
 
 import paddle
-import unittest
 
 from paddlefleet.generation.greedy_generator import DynamicKVCache
 
@@ -56,8 +57,12 @@ class TestDynamicKVCache(unittest.TestCase):
         self.assertIsNotNone(returned_v)
 
         # Should be the same as input (first update)
-        self.assertTrue(paddle.allclose(returned_k.cast("float32"), k1.cast("float32")))
-        self.assertTrue(paddle.allclose(returned_v.cast("float32"), v1.cast("float32")))
+        self.assertTrue(
+            paddle.allclose(returned_k.cast("float32"), k1.cast("float32"))
+        )
+        self.assertTrue(
+            paddle.allclose(returned_v.cast("float32"), v1.cast("float32"))
+        )
 
     def test_second_update_concat(self):
         """Test that second update concatenates."""
@@ -142,6 +147,6 @@ class TestDynamicKVCache(unittest.TestCase):
         self.assertEqual(cache.get_seq_len(3), 3)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("Running DynamicKVCache unit tests...")
     unittest.main(verbosity=2)

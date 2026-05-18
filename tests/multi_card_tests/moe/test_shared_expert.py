@@ -117,7 +117,11 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
     )
     input_ids = data[:, :-1]
     labels = data[:, 1:]
-    position_ids = paddle.arange(seq_len, dtype=paddle.int64).unsqueeze(0).expand([batch_size, -1])
+    position_ids = (
+        paddle.arange(seq_len, dtype=paddle.int64)
+        .unsqueeze(0)
+        .expand([batch_size, -1])
+    )
 
     strategy = fleet.DistributedStrategy()
     gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
@@ -178,7 +182,11 @@ def run_tp_sp(
     )
     input_ids = data[:, :-1]
     labels = data[:, 1:]
-    position_ids = paddle.arange(seq_len, dtype=paddle.int64).unsqueeze(0).expand([batch_size, -1])
+    position_ids = (
+        paddle.arange(seq_len, dtype=paddle.int64)
+        .unsqueeze(0)
+        .expand([batch_size, -1])
+    )
 
     tp_group = ps.get_tensor_model_parallel_group()
 

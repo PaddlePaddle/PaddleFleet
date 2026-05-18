@@ -39,7 +39,7 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import paddle
 
@@ -66,15 +66,19 @@ def _apply_repetition_penalty(
     # Create mask for tokens that appeared in input_ids using scatter
     # This is more efficient than the loop version
     token_mask = paddle.zeros([batch_size, vocab_size], dtype="float32")
-    
+
     # Flatten input_ids and create batch indices
     flat_input_ids = input_ids.reshape([-1])  # [batch_size * seq_len]
     batch_indices = paddle.arange(batch_size, dtype="int64").unsqueeze(-1)
-    batch_indices = batch_indices.expand([batch_size, seq_len]).reshape([-1])  # [batch_size * seq_len]
-    
+    batch_indices = batch_indices.expand([batch_size, seq_len]).reshape(
+        [-1]
+    )  # [batch_size * seq_len]
+
     # Create indices for scatter
-    scatter_indices = paddle.stack([batch_indices, flat_input_ids], axis=-1)  # [batch_size * seq_len, 2]
-    
+    scatter_indices = paddle.stack(
+        [batch_indices, flat_input_ids], axis=-1
+    )  # [batch_size * seq_len, 2]
+
     # Scatter 1.0 to mark appeared tokens
     token_mask = paddle.scatter_nd(
         scatter_indices,
@@ -96,6 +100,7 @@ def _apply_repetition_penalty(
 # KV cache
 # ---------------------------------------------------------------------------
 
+
 class DynamicKVCache:
     """HF-style dynamic KV cache: per-layer tensors grow by concat.
 
@@ -104,8 +109,8 @@ class DynamicKVCache:
     """
 
     def __init__(self, num_layers: int):
-        self.k: list[Optional[paddle.Tensor]] = [None] * num_layers
-        self.v: list[Optional[paddle.Tensor]] = [None] * num_layers
+        self.k: list[paddle.Tensor | None] = [None] * num_layers
+        self.v: list[paddle.Tensor | None] = [None] * num_layers
 
     def get_seq_len(self, layer_idx: int = 0) -> int:
         if self.k[layer_idx] is not None:
@@ -116,13 +121,19 @@ class DynamicKVCache:
                 return k.shape[1]
         return 0
 
-    def update(self, k_new: paddle.Tensor, v_new: paddle.Tensor, layer_idx: int):
+    def update(
+        self, k_new: paddle.Tensor, v_new: paddle.Tensor, layer_idx: int
+    ):
         if self.k[layer_idx] is None:
             self.k[layer_idx] = k_new
             self.v[layer_idx] = v_new
         else:
-            self.k[layer_idx] = paddle.concat([self.k[layer_idx], k_new], axis=1)
-            self.v[layer_idx] = paddle.concat([self.v[layer_idx], v_new], axis=1)
+            self.k[layer_idx] = paddle.concat(
+                [self.k[layer_idx], k_new], axis=1
+            )
+            self.v[layer_idx] = paddle.concat(
+                [self.v[layer_idx], v_new], axis=1
+            )
         return self.k[layer_idx], self.v[layer_idx]
 
     def reset(self) -> None:
@@ -134,6 +145,7 @@ class DynamicKVCache:
 # ---------------------------------------------------------------------------
 # Greedy generator
 # ---------------------------------------------------------------------------
+
 
 class GreedyGenerator:
     """Greedy decode on top of a FleetGPTModel using the native KV cache path.
@@ -149,7 +161,7 @@ class GreedyGenerator:
                            eos_token_id=tok.eos_token_id)
     """
 
-    def __init__(self, fleet_model: "GPTModel"):
+    def __init__(self, fleet_model: GPTModel):
         cfg = fleet_model.config
 
         if getattr(cfg, "sequence_parallel", False):
@@ -172,9 +184,17 @@ class GreedyGenerator:
         self.model = fleet_model
         num_layers = cfg.num_hidden_layers
         # Account for empty layers in head/tail that offset layer_number
-        num_empty_layers_add_in_head = getattr(cfg, "num_empty_layers_add_in_head", 0)
-        num_empty_layers_add_in_tail = getattr(cfg, "num_empty_layers_add_in_tail", 0)
-        total_layers = num_layers + num_empty_layers_add_in_head + num_empty_layers_add_in_tail
+        num_empty_layers_add_in_head = getattr(
+            cfg, "num_empty_layers_add_in_head", 0
+        )
+        num_empty_layers_add_in_tail = getattr(
+            cfg, "num_empty_layers_add_in_tail", 0
+        )
+        total_layers = (
+            num_layers
+            + num_empty_layers_add_in_head
+            + num_empty_layers_add_in_tail
+        )
         self.cache = DynamicKVCache(num_layers=total_layers)
 
     @paddle.no_grad()
@@ -182,7 +202,7 @@ class GreedyGenerator:
         self,
         input_ids: paddle.Tensor,
         max_new_tokens: int,
-        eos_token_id: Optional[int] = None,
+        eos_token_id: int | None = None,
         repetition_penalty: float = 1.0,
     ) -> paddle.Tensor:
         """Run greedy auto-regressive decoding.
@@ -214,14 +234,18 @@ class GreedyGenerator:
                 .unsqueeze(0)
                 .expand([bsz, prompt_len])
             )
-            logits = self.model({
-                "input_ids": input_ids,
-                "position_ids": position_ids,
-                "past_key_values": self.cache,
-                "use_cache": True,
-            })
+            logits = self.model(
+                {
+                    "input_ids": input_ids,
+                    "position_ids": position_ids,
+                    "past_key_values": self.cache,
+                    "use_cache": True,
+                }
+            )
             # Apply repetition penalty to prefill output
-            logits = _apply_repetition_penalty(logits, generated, repetition_penalty)
+            logits = _apply_repetition_penalty(
+                logits, generated, repetition_penalty
+            )
             next_tok = logits[:, -1].argmax(axis=-1, keepdim=True)
             generated = paddle.concat([generated, next_tok], axis=1)
 
@@ -230,14 +254,18 @@ class GreedyGenerator:
             for step in range(max_new_tokens - 1):
                 cur_len = self.cache.get_seq_len()
                 position_ids = paddle.full([bsz, 1], cur_len, dtype="int64")
-                logits = self.model({
-                    "input_ids": next_tok,
-                    "position_ids": position_ids,
-                    "past_key_values": self.cache,
-                    "use_cache": True,
-                })
+                logits = self.model(
+                    {
+                        "input_ids": next_tok,
+                        "position_ids": position_ids,
+                        "past_key_values": self.cache,
+                        "use_cache": True,
+                    }
+                )
                 # Apply repetition penalty
-                logits = _apply_repetition_penalty(logits, generated, repetition_penalty)
+                logits = _apply_repetition_penalty(
+                    logits, generated, repetition_penalty
+                )
                 next_tok = logits[:, -1].argmax(axis=-1, keepdim=True)
                 generated = paddle.concat([generated, next_tok], axis=1)
                 if eos_token_id is not None:

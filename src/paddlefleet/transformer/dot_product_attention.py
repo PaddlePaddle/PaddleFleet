@@ -95,8 +95,12 @@ class DotProductAttention(FleetLayer):
 
         # For MLA, k_channels and v_channels may differ from config.head_dim
         # Default to config.head_dim if not provided (standard attention)
-        self.k_channels = k_channels if k_channels is not None else self.config.head_dim
-        self.v_channels = v_channels if v_channels is not None else self.config.head_dim
+        self.k_channels = (
+            k_channels if k_channels is not None else self.config.head_dim
+        )
+        self.v_channels = (
+            v_channels if v_channels is not None else self.config.head_dim
+        )
 
         projection_size = self.k_channels * self.config.num_attention_heads
 
@@ -327,7 +331,7 @@ class DotProductAttention(FleetLayer):
                 # During prefill (query_len > 1), is_causal=True handles causal masking.
                 # We still need attention_mask to prevent attending to padding tokens.
                 # During decode (query_len == 1), no causal mask needed.
-                is_causal = (query.shape[1] > 1)
+                is_causal = query.shape[1] > 1
                 # When KV cache is used, key/value include history and may have different
                 # seq length than attention_mask. In that case, skip using attention_mask.
                 attn_mask_kv = attention_mask

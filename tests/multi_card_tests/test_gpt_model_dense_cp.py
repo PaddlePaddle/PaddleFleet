@@ -113,7 +113,12 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
     ).cuda()
     input_ids = data[:, :-1]
     labels = data[:, 1:]
-    position_ids = paddle.arange(seq_len, dtype=paddle.int64).unsqueeze(0).expand([batch_size, -1]).cuda()
+    position_ids = (
+        paddle.arange(seq_len, dtype=paddle.int64)
+        .unsqueeze(0)
+        .expand([batch_size, -1])
+        .cuda()
+    )
 
     gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
     inputs = (

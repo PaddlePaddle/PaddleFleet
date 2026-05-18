@@ -14,8 +14,8 @@
 
 """Generation configuration for Fleet models."""
 
-from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -56,14 +56,14 @@ class GenerationConfig:
     repetition_penalty: float = 1.0
 
     # Special tokens
-    eos_token_id: Optional[int] = None
-    pad_token_id: Optional[int] = None
-    bos_token_id: Optional[int] = None
+    eos_token_id: int | None = None
+    pad_token_id: int | None = None
+    bos_token_id: int | None = None
 
     # Advanced features (reserved for V2)
     use_cache: bool = True
-    stop_words: Optional[List[str]] = None
-    streamer: Optional[Any] = None
+    stop_words: list[str] | None = None
+    streamer: Any | None = None
 
     def __post_init__(self):
         """Validate configuration."""
@@ -73,10 +73,14 @@ class GenerationConfig:
                 f"got {self.decode_strategy}"
             )
         if self.temperature <= 0:
-            raise ValueError(f"temperature must be positive, got {self.temperature}")
+            raise ValueError(
+                f"temperature must be positive, got {self.temperature}"
+            )
         if self.top_k < 1:
             raise ValueError(f"top_k must be >= 1, got {self.top_k}")
         if not (0 < self.top_p <= 1.0):
             raise ValueError(f"top_p must be in (0, 1.0], got {self.top_p}")
         if self.repetition_penalty <= 0:
-            raise ValueError(f"repetition_penalty must be positive, got {self.repetition_penalty}")
+            raise ValueError(
+                f"repetition_penalty must be positive, got {self.repetition_penalty}"
+            )
