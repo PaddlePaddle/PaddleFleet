@@ -99,9 +99,9 @@ class TestHybridEPFusion(unittest.TestCase):
             bias_activation_fusion=True,
         )
         config.hybrid_ep_config = {
-            "num_sms_dispatch": 8,
-            "num_sms_combine": 8,
-            "num_sms_preprocessing": 8,
+            "num_sms_dispatch_api": 8,
+            "num_sms_combine_api": 8,
+            "num_sms_preprocessing_api": 8,
         }
         return config
 
