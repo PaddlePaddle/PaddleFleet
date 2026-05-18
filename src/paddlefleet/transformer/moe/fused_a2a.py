@@ -147,41 +147,6 @@ def reset_hybrid_ep_buffer():
     _hybrid_ep_buffer = None
 
 
-def _need_new_hybrid_ep_buffer(
-    group,
-    hidden_dim,
-    max_num_of_tokens_per_rank,
-    num_local_experts,
-    num_sms_dispatch_api,
-    num_sms_combine_api,
-    num_sms_preprocessing_api,
-):
-    if _hybrid_ep_buffer is None:
-        return True
-
-    config = _hybrid_ep_buffer.config
-    need_new_buffer = (
-        _hybrid_ep_buffer.group != group
-        or config.hidden_dim != hidden_dim
-        or config.max_num_of_tokens_per_rank < max_num_of_tokens_per_rank
-        or config.num_of_experts_per_rank != num_local_experts
-    )
-    if num_sms_dispatch_api is not None:
-        need_new_buffer |= (
-            _hybrid_ep_buffer.num_sms_dispatch_api != num_sms_dispatch_api
-        )
-    if num_sms_combine_api is not None:
-        need_new_buffer |= (
-            _hybrid_ep_buffer.num_sms_combine_api != num_sms_combine_api
-        )
-    if num_sms_preprocessing_api is not None:
-        need_new_buffer |= (
-            _hybrid_ep_buffer.num_sms_preprocessing_api
-            != num_sms_preprocessing_api
-        )
-    return need_new_buffer
-
-
 def get_hybrid_ep_buffer(
     group: Group,
     hidden_dim: int,
@@ -203,15 +168,7 @@ def get_hybrid_ep_buffer(
     )
     num_sms_preprocessing_api = num_sms_preprocessing
 
-    if _need_new_hybrid_ep_buffer(
-        group,
-        hidden_dim,
-        max_num_of_tokens_per_rank,
-        num_local_experts,
-        num_sms_dispatch_api,
-        num_sms_combine_api,
-        num_sms_preprocessing_api,
-    ):
+    if _hybrid_ep_buffer is None:
         _hybrid_ep_buffer = hybrid_ep.HybridEPBuffer(
             group=group,
             hidden_dim=hidden_dim,
