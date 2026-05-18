@@ -82,6 +82,18 @@ tests:
   - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_forward_backward_overlap_utils.py]
     products:
       - num_gpus: 2
+  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_p2p_communication_full.py]
+    products:
+      - num_gpus: 2
+  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_four_directions_p2p_communication.py]
+    products:
+      - num_gpus: 2
+  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_four_directions_p2p_mp.py]
+    products:
+      - num_gpus: 4
+  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_four_directions_p2p_sync_send.py]
+    products:
+      - num_gpus: 2
   # ai_edited_test: tensor_parallel advanced (Pattern A/B, TP=4)
   - test_case: [tests/multi_card_tests/ai_edited_test/tensor_parallel/test_ai_tp_mappings_advanced.py]
     products:
