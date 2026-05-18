@@ -107,8 +107,11 @@ class VisionEmbedding(FleetLayer):
         # pos_ids: [seq_len, 2], freqs: [max_grid_size, head_dim//2]
         # Index freqs with each position dim: freqs[pos_ids] -> [seq_len, 2, head_dim//2]
         rotary_pos_emb = freqs[pos_ids].flatten(start_axis=1)
-        # rotary_pos_emb: [seq_len, head_dim] (2 * head_dim//2)
-        # Duplicate to match expected format [seq_len, 1, 1, head_dim]
+        # rotary_pos_emb: [seq_len, head_dim//2] (2 spatial dims * dim//2 freqs)
+        # Repeat to cover full head_dim so apply_rotary_pos_emb rotates all dims
+        rotary_pos_emb = paddle.concat(
+            [rotary_pos_emb, rotary_pos_emb], axis=-1
+        )
         rotary_pos_emb = rotary_pos_emb[None, :, None, :]
         return rotary_pos_emb
 
