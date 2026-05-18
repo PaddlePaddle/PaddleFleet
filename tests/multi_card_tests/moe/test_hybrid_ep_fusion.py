@@ -98,10 +98,10 @@ class TestHybridEPFusion(unittest.TestCase):
             norm_topk_prob=False,
             bias_activation_fusion=True,
         )
-        config.deepep_buffer_configs = {
-            "num_sms": 20,
-            "dispatch_config": [6, hidden_size],
-            "combine_config": [6, hidden_size],
+        config.hybrid_ep_config = {
+            "num_sms_dispatch": 8,
+            "num_sms_combine": 8,
+            "num_sms_preprocessing": 8,
         }
         return config
 

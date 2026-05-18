@@ -89,6 +89,7 @@ def _new_hybrid_manager(**overrides):
         "router_topk": overrides.pop("router_topk", 2),
         "num_experts": overrides.pop("num_experts", 4),
         "num_local_experts": overrides.pop("num_local_experts", 2),
+        "hybrid_ep_config": overrides.pop("hybrid_ep_config", None),
     }
     manager = _HybridEPManager(**init_kwargs)
     for key, value in overrides.items():
@@ -154,6 +155,17 @@ class _RecordingHybridEPBuffer:
 class _ConstructedHybridEPBuffer:
     instances = []
 
+    class Config:
+        def __init__(
+            self,
+            hidden_dim,
+            max_num_of_tokens_per_rank,
+            num_local_experts,
+        ):
+            self.hidden_dim = hidden_dim
+            self.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
+            self.num_of_experts_per_rank = num_local_experts
+
     def __init__(
         self,
         group,
@@ -167,6 +179,11 @@ class _ConstructedHybridEPBuffer:
         load_cached_kernels=False,
     ):
         self.group = group
+        self.config = self.Config(
+            hidden_dim,
+            max_num_of_tokens_per_rank,
+            num_local_experts,
+        )
         self.hidden_dim = hidden_dim
         self.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
         self.num_local_experts = num_local_experts
@@ -441,28 +458,70 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             [4, 8],
         )
 
-    def test_hybrid_ep_buffer_uses_configured_num_sms(self):
-        manager = _new_hybrid_manager(group=_HybridEPGroup(nranks=2))
+    def test_hybrid_ep_buffer_uses_configured_sms(self):
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=2),
+            hybrid_ep_config={
+                "num_sms_dispatch": 20,
+                "num_sms_combine": 21,
+                "num_sms_preprocessing": 22,
+            },
+        )
         _ConstructedHybridEPBuffer.instances = []
-        original_num_sms = fused_a2a._hybrid_ep_buffer_num_sms
 
-        try:
-            fused_a2a.configure_buffer(num_sms=20)
-            with patch.object(
-                fused_a2a,
-                "hybrid_ep",
-                _HybridEPRuntimeModule,
-                create=True,
-            ):
-                manager._get_buffer(paddle.zeros([4, 8], dtype="float32"))
-        finally:
-            fused_a2a._hybrid_ep_buffer_num_sms = original_num_sms
-            fused_a2a.reset_hybrid_ep_buffer()
+        with patch.object(
+            fused_a2a,
+            "hybrid_ep",
+            _HybridEPRuntimeModule,
+            create=True,
+        ):
+            manager._get_buffer(paddle.zeros([4, 8], dtype="float32"))
 
         buffer = _ConstructedHybridEPBuffer.instances[-1]
         self.assertEqual(buffer.num_sms_dispatch_api, 20)
-        self.assertEqual(buffer.num_sms_combine_api, 20)
-        self.assertEqual(buffer.num_sms_preprocessing_api, 20)
+        self.assertEqual(buffer.num_sms_combine_api, 21)
+        self.assertEqual(buffer.num_sms_preprocessing_api, 22)
+
+    def test_hybrid_ep_buffer_rebuilds_when_configured_sms_changes(self):
+        group = _HybridEPGroup(nranks=2)
+        manager_a = _new_hybrid_manager(
+            group=group,
+            hybrid_ep_config={
+                "num_sms_dispatch": 20,
+                "num_sms_combine": 21,
+                "num_sms_preprocessing": 22,
+            },
+        )
+        manager_b = _new_hybrid_manager(
+            group=group,
+            hybrid_ep_config={
+                "num_sms_dispatch": 20,
+                "num_sms_combine": 23,
+                "num_sms_preprocessing": 22,
+            },
+        )
+        _ConstructedHybridEPBuffer.instances = []
+
+        with patch.object(
+            fused_a2a,
+            "hybrid_ep",
+            _HybridEPRuntimeModule,
+            create=True,
+        ):
+            first = manager_a._get_buffer(paddle.zeros([4, 8], dtype="float32"))
+            second = manager_b._get_buffer(
+                paddle.zeros([4, 8], dtype="float32")
+            )
+
+        self.assertIsNot(first, second)
+        self.assertEqual(len(_ConstructedHybridEPBuffer.instances), 2)
+        self.assertEqual(
+            [
+                item.num_sms_combine_api
+                for item in _ConstructedHybridEPBuffer.instances
+            ],
+            [21, 23],
+        )
 
     def test_dispatch_with_permute_uses_hybrid_ep_runtime_contract(self):
         routing_map = paddle.to_tensor(
