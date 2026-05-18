@@ -44,6 +44,10 @@ jobs:
       group: GZ_BD-CPU
     env:
       TASK: fleet-ci-build-whl-${{ github.event.pull_request.number }}
+      CCACHE_DIR: "/home/data/shared/.ccache/l1" # L1 cache on machine shared dir
+      CCACHE_SECONDARY_STORAGE: "file:///home/data/cfs/.ccache/l2" # L2 cache on cfs
+      CCACHE_MAXSIZE: 50G
+      CCACHE_LIMIT_MULTIPLE: 0.8
     steps:
       - name: Check docker image and run container
         run: |
@@ -53,6 +57,7 @@ jobs:
           docker run -d -t --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
             -v "/home/data/cfs:/home/data/cfs" \
+            -v "/home/data/shared:/home/data/shared" \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}:/paddle \
             -e BRANCH \
@@ -62,6 +67,10 @@ jobs:
             -e ci_scripts \
             -e no_proxy \
             -e CI_name \
+            -e CCACHE_DIR \
+            -e CCACHE_SECONDARY_STORAGE \
+            -e CCACHE_MAXSIZE \
+            -e CCACHE_LIMIT_MULTIPLE \
             -w /paddle --network host ${docker_image}
 
       - name: uv build whl

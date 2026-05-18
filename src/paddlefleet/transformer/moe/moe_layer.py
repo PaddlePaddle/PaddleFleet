@@ -147,6 +147,16 @@ class MoELayer(nn.Layer):
         self.sublayers = sublayers
         routed_expert_config = deepcopy(config)
         shared_expert_config = deepcopy(config)
+        global_use_bias = routed_expert_config.use_bias
+        moe_routed_expert_use_bias = config.moe_routed_expert_use_bias
+        if moe_routed_expert_use_bias is not None:
+            routed_expert_config.use_bias = moe_routed_expert_use_bias
+            logger.info(
+                "PaddleFleet MoELayer moe_routed_expert_use_bias overrides "
+                "routed_expert_config.use_bias: global_use_bias=%s moe_routed_expert_use_bias=%s",
+                global_use_bias,
+                moe_routed_expert_use_bias,
+            )
         self.pg_collection = pg_collection
         self.hidden_size = config.hidden_size
         self.moe_intermediate_size = config.moe_intermediate_size
@@ -328,6 +338,7 @@ class MoELayer(nn.Layer):
                     self.experts.append(None)
 
         shared_expert_args = deepcopy(expert_args)
+        shared_expert_args["config"].use_bias = shared_expert_config.use_bias
         shared_expert_args["config"].hidden_size = self.config.hidden_size
         shared_expert_args["moe_intermediate_size"] = (
             self.moe_shared_expert_intermediate_size

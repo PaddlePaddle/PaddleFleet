@@ -14,6 +14,7 @@
 
 // swiglu_kernel.cu
 #include <cuda_bf16.h>
+#include <cstdint>
 #include <limits>
 #include <vector>
 #include "paddle/extension.h"
@@ -28,21 +29,104 @@ __device__ __forceinline__ float precise_sigmoid(T x) {
   return 1.0f / (1.0f + expf(-static_cast<float>(x)));
 }
 
+constexpr int kSwiGLUBackBlockSize = 256;
+
+inline bool ShouldUseInt64Index(int64_t rows, int64_t row_stride) {
+  // This predicate protects Y/DX offsets:
+  //   row * row_stride + col
+  // The G offset uses row * hidden_size + col. For fused_swiglu_bwd,
+  // row_stride is 2 * hidden_size after shape checks, so any int32-safe Y/DX
+  // offset range also bounds the G offset range.
+  return rows >=
+         static_cast<int64_t>(std::numeric_limits<int>::max()) / row_stride;
+}
+
+inline void CheckSwiGLUBackShape(const paddle::Tensor& g,
+                                 const paddle::Tensor& y,
+                                 int64_t input_dim,
+                                 int64_t hidden_size) {
+  auto g_shape = g.shape();
+  auto y_shape = y.shape();
+  PADDLE_ENFORCE_EQ(
+      g_shape.size(),
+      y_shape.size(),
+      common::errors::InvalidArgument(
+          "Input G and Y must have the same rank for fused_swiglu_bwd, "
+          "but got G rank %d and Y rank %d.",
+          g_shape.size(),
+          y_shape.size()));
+
+  PADDLE_ENFORCE_EQ(
+      input_dim % 2,
+      0,
+      common::errors::InvalidArgument(
+          "The last dimension of Input Y must be even for fused_swiglu_bwd, "
+          "but got %d.",
+          input_dim));
+
+  PADDLE_ENFORCE_EQ(
+      g_shape.back(),
+      hidden_size,
+      common::errors::InvalidArgument(
+          "The last dimension of Input G must equal half of Input Y's last "
+          "dimension for fused_swiglu_bwd, but got G last dimension %d and "
+          "Y last dimension %d.",
+          g_shape.back(),
+          input_dim));
+
+  for (size_t i = 0; i + 1 < y_shape.size(); ++i) {
+    PADDLE_ENFORCE_EQ(
+        g_shape[i],
+        y_shape[i],
+        common::errors::InvalidArgument(
+            "Input G and Y must have the same prefix shape for "
+            "fused_swiglu_bwd, but got G.shape[%d] = %d and Y.shape[%d] = %d.",
+            i,
+            g_shape[i],
+            i,
+            y_shape[i]));
+  }
+}
+
+inline void CheckSwiGLUBackPackedAccess(paddle::DataType dtype,
+                                        int64_t hidden_size) {
+  int vec_size = 0;
+  if (dtype == paddle::DataType::BFLOAT16) {
+    vec_size = 8;
+  } else if (dtype == paddle::DataType::FLOAT32) {
+    vec_size = 4;
+  } else {
+    PADDLE_THROW(common::errors::InvalidArgument(
+        "fused_swiglu_bwd only supports bfloat16 and float32, but got %s.",
+        phi::DataTypeToString(dtype)));
+  }
+
+  PADDLE_ENFORCE_EQ(
+      hidden_size % vec_size,
+      0,
+      common::errors::InvalidArgument(
+          "The hidden size of fused_swiglu_bwd must be divisible by %d for "
+          "128-bit vectorized access, but got %d.",
+          vec_size,
+          hidden_size));
+}
+
 // Custom Kernel Implementation
-template <typename T, int VEC_SIZE>
+template <typename T, int VEC_SIZE, typename IndexT>
 __global__ void VectorizedSwiGLUBackKernel(const T* __restrict__ g,
                                            const T* __restrict__ y,
                                            T* __restrict__ dx,
-                                           int hidden_size,
-                                           int input_stride) {
-  int row = blockIdx.x;
+                                           IndexT hidden_size,
+                                           IndexT input_stride) {
+  IndexT row = static_cast<IndexT>(blockIdx.x);
   int tid = threadIdx.x;
-  int lane_idx = tid * VEC_SIZE;
+  IndexT lane_idx = static_cast<IndexT>(tid) * VEC_SIZE;
 
-  for (int col = lane_idx; col < hidden_size; col += blockDim.x * VEC_SIZE) {
-    int g_offset = row * hidden_size + col;
-    int y1_offset = row * input_stride + col;
-    int y2_offset = y1_offset + hidden_size;
+  for (IndexT col = lane_idx; col < hidden_size;
+       col += static_cast<IndexT>(blockDim.x) * VEC_SIZE) {
+    IndexT g_offset = row * hidden_size + col;
+    IndexT y1_offset = row * input_stride + col;
+    IndexT y2_offset = y1_offset + hidden_size;
 
     Packed128 g_pack = *reinterpret_cast<const Packed128*>(&g[g_offset]);
     Packed128 y1_pack = *reinterpret_cast<const Packed128*>(&y[y1_offset]);
@@ -79,45 +163,106 @@ __global__ void VectorizedSwiGLUBackKernel(const T* __restrict__ g,
   }
 }
 
+template <typename T, int VEC_SIZE, typename IndexT, typename StreamT>
+void LaunchSwiGLUBackKernel(const T* g,
+                            const T* y,
+                            T* dx,
+                            int grid_size,
+                            int64_t hidden_size,
+                            int64_t input_stride,
+                            StreamT stream) {
+  VectorizedSwiGLUBackKernel<T, VEC_SIZE, IndexT>
+      <<<grid_size, kSwiGLUBackBlockSize, 0, stream>>>(
+          g,
+          y,
+          dx,
+          static_cast<IndexT>(hidden_size),
+          static_cast<IndexT>(input_stride));
+}
+
+template <typename T, int VEC_SIZE, typename StreamT>
+void DispatchSwiGLUBackKernel(const T* g,
+                              const T* y,
+                              T* dx,
+                              int grid_size,
+                              int64_t rows,
+                              int64_t hidden_size,
+                              int64_t input_stride,
+                              StreamT stream) {
+  if (ShouldUseInt64Index(rows, input_stride)) {
+    LaunchSwiGLUBackKernel<T, VEC_SIZE, int64_t>(
+        g, y, dx, grid_size, hidden_size, input_stride, stream);
+  } else {
+    LaunchSwiGLUBackKernel<T, VEC_SIZE, int>(
+        g, y, dx, grid_size, hidden_size, input_stride, stream);
+  }
+}
+
 std::vector<paddle::Tensor> SwiGLUBackward(const paddle::Tensor& g,
                                            const paddle::Tensor& y) {
   auto y_shape = y.shape();
-  int64_t rows = y.numel() / y_shape.back();
-  int64_t input_dim = y_shape.back();
-  int64_t hidden_size = input_dim / 2;
   auto dx = paddle::empty_like(y);
 
+  PADDLE_ENFORCE_GT(
+      y_shape.size(),
+      0,
+      common::errors::InvalidArgument(
+          "Input Y must have at least one dimension for fused_swiglu_bwd."));
+
+  int64_t input_dim = y_shape.back();
+  int64_t hidden_size = input_dim / 2;
+  PADDLE_ENFORCE_EQ(
+      g.dtype(),
+      y.dtype(),
+      common::errors::InvalidArgument(
+          "Input G and Y must have the same dtype for fused_swiglu_bwd, "
+          "but got G dtype %s and Y dtype %s.",
+          phi::DataTypeToString(g.dtype()),
+          phi::DataTypeToString(y.dtype())));
+  CheckSwiGLUBackShape(g, y, input_dim, hidden_size);
+
+  if (input_dim == 0) {
+    return {dx};
+  }
+
+  int64_t rows = y.numel() / input_dim;
   if (rows == 0 || hidden_size == 0) {
     return {dx};
   }
 
+  CheckSwiGLUBackPackedAccess(y.dtype(), hidden_size);
+
   PADDLE_ENFORCE_LE(
-      rows * input_dim,
+      rows,
       static_cast<int64_t>(std::numeric_limits<int>::max()),
       common::errors::InvalidArgument(
-          "rows * input_dim must be <= INT_MAX for fused_swiglu_bwd."));
+          "rows must be <= INT_MAX for fused_swiglu_bwd because one CUDA "
+          "block is launched per row."));
 
   int grid_size = static_cast<int>(rows);
-  int block_size = 256;
   auto stream = y.stream();
 
   if (y.dtype() == paddle::DataType::BFLOAT16) {
     using paddle_bf16 = paddle::bfloat16;
     using cuda_bf16 = __nv_bfloat16;
-    VectorizedSwiGLUBackKernel<cuda_bf16, 8>
-        <<<grid_size, block_size, 0, stream>>>(
-            reinterpret_cast<const cuda_bf16*>(g.data<paddle_bf16>()),
-            reinterpret_cast<const cuda_bf16*>(y.data<paddle_bf16>()),
-            reinterpret_cast<cuda_bf16*>(dx.data<paddle_bf16>()),
-            hidden_size,
-            input_dim);
+    DispatchSwiGLUBackKernel<cuda_bf16, 8>(
+        reinterpret_cast<const cuda_bf16*>(g.data<paddle_bf16>()),
+        reinterpret_cast<const cuda_bf16*>(y.data<paddle_bf16>()),
+        reinterpret_cast<cuda_bf16*>(dx.data<paddle_bf16>()),
+        grid_size,
+        rows,
+        hidden_size,
+        input_dim,
+        stream);
   } else if (y.dtype() == paddle::DataType::FLOAT32) {
-    VectorizedSwiGLUBackKernel<float, 4>
-        <<<grid_size, block_size, 0, stream>>>(g.data<float>(),
-                                               y.data<float>(),
-                                               dx.data<float>(),
-                                               hidden_size,
-                                               input_dim);
+    DispatchSwiGLUBackKernel<float, 4>(g.data<float>(),
+                                       y.data<float>(),
+                                       dx.data<float>(),
+                                       grid_size,
+                                       rows,
+                                       hidden_size,
+                                       input_dim,
+                                       stream);
   }
   return {dx};
 }

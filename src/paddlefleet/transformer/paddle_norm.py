@@ -267,6 +267,10 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             and self.config.num_nextn_predict_layers > 0
             and not self.config.mtp_load_weight_only
         ):
+            # normalize MTP hidden_states
+            if self.config.gpt_model_use_experimental_version:
+                for i in range(1, len(tensor_list)):
+                    tensor_list[i] = self.norm(tensor_list[i])
             hidden_states_concat = paddle.concat(
                 [rst["hidden_states"], *tensor_list[1:]]
             )
