@@ -135,7 +135,7 @@ class TestFusedSwigluScaleForwardCuda(unittest.TestCase):
         x = paddle.randn([2, 8])
         scale = paddle.to_tensor(1.0)
         with patch(
-            "paddlefleet.ops.fused_swiglu_scale",
+            "paddlefleet_ops.fused_swiglu_scale",
             return_value=paddle.randn([2, 4]),
         ) as mock_op:
             result = fused_swiglu_scale_forward(x, scale)
@@ -155,7 +155,7 @@ class TestFusedSwigluScaleBackwardCuda(unittest.TestCase):
         scale = paddle.to_tensor(1.0)
         out_grad = paddle.randn([2, 4])
         with patch(
-            "paddlefleet.ops.fused_swiglu_scale_bwd",
+            "paddlefleet_ops.fused_swiglu_scale_bwd",
             return_value=(paddle.randn([2, 8]), paddle.to_tensor(1.0)),
         ) as mock_op:
             result = fused_swiglu_scale_backward(x, scale, out_grad)

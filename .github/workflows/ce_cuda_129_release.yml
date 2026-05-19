@@ -30,6 +30,7 @@ env:
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-coverage-test"
   paddle_url: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/cu129/paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl"
+  paddlefleet_ops_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/cu129/paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl"
   fleet_branch: "release/0.2"
   formers_branch: "release/1.1"
   use_release: ${{ inputs.use_release || 'true' }}
@@ -77,6 +78,7 @@ jobs:
             -e paddle_url \
             -e use_release \
             -e paddlefleet_url \
+            -e paddlefleet_ops_url \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
@@ -106,7 +108,8 @@ jobs:
           git config pull.rebase false
           git checkout $fleet_branch
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          wget $paddlefleet_ops_url -O paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl
+          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
             pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
@@ -164,6 +167,7 @@ jobs:
             -e no_proxy \
             -e paddle_url \
             -e paddlefleet_url \
+            -e paddlefleet_ops_url \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
@@ -190,7 +194,8 @@ jobs:
           git checkout $fleet_branch
           git submodule update --init --recursive
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          wget $paddlefleet_ops_url -O paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl
+          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
             pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
@@ -264,6 +269,7 @@ jobs:
             -e paddle_url \
             -e use_release \
             -e paddlefleet_url \
+            -e paddlefleet_ops_url \
             -e PIP_CACHE_DIR \
             -e fleet_branch \
             -e formers_branch \
@@ -292,7 +298,8 @@ jobs:
           git config pull.rebase false
           git checkout $fleet_branch
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          wget $paddlefleet_ops_url -O paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl
+          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
             pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
@@ -423,6 +430,7 @@ jobs:
             -e paddle_url \
             -e use_release \
             -e paddlefleet_url \
+            -e paddlefleet_ops_url \
             -e PIP_CACHE_DIR \
             -e fleet_branch \
             -e formers_branch \
@@ -450,7 +458,8 @@ jobs:
           git config pull.rebase false
           git checkout $fleet_branch
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          wget $paddlefleet_ops_url -O paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl
+          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
             pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir
@@ -691,6 +700,7 @@ jobs:
             -e CACHE_DIR \
             -e paddle_url \
             -e paddlefleet_url \
+            -e paddlefleet_ops_url \
             -e no_proxy \
             -e CI_name \
             -e formers_branch \
@@ -723,7 +733,8 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           wget $paddlefleet_url -O paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl
-          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          wget $paddlefleet_ops_url -O paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl
+          pip install paddlefleet-0.0.0-cp310-cp310-linux_x86_64.whl paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           if [ "$use_release" == "true" ]; then
             echo "Use release paddle package"
             pip install $paddle_url --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall --no-cache-dir

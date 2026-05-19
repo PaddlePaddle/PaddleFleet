@@ -135,7 +135,7 @@ def get_qwen3_5_language_spec(config):
             layer_number=i + head_offset,
             attention_layer_type=attn_type,
             num_experts=config.n_routed_experts,
-            moe_grouped_gemm=config.moe_grouped_gemm,
+            moe_expert_fusion=config.moe_expert_fusion,
             multi_latent_attention=config.multi_latent_attention,
         )
 

@@ -177,5 +177,17 @@ class TestRoutedScalingFactorConfig(unittest.TestCase):
         self.assertTrue(config.routed_scaling_factor_learnable)
 
 
+class TestMoETokenDispatcherConfig(unittest.TestCase):
+    def test_hybridep_dispatcher_type_is_preserved(self):
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            n_routed_experts=8,
+            moe_token_dispatcher_type="hybridep",
+        )
+
+        self.assertEqual(config.moe_token_dispatcher_type, "hybridep")
+        self.assertTrue(config.moe_use_fusion_node)
+
+
 if __name__ == "__main__":
     unittest.main()

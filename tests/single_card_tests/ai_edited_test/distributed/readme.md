@@ -1,36 +1,27 @@
-# Distributed Unit Tests
+# Distributed Tests / 分布式模块测试
 
-This directory contains unit tests for PaddleFleet's distributed module and related parallelism utilities.
+Unit tests for PaddleFleet distributed module including parallel state, model parallel config, and context parallel utilities.
+PaddleFleet 分布式模块的单元测试，包括并行状态、模型并行配置和上下文并行工具。
 
 ## Test Files
 
-| File | Source Under Test | Description |
-|------|------------------|-------------|
-| `test_distributed_init.py` | `src/paddlefleet/distributed/__init__.py` | Package import tests |
-| `test_model.py` | `src/paddlefleet/distributed/model.py` | `distributed_model()` function: pipeline parallel, AMP, strategy |
-| `test_parallel_state.py` | `src/paddlefleet/parallel_state.py` | Parallel group management: tensor/pipeline/data/expert/context parallel |
-| `test_process_groups_config.py` | `src/paddlefleet/process_groups_config.py` | `ProcessGroupCollection` dataclass and `use_mpu_process_groups()` |
-| `test_model_parallel_config.py` | `src/paddlefleet/model_parallel_config.py` | `ModelParallelConfig` dataclass validation and defaults |
-| `test_context_parallel_utils.py` | `src/paddlefleet/context_parallel_utils.py` | Context parallel ops: scatter/gather/reduce-scatter, flashmask CP |
-| `test_recompute_utils.py` | `src/paddlefleet/recompute_utils.py` | Recompute layer selection: block, first_n, full |
-| `test_packed_seq_params.py` | `src/paddlefleet/packed_seq_params.py` | `PackedSeqParams` dataclass for packed sequence format |
-| `test_flashmask_version_dispatch.py` | `src/paddlefleet/context_parallel_utils.py` & `src/paddlefleet/refined_recompute/flash_attn.py` | Test flashmask API params for different dispatching different versions |
-
-## Running Tests
-
-```bash
-cd /path/to/PaddleFleet
-python -m pytest tests/single_card_tests/ai_edited_test/distributed/ -v
-```
-
-Or run a single test file:
-
-```bash
-python tests/single_card_tests/ai_edited_test/distributed/test_parallel_state.py
-```
-
-## Notes
-
-- All tests use `unittest.TestCase` style.
-- Distributed communication is heavily mocked since tests run in single-card mode.
-- No CUDA requirement for these tests.
+| File | Description / 描述 |
+|------|-------------------|
+| `test_ai_context_parallel_utils.py` | Tests for mark_context_parallel_parameter_disable_scale_grad on layers / 测试层与参数的上下文并行缩放梯度禁用标记 |
+| `test_ai_context_parallel_utils_extra.py` | Tests for scatter_balance and all_gather_balance with single rank / 单卡场景下的 scatter/gather balance 测试 |
+| `test_ai_cp_flashmask.py` | Tests for FlashMaskContextParallel forward pass error handling / 测试 FlashMask 上下文并行前向传播错误处理 |
+| `test_ai_cp_padding.py` | Tests for scatter_with_padding with various divisibility scenarios / 测试不同整除场景下的带 padding scatter 操作 |
+| `test_ai_cp_scatter_gather_ops.py` | Tests for ContextParallelScatterOp and ContextParallelGatherOp PyLayers / 测试上下文并行的 scatter/gather PyLayer 算子 |
+| `test_ai_distributed_extra.py` | Tests for distributed_model with AMP, pipeline parallel, and interleave / 测试分布式模型与 AMP、流水线并行设置 |
+| `test_ai_distributed_init.py` | Tests for the distributed package import / 测试分布式包的导入 |
+| `test_ai_flashmask_version_dispatch.py` | Tests for group and block_mask branch dispatch in flashmask backward / 测试 FlashMask 反向传播的分支分发逻辑 |
+| `test_ai_fp8_extra.py` | Tests for get_quant_func with blockwise recipe and parameters / 测试 blockwise 量化函数获取 |
+| `test_ai_model.py` | Tests for distributed_model function with PipelineLayer validation / 测试分布式模型函数与 PipelineLayer 校验 |
+| `test_ai_model_parallel_config.py` | Tests for ModelParallelConfig dataclass defaults and constraints / 测试模型并行配置数据类的默认值与约束 |
+| `test_ai_packed_seq_params.py` | Tests for PackedSeqParams dataclass default and custom values / 测试打包序列参数数据类 |
+| `test_ai_paddlefleet_utils_extra.py` | Tests for make_viewless_tensor and MakeViewlessTensor PyLayer / 测试无视图张量创建与 PyLayer |
+| `test_ai_parallel_state.py` | Tests for parallel_state initialize_model_parallel and group setup / 测试并行状态初始化与通信组设置 |
+| `test_ai_parallel_state_extra2.py` | Tests for parallel_state getter functions when not initialized / 测试未初始化状态下的并行状态读取 |
+| `test_ai_parallel_state_extra3.py` | Tests for set_virtual_pipeline_model_parallel_rank and deprecation / 测试虚拟流水线并行排序设置与弃用警告 |
+| `test_ai_process_groups_config.py` | Tests for ProcessGroupCollection initialization / 测试进程组集合初始化 |
+| `test_ai_recompute_utils.py` | Tests for need_recompute_in_block with various configurations / 测试不同配置下的块级重计算判断 |

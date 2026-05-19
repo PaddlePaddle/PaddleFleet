@@ -172,11 +172,11 @@ class TestFP8Utils(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         self.assertIsNotNone(node)
         self.assertFalse(node.use_fp8_mlp)
-        self.assertFalse(node.moe_grouped_gemm)
+        self.assertFalse(node.moe_expert_fusion)
 
     def test_experts_group_gemm_node_cached_tensors(self):
         """Test cached_tensors returns correct list."""
@@ -189,7 +189,7 @@ class TestFP8Utils(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         cached = node.cached_tensors()
         self.assertEqual(len(cached), 6)
@@ -207,7 +207,7 @@ class TestFP8Utils(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         values = [paddle.ones([2]) if i < 2 else None for i in range(6)]
         node.set_cached_tensors(values)
@@ -226,7 +226,7 @@ class TestFP8Utils(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         node.set_cached_tensors([paddle.ones([2])] * 6)
         node.clear_cached_tensors()
@@ -245,7 +245,7 @@ class TestFP8Utils(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         node.tokens_per_expert = [1, 2]
         node.m_indices = paddle.ones([3], dtype="int32")
@@ -264,7 +264,7 @@ class TestFP8Utils(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         tokens_per_expert = [2, 0, 3]
         indices = node.gen_m_indices(tokens_per_expert)
@@ -282,7 +282,7 @@ class TestFP8Utils(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         indices = node.gen_m_indices([0, 0])
         self.assertEqual(indices.shape[0], 0)
@@ -298,7 +298,7 @@ class TestFP8Utils(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         node.input = paddle.ones([4, 8])
         node.input_fp8 = paddle.zeros([4, 8], dtype=paddle.float8_e4m3fn)
@@ -321,7 +321,7 @@ class TestFP8Utils(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
             expert_id=1,
         )
         self.assertEqual(len(node.experts), 1)
@@ -339,14 +339,14 @@ class TestFP8Utils(unittest.TestCase):
                 custom_map,
                 moe_subbatch_token_num_after_dispatch=-1,
                 use_fp8_mlp=False,
-                moe_grouped_gemm=False,
+                moe_expert_fusion=False,
             )
         with self.assertRaises(AssertionError):
             ExpertsGroupGemmContiguousNode(
                 custom_map,
                 moe_subbatch_token_num_after_dispatch=127,
                 use_fp8_mlp=False,
-                moe_grouped_gemm=False,
+                moe_expert_fusion=False,
             )
 
     def test_swiglu_fallback(self):

@@ -21,8 +21,8 @@ import paddle.nn.functional as F
 from paddle import base
 from paddle.base import core
 
-# from paddlefleet._extensions.flashmask import (
-from paddlefleet.ops import (
+# from paddlefleet_ops._extensions.flashmask import (
+from paddlefleet_ops import (
     rr_attn_estimate_triton_func,
 )
 

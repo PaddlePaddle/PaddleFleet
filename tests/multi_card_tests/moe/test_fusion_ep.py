@@ -81,8 +81,9 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             bias_activation_fusion=True,
+            moe_deep_gemm=False,
         )
         transformer_config_moe_use_fusion_node.deepep_buffer_configs = {
             "num_sms": 20,
