@@ -30,6 +30,10 @@ from paddle.distributed.fleet.meta_parallel import (
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet import tensor_parallel
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
@@ -349,6 +353,17 @@ class MultiTokenPredictionLayer(FleetLayer):
             mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.astype(
                 hidden_states.dtype
             )
+
+            if (
+                get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                # In EB dataflow and CP size > 1, mtp_hidden_inputs_mask is [b, s, 1];
+                # we need to scatter it to [b, s/cp, 1] here.
+                mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
+                    mtp_hidden_inputs_mask, axis=1
+                )
+
             hidden_states = hidden_states * mtp_hidden_inputs_mask
         # At the (k - 1)-th MTP layer, concatenates the i-th token's hidden_states
         # and the (i + K)-th token's embedding, and combine them with linear projection.

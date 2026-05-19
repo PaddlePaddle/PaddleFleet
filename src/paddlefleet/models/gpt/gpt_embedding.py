@@ -26,7 +26,14 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
 )
 
+from paddlefleet.context_parallel_utils import (
+    ContextParallelScatterOp,
+    mark_context_parallel_parameter_disable_scale_grad,
+)
 from paddlefleet.models.gpt.utils import fill_feature
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
@@ -83,6 +90,14 @@ class GPTEmbedding(FleetLayer):
             self.embedding.scatter_to_sequence_parallel = False
             self.embedding.reduce_scatter_embeddings = False
             self.embedding.sequence_parallel = False
+
+        if self.config.experimental_dataflow:
+            # In EB data flow, since CP scatter is apply after embedding,
+            # we need to disable scale grad for the parameters that need to be scattered to each cp local.
+            mark_context_parallel_parameter_disable_scale_grad(
+                self.embedding.embed_tokens
+            )
+
         self.rotary_pos_emb = None
         self.mrope_section = mrope_section
         self.position_embedding_type = position_embedding_type
@@ -200,6 +215,15 @@ class GPTEmbedding(FleetLayer):
                 inputs_embeds_ori = inputs_embeds
                 batch_size, seq_length, hidden_size = inputs_embeds.shape
 
+                if (
+                    get_context_parallel_world_size() > 1
+                    and self.config.experimental_dataflow
+                ):
+                    # In EB data flow, main input embed apply CP scatter here
+                    inputs_embeds = ContextParallelScatterOp.apply(
+                        inputs_embeds, axis=1
+                    )
+
                 if self.sequence_parallel:
                     inputs_embeds = inputs_embeds.reshape(
                         [-1, inputs_embeds.shape[-1]]
@@ -219,6 +243,16 @@ class GPTEmbedding(FleetLayer):
                         ],
                         axis=1,
                     )
+
+                    if (
+                        get_context_parallel_world_size() > 1
+                        and self.config.experimental_dataflow
+                    ):
+                        # In EB data flow, mtp input embed apply CP scatter here
+                        inputs_embeds_mtp = ContextParallelScatterOp.apply(
+                            inputs_embeds_mtp, axis=1
+                        )
+
                     if self.sequence_parallel:
                         inputs_embeds_mtp = inputs_embeds_mtp.reshape(
                             [-1, inputs_embeds_mtp.shape[-1]]
