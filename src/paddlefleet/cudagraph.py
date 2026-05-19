@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import warnings
 import paddle
 from paddle import nn
 from paddle.base.core import CUDAGraph
@@ -139,6 +140,15 @@ def autocudagraph(
 
             if key not in state_registry:
                 if len(state_registry) >= max_graphs:
+                    warnings.warn(
+                        f"CUDAGraph cache limit ({max_graphs}) reached for function '{func.__name__}' "
+                        f"with dispatch key: {key}. "
+                        f"Falling back to eager execution. This is usually caused by highly dynamic "
+                        f"input shapes or continuously creating new instances without clearing cache. "
+                        f"Consider stabilizing inputs, increasing max_graphs, or calling .clear_cache().",
+                        category=RuntimeWarning,
+                        stacklevel=2
+                    )
                     return func(*args, **kwargs)
                 state_registry[key] = CUDAGraphContext()
 
