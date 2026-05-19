@@ -361,7 +361,8 @@ class TransformerConfig(ModelParallelConfig):
     """Number of experts to route to for each token."""
 
     scoring_func: str = "softmax"
-    """Score function for MoE routing. Can be "softmax" or "sigmoid"."""
+    """Score function for MoE routing. Options: "softmax", "sigmoid", "tanh",
+    "relu", "gelu", "leaky_relu", "sftplus" (softplus, non-negative unbounded)."""
 
     moe_intermediate_size: int | None = None
     """MoE Feed-Forward Network hidden size"""
@@ -461,6 +462,11 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
+
+    moe_n_hash_layers: int = 0
+    """Number of last transformer layers to use deterministic Hash Routing instead of
+    learned TopK Routing. E.g., if num_hidden_layers=32 and moe_n_hash_layers=4,
+    layers 28-31 (0-indexed) use HashRouter. 0 means all layers use TopKRouter."""
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""

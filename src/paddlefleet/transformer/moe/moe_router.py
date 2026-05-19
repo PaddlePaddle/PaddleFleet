@@ -220,6 +220,8 @@ class StandardMoERouter(nn.Layer):
                 scores = F.gelu(logits)
             elif scoring_func == "leaky_relu":
                 scores = F.leaky_relu(logits)
+            elif scoring_func == "sftplus":
+                scores = F.softplus(logits)
             else:
                 raise NotImplementedError(f"{scoring_func} is not implemented.")
         return scores
@@ -872,4 +874,148 @@ class TopKRouter(StandardMoERouter):
             None,  # token priority
             l_aux,
             l_zloss,
+        )
+
+
+class HashRouter(nn.Layer):
+    """Deterministic hash-based MoE router (no learned parameters).
+
+    Routes each token to ``num_experts_per_tok`` experts deterministically
+    using a simple modulo hash of the input token ID:
+
+        expert_k = (token_id + k) % num_experts,  k = 0, ..., num_experts_per_tok - 1
+
+    All selected experts receive equal weight (1 / num_experts_per_tok when
+    ``norm_topk_prob`` is True, otherwise 1.0), scaled by ``routed_scaling_factor``.
+
+    Padding tokens (token_id == 0) are masked out: their weights and mask are 0
+    and their expert indices are set to -1.
+
+    This router produces the same 8-tuple output as TopKRouter so it can be used
+    as a drop-in replacement inside MoELayer.
+
+    Args:
+        config (TransformerConfig): Model configuration.
+        pg_collection: Process group collection (unused, kept for API compatibility).
+        layer_number (int, optional): 0-indexed layer number, used for logging.
+    """
+
+    def __init__(
+        self,
+        config: "TransformerConfig",
+        pg_collection=None,
+        layer_number: int | None = None,
+    ):
+        super().__init__()
+        self.config = config
+        self.num_experts = config.n_routed_experts
+        self.num_experts_per_tok = config.num_experts_per_tok
+        self.norm_topk_prob = config.norm_topk_prob
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.sequence_parallel = config.sequence_parallel
+        self._layer_number = layer_number
+        # HashRouter has no learned parameters
+        self._cast_to_low_precision = False
+
+    def set_layer_number(self, layer_number: int):
+        """Set the layer number (used for logging / debugging)."""
+        self._layer_number = layer_number
+
+    def forward(self, input: paddle.Tensor, input_ids: paddle.Tensor | None = None):
+        """Compute hash-based token-to-expert routing.
+
+        Args:
+            input (paddle.Tensor): Hidden states, shape [B, S, H] (or [S, B, H]
+                when sequence_parallel=True). Not used for routing itself.
+            input_ids (paddle.Tensor): Token IDs, shape [B, S]. **Required.**
+
+        Returns:
+            tuple: 8-element tuple matching TopKRouter output format:
+                - capacity (None)
+                - top_gate  [B*S, K]  per-token expert weights
+                - top_idx   [B*S, K]  selected expert indices (-1 for padding)
+                - probs     [B*S, E]  sparse weight matrix
+                - mask      [B*S, E]  binary routing mask
+                - token_priority (None)
+                - l_aux (None)
+                - l_zloss (None)
+        """
+        assert input_ids is not None, (
+            "HashRouter requires input_ids to be provided. "
+            "Make sure input_ids is passed through the model forward to the MoE layer."
+        )
+
+        if len(input.shape) != 3:
+            raise ValueError(
+                f"HashRouter expects 3-D input [B, S, H] or [S, B, H], "
+                f"got shape {list(input.shape)}"
+            )
+
+        if self.sequence_parallel:
+            seq_len, batch_size, _ = input.shape
+        else:
+            batch_size, seq_len, _ = input.shape
+
+        num_tokens = batch_size * seq_len
+
+        # ------------------------------------------------------------------ #
+        # Hash assignment: expert_k = (token_id + k) % num_experts            #
+        # ------------------------------------------------------------------ #
+        flat_ids = input_ids.reshape([-1]).cast(paddle.int64)  # [B*S]
+
+        # offsets: [[0, 1, ..., K-1]]  ->  broadcast with flat_ids
+        offsets = paddle.arange(
+            self.num_experts_per_tok, dtype=paddle.int64
+        ).unsqueeze(0)  # [1, K]
+        topk_idx = (flat_ids.unsqueeze(1) + offsets) % self.num_experts  # [B*S, K]
+
+        # ------------------------------------------------------------------ #
+        # Uniform weights                                                       #
+        # ------------------------------------------------------------------ #
+        weight_val = (
+            1.0 / self.num_experts_per_tok if self.norm_topk_prob else 1.0
+        )
+        if abs(self.routed_scaling_factor - 1.0) > 1e-6:
+            weight_val = weight_val * self.routed_scaling_factor
+
+        top_gate = paddle.full(
+            [num_tokens, self.num_experts_per_tok],
+            weight_val,
+            dtype=paddle.float32,
+        )  # [B*S, K]
+
+        # ------------------------------------------------------------------ #
+        # Padding mask: token_id == 0 → weight=0, idx=-1                      #
+        # ------------------------------------------------------------------ #
+        valid_mask = (flat_ids != 0).cast(paddle.float32).unsqueeze(-1)  # [B*S, 1]
+        top_gate = top_gate * valid_mask
+        topk_idx = topk_idx.masked_fill(
+            ~valid_mask.cast(paddle.bool), paddle.to_tensor(-1, dtype=paddle.int64)
+        )
+
+        # ------------------------------------------------------------------ #
+        # Build sparse probs [B*S, E] and mask [B*S, E]                        #
+        # ------------------------------------------------------------------ #
+        safe_idx = topk_idx.clip(min=0)  # avoid -1 in put_along_axis
+        probs = paddle.zeros(
+            [num_tokens, self.num_experts], dtype=paddle.float32
+        ).put_along_axis(safe_idx, top_gate, axis=1)
+        # Re-zero padding positions that may have been written via safe_idx
+        probs = probs * valid_mask
+
+        mask = (probs > 0).cast(paddle.float32)
+
+        _log_moe_md5(
+            topk_idx.cast(paddle.float32), "hash_topk_indices", self._layer_number
+        )
+
+        return (
+            None,       # capacity
+            top_gate,   # [B*S, K]
+            topk_idx,   # [B*S, K]
+            probs,      # [B*S, E]
+            mask,       # [B*S, E]
+            None,       # token_priority
+            None,       # l_aux  (no auxiliary loss for hash routing)
+            None,       # l_zloss
         )

@@ -44,7 +44,7 @@ from .fp8_utils import fused_stack_quant_without_cache
 from .fused_a2a import configure_buffer
 from .fusion_layer_utils import FusionMoePyLayer
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
-from .moe_router import TopKRouter
+from .moe_router import HashRouter, TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
 from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
@@ -138,6 +138,7 @@ class MoELayer(nn.Layer):
         config: TransformerConfig,
         sublayers: MoESublayers | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        layer_number: int | None = None,
     ):
         super().__init__()
         self.config = config
@@ -224,7 +225,29 @@ class MoELayer(nn.Layer):
         # MoE-Related Configs
         self._init_expert_parallel()
 
-        self.gate = TopKRouter(config=config, pg_collection=pg_collection)
+        # Determine whether to use HashRouter or TopKRouter for this layer.
+        # The last `moe_n_hash_layers` layers (by layer_number) use HashRouter.
+        _use_hash_routing = (
+            getattr(config, "moe_n_hash_layers", 0) > 0
+            and layer_number is not None
+            and layer_number
+            >= config.num_hidden_layers - config.moe_n_hash_layers
+        )
+        if _use_hash_routing:
+            self.gate = HashRouter(
+                config=config,
+                pg_collection=pg_collection,
+                layer_number=layer_number,
+            )
+            logger.info(
+                f"MoELayer layer_number={layer_number}: using HashRouter "
+                f"(moe_n_hash_layers={config.moe_n_hash_layers}, "
+                f"num_hidden_layers={config.num_hidden_layers})"
+            )
+        else:
+            self.gate = TopKRouter(config=config, pg_collection=pg_collection)
+            if layer_number is not None:
+                self.gate.set_layer_number(layer_number)
 
         self.expert_class = StandardMLPExpert
         self.shared_expert_class = StandardMLPSharedExpert

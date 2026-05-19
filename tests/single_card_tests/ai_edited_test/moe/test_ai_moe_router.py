@@ -27,6 +27,7 @@ sys.path.insert(
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import paddle
 
 
@@ -48,10 +49,12 @@ def _make_router_config(**overrides):
         "n_group": 1,
         "topk_group": 1,
         "routed_scaling_factor": 1.0,
+        "routed_scaling_factor_learnable": False,
         "moe_router_force_load_balancing": False,
         "moe_router_load_balancing_type": "aux_loss",
         "router_aux_loss_coef": 0.01,
         "router_z_loss_coef": None,
+        "moe_n_hash_layers": 0,
     }
     defaults.update(overrides)
     return TransformerConfig(**defaults)
@@ -448,6 +451,285 @@ class TestMoERouter(unittest.TestCase):
         )
         self.assertEqual(topk_weight.shape, [4, 2])
         self.assertEqual(topk_idx.shape, [4, 2])
+
+
+class TestSftPlusScore(unittest.TestCase):
+    """Tests for the 'sftplus' (softplus) scoring function in StandardMoERouter."""
+
+    @patch(
+        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+        return_value=1,
+    )
+    def test_sftplus_scores_are_non_negative(self, _mock):
+        """softplus output should always be >= 0."""
+        import paddle.nn.functional as F
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        config = _make_router_config(scoring_func="sftplus")
+        router = StandardMoERouter(config)
+        logits = paddle.randn([16, 4])
+        scores = router.gate_score_func(logits)
+        self.assertTrue(
+            bool((scores >= 0).all().numpy()),
+            "SftPlus scores should all be non-negative",
+        )
+
+    @patch(
+        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+        return_value=1,
+    )
+    def test_sftplus_output_shape(self, _mock):
+        """Output shape of gate_score_func should match input logits shape."""
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        config = _make_router_config(scoring_func="sftplus", n_routed_experts=4)
+        router = StandardMoERouter(config)
+        logits = paddle.randn([32, 4])
+        scores = router.gate_score_func(logits)
+        self.assertEqual(list(scores.shape), [32, 4])
+
+    @patch(
+        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+        return_value=1,
+    )
+    def test_sftplus_matches_paddle_softplus(self, _mock):
+        """gate_score_func('sftplus') should exactly match F.softplus."""
+        import paddle.nn.functional as F
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        config = _make_router_config(scoring_func="sftplus")
+        router = StandardMoERouter(config)
+        logits = paddle.randn([8, 4])
+        scores = router.gate_score_func(logits, logits_type_promotion=False)
+        expected = F.softplus(logits)
+        np.testing.assert_allclose(
+            scores.numpy(), expected.numpy(), atol=1e-6,
+            err_msg="SftPlus scores should match F.softplus",
+        )
+
+    @patch(
+        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+        return_value=1,
+    )
+    def test_invalid_scoring_func_raises(self, _mock):
+        """Unknown scoring_func should raise NotImplementedError."""
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        config = _make_router_config(scoring_func="unknown_func")
+        router = StandardMoERouter(config)
+        logits = paddle.randn([4, 4])
+        with self.assertRaises(NotImplementedError):
+            router.gate_score_func(logits)
+
+
+class TestHashRouter(unittest.TestCase):
+    """Tests for the HashRouter class."""
+
+    def _make_router(self, **cfg_overrides):
+        from paddlefleet.transformer.moe.moe_router import HashRouter
+
+        config = _make_router_config(**cfg_overrides)
+        return HashRouter(config=config, layer_number=0), config
+
+    def _dummy_hidden(self, B, S, H=64):
+        return paddle.randn([B, S, H])
+
+    def test_deterministic_routing(self):
+        """Same input_ids → same expert assignment every time."""
+        router, _ = self._make_router(n_routed_experts=4, num_experts_per_tok=2)
+        hidden = self._dummy_hidden(2, 4)
+        input_ids = paddle.to_tensor([[3, 7, 1, 5], [2, 6, 4, 8]], dtype="int64")
+
+        _, _, idx1, _, _, _, _, _ = router(hidden, input_ids=input_ids)
+        _, _, idx2, _, _, _, _, _ = router(hidden, input_ids=input_ids)
+
+        np.testing.assert_array_equal(
+            idx1.numpy(), idx2.numpy(),
+            err_msg="HashRouter should be deterministic",
+        )
+
+    def test_modulo_expert_assignment(self):
+        """Expert indices should follow (token_id + k) % num_experts."""
+        num_experts = 4
+        k = 2
+        router, _ = self._make_router(n_routed_experts=num_experts, num_experts_per_tok=k)
+
+        B, S = 1, 4
+        token_ids = [[3, 7, 1, 5]]
+        hidden = self._dummy_hidden(B, S)
+        input_ids = paddle.to_tensor(token_ids, dtype="int64")
+
+        _, _, top_idx, _, _, _, _, _ = router(hidden, input_ids=input_ids)
+        top_idx_np = top_idx.numpy()  # [4, 2]
+
+        for pos, tid in enumerate(token_ids[0]):
+            for ki in range(k):
+                expected = (int(tid) + ki) % num_experts
+                self.assertEqual(
+                    int(top_idx_np[pos, ki]), expected,
+                    f"pos={pos} k={ki}: expected expert {expected}, got {int(top_idx_np[pos, ki])}",
+                )
+
+    def test_padding_tokens_masked(self):
+        """Tokens with id==0 (padding) should have weight=0 and idx=-1."""
+        router, _ = self._make_router(n_routed_experts=4, num_experts_per_tok=2)
+        B, S = 1, 4
+        input_ids = paddle.to_tensor([[0, 3, 5, 7]], dtype="int64")
+        hidden = self._dummy_hidden(B, S)
+
+        _, top_gate, top_idx, probs, mask, _, _, _ = router(
+            hidden, input_ids=input_ids
+        )
+        top_gate_np = top_gate.numpy()
+        top_idx_np = top_idx.numpy()
+        probs_np = probs.numpy()
+        mask_np = mask.numpy()
+
+        np.testing.assert_array_equal(
+            top_gate_np[0], [0.0, 0.0],
+            err_msg="Padding token should have zero weights",
+        )
+        np.testing.assert_array_equal(
+            top_idx_np[0], [-1, -1],
+            err_msg="Padding token should have index -1",
+        )
+        self.assertEqual(probs_np[0].sum(), 0.0, "Padding token probs should be 0")
+        self.assertEqual(mask_np[0].sum(), 0.0, "Padding token mask should be 0")
+
+    def test_output_shapes(self):
+        """Output tensors should have expected shapes."""
+        num_experts, k = 4, 2
+        B, S, H = 2, 6, 64
+        router, _ = self._make_router(
+            n_routed_experts=num_experts, num_experts_per_tok=k, hidden_size=H
+        )
+        hidden = self._dummy_hidden(B, S, H)
+        input_ids = paddle.randint(1, 100, [B, S])
+
+        _, top_gate, top_idx, probs, mask, tp, l_aux, l_zloss = router(
+            hidden, input_ids=input_ids
+        )
+        num_tokens = B * S
+        self.assertEqual(list(top_gate.shape), [num_tokens, k])
+        self.assertEqual(list(top_idx.shape), [num_tokens, k])
+        self.assertEqual(list(probs.shape), [num_tokens, num_experts])
+        self.assertEqual(list(mask.shape), [num_tokens, num_experts])
+        self.assertIsNone(tp)
+        self.assertIsNone(l_aux)
+        self.assertIsNone(l_zloss)
+
+    def test_norm_topk_prob_weights_sum(self):
+        """When norm_topk_prob=True, each valid token's top_gate should sum to 1."""
+        router, _ = self._make_router(
+            n_routed_experts=4, num_experts_per_tok=2, norm_topk_prob=True
+        )
+        B, S = 2, 4
+        input_ids = paddle.randint(1, 50, [B, S])
+        hidden = self._dummy_hidden(B, S)
+        _, top_gate, _, _, _, _, _, _ = router(hidden, input_ids=input_ids)
+        sums = top_gate.sum(axis=-1).numpy()
+        np.testing.assert_allclose(
+            sums,
+            np.ones(B * S),
+            atol=1e-6,
+            err_msg="With norm_topk_prob=True, weights should sum to 1",
+        )
+
+    def test_no_input_ids_raises(self):
+        """HashRouter must raise if input_ids is None."""
+        router, _ = self._make_router()
+        hidden = self._dummy_hidden(2, 4)
+        with self.assertRaises(AssertionError):
+            router(hidden, input_ids=None)
+
+    def test_set_layer_number(self):
+        """set_layer_number should update _layer_number."""
+        router, _ = self._make_router()
+        router.set_layer_number(5)
+        self.assertEqual(router._layer_number, 5)
+
+
+class TestHashRouterInMoELayer(unittest.TestCase):
+    """Tests verifying that MoELayer selects the correct router type."""
+
+    def _get_router_class_for_layer(self, config, layer_number):
+        _use_hash = (
+            getattr(config, "moe_n_hash_layers", 0) > 0
+            and layer_number is not None
+            and layer_number >= config.num_hidden_layers - config.moe_n_hash_layers
+        )
+        from paddlefleet.transformer.moe.moe_router import HashRouter, TopKRouter
+
+        return HashRouter if _use_hash else TopKRouter
+
+    def test_moe_layer_selects_hash_router(self):
+        """Layer number in hash range should select HashRouter."""
+        from paddlefleet.transformer.moe.moe_router import HashRouter
+
+        config = _make_router_config(
+            num_hidden_layers=8,
+            moe_n_hash_layers=2,
+        )
+        router_cls = self._get_router_class_for_layer(config, layer_number=7)
+        self.assertIs(router_cls, HashRouter)
+
+    def test_moe_layer_selects_topk_router(self):
+        """Layer number outside hash range should select TopKRouter."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            num_hidden_layers=8,
+            moe_n_hash_layers=2,
+        )
+        router_cls = self._get_router_class_for_layer(config, layer_number=5)
+        self.assertIs(router_cls, TopKRouter)
+
+    def test_moe_layer_no_hash_layers(self):
+        """When moe_n_hash_layers=0, all layers should use TopKRouter."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            num_hidden_layers=8,
+            moe_n_hash_layers=0,
+        )
+        router_cls = self._get_router_class_for_layer(config, layer_number=7)
+        self.assertIs(router_cls, TopKRouter)
+
+    def test_boundary_layer_uses_hash_router(self):
+        """The first layer of the hash range (num_hidden_layers - moe_n_hash_layers)."""
+        from paddlefleet.transformer.moe.moe_router import HashRouter
+
+        config = _make_router_config(num_hidden_layers=32, moe_n_hash_layers=4)
+        router_cls = self._get_router_class_for_layer(config, layer_number=28)
+        self.assertIs(router_cls, HashRouter)
+
+    def test_layer_before_boundary_uses_topk_router(self):
+        """Layer just before the hash range boundary should use TopKRouter."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(num_hidden_layers=32, moe_n_hash_layers=4)
+        router_cls = self._get_router_class_for_layer(config, layer_number=27)
+        self.assertIs(router_cls, TopKRouter)
+
+    @patch(
+        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+        return_value=1,
+    )
+    def test_hash_router_instantiates_correctly(self, _mock):
+        """HashRouter can be instantiated with config and layer_number."""
+        from paddlefleet.transformer.moe.moe_router import HashRouter
+
+        config = _make_router_config(
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=2,
+            num_hidden_layers=8,
+        )
+        router = HashRouter(config=config, layer_number=7)
+        self.assertIsInstance(router, HashRouter)
+        self.assertEqual(router.num_experts, 4)
+        self.assertEqual(router.num_experts_per_tok, 2)
+        self.assertEqual(router._layer_number, 7)
 
 
 if __name__ == "__main__":
