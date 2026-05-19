@@ -166,6 +166,26 @@ def _build_mtp_layer(config, layer_number=0):
 
 
 # ---------------------------------------------------------------------------
+# Patches for GPTEmbedding tests (handles new CP-related code in __init__
+# and forward introduced by PR #941)
+# ---------------------------------------------------------------------------
+
+_EMBEDDING_INIT_PATCHES = [
+    patch(
+        "paddlefleet.models.gpt.gpt_embedding.build_spec_layer",
+        side_effect=_mock_build_layer_side_effect,
+    ),
+    patch(
+        "paddlefleet.models.gpt.gpt_embedding.mark_context_parallel_parameter_disable_scale_grad",
+    ),
+    patch(
+        "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
+        return_value=1,
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
 # Test: experimental_dataflow config field
 # ---------------------------------------------------------------------------
 
@@ -201,9 +221,10 @@ class TestGPTEmbeddingMTPMask(unittest.TestCase):
             experimental_dataflow=True,
         )
 
-        with patch(
-            "paddlefleet.models.gpt.gpt_embedding.build_spec_layer",
-            side_effect=_mock_build_layer_side_effect,
+        with (
+            _EMBEDDING_INIT_PATCHES[0],
+            _EMBEDDING_INIT_PATCHES[1],
+            _EMBEDDING_INIT_PATCHES[2],
         ):
             mock_spec = MagicMock()
             mock_spec.rope_embedding = None
@@ -237,9 +258,10 @@ class TestGPTEmbeddingMTPMask(unittest.TestCase):
             experimental_dataflow=True,
         )
 
-        with patch(
-            "paddlefleet.models.gpt.gpt_embedding.build_spec_layer",
-            side_effect=_mock_build_layer_side_effect,
+        with (
+            _EMBEDDING_INIT_PATCHES[0],
+            _EMBEDDING_INIT_PATCHES[1],
+            _EMBEDDING_INIT_PATCHES[2],
         ):
             mock_spec = MagicMock()
             mock_spec.rope_embedding = None
@@ -273,9 +295,10 @@ class TestGPTEmbeddingMTPMask(unittest.TestCase):
             experimental_dataflow=True,
         )
 
-        with patch(
-            "paddlefleet.models.gpt.gpt_embedding.build_spec_layer",
-            side_effect=_mock_build_layer_side_effect,
+        with (
+            _EMBEDDING_INIT_PATCHES[0],
+            _EMBEDDING_INIT_PATCHES[1],
+            _EMBEDDING_INIT_PATCHES[2],
         ):
             mock_spec = MagicMock()
             mock_spec.rope_embedding = None
@@ -905,9 +928,6 @@ class TestTransformerLayerExperimentalDataflow(unittest.TestCase):
             num_hidden_layers=1,
         )
 
-        # We test the logic conceptually: when experimental_dataflow=True,
-        # the code enters the else branch and sets attn_mask_startend_row_indices_mtp = None
-        # This means no split/concat of the mask happens
         self.assertTrue(config.experimental_dataflow)
         self.assertEqual(config.num_nextn_predict_layers, 2)
 
@@ -1254,9 +1274,18 @@ class TestGPTEmbeddingMTPInputIdsForMoeMask(unittest.TestCase):
     def _build_embedding(self, config, B, S, H):
         from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 
-        with patch(
-            "paddlefleet.models.gpt.gpt_embedding.build_spec_layer",
-            side_effect=_mock_build_layer_side_effect,
+        with (
+            patch(
+                "paddlefleet.models.gpt.gpt_embedding.build_spec_layer",
+                side_effect=_mock_build_layer_side_effect,
+            ),
+            patch(
+                "paddlefleet.models.gpt.gpt_embedding.mark_context_parallel_parameter_disable_scale_grad",
+            ),
+            patch(
+                "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
+                return_value=1,
+            ),
         ):
             mock_spec = MagicMock()
             mock_spec.rope_embedding = None

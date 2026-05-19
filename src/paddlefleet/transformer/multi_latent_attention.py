@@ -26,6 +26,7 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
 )
 from paddle.distributed.fleet.utils import recompute
 
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 from paddlefleet.models.common.embeddings import (
     apply_rotary_pos_emb,
 )
@@ -35,6 +36,9 @@ from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding as YarnRotaryEmbedding,
     _yarn_get_mscale,
+)
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
@@ -75,6 +79,12 @@ def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
         rope_base
         ** (paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim))
     )
+
+    if get_context_parallel_world_size() > 1:
+        # In EB dataflow and CP size > 1, shape of q is [b, s/cp, h, d],
+        # we need to get full seq_len here
+        seq_len = seq_len * get_context_parallel_world_size()
+
     # position ids: [0, 1, ..., seq_len-1]
     positions = paddle.arange(0, seq_len, dtype="float32")
     # freqs_table: [S, D/2]
@@ -88,6 +98,11 @@ def _ec_compatible_rope_apply(q_pe, k_pe, seq_len, rope_base=1000000.0):
     # freqs_cis: complex [B, S, D/2] -> [B, S, 1, D/2]
     freqs_cis = paddle.polar(paddle.ones_like(freqs_expanded), freqs_expanded)
     freqs_cis = freqs_cis.unsqueeze(2)  # [B, S, 1, D/2]
+
+    if get_context_parallel_world_size() > 1:
+        # In EB dataflow and CP size > 1, freqs_cis is [b, s/cp, 1, d] in local
+        # so, we need to scatter freqs_cis here
+        freqs_cis = ContextParallelScatterOp.apply(freqs_cis, axis=1)
 
     # MD5 debug
     import hashlib as _hl
@@ -854,10 +869,13 @@ class MLASelfAttention(MultiLatentAttention):
                     q_len = q.size(1)
                 # rotary_pos_emb: squeeze [1, seq_len, 1, headdim]
 
-                if (
-                    packed_seq_params is None
-                    or self.config.context_parallel_size == 1
-                ):
+                if get_context_parallel_world_size() > 1:
+                    # In EB dataflow and CP size > 1, rotary_pos_emb is [1, s, 1, d];
+                    # we need to scatter it to [1, s/cp, 1, d] here.
+                    rotary_pos_emb = ContextParallelScatterOp.apply(
+                        rotary_pos_emb, axis=1
+                    )
+                elif self.config.context_parallel_size == 1:
                     # During training, the sequence length is always
                     # the full rotary_pos_emb length, except for sequence packing + CP.
                     # We need the full rotary_pos_emb to cover the full sequence,
