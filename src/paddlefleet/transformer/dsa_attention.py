@@ -44,10 +44,14 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.tensor_parallel.mappings import (
+    gather_from_sequence_parallel_region,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
+    from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -362,19 +366,33 @@ class DSAIndexer(paddle.nn.Layer):
 
     def forward_before_topk(
         self,
-        hidden_states: Tensor,  # [b, s, hidden_size]
-        q_latent: Tensor,  # [b, s, q_lora_rank]
+        hidden_states: Tensor,  # [b, s, hidden_size] or [s/TP, b, hidden_size] (SP mode)
+        q_latent: Tensor,  # [b, s, q_lora_rank] or [s/TP, b, q_lora_rank] (SP mode)
     ):
         """Compute q, k, weights before top-k selection.
 
-        RoPE frequencies are computed internally from self.rotary_pos_emb
+        RoPE frequencies are computed internally from self.rotary_pos_emb.
+
+        When sequence_parallel is enabled, inputs are seq-first sharded
+        [s/TP, b, h]. This method gathers them internally (like Megatron DSA)
+        and transposes to batch-first [b, s, h] before processing.
         """
+        # Gather from sequence parallel region if needed
+        if self.config.sequence_parallel and self.pg_collection.tp.size() > 1:
+            hidden_states = gather_from_sequence_parallel_region(
+                hidden_states, group=self.pg_collection.tp
+            )
+            q_latent = gather_from_sequence_parallel_region(
+                q_latent, group=self.pg_collection.tp
+            )
+            # Transpose from seq-first [s, b, h] to batch-first [b, s, h]
+            hidden_states = hidden_states.transpose([1, 0, 2])
+            q_latent = q_latent.transpose([1, 0, 2])
+
         bsz, seqlen, _ = hidden_states.shape
 
         # Compute RoPE internally
         rotary_seq_len = seqlen
-        if self.config.sequence_parallel:
-            rotary_seq_len *= self.config.tensor_model_parallel_size
         if self.config.rope_type == "rope":
             freqs = self.rotary_pos_emb(rotary_seq_len, packed_seq=False)
             mscale = 1.0
@@ -1071,7 +1089,7 @@ class DSAttention(FleetLayer):
         attn_mask_startend_row_indices: Tensor | None = None,
         attn_mask_type: AttnMaskType | None = None,
         attention_bias: Tensor | None = None,
-        packed_seq_params: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
         # DSA-specific parameters
         x: Tensor | None = None,
@@ -1084,8 +1102,10 @@ class DSAttention(FleetLayer):
             key: Key tensor [b, s, nhpp, qk_head_dim] or [sk, b, nhpp, hn].
             value: Value tensor [b, s, nhpp, hnv] or [sk, b, nhpp, hnv].
             attention_mask: Attention mask tensor [b, 1, sq, sk].
-            x: Original hidden states [b, s, hidden_size] for indexer.
-            qr: Low-rank query representation [b, s, q_lora_rank] for indexer.
+            x: Original hidden states for indexer. [b, s, hidden_size] or
+                [s/TP, b, hidden_size] in sequence_parallel mode.
+            qr: Low-rank query representation for indexer. [b, s, q_lora_rank] or
+                [s/TP, b, q_lora_rank] in sequence_parallel mode.
             attn_mask_startend_row_indices: Optional row indices for packed seq.
             attn_mask_type: Attention mask type.
             attention_bias: Optional attention bias.
