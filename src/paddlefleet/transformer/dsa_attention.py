@@ -378,7 +378,7 @@ class DSAIndexer(paddle.nn.Layer):
         and transposes to batch-first [b, s, h] before processing.
         """
         # Gather from sequence parallel region if needed
-        if self.config.sequence_parallel and self.pg_collection.tp.size() > 1:
+        if self.config.sequence_parallel and self.pg_collection.tp.nranks > 1:
             hidden_states = gather_from_sequence_parallel_region(
                 hidden_states, group=self.pg_collection.tp
             )
