@@ -214,7 +214,15 @@ class DSv4HybridAttention(Attention):
 
         # Core attention (CompressedSparseAttention)
         core_attn_out = self.core_attention(
-            query, key, value, attention_mask, x=hidden_states, qr=q_compressed
+            query,
+            key,
+            value,
+            attention_mask,
+            x=hidden_states,
+            qr=q_compressed,
+            attn_mask_startend_row_indices=kwargs.get(
+                "attn_mask_startend_row_indices", None
+            ),
         )
         # core_attn_out: [b, sq, np * v_head_dim]
 
