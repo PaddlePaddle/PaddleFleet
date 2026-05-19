@@ -657,6 +657,7 @@ class TestUe8m0CodePaths(unittest.TestCase):
             moe_intermediate_size=512,
             moe_token_dispatcher_type="deepep",
             moe_expert_fusion=False,
+            moe_deep_gemm=False,
             moe_use_fusion_node=True,
             use_ue8m0=True,
             fp8=None,

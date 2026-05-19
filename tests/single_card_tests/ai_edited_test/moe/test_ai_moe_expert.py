@@ -37,6 +37,7 @@ def _make_expert_config(**overrides):
         "num_attention_heads": 2,
         "intermediate_size": 256,
         "moe_intermediate_size": 128,
+        "moe_deep_gemm": False,
         "gated_linear_unit": True,
         "sequence_parallel": False,
         "tensor_model_parallel_size": 1,

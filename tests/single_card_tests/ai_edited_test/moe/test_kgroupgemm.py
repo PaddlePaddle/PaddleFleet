@@ -876,6 +876,7 @@ class TestMoELayerFp8QuantWeightBranches(unittest.TestCase):
             hidden_size=self.HIDDEN_SIZE,
             gated_linear_unit=True,
             moe_intermediate_size=self.INTERMEDIATE_SIZE,
+            moe_deep_gemm=False,
         )
         return GroupedMLPExpert(self.N_EXPERTS, config, False, None)
 

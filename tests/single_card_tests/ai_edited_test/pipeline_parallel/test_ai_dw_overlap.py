@@ -448,6 +448,7 @@ class TestTopKRouterDwP2POverlap(unittest.TestCase):
             routed_scaling_factor_learnable=False,
             scoring_func="softmax",
             moe_router_load_balancing_type="aux_loss",
+            moe_deep_gemm=False,
             moe_router_force_load_balancing=False,
             moe_router_fusion=True,
             router_z_loss_coef=0.0,

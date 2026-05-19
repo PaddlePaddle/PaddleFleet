@@ -95,6 +95,7 @@ def _build_router_config(**overrides):
         bf16=False,
         params_dtype=paddle.float32,
         moe_intermediate_size=64,
+        moe_deep_gemm=False,
         gated_linear_unit=True,
         n_shared_experts=0,
         rms_norm_eps=1e-5,
