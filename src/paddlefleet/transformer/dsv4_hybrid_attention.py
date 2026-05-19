@@ -97,16 +97,23 @@ class DSv4HybridAttention(Attention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
     ):
-        # Skip Attention.__init__ (which builds a generic core_attention and process groups).
-        nn.Layer.__init__(self)
-        self.config = config
-        self.layer_number = layer_number
-        self.attn_mask_type = attn_mask_type
+        super().__init__(
+            config=config,
+            sublayers_spec=sublayers_spec,
+            layer_number=layer_number,
+            attention_type=attention_type,
+            attn_mask_type=attn_mask_type,
+            cp_comm_type=cp_comm_type,
+            pg_collection=pg_collection,
+        )
 
         self.num_attention_heads = config.num_attention_heads
         self.v_head_dim = config.v_head_dim
         self.qk_pos_emb_head_dim = config.qk_pos_emb_head_dim or 0
         self.query_projection_size = self.num_attention_heads * self.v_head_dim
+        self.q_head_dim = self.v_head_dim
+        self.key_hidden_size = self.q_head_dim
+        self.val_hidden_size = self.v_head_dim
 
         # Per-layer compress ratio
         compress_ratio = config.csa_compress_ratios[layer_number - 1]
@@ -139,13 +146,18 @@ class DSv4HybridAttention(Attention):
         else:
             raise ValueError(f"Unsupported rope_type: {rope_type}")
 
-        # Core attention: CompressedSparseAttention
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
             config=config,
             layer_number=layer_number,
             attn_mask_type=attn_mask_type,
             attention_type=attention_type,
+            attention_dropout=None,
+            softmax_scale=getattr(config, "softmax_scale", None),
+            k_channels=self.q_head_dim,
+            v_channels=self.v_head_dim,
+            cp_comm_type=cp_comm_type,
+            pg_collection=self.pg_collection,
             compress_ratio=compress_ratio,
             rotary_pos_emb=self.rotary_pos_emb,
         )
@@ -166,13 +178,18 @@ class DSv4HybridAttention(Attention):
             ),
         )
 
-        # Output projection: o_groups * o_lora_rank -> hidden_size
         linear_proj_in_size = config.o_groups * config.o_lora_rank
         self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
-            in_features=linear_proj_in_size,
-            out_features=config.hidden_size,
-            bias_attr=False,
+            linear_proj_in_size,
+            config.hidden_size,
+            config=config,
+            init_method=config.output_layer_init_method,
+            bias=False,
+            input_is_parallel=True,
+            skip_bias_add=True,
+            is_expert=False,
+            tp_group=self.pg_collection.tp,
         )
 
     def forward(
@@ -243,9 +260,9 @@ class DSv4HybridAttention(Attention):
         core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Output projection
-        output = self.o_proj(core_attn_out)
+        output, bias = self.o_proj(core_attn_out)
 
-        return output, None
+        return output, bias
 
     def get_query_key_value_tensors(self, hidden_states: Tensor):
         """Override in subclass."""
@@ -290,9 +307,15 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         # Q down projection: hidden_size -> q_lora_rank (duplicated)
         self.linear_q_down_proj = build_spec_layer(
             sublayers_spec.linear_q_down_proj,
-            in_features=config.hidden_size,
-            out_features=config.q_lora_rank,
-            bias_attr=False,
+            config.hidden_size,
+            config.q_lora_rank,
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=False,
+            is_expert=False,
+            skip_weight_param_allocation=False,
+            tp_group=None,
         )
 
         # Q layernorm
@@ -306,17 +329,29 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         # Q up projection: q_lora_rank -> num_heads * q_head_dim (column parallel)
         self.linear_q_up_proj = build_spec_layer(
             sublayers_spec.linear_q_up_proj,
-            in_features=config.q_lora_rank,
-            out_features=self.num_attention_heads * q_head_dim,
-            bias_attr=False,
+            config.q_lora_rank,
+            self.num_attention_heads * q_head_dim,
+            config=config,
+            init_method=config.init_method,
+            gather_output=False,
+            bias=False,
+            skip_bias_add=False,
+            is_expert=False,
+            tp_group=self.pg_collection.tp,
         )
 
         # KV projection: hidden_size -> v_head_dim (single head)
         self.linear_kv_proj = build_spec_layer(
             sublayers_spec.linear_kv_proj,
-            in_features=config.hidden_size,
-            out_features=config.v_head_dim,
-            bias_attr=False,
+            config.hidden_size,
+            config.v_head_dim,
+            config=config,
+            init_method=config.init_method,
+            gather_output=False,
+            bias=False,
+            skip_bias_add=False,
+            is_expert=False,
+            tp_group=self.pg_collection.tp,
         )
 
         # KV layernorm
