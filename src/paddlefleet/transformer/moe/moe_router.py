@@ -36,6 +36,7 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
 )
 
 from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
+from paddlefleet.cudagraph import autocudagraph
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 
@@ -349,8 +350,17 @@ class StandardMoERouter(nn.Layer):
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
         return aux_loss
 
-    def _cal_seq_aux_loss(
-        self, probs, top_k, routing_map, seq_len, batch_size, input_ids=None
+    @autocudagraph(
+        warmup_steps=1,
+        max_graphs=10,
+        dispatch_key_fn=lambda kw: (
+            kw["seq_len"],
+            kw["batch_size"],
+            paddle.is_grad_enabled(),
+        ),
+    )
+    def _cal_seq_aux_loss_part(
+        self, probs, routing_map, seq_len, batch_size, input_ids=None
     ):
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
@@ -420,6 +430,14 @@ class StandardMoERouter(nn.Layer):
             denom = token_count_per_line + 1e-6 * is_invalid_line_float
         else:
             denom = paddle.to_tensor(float(max_seq_len), dtype="float32")
+        return routing_map, seq_axis, denom, all_probs
+
+    def _cal_seq_aux_loss(
+        self, probs, top_k, routing_map, seq_len, batch_size, input_ids=None
+    ):
+        routing_map, seq_axis, denom, all_probs = self._cal_seq_aux_loss_part(
+            probs, routing_map, seq_len, batch_size, input_ids
+        )
 
         if getattr(self.config, "gpt_model_use_experimental_version", False):
             # Align with ernie: divide by S first, then multiply by E/K (two-step to match float order)
