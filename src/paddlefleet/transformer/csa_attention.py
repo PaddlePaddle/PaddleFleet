@@ -54,15 +54,61 @@ from paddlefleet.transformer.paddle_norm import RMSNorm as _RMSNorm
 # ---------------------------------------------------------------------------
 
 
+def _get_doc_start(
+    attn_mask_startend_row_indices: Tensor, seqlen: int
+) -> Tensor:
+    """Derive per-position document start from attn_mask_startend_row_indices.
+
+    Pure tensor operations using cummax, no Python for-loop.
+
+    Logic:
+      1. Detect boundary: where the end-boundary value changes → new doc starts
+      2. Mark boundary positions with their index, non-boundary with 0
+      3. cummax along seqlen propagates each boundary's index to all subsequent
+         positions until the next boundary (since boundaries are monotonically increasing)
+
+    Args:
+        attn_mask_startend_row_indices: [b, seqlen] or [seqlen] tensor where each value
+            is the end boundary (exclusive) of the document that position belongs to.
+
+    Returns:
+        doc_start: [b, seqlen] int64 tensor with start position of each token's document.
+    """
+    mask = attn_mask_startend_row_indices
+    squeeze_batch: bool = mask.ndim == 1
+    if squeeze_batch:
+        mask = mask.unsqueeze(0)  # [1, seqlen]
+
+    # Step 1: 检测文本边界 (相邻值不同 → 新文本开始)
+    changed = paddle.zeros_like(mask, dtype="int64")
+    changed[:, 0] = 1
+    changed[:, 1:] = (mask[:, 1:] != mask[:, :-1]).cast("int64")
+
+    # Step 2: 在边界位置标记其索引，非边界标记0
+    positions = (
+        paddle.arange(seqlen, dtype="int64").unsqueeze(0).expand_as(mask)
+    )
+    start_marker = changed * positions
+    # 例: 两个文本(24+8) → start_marker = [0, 0, ..., 0, 24, 0, ..., 0]
+    #                                       ^pos0(边界)     ^pos24(边界)
+    # 注: pos0 的 changed=1, positions=0, 所以 start_marker[0]=0 是正确的
+
+    # Step 3: cummax 沿 seqlen 方向取累积最大值
+    # 由于文本段起始位置单调递增，cummax 的结果就是每个位置的 doc_start
+    # 例: [0,0,...,0,24,0,...,0] → cummax → [0,0,...,0,24,24,...,24]
+    doc_start = paddle.cummax(start_marker, axis=1).values
+
+    if squeeze_batch:
+        doc_start = doc_start.squeeze(0)
+
+    return doc_start
+
+
 @functools.lru_cache(maxsize=8)
-def _get_window_topk_idxs_cached(
+def _get_window_topk_idxs_no_doc(
     window_size: int, seqlen: int, device_str: str
 ) -> Tensor:
-    """Compute sliding window indices [seqlen, window_size].
-
-    For each position i, returns indices of the last window_size tokens.
-    Uses -1 for invalid (out-of-range) positions.
-    """
+    """Compute sliding window indices without document mask (cached)."""
     base = paddle.arange(seqlen).unsqueeze(1)  # [seqlen, 1]
     offsets = paddle.arange(window_size)  # [window_size]
     matrix = paddle.clip(base - window_size + 1, min=0) + offsets
@@ -70,36 +116,112 @@ def _get_window_topk_idxs_cached(
     return matrix
 
 
-def get_window_topk_idxs(
-    window_size: int, batch_size: int, seqlen: int, device=None
-) -> Tensor:
-    """Get sliding window indices expanded to batch: [b, seqlen, window_size]."""
-    indices = _get_window_topk_idxs_cached(window_size, seqlen, "gpu")
-    return indices.unsqueeze(0).expand([batch_size, -1, -1])
-
-
 @functools.lru_cache(maxsize=8)
-def _get_compress_topk_idxs_cached(
+def _get_compress_topk_idxs_no_doc(
     ratio: int, seqlen: int, offset: int, device_str: str
 ) -> Tensor:
-    """Compute all-compressed-positions indices for a single sequence (cached).
-
-    Returns:
-        indices: [seqlen, seqlen // ratio] int tensor, -1 for future positions.
-    """
+    """Compute compress indices without document mask (cached)."""
     n_compressed = seqlen // ratio
-    matrix = paddle.arange(n_compressed).repeat([seqlen, 1])
-    mask = matrix >= paddle.arange(1, seqlen + 1).unsqueeze(1) // ratio
-    matrix = paddle.where(mask, paddle.full_like(matrix, -1), matrix + offset)
+    k_indices = paddle.arange(n_compressed)
+    matrix = k_indices.unsqueeze(0).expand([seqlen, -1])
+    causal_bound = paddle.arange(1, seqlen + 1).unsqueeze(1) // ratio
+    causal_invalid = matrix >= causal_bound
+    matrix = paddle.where(
+        causal_invalid, paddle.full_like(matrix, -1), matrix + offset
+    )
+    return matrix
+
+
+def get_window_topk_idxs(
+    window_size: int,
+    batch_size: int,
+    seqlen: int,
+    attn_mask_startend_row_indices: Tensor,
+    device=None,
+) -> Tensor:
+    """Get sliding window indices: [b, seqlen, window_size].
+
+    Args:
+        attn_mask_startend_row_indices: None for single-document (no mask), or
+            a tensor of shape [b, 1, seqlen, 1] or [b, seqlen] with per-position
+            document end boundaries.
+    """
+    if attn_mask_startend_row_indices is None:
+        indices = _get_window_topk_idxs_no_doc(window_size, seqlen, "gpu")
+        return indices.unsqueeze(0).expand([batch_size, -1, -1])
+
+    # Reshape to [b, seqlen]
+    mask = attn_mask_startend_row_indices.reshape([batch_size, seqlen])
+    doc_start = _get_doc_start(mask, seqlen)  # [b, seqlen]
+
+    # Vectorized computation for all batches at once
+    base = paddle.arange(seqlen).unsqueeze(1)  # [seqlen, 1]
+    offsets = paddle.arange(window_size)  # [window_size]
+
+    # doc_start: [b, seqlen] -> [b, seqlen, 1]
+    doc_start_3d = doc_start.unsqueeze(2)  # [b, seqlen, 1]
+    base_3d = base.unsqueeze(0)  # [1, seqlen, 1]
+
+    win_start = paddle.maximum(
+        base_3d - window_size + 1, doc_start_3d
+    )  # [b, seqlen, 1]
+    matrix = win_start + offsets.unsqueeze(0).unsqueeze(
+        0
+    )  # [b, seqlen, window_size]
+    matrix = paddle.where(
+        matrix > base_3d, paddle.full_like(matrix, -1), matrix
+    )
     return matrix
 
 
 def get_compress_topk_idxs(
-    ratio: int, batch_size: int, seqlen: int, offset: int, device=None
+    ratio: int,
+    batch_size: int,
+    seqlen: int,
+    offset: int,
+    attn_mask_startend_row_indices: Tensor,
+    device=None,
 ) -> Tensor:
-    """Get compressed indices expanded to batch: [b, seqlen, seqlen // ratio]."""
-    matrix = _get_compress_topk_idxs_cached(ratio, seqlen, offset, "gpu")
-    return matrix.unsqueeze(0).expand([batch_size, -1, -1])
+    """Get compressed indices: [b, seqlen, seqlen // ratio].
+
+    Args:
+        attn_mask_startend_row_indices: None for single-document (no mask), or
+            a tensor of shape [b, 1, seqlen, 1] or [b, seqlen] with per-position
+            document end boundaries.
+    """
+    if attn_mask_startend_row_indices is None:
+        matrix = _get_compress_topk_idxs_no_doc(ratio, seqlen, offset, "gpu")
+        return matrix.unsqueeze(0).expand([batch_size, -1, -1])
+
+    # Reshape to [b, seqlen]
+    mask = attn_mask_startend_row_indices.reshape([batch_size, seqlen])
+    doc_start = _get_doc_start(mask, seqlen)  # [b, seqlen]
+
+    n_compressed = seqlen // ratio
+    k_indices = paddle.arange(n_compressed)  # [n_compressed]
+
+    # Expand: [b, seqlen, n_compressed]
+    matrix = (
+        k_indices.unsqueeze(0).unsqueeze(0).expand([batch_size, seqlen, -1])
+    )  # [b, seqlen, n_compressed]
+
+    # Causal mask: k >= (i+1) // ratio
+    causal_bound = (
+        paddle.arange(1, seqlen + 1).unsqueeze(1) // ratio
+    ).unsqueeze(0)  # [1, seqlen, 1]
+    causal_invalid = matrix >= causal_bound
+
+    # Document boundary mask: k < ceil(doc_start[i] / ratio)
+    doc_start_compressed = ((doc_start + ratio - 1) // ratio).unsqueeze(
+        2
+    )  # [b, seqlen, 1]
+    doc_invalid = matrix < doc_start_compressed
+
+    invalid = causal_invalid | doc_invalid
+    matrix = paddle.where(
+        invalid, paddle.full_like(matrix, -1), matrix + offset
+    )
+    return matrix
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +701,7 @@ class CompressedSparseAttention(nn.Layer):
         attention_mask: Tensor | None,
         x: Tensor = None,
         qr: Tensor = None,
+        attn_mask_startend_row_indices: Tensor = None,
     ) -> Tensor:
         """Forward pass for CompressedSparseAttention.
 
@@ -614,7 +737,9 @@ class CompressedSparseAttention(nn.Layer):
         offset = sq  # compressed indices start after original positions
 
         # Step 3: Window indices
-        window_idxs = get_window_topk_idxs(self.window_size, b, sq)
+        window_idxs = get_window_topk_idxs(
+            self.window_size, b, sq, attn_mask_startend_row_indices
+        )
 
         # Step 4: Compressed indices
         indexer_loss = None
@@ -713,7 +838,11 @@ class CompressedSparseAttention(nn.Layer):
             else:
                 # ratio=128: attend to all compressed positions
                 compress_topk_idxs = get_compress_topk_idxs(
-                    self.compress_ratio, b, sq, offset
+                    self.compress_ratio,
+                    b,
+                    sq,
+                    offset,
+                    attn_mask_startend_row_indices,
                 )
 
             topk_idxs = paddle.concat(
