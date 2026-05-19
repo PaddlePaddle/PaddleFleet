@@ -749,8 +749,6 @@ class TestDispatchNumber(BaseTest):
         fake_calc.clear_cache()
 
     def test_max_graphs_limit(self):
-        fake_calc.clear_cache()
-
         for bs in range(1, 10):
             for _ in range(5):
                 with paddle.no_grad():
