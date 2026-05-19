@@ -195,8 +195,24 @@ def _apply_rotary_pos_emb_bshd(
     # When SP is enabled, each rank processes only a subset of the full sequence.
     # We need to slice freqs to corresponding positions for this rank.
     # NOTE: Determine unsqueeze_dim BEFORE slicing freqs, as slicing changes the shape.
+    # But we need to handle M-RoPE case where freqs may be [S, B, D] vs t's [B, S, H, D].
+    # In that case, we should transpose first before calculating unsqueeze_dim.
+
+    # Check if freqs needs transpose (M-RoPE with swapped dims)
+    needs_transpose = False
+    if freqs.ndim == 3:
+        t_d0, t_d1 = t.shape[0], t.shape[1]
+        f_d0, f_d1 = freqs.shape[0], freqs.shape[1]
+        # freqs is [S, B, D] but t is [B, S, H, D] -> need transpose
+        if t_d0 == f_d1 and t_d1 == f_d0 and t_d0 != f_d0:
+            needs_transpose = True
+
     if len(freqs.shape) < len(t.shape):
-        unsqueeze_dim = get_unsqueeze_dim(t, freqs)
+        if needs_transpose:
+            # For M-RoPE [S, B, D] -> [B, S, D], unsqueeze should be at dim 2
+            unsqueeze_dim = 2
+        else:
+            unsqueeze_dim = get_unsqueeze_dim(t, freqs)
     else:
         unsqueeze_dim = None
 
