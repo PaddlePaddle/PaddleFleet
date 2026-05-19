@@ -331,25 +331,10 @@ class WeightedSwiGLUFunction(paddle.autograd.PyLayer):
             )
         else:
             tmp, wgrad = weighted_swiglu_back(grad_output, input, weights)
-        return tmp, wgrad, None, None
-
-
-class ClampedWeightedSwiGLUFunction(paddle.autograd.PyLayer):
-    """Custom autograd function for ClampedSwiGLU with per-token weight scaling."""
-
-    @staticmethod
-    def forward(ctx, input, weights, clamp_value):
-        ctx.save_for_backward(input, weights)
-        ctx.clamp_value = clamp_value
-        return clamped_weighted_swiglu(input, weights, clamp_value)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, weights = ctx.saved_tensor()
-        tmp, wgrad = clamped_weighted_swiglu_back(
-            grad_output, input, weights, ctx.clamp_value
-        )
-        return tmp, wgrad, None
+        # PyLayer.backward must return one gradient per tensor input
+        # (input, weights). fp8_input_store and clamp_value are non-tensor
+        # constants and do not require gradients.
+        return tmp, wgrad
 
 
 def bias_swiglu_impl(

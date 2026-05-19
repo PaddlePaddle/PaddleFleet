@@ -650,10 +650,10 @@ class TestHashRouter(unittest.TestCase):
         )
 
     def test_no_input_ids_raises(self):
-        """HashRouter must raise if input_ids is None."""
+        """HashRouter must raise ValueError if input_ids is None."""
         router, _ = self._make_router()
         hidden = self._dummy_hidden(2, 4)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             router(hidden, input_ids=None)
 
     def test_set_layer_number(self):
@@ -689,6 +689,30 @@ class TestHashRouter(unittest.TestCase):
             np.full((B * S, 2), scale, dtype="float32"),
             atol=1e-6,
         )
+
+    def test_sequence_parallel_token_alignment(self):
+        """With sequence_parallel=True, input_ids must align with [S,B,H] layout.
+
+        For input_ids [B,S]=[[3,5],[7,9]] and hidden [S,B,H]:
+          flat_ids should be [3,7,5,9] (sequence-major), NOT [3,5,7,9].
+        Each token's expert_0 = token_id % num_experts.
+        """
+        num_experts = 8
+        router, _ = self._make_router(
+            n_routed_experts=num_experts,
+            num_experts_per_tok=1,
+        )
+        # TransformerConfig may auto-disable sequence_parallel when tp_size=1,
+        # so set it directly on the router instance to test the flatten branch.
+        router.sequence_parallel = True
+
+        B, S, H = 2, 2, 64
+        input_ids = paddle.to_tensor([[3, 5], [7, 9]], dtype="int64")
+        hidden = paddle.randn([S, B, H])  # sequence-major
+        _, _, top_idx, _, _, _, _, _ = router(hidden, input_ids=input_ids)
+        # Expected sequence-major flatten: [3, 7, 5, 9]
+        expected = np.array([[3], [7], [5], [9]], dtype="int64") % num_experts
+        np.testing.assert_array_equal(top_idx.numpy(), expected)
 
 
 class TestHashRouterInMoELayer(unittest.TestCase):

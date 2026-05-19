@@ -942,10 +942,12 @@ class HashRouter(nn.Layer):
                 - l_aux (None)
                 - l_zloss (None)
         """
-        assert input_ids is not None, (
-            "HashRouter requires input_ids to be provided. "
-            "Make sure input_ids is passed through the model forward to the MoE layer."
-        )
+        if input_ids is None:
+            raise ValueError(
+                "HashRouter requires input_ids to be provided. "
+                "Make sure input_ids is passed through the model forward "
+                "to the MoE layer."
+            )
 
         if len(input.shape) != 3:
             raise ValueError(
@@ -953,17 +955,24 @@ class HashRouter(nn.Layer):
                 f"got shape {list(input.shape)}"
             )
 
+        # `input_ids` is conventionally [B, S] (batch-major). When
+        # `sequence_parallel=True` the hidden-state `input` is [S, B, H]
+        # (sequence-major), so we must transpose `input_ids` before flatten
+        # to keep token-id alignment with hidden states.
         if self.sequence_parallel:
             seq_len, batch_size, _ = input.shape
+            flat_ids = (
+                input_ids.transpose([1, 0]).reshape([-1]).cast(paddle.int64)
+            )
         else:
             batch_size, seq_len, _ = input.shape
+            flat_ids = input_ids.reshape([-1]).cast(paddle.int64)
 
         num_tokens = batch_size * seq_len
 
         # ------------------------------------------------------------------ #
         # Hash assignment: expert_k = (token_id + k) % num_experts            #
         # ------------------------------------------------------------------ #
-        flat_ids = input_ids.reshape([-1]).cast(paddle.int64)  # [B*S]
 
         # offsets: [[0, 1, ..., K-1]]  ->  broadcast with flat_ids
         offsets = paddle.arange(

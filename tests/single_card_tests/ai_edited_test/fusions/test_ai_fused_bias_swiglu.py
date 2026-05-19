@@ -442,6 +442,21 @@ class TestClampedSwiGLU(unittest.TestCase):
         self.assertEqual(grad_y.shape, list(y.shape))
         self.assertEqual(grad_w.shape, list(weights.shape))
 
+    def test_weighted_bias_swiglu_impl_clamp_backward(self):
+        """End-to-end fwd+bwd through weighted_bias_swiglu_impl with clamp."""
+        from paddlefleet.fusions.fused_bias_swiglu import (
+            weighted_bias_swiglu_impl,
+        )
+
+        inp = paddle.randn([4, 16])
+        inp.stop_gradient = False
+        weights = paddle.randn([4, 1])
+        weights.stop_gradient = False
+        out = weighted_bias_swiglu_impl(inp, None, weights, clamp_value=2.0)
+        grads = paddle.grad([out.sum()], [inp, weights])
+        self.assertEqual(grads[0].shape, [4, 16])
+        self.assertEqual(grads[1].shape, [4, 1])
+
 
 if __name__ == "__main__":
     unittest.main()
