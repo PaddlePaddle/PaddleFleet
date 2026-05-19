@@ -37,7 +37,7 @@ def _make_layer(use_bias=False, moe_routed_expert_use_bias=None):
         num_experts_per_tok=1,
         moe_intermediate_size=16,
         moe_token_dispatcher_type="alltoall",
-        moe_grouped_gemm=False,
+        moe_expert_fusion=False,
         fp8=None,
         gated_linear_unit=True,
         hidden_act=F.silu,

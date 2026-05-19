@@ -49,7 +49,7 @@ class TestGetMoeLayerSpecForBackend(unittest.TestCase):
         result = get_moe_layer_spec_for_backend(
             backend=mock_backend,
             num_experts=8,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
         self.assertIsInstance(result, LayerSpec)
 
