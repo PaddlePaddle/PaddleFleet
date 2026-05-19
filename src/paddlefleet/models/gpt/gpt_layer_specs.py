@@ -59,6 +59,10 @@ from paddlefleet.transformer.block_attn_res import (
 from paddlefleet.transformer.dsa_attention import (
     MLASelfAttentionWithDSA,
 )
+from paddlefleet.transformer.dsv4_hybrid_attention import (
+    DSv4HybridSelfAttention,
+    DSv4HybridSelfAttentionSublayersSpec,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.gated_delta_net import (
     GatedDeltaNet,
@@ -200,6 +204,20 @@ def get_attention_spec(
                 else None,
             ),
         )
+    elif attention_layer_type == "dsv4_hybrid_attention":
+        return LayerSpec(
+            layer=DSv4HybridSelfAttention,
+            extra_kwargs={"attn_mask_type": attn_mask_type},
+            sublayers_spec=DSv4HybridSelfAttentionSublayersSpec(
+                linear_q_down_proj=backend.column_parallel_linear(),
+                linear_q_up_proj=backend.column_parallel_linear(),
+                linear_kv_proj=backend.column_parallel_linear(),
+                core_attention=None,
+                o_proj=backend.row_parallel_linear(),
+                q_layernorm=qk_norm_standard,
+                kv_layernorm=qk_norm_standard,
+            ),
+        )
     else:
         raise ValueError(
             f"Unknown attention_layer_type: {attention_layer_type!r}. "
@@ -270,11 +288,20 @@ def get_gpt_layer_local_spec(
             transformer_cls = TransformerLayerWithOverlap
 
     if multi_latent_attention:
-        self_attn_spec = get_attention_spec(
-            config=config,
-            attention_layer_type="multi_latent_attention",
-            attn_mask_type=AttnMaskType.causal,
-        )
+        # Route to DSv4 Hybrid if configured
+        exp_variant = getattr(config, "experimental_attention_variant", None)
+        if exp_variant == "dsv4_hybrid":
+            self_attn_spec = get_attention_spec(
+                config=config,
+                attention_layer_type="dsv4_hybrid_attention",
+                attn_mask_type=AttnMaskType.causal,
+            )
+        else:
+            self_attn_spec = get_attention_spec(
+                config=config,
+                attention_layer_type="multi_latent_attention",
+                attn_mask_type=AttnMaskType.causal,
+            )
     else:
         self_attn_spec = get_attention_spec(
             config=config,
