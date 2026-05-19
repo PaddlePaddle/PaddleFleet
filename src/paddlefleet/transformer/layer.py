@@ -22,19 +22,6 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-def build_spec_layer(spec, **kwargs):
-    """Build a layer from a sublayer spec.
-
-    If spec is None, returns None.
-    If spec is a callable (class or factory), it is called with the provided kwargs.
-    """
-    if spec is None:
-        return None
-    if callable(spec):
-        return spec(**kwargs)
-    return None
-
-
 class FleetLayer(paddle.nn.Layer):
     """Base Fleet Layer inherited by all Models.
     Args:
