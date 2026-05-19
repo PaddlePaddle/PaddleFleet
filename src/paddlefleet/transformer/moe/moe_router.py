@@ -157,7 +157,7 @@ class StandardMoERouter(nn.Layer):
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
             dtype="float32",
-            default_initializer=paddle.nn.initializer.Uniform(),
+            # default_initializer=paddle.nn.initializer.Uniform(),
         )
 
         if self.routed_scaling_factor_learnable:

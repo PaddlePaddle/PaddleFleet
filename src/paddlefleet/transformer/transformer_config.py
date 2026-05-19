@@ -699,6 +699,65 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_loss_coeff: float = 0.01
     """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
 
+    ####################
+    # CSA / DSv4 Hybrid Attention
+    ####################
+
+    experimental_attention_variant: str | None = None
+    """Which experimental attention variant to use.
+    Supported values: None (disabled), 'dsa', 'dsv4_hybrid'.
+    When 'dsv4_hybrid', enables DeepSeekV4 Hybrid Attention with Compressed Sparse Attention.
+    """
+
+    csa_window_size: int = 128
+    """Sliding window size for Compressed Sparse Attention (CSA).
+    Each query attends to the last csa_window_size tokens via a sliding window.
+    """
+
+    csa_compress_ratios: list | None = None
+    """Per-layer compression ratios for CSA. Length must equal num_hidden_layers.
+    Each value must be one of {0, 4, 128}:
+      - 0: window-only attention (no compression)
+      - 4: overlapping compression with learned CSAIndexer
+      - 128: non-overlapping compression, attend to all compressed positions
+    """
+
+    csa_compress_rotary_base: float = 40000.0
+    """Rotary base for compressed KV positions in CSA.
+    Used instead of the standard rotary_base when compress_ratio > 1 for a layer.
+    """
+
+    csa_dense_mode: bool = False
+    """If True, skip CSAIndexer for ratio==4 layers and attend to all compressed positions.
+    Useful for debugging or ablation studies.
+    """
+
+    dsv4_tilelang_backend: str | None = None
+    """Optional DSv4 TileLang backend. None keeps the default Paddle unfused path."""
+
+    dsv4_tilelang_debug_compare: bool = False
+    """If True, compare TileLang output with unfused Paddle output before returning."""
+
+    dsv4_tilelang_topk_pad_to: int = 64
+    """Pad DSv4 TileLang topk indices to this block size using -1 invalid indices."""
+
+    dsv4_tilelang_enable_backward: bool = False
+    """Enable DSv4 TileLang backward path. Disabled until Paddle integration is validated."""
+
+    o_groups: int = 8
+    """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
+    Set to 0 to use a single linear output projection instead.
+    """
+
+    o_lora_rank: int = 1024
+    """Low-rank dimension per group for the grouped output projection in DSv4 Hybrid."""
+
+    qk_pos_emb_head_dim: int | None = None
+    """Dimension of positional embedding portion in each QK head for DSv4 Hybrid.
+    When set, the total head dim is split as: v_head_dim = qk_nope_dim + qk_pos_emb_head_dim.
+    The positional embedding (RoPE) is applied only to the last qk_pos_emb_head_dim dims.
+    """
+
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
 
@@ -717,6 +776,18 @@ class TransformerConfig(ModelParallelConfig):
         "indexer_loss_coeff": "dsa_indexer_loss_coeff",
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
+        # CSA / DSv4 Hybrid field mapping
+        "csa_window_size": "csa_window_size",
+        "csa_compress_ratios": "csa_compress_ratios",
+        "csa_compress_rotary_base": "csa_compress_rotary_base",
+        "csa_dense_mode": "csa_dense_mode",
+        "dsv4_tilelang_backend": "dsv4_tilelang_backend",
+        "dsv4_tilelang_debug_compare": "dsv4_tilelang_debug_compare",
+        "dsv4_tilelang_topk_pad_to": "dsv4_tilelang_topk_pad_to",
+        "dsv4_tilelang_enable_backward": "dsv4_tilelang_enable_backward",
+        "o_groups": "o_groups",
+        "o_lora_rank": "o_lora_rank",
+        "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
     }
 
     @classmethod
@@ -902,3 +973,45 @@ class TransformerConfig(ModelParallelConfig):
             raise ValueError(
                 "apply_rope_fusion for MLA only works with YARN RoPE."
             )
+
+        # DSv4 Hybrid Attention validation
+        if self.experimental_attention_variant == "dsv4_hybrid":
+            if not self.multi_latent_attention:
+                raise ValueError(
+                    "experimental_attention_variant='dsv4_hybrid' requires "
+                    "multi_latent_attention=True."
+                )
+            if self.csa_compress_ratios is None:
+                raise ValueError(
+                    "experimental_attention_variant='dsv4_hybrid' requires "
+                    "csa_compress_ratios to be set."
+                )
+            if len(self.csa_compress_ratios) != self.num_hidden_layers:
+                raise ValueError(
+                    f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
+                    f"must equal num_hidden_layers ({self.num_hidden_layers})."
+                )
+            valid_ratios = {0, 4, 128}
+            for i, r in enumerate(self.csa_compress_ratios):
+                if r not in valid_ratios:
+                    raise ValueError(
+                        f"csa_compress_ratios[{i}]={r} is invalid. "
+                        f"Must be one of {valid_ratios}."
+                    )
+
+            valid_tilelang_backends = {None, "attention_paddle_compat"}
+            if self.dsv4_tilelang_backend not in valid_tilelang_backends:
+                raise ValueError(
+                    f"dsv4_tilelang_backend={self.dsv4_tilelang_backend!r} is invalid. "
+                    f"Must be one of {valid_tilelang_backends}."
+                )
+            if self.dsv4_tilelang_topk_pad_to != 64:
+                raise ValueError(
+                    "dsv4_tilelang_topk_pad_to must be 64 in the current DSv4 "
+                    "TileLang integration. Other values only change outer padding "
+                    "and do not alter the underlying TileLang block size."
+                )
+            if self.dsv4_tilelang_enable_backward and self.dsv4_tilelang_backend not in {"attention_paddle_compat"}:
+                raise ValueError(
+                    "dsv4_tilelang_enable_backward requires dsv4_tilelang_backend='attention_paddle_compat'."
+                )
