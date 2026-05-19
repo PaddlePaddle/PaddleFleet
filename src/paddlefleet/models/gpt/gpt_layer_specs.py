@@ -56,6 +56,14 @@ from paddlefleet.transformer.block_attn_res import (
     BlockAttnRes,
     BlockAttnResSublayersSpec,
 )
+from paddlefleet.transformer.csa_attention import (
+    CompressedSparseAttention,
+    CompressedSparseAttentionSublayersSpec,
+    Compressor,
+    CompressorSublayersSpec,
+    CSAIndexer,
+    CSAIndexerSublayersSpec,
+)
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexer,
     DSAIndexerSublayersSpec,
@@ -235,17 +243,54 @@ def get_attention_spec(
             ),
         )
     elif attention_layer_type == "dsv4_hybrid_attention":
+        # Build nested CSA spec tree matching Megatron's structure
+        compressor_spec = LayerSpec(
+            layer=Compressor,
+            sublayers_spec=CompressorSublayersSpec(
+                linear_wkv=backend.linear(),
+                linear_wgate=backend.linear(),
+                norm=backend.layer_norm(rms_norm=True, for_qk=False),
+            ),
+        )
+
+        indexer_spec = LayerSpec(
+            layer=CSAIndexer,
+            sublayers_spec=CSAIndexerSublayersSpec(
+                linear_wq_b=backend.linear(),
+                linear_weights_proj=backend.linear(),
+                compressor=compressor_spec,
+            ),
+        )
+
+        core_attention_spec = LayerSpec(
+            layer=CompressedSparseAttention,
+            sublayers_spec=CompressedSparseAttentionSublayersSpec(
+                compressor=compressor_spec,
+                indexer=indexer_spec,
+            ),
+        )
+
+        # DSA indexer requires normalized q as input, so here we cannot fuse
+        # qk layernorm with linear projection and have to use unfused qk layernorm.
+        qk_norm = (
+            backend.layer_norm(
+                rms_norm=config.normalization == "RMSNorm", for_qk=True
+            )
+            if getattr(config, "qk_layernorm", True)
+            else IdentityOp
+        )
+
         return LayerSpec(
             layer=DSv4HybridSelfAttention,
             extra_kwargs={"attn_mask_type": attn_mask_type},
             sublayers_spec=DSv4HybridSelfAttentionSublayersSpec(
-                linear_q_down_proj=backend.column_parallel_linear(),
+                linear_q_down_proj=backend.linear(),
                 linear_q_up_proj=backend.column_parallel_linear(),
                 linear_kv_proj=backend.column_parallel_linear(),
-                core_attention=None,
+                core_attention=core_attention_spec,
                 o_proj=backend.row_parallel_linear(),
-                q_layernorm=qk_norm_standard,
-                kv_layernorm=qk_norm_standard,
+                q_layernorm=qk_norm,
+                kv_layernorm=qk_norm,
             ),
         )
     else:

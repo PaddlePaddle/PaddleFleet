@@ -26,15 +26,18 @@ Components:
 from __future__ import annotations
 
 import functools
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
 from paddle import Tensor, nn
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
+from paddlefleet.transformer import FleetLayer
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -44,10 +47,9 @@ from paddlefleet.transformer.dsa_attention import (
 )
 
 if TYPE_CHECKING:
+    from paddlefleet.process_groups_config import ProcessGroupCollection
+    from paddlefleet.transformer.enums import AttnMaskType
     from paddlefleet.transformer.transformer_config import TransformerConfig
-
-
-from paddlefleet.transformer.paddle_norm import RMSNorm as _RMSNorm
 
 # ---------------------------------------------------------------------------
 # Helper functions for index computation
@@ -107,7 +109,7 @@ def get_compress_topk_idxs(
 # ---------------------------------------------------------------------------
 
 
-def _csa_apply_rope(
+def _apply_rope(
     x: Tensor,
     nope_dim: int,
     pos_dim: int,
@@ -247,6 +249,15 @@ def unfused_compressed_sparse_attn(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class CompressorSublayersSpec:
+    """Sublayer specifications for CSA Compressor."""
+
+    linear_wkv: type | LayerSpec = None
+    linear_wgate: type | LayerSpec = None
+    norm: type | LayerSpec = None
+
+
 class Compressor(nn.Layer):
     """Gated pooling compressor for CSA.
 
@@ -260,6 +271,7 @@ class Compressor(nn.Layer):
     def __init__(
         self,
         config: TransformerConfig,
+        sublayers_spec: CompressorSublayersSpec,
         compress_ratio: int,
         head_dim: int,
         rotate: bool = False,
@@ -277,11 +289,17 @@ class Compressor(nn.Layer):
 
         proj_out_dim = self.coff * head_dim
 
-        self.linear_wkv = nn.Linear(
-            config.hidden_size, proj_out_dim, bias_attr=False
+        self.linear_wkv = build_spec_layer(
+            sublayers_spec.linear_wkv,
+            in_features=config.hidden_size,
+            out_features=proj_out_dim,
+            bias_attr=False,
         )
-        self.linear_wgate = nn.Linear(
-            config.hidden_size, proj_out_dim, bias_attr=False
+        self.linear_wgate = build_spec_layer(
+            sublayers_spec.linear_wgate,
+            in_features=config.hidden_size,
+            out_features=proj_out_dim,
+            bias_attr=False,
         )
 
         self.ape = self.create_parameter(
@@ -294,10 +312,11 @@ class Compressor(nn.Layer):
             ),
         )
 
-        self.norm = _RMSNorm(
-            config,
-            normalized_shape=head_dim,
-            norm_eps=getattr(config, "layernorm_epsilon", 1e-5),
+        self.norm = build_spec_layer(
+            sublayers_spec.norm,
+            config=config,
+            hidden_size=head_dim,
+            eps=getattr(config, "layernorm_epsilon", 1e-5),
         )
 
     def _overlap_transform(
@@ -364,7 +383,7 @@ class Compressor(nn.Layer):
 
         # Apply RoPE with subsampled positions
         if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
-            kv = _csa_apply_rope(
+            kv = _apply_rope(
                 kv,
                 self.head_dim - self.qk_pos_emb_head_dim,
                 self.qk_pos_emb_head_dim,
@@ -385,6 +404,15 @@ class Compressor(nn.Layer):
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class CSAIndexerSublayersSpec:
+    """Sublayer specifications for CSAIndexer."""
+
+    linear_wq_b: type | LayerSpec = None
+    linear_weights_proj: type | LayerSpec = None
+    compressor: type | LayerSpec = None
+
+
 class CSAIndexer(nn.Layer):
     """Learned top-k retrieval over compressed positions for CSA.
 
@@ -396,6 +424,7 @@ class CSAIndexer(nn.Layer):
     def __init__(
         self,
         config: TransformerConfig,
+        sublayers_spec: CSAIndexerSublayersSpec,
         compress_ratio: int,
         rotary_pos_emb=None,
     ):
@@ -415,19 +444,24 @@ class CSAIndexer(nn.Layer):
         self.rotary_pos_emb = rotary_pos_emb
 
         # Q projection: q_lora_rank -> n_heads * head_dim
-        self.linear_wq_b = nn.Linear(
-            self.q_lora_rank,
-            self.index_n_heads * self.index_head_dim,
+        self.linear_wq_b = build_spec_layer(
+            sublayers_spec.linear_wq_b,
+            in_features=self.q_lora_rank,
+            out_features=self.index_n_heads * self.index_head_dim,
             bias_attr=False,
         )
 
         # Weights projection: hidden_size -> n_heads
-        self.linear_weights_proj = nn.Linear(
-            self.hidden_size, self.index_n_heads, bias_attr=False
+        self.linear_weights_proj = build_spec_layer(
+            sublayers_spec.linear_weights_proj,
+            in_features=self.hidden_size,
+            out_features=self.index_n_heads,
+            bias_attr=False,
         )
 
         # Own compressor (smaller head_dim, with Hadamard rotation)
-        self.compressor = Compressor(
+        self.compressor = build_spec_layer(
+            sublayers_spec.compressor,
             config=config,
             compress_ratio=compress_ratio,
             head_dim=self.index_head_dim,
@@ -447,7 +481,7 @@ class CSAIndexer(nn.Layer):
         q = self.linear_wq_b(qr)  # [b, sq, n_heads * head_dim]
         q = q.reshape([b, sq, self.index_n_heads, self.index_head_dim])
         if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
-            q = _csa_apply_rope(
+            q = _apply_rope(
                 q,
                 self.index_head_dim - self.qk_pos_emb_head_dim,
                 self.qk_pos_emb_head_dim,
@@ -497,7 +531,15 @@ class CSAIndexer(nn.Layer):
 # ---------------------------------------------------------------------------
 
 
-class CompressedSparseAttention(nn.Layer):
+@dataclass
+class CompressedSparseAttentionSublayersSpec:
+    """Sublayer specifications for CompressedSparseAttention."""
+
+    compressor: type | LayerSpec = None
+    indexer: type | LayerSpec = None
+
+
+class CompressedSparseAttention(FleetLayer):
     """Core attention combining sliding window + compressed KV attention.
 
     Conditionally builds Compressor and CSAIndexer based on compress_ratio:
@@ -509,11 +551,18 @@ class CompressedSparseAttention(nn.Layer):
     def __init__(
         self,
         config: TransformerConfig,
+        sublayers_spec: CompressedSparseAttentionSublayersSpec,
         layer_number: int,
+        attn_mask_type: AttnMaskType,
+        attention_type: str,
+        attention_dropout: float | None = None,
+        softmax_scale: float | None = None,
+        cp_comm_type: str = "p2p",
+        pg_collection: ProcessGroupCollection = None,
+        rotary_pos_emb: nn.Layer = None,
         compress_ratio: int = 0,
-        rotary_pos_emb=None,
     ):
-        super().__init__()
+        super().__init__(config)
         self.config = config
         self.layer_number = layer_number
         self.compress_ratio = compress_ratio
@@ -531,7 +580,8 @@ class CompressedSparseAttention(nn.Layer):
 
         # Conditionally build Compressor (ratio > 1)
         if self.compress_ratio > 1:
-            self.compressor = Compressor(
+            self.compressor = build_spec_layer(
+                sublayers_spec.compressor,
                 config=config,
                 compress_ratio=self.compress_ratio,
                 head_dim=config.v_head_dim,
@@ -543,7 +593,8 @@ class CompressedSparseAttention(nn.Layer):
 
         # Conditionally build Indexer (ratio == 4 and not dense_mode)
         if self.compress_ratio == 4 and not config.csa_dense_mode:
-            self.indexer = CSAIndexer(
+            self.indexer = build_spec_layer(
+                sublayers_spec.indexer,
                 config=config,
                 compress_ratio=self.compress_ratio,
                 rotary_pos_emb=rotary_pos_emb,

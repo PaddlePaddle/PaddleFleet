@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor, nn
+from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
@@ -41,14 +42,10 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
 from paddlefleet.transformer.attention import Attention
-from paddlefleet.transformer.csa_attention import CompressedSparseAttention
-from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.layer import build_spec_layer
-from paddlefleet.transformer.paddle_norm import RMSNorm as _RMSNorm
 
 if TYPE_CHECKING:
-    from paddle.distributed.fleet.meta_parallel import LayerSpec
-
+    from paddlefleet.process_groups_config import ProcessGroupCollection
+    from paddlefleet.transformer.enums import AttnMaskType
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -95,12 +92,13 @@ class DSv4HybridAttention(Attention):
         config: TransformerConfig,
         sublayers_spec: DSv4HybridSelfAttentionSublayersSpec,
         layer_number: int,
-        attn_mask_type: AttnMaskType = AttnMaskType.causal,
-        **kwargs,
+        attn_mask_type: AttnMaskType,
+        attention_type: str,
+        cp_comm_type: str | None = None,
+        pg_collection: ProcessGroupCollection = None,
     ):
-        # Skip Attention.__init__ (which tries to build core_attention from spec)
-        # and initialize nn.Layer directly
-        paddle.nn.Layer.__init__(self)
+        # Skip Attention.__init__ (which builds a generic core_attention and process groups).
+        nn.Layer.__init__(self)
         self.config = config
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
@@ -142,9 +140,12 @@ class DSv4HybridAttention(Attention):
             raise ValueError(f"Unsupported rope_type: {rope_type}")
 
         # Core attention: CompressedSparseAttention
-        self.core_attention = CompressedSparseAttention(
+        self.core_attention = build_spec_layer(
+            sublayers_spec.core_attention,
             config=config,
             layer_number=layer_number,
+            attn_mask_type=attn_mask_type,
+            attention_type=attention_type,
             compress_ratio=compress_ratio,
             rotary_pos_emb=self.rotary_pos_emb,
         )
@@ -167,17 +168,12 @@ class DSv4HybridAttention(Attention):
 
         # Output projection: o_groups * o_lora_rank -> hidden_size
         linear_proj_in_size = config.o_groups * config.o_lora_rank
-        if sublayers_spec.o_proj is not None:
-            self.o_proj = build_spec_layer(
-                sublayers_spec.o_proj,
-                in_features=linear_proj_in_size,
-                out_features=config.hidden_size,
-                has_bias=False,
-            )
-        else:
-            self.o_proj = nn.Linear(
-                linear_proj_in_size, config.hidden_size, bias_attr=False
-            )
+        self.o_proj = build_spec_layer(
+            sublayers_spec.o_proj,
+            in_features=linear_proj_in_size,
+            out_features=config.hidden_size,
+            bias_attr=False,
+        )
 
     def forward(
         self,
@@ -273,7 +269,9 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         config: TransformerConfig,
         sublayers_spec: DSv4HybridSelfAttentionSublayersSpec,
         layer_number: int,
-        attn_mask_type: AttnMaskType = AttnMaskType.causal,
+        attn_mask_type: AttnMaskType,
+        cp_comm_type: str | None = None,
+        pg_collection: ProcessGroupCollection = None,
         **kwargs,
     ):
         super().__init__(
@@ -281,57 +279,52 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             sublayers_spec=sublayers_spec,
             layer_number=layer_number,
             attn_mask_type=attn_mask_type,
-            **kwargs,
+            attention_type="self",
+            cp_comm_type=cp_comm_type,
+            pg_collection=pg_collection,
         )
 
         self.q_lora_rank = config.q_lora_rank
         q_head_dim = self.v_head_dim  # In DSv4 Hybrid, q_head_dim == v_head_dim
 
         # Q down projection: hidden_size -> q_lora_rank (duplicated)
-        self.linear_q_down_proj = nn.Linear(
-            config.hidden_size, config.q_lora_rank, bias_attr=False
+        self.linear_q_down_proj = build_spec_layer(
+            sublayers_spec.linear_q_down_proj,
+            in_features=config.hidden_size,
+            out_features=config.q_lora_rank,
+            bias_attr=False,
         )
 
         # Q layernorm
-        self.q_layernorm = _RMSNorm(
-            config,
-            normalized_shape=config.q_lora_rank,
-            norm_eps=getattr(config, "layernorm_epsilon", 1e-5),
+        self.q_layernorm = build_spec_layer(
+            sublayers_spec.q_layernorm,
+            config=config,
+            hidden_size=config.q_lora_rank,
+            eps=getattr(config, "layernorm_epsilon", 1e-5),
         )
 
         # Q up projection: q_lora_rank -> num_heads * q_head_dim (column parallel)
-        if sublayers_spec.linear_q_up_proj is not None:
-            self.linear_q_up_proj = build_spec_layer(
-                sublayers_spec.linear_q_up_proj,
-                in_features=config.q_lora_rank,
-                out_features=self.num_attention_heads * q_head_dim,
-                has_bias=False,
-            )
-        else:
-            self.linear_q_up_proj = nn.Linear(
-                config.q_lora_rank,
-                self.num_attention_heads * q_head_dim,
-                bias_attr=False,
-            )
+        self.linear_q_up_proj = build_spec_layer(
+            sublayers_spec.linear_q_up_proj,
+            in_features=config.q_lora_rank,
+            out_features=self.num_attention_heads * q_head_dim,
+            bias_attr=False,
+        )
 
         # KV projection: hidden_size -> v_head_dim (single head)
-        if sublayers_spec.linear_kv_proj is not None:
-            self.linear_kv_proj = build_spec_layer(
-                sublayers_spec.linear_kv_proj,
-                in_features=config.hidden_size,
-                out_features=config.v_head_dim,
-                has_bias=False,
-            )
-        else:
-            self.linear_kv_proj = nn.Linear(
-                config.hidden_size, config.v_head_dim, bias_attr=False
-            )
+        self.linear_kv_proj = build_spec_layer(
+            sublayers_spec.linear_kv_proj,
+            in_features=config.hidden_size,
+            out_features=config.v_head_dim,
+            bias_attr=False,
+        )
 
         # KV layernorm
-        self.kv_layernorm = _RMSNorm(
-            config,
-            normalized_shape=config.v_head_dim,
-            norm_eps=getattr(config, "layernorm_epsilon", 1e-5),
+        self.kv_layernorm = build_spec_layer(
+            sublayers_spec.kv_layernorm,
+            config=config,
+            hidden_size=config.v_head_dim,
+            eps=getattr(config, "layernorm_epsilon", 1e-5),
         )
 
     def get_query_key_value_tensors(
@@ -355,15 +348,15 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         q_compressed = self.linear_q_down_proj(
             hidden_states
         )  # [b, sq, q_lora_rank]
-        q_compressed = self.q_layernorm(q_compressed)
+        # q_compressed = self.q_layernorm(q_compressed)
 
         q = self.linear_q_up_proj(q_compressed)  # [b, sq, n * v_head_dim]
         q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
-        q = _q_rms_norm(q, getattr(self.config, "layernorm_epsilon", 1e-5))
+        # q = _q_rms_norm(q, getattr(self.config, "layernorm_epsilon", 1e-5))
 
         # KV path
         kv = self.linear_kv_proj(hidden_states)  # [b, sq, v_head_dim]
-        kv = self.kv_layernorm(kv)
+        # kv = self.kv_layernorm(kv)
 
         # Apply RoPE to both Q and KV
         pos_dim = self.qk_pos_emb_head_dim
