@@ -365,7 +365,7 @@ fi
 
 # 运行单卡模型测试
 if [ "$RUN_SINGLE_MODEL" = true ]; then
-    export CACHE_DIR=/root/paddlejob/share-storage/gpfs/system-public/fleet-model-cache
+    export CACHE_DIR=/root/paddlejob/share-storage/gpfs/system-public/futianle
     BASE_NAME="${CUDA_VERSION}-${PYTHON_VERSION}-single"
 
     # 如果没有指定具体模型，运行所有单卡模型测试
@@ -460,7 +460,7 @@ fi
 
 # 运行多卡模型测试
 if [ "$RUN_MULTI_MODEL" = true ]; then
-    export CACHE_DIR=/root/paddlejob/share-storage/gpfs/system-public/fleet-model-cache
+    export CACHE_DIR=/root/paddlejob/share-storage/gpfs/system-public/futianle
     cd PaddleFormers
     pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
     cd ..
