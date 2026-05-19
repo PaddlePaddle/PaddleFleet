@@ -153,6 +153,12 @@ def get_window_topk_idxs(
         return indices.unsqueeze(0).expand([batch_size, -1, -1])
 
     # Reshape to [b, seqlen]
+    assert (
+        attn_mask_startend_row_indices.shape[1] == 1
+        and attn_mask_startend_row_indices.shape[3] == 1
+    ), (
+        f"attn_mask_startend_row_indices shape must be [b, 1, seqlen, 1] now, but got {attn_mask_startend_row_indices.shape}"
+    )
     mask = attn_mask_startend_row_indices.reshape([batch_size, seqlen])
     doc_start = _get_doc_start(mask, seqlen)  # [b, seqlen]
 

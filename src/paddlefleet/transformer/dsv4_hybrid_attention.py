@@ -220,9 +220,9 @@ class DSv4HybridAttention(Attention):
             attention_mask,
             x=hidden_states,
             qr=q_compressed,
-            attn_mask_startend_row_indices=kwargs[
-                "attn_mask_startend_row_indices"
-            ],
+            attn_mask_startend_row_indices=kwargs.get(
+                "attn_mask_startend_row_indices", None
+            ),
         )
         # core_attn_out: [b, sq, np * v_head_dim]
 
