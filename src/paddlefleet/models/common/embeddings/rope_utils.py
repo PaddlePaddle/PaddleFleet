@@ -194,6 +194,12 @@ def _apply_rotary_pos_emb_bshd(
     # For Sequence Parallel: slice freqs to match sharded sequence length
     # When SP is enabled, each rank processes only a subset of the full sequence.
     # We need to slice freqs to corresponding positions for this rank.
+    # NOTE: Determine unsqueeze_dim BEFORE slicing freqs, as slicing changes the shape.
+    if len(freqs.shape) < len(t.shape):
+        unsqueeze_dim = get_unsqueeze_dim(t, freqs)
+    else:
+        unsqueeze_dim = None
+
     if sp_group is not None and sp_group.nranks > 1 and not apply_rope_fusion:
         sp_rank = sp_group.rank
         sp_size = sp_group.nranks
@@ -253,7 +259,10 @@ def _apply_rotary_pos_emb_bshd(
         sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
         if len(cos_.shape) < len(t.shape):
             # [b,s,h]->[b,s,1,h]
-            unsqueeze_dim = get_unsqueeze_dim(t, cos_)
+            # Use pre-computed unsqueeze_dim if available (for SP case),
+            # otherwise compute it now
+            if unsqueeze_dim is None:
+                unsqueeze_dim = get_unsqueeze_dim(t, cos_)
             cos_.unsqueeze_(unsqueeze_dim)
             sin_.unsqueeze_(unsqueeze_dim)
 
