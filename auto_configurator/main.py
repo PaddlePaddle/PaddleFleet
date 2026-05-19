@@ -149,7 +149,7 @@ def create_recipe(args) -> PaddleFleetRecipe:
             model_config.num_experts_per_tok = args.experts_per_tok
         if args.moe_ffn_size is not None:
             model_config.moe_intermediate_size = args.moe_ffn_size
-            model_config.moe_grouped_gemm = True
+            model_config.moe_expert_fusion = True
             model_config.expert_model_parallel_size = 1
 
     return PaddleFleetRecipe(

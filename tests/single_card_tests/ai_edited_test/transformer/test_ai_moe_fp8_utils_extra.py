@@ -99,7 +99,7 @@ class TestFusedStackQuant(unittest.TestCase):
         weight.fp8_weight_stacked = True
         result = fused_stack_quant([weight], transpose=False)
         mock_get.assert_called_once_with(
-            weight, transpose=False, num_expert=None
+            weight, transpose=False, num_expert=None, use_ue8m0=False
         )
         self.assertEqual(len(result), 2)
 
@@ -110,7 +110,7 @@ class TestFusedStackQuant(unittest.TestCase):
         weight.fp8_weight_stacked_transpose = True
         result = fused_stack_quant([weight], transpose=True)
         mock_get.assert_called_once_with(
-            weight, transpose=True, num_expert=None
+            weight, transpose=True, num_expert=None, use_ue8m0=False
         )
         self.assertEqual(len(result), 2)
 
@@ -144,7 +144,7 @@ class TestFusedStackQuant(unittest.TestCase):
         weight.fp8_weight_stacked = True
         result = fused_stack_quant([weight], transpose=True)
         mock_get.assert_called_once_with(
-            weight, transpose=True, num_expert=None
+            weight, transpose=True, num_expert=None, use_ue8m0=False
         )
 
 
@@ -172,7 +172,7 @@ class TestExpertsGroupGemmContiguousNode(unittest.TestCase):
         custom_map.grouped_gemm_experts = MagicMock()
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             use_fp8_mlp=False,
         )
         self.assertTrue(hasattr(node, "grouped_gemm_experts"))

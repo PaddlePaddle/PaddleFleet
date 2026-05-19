@@ -16,8 +16,7 @@ import unittest
 
 import numpy as np
 import paddle
-
-from paddlefleet.ops import filter_scores, filter_scores_grad
+from paddlefleet_ops import filter_scores, filter_scores_grad
 
 
 class _FilterScores(paddle.autograd.Function):

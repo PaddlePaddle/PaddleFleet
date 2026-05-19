@@ -63,7 +63,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         model_parallel_cuda_manual_seed(seed)
         self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
-    def test_moe_grouped_gemm(self):
+    def test_moe_expert_fusion(self):
         n_routed_experts = 64
         hidden_size = 256
         transformer_config = TransformerConfig(
@@ -81,7 +81,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             bias_activation_fusion=True,
             moe_token_dispatcher_type="alltoall",
         )
@@ -91,7 +91,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         )
 
         # This configuration should raise a ValueError because:
-        # moe_grouped_gemm=True is only supported when
+        # moe_expert_fusion=True is only supported when
         # moe_token_dispatcher_type is 'deepep' or 'hybridep'
         # but current moe_token_dispatcher_type='alltoall'
         with self.assertRaises(ValueError) as context:
@@ -104,7 +104,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             )
 
         # Verify the error message contains the expected content
-        expected_error_msg = "moe_grouped_gemm is only supported when moe_token_dispatcher_type is"
+        expected_error_msg = "moe_expert_fusion is only supported when moe_token_dispatcher_type is"
         self.assertIn(expected_error_msg, str(context.exception))
 
     def tearDown(self):

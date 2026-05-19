@@ -290,6 +290,13 @@ class GPTModel(PipelineLayer):
             )
             i += 1
 
+        if (
+            self.config.gpt_model_use_experimental_version
+            and self.config.num_nextn_predict_layers >= 1
+        ):
+            self.add_sequential_layer(
+                layers, LayerDesc(spec.layer_norm), name_prefix
+            )
         if tie_word_embeddings or spec.mtp_lm_head:
             self.add_sequential_layer(
                 layers,

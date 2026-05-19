@@ -206,7 +206,7 @@ class LanguageLoss(FleetLayer):
                 "fused_linear_ce_loss_chunk is incompatible with tensor parallel "
                 "parallel_output=True (ParallelCrossEntropy path)."
             )
-            from paddlefleet.ops.triton_ops.fused_linear_cross_entropy import (
+            from paddlefleet.triton_ops.fused_linear_cross_entropy import (
                 LigerFusedLinearCrossEntropyFunction,
             )
 

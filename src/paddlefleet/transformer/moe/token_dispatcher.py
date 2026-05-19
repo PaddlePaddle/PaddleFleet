@@ -45,7 +45,7 @@ HAVE_HYBRID_EP = False
 HYBRID_EP_LOAD_CACHED_KERNELS = True
 
 try:
-    from paddlefleet.ops import is_hybrid_ep_available
+    from paddlefleet_ops import is_hybrid_ep_available
 
     HAVE_HYBRID_EP = is_hybrid_ep_available()
 except ImportError:
@@ -172,6 +172,7 @@ class _HybridEPManager(_DispatchManager):
         num_experts: int | None = None,
         num_local_experts: int | None = None,
         moe_ep_barrier: bool = True,
+        hybridep_buffer_configs: dict | None = None,
     ):
         if not HAVE_HYBRID_EP:
             raise ImportError("HybridEP runtime is not available.")
@@ -190,6 +191,7 @@ class _HybridEPManager(_DispatchManager):
         self.padded_tokens_per_expert = None
         self.handle = None
         self._active_buffer = None
+        self.hybridep_buffer_configs = hybridep_buffer_configs or {}
 
     def _get_buffer(
         self,
@@ -205,6 +207,7 @@ class _HybridEPManager(_DispatchManager):
             max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
             num_local_experts=self.num_local_experts,
             load_cached_kernels=HYBRID_EP_LOAD_CACHED_KERNELS,
+            **self.hybridep_buffer_configs,
         )
         return self._active_buffer
 
@@ -298,6 +301,7 @@ class _HybridEPManager(_DispatchManager):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         del async_finish
         self.token_indices = token_indices
@@ -376,6 +380,7 @@ class _HybridEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         return self.dispatch_overlap(
             hidden_states,
@@ -501,6 +506,7 @@ class _DeepEPManager(_DispatchManager):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -510,6 +516,7 @@ class _DeepEPManager(_DispatchManager):
             self.group,
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
+            use_ue8m0=use_ue8m0,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -523,6 +530,7 @@ class _DeepEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -533,6 +541,7 @@ class _DeepEPManager(_DispatchManager):
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
+            use_ue8m0=use_ue8m0,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -702,6 +711,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         ep_group: Group,
         moe_ep_barrier: bool = True,
         dispatcher_type: str | None = None,
+        hybridep_buffer_configs: dict | None = None,
     ):
         super().__init__(ep_group)
 
@@ -712,13 +722,16 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             if is_hybrid_ep_backend_selected(dispatcher_type)
             else _DeepEPManager
         )
-        self._comm_manager = manager_cls(
-            group=self.ep_group,
-            router_topk=num_experts_per_tok,
-            num_experts=n_routed_experts,
-            num_local_experts=self.num_local_experts,
-            moe_ep_barrier=moe_ep_barrier,
-        )
+        manager_kwargs = {
+            "group": self.ep_group,
+            "router_topk": num_experts_per_tok,
+            "num_experts": n_routed_experts,
+            "num_local_experts": self.num_local_experts,
+            "moe_ep_barrier": moe_ep_barrier,
+        }
+        if manager_cls is _HybridEPManager:
+            manager_kwargs["hybridep_buffer_configs"] = hybridep_buffer_configs
+        self._comm_manager = manager_cls(**manager_kwargs)
 
     def dispatch_preprocess(
         self,
@@ -756,6 +769,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ):
         return self._comm_manager.dispatch_overlap(
             hidden_states,
@@ -763,6 +777,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             token_weights,
             fp8_dispatch,
             async_finish,
+            use_ue8m0=use_ue8m0,
         )
 
     def token_dispatch(
@@ -770,9 +785,10 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ):
         return self._comm_manager.dispatch(
-            hidden_states, fp8_dispatch, async_finish
+            hidden_states, fp8_dispatch, async_finish, use_ue8m0=use_ue8m0
         )
 
     def dispatch_postprocess(
@@ -946,6 +962,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         permutated_local_input_tokens: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
         global_input_tokens = _AllToAll.apply(

@@ -20,9 +20,9 @@ import paddle
 import paddle.nn.functional as F
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
+from paddlefleet_ops import is_hybrid_ep_available
 
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
-from paddlefleet.ops import is_hybrid_ep_available
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet
@@ -92,16 +92,16 @@ class TestHybridEPFusion(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_token_dispatcher_type="hybridep",
             moe_shared_expert_overlap=True,
             norm_topk_prob=False,
             bias_activation_fusion=True,
         )
-        config.deepep_buffer_configs = {
-            "num_sms": 20,
-            "dispatch_config": [6, hidden_size],
-            "combine_config": [6, hidden_size],
+        config.hybridep_buffer_configs = {
+            "num_sms_dispatch_api": 8,
+            "num_sms_combine_api": 8,
+            "num_sms_preprocessing_api": 8,
         }
         return config
 
@@ -120,6 +120,10 @@ class TestHybridEPFusion(unittest.TestCase):
         moe_layer = self._build_moe_layer(config)
         self.assertTrue(moe_layer.use_hybrid_ep_backend)
         self.assertFalse(moe_layer.moe_shared_expert_overlap)
+        self.assertEqual(
+            moe_layer.token_dispatcher._comm_manager.hybridep_buffer_configs,
+            config.hybridep_buffer_configs,
+        )
 
         input_data = paddle.randn(
             4, 64, config.hidden_size, dtype=paddle.bfloat16

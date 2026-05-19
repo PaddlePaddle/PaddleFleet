@@ -19,7 +19,7 @@ from paddle.nn.functional import swiglu
 
 def fused_swiglu_scale_forward(x, scale):
     if paddle.is_compiled_with_cuda():
-        from paddlefleet.ops import fused_swiglu_scale
+        from paddlefleet_ops import fused_swiglu_scale
 
         return fused_swiglu_scale(x, scale)
     else:
@@ -35,7 +35,7 @@ def fused_swiglu_scale_forward(x, scale):
 
 def fused_swiglu_scale_backward(x, scale, out_grad):
     if paddle.is_compiled_with_cuda():
-        from paddlefleet.ops import fused_swiglu_scale_bwd
+        from paddlefleet_ops import fused_swiglu_scale_bwd
 
         return fused_swiglu_scale_bwd(x, scale, out_grad)
     else:

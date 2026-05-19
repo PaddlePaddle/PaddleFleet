@@ -18,15 +18,14 @@ import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
-
-from paddlefleet.ops import is_deep_ep_available, is_hybrid_ep_available
+from paddlefleet_ops import is_deep_ep_available, is_hybrid_ep_available
 
 from .fp8_utils import FP8_ALIGN
 from .moe_utils import manual_backward
 
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():
-        from paddlefleet.ops import deep_ep
+        from paddlefleet_ops import deep_ep
     else:
         from paddle.distributed.communication import deep_ep
 
@@ -35,7 +34,7 @@ else:
     HAVE_DEEP_EP = False
 
 if is_hybrid_ep_available():
-    from paddlefleet.ops import hybrid_ep
+    from paddlefleet_ops import hybrid_ep
 
     HAVE_HYBRID_EP = True
 else:
@@ -43,12 +42,6 @@ else:
 
 _buffer = None
 _hybrid_ep_buffer = None
-_hybrid_ep_buffer_group = None
-_hybrid_ep_buffer_hidden_dim = None
-_hybrid_ep_buffer_max_num_of_tokens_per_rank = 0
-_hybrid_ep_buffer_num_local_experts = None
-_hybrid_ep_buffer_num_sms = None
-_hybrid_ep_buffer_active_num_sms = None
 
 
 def barrier_ep(ep_group):
@@ -87,10 +80,6 @@ def configure_buffer(num_sms=None, dispatch_config=None, combine_config=None):
             Trailing values may be omitted to use the defaults.
         combine_config (List[int]): Same as above, but for combine kernels.
     """
-    global _hybrid_ep_buffer_num_sms
-
-    if num_sms is not None:
-        _hybrid_ep_buffer_num_sms = num_sms
     if num_sms is not None and HAVE_DEEP_EP:
         deep_ep.Buffer.set_num_sms(num_sms)
     if dispatch_config is not None and HAVE_DEEP_EP:
@@ -144,18 +133,43 @@ def get_buffer(group: Group, hidden_bytes: int):
 def reset_hybrid_ep_buffer():
     """Reset the shared HybridEP communication buffer."""
     global _hybrid_ep_buffer
-    global _hybrid_ep_buffer_group
-    global _hybrid_ep_buffer_hidden_dim
-    global _hybrid_ep_buffer_max_num_of_tokens_per_rank
-    global _hybrid_ep_buffer_num_local_experts
-    global _hybrid_ep_buffer_active_num_sms
 
     _hybrid_ep_buffer = None
-    _hybrid_ep_buffer_group = None
-    _hybrid_ep_buffer_hidden_dim = None
-    _hybrid_ep_buffer_max_num_of_tokens_per_rank = 0
-    _hybrid_ep_buffer_num_local_experts = None
-    _hybrid_ep_buffer_active_num_sms = None
+
+
+def _need_new_hybrid_ep_buffer(
+    group: Group,
+    hidden_dim: int,
+    max_num_of_tokens_per_rank: int,
+    num_local_experts: int,
+    num_sms_dispatch_api: int | None,
+    num_sms_combine_api: int | None,
+    num_sms_preprocessing_api: int | None,
+):
+    if _hybrid_ep_buffer is None:
+        return True
+
+    config = _hybrid_ep_buffer.config
+    need_new_buffer = (
+        _hybrid_ep_buffer.group != group
+        or config.hidden_dim != hidden_dim
+        or config.max_num_of_tokens_per_rank < max_num_of_tokens_per_rank
+        or config.num_of_experts_per_rank != num_local_experts
+    )
+    if num_sms_dispatch_api is not None:
+        need_new_buffer |= (
+            _hybrid_ep_buffer.num_sms_dispatch_api != num_sms_dispatch_api
+        )
+    if num_sms_combine_api is not None:
+        need_new_buffer |= (
+            _hybrid_ep_buffer.num_sms_combine_api != num_sms_combine_api
+        )
+    if num_sms_preprocessing_api is not None:
+        need_new_buffer |= (
+            _hybrid_ep_buffer.num_sms_preprocessing_api
+            != num_sms_preprocessing_api
+        )
+    return need_new_buffer
 
 
 def get_hybrid_ep_buffer(
@@ -164,23 +178,21 @@ def get_hybrid_ep_buffer(
     max_num_of_tokens_per_rank: int,
     num_local_experts: int,
     load_cached_kernels: bool = True,
+    num_sms_dispatch_api: int | None = None,
+    num_sms_combine_api: int | None = None,
+    num_sms_preprocessing_api: int | None = None,
 ):
     """Get or create the shared HybridEP communication buffer."""
     global _hybrid_ep_buffer
-    global _hybrid_ep_buffer_group
-    global _hybrid_ep_buffer_hidden_dim
-    global _hybrid_ep_buffer_max_num_of_tokens_per_rank
-    global _hybrid_ep_buffer_num_local_experts
-    global _hybrid_ep_buffer_active_num_sms
 
-    if (
-        _hybrid_ep_buffer is None
-        or _hybrid_ep_buffer_group != group
-        or _hybrid_ep_buffer_hidden_dim != hidden_dim
-        or _hybrid_ep_buffer_max_num_of_tokens_per_rank
-        < max_num_of_tokens_per_rank
-        or _hybrid_ep_buffer_num_local_experts != num_local_experts
-        or _hybrid_ep_buffer_active_num_sms != _hybrid_ep_buffer_num_sms
+    if _need_new_hybrid_ep_buffer(
+        group,
+        hidden_dim,
+        max_num_of_tokens_per_rank,
+        num_local_experts,
+        num_sms_dispatch_api,
+        num_sms_combine_api,
+        num_sms_preprocessing_api,
     ):
         _hybrid_ep_buffer = hybrid_ep.HybridEPBuffer(
             group=group,
@@ -188,18 +200,11 @@ def get_hybrid_ep_buffer(
             max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
             num_local_experts=num_local_experts,
             use_fp8=False,
-            num_sms_dispatch_api=_hybrid_ep_buffer_num_sms,
-            num_sms_combine_api=_hybrid_ep_buffer_num_sms,
-            num_sms_preprocessing_api=_hybrid_ep_buffer_num_sms,
+            num_sms_dispatch_api=num_sms_dispatch_api,
+            num_sms_combine_api=num_sms_combine_api,
+            num_sms_preprocessing_api=num_sms_preprocessing_api,
             load_cached_kernels=load_cached_kernels,
         )
-        _hybrid_ep_buffer_group = group
-        _hybrid_ep_buffer_hidden_dim = hidden_dim
-        _hybrid_ep_buffer_max_num_of_tokens_per_rank = (
-            max_num_of_tokens_per_rank
-        )
-        _hybrid_ep_buffer_num_local_experts = num_local_experts
-        _hybrid_ep_buffer_active_num_sms = _hybrid_ep_buffer_num_sms
     return _hybrid_ep_buffer
 
 
@@ -370,6 +375,7 @@ class DeepEPDispatch(PyLayer):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         moe_ep_barrier: bool = True,
+        use_ue8m0: bool = False,
     ):
         """Forward pass of fused dispatch."""
         if fp8_dispatch:
@@ -379,6 +385,7 @@ class DeepEPDispatch(PyLayer):
                 input_transpose=False,
                 output_scale_transpose=True,
                 return_transpose_only=False,
+                using_ue8m0_scale=use_ue8m0,
             )
             scale = scale.T.contiguous()
             x = (x_fp8, scale)
@@ -523,6 +530,7 @@ if HAVE_DEEP_EP:
         async_finish=False,
         allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
+        use_ue8m0: bool = False,
     ):
         """Perform fused dispatch operation if deep_ep is available.
 
@@ -548,7 +556,8 @@ if HAVE_DEEP_EP:
             fp8_dispatch,
             async_finish,
             allocate_on_comm_stream,
-            moe_ep_barrier=moe_ep_barrier,
+            moe_ep_barrier,
+            use_ue8m0,
         )
 
     def fused_combine(

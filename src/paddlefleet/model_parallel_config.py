@@ -434,3 +434,10 @@ class ModelParallelConfig:
                     "Pipeline parallel communication overlapping in warmup and flush is only "
                     "compatible with overlap_p2p_comm but not batch_p2p_comm."
                 )
+        # Note(chenzhichao02): To unify the two switches moe_grouped_gemm and moe_expert_fusion, I applied a hack here to pass the CI.
+        # Note: remove later
+        if (
+            hasattr(self, "moe_grouped_gemm")
+            and self.moe_grouped_gemm is not None
+        ):
+            self.moe_expert_fusion = self.moe_grouped_gemm

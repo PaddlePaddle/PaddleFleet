@@ -62,7 +62,7 @@ def _make_moe_config(**overrides):
         "tensor_model_parallel_size": 1,
         "moe_token_dispatcher_type": "alltoall",
         "moe_use_fusion_node": False,
-        "moe_grouped_gemm": False,
+        "moe_expert_fusion": False,
         "moe_ep_barrier": True,
         "fp8": None,
         "fp8_wgrad": True,
@@ -534,7 +534,7 @@ class TestForwardLatent(unittest.TestCase):
         # Parallel / sequence flags → single-card non-sequence path
         stub.expert_model_parallel_size = 1
         stub.sequence_parallel = False
-        stub.moe_grouped_gemm = False
+        stub.moe_expert_fusion = False
         stub.shared_experts = None
         stub.moe_shared_expert_overlap = False
         stub.moe_use_fusion_node = False
@@ -626,7 +626,7 @@ class TestForwardLatent(unittest.TestCase):
         stub.use_latent_moe = False
         stub.expert_model_parallel_size = 1
         stub.sequence_parallel = False
-        stub.moe_grouped_gemm = False
+        stub.moe_expert_fusion = False
         stub.shared_experts = None
         stub.moe_shared_expert_overlap = False
         stub.moe_use_fusion_node = False
@@ -816,7 +816,7 @@ class TestFusionMoeForwardLatent(unittest.TestCase):
         stub.using_sonic_moe = False
         stub.fp8 = False
         stub.moe_deep_gemm = False
-        stub.moe_grouped_gemm = False
+        stub.moe_expert_fusion = False
         stub.recompute_moe_gate_up = False
         stub.recompute_moe_premute = False
         stub.fp8_wgrad = True

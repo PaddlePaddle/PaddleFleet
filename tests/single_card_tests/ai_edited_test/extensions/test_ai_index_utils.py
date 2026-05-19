@@ -29,6 +29,13 @@ sys.path.insert(
 
 import types
 import unittest
+
+try:
+    import paddlefleet_ops._extensions  # noqa: F401
+
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
 from unittest import mock
 
 # Mock triton and triton.language if not available
@@ -48,13 +55,14 @@ if not _triton_available:
         fn if fn is not None else lambda f: f
     )
     _mock_triton.cdiv = lambda a, b: (a + b - 1) // b
-    _mock_triton.next_power_of_2 = (
-        lambda n: 1 << (n - 1).bit_length() if n > 0 else 1
+    _mock_triton.next_power_of_2 = lambda n: (
+        1 << (n - 1).bit_length() if n > 0 else 1
     )
     sys.modules.setdefault("triton", _mock_triton)
     sys.modules.setdefault("triton.language", _mock_tl)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestPrepareMaxmin(unittest.TestCase):
     """Tests for prepare_maxmin function."""
 
@@ -135,6 +143,7 @@ class TestPrepareMaxmin(unittest.TestCase):
         self.assertEqual(output_min.dtype, paddle.int32)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestScanMaxminChunked(unittest.TestCase):
     """Tests for scan_maxmin_chunked triton kernel."""
 

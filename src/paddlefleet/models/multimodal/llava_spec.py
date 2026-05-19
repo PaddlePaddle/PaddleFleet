@@ -39,12 +39,14 @@ LNImpl = FusedLayerNorm
 
 def decoder_model_with_local_default_spec(
     num_experts: int | None = None,
-    moe_grouped_gemm: bool = False,
+    moe_expert_fusion: bool = False,
     qk_layernorm: bool = False,
 ) -> LayerSpec:
     """LLava decoder local spec."""
     mlp = get_mlp_layer_spec(
-        use_te=False, num_experts=num_experts, moe_grouped_gemm=moe_grouped_gemm
+        use_te=False,
+        num_experts=num_experts,
+        moe_expert_fusion=moe_expert_fusion,
     )
     return LayerSpec(
         module=TransformerLayer,
