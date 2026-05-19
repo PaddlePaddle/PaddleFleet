@@ -291,15 +291,27 @@ class Compressor(nn.Layer):
 
         self.linear_wkv = build_spec_layer(
             sublayers_spec.linear_wkv,
-            in_features=config.hidden_size,
-            out_features=proj_out_dim,
-            bias_attr=False,
+            config.hidden_size,
+            proj_out_dim,
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=False,
+            is_expert=False,
+            skip_weight_param_allocation=False,
+            tp_group=None,
         )
         self.linear_wgate = build_spec_layer(
             sublayers_spec.linear_wgate,
-            in_features=config.hidden_size,
-            out_features=proj_out_dim,
-            bias_attr=False,
+            config.hidden_size,
+            proj_out_dim,
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=False,
+            is_expert=False,
+            skip_weight_param_allocation=False,
+            tp_group=None,
         )
 
         self.ape = self.create_parameter(
@@ -353,8 +365,8 @@ class Compressor(nn.Layer):
         if sq < ratio:
             return None
 
-        kv = self.linear_wkv(x)  # [b, sq, coff * head_dim]
-        score = self.linear_wgate(x)  # [b, sq, coff * head_dim]
+        kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
+        score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
 
         cutoff = (sq // ratio) * ratio
         if cutoff < sq:
@@ -446,17 +458,29 @@ class CSAIndexer(nn.Layer):
         # Q projection: q_lora_rank -> n_heads * head_dim
         self.linear_wq_b = build_spec_layer(
             sublayers_spec.linear_wq_b,
-            in_features=self.q_lora_rank,
-            out_features=self.index_n_heads * self.index_head_dim,
-            bias_attr=False,
+            self.q_lora_rank,
+            self.index_n_heads * self.index_head_dim,
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=False,
+            is_expert=False,
+            skip_weight_param_allocation=False,
+            tp_group=None,
         )
 
         # Weights projection: hidden_size -> n_heads
         self.linear_weights_proj = build_spec_layer(
             sublayers_spec.linear_weights_proj,
-            in_features=self.hidden_size,
-            out_features=self.index_n_heads,
-            bias_attr=False,
+            self.hidden_size,
+            self.index_n_heads,
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=False,
+            is_expert=False,
+            skip_weight_param_allocation=False,
+            tp_group=None,
         )
 
         # Own compressor (smaller head_dim, with Hadamard rotation)
@@ -478,7 +502,7 @@ class CSAIndexer(nn.Layer):
         b, sq, _ = x.shape
 
         # Q path
-        q = self.linear_wq_b(qr)  # [b, sq, n_heads * head_dim]
+        q, _ = self.linear_wq_b(qr)  # [b, sq, n_heads * head_dim]
         q = q.reshape([b, sq, self.index_n_heads, self.index_head_dim])
         if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
             q = _apply_rope(
@@ -496,7 +520,7 @@ class CSAIndexer(nn.Layer):
         k = self.compressor(x)  # [b, n_compressed, index_head_dim]
 
         # Weights
-        weights = self.linear_weights_proj(x)  # [b, sq, n_heads]
+        weights, _ = self.linear_weights_proj(x)  # [b, sq, n_heads]
         weights = weights * (self.index_n_heads**-0.5)
 
         return q, k, weights
@@ -557,6 +581,8 @@ class CompressedSparseAttention(FleetLayer):
         attention_type: str,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
+        k_channels: int | None = None,
+        v_channels: int | None = None,
         cp_comm_type: str = "p2p",
         pg_collection: ProcessGroupCollection = None,
         rotary_pos_emb: nn.Layer = None,
