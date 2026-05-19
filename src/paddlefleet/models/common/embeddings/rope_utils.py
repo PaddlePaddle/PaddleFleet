@@ -235,6 +235,9 @@ def _apply_rotary_pos_emb_bshd(
         f_d0, f_d1 = freqs.shape[0], freqs.shape[1]
         if (t_d0 != f_d0 or t_d1 != f_d1) and t_d0 * t_d1 == f_d0 * f_d1:
             freqs = freqs.transpose([1, 0, 2]).contiguous()
+            # After transpose, need to recalculate unsqueeze_dim
+            if len(freqs.shape) < len(t.shape):
+                unsqueeze_dim = get_unsqueeze_dim(t, freqs)
 
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
