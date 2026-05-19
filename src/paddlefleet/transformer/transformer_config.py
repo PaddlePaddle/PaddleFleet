@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import functools
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -757,6 +758,34 @@ class TransformerConfig(ModelParallelConfig):
     Useful for debugging or ablation studies.
     """
 
+    dsv4_tilelang_backend: str | None = None
+    """Optional DSv4 TileLang backend. None keeps the default Paddle unfused path."""
+
+    dsv4_tilelang_topk_pad_to: int = 64
+    """Pad DSv4 TileLang topk indices to this block size using -1 invalid indices."""
+
+    dsv4_tilelang_enable_backward: bool = False
+    """Enable DSv4 TileLang backward path. Disabled until Paddle integration is validated."""
+
+    dsv4_tilelang_enable_csa_indexer: bool = False
+    """Enable TileLang kernels for the CSA Indexer only.
+
+    This switch controls whether ratio==4 CSA may use the fused compressed
+    Indexer top-k kernel. It does not change the training phase semantics;
+    csa_dense_mode, dsa_indexer_use_sparse_loss, and dsa_indexer_loss_coeff
+    still decide dense mode, sparse/full loss scope, and loss weight.
+    """
+
+    dsv4_tilelang_csa_indexer_enable_backward: bool = False
+    """Enable TileLang backward for the CSA Indexer loss path.
+
+    This switch only selects the TileLang CSA Indexer gradient kernel when the
+    TileLang Indexer path is active. It does not replace the existing phase
+    controls csa_dense_mode, dsa_indexer_use_sparse_loss, or
+    dsa_indexer_loss_coeff.
+    """
+
+
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
     Set to 0 to use a single linear output projection instead.
@@ -795,6 +824,11 @@ class TransformerConfig(ModelParallelConfig):
         "csa_compress_ratios": "csa_compress_ratios",
         "csa_compress_rotary_base": "csa_compress_rotary_base",
         "csa_dense_mode": "csa_dense_mode",
+        "dsv4_tilelang_backend": "dsv4_tilelang_backend",
+        "dsv4_tilelang_topk_pad_to": "dsv4_tilelang_topk_pad_to",
+        "dsv4_tilelang_enable_backward": "dsv4_tilelang_enable_backward",
+        "dsv4_tilelang_enable_csa_indexer": "dsv4_tilelang_enable_csa_indexer",
+        "dsv4_tilelang_csa_indexer_enable_backward": "dsv4_tilelang_csa_indexer_enable_backward",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -975,6 +1009,15 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
+        if (
+            self.multi_latent_attention
+            and self.apply_rope_fusion
+            and self.rope_type != "yarn"
+        ):
+            raise ValueError(
+                "apply_rope_fusion for MLA only works with YARN RoPE."
+            )
+
         # Hyper-connection (mHC) validation
         if self.enable_hyper_connections:
             if self.mhc_recompute_layer_num is not None and (
@@ -987,6 +1030,11 @@ class TransformerConfig(ModelParallelConfig):
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
+            if not self.multi_latent_attention:
+                raise ValueError(
+                    "experimental_attention_variant='dsv4_hybrid' requires "
+                    "multi_latent_attention=True."
+                )
             if self.csa_compress_ratios is None:
                 raise ValueError(
                     "experimental_attention_variant='dsv4_hybrid' requires "
@@ -1007,6 +1055,34 @@ class TransformerConfig(ModelParallelConfig):
                         f"csa_compress_ratios[{i}]={r} is invalid. "
                         f"Must be one of {valid_ratios}."
                     )
+
+            valid_tilelang_backends = {None, "attention_paddle_compat"}
+            if self.dsv4_tilelang_backend not in valid_tilelang_backends:
+                raise ValueError(
+                    f"dsv4_tilelang_backend={self.dsv4_tilelang_backend!r} is invalid. "
+                    f"Must be one of {valid_tilelang_backends}."
+                )
+            if self.dsv4_tilelang_topk_pad_to != 64:
+                warnings.warn(
+                    "dsv4_tilelang_topk_pad_to values other than 64 only change outer padding "
+                    "and do not alter the underlying DSv4 TileLang block size.",
+                    stacklevel=2,
+                )
+            if (
+                self.dsv4_tilelang_enable_backward
+                and self.dsv4_tilelang_backend != "attention_paddle_compat"
+            ):
+                raise ValueError(
+                    "dsv4_tilelang_enable_backward requires dsv4_tilelang_backend='attention_paddle_compat'."
+                )
+            if (
+                self.dsv4_tilelang_csa_indexer_enable_backward
+                and not self.dsv4_tilelang_enable_csa_indexer
+            ):
+                raise ValueError(
+                    "dsv4_tilelang_csa_indexer_enable_backward requires dsv4_tilelang_enable_csa_indexer=True."
+                )
+
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:
             if self.actual_vocab_size is None:
