@@ -1097,10 +1097,14 @@ class DSAttention(FleetLayer):
     ) -> Tensor:
         """Forward pass for Sparse Attention.
 
+        Note: query/key/value are always batch-first [b, s, ...] when entering
+        this method. The upstream MLASelfAttention transposes from seq-first to
+        batch-first before calling core_attention.
+
         Args:
-            query: Query tensor [b, s, nhpp, qk_head_dim] or [sq, b, nhpp, hn].
-            key: Key tensor [b, s, nhpp, qk_head_dim] or [sk, b, nhpp, hn].
-            value: Value tensor [b, s, nhpp, hnv] or [sk, b, nhpp, hnv].
+            query: Query tensor [b, s, nhpp, qk_head_dim].
+            key: Key tensor [b, s, nhpp, qk_head_dim].
+            value: Value tensor [b, s, nhpp, hnv].
             attention_mask: Attention mask tensor [b, 1, sq, sk].
             x: Original hidden states for indexer. [b, s, hidden_size] or
                 [s/TP, b, hidden_size] in sequence_parallel mode.
