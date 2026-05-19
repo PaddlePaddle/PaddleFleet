@@ -380,18 +380,18 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         b, sq, _ = hidden_states.shape
 
         # Q path
-        q_compressed = self.linear_q_down_proj(
+        q_compressed, _ = self.linear_q_down_proj(
             hidden_states
         )  # [b, sq, q_lora_rank]
-        # q_compressed = self.q_layernorm(q_compressed)
+        q_compressed = self.q_layernorm(q_compressed)
 
-        q = self.linear_q_up_proj(q_compressed)  # [b, sq, n * v_head_dim]
+        q, _ = self.linear_q_up_proj(q_compressed)  # [b, sq, n * v_head_dim]
         q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
-        # q = _q_rms_norm(q, getattr(self.config, "layernorm_epsilon", 1e-5))
+        q = _q_rms_norm(q, getattr(self.config, "layernorm_epsilon", 1e-5))
 
         # KV path
-        kv = self.linear_kv_proj(hidden_states)  # [b, sq, v_head_dim]
-        # kv = self.kv_layernorm(kv)
+        kv, _ = self.linear_kv_proj(hidden_states)  # [b, sq, v_head_dim]
+        kv = self.kv_layernorm(kv)
 
         # Apply RoPE to both Q and KV
         pos_dim = self.qk_pos_emb_head_dim
