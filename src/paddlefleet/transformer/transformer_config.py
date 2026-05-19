@@ -478,12 +478,8 @@ class TransformerConfig(ModelParallelConfig):
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""
 
-    use_latent_moe: bool = False
-    """Whether to use latent MoE. When enabled, adds projection layers
-    to compress hidden states before routing and decompress after."""
-
     moe_latent_size: int | None = None
-    """The latent dimension size for latent MoE. Only used when use_latent_moe is True."""
+    """The latent dimension size for latent MoE. Positive values enable latent MoE."""
 
     ##################
     # Context Parallel

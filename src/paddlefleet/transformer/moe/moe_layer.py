@@ -208,8 +208,8 @@ class MoELayer(nn.Layer):
 
         # Latent MoE initialization
         self.use_latent_moe = (
-            self.config.use_latent_moe
-            and self.config.moe_latent_size is not None
+            self.config.moe_latent_size is not None
+            and self.config.moe_latent_size > 0
         )
         if self.use_latent_moe:
             logging.info(
