@@ -177,7 +177,7 @@ class TestTransformerLayerMoE(unittest.TestCase):
             cls.config = _build_moe_config()
             cls.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
             layer_spec = get_gpt_layer_local_spec(
-                cls.config, num_experts=cls.n_experts, moe_grouped_gemm=False
+                cls.config, num_experts=cls.n_experts, moe_expert_fusion=False
             )
             cls.transformer_layer = layer_spec.layer(
                 cls.config,
