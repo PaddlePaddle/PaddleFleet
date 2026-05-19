@@ -717,6 +717,7 @@ class TransformerConfig(ModelParallelConfig):
         "indexer_loss_coeff": "dsa_indexer_loss_coeff",
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
+        "indexer_rope_interleave": "dsa_indexer_rotary_interleaved",
     }
 
     @classmethod

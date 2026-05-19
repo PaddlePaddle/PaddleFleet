@@ -19,21 +19,23 @@ Tests are organized in 4 layers:
      _compute_index_scores_fused
   2. Indexer module: forward_before_topk, compute_index_scores, backward
   3. Loss: _compute_dsa_indexer_loss, FusedDSAIndexerLoss, DSAIndexerLossAutoScaler
-  4. Integration: MLASelfAttentionWithDSA forward + backward
+  4. Integration: MLASelfAttention with DSAttention (as core_attention) forward + backward
 """
 
 import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
 from paddlefleet.transformer.dsa_attention import (
+    DSAIndexer,
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
+    DSAIndexerSublayersSpec,
+    DSAttention,
+    DSAttentionSublayersSpec,
     FusedDSAIndexerLoss,
-    Indexer,
-    MLASelfAttentionWithDSA,
     _bwd_fused_indexer_loss,
     _compute_dsa_indexer_loss,
     _compute_index_scores_fused,
@@ -43,6 +45,7 @@ from paddlefleet.transformer.dsa_attention import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.multi_latent_attention import (
+    MLASelfAttention,
     MLASelfAttentionSublayersSpec,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -61,7 +64,38 @@ class BiasedLinear(paddle.nn.Layer):
         self.linear = paddle.nn.Linear(in_features, out_features)
 
     def forward(self, x):
+        # Cast input to match weight dtype (mimic ColumnParallelLinear behavior)
+        if x.dtype != self.linear.weight.dtype:
+            x = x.cast(self.linear.weight.dtype)
         return self.linear(x), self.linear.bias
+
+
+class LayerNormStub(paddle.nn.Layer):
+    """Stub for LayerNorm that accepts hidden_size or normalized_shape keyword argument."""
+
+    def __init__(
+        self,
+        hidden_size=None,
+        eps=None,
+        normalized_shape=None,
+        epsilon=None,
+        **kwargs,
+    ):
+        super().__init__()
+        size = hidden_size if hidden_size is not None else normalized_shape
+        self.eps = (
+            eps
+            if eps is not None
+            else (epsilon if epsilon is not None else 1e-5)
+        )
+        self.weight = paddle.nn.Parameter(paddle.ones([size]))
+        self.bias = paddle.nn.Parameter(paddle.zeros([size]))
+
+    def forward(self, x):
+        mean = x.mean(axis=-1, keepdim=True)
+        var = x.var(axis=-1, keepdim=True, unbiased=False)
+        x = (x - mean) / paddle.sqrt(var + self.eps)
+        return x * self.weight + self.bias
 
 
 class RMSNorm(paddle.nn.Layer):
@@ -154,13 +188,36 @@ def _create_dsa_config(
 
 
 def _create_sublayers_spec():
+    """Create MLASelfAttentionSublayersSpec with DSAttention as core_attention."""
+    # DSA Indexer sublayers spec for testing
+    dsa_indexer_sublayers = DSAIndexerSublayersSpec(
+        linear_wq_b=BiasedLinear,
+        linear_wk=BiasedLinear,
+        k_norm=LayerNormStub,  # Use stub that accepts hidden_size kwarg
+        linear_weights_proj=BiasedLinear,
+    )
+
+    # DSAttention as core_attention (pluggable component)
+    class DSAttentionWrapper(DSAttention):
+        """Wrapper for testing that uses test stub layers."""
+
+        pass  # Inherits all behavior from DSAttention
+
     return MLASelfAttentionSublayersSpec(
         q_proj=BiasedLinear,
         q_a_proj=BiasedLinear,
         q_b_proj=BiasedLinear,
         kv_a_proj_with_mqa=BiasedLinear,
         kv_b_proj=BiasedLinear,
-        core_attention=DotProductAttention,
+        core_attention=LayerSpec(
+            layer=DSAttentionWrapper,
+            sublayers_spec=DSAttentionSublayersSpec(
+                indexer=LayerSpec(
+                    layer=DSAIndexer,
+                    sublayers_spec=dsa_indexer_sublayers,
+                ),
+            ),
+        ),
         o_proj=BiasedLinear,
         q_a_layernorm=RMSNorm,
         kv_a_layernorm=RMSNorm,
@@ -296,12 +353,24 @@ class TestComputeIndexScoresFused(unittest.TestCase):
 
 
 # ===========================================================================
-# Layer 2: Indexer module tests
+# Layer 2: DSAIndexer module tests
 # ===========================================================================
 class TestIndexer(unittest.TestCase):
     def setUp(self):
         self.config = _create_dsa_config()
-        self.indexer = Indexer(self.config, layer_number=1)
+        # Create indexer sublayers spec with stub layers that accept **kwargs
+        indexer_sublayers = DSAIndexerSublayersSpec(
+            linear_wq_b=BiasedLinear,
+            linear_wk=BiasedLinear,
+            k_norm=LayerNormStub,
+            linear_weights_proj=BiasedLinear,
+        )
+        self.indexer = DSAIndexer(
+            config=self.config,
+            sublayers_spec=indexer_sublayers,
+            layer_number=1,
+            pg_collection=None,
+        )
         self.b = 2
         self.s = 16
 
@@ -321,9 +390,7 @@ class TestIndexer(unittest.TestCase):
             "bfloat16"
         )
 
-        q, k, weights = self.indexer.forward_before_topk(
-            hidden, q_latent, freqs=None, mscale=1.0
-        )
+        q, k, weights = self.indexer.forward_before_topk(hidden, q_latent)
         self.assertEqual(
             list(q.shape),
             [
@@ -389,9 +456,7 @@ class TestIndexer(unittest.TestCase):
             "bfloat16"
         )
 
-        q, k, weights = self.indexer.forward_before_topk(
-            hidden, q_latent, freqs=None, mscale=1.0
-        )
+        q, k, weights = self.indexer.forward_before_topk(hidden, q_latent)
         # rotate_activation requires bf16, so skip it in this unit test
         # and just use the raw outputs for gradient checking.
         loss = q.cast("float32").sum() + k.cast("float32").sum() + weights.sum()
@@ -630,7 +695,7 @@ class TestDSAIndexerLossAutoScaler(unittest.TestCase):
 
 
 # ===========================================================================
-# Layer 4: MLASelfAttentionWithDSA integration tests
+# Layer 4: MLASelfAttention with DSAttention (core_attention) integration tests
 # ===========================================================================
 class TestMLASelfAttentionWithDSA(unittest.TestCase):
     def setUp(self):
@@ -640,7 +705,7 @@ class TestMLASelfAttentionWithDSA(unittest.TestCase):
 
     def _build_model(self, config=None):
         cfg = config or self.config
-        model = MLASelfAttentionWithDSA(
+        model = MLASelfAttention(
             cfg,
             _create_sublayers_spec(),
             layer_number=1,
@@ -650,8 +715,8 @@ class TestMLASelfAttentionWithDSA(unittest.TestCase):
         # But weights_proj does hidden.cast("float32") internally and expects
         # fp32 weights, so convert it back to fp32 after the global bf16 cast.
         model = model.to(dtype="bfloat16")
-        model.indexer.weights_proj = model.indexer.weights_proj.to(
-            dtype="float32"
+        model.core_attention.indexer.weights_proj = (
+            model.core_attention.indexer.weights_proj.to(dtype="float32")
         )
         return model
 
@@ -1157,14 +1222,25 @@ class TestDSAIndexerLossLoggingHelperTrackMetrics(unittest.TestCase):
 
 
 # ===========================================================================
-# Layer 6: Additional coverage for Indexer and helper functions
+# Layer 6: Additional coverage for DSAIndexer and helper functions
 # ===========================================================================
 class TestIndexerForward(unittest.TestCase):
-    """Test Indexer.forward (the combined forward_before_topk + compute_index_scores)."""
+    """Test DSAIndexer.forward (the combined forward_before_topk + compute_index_scores)."""
 
     def setUp(self):
         self.config = _create_dsa_config()
-        self.indexer = Indexer(self.config, layer_number=1)
+        indexer_sublayers = DSAIndexerSublayersSpec(
+            linear_wq_b=BiasedLinear,
+            linear_wk=BiasedLinear,
+            k_norm=LayerNormStub,
+            linear_weights_proj=BiasedLinear,
+        )
+        self.indexer = DSAIndexer(
+            config=self.config,
+            sublayers_spec=indexer_sublayers,
+            layer_number=1,
+            pg_collection=None,
+        )
         self.b = 2
         self.s = 16
 
@@ -1174,7 +1250,7 @@ class TestIndexerForward(unittest.TestCase):
         self.indexer.k_norm = self.indexer.k_norm.to(dtype="bfloat16")
 
     def test_forward_returns_scores_and_indices(self):
-        """Indexer.forward should return (index_scores, topk_indices)."""
+        """DSAIndexer.forward should return (index_scores, topk_indices)."""
         self._prepare_indexer_bf16()
         hidden = paddle.randn([self.b, self.s, self.config.hidden_size]).cast(
             "bfloat16"
@@ -1189,7 +1265,7 @@ class TestIndexerForward(unittest.TestCase):
         mask = causal.unsqueeze(0).unsqueeze(0)
 
         index_scores, topk_indices = self.indexer.forward(
-            hidden, q_latent, freqs=None, attention_mask=mask, mscale=1.0
+            hidden, q_latent, attention_mask=mask
         )
         self.assertEqual(list(index_scores.shape), [self.b, self.s, self.s])
         self.assertEqual(
@@ -1198,7 +1274,7 @@ class TestIndexerForward(unittest.TestCase):
         )
 
     def test_forward_no_mask(self):
-        """Indexer.forward should work with mask=None."""
+        """DSAIndexer.forward should work with mask=None."""
         self._prepare_indexer_bf16()
         hidden = paddle.randn([self.b, self.s, self.config.hidden_size]).cast(
             "bfloat16"
@@ -1207,17 +1283,28 @@ class TestIndexerForward(unittest.TestCase):
             "bfloat16"
         )
         index_scores, topk_indices = self.indexer.forward(
-            hidden, q_latent, freqs=None, attention_mask=None, mscale=1.0
+            hidden, q_latent, attention_mask=None
         )
         self.assertEqual(list(index_scores.shape), [self.b, self.s, self.s])
 
 
 class TestIndexerComputeScoresWithMask(unittest.TestCase):
-    """Test mask handling in Indexer.compute_index_scores."""
+    """Test mask handling in DSAIndexer.compute_index_scores."""
 
     def setUp(self):
         self.config = _create_dsa_config(index_topk=4)
-        self.indexer = Indexer(self.config, layer_number=1)
+        indexer_sublayers = DSAIndexerSublayersSpec(
+            linear_wq_b=BiasedLinear,
+            linear_wk=BiasedLinear,
+            k_norm=LayerNormStub,
+            linear_weights_proj=BiasedLinear,
+        )
+        self.indexer = DSAIndexer(
+            config=self.config,
+            sublayers_spec=indexer_sublayers,
+            layer_number=1,
+            pg_collection=None,
+        )
         self.b = 2
         self.s = 8
 
@@ -1570,7 +1657,7 @@ class TestDSAIndexerLossAutoScalerAdditional(unittest.TestCase):
 
 
 class TestMLASelfAttentionWithDSASparseLoss(unittest.TestCase):
-    """Integration test for MLASelfAttentionWithDSA with sparse_loss enabled."""
+    """Integration test for MLASelfAttention with DSAttention and sparse_loss enabled."""
 
     def setUp(self):
         self.config = _create_dsa_config(indexer_use_sparse_loss=True)
@@ -1579,15 +1666,15 @@ class TestMLASelfAttentionWithDSASparseLoss(unittest.TestCase):
 
     def _build_model(self, config=None):
         cfg = config or self.config
-        model = MLASelfAttentionWithDSA(
+        model = MLASelfAttention(
             cfg,
             _create_sublayers_spec(),
             layer_number=1,
             attn_mask_type=AttnMaskType.causal,
         )
         model = model.to(dtype="bfloat16")
-        model.indexer.weights_proj = model.indexer.weights_proj.to(
-            dtype="float32"
+        model.core_attention.indexer.weights_proj = (
+            model.core_attention.indexer.weights_proj.to(dtype="float32")
         )
         return model
 
@@ -1620,7 +1707,7 @@ class TestMLASelfAttentionWithDSASparseLoss(unittest.TestCase):
 
 
 class TestMLASelfAttentionWithDSAZeroLossCoeff(unittest.TestCase):
-    """Test MLASelfAttentionWithDSA with indexer_loss_coeff=0."""
+    """Test MLASelfAttention with DSAttention and indexer_loss_coeff=0."""
 
     def setUp(self):
         self.config = _create_dsa_config(indexer_loss_coeff=0.0)
@@ -1628,15 +1715,15 @@ class TestMLASelfAttentionWithDSAZeroLossCoeff(unittest.TestCase):
         self.sequence_length = 32
 
     def _build_model(self):
-        model = MLASelfAttentionWithDSA(
+        model = MLASelfAttention(
             self.config,
             _create_sublayers_spec(),
             layer_number=1,
             attn_mask_type=AttnMaskType.causal,
         )
         model = model.to(dtype="bfloat16")
-        model.indexer.weights_proj = model.indexer.weights_proj.to(
-            dtype="float32"
+        model.core_attention.indexer.weights_proj = (
+            model.core_attention.indexer.weights_proj.to(dtype="float32")
         )
         return model
 
