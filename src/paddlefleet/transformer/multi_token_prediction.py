@@ -38,6 +38,12 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
+
 if TYPE_CHECKING:
     from paddlefleet.models.backends import BackendSpecProvider
     from paddlefleet.packed_seq_params import PackedSeqParams
@@ -349,6 +355,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.astype(
                 hidden_states.dtype
             )
+            if get_context_parallel_world_size() > 1 and self.config.experimental_dataflow:
+                # eb数据流下，mtp_hidden_inputs_mask的shape为[b, s]，但是cp下hidden states的shape为[b, s/cp, h]，需要CP切分。
+                mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(mtp_hidden_inputs_mask, axis=1)
             hidden_states = hidden_states * mtp_hidden_inputs_mask
         # At the (k - 1)-th MTP layer, concatenates the i-th token's hidden_states
         # and the (i + K)-th token's embedding, and combine them with linear projection.

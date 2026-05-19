@@ -38,6 +38,11 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
 
 class DistributedSoftmaxOp(PyLayer):
     @staticmethod
@@ -375,6 +380,9 @@ class LanguageLoss(FleetLayer):
         return loss
 
     def _forward(self, logits: Tensor | tuple, labels: Tensor):
+        if get_context_parallel_world_size() > 1 and self.config.experimental_dataflow:
+            # 在ernie数据流且开启cp下，labels的shape为[b, s+k]，需要在计算loss前进行cp切分。
+            labels = ContextParallelScatterOp.apply(labels, axis=1)
         if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules
@@ -412,9 +420,19 @@ class LanguageLoss(FleetLayer):
                         # Align with EB: compute per-token loss matrix and reduce
                         # with global sum/count instead of going through forward_impl
                         # which applies line-wise loss.
+
+                        if get_context_parallel_world_size() > 1:
+                            # 在ernie数据流且开启cp下，labels的shape为[b, s]，由于不使用_forward进行loss计算，需要在计算loss前进行cp切分。
+                            labels_cur_depth = ContextParallelScatterOp.apply(labels_cur_depth, axis=1)
+
                         loss_matrix_cur_depth = self.loss_func(
                             logits_cur_depth.cast("float32"), labels_cur_depth
                         )
+
+                        if get_context_parallel_world_size() > 1:
+                            loss_matrix_cur_depth = ContextParallelGatherOp.apply(loss_matrix_cur_depth, axis=1)
+                            labels_cur_depth = ContextParallelGatherOp.apply(labels_cur_depth, axis=1)
+
                         lossmask_cur_depth = (
                             labels_cur_depth != self.ignored_index
                         ).cast(paddle.float32)
@@ -429,6 +447,7 @@ class LanguageLoss(FleetLayer):
                         else:
                             loss_cur_depth = loss_matrix_cur_depth.sum() * 0.0
                     else:
+                        # 非精度对齐模式下，label在_forward中进行切分。
                         loss_cur_depth = self._forward(
                             logits_cur_depth,
                             labels_cur_depth,
