@@ -877,9 +877,10 @@ class TopKRouter(StandardMoERouter):
                 gates, top_idx, input_ids_none_zero_mask, input_ids
             )
         else:
-            mask = paddle.zeros_like(gates).put_along_axis_(
-                top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
-            )
+            with paddle.amp.auto_cast(enable=False):
+                mask = paddle.zeros_like(gates).put_along_axis_(
+                    top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
+                )
             if input_ids_none_zero_mask is not None:
                 valid_mask = input_ids_none_zero_mask
                 mask = mask * valid_mask.cast(mask.dtype)
@@ -907,7 +908,7 @@ class TopKRouter(StandardMoERouter):
             top_gate = top_gate * self.routed_scaling_factor
 
         # Reconstruct probs (combine weights in [S, E] sparse layout) from final top_gate.
-        probs = paddle.zeros_like(gates).put_along_axis_(
+        probs = paddle.zeros_like(gates, dtype=top_gate.dtype).put_along_axis_(
             top_idx, top_gate, axis=1
         )
 
