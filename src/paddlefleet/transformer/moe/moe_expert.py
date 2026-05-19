@@ -184,9 +184,6 @@ class GroupedMLPExpert(FleetLayer):
 
         fc2_input_size = self.config.moe_intermediate_size
 
-        initializer = paddle.nn.initializer.Uniform(-0.001, 0.001)
-        # default_initializer=paddle.nn.initializer.Normal(mean=0.0, std=0.01),
-
         dtype = "bfloat16"
         if self.using_sonic_moe:
             w1_shape = [
@@ -221,13 +218,17 @@ class GroupedMLPExpert(FleetLayer):
             self.weight1 = paddle.create_parameter(
                 shape=w1_shape,
                 dtype=dtype,
-                default_initializer=initializer,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             self.weight2 = paddle.create_parameter(
                 shape=w2_shape,
                 dtype=dtype,
-                default_initializer=initializer,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
             )
+            # Use config.init_method / config.output_layer_init_method
+            # which are functions that take a tensor and initialize it in-place.
+            self.config.init_method(self.weight1)
+            self.config.output_layer_init_method(self.weight2)
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 

@@ -55,8 +55,10 @@ class StandardMLPSharedExpert(MLP):
             self.gate_weight = paddle.create_parameter(
                 shape=[config.hidden_size, 1],
                 dtype=config.params_dtype,
-                default_initializer=paddle.nn.initializer.Uniform(),
+                default_initializer=paddle.nn.initializer.Constant(0.0),
             )
+            # Initialize with Normal distribution aligned with Megatron.
+            config.init_method(self.gate_weight)
         else:
             self.gate_weight = None
 
