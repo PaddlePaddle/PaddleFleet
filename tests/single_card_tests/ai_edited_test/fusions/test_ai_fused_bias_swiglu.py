@@ -288,6 +288,7 @@ class TestClampedSwiGLU(unittest.TestCase):
             clamped_weighted_swiglu,
             clamped_weighted_swiglu_back,
         )
+
         self.clamped_swiglu = clamped_swiglu
         self.clamped_swiglu_back = clamped_swiglu_back
         self.clamped_weighted_swiglu = clamped_weighted_swiglu
@@ -307,7 +308,9 @@ class TestClampedSwiGLU(unittest.TestCase):
         clamp_value = 0.1
         y = paddle.full([4, 16], fill_value=100.0)
         out = self.clamped_swiglu(y, clamp_value=clamp_value)
-        max_possible = float(F.silu(paddle.to_tensor(clamp_value)).numpy()) * clamp_value
+        max_possible = (
+            float(F.silu(paddle.to_tensor(clamp_value)).numpy()) * clamp_value
+        )
         self.assertTrue(
             float(out.abs().max().numpy()) <= max_possible + 1e-5,
             f"output max {float(out.abs().max().numpy())} > expected max {max_possible}",
@@ -350,16 +353,27 @@ class TestClampedSwiGLU(unittest.TestCase):
                 y_plus[i, j] += eps
                 y_minus = y_np.copy()
                 y_minus[i, j] -= eps
-                out_plus = clamped_swiglu_autograd(
-                    paddle.to_tensor(y_plus), clamp_value
-                ).sum().numpy()
-                out_minus = clamped_swiglu_autograd(
-                    paddle.to_tensor(y_minus), clamp_value
-                ).sum().numpy()
+                out_plus = (
+                    clamped_swiglu_autograd(
+                        paddle.to_tensor(y_plus), clamp_value
+                    )
+                    .sum()
+                    .numpy()
+                )
+                out_minus = (
+                    clamped_swiglu_autograd(
+                        paddle.to_tensor(y_minus), clamp_value
+                    )
+                    .sum()
+                    .numpy()
+                )
                 num_grad[i, j] = (out_plus - out_minus) / (2 * eps)
 
         np.testing.assert_allclose(
-            analytic_grad, num_grad, atol=1e-4, rtol=1e-3,
+            analytic_grad,
+            num_grad,
+            atol=1e-4,
+            rtol=1e-3,
             err_msg="Analytical gradient does not match numerical gradient",
         )
 
@@ -372,7 +386,9 @@ class TestClampedSwiGLU(unittest.TestCase):
 
     def test_weighted_bias_swiglu_impl_clamp(self):
         """weighted_bias_swiglu_impl with clamp_value should run without error."""
-        from paddlefleet.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
+        from paddlefleet.fusions.fused_bias_swiglu import (
+            weighted_bias_swiglu_impl,
+        )
 
         inp = paddle.randn([8, 16])
         weights = paddle.randn([8, 1])
@@ -385,12 +401,46 @@ class TestClampedSwiGLU(unittest.TestCase):
 
     def test_weighted_bias_swiglu_impl_no_clamp_backward_compat(self):
         """weighted_bias_swiglu_impl without clamp_value should behave as before."""
-        from paddlefleet.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
+        from paddlefleet.fusions.fused_bias_swiglu import (
+            weighted_bias_swiglu_impl,
+        )
 
         inp = paddle.randn([8, 16])
         weights = paddle.randn([8, 1])
         out = weighted_bias_swiglu_impl(inp, None, weights)  # clamp_value=None
         self.assertEqual(out.shape, [8, 8])
+
+    def test_clamped_swiglu_back_direct(self):
+        """Direct call to clamped_swiglu_back covers backward kernel lines."""
+        y = paddle.randn([4, 16])
+        g = paddle.randn([4, 8])
+        grad = self.clamped_swiglu_back(g, y, clamp_value=2.0)
+        self.assertEqual(grad.shape, list(y.shape))
+        self.assertEqual(grad.dtype, y.dtype)
+
+    def test_clamped_swiglu_back_zero_grad_at_clamp(self):
+        """Gradient should be 0 where input was clamped (saturated)."""
+        # All inputs at +100 → clamped → mask = 0 → grad = 0
+        y = paddle.full([2, 8], fill_value=100.0)
+        g = paddle.ones([2, 4])
+        grad = self.clamped_swiglu_back(g, y, clamp_value=1.0)
+        np.testing.assert_allclose(
+            grad.numpy(),
+            np.zeros_like(grad.numpy()),
+            atol=1e-6,
+            err_msg="Saturated inputs should produce zero gradient",
+        )
+
+    def test_clamped_weighted_swiglu_back_direct(self):
+        """Direct call to clamped_weighted_swiglu_back covers backward kernel lines."""
+        y = paddle.randn([4, 16])
+        weights = paddle.randn([4, 1])
+        g = paddle.randn([4, 8])
+        grad_y, grad_w = self.clamped_weighted_swiglu_back(
+            g, y, weights, clamp_value=2.0
+        )
+        self.assertEqual(grad_y.shape, list(y.shape))
+        self.assertEqual(grad_w.shape, list(weights.shape))
 
 
 if __name__ == "__main__":

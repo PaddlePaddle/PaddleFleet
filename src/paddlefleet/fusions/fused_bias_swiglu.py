@@ -163,7 +163,9 @@ def clamped_swiglu_back(g, y, clamp_value):
     dsilu_dy1 = sigmoid_y1 * (1.0 + y_1_clamped * (1.0 - sigmoid_y1))
     # Clamp masks: gradient is 0 where the input was clamped
     y1_mask = (y_1 <= clamp_value).cast(paddle.float32)
-    y2_mask = ((y_2 >= -clamp_value) & (y_2 <= clamp_value)).cast(paddle.float32)
+    y2_mask = ((y_2 >= -clamp_value) & (y_2 <= clamp_value)).cast(
+        paddle.float32
+    )
     grad_y1 = g_fp32 * dsilu_dy1 * y_2_clamped * y1_mask
     grad_y2 = g_fp32 * F.silu(y_1_clamped) * y2_mask
     return paddle.concat([grad_y1, grad_y2], axis=-1).cast(dtype)
@@ -388,7 +390,9 @@ def bias_swiglu_impl(
     )
 
 
-def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False, clamp_value=None):
+def weighted_bias_swiglu_impl(
+    input, bias, weights, fp8_input_store=False, clamp_value=None
+):
     """
     Token-wise-weighted bias swiglu fusion.
 
@@ -407,7 +411,9 @@ def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False, clamp
             "Bias is not supported for weighted swiglu fusion"
         )
     else:
-        output = WeightedSwiGLUFunction.apply(input, weights, fp8_input_store, clamp_value)
+        output = WeightedSwiGLUFunction.apply(
+            input, weights, fp8_input_store, clamp_value
+        )
 
     return (
         output

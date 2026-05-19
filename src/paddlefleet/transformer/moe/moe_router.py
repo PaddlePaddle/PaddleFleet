@@ -902,7 +902,7 @@ class HashRouter(nn.Layer):
 
     def __init__(
         self,
-        config: "TransformerConfig",
+        config: TransformerConfig,
         pg_collection=None,
         layer_number: int | None = None,
     ):
@@ -921,7 +921,9 @@ class HashRouter(nn.Layer):
         """Set the layer number (used for logging / debugging)."""
         self._layer_number = layer_number
 
-    def forward(self, input: paddle.Tensor, input_ids: paddle.Tensor | None = None):
+    def forward(
+        self, input: paddle.Tensor, input_ids: paddle.Tensor | None = None
+    ):
         """Compute hash-based token-to-expert routing.
 
         Args:
@@ -967,7 +969,9 @@ class HashRouter(nn.Layer):
         offsets = paddle.arange(
             self.num_experts_per_tok, dtype=paddle.int64
         ).unsqueeze(0)  # [1, K]
-        topk_idx = (flat_ids.unsqueeze(1) + offsets) % self.num_experts  # [B*S, K]
+        topk_idx = (
+            flat_ids.unsqueeze(1) + offsets
+        ) % self.num_experts  # [B*S, K]
 
         # ------------------------------------------------------------------ #
         # Uniform weights                                                       #
@@ -987,10 +991,13 @@ class HashRouter(nn.Layer):
         # ------------------------------------------------------------------ #
         # Padding mask: token_id == 0 → weight=0, idx=-1                      #
         # ------------------------------------------------------------------ #
-        valid_mask = (flat_ids != 0).cast(paddle.float32).unsqueeze(-1)  # [B*S, 1]
+        valid_mask = (
+            (flat_ids != 0).cast(paddle.float32).unsqueeze(-1)
+        )  # [B*S, 1]
         top_gate = top_gate * valid_mask
         topk_idx = topk_idx.masked_fill(
-            ~valid_mask.cast(paddle.bool), paddle.to_tensor(-1, dtype=paddle.int64)
+            ~valid_mask.cast(paddle.bool),
+            paddle.to_tensor(-1, dtype=paddle.int64),
         )
 
         # ------------------------------------------------------------------ #
@@ -1006,16 +1013,18 @@ class HashRouter(nn.Layer):
         mask = (probs > 0).cast(paddle.float32)
 
         _log_moe_md5(
-            topk_idx.cast(paddle.float32), "hash_topk_indices", self._layer_number
+            topk_idx.cast(paddle.float32),
+            "hash_topk_indices",
+            self._layer_number,
         )
 
         return (
-            None,       # capacity
-            top_gate,   # [B*S, K]
-            topk_idx,   # [B*S, K]
-            probs,      # [B*S, E]
-            mask,       # [B*S, E]
-            None,       # token_priority
-            None,       # l_aux  (no auxiliary loss for hash routing)
-            None,       # l_zloss
+            None,  # capacity
+            top_gate,  # [B*S, K]
+            topk_idx,  # [B*S, K]
+            probs,  # [B*S, E]
+            mask,  # [B*S, E]
+            None,  # token_priority
+            None,  # l_aux  (no auxiliary loss for hash routing)
+            None,  # l_zloss
         )

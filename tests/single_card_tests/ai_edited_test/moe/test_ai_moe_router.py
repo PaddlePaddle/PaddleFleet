@@ -462,7 +462,6 @@ class TestSftPlusScore(unittest.TestCase):
     )
     def test_sftplus_scores_are_non_negative(self, _mock):
         """softplus output should always be >= 0."""
-        import paddle.nn.functional as F
         from paddlefleet.transformer.moe.moe_router import StandardMoERouter
 
         config = _make_router_config(scoring_func="sftplus")
@@ -495,6 +494,7 @@ class TestSftPlusScore(unittest.TestCase):
     def test_sftplus_matches_paddle_softplus(self, _mock):
         """gate_score_func('sftplus') should exactly match F.softplus."""
         import paddle.nn.functional as F
+
         from paddlefleet.transformer.moe.moe_router import StandardMoERouter
 
         config = _make_router_config(scoring_func="sftplus")
@@ -503,7 +503,9 @@ class TestSftPlusScore(unittest.TestCase):
         scores = router.gate_score_func(logits, logits_type_promotion=False)
         expected = F.softplus(logits)
         np.testing.assert_allclose(
-            scores.numpy(), expected.numpy(), atol=1e-6,
+            scores.numpy(),
+            expected.numpy(),
+            atol=1e-6,
             err_msg="SftPlus scores should match F.softplus",
         )
 
@@ -538,13 +540,16 @@ class TestHashRouter(unittest.TestCase):
         """Same input_ids → same expert assignment every time."""
         router, _ = self._make_router(n_routed_experts=4, num_experts_per_tok=2)
         hidden = self._dummy_hidden(2, 4)
-        input_ids = paddle.to_tensor([[3, 7, 1, 5], [2, 6, 4, 8]], dtype="int64")
+        input_ids = paddle.to_tensor(
+            [[3, 7, 1, 5], [2, 6, 4, 8]], dtype="int64"
+        )
 
         _, _, idx1, _, _, _, _, _ = router(hidden, input_ids=input_ids)
         _, _, idx2, _, _, _, _, _ = router(hidden, input_ids=input_ids)
 
         np.testing.assert_array_equal(
-            idx1.numpy(), idx2.numpy(),
+            idx1.numpy(),
+            idx2.numpy(),
             err_msg="HashRouter should be deterministic",
         )
 
@@ -552,7 +557,9 @@ class TestHashRouter(unittest.TestCase):
         """Expert indices should follow (token_id + k) % num_experts."""
         num_experts = 4
         k = 2
-        router, _ = self._make_router(n_routed_experts=num_experts, num_experts_per_tok=k)
+        router, _ = self._make_router(
+            n_routed_experts=num_experts, num_experts_per_tok=k
+        )
 
         B, S = 1, 4
         token_ids = [[3, 7, 1, 5]]
@@ -566,7 +573,8 @@ class TestHashRouter(unittest.TestCase):
             for ki in range(k):
                 expected = (int(tid) + ki) % num_experts
                 self.assertEqual(
-                    int(top_idx_np[pos, ki]), expected,
+                    int(top_idx_np[pos, ki]),
+                    expected,
                     f"pos={pos} k={ki}: expected expert {expected}, got {int(top_idx_np[pos, ki])}",
                 )
 
@@ -586,15 +594,21 @@ class TestHashRouter(unittest.TestCase):
         mask_np = mask.numpy()
 
         np.testing.assert_array_equal(
-            top_gate_np[0], [0.0, 0.0],
+            top_gate_np[0],
+            [0.0, 0.0],
             err_msg="Padding token should have zero weights",
         )
         np.testing.assert_array_equal(
-            top_idx_np[0], [-1, -1],
+            top_idx_np[0],
+            [-1, -1],
             err_msg="Padding token should have index -1",
         )
-        self.assertEqual(probs_np[0].sum(), 0.0, "Padding token probs should be 0")
-        self.assertEqual(mask_np[0].sum(), 0.0, "Padding token mask should be 0")
+        self.assertEqual(
+            probs_np[0].sum(), 0.0, "Padding token probs should be 0"
+        )
+        self.assertEqual(
+            mask_np[0].sum(), 0.0, "Padding token mask should be 0"
+        )
 
     def test_output_shapes(self):
         """Output tensors should have expected shapes."""
@@ -648,6 +662,34 @@ class TestHashRouter(unittest.TestCase):
         router.set_layer_number(5)
         self.assertEqual(router._layer_number, 5)
 
+    def test_invalid_input_shape_raises(self):
+        """HashRouter should raise ValueError for non-3D input."""
+        router, _ = self._make_router()
+        bad_input = paddle.randn([8, 64])  # 2-D, not 3-D
+        input_ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype="int64")
+        with self.assertRaises(ValueError):
+            router(bad_input, input_ids=input_ids)
+
+    def test_routed_scaling_factor(self):
+        """routed_scaling_factor != 1.0 should multiply weights when norm_topk_prob=False."""
+        scale = 2.5
+        router, _ = self._make_router(
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            norm_topk_prob=False,
+            routed_scaling_factor=scale,
+        )
+        B, S = 1, 4
+        input_ids = paddle.to_tensor([[3, 5, 7, 9]], dtype="int64")
+        hidden = self._dummy_hidden(B, S)
+        _, top_gate, _, _, _, _, _, _ = router(hidden, input_ids=input_ids)
+        # weight per slot = 1.0 * scale (since norm_topk_prob=False)
+        np.testing.assert_allclose(
+            top_gate.numpy(),
+            np.full((B * S, 2), scale, dtype="float32"),
+            atol=1e-6,
+        )
+
 
 class TestHashRouterInMoELayer(unittest.TestCase):
     """Tests verifying that MoELayer selects the correct router type."""
@@ -656,9 +698,13 @@ class TestHashRouterInMoELayer(unittest.TestCase):
         _use_hash = (
             getattr(config, "moe_n_hash_layers", 0) > 0
             and layer_number is not None
-            and layer_number >= config.num_hidden_layers - config.moe_n_hash_layers
+            and layer_number
+            >= config.num_hidden_layers - config.moe_n_hash_layers
         )
-        from paddlefleet.transformer.moe.moe_router import HashRouter, TopKRouter
+        from paddlefleet.transformer.moe.moe_router import (
+            HashRouter,
+            TopKRouter,
+        )
 
         return HashRouter if _use_hash else TopKRouter
 
