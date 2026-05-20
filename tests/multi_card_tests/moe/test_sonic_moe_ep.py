@@ -85,7 +85,7 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
 
     def setUp(self):
         self.seed = 123
-        self.hidden_size = 256
+        self.hidden_size = 2048
         self.n_routed_experts = 64
 
         random.seed(self.seed)
@@ -123,7 +123,7 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             sequence_parallel=False,
             bf16=True,
             params_dtype=paddle.bfloat16,
-            moe_intermediate_size=128,
+            moe_intermediate_size=1024,
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,

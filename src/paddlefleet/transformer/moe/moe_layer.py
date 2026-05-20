@@ -319,7 +319,7 @@ class MoELayer(nn.Layer):
 
         self.grouped_gemm_experts = None
         self.experts = None
-        if self.moe_grouped_gemm:
+        if self.moe_expert_fusion:
             if self.fp8:
                 assert self.using_sonic_moe or self.moe_deep_gemm, (
                     "For fp8 grouped_gemm, either set using_sonic_moe=True or moe_deep_gemm=True."

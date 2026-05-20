@@ -698,7 +698,10 @@ class ExpertsGroupGemmContiguousNode:
         """
         # concat and transpose w2
 
-        if hasattr(self, "grouped_gemm_experts"):
+        if (
+            hasattr(self, "grouped_gemm_experts")
+            and self.grouped_gemm_experts is not None
+        ):
             offline_quant = hasattr(
                 self.grouped_gemm_experts.weight2,
                 "fp8_weight_stacked_transpose",
