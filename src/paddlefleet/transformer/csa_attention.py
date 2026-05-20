@@ -811,6 +811,9 @@ class CompressedSparseAttention(FleetLayer):
             if self.indexer is not None:
                 x_det = x.detach()
                 qr_det = qr.detach()
+                if self.training:
+                    x_det.stop_gradient = False
+                    qr_det.stop_gradient = False
 
                 # Build causal mask for compressed positions: [b, sq, n_compressed]
                 compressed_ids = paddle.arange(n_compressed).unsqueeze(
