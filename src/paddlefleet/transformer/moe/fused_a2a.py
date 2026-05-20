@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import queue
+
 import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
@@ -22,6 +24,7 @@ from paddlefleet_ops import is_deep_ep_available, is_hybrid_ep_available
 
 from .fp8_utils import FP8_ALIGN
 from .moe_utils import manual_backward
+from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():
@@ -517,6 +520,98 @@ class DeepEPCombineAsync(PyLayer):
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 
 
+class DeepEPCombineAsyncFunctor(PyLayer):
+    """DeepEPCombineAsyncFunctor for deepep combine with overlap (Refined Recompute)."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        hold_tensors,
+        x,
+        group,
+        states,
+        *fn_args,
+        fn,
+    ):
+        """Forward pass of fused combine with overlap, get cached output directly."""
+        combined_x = hold_tensors["res_output"]
+
+        # Re-run fn with grad tracking to build backward graph and obtain bwf
+        ctx.bwf, fn_out = manual_backward(fn, False, *fn_args)
+
+        ctx.handle = states["handle"]
+        ctx.group = group
+
+        return (combined_x,) + fn_out
+
+    @staticmethod
+    def backward(ctx, grad_output, *fn_out_grads):
+        """Backward pass of fused combine with overlap."""
+        grad_x = fused_combine_backward_func(
+            grad_output,
+            ctx.group,
+            ctx.handle,
+            async_finish=True,
+        )
+
+        fn_args_grads = ctx.bwf(*fn_out_grads)
+
+        wait_for_deepep(ctx.group.id)
+        return (grad_x,) + fn_args_grads
+
+
+class DeepEPCombineAsyncRefinedRecompute(object):
+    """RefinedRecompute class for deepep fused_combine with overlap."""
+
+    def __init__(self):
+        """__init__"""
+        self._hold_tensors_queue = queue.Queue()
+        global_rr_queue_log.update(self._hold_tensors_queue, "DeepEPCombineAsync")
+
+    def forward(self, x, group, states, *fn_args, fn, is_first_fwd=False):
+        """forward"""
+        tracer = framework._dygraph_tracer()
+        is_first_fwd = not tracer._has_grad
+        if is_first_fwd:
+            fwd_output, fn_out = self._first_fwd(x, group, states, fn, is_first_fwd, *fn_args)
+            self._hold_tensors_queue.put({"res_output": fwd_output, "fn_out": fn_out})
+            return (fwd_output,) + fn_out
+        else:
+            assert not self._hold_tensors_queue.empty(), "Queue should not be empty for the second forward pass."
+            hold_tensors = self._hold_tensors_queue.get()
+            output = self._second_fwd(
+                hold_tensors, x, group, states, fn, *fn_args
+            )
+            return output
+
+    @paddle.no_grad()
+    def _first_fwd(self, x, group, states, fn, is_first_fwd, *fn_args):
+        """_first_fwd"""
+        combined_x = fused_combine_forward_func(
+            x,
+            group,
+            states,
+            async_finish=True,
+        )
+
+        assert fn is not None, "use DeepEPCombineAsyncRefinedRecompute, but fn is None."
+        bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
+
+        wait_for_deepep(group.id)
+
+        return combined_x, fn_out
+
+    def _second_fwd(self, hold_tensors, x, group, states, fn, *fn_args):
+        """_second_fwd"""
+        return DeepEPCombineAsyncFunctor.apply(
+            hold_tensors, x, group, states, *fn_args, fn=fn
+        )
+
+    def __call__(self, *args, **kwargs):
+        """__call__"""
+        return self.forward(*args, **kwargs)
+
+
 if HAVE_DEEP_EP:
 
     def fused_dispatch(
@@ -564,10 +659,12 @@ if HAVE_DEEP_EP:
         x,
         group,
         handle,
+        _rr_fusedcombined=None,
         previous_event=None,
         combine_overlap_handle=None,
         async_finish=False,
         moe_ep_barrier: bool = True,
+        use_rr_deepep_combine: bool = False,
     ):
         """Perform fused combine operation if deep_ep is available.
 
@@ -575,9 +672,11 @@ if HAVE_DEEP_EP:
             x: Input tensor
             group: Process group
             handle: Communication handle
+            _rr_fusedcombined: RefinedRecompute functor for deepep combine
             previous_event: Previous CUDA event
             combine_overlap_handle: Handle for overlapping with shared experts
             moe_ep_barrier: Whether to use barrier for expert parallelism
+            use_rr_deepep_combine: Whether to use refined recompute for deepep combine
 
         Returns:
             Result of DeepEPCombine
@@ -599,16 +698,31 @@ if HAVE_DEEP_EP:
             assert "fn" in combine_overlap_handle
             assert "fn_args" in combine_overlap_handle
             assert isinstance(combine_overlap_handle["fn_args"], tuple)
-            combined_x, *fn_out = DeepEPCombineAsync.apply(
-                x,
-                group,
-                states,
-                *(combine_overlap_handle["fn_args"]),
-                fn=combine_overlap_handle["fn"],
-                is_first_fwd=not framework._dygraph_tracer()._has_grad,
-            )
-            combine_overlap_handle["fn_out"] = fn_out
-            return combined_x
+            if not use_rr_deepep_combine:
+                combined_x, *fn_out = DeepEPCombineAsync.apply(
+                    x,
+                    group,
+                    states,
+                    *(combine_overlap_handle["fn_args"]),
+                    fn=combine_overlap_handle["fn"],
+                    is_first_fwd=not framework._dygraph_tracer()._has_grad,
+                )
+                combine_overlap_handle["fn_out"] = fn_out
+                return combined_x
+            else:
+                assert _rr_fusedcombined is not None, (
+                    "_rr_fusedcombined must be provided when use_rr_deepep_combine is True with combine_overlap_handle."
+                )
+                combined_x, *fn_out = _rr_fusedcombined(
+                    x,
+                    group,
+                    states,
+                    *(combine_overlap_handle["fn_args"]),
+                    fn=combine_overlap_handle["fn"],
+                    is_first_fwd=not framework._dygraph_tracer()._has_grad,
+                )
+                combine_overlap_handle["fn_out"] = fn_out
+                return combined_x
 
 else:
     fused_dispatch = None

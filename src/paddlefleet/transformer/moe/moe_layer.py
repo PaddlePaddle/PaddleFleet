@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 from paddlefleet import utils
 from paddlefleet.transformer.utils import profile
+from paddlefleet.recompute_utils import need_recompute_in_first_n
 
 from .fp8_utils import fused_stack_quant_without_cache
 from .fused_a2a import configure_buffer
@@ -432,6 +433,29 @@ class MoELayer(nn.Layer):
                     if self.is_mp_moe or self.is_ep_moe:
                         p.is_distributed = True
 
+        self.use_rr_deepep_combine = False
+
+    def rr_recompute_update(self, in_full_recompute, in_mlp_recompute):
+        if (
+            self.config.recompute_modules is not None
+            and "moe_combine" in self.config.recompute_modules
+        ):
+            assert self.config.recompute_granularity is not None, (
+                "rr must be used when recompute is enabled"
+            )
+            if isinstance(self.config.recompute_modules, list):
+                self.use_rr_deepep_combine = True
+            elif isinstance(self.config.recompute_modules, dict):
+                self.use_rr_deepep_combine = not need_recompute_in_first_n(
+                    self.layer_number,
+                    self.config,
+                    self.config.recompute_modules["moe_combine"],
+                )
+        if (not in_full_recompute) and (not in_mlp_recompute):
+            assert not self.use_rr_deepep_combine, (
+                "If the transformer or MoE does not use recompute, enabling rr for moe_combine is meaningless."
+            )
+
     def _init_expert_parallel(self):
         def _parse_moe_expert_parallel(
             num_experts: int, expert_model_parallel_size: int
@@ -706,7 +730,7 @@ class MoELayer(nn.Layer):
 
         with profile("combine"):
             hidden_states = self.token_dispatcher._comm_manager.combine(
-                hidden_states, combine_overlap_handle
+                hidden_states, combine_overlap_handle, use_rr_deepep_combine=self.use_rr_deepep_combine,
             )
 
         # Latent MoE: project back from latent space to hidden_size
