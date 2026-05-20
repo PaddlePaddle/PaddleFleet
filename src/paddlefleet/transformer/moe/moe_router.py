@@ -891,6 +891,13 @@ class HashRouter(nn.Layer):
     Padding tokens (token_id == 0) are masked out: their weights and mask are 0
     and their expert indices are set to -1.
 
+    .. note::
+        The padding-token detection assumes pad_token_id == 0, which matches
+        Megatron-LM convention and most PaddlePaddle models.  If your tokenizer
+        uses a different pad ID, this masking will either miss real padding or
+        suppress valid BOS tokens.  Future work can expose a
+        moe_hash_router_pad_token_id config field to override this.
+
     This router produces the same 8-tuple output as TopKRouter so it can be used
     as a drop-in replacement inside MoELayer.
 
@@ -1006,7 +1013,7 @@ class HashRouter(nn.Layer):
         top_gate = top_gate * valid_mask
         topk_idx = topk_idx.masked_fill(
             ~valid_mask.cast(paddle.bool),
-            paddle.to_tensor(-1, dtype=paddle.int64),
+            -1,
         )
 
         # ------------------------------------------------------------------ #

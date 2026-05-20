@@ -25,6 +25,16 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     )
 
     parser.add_argument("--configs", type=str, default=None)
+    parser.add_argument(
+        "--moe-n-hash-layers",
+        type=int,
+        default=0,
+        help=(
+            "Number of last transformer layers to use HashRouter instead of "
+            "TopKRouter. E.g. --moe-n-hash-layers 2 enables HashRouter for "
+            "the last 2 MoE layers."
+        ),
+    )
 
     # Custom arguments.
     if extra_args_provider is not None:
