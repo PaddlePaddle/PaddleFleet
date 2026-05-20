@@ -887,10 +887,12 @@ class MoELayer(nn.Layer):
         return hidden_states
 
     def compute_combine(self, hidden_states, async_finish=False):
+        # Note: RR (use_rr_deepep_combine) is NOT passed here because this method
+        # is used by TransformerLayerWithOverlap where shared expert computation is
+        # managed by the scheduler separately, not via combine_overlap_handle.
         if self.moe_use_fusion_node:
             hidden_states = self.token_dispatcher._comm_manager.combine(
                 hidden_states, None, async_finish=async_finish,
-                use_rr_deepep_combine=self.use_rr_deepep_combine,
             )
         else:
             hidden_states = self.combine(hidden_states)
