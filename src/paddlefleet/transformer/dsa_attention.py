@@ -183,6 +183,17 @@ def _unfused_dsa_attention(
     return output
 
 
+def _normalize_dsa_mask(mask: Tensor | None) -> Tensor | None:
+    if mask is None:
+        return None
+    if mask.ndim == 4:
+        assert mask.shape[1] == 1, "DSA mask must have singleton head dimension"
+        mask = mask.squeeze(1)
+    if mask.ndim == 3 and mask.shape[0] == 1:
+        mask = mask.squeeze(0)
+    return mask
+
+
 # ---------------------------------------------------------------------------
 # DSA Indexer Sublayers Spec
 # ---------------------------------------------------------------------------
@@ -433,7 +444,7 @@ class DSAIndexer(paddle.nn.Layer):
         index_scores = (weights.unsqueeze(-1) * F.relu(scores)).sum(axis=2)
 
         if mask is not None:
-            index_scores = index_scores + mask.squeeze(1)
+            index_scores = index_scores + _normalize_dsa_mask(mask)
 
         topk_k = min(self.index_topk, index_scores.shape[-1])
         topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)[1]
@@ -594,13 +605,11 @@ def _compute_dsa_indexer_loss(
     )
 
     # Apply causal mask
-    if causal_mask.ndim == 2:
-        attention_scores = attention_scores + causal_mask.reshape(
-            [1, 1, sq, sk]
-        )
+    if causal_mask.ndim == 3:
+        attention_scores = attention_scores + causal_mask.unsqueeze(1)
     else:
         attention_scores = attention_scores + causal_mask.reshape(
-            [b, 1, sq, sk]
+            [1, 1, sq, sk]
         )
     if sparse_loss:
         attention_scores = attention_scores + index_mask.reshape([b, 1, sq, sk])
@@ -723,16 +732,14 @@ def _bwd_fused_indexer_loss(
     )
 
     # Apply causal mask to both attention and index scores
-    if causal_mask.ndim == 2:
+    if causal_mask.ndim == 3:
+        attention_scores = attention_scores + causal_mask.unsqueeze(1)
+        index_scores = index_scores + causal_mask
+    else:
         attention_scores = attention_scores + causal_mask.reshape(
             [1, 1, sq, sk]
         )
         index_scores = index_scores + causal_mask.unsqueeze(0)
-    else:
-        attention_scores = attention_scores + causal_mask.reshape(
-            [b, 1, sq, sk]
-        )
-        index_scores = index_scores + causal_mask
 
     if sparse_loss:
         attention_scores = attention_scores + index_mask.reshape([b, 1, sq, sk])
@@ -820,15 +827,18 @@ def _bwd_fused_indexer_loss(
 
     # Zero out gradients for masked positions
     if causal_mask_override is not None:
-        if causal_mask.ndim == 2:
-            causal_valid_mask = causal_mask > float("-inf")  # [sq, sk]
-            causal_valid_mask = causal_valid_mask.unsqueeze(0)  # [1, sq, sk]
-        else:
-            causal_valid_mask = causal_mask > float("-inf")  # [b, sq, sk]
+        causal_valid_mask = causal_mask == 0
+        if causal_valid_mask.ndim == 2:
+            causal_valid_mask = causal_valid_mask.unsqueeze(0)
+        elif causal_valid_mask.shape[0] == 1:
+            causal_valid_mask = causal_valid_mask.squeeze(0).unsqueeze(0)
+        causal_valid_mask = causal_valid_mask.expand([b, sq, sk])
     else:
-        causal_valid_mask = paddle.tril(
-            paddle.ones([sq, sk], dtype="bool")
-        ).unsqueeze(0)  # [1, sq, sk]
+        causal_valid_mask = (
+            paddle.tril(paddle.ones([sq, sk], dtype="bool"))
+            .unsqueeze(0)
+            .expand([b, sq, sk])
+        )
     del causal_mask
 
     if sparse_loss:
@@ -838,7 +848,7 @@ def _bwd_fused_indexer_loss(
         del index_valid_mask
     else:
         del index_mask
-        valid_mask = causal_valid_mask.expand([b, sq, sk])  # [b, sq, sk]
+        valid_mask = causal_valid_mask  # [b, sq, sk]
     del causal_valid_mask
 
     grad_index_scores_logits = grad_index_scores_logits * valid_mask.cast(
@@ -943,8 +953,9 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         index_scores = _compute_index_scores_fused(q, weights, k)  # [b, sq, sk]
 
         # Step 2: Apply mask and select topk
+        mask = _normalize_dsa_mask(mask)
         if mask is not None:
-            masked_scores = index_scores + mask.squeeze(1)
+            masked_scores = index_scores + mask
         else:
             masked_scores = index_scores
         topk_k = min(topk, masked_scores.shape[-1])
@@ -967,7 +978,7 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
             loss_coeff,
             sparse_loss,
             tp_group,
-            causal_mask_override=mask.squeeze(1) if mask is not None else None,
+            causal_mask_override=mask,
         )
 
         ctx.save_for_backward(q, weights, k, query, key, topk_indices)
@@ -975,7 +986,7 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         ctx.loss_coeff = loss_coeff
         ctx.sparse_loss = sparse_loss
         ctx.tp_group = tp_group
-        ctx.causal_mask_override = mask.squeeze(1) if mask is not None else None
+        ctx.causal_mask_override = mask
 
         return indexer_loss
 
@@ -1286,9 +1297,17 @@ class DSAttention(FleetLayer):
                 0
             )  # [1, 1, sq, sk]
         elif attention_mask is not None:
-            indexer_float_mask = attention_mask.cast(
-                "float32"
-            ) + causal_mask.unsqueeze(0).unsqueeze(0)
+            assert list(attention_mask.shape) == [
+                indexer_hidden.shape[0],
+                1,
+                indexer_seq_len,
+                indexer_seq_len,
+            ]
+            mask = attention_mask.squeeze(1)
+            indexer_float_mask = paddle.zeros_like(
+                mask, dtype="float32"
+            ).masked_fill(mask.cast("bool"), float("-inf"))
+
         else:
             indexer_float_mask = causal_mask.unsqueeze(0).unsqueeze(
                 0
