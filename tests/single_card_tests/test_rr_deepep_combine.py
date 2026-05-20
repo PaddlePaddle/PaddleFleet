@@ -42,7 +42,10 @@ def _has_deep_ep():
         return False
 
 
-def rr_recompute_update(config, layer_number, in_full_recompute, in_mlp_recompute):
+def rr_recompute_update(
+    config, layer_number, in_full_recompute, in_mlp_recompute,
+    moe_token_dispatcher_type="deepep", moe_shared_expert_overlap=True,
+):
     """
     Standalone version of MoELayer.rr_recompute_update for testing.
     This mirrors the logic in moe_layer.py and is used to verify the config validation
@@ -53,6 +56,11 @@ def rr_recompute_update(config, layer_number, in_full_recompute, in_mlp_recomput
         config.recompute_modules is not None
         and "moe_combine" in config.recompute_modules
     ):
+        if moe_token_dispatcher_type != "deepep" or not moe_shared_expert_overlap:
+            raise ValueError(
+                "moe_combine RR is only supported in DeepEP mode with "
+                "moe_shared_expert_overlap enabled (combine_overlap scenario)."
+            )
         if config.recompute_granularity is None:
             raise ValueError(
                 "recompute_granularity must be set when moe_combine RR is enabled."
@@ -153,6 +161,28 @@ class TestRRRecomputeUpdate(unittest.TestCase):
         config = self._make_config(recompute_modules=["moe_combine"])
         result = rr_recompute_update(config, 0, in_full_recompute=False, in_mlp_recompute=True)
         self.assertTrue(result)
+
+    def test_raises_when_not_deepep_mode(self):
+        """Should raise ValueError when moe_token_dispatcher_type is not 'deepep'."""
+        config = self._make_config(recompute_modules=["moe_combine"])
+        with self.assertRaises(ValueError) as cm:
+            rr_recompute_update(
+                config, 0,
+                in_full_recompute=True, in_mlp_recompute=False,
+                moe_token_dispatcher_type="alltoall",
+            )
+        self.assertIn("DeepEP mode", str(cm.exception))
+
+    def test_raises_when_no_shared_expert_overlap(self):
+        """Should raise ValueError when moe_shared_expert_overlap is False."""
+        config = self._make_config(recompute_modules=["moe_combine"])
+        with self.assertRaises(ValueError) as cm:
+            rr_recompute_update(
+                config, 0,
+                in_full_recompute=True, in_mlp_recompute=False,
+                moe_shared_expert_overlap=False,
+            )
+        self.assertIn("moe_shared_expert_overlap", str(cm.exception))
 
 
 @unittest.skipUnless(_has_deep_ep(), "DeepEP not available")

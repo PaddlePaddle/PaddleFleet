@@ -602,9 +602,10 @@ class _DeepEPManager(_DispatchManager):
         if combine_overlap_handle is not None and use_rr_deepep_combine:
             if self._rr_fusedcombined is None:
                 self._rr_fusedcombined = DeepEPCombineAsyncRefinedRecompute()
-            else:
-                assert isinstance(self._rr_fusedcombined, DeepEPCombineAsyncRefinedRecompute), (
-                    "_rr_fusedcombined type mismatch."
+            elif not isinstance(self._rr_fusedcombined, DeepEPCombineAsyncRefinedRecompute):
+                raise RuntimeError(
+                    f"_rr_fusedcombined type mismatch: expected DeepEPCombineAsyncRefinedRecompute, "
+                    f"got {type(self._rr_fusedcombined).__name__}."
                 )
         hidden_states = fused_combine(
             hidden_states,

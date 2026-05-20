@@ -440,6 +440,11 @@ class MoELayer(nn.Layer):
             self.config.recompute_modules is not None
             and "moe_combine" in self.config.recompute_modules
         ):
+            if self.moe_token_dispatcher_type != "deepep" or not self.moe_shared_expert_overlap:
+                raise ValueError(
+                    "moe_combine RR is only supported in DeepEP mode with "
+                    "moe_shared_expert_overlap enabled (combine_overlap scenario)."
+                )
             if self.config.recompute_granularity is None:
                 raise ValueError(
                     "recompute_granularity must be set when moe_combine RR is enabled."

@@ -568,7 +568,7 @@ class DeepEPCombineAsyncRefinedRecompute(object):
         self._hold_tensors_queue = queue.Queue()
         global_rr_queue_log.update(self._hold_tensors_queue, "DeepEPCombineAsync")
 
-    def forward(self, x, group, states, *fn_args, fn, is_first_fwd=False):
+    def forward(self, x, group, states, *fn_args, fn):
         """forward"""
         tracer = framework._dygraph_tracer()
         is_first_fwd = not tracer._has_grad
@@ -731,7 +731,6 @@ if HAVE_DEEP_EP:
                     states,
                     *(combine_overlap_handle["fn_args"]),
                     fn=combine_overlap_handle["fn"],
-                    is_first_fwd=not framework._dygraph_tracer()._has_grad,
                 )
                 combine_overlap_handle["fn_out"] = fn_out
                 return combined_x
