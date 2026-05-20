@@ -17,8 +17,17 @@ import unittest
 import paddle
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
-from paddlefleet.models.gpt.gpt_layer_specs import get_attention_spec
-from paddlefleet.transformer.csa_attention import CompressedSparseAttention
+from paddlefleet.models.gpt.gpt_layer_specs import (
+    get_attention_spec,
+    get_gpt_layer_local_spec,
+)
+from paddlefleet.transformer.csa_attention import (
+    CompressedSparseAttention,
+    _get_doc_start,
+    get_compress_topk_idxs,
+    get_window_topk_idxs,
+)
+from paddlefleet.transformer.dsa_attention import fused_qk_topk_naive
 from paddlefleet.transformer.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
 )
@@ -43,6 +52,8 @@ def _make_config(
     dsa_index_head_dim=32,
     dsa_index_topk=8,
     dsa_indexer_loss_coeff=1.0,
+    rope_type="rope",
+    apply_rope_fusion=False,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -64,7 +75,7 @@ def _make_config(
         v_head_dim=v_head_dim,
         o_groups=o_groups,
         o_lora_rank=o_lora_rank,
-        rope_type="rope",
+        rope_type=rope_type,
         rotary_base=10000.0,
         rotary_percent=1.0,
         normalization="RMSNorm",
@@ -77,7 +88,7 @@ def _make_config(
         dsa_indexer_loss_coeff=dsa_indexer_loss_coeff,
         dsa_indexer_use_sparse_loss=False,
         dsa_indexer_rotary_interleaved=False,
-        apply_rope_fusion=False,
+        apply_rope_fusion=apply_rope_fusion,
         attention_dropout=0.0,
         attention_softmax_in_fp32=True,
         masked_softmax_fusion=False,
@@ -92,6 +103,167 @@ def _build_attention(config, layer_number):
         attn_mask_type=AttnMaskType.causal,
     )
     return build_spec_layer(spec, config=config, layer_number=layer_number)
+
+
+class TestDSv4HybridConfigAndSpec(unittest.TestCase):
+    def test_gpt_layer_local_spec_routes_to_dsv4_hybrid_attention(self):
+        config = _make_config()
+        spec = get_gpt_layer_local_spec(
+            config=config,
+            multi_latent_attention=True,
+            normalization=config.normalization,
+        )
+
+        self_attn_spec = spec.sublayers_spec.self_attn
+        self.assertIs(self_attn_spec.layer, DSv4HybridSelfAttention)
+
+    def test_config_validation_errors(self):
+        with self.assertRaisesRegex(ValueError, "multi_latent_attention=True"):
+            TransformerConfig(
+                num_hidden_layers=1,
+                hidden_size=256,
+                num_attention_heads=8,
+                params_dtype=paddle.bfloat16,
+                bf16=True,
+                multi_latent_attention=False,
+                experimental_attention_variant="dsv4_hybrid",
+                csa_compress_ratios=[0],
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "csa_compress_ratios to be set"
+        ):
+            TransformerConfig(
+                num_hidden_layers=1,
+                hidden_size=256,
+                num_attention_heads=8,
+                params_dtype=paddle.bfloat16,
+                bf16=True,
+                multi_latent_attention=True,
+                experimental_attention_variant="dsv4_hybrid",
+            )
+
+        with self.assertRaisesRegex(ValueError, "must equal num_hidden_layers"):
+            _make_config(num_layers=2, csa_compress_ratios=[0])
+
+        with self.assertRaisesRegex(ValueError, "is invalid"):
+            _make_config(num_layers=1, csa_compress_ratios=[2])
+
+        with self.assertRaisesRegex(ValueError, "apply_rope_fusion"):
+            _make_config(
+                num_layers=1, csa_compress_ratios=[0], apply_rope_fusion=True
+            )
+
+
+class TestCSAIndexHelpers(unittest.TestCase):
+    def test_doc_start_accepts_1d_and_2d_masks(self):
+        mask_1d = paddle.to_tensor([4, 4, 4, 4, 8, 8, 8, 8], dtype="int64")
+        doc_start_1d = _get_doc_start(mask_1d, seqlen=8)
+        self.assertEqual(
+            doc_start_1d.numpy().tolist(), [0, 0, 0, 0, 4, 4, 4, 4]
+        )
+
+        mask_2d = paddle.stack([mask_1d, mask_1d])
+        doc_start_2d = _get_doc_start(mask_2d, seqlen=8)
+        self.assertEqual(
+            doc_start_2d.numpy().tolist(),
+            [[0, 0, 0, 0, 4, 4, 4, 4], [0, 0, 0, 0, 4, 4, 4, 4]],
+        )
+
+    def test_window_and_compress_indices_with_document_boundaries(self):
+        boundaries = paddle.to_tensor(
+            [[[[4], [4], [4], [4], [8], [8], [8], [8]]]], dtype="int64"
+        )
+
+        window = get_window_topk_idxs(
+            window_size=3,
+            batch_size=1,
+            seqlen=8,
+            attn_mask_startend_row_indices=boundaries,
+        )
+        self.assertEqual(
+            window.numpy().tolist()[0],
+            [
+                [0, -1, -1],
+                [0, 1, -1],
+                [0, 1, 2],
+                [1, 2, 3],
+                [4, -1, -1],
+                [4, 5, -1],
+                [4, 5, 6],
+                [5, 6, 7],
+            ],
+        )
+
+        compressed = get_compress_topk_idxs(
+            ratio=4,
+            batch_size=1,
+            seqlen=8,
+            offset=8,
+            attn_mask_startend_row_indices=boundaries,
+        )
+        self.assertEqual(
+            compressed.numpy().tolist()[0],
+            [
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+                [8, -1],
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+                [-1, 9],
+            ],
+        )
+
+    def test_window_and_compress_indices_without_document_boundaries(self):
+        window = get_window_topk_idxs(
+            window_size=3,
+            batch_size=2,
+            seqlen=4,
+            attn_mask_startend_row_indices=None,
+        )
+        self.assertEqual(list(window.shape), [2, 4, 3])
+        self.assertEqual(
+            window.numpy().tolist()[0],
+            [[0, -1, -1], [0, 1, -1], [0, 1, 2], [1, 2, 3]],
+        )
+
+        compressed = get_compress_topk_idxs(
+            ratio=4,
+            batch_size=2,
+            seqlen=8,
+            offset=8,
+            attn_mask_startend_row_indices=None,
+        )
+        self.assertEqual(list(compressed.shape), [2, 8, 2])
+        self.assertEqual(
+            compressed.numpy().tolist()[0],
+            [
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+                [8, -1],
+                [8, -1],
+                [8, -1],
+                [8, -1],
+                [8, 9],
+            ],
+        )
+
+    def test_fused_qk_topk_naive_with_mask(self):
+        q = paddle.ones([1, 2, 1, 2], dtype="bfloat16")
+        k = paddle.to_tensor([[[1.0, 0.0], [0.0, 1.0]]], dtype="bfloat16")
+        weights = paddle.ones([1, 2, 1], dtype="float32")
+        mask = paddle.to_tensor(
+            [[[0.0, float("-inf")], [0.0, 0.0]]], dtype="float32"
+        )
+
+        index_scores, topk_indices = fused_qk_topk_naive(q, k, weights, 2, mask)
+
+        self.assertEqual(list(index_scores.shape), [1, 2, 2])
+        self.assertEqual(list(topk_indices.shape), [1, 2, 2])
+        self.assertEqual(topk_indices.numpy().tolist()[0][0][0], 0)
 
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):
@@ -147,6 +319,21 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
                     atol=1e-5,
                 ).item()
             )
+
+    def test_yarn_rope_construction(self):
+        config = _make_config(rope_type="yarn")
+        attn = _build_attention(config, layer_number=1)
+        freqs, mscale = attn.rotary_pos_emb(8, packed_seq=False)
+
+        self.assertEqual(
+            list(freqs.shape), [1, 8, 1, config.qk_pos_emb_head_dim]
+        )
+        self.assertIsInstance(mscale, float)
+
+    def test_unsupported_rope_type_raises(self):
+        config = _make_config(rope_type="invalid")
+        with self.assertRaisesRegex(ValueError, "Unsupported rope_type"):
+            _build_attention(config, layer_number=1)
 
     def test_o_group_proj_shape(self):
         paddle.seed(_SEED)
