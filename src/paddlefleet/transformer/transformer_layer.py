@@ -32,6 +32,9 @@ from paddle.distributed.fleet.meta_parallel import (
 from paddle.distributed.fleet.utils import recompute
 from paddlefleet_ops import is_deep_ep_available
 
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     need_full_recompute,
@@ -513,12 +516,16 @@ class TransformerLayer(nn.Layer):
                 and dict_args["input_ids"] is not None
             ):
                 full_input_ids = dict_args["input_ids"]
-                if (
-                    full_input_ids.shape[-1]
-                    > hidden_states.shape[
-                        0 if self.config.sequence_parallel else 1
-                    ]
-                ):
+
+                # In EB dataflow and CP size > 1，shape of hidden_states is [b, s/cp, h]
+                # but input_ids' shape is [b, s], so we need to get full seq_len here
+                seq_lens = hidden_states.shape[
+                    0 if self.config.sequence_parallel else 1
+                ]
+                if get_context_parallel_world_size() > 1:
+                    seq_lens *= get_context_parallel_world_size()
+
+                if full_input_ids.shape[-1] > seq_lens:
                     decoder_input_ids = full_input_ids[
                         :, : -self.config.num_nextn_predict_layers
                     ].contiguous()

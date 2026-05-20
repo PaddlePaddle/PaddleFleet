@@ -35,7 +35,11 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
 )
 
-from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
+from paddlefleet.context_parallel_utils import (
+    ContextParallelAllGatherOp,
+    ContextParallelGatherOp,
+    ContextParallelScatterOp,
+)
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 
@@ -399,6 +403,12 @@ class StandardMoERouter(nn.Layer):
         # fixed max_seq_len. PF's input_ids plays the role of EC's origin_input_ids.
         # [B, 1]
         if input_ids is not None:
+            if (
+                get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                # In EB data flow, we need to gather input_ids here to get right denom.
+                input_ids = ContextParallelGatherOp.apply(input_ids, axis=1)
             _ids = input_ids
             if _ids.ndim == 1:
                 _ids = _ids.unsqueeze(axis=0)
@@ -462,8 +472,19 @@ class StandardMoERouter(nn.Layer):
             paddle.Tensor: The z loss value.
         """
         if input_ids is not None:
-            origin_loss_mask = (input_ids != 0).astype(paddle.float32)
-            loss_mask = origin_loss_mask.reshape([-1])
+            if (
+                get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                # In EB data flow, we need to gather input_ids here to get right denom.
+                origin_input_ids = ContextParallelGatherOp.apply(
+                    input_ids, axis=1
+                )
+            else:
+                origin_input_ids = input_ids
+            origin_loss_mask = (origin_input_ids != 0).astype(paddle.float32)
+            loss_mask = (input_ids != 0).astype(paddle.float32)
+            loss_mask = loss_mask.reshape([-1])
             if getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
@@ -752,6 +773,14 @@ class TopKRouter(StandardMoERouter):
             else:
                 seq_len, batch_size, d_model = input.shape
             input = input.reshape([-1, d_model])
+            if (
+                get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                # In EB dataflow, shape of input_ids [b, s],
+                # but shape of input is [b, s/cp, h] ([s/cp, b, h] in sp),
+                # so we need to scatter input_ids here to avid the assertion below
+                input_ids = ContextParallelScatterOp.apply(input_ids, axis=1)
             if input_ids is not None:
                 input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
                 batch_size_, seq_len_ = input_ids.shape
@@ -877,9 +906,10 @@ class TopKRouter(StandardMoERouter):
                 gates, top_idx, input_ids_none_zero_mask, input_ids
             )
         else:
-            mask = paddle.zeros_like(gates).put_along_axis(
-                top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
-            )
+            with paddle.amp.auto_cast(enable=False):
+                mask = paddle.zeros_like(gates).put_along_axis_(
+                    top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
+                )
             if input_ids_none_zero_mask is not None:
                 valid_mask = input_ids_none_zero_mask
                 mask = mask * valid_mask.cast(mask.dtype)
@@ -907,7 +937,7 @@ class TopKRouter(StandardMoERouter):
             top_gate = top_gate * self.routed_scaling_factor
 
         # Reconstruct probs (combine weights in [S, E] sparse layout) from final top_gate.
-        probs = paddle.zeros_like(gates).put_along_axis(
+        probs = paddle.zeros_like(gates, dtype=top_gate.dtype).put_along_axis_(
             top_idx, top_gate, axis=1
         )
 

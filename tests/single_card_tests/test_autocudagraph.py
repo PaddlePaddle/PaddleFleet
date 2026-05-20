@@ -539,6 +539,9 @@ class BasicBlockEager(nn.Layer):
 
 
 class TestAdvancedMechanics(BaseTest):
+    def tearDown(self):
+        BasicBlock.forward.clear_cache()
+
     def test_gradient_accumulation(self):
         model_cg = BasicBlock()
         model_eager = BasicBlockEager()

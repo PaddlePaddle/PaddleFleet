@@ -172,6 +172,7 @@ class _HybridEPManager(_DispatchManager):
         num_experts: int | None = None,
         num_local_experts: int | None = None,
         moe_ep_barrier: bool = True,
+        hybridep_buffer_configs: dict | None = None,
     ):
         if not HAVE_HYBRID_EP:
             raise ImportError("HybridEP runtime is not available.")
@@ -190,6 +191,7 @@ class _HybridEPManager(_DispatchManager):
         self.padded_tokens_per_expert = None
         self.handle = None
         self._active_buffer = None
+        self.hybridep_buffer_configs = hybridep_buffer_configs or {}
 
     def _get_buffer(
         self,
@@ -205,6 +207,7 @@ class _HybridEPManager(_DispatchManager):
             max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
             num_local_experts=self.num_local_experts,
             load_cached_kernels=HYBRID_EP_LOAD_CACHED_KERNELS,
+            **self.hybridep_buffer_configs,
         )
         return self._active_buffer
 
@@ -708,6 +711,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         ep_group: Group,
         moe_ep_barrier: bool = True,
         dispatcher_type: str | None = None,
+        hybridep_buffer_configs: dict | None = None,
     ):
         super().__init__(ep_group)
 
@@ -718,13 +722,16 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             if is_hybrid_ep_backend_selected(dispatcher_type)
             else _DeepEPManager
         )
-        self._comm_manager = manager_cls(
-            group=self.ep_group,
-            router_topk=num_experts_per_tok,
-            num_experts=n_routed_experts,
-            num_local_experts=self.num_local_experts,
-            moe_ep_barrier=moe_ep_barrier,
-        )
+        manager_kwargs = {
+            "group": self.ep_group,
+            "router_topk": num_experts_per_tok,
+            "num_experts": n_routed_experts,
+            "num_local_experts": self.num_local_experts,
+            "moe_ep_barrier": moe_ep_barrier,
+        }
+        if manager_cls is _HybridEPManager:
+            manager_kwargs["hybridep_buffer_configs"] = hybridep_buffer_configs
+        self._comm_manager = manager_cls(**manager_kwargs)
 
     def dispatch_preprocess(
         self,

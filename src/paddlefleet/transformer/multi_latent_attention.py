@@ -26,6 +26,7 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
 )
 from paddle.distributed.fleet.utils import recompute
 
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 from paddlefleet.models.common.embeddings import (
     apply_rotary_pos_emb,
 )
@@ -35,6 +36,9 @@ from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding as YarnRotaryEmbedding,
     _yarn_get_mscale,
+)
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
@@ -46,7 +50,7 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.utils import get_pg_size
+from paddlefleet.utils import get_pg_rank, get_pg_size
 
 try:
     from paddlefleet.transformer.dot_product_attention import (
@@ -54,15 +58,6 @@ try:
     )
 except Exception:
     CPDotProductAttention = None
-
-try:
-    from paddlefleet.fusions.fused_mla_yarn_rope_apply import (
-        fused_apply_mla_rope_for_kv,
-        fused_apply_mla_rope_for_q,
-    )
-except:
-    fused_apply_mla_rope_for_kv = None
-    fused_apply_mla_rope_for_q = None
 
 
 def _ec_compatible_rope_apply(
@@ -87,6 +82,13 @@ def _ec_compatible_rope_apply(
         rope_base
         ** (paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim))
     )
+
+    if get_context_parallel_world_size() > 1:
+        # In EB dataflow and CP size > 1, shape of q is [b, s/cp, h, d],
+        # we need to get full seq_len here
+        seq_len = seq_len * get_context_parallel_world_size()
+
+    # position ids: [position_offset, position_offset+1, ..., position_offset+seq_len-1]
     positions = paddle.arange(
         position_offset, position_offset + seq_len, dtype="float32"
     )
@@ -101,6 +103,11 @@ def _ec_compatible_rope_apply(
     # freqs_cis: complex [B, S, D/2] -> [B, S, 1, D/2]
     freqs_cis = paddle.polar(paddle.ones_like(freqs_expanded), freqs_expanded)
     freqs_cis = freqs_cis.unsqueeze(2)  # [B, S, 1, D/2]
+
+    if get_context_parallel_world_size() > 1:
+        # In EB dataflow and CP size > 1, freqs_cis is [b, s/cp, 1, d] in local
+        # so, we need to scatter freqs_cis here
+        freqs_cis = ContextParallelScatterOp.apply(freqs_cis, axis=1)
 
     # MD5 debug
     import hashlib as _hl
@@ -651,6 +658,11 @@ class MLASelfAttention(MultiLatentAttention):
                     )
                 )
                 rotary_pos_emb = None
+                from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
+                    fused_apply_mla_rope_for_kv,
+                    fused_apply_mla_rope_for_q,
+                )
+
                 assert (
                     fused_apply_mla_rope_for_q is not None
                     and fused_apply_mla_rope_for_kv is not None
@@ -766,7 +778,12 @@ class MLASelfAttention(MultiLatentAttention):
         # =========================================
 
         def qkv_up_proj_and_rope_apply(
-            q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
         ):
             """
             Apply the up projection and RoPE to the query and key.
@@ -812,12 +829,39 @@ class MLASelfAttention(MultiLatentAttention):
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
             if self.config.apply_rope_fusion:
-                cp_rank = self.pg_collection.cp.rank()
-                cp_size = self.pg_collection.cp.size()
+                from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
+                    fused_apply_mla_rope_for_kv,
+                    fused_apply_mla_rope_for_q,
+                )
+
+                assert not self.config.sequence_parallel, (
+                    "sequence_parallel for apply_rope_fusion in mla is not supported yet."
+                )
+                assert cu_seqlens_q is None, (
+                    "thd for apply_rope_fusion in mla is not supported yet."
+                )
+                cp_size = get_pg_size(self.pg_collection.cp)
+                cp_rank = get_pg_rank(self.pg_collection.cp)
+                q_len = q.size(1)
+                if (
+                    packed_seq_params is None
+                    or self.config.context_parallel_size == 1
+                ) and self.config.rope_type == "rope":
+                    # During training, the sequence length is always
+                    # the full rotary_pos_emb length, except for sequence packing + CP.
+                    # We need the full rotary_pos_emb to cover the full sequence,
+                    # so we do not shorten it here.
+                    rotary_pos_emb = rotary_pos_emb[:, 0:q_len]
+                if self.config.rope_type == "rope":
+                    cos = paddle.cos(rotary_pos_emb).contiguous()
+                    sin = paddle.sin(rotary_pos_emb).contiguous()
+                else:
+                    cos = rotary_pos_cos
+                    sin = rotary_pos_sin
                 query = fused_apply_mla_rope_for_q(
                     q,
-                    rotary_pos_cos,
-                    rotary_pos_sin,
+                    cos,
+                    sin,
                     self.config.qk_nope_head_dim,
                     self.config.qk_rope_head_dim,
                     cu_seqlens_q,
@@ -827,8 +871,8 @@ class MLASelfAttention(MultiLatentAttention):
                 key, value = fused_apply_mla_rope_for_kv(
                     kv,
                     k_pos_emb,
-                    rotary_pos_cos,
-                    rotary_pos_sin,
+                    cos,
+                    sin,
                     self.config.qk_rope_head_dim,
                     self.config.qk_nope_head_dim,
                     self.config.v_head_dim,
@@ -852,7 +896,13 @@ class MLASelfAttention(MultiLatentAttention):
                 else:
                     start_pos = 0
 
-                if (
+                if get_context_parallel_world_size() > 1:
+                    # In EB dataflow and CP size > 1, rotary_pos_emb is [1, s, 1, d];
+                    # we need to scatter it to [1, s/cp, 1, d] here.
+                    rotary_pos_emb = ContextParallelScatterOp.apply(
+                        rotary_pos_emb, axis=1
+                    )
+                elif (
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
                 ):
@@ -965,7 +1015,12 @@ class MLASelfAttention(MultiLatentAttention):
             return query, key, value
 
         query, key, value = qkv_up_proj_and_rope_apply(
-            q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
         )
 
         return query, key, value, q_compressed, kv_compressed

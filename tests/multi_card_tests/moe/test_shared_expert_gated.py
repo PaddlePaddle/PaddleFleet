@@ -222,6 +222,7 @@ class TestTPSP(unittest.TestCase):
 
     def test_tp_sp(self):
         config = GPTConfig(
+            moe_expert_fusion=False,
             vocab_size=self.vocab_size,
             max_sequence_length=self.seq_len,
             n_routed_experts=64,
@@ -256,6 +257,7 @@ class TestTPSP(unittest.TestCase):
         )
 
         dist_config = GPTConfig(
+            moe_expert_fusion=False,
             vocab_size=self.vocab_size,
             max_sequence_length=self.seq_len,
             n_routed_experts=64,

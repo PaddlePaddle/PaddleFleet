@@ -448,6 +448,7 @@ class TestTopKRouterDwP2POverlap(unittest.TestCase):
             routed_scaling_factor_learnable=False,
             scoring_func="softmax",
             moe_router_load_balancing_type="aux_loss",
+            moe_deep_gemm=False,
             moe_router_force_load_balancing=False,
             moe_router_fusion=True,
             router_z_loss_coef=0.0,
@@ -914,7 +915,6 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
             moe_layer,
             self.topk,
             use_fp8_mlp=True,
-            moe_grouped_gemm=False,
             recompute_moe_gate_up=True,
             dequant_input=True,
             moe_expert_fusion=True,
@@ -1061,7 +1061,7 @@ class TestFusedGateDetachMatmulComputeWeightGrad(unittest.TestCase):
 class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
     """
     Directly tests ExpertsGroupGemmContiguousNode.bf16_weight_grad with
-    moe_deep_gemm=True + moe_grouped_gemm=True to cover lines 1638-1723
+    moe_deep_gemm=True + moe_expert_fusion=True to cover lines 1638-1723
     in fp8_utils.py.
     Uses mock.patch for deep_gemm calls to avoid GEMM kernel dimension constraints.
     Tests both:
@@ -1111,7 +1111,7 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
 
         node = ExpertsGroupGemmContiguousNode(
             custom_map=custom_map,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_deep_gemm=True,
             use_fp8_mlp=True,
             use_bf16_gemm_weight_grad=True,
@@ -1289,7 +1289,7 @@ class TestBf16WeightGradMoeDeepGemm(unittest.TestCase):
 # ============================================================
 class TestBf16WeightGradPerExpertLoop(unittest.TestCase):
     """
-    Tests bf16_weight_grad with moe_grouped_gemm=False so it falls into the
+    Tests bf16_weight_grad with moe_expert_fusion=False so it falls into the
     per-expert loop (else branch at line 1732), covering lines 1733-1759.
     Uses tensors with correct alignment: each expert gets tokens multiple of
     FP8_ALIGN=128.
@@ -1340,7 +1340,7 @@ class TestBf16WeightGradPerExpertLoop(unittest.TestCase):
 
         node = ExpertsGroupGemmContiguousNode(
             custom_map=custom_map,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
             moe_deep_gemm=False,
             use_fp8_mlp=False,
             use_bf16_gemm_weight_grad=True,
@@ -1359,7 +1359,7 @@ class TestBf16WeightGradPerExpertLoop(unittest.TestCase):
 
     def test_per_expert_loop_with_main_grad(self):
         """
-        moe_grouped_gemm=False falls into per-expert loop.
+        moe_expert_fusion=False falls into per-expert loop.
         Exercises lines 1733-1759 with main_grad initialization + fused_linear_param_grad_add.
         """
         print("\n[bf16_weight_grad per-expert] with main_grad")
@@ -1380,7 +1380,7 @@ class TestBf16WeightGradPerExpertLoop(unittest.TestCase):
 
     def test_per_expert_loop_without_main_grad(self):
         """
-        moe_grouped_gemm=False falls into per-expert loop.
+        moe_expert_fusion=False falls into per-expert loop.
         Exercises lines 1741-1759 with weights.grad initialization + fused_linear_param_grad_add.
         """
         print(

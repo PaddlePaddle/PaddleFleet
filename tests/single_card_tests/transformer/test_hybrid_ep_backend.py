@@ -89,6 +89,9 @@ def _new_hybrid_manager(**overrides):
         "router_topk": overrides.pop("router_topk", 2),
         "num_experts": overrides.pop("num_experts", 4),
         "num_local_experts": overrides.pop("num_local_experts", 2),
+        "hybridep_buffer_configs": overrides.pop(
+            "hybridep_buffer_configs", None
+        ),
     }
     manager = _HybridEPManager(**init_kwargs)
     for key, value in overrides.items():
@@ -154,6 +157,17 @@ class _RecordingHybridEPBuffer:
 class _ConstructedHybridEPBuffer:
     instances = []
 
+    class Config:
+        def __init__(
+            self,
+            hidden_dim,
+            max_num_of_tokens_per_rank,
+            num_local_experts,
+        ):
+            self.hidden_dim = hidden_dim
+            self.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
+            self.num_of_experts_per_rank = num_local_experts
+
     def __init__(
         self,
         group,
@@ -167,6 +181,11 @@ class _ConstructedHybridEPBuffer:
         load_cached_kernels=False,
     ):
         self.group = group
+        self.config = self.Config(
+            hidden_dim,
+            max_num_of_tokens_per_rank,
+            num_local_experts,
+        )
         self.hidden_dim = hidden_dim
         self.max_num_of_tokens_per_rank = max_num_of_tokens_per_rank
         self.num_local_experts = num_local_experts
@@ -441,28 +460,36 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             [4, 8],
         )
 
-    def test_hybrid_ep_buffer_uses_configured_num_sms(self):
-        manager = _new_hybrid_manager(group=_HybridEPGroup(nranks=2))
-        _ConstructedHybridEPBuffer.instances = []
-        original_num_sms = fused_a2a._hybrid_ep_buffer_num_sms
+    def test_hybrid_ep_buffer_rebuild_check_respects_explicit_sms(self):
+        group = _HybridEPGroup(nranks=2)
+        fused_a2a._hybrid_ep_buffer = _ConstructedHybridEPBuffer(
+            group=group,
+            hidden_dim=8,
+            max_num_of_tokens_per_rank=4,
+            num_local_experts=2,
+            use_fp8=False,
+            num_sms_dispatch_api=8,
+            num_sms_combine_api=16,
+            num_sms_preprocessing_api=32,
+        )
 
-        try:
-            fused_a2a.configure_buffer(num_sms=20)
-            with patch.object(
-                fused_a2a,
-                "hybrid_ep",
-                _HybridEPRuntimeModule,
-                create=True,
-            ):
-                manager._get_buffer(paddle.zeros([4, 8], dtype="float32"))
-        finally:
-            fused_a2a._hybrid_ep_buffer_num_sms = original_num_sms
-            fused_a2a.reset_hybrid_ep_buffer()
-
-        buffer = _ConstructedHybridEPBuffer.instances[-1]
-        self.assertEqual(buffer.num_sms_dispatch_api, 20)
-        self.assertEqual(buffer.num_sms_combine_api, 20)
-        self.assertEqual(buffer.num_sms_preprocessing_api, 20)
+        self.assertFalse(
+            fused_a2a._need_new_hybrid_ep_buffer(group, 8, 4, 2, 8, 16, 32)
+        )
+        self.assertTrue(
+            fused_a2a._need_new_hybrid_ep_buffer(group, 8, 4, 2, 9, 16, 32)
+        )
+        self.assertTrue(
+            fused_a2a._need_new_hybrid_ep_buffer(group, 8, 4, 2, 8, 17, 32)
+        )
+        self.assertTrue(
+            fused_a2a._need_new_hybrid_ep_buffer(group, 8, 4, 2, 8, 16, 33)
+        )
+        self.assertFalse(
+            fused_a2a._need_new_hybrid_ep_buffer(
+                group, 8, 4, 2, None, None, None
+            )
+        )
 
     def test_dispatch_with_permute_uses_hybrid_ep_runtime_contract(self):
         routing_map = paddle.to_tensor(
@@ -859,7 +886,7 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
         counts, num_tokens = _hybrid_ep_prepare_expert_counts(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
         )
 
         self.assertEqual(counts, [2, 0, 1])
@@ -871,7 +898,7 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
         counts, num_tokens = _hybrid_ep_prepare_expert_counts(
             custom_map,
             use_fp8_mlp=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
         )
 
         self.assertIsInstance(counts, paddle.Tensor)
@@ -891,7 +918,7 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
             _hybrid_ep_prepare_expert_counts(
                 custom_map,
                 use_fp8_mlp=False,
-                moe_grouped_gemm=False,
+                moe_expert_fusion=False,
             )
 
     def test_padding_helpers_restore_forward_shapes(self):
@@ -933,7 +960,7 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
             custom_map,
             use_fp8_mlp=False,
             moe_deep_gemm=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
             is_first_fwd=True,
         )
         output.sum().backward()
@@ -962,7 +989,7 @@ class TestHybridEPExpertInputCounts(unittest.TestCase):
             custom_map,
             use_fp8_mlp=True,
             moe_deep_gemm=False,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
             fp8_dispatched_handle={
                 "scale": paddle.ones([2, 1], dtype="float32")
             },

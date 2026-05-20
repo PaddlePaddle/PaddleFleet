@@ -147,6 +147,16 @@ class MoELayer(nn.Layer):
         self.sublayers = sublayers
         routed_expert_config = deepcopy(config)
         shared_expert_config = deepcopy(config)
+        global_use_bias = routed_expert_config.use_bias
+        moe_routed_expert_use_bias = config.moe_routed_expert_use_bias
+        if moe_routed_expert_use_bias is not None:
+            routed_expert_config.use_bias = moe_routed_expert_use_bias
+            logger.info(
+                "PaddleFleet MoELayer moe_routed_expert_use_bias overrides "
+                "routed_expert_config.use_bias: global_use_bias=%s moe_routed_expert_use_bias=%s",
+                global_use_bias,
+                moe_routed_expert_use_bias,
+            )
         self.pg_collection = pg_collection
         self.hidden_size = config.hidden_size
         self.moe_intermediate_size = config.moe_intermediate_size
@@ -181,13 +191,12 @@ class MoELayer(nn.Layer):
                 ]
             )
         self.router_aux_loss_coef = config.router_aux_loss_coef
-        self.moe_grouped_gemm = config.moe_grouped_gemm
         self.moe_deep_gemm = config.moe_deep_gemm
 
         if self.moe_deep_gemm:
             incompatible_reasons = []
-            if not self.moe_grouped_gemm:
-                incompatible_reasons.append("moe_grouped_gemm must be True")
+            if not self.moe_expert_fusion:
+                incompatible_reasons.append("moe_expert_fusion must be True")
             if incompatible_reasons:
                 logging.warning(
                     "moe_deep_gemm=True is ignored because %s; "
@@ -283,9 +292,9 @@ class MoELayer(nn.Layer):
                     )
                     self.moe_shared_expert_overlap = False
             else:
-                if self.moe_grouped_gemm:
+                if self.moe_expert_fusion:
                     raise ValueError(
-                        "moe_grouped_gemm is only supported when moe_token_dispatcher_type is 'deepep' or 'hybridep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
+                        "moe_expert_fusion is only supported when moe_token_dispatcher_type is 'deepep' or 'hybridep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
                     )
                 self.fp8_dispatch = False
 
@@ -312,7 +321,7 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.sublayers.mlp_spec
 
-        if self.moe_grouped_gemm and (not self.fp8 or self.moe_deep_gemm):
+        if self.moe_expert_fusion and (not self.fp8 or self.moe_deep_gemm):
             self.grouped_gemm_experts = GroupedMLPExpert(
                 self.num_local_experts,
                 routed_expert_config,
@@ -328,6 +337,7 @@ class MoELayer(nn.Layer):
                     self.experts.append(None)
 
         shared_expert_args = deepcopy(expert_args)
+        shared_expert_args["config"].use_bias = shared_expert_config.use_bias
         shared_expert_args["config"].hidden_size = self.config.hidden_size
         shared_expert_args["moe_intermediate_size"] = (
             self.moe_shared_expert_intermediate_size
@@ -347,8 +357,15 @@ class MoELayer(nn.Layer):
                     self.moe_group,
                     self.moe_ep_barrier,
                     dispatcher_type=self.moe_token_dispatcher_type,
+                    hybridep_buffer_configs=getattr(
+                        config, "hybridep_buffer_configs", None
+                    ),
                 )
-                if getattr(config, "deepep_buffer_configs", None) is not None:
+                if (
+                    self.moe_token_dispatcher_type == "deepep"
+                    and getattr(config, "deepep_buffer_configs", None)
+                    is not None
+                ):
                     configure_buffer(**config.deepep_buffer_configs)
             elif self.moe_token_dispatcher_type == "alltoall":
                 local_expert_indices = list(
@@ -392,7 +409,7 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            if self.moe_grouped_gemm and (not self.fp8 or self.moe_deep_gemm):
+            if self.moe_expert_fusion and (not self.fp8 or self.moe_deep_gemm):
                 for p in self.grouped_gemm_experts.parameters():
                     p.is_moe_param = True
                     p.color = {
@@ -675,7 +692,6 @@ class MoELayer(nn.Layer):
                     self.num_experts_per_tok,
                     use_fp8_mlp=self.fp8,
                     moe_deep_gemm=self.moe_deep_gemm,
-                    moe_grouped_gemm=self.moe_grouped_gemm,
                     recompute_moe_gate_up=self.recompute_moe_gate_up,
                     recompute_moe_premute=self.recompute_moe_premute,
                     fp8_dispatched_handle=fp8_dispatched_handle,
@@ -722,7 +738,7 @@ class MoELayer(nn.Layer):
             self,
             use_fp8_mlp=self.fp8,
             moe_deep_gemm=self.moe_deep_gemm,
-            moe_grouped_gemm=self.moe_grouped_gemm,
+            moe_expert_fusion=self.moe_expert_fusion,
             recompute_moe_gate_up=self.recompute_moe_gate_up,
             use_bf16_gemm_weight_grad=not self.fp8_wgrad,
             fp8_dispatched_handle=fp8_dispatched_handle,
@@ -815,7 +831,6 @@ class MoELayer(nn.Layer):
                     self.num_experts_per_tok,
                     use_fp8_mlp=self.fp8,
                     moe_deep_gemm=self.moe_deep_gemm,
-                    moe_grouped_gemm=self.moe_grouped_gemm,
                     recompute_moe_gate_up=self.recompute_moe_gate_up,
                     recompute_moe_premute=self.recompute_moe_premute,
                     fp8_dispatched_handle=fp8_dispatched_handle,
@@ -827,6 +842,7 @@ class MoELayer(nn.Layer):
                     use_ue8m0=self.use_ue8m0,
                     dw_p2p_overlap=self.dw_p2p_overlap,
                 )
+
             if is_first_fwd:
                 hidden_states.stop_gradient = False
         else:
@@ -945,7 +961,7 @@ class MoELayer(nn.Layer):
             # Latent MoE: project to latent space before single-card MoE
             if self.use_latent_moe:
                 reshaped_input = self.fc1_latent_proj(reshaped_input)
-            if self.moe_grouped_gemm:
+            if self.moe_expert_fusion:
                 output = self._forward_single_card_grouped_gemm_moe(
                     reshaped_input, mask, probs
                 )

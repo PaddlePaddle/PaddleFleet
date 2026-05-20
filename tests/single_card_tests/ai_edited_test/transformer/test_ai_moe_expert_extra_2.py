@@ -42,6 +42,7 @@ def _make_config(**overrides):
         "hidden_size": 64,
         "num_attention_heads": 4,
         "moe_intermediate_size": 128,
+        "moe_deep_gemm": False,
         "intermediate_size": 128,
         "use_bias": False,
         "gated_linear_unit": True,

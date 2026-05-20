@@ -138,7 +138,7 @@ class TestMlpNodeConstruction(unittest.TestCase):
             custom_map,
             num_experts_per_tok=2,
         )
-        self.assertTrue(node.moe_expert_fusion)
+        self.assertFalse(node.moe_expert_fusion)
         self.assertFalse(node.recompute_moe_premute)
         self.assertIsNotNone(node.experts_group_gemm_node)
         self.assertIsNotNone(node.unzip_node)

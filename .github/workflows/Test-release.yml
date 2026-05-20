@@ -1434,6 +1434,11 @@ jobs:
     needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, check-bypass]
     if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' && needs.single_card_test.result != 'skipped' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      pull-requests: read
     env:
       GITHUB_REPO_NAME: ${{ github.repository }}
     steps:
@@ -1542,4 +1547,5 @@ jobs:
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
+          use_oidc: true
           verbose: true

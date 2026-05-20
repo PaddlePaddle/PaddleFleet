@@ -119,7 +119,8 @@ class TestGPTModel(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             use_qk_norm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
+            moe_deep_gemm=False,
         )
         self.gpt_model = gpt_builder(config, num_stages=1)
         self.config = config

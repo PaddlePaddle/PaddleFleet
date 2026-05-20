@@ -50,6 +50,7 @@ def _make_router_config(**overrides):
         "routed_scaling_factor": 1.0,
         "moe_router_force_load_balancing": False,
         "moe_router_load_balancing_type": "aux_loss",
+        "moe_deep_gemm": False,
         "router_aux_loss_coef": 0.01,
         "router_z_loss_coef": None,
     }

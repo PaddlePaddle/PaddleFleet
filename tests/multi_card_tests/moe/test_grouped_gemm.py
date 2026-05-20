@@ -63,7 +63,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         model_parallel_cuda_manual_seed(seed)
         self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
-    def test_moe_grouped_gemm(self):
+    def test_moe_expert_fusion(self):
         n_routed_experts = 64
         hidden_size = 256
         transformer_config = TransformerConfig(
@@ -81,7 +81,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             bias_activation_fusion=True,
         )
 

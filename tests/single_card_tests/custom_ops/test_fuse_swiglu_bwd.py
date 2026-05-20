@@ -142,6 +142,27 @@ class TestFusedSwiGLUBack(unittest.TestCase):
         if core.is_bfloat16_supported(base.CUDAPlace(0)):
             self.run_fused_op_test(2, 2048, 4096, "bfloat16")
 
+    def test_fused_swiglu_bwd_dtype_mismatch(self):
+        y = paddle.randn([1, 1, 8], dtype="float32")
+        g = paddle.randn([1, 1, 4]).astype("bfloat16")
+
+        with self.assertRaises(Exception):  # noqa: B017
+            fused_swiglu_bwd(g, y)
+
+    def test_fused_swiglu_bwd_shape_mismatch(self):
+        y = paddle.randn([1, 2, 8], dtype="float32")
+        g = paddle.randn([1, 1, 4], dtype="float32")
+
+        with self.assertRaises(Exception):  # noqa: B017
+            fused_swiglu_bwd(g, y)
+
+    def test_fused_swiglu_bwd_unaligned_hidden_size(self):
+        y = paddle.randn([1, 1, 10], dtype="float32")
+        g = paddle.randn([1, 1, 5], dtype="float32")
+
+        with self.assertRaises(Exception):  # noqa: B017
+            fused_swiglu_bwd(g, y)
+
 
 if __name__ == "__main__":
     unittest.main()
