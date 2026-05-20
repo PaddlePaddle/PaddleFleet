@@ -845,5 +845,50 @@ class TestHashRouterInMoELayer(unittest.TestCase):
         self.assertEqual(router._layer_number, 7)
 
 
+    def test_set_layer_number_activates_hash_router(self):
+        """set_layer_number on MoELayer must switch TopKRouter → HashRouter.
+
+        build_spec_layer in TransformerLayer does NOT pass layer_number to
+        MoELayer.__init__, so __init__ always creates a TopKRouter first.
+        TransformerLayer then calls set_layer_number(layer_number) afterward.
+        This test verifies that set_layer_number correctly replaces the gate
+        with a HashRouter when the layer is in the hash range.
+        """
+        from paddlefleet.transformer.moe.moe_router import HashRouter, TopKRouter
+
+        config = _make_router_config(
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=2,
+            num_hidden_layers=8,
+        )
+        # Simulate build_spec_layer: MoELayer init WITHOUT layer_number
+        router_cls = self._get_router_class_for_layer(config, layer_number=None)
+        self.assertIs(router_cls, TopKRouter, "should default to TopKRouter")
+
+        # Simulate TransformerLayer calling set_layer_number afterward
+        # Layer 7 is in hash range (>=8-2=6): should switch to HashRouter
+        router_cls_after = self._get_router_class_for_layer(config, layer_number=7)
+        self.assertIs(router_cls_after, HashRouter, "layer 7 should use HashRouter")
+
+        # Layer 5 is NOT in hash range (<6): should stay TopKRouter
+        router_cls_outside = self._get_router_class_for_layer(config, layer_number=5)
+        self.assertIs(router_cls_outside, TopKRouter, "layer 5 should stay TopKRouter")
+
+    def test_set_layer_number_keeps_topk_for_non_hash_layer(self):
+        """set_layer_number on a non-hash layer should NOT replace the gate."""
+        from paddlefleet.transformer.moe.moe_router import HashRouter, TopKRouter
+
+        config = _make_router_config(
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=2,
+            num_hidden_layers=8,
+        )
+        # Layer 3 is outside hash range → TopKRouter
+        router_cls = self._get_router_class_for_layer(config, layer_number=3)
+        self.assertIs(router_cls, TopKRouter)
+
+
 if __name__ == "__main__":
     unittest.main()

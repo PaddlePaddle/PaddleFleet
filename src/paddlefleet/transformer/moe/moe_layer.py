@@ -1196,7 +1196,28 @@ class MoELayer(nn.Layer):
 
     def set_layer_number(self, layer_number):
         self.layer_number = layer_number
-        assert hasattr(self.gate, "set_layer_number"), (
-            "expect gate has method 'set_layer_number'"
+
+        # Re-evaluate router type: build_spec_layer doesn't pass layer_number,
+        # so __init__ may have created TopKRouter with layer_number=None.
+        # Now that we know the real layer_number, switch to HashRouter if needed.
+        _use_hash = (
+            getattr(self.config, "moe_n_hash_layers", 0) > 0
+            and layer_number
+            >= self.config.num_hidden_layers - self.config.moe_n_hash_layers
         )
-        self.gate.set_layer_number(layer_number)
+        if _use_hash and not isinstance(self.gate, HashRouter):
+            self.gate = HashRouter(
+                config=self.config,
+                pg_collection=self.pg_collection,
+                layer_number=layer_number,
+            )
+            logger.info(
+                f"MoELayer layer_number={layer_number}: switching to HashRouter "
+                f"(moe_n_hash_layers={self.config.moe_n_hash_layers}, "
+                f"num_hidden_layers={self.config.num_hidden_layers})"
+            )
+        else:
+            assert hasattr(self.gate, "set_layer_number"), (
+                "expect gate has method 'set_layer_number'"
+            )
+            self.gate.set_layer_number(layer_number)
