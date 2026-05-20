@@ -641,6 +641,49 @@ class StandardMoERouter(nn.Layer):
 
         return topk_weight, topk_idx
 
+    def _topk_hash(
+        self,
+        flat_ids: paddle.Tensor,
+        k: int,
+    ):
+        """Deterministic hash-based routing (no learned parameters).
+
+        Assigns each token to ``k`` experts via:
+            expert_offset = (token_id + offset) % num_experts,  offset = 0..k-1
+
+        All selected experts receive equal weight (1/k if norm_topk_prob else
+        1.0), scaled by routed_scaling_factor.  Padding tokens (token_id ==
+        moe_hash_router_pad_token_id) are masked out: weight = 0, index = -1.
+
+        Args:
+            flat_ids (Tensor): Flattened token IDs, shape [B*S], dtype int64.
+            k (int): Number of experts per token.
+
+        Returns:
+            top_gate (Tensor): Shape [B*S, k], dtype float32.
+            top_idx  (Tensor): Shape [B*S, k], dtype int64.  -1 for padding.
+        """
+        pad_token_id = getattr(self.config, "moe_hash_router_pad_token_id", 0)
+        offsets = paddle.arange(k, dtype=paddle.int64).unsqueeze(0)  # [1, k]
+        top_idx = (
+            flat_ids.unsqueeze(1) + offsets
+        ) % self.num_experts  # [B*S, k]
+
+        weight_val = (
+            1.0 / k if self.norm_topk_prob else 1.0
+        ) * self.routed_scaling_factor
+        num_tokens = flat_ids.shape[0]
+        top_gate = paddle.full(
+            [num_tokens, k], weight_val, dtype=paddle.float32
+        )
+
+        valid = (
+            (flat_ids != pad_token_id).cast(paddle.float32).unsqueeze(-1)
+        )  # [B*S, 1]
+        top_gate = top_gate * valid
+        top_idx = top_idx.masked_fill(~valid.cast(paddle.bool), -1)
+        return top_gate, top_idx
+
     def _call_topk_method(
         self, topk_method, gates, k, n_group=None, topk_group=None
     ):
@@ -697,6 +740,36 @@ class TopKRouter(StandardMoERouter):
             raise ValueError(
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
             )
+
+        # ---- hash routing short-circuit (no learned gate) ----
+        if self.topk_method == "hash":
+            if input_ids is None:
+                raise ValueError(
+                    "topk_method='hash' requires input_ids. "
+                    "Make sure input_ids is passed through the model forward to the MoE layer."
+                )
+            if self.sequence_parallel:
+                flat_ids = (
+                    input_ids.transpose([1, 0]).reshape([-1]).cast(paddle.int64)
+                )
+            else:
+                flat_ids = input_ids.reshape([-1]).cast(paddle.int64)
+            top_gate, top_idx = self._topk_hash(
+                flat_ids, k=self.num_experts_per_tok
+            )
+            num_tokens = flat_ids.shape[0]
+            safe_idx = top_idx.clip(min=0)
+            probs = paddle.zeros(
+                [num_tokens, self.num_experts], dtype=paddle.float32
+            ).put_along_axis(safe_idx, top_gate, axis=1)
+            mask = (probs > 0).cast(paddle.float32)
+            _log_moe_md5(
+                top_idx.cast(paddle.float32),
+                "hash_topk_indices",
+                self._layer_number,
+            )
+            return (None, top_gate, top_idx, probs, mask, None, None, None)
+        # ---- end hash short-circuit ----
 
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
@@ -874,169 +947,4 @@ class TopKRouter(StandardMoERouter):
             None,  # token priority
             l_aux,
             l_zloss,
-        )
-
-
-class HashRouter(nn.Layer):
-    """Deterministic hash-based MoE router (no learned parameters).
-
-    Routes each token to ``num_experts_per_tok`` experts deterministically
-    using a simple modulo hash of the input token ID:
-
-        expert_k = (token_id + k) % num_experts,  k = 0, ..., num_experts_per_tok - 1
-
-    All selected experts receive equal weight (1 / num_experts_per_tok when
-    ``norm_topk_prob`` is True, otherwise 1.0), scaled by ``routed_scaling_factor``.
-
-    Padding tokens are masked out: their routing weights are 0 and expert indices
-    are -1.  The pad token ID defaults to 0 (Megatron-LM / most PaddlePaddle model
-    convention) and is configurable via
-    TransformerConfig.moe_hash_router_pad_token_id.
-
-    This router produces the same 8-tuple output as TopKRouter so it can be used
-    as a drop-in replacement inside MoELayer.
-
-    Args:
-        config (TransformerConfig): Model configuration.
-        pg_collection: Process group collection (unused, kept for API compatibility).
-        layer_number (int, optional): 0-indexed layer number, used for logging.
-    """
-
-    def __init__(
-        self,
-        config: TransformerConfig,
-        pg_collection=None,
-        layer_number: int | None = None,
-    ):
-        super().__init__()
-        self.config = config
-        self.num_experts = config.n_routed_experts
-        self.num_experts_per_tok = config.num_experts_per_tok
-        self.norm_topk_prob = config.norm_topk_prob
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.sequence_parallel = config.sequence_parallel
-        self.pad_token_id = getattr(config, "moe_hash_router_pad_token_id", 0)
-        self._layer_number = layer_number
-        # HashRouter has no learned parameters
-        self._cast_to_low_precision = False
-
-    def set_layer_number(self, layer_number: int):
-        """Set the layer number (used for logging / debugging)."""
-        self._layer_number = layer_number
-
-    def forward(
-        self, input: paddle.Tensor, input_ids: paddle.Tensor | None = None
-    ):
-        """Compute hash-based token-to-expert routing.
-
-        Args:
-            input (paddle.Tensor): Hidden states, shape [B, S, H] (or [S, B, H]
-                when sequence_parallel=True). Not used for routing itself.
-            input_ids (paddle.Tensor): Token IDs, shape [B, S]. **Required.**
-
-        Returns:
-            tuple: 8-element tuple matching TopKRouter output format:
-                - capacity (None)
-                - top_gate  [B*S, K]  per-token expert weights
-                - top_idx   [B*S, K]  selected expert indices (-1 for padding)
-                - probs     [B*S, E]  sparse weight matrix
-                - mask      [B*S, E]  binary routing mask
-                - token_priority (None)
-                - l_aux (None)
-                - l_zloss (None)
-        """
-        if input_ids is None:
-            raise ValueError(
-                "HashRouter requires input_ids to be provided. "
-                "Make sure input_ids is passed through the model forward "
-                "to the MoE layer."
-            )
-
-        if len(input.shape) != 3:
-            raise ValueError(
-                f"HashRouter expects 3-D input [B, S, H] or [S, B, H], "
-                f"got shape {list(input.shape)}"
-            )
-
-        # `input_ids` is conventionally [B, S] (batch-major). When
-        # `sequence_parallel=True` the hidden-state `input` is [S, B, H]
-        # (sequence-major), so we must transpose `input_ids` before flatten
-        # to keep token-id alignment with hidden states.
-        if self.sequence_parallel:
-            seq_len, batch_size, _ = input.shape
-            flat_ids = (
-                input_ids.transpose([1, 0]).reshape([-1]).cast(paddle.int64)
-            )
-        else:
-            batch_size, seq_len, _ = input.shape
-            flat_ids = input_ids.reshape([-1]).cast(paddle.int64)
-
-        num_tokens = batch_size * seq_len
-
-        # ------------------------------------------------------------------ #
-        # Hash assignment: expert_k = (token_id + k) % num_experts            #
-        # ------------------------------------------------------------------ #
-
-        # offsets: [[0, 1, ..., K-1]]  ->  broadcast with flat_ids
-        offsets = paddle.arange(
-            self.num_experts_per_tok, dtype=paddle.int64
-        ).unsqueeze(0)  # [1, K]
-        topk_idx = (
-            flat_ids.unsqueeze(1) + offsets
-        ) % self.num_experts  # [B*S, K]
-
-        # ------------------------------------------------------------------ #
-        # Uniform weights                                                       #
-        # ------------------------------------------------------------------ #
-        weight_val = (
-            1.0 / self.num_experts_per_tok if self.norm_topk_prob else 1.0
-        )
-        if abs(self.routed_scaling_factor - 1.0) > 1e-6:
-            weight_val = weight_val * self.routed_scaling_factor
-
-        top_gate = paddle.full(
-            [num_tokens, self.num_experts_per_tok],
-            weight_val,
-            dtype=paddle.float32,
-        )  # [B*S, K]
-
-        # ------------------------------------------------------------------ #
-        # Padding mask: token_id == pad_token_id → weight=0, idx=-1           #
-        # ------------------------------------------------------------------ #
-        valid_mask = (
-            (flat_ids != self.pad_token_id).cast(paddle.float32).unsqueeze(-1)
-        )  # [B*S, 1]
-        top_gate = top_gate * valid_mask
-        topk_idx = topk_idx.masked_fill(
-            ~valid_mask.cast(paddle.bool),
-            -1,
-        )
-
-        # ------------------------------------------------------------------ #
-        # Build sparse probs [B*S, E] and mask [B*S, E]                        #
-        # ------------------------------------------------------------------ #
-        safe_idx = topk_idx.clip(min=0)  # avoid -1 in put_along_axis
-        probs = paddle.zeros(
-            [num_tokens, self.num_experts], dtype=paddle.float32
-        ).put_along_axis(safe_idx, top_gate, axis=1)
-        # Re-zero padding positions that may have been written via safe_idx
-        probs = probs * valid_mask
-
-        mask = (probs > 0).cast(paddle.float32)
-
-        _log_moe_md5(
-            topk_idx.cast(paddle.float32),
-            "hash_topk_indices",
-            self._layer_number,
-        )
-
-        return (
-            None,  # capacity
-            top_gate,  # [B*S, K]
-            topk_idx,  # [B*S, K]
-            probs,  # [B*S, E]
-            mask,  # [B*S, E]
-            None,  # token_priority
-            None,  # l_aux  (no auxiliary loss for hash routing)
-            None,  # l_zloss
         )

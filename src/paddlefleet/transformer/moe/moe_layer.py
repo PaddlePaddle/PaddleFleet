@@ -44,7 +44,7 @@ from .fp8_utils import fused_stack_quant_without_cache
 from .fused_a2a import configure_buffer
 from .fusion_layer_utils import FusionMoePyLayer
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
-from .moe_router import HashRouter, TopKRouter
+from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
 from .token_dispatcher import AllToAllTokenDispatcher, MoEFlexTokenDispatcher
@@ -225,29 +225,11 @@ class MoELayer(nn.Layer):
         # MoE-Related Configs
         self._init_expert_parallel()
 
-        # Determine whether to use HashRouter or TopKRouter for this layer.
-        # The last `moe_n_hash_layers` layers (by layer_number) use HashRouter.
-        _use_hash_routing = (
-            getattr(config, "moe_n_hash_layers", 0) > 0
-            and layer_number is not None
-            and layer_number
-            >= config.num_hidden_layers - config.moe_n_hash_layers
-        )
-        if _use_hash_routing:
-            self.gate = HashRouter(
-                config=config,
-                pg_collection=pg_collection,
-                layer_number=layer_number,
-            )
-            logger.info(
-                f"MoELayer layer_number={layer_number}: using HashRouter "
-                f"(moe_n_hash_layers={config.moe_n_hash_layers}, "
-                f"num_hidden_layers={config.num_hidden_layers})"
-            )
-        else:
-            self.gate = TopKRouter(config=config, pg_collection=pg_collection)
-            if layer_number is not None:
-                self.gate.set_layer_number(layer_number)
+        # Always use TopKRouter; set_layer_number will switch topk_method to
+        # "hash" for layers in the hash range (last moe_n_hash_layers layers).
+        self.gate = TopKRouter(config=config, pg_collection=pg_collection)
+        if layer_number is not None:
+            self.gate.set_layer_number(layer_number)
 
         self.expert_class = StandardMLPExpert
         self.shared_expert_class = StandardMLPSharedExpert
@@ -1197,27 +1179,21 @@ class MoELayer(nn.Layer):
     def set_layer_number(self, layer_number):
         self.layer_number = layer_number
 
-        # Re-evaluate router type: build_spec_layer doesn't pass layer_number,
-        # so __init__ may have created TopKRouter with layer_number=None.
-        # Now that we know the real layer_number, switch to HashRouter if needed.
+        # The last `moe_n_hash_layers` layers use deterministic hash routing.
+        # Switching the topk_method attribute is enough; no need to replace the
+        # gate object since TopKRouter now handles topk_method="hash" natively.
         _use_hash = (
             getattr(self.config, "moe_n_hash_layers", 0) > 0
             and layer_number
             >= self.config.num_hidden_layers - self.config.moe_n_hash_layers
         )
-        if _use_hash and not isinstance(self.gate, HashRouter):
-            self.gate = HashRouter(
-                config=self.config,
-                pg_collection=self.pg_collection,
-                layer_number=layer_number,
-            )
+        if _use_hash:
+            self.gate.topk_method = "hash"
             logger.info(
-                f"MoELayer layer_number={layer_number}: switching to HashRouter "
+                f"MoELayer layer_number={layer_number}: gate switched to "
+                f"topk_method='hash' "
                 f"(moe_n_hash_layers={self.config.moe_n_hash_layers}, "
                 f"num_hidden_layers={self.config.num_hidden_layers})"
             )
         else:
-            assert hasattr(self.gate, "set_layer_number"), (
-                "expect gate has method 'set_layer_number'"
-            )
             self.gate.set_layer_number(layer_number)

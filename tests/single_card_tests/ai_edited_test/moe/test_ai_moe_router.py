@@ -525,13 +525,15 @@ class TestSftPlusScore(unittest.TestCase):
 
 
 class TestHashRouter(unittest.TestCase):
-    """Tests for the HashRouter class."""
+    """Tests for hash routing via TopKRouter(topk_method='hash')."""
 
     def _make_router(self, **cfg_overrides):
-        from paddlefleet.transformer.moe.moe_router import HashRouter
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
 
+        # topk_method="hash" activates deterministic hash routing in TopKRouter
+        cfg_overrides.setdefault("topk_method", "hash")
         config = _make_router_config(**cfg_overrides)
-        return HashRouter(config=config, layer_number=0), config
+        return TopKRouter(config=config), config
 
     def _dummy_hidden(self, B, S, H=64):
         return paddle.randn([B, S, H])
@@ -550,7 +552,7 @@ class TestHashRouter(unittest.TestCase):
         np.testing.assert_array_equal(
             idx1.numpy(),
             idx2.numpy(),
-            err_msg="HashRouter should be deterministic",
+            err_msg="Hash routing should be deterministic",
         )
 
     def test_modulo_expert_assignment(self):
@@ -693,7 +695,7 @@ class TestHashRouter(unittest.TestCase):
         )
 
     def test_no_input_ids_raises(self):
-        """HashRouter must raise ValueError if input_ids is None."""
+        """topk_method='hash' must raise ValueError if input_ids is None."""
         router, _ = self._make_router()
         hidden = self._dummy_hidden(2, 4)
         with self.assertRaises(ValueError):
@@ -706,7 +708,7 @@ class TestHashRouter(unittest.TestCase):
         self.assertEqual(router._layer_number, 5)
 
     def test_invalid_input_shape_raises(self):
-        """HashRouter should raise ValueError for non-3D input."""
+        """TopKRouter should raise ValueError for non-3D input (regardless of topk_method)."""
         router, _ = self._make_router()
         bad_input = paddle.randn([8, 64])  # 2-D, not 3-D
         input_ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype="int64")
@@ -759,135 +761,116 @@ class TestHashRouter(unittest.TestCase):
 
 
 class TestHashRouterInMoELayer(unittest.TestCase):
-    """Tests verifying that MoELayer selects the correct router type."""
+    """Tests verifying that MoELayer switches to topk_method='hash' correctly."""
 
-    def _get_router_class_for_layer(self, config, layer_number):
+    def _expected_topk_method(self, config, layer_number):
+        """Return the expected topk_method for a given layer_number."""
         _use_hash = (
             getattr(config, "moe_n_hash_layers", 0) > 0
             and layer_number is not None
             and layer_number
             >= config.num_hidden_layers - config.moe_n_hash_layers
         )
-        from paddlefleet.transformer.moe.moe_router import (
-            HashRouter,
-            TopKRouter,
-        )
-
-        return HashRouter if _use_hash else TopKRouter
+        return "hash" if _use_hash else config.topk_method
 
     def test_moe_layer_selects_hash_router(self):
-        """Layer number in hash range should select HashRouter."""
-        from paddlefleet.transformer.moe.moe_router import HashRouter
-
+        """Layer number in hash range should result in topk_method='hash'."""
         config = _make_router_config(
             num_hidden_layers=8,
             moe_n_hash_layers=2,
         )
-        router_cls = self._get_router_class_for_layer(config, layer_number=7)
-        self.assertIs(router_cls, HashRouter)
+        method = self._expected_topk_method(config, layer_number=7)
+        self.assertEqual(method, "hash")
 
     def test_moe_layer_selects_topk_router(self):
-        """Layer number outside hash range should select TopKRouter."""
-        from paddlefleet.transformer.moe.moe_router import TopKRouter
-
+        """Layer number outside hash range should keep original topk_method."""
         config = _make_router_config(
             num_hidden_layers=8,
             moe_n_hash_layers=2,
         )
-        router_cls = self._get_router_class_for_layer(config, layer_number=5)
-        self.assertIs(router_cls, TopKRouter)
+        method = self._expected_topk_method(config, layer_number=5)
+        self.assertNotEqual(method, "hash")
 
     def test_moe_layer_no_hash_layers(self):
-        """When moe_n_hash_layers=0, all layers should use TopKRouter."""
-        from paddlefleet.transformer.moe.moe_router import TopKRouter
-
+        """When moe_n_hash_layers=0, all layers should keep original topk_method."""
         config = _make_router_config(
             num_hidden_layers=8,
             moe_n_hash_layers=0,
         )
-        router_cls = self._get_router_class_for_layer(config, layer_number=7)
-        self.assertIs(router_cls, TopKRouter)
+        method = self._expected_topk_method(config, layer_number=7)
+        self.assertNotEqual(method, "hash")
 
     def test_boundary_layer_uses_hash_router(self):
-        """The first layer of the hash range (num_hidden_layers - moe_n_hash_layers)."""
-        from paddlefleet.transformer.moe.moe_router import HashRouter
-
+        """The first layer of the hash range should use topk_method='hash'."""
         config = _make_router_config(num_hidden_layers=32, moe_n_hash_layers=4)
-        router_cls = self._get_router_class_for_layer(config, layer_number=28)
-        self.assertIs(router_cls, HashRouter)
+        method = self._expected_topk_method(config, layer_number=28)
+        self.assertEqual(method, "hash")
 
     def test_layer_before_boundary_uses_topk_router(self):
-        """Layer just before the hash range boundary should use TopKRouter."""
-        from paddlefleet.transformer.moe.moe_router import TopKRouter
-
+        """Layer just before the hash range boundary should keep original topk_method."""
         config = _make_router_config(num_hidden_layers=32, moe_n_hash_layers=4)
-        router_cls = self._get_router_class_for_layer(config, layer_number=27)
-        self.assertIs(router_cls, TopKRouter)
+        method = self._expected_topk_method(config, layer_number=27)
+        self.assertNotEqual(method, "hash")
 
     @patch(
         "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
         return_value=1,
     )
     def test_hash_router_instantiates_correctly(self, _mock):
-        """HashRouter can be instantiated with config and layer_number."""
-        from paddlefleet.transformer.moe.moe_router import HashRouter
+        """TopKRouter with topk_method='hash' should have correct attributes."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
 
         config = _make_router_config(
             n_routed_experts=4,
             num_experts_per_tok=2,
             moe_n_hash_layers=2,
             num_hidden_layers=8,
+            topk_method="hash",
         )
-        router = HashRouter(config=config, layer_number=7)
-        self.assertIsInstance(router, HashRouter)
+        router = TopKRouter(config=config)
+        self.assertIsInstance(router, TopKRouter)
+        self.assertEqual(router.topk_method, "hash")
         self.assertEqual(router.num_experts, 4)
         self.assertEqual(router.num_experts_per_tok, 2)
-        self.assertEqual(router._layer_number, 7)
-
 
     def test_set_layer_number_activates_hash_router(self):
-        """set_layer_number on MoELayer must switch TopKRouter → HashRouter.
+        """set_layer_number on MoELayer must switch gate to topk_method='hash'.
 
         build_spec_layer in TransformerLayer does NOT pass layer_number to
         MoELayer.__init__, so __init__ always creates a TopKRouter first.
         TransformerLayer then calls set_layer_number(layer_number) afterward.
-        This test verifies that set_layer_number correctly replaces the gate
-        with a HashRouter when the layer is in the hash range.
+        This test verifies that set_layer_number correctly sets
+        gate.topk_method='hash' when the layer is in the hash range.
         """
-        from paddlefleet.transformer.moe.moe_router import HashRouter, TopKRouter
-
         config = _make_router_config(
             n_routed_experts=4,
             num_experts_per_tok=2,
             moe_n_hash_layers=2,
             num_hidden_layers=8,
         )
-        # Simulate build_spec_layer: MoELayer init WITHOUT layer_number
-        router_cls = self._get_router_class_for_layer(config, layer_number=None)
-        self.assertIs(router_cls, TopKRouter, "should default to TopKRouter")
+        # layer_number=None → default topk_method (not hash)
+        method_init = self._expected_topk_method(config, layer_number=None)
+        self.assertNotEqual(method_init, "hash", "should default to non-hash")
 
-        # Simulate TransformerLayer calling set_layer_number afterward
-        # Layer 7 is in hash range (>=8-2=6): should switch to HashRouter
-        router_cls_after = self._get_router_class_for_layer(config, layer_number=7)
-        self.assertIs(router_cls_after, HashRouter, "layer 7 should use HashRouter")
+        # Layer 7 is in hash range (>=8-2=6): should activate hash
+        method_hash = self._expected_topk_method(config, layer_number=7)
+        self.assertEqual(method_hash, "hash", "layer 7 should use hash")
 
-        # Layer 5 is NOT in hash range (<6): should stay TopKRouter
-        router_cls_outside = self._get_router_class_for_layer(config, layer_number=5)
-        self.assertIs(router_cls_outside, TopKRouter, "layer 5 should stay TopKRouter")
+        # Layer 5 is NOT in hash range: should keep original topk_method
+        method_topk = self._expected_topk_method(config, layer_number=5)
+        self.assertNotEqual(method_topk, "hash", "layer 5 should not use hash")
 
     def test_set_layer_number_keeps_topk_for_non_hash_layer(self):
-        """set_layer_number on a non-hash layer should NOT replace the gate."""
-        from paddlefleet.transformer.moe.moe_router import HashRouter, TopKRouter
-
+        """set_layer_number on a non-hash layer should NOT switch to hash."""
         config = _make_router_config(
             n_routed_experts=4,
             num_experts_per_tok=2,
             moe_n_hash_layers=2,
             num_hidden_layers=8,
         )
-        # Layer 3 is outside hash range → TopKRouter
-        router_cls = self._get_router_class_for_layer(config, layer_number=3)
-        self.assertIs(router_cls, TopKRouter)
+        # Layer 3 is outside hash range
+        method = self._expected_topk_method(config, layer_number=3)
+        self.assertNotEqual(method, "hash")
 
 
 if __name__ == "__main__":

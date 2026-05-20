@@ -331,9 +331,6 @@ class WeightedSwiGLUFunction(paddle.autograd.PyLayer):
             )
         else:
             tmp, wgrad = weighted_swiglu_back(grad_output, input, weights)
-        # PyLayer.backward must return one gradient per tensor input
-        # (input, weights). fp8_input_store and clamp_value are non-tensor
-        # constants and do not require gradients.
         return tmp, wgrad
 
 
