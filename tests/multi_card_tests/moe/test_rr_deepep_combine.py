@@ -27,6 +27,16 @@ import sys
 import unittest
 import random
 
+# Enable coverage in subprocess when WITH_COVERAGE is set
+if os.environ.get("WITH_COVERAGE") == "ON":
+    import coverage
+
+    cov = coverage.Coverage(
+        data_file=os.environ.get("COVERAGE_FILE", ".coverage"),
+        config_file=os.environ.get("COVERAGE_RCFILE", True),
+    )
+    cov.start()
+
 import numpy as np
 import paddle
 import paddle.nn.functional as F
@@ -62,7 +72,9 @@ class SharedExpertSimulator(paddle.nn.Layer):
 
     def __init__(self):
         super().__init__()
-        self.linear = paddle.nn.Linear(hidden_size, hidden_size, bias_attr=False)
+        self.linear = paddle.nn.Linear(
+            hidden_size, hidden_size, bias_attr=False
+        )
 
     def forward(self, x):
         return (self.linear(x),)
@@ -81,8 +93,12 @@ class TestCombineLayer(paddle.nn.Layer):
             self._rr_fusedcombined = DeepEPCombineAsyncRefinedRecompute()
         else:
             self._rr_fusedcombined = None
-        self.group = fleet.get_hybrid_communicate_group().get_model_parallel_group()
-        self.linear = paddle.nn.Linear(hidden_size, hidden_size, bias_attr=False)
+        self.group = (
+            fleet.get_hybrid_communicate_group().get_model_parallel_group()
+        )
+        self.linear = paddle.nn.Linear(
+            hidden_size, hidden_size, bias_attr=False
+        )
         self.shared_expert = SharedExpertSimulator()
         self.deepep_dtype = paddle.bfloat16
 
@@ -133,7 +149,9 @@ class TestRecomputeLayer(paddle.nn.Layer):
         self.combine_layer = TestCombineLayer(use_rr=use_rr)
 
     def forward(self, x, mock_token_indices, mock_token_probs):
-        out = recompute(self.combine_layer, x, mock_token_indices, mock_token_probs)
+        out = recompute(
+            self.combine_layer, x, mock_token_indices, mock_token_probs
+        )
         return out
 
 
@@ -147,7 +165,9 @@ class TestRRDeepEPCombine(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if fused_combine is None or fused_dispatch is None:
-            raise unittest.SkipTest("DeepEP fused_combine/fused_dispatch not available.")
+            raise unittest.SkipTest(
+                "DeepEP fused_combine/fused_dispatch not available."
+            )
 
         cls.original_dtype = paddle.get_default_dtype()
         paddle.set_default_dtype("float32")
@@ -169,10 +189,14 @@ class TestRRDeepEPCombine(unittest.TestCase):
         cls.x = paddle.randn([batch_size, hidden_size], dtype="float32")
 
         num_tokens = paddle.shape(cls.x)[0]
-        cls.mock_token_indices = paddle.randint(0, num_experts, shape=[num_tokens, topk])
+        cls.mock_token_indices = paddle.randint(
+            0, num_experts, shape=[num_tokens, topk]
+        )
         cls.mock_token_indices.stop_gradient = True
 
-        cls.mock_token_probs_raw = paddle.rand([num_tokens, topk], dtype="float32")
+        cls.mock_token_probs_raw = paddle.rand(
+            [num_tokens, topk], dtype="float32"
+        )
         cls.mock_token_probs_raw.stop_gradient = False
 
     @classmethod
@@ -215,12 +239,18 @@ class TestRRDeepEPCombine(unittest.TestCase):
 
         # Run baseline (recompute without RR)
         ori_x_grad, ori_weight_grad, ori_probs_grad = self.run_test_case(
-            layer_without_rr, self.x, self.mock_token_indices, self.mock_token_probs_raw
+            layer_without_rr,
+            self.x,
+            self.mock_token_indices,
+            self.mock_token_probs_raw,
         )
 
         # Run RR (recompute with RR)
         rr_x_grad, rr_weight_grad, rr_probs_grad = self.run_test_case(
-            layer_with_rr, self.x, self.mock_token_indices, self.mock_token_probs_raw
+            layer_with_rr,
+            self.x,
+            self.mock_token_indices,
+            self.mock_token_probs_raw,
         )
 
         # Assert bit-exact gradient consistency
@@ -231,7 +261,9 @@ class TestRRDeepEPCombine(unittest.TestCase):
         # Verify all RR queues are fully consumed
         global_rr_queue_log.check()
 
-        print("\nTest passed: All gradients with and without Refined Recompute are consistent.")
+        print(
+            "\nTest passed: All gradients with and without Refined Recompute are consistent."
+        )
 
 
 if __name__ == "__main__":
@@ -241,3 +273,8 @@ if __name__ == "__main__":
     if not result.result.wasSuccessful():
         with open(failed_flag, "w") as f:
             f.write(f"{filename} unittest failed")
+
+    # Save coverage data for subprocess
+    if os.environ.get("WITH_COVERAGE") == "ON":
+        cov.stop()
+        cov.save()

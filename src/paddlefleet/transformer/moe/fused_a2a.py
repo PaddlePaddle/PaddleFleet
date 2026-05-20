@@ -566,7 +566,9 @@ class DeepEPCombineAsyncRefinedRecompute(object):
     def __init__(self):
         """__init__"""
         self._hold_tensors_queue = queue.Queue()
-        global_rr_queue_log.update(self._hold_tensors_queue, "DeepEPCombineAsync")
+        global_rr_queue_log.update(
+            self._hold_tensors_queue, "DeepEPCombineAsync"
+        )
 
     def forward(self, x, group, states, *fn_args, fn):
         """forward"""
@@ -575,7 +577,7 @@ class DeepEPCombineAsyncRefinedRecompute(object):
         if is_first_fwd:
             fwd_output, fn_out = self._first_fwd(x, group, states, fn, *fn_args)
             self._hold_tensors_queue.put({"res_output": fwd_output.detach()})
-            return (fwd_output,) + fn_out
+            return (fwd_output, *fn_out)
         else:
             if self._hold_tensors_queue.empty():
                 raise RuntimeError(
@@ -708,15 +710,23 @@ if HAVE_DEEP_EP:
             )
         else:
             if previous_event is not None:
-                raise ValueError("previous_event must be None when combine_overlap_handle is provided.")
+                raise ValueError(
+                    "previous_event must be None when combine_overlap_handle is provided."
+                )
             if not isinstance(combine_overlap_handle, dict):
                 raise TypeError("combine_overlap_handle must be a dict.")
             if "fn" not in combine_overlap_handle:
-                raise ValueError("combine_overlap_handle must contain 'fn' key.")
+                raise ValueError(
+                    "combine_overlap_handle must contain 'fn' key."
+                )
             if "fn_args" not in combine_overlap_handle:
-                raise ValueError("combine_overlap_handle must contain 'fn_args' key.")
+                raise ValueError(
+                    "combine_overlap_handle must contain 'fn_args' key."
+                )
             if not isinstance(combine_overlap_handle["fn_args"], tuple):
-                raise TypeError("combine_overlap_handle['fn_args'] must be a tuple.")
+                raise TypeError(
+                    "combine_overlap_handle['fn_args'] must be a tuple."
+                )
             if not use_rr_deepep_combine:
                 combined_x, *fn_out = DeepEPCombineAsync.apply(
                     x,

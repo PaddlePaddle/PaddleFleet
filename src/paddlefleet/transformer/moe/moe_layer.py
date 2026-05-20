@@ -440,7 +440,10 @@ class MoELayer(nn.Layer):
             self.config.recompute_modules is not None
             and "moe_combine" in self.config.recompute_modules
         ):
-            if self.moe_token_dispatcher_type != "deepep" or not self.moe_shared_expert_overlap:
+            if (
+                self.moe_token_dispatcher_type != "deepep"
+                or not self.moe_shared_expert_overlap
+            ):
                 raise ValueError(
                     "moe_combine RR is only supported in DeepEP mode with "
                     "moe_shared_expert_overlap enabled (combine_overlap scenario)."
@@ -457,7 +460,9 @@ class MoELayer(nn.Layer):
                 if self.config.recompute_method != "first_n":
                     raise ValueError(
                         "recompute_modules dict mode for moe_combine RR requires "
-                        "recompute_method='first_n', got '{}'.".format(self.config.recompute_method)
+                        "recompute_method='first_n', got '{}'.".format(
+                            self.config.recompute_method
+                        )
                     )
                 if not hasattr(self, "layer_number"):
                     raise ValueError(
@@ -469,7 +474,11 @@ class MoELayer(nn.Layer):
                     self.config,
                     self.config.recompute_modules["moe_combine"],
                 )
-        if (not in_full_recompute) and (not in_mlp_recompute) and self.use_rr_deepep_combine:
+        if (
+            (not in_full_recompute)
+            and (not in_mlp_recompute)
+            and self.use_rr_deepep_combine
+        ):
             raise ValueError(
                 "Enabling rr for moe_combine is meaningless when neither full_recompute "
                 "nor mlp_recompute is active."
@@ -749,7 +758,9 @@ class MoELayer(nn.Layer):
 
         with profile("combine"):
             hidden_states = self.token_dispatcher._comm_manager.combine(
-                hidden_states, combine_overlap_handle, use_rr_deepep_combine=self.use_rr_deepep_combine,
+                hidden_states,
+                combine_overlap_handle,
+                use_rr_deepep_combine=self.use_rr_deepep_combine,
             )
 
         # Latent MoE: project back from latent space to hidden_size
@@ -899,7 +910,9 @@ class MoELayer(nn.Layer):
         # managed by the scheduler separately, not via combine_overlap_handle.
         if self.moe_use_fusion_node:
             hidden_states = self.token_dispatcher._comm_manager.combine(
-                hidden_states, None, async_finish=async_finish,
+                hidden_states,
+                None,
+                async_finish=async_finish,
             )
         else:
             hidden_states = self.combine(hidden_states)

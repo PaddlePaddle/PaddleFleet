@@ -1,0 +1,271 @@
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Single-card unit tests for RR DeepEP Combine configuration validation.
+
+Tests the parameter validation logic in:
+- moe_layer.py: rr_recompute_update()
+- fused_a2a.py: fused_combine() parameter validation, DeepEPCombineAsyncRefinedRecompute init
+- token_dispatcher.py: _HybridEPManager.combine() accepts use_rr_deepep_combine
+"""
+
+import unittest
+from unittest.mock import MagicMock, patch
+
+try:
+    from paddlefleet.transformer.moe.fused_a2a import (
+        DeepEPCombineAsyncRefinedRecompute,
+        fused_combine,
+    )
+
+    HAS_DEEP_EP = True
+except (ImportError, RuntimeError):
+    HAS_DEEP_EP = False
+
+
+@unittest.skipUnless(HAS_DEEP_EP, "DeepEP not available")
+class TestFusedCombineValidation(unittest.TestCase):
+    """Tests parameter validation in fused_combine()."""
+
+    def test_rr_without_overlap_handle_raises(self):
+        """use_rr_deepep_combine=True requires combine_overlap_handle."""
+        with self.assertRaises(ValueError) as ctx:
+            fused_combine(
+                x=MagicMock(),
+                group=MagicMock(),
+                handle=MagicMock(),
+                combine_overlap_handle=None,
+                use_rr_deepep_combine=True,
+            )
+        self.assertIn(
+            "use_rr_deepep_combine requires combine_overlap_handle",
+            str(ctx.exception),
+        )
+
+    def test_overlap_handle_previous_event_conflict(self):
+        """previous_event must be None when combine_overlap_handle is provided."""
+        with self.assertRaises(ValueError) as ctx:
+            fused_combine(
+                x=MagicMock(),
+                group=MagicMock(),
+                handle=MagicMock(),
+                combine_overlap_handle={"fn": lambda: None, "fn_args": ()},
+                previous_event=MagicMock(),
+            )
+        self.assertIn("previous_event must be None", str(ctx.exception))
+
+    def test_overlap_handle_not_dict_raises(self):
+        """combine_overlap_handle must be a dict."""
+        with self.assertRaises(TypeError) as ctx:
+            fused_combine(
+                x=MagicMock(),
+                group=MagicMock(),
+                handle=MagicMock(),
+                combine_overlap_handle="not_a_dict",
+            )
+        self.assertIn("must be a dict", str(ctx.exception))
+
+    def test_overlap_handle_missing_fn_raises(self):
+        """combine_overlap_handle must contain 'fn' key."""
+        with self.assertRaises(ValueError) as ctx:
+            fused_combine(
+                x=MagicMock(),
+                group=MagicMock(),
+                handle=MagicMock(),
+                combine_overlap_handle={"fn_args": ()},
+            )
+        self.assertIn("must contain 'fn' key", str(ctx.exception))
+
+    def test_overlap_handle_missing_fn_args_raises(self):
+        """combine_overlap_handle must contain 'fn_args' key."""
+        with self.assertRaises(ValueError) as ctx:
+            fused_combine(
+                x=MagicMock(),
+                group=MagicMock(),
+                handle=MagicMock(),
+                combine_overlap_handle={"fn": lambda: None},
+            )
+        self.assertIn("must contain 'fn_args' key", str(ctx.exception))
+
+    def test_overlap_handle_fn_args_not_tuple_raises(self):
+        """combine_overlap_handle['fn_args'] must be a tuple."""
+        with self.assertRaises(TypeError) as ctx:
+            fused_combine(
+                x=MagicMock(),
+                group=MagicMock(),
+                handle=MagicMock(),
+                combine_overlap_handle={"fn": lambda: None, "fn_args": []},
+            )
+        self.assertIn("must be a tuple", str(ctx.exception))
+
+    def test_rr_without_rr_fusedcombined_raises(self):
+        """_rr_fusedcombined must be provided when use_rr_deepep_combine=True."""
+        with self.assertRaises(ValueError) as ctx:
+            fused_combine(
+                x=MagicMock(),
+                group=MagicMock(),
+                handle=MagicMock(),
+                combine_overlap_handle={"fn": lambda: None, "fn_args": ()},
+                use_rr_deepep_combine=True,
+                _rr_fusedcombined=None,
+            )
+        self.assertIn("_rr_fusedcombined must be provided", str(ctx.exception))
+
+
+@unittest.skipUnless(HAS_DEEP_EP, "DeepEP not available")
+class TestDeepEPCombineAsyncRefinedRecomputeInit(unittest.TestCase):
+    """Tests DeepEPCombineAsyncRefinedRecompute initialization."""
+
+    def test_init_creates_queue(self):
+        """Initialization creates a queue and registers it."""
+        rr = DeepEPCombineAsyncRefinedRecompute()
+        self.assertIsNotNone(rr._hold_tensors_queue)
+        self.assertTrue(rr._hold_tensors_queue.empty())
+
+    def test_second_fwd_empty_queue_raises(self):
+        """Second forward with empty queue raises RuntimeError."""
+        from paddle import framework
+
+        rr = DeepEPCombineAsyncRefinedRecompute()
+        # Simulate recompute pass (has_grad=True means second forward)
+        with patch.object(framework._dygraph_tracer(), "_has_grad", True):
+            with self.assertRaises(RuntimeError) as ctx:
+                rr.forward(MagicMock(), MagicMock(), {}, fn=lambda: None)
+            self.assertIn("Queue is empty", str(ctx.exception))
+
+
+try:
+    from paddlefleet.transformer.moe.moe_layer import MoELayer  # noqa: F401
+
+    HAS_MOE_LAYER = True
+except (ImportError, RuntimeError):
+    HAS_MOE_LAYER = False
+
+
+@unittest.skipUnless(
+    HAS_MOE_LAYER, "MoELayer not available (DeepEP dependency)"
+)
+class TestRRRecomputeUpdate(unittest.TestCase):
+    """Tests MoELayer.rr_recompute_update() validation logic."""
+
+    def _make_moe_layer_mock(self, **overrides):
+        """Create a mock MoELayer with necessary attributes."""
+        mock = MagicMock()
+        mock.moe_token_dispatcher_type = overrides.get(
+            "dispatcher_type", "deepep"
+        )
+        mock.moe_shared_expert_overlap = overrides.get(
+            "shared_expert_overlap", True
+        )
+        mock.use_rr_deepep_combine = False
+        mock.config = MagicMock()
+        mock.config.recompute_modules = overrides.get(
+            "recompute_modules", ["moe_combine"]
+        )
+        mock.config.recompute_granularity = overrides.get(
+            "recompute_granularity", "full"
+        )
+        mock.config.recompute_method = overrides.get(
+            "recompute_method", "first_n"
+        )
+        if "layer_number" in overrides:
+            mock.layer_number = overrides["layer_number"]
+        return mock
+
+    def test_non_deepep_dispatcher_raises(self):
+        """RR only supported in DeepEP mode."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock = self._make_moe_layer_mock(dispatcher_type="alltoall")
+        with self.assertRaises(ValueError) as ctx:
+            MoELayer.rr_recompute_update(
+                mock, in_full_recompute=True, in_mlp_recompute=False
+            )
+        self.assertIn("only supported in DeepEP mode", str(ctx.exception))
+
+    def test_no_shared_expert_overlap_raises(self):
+        """RR requires moe_shared_expert_overlap."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock = self._make_moe_layer_mock(shared_expert_overlap=False)
+        with self.assertRaises(ValueError) as ctx:
+            MoELayer.rr_recompute_update(
+                mock, in_full_recompute=True, in_mlp_recompute=False
+            )
+        self.assertIn("only supported in DeepEP mode", str(ctx.exception))
+
+    def test_no_recompute_granularity_raises(self):
+        """RR requires recompute_granularity to be set."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock = self._make_moe_layer_mock(recompute_granularity=None)
+        with self.assertRaises(ValueError) as ctx:
+            MoELayer.rr_recompute_update(
+                mock, in_full_recompute=True, in_mlp_recompute=False
+            )
+        self.assertIn("recompute_granularity must be set", str(ctx.exception))
+
+    def test_list_mode_sets_flag(self):
+        """List mode sets use_rr_deepep_combine=True."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock = self._make_moe_layer_mock(recompute_modules=["moe_combine"])
+        MoELayer.rr_recompute_update(
+            mock, in_full_recompute=True, in_mlp_recompute=False
+        )
+        self.assertTrue(mock.use_rr_deepep_combine)
+
+    def test_dict_mode_wrong_method_raises(self):
+        """Dict mode requires recompute_method='first_n'."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock = self._make_moe_layer_mock(
+            recompute_modules={"moe_combine": 4},
+            recompute_method="uniform",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            MoELayer.rr_recompute_update(
+                mock, in_full_recompute=True, in_mlp_recompute=False
+            )
+        self.assertIn("recompute_method='first_n'", str(ctx.exception))
+
+    def test_dict_mode_no_layer_number_raises(self):
+        """Dict mode requires layer_number to be set."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock = self._make_moe_layer_mock(recompute_modules={"moe_combine": 4})
+        del mock.layer_number  # Remove the attribute
+        with self.assertRaises(ValueError) as ctx:
+            MoELayer.rr_recompute_update(
+                mock, in_full_recompute=True, in_mlp_recompute=False
+            )
+        self.assertIn("layer_number must be set", str(ctx.exception))
+
+    def test_rr_without_recompute_active_raises(self):
+        """RR is meaningless without full_recompute or mlp_recompute."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock = self._make_moe_layer_mock(recompute_modules=["moe_combine"])
+        with self.assertRaises(ValueError) as ctx:
+            MoELayer.rr_recompute_update(
+                mock, in_full_recompute=False, in_mlp_recompute=False
+            )
+        self.assertIn(
+            "meaningless when neither full_recompute", str(ctx.exception)
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

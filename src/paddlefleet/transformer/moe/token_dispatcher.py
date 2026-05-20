@@ -396,8 +396,9 @@ class _HybridEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
+        use_rr_deepep_combine: bool = False,
     ) -> paddle.Tensor:
-        del async_finish
+        del async_finish, use_rr_deepep_combine
         if combine_overlap_handle is not None:
             raise NotImplementedError(
                 "HybridEP backend does not support combine overlap in PaddleFleet."
@@ -602,7 +603,9 @@ class _DeepEPManager(_DispatchManager):
         if combine_overlap_handle is not None and use_rr_deepep_combine:
             if self._rr_fusedcombined is None:
                 self._rr_fusedcombined = DeepEPCombineAsyncRefinedRecompute()
-            elif not isinstance(self._rr_fusedcombined, DeepEPCombineAsyncRefinedRecompute):
+            elif not isinstance(
+                self._rr_fusedcombined, DeepEPCombineAsyncRefinedRecompute
+            ):
                 raise RuntimeError(
                     f"_rr_fusedcombined type mismatch: expected DeepEPCombineAsyncRefinedRecompute, "
                     f"got {type(self._rr_fusedcombined).__name__}."
