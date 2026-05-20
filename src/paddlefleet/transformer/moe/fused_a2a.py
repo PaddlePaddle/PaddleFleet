@@ -542,7 +542,7 @@ class DeepEPCombineAsyncFunctor(PyLayer):
         ctx.handle = states["handle"]
         ctx.group = group
 
-        return (combined_x,) + fn_out
+        return (combined_x,) + fn_out  # noqa: RUF005
 
     @staticmethod
     def backward(ctx, grad_output, *fn_out_grads):
@@ -557,7 +557,7 @@ class DeepEPCombineAsyncFunctor(PyLayer):
         fn_args_grads = ctx.bwf(*fn_out_grads)
 
         wait_for_deepep(ctx.group.id)
-        return (grad_x,) + fn_args_grads
+        return (grad_x,) + fn_args_grads  # noqa: RUF005
 
 
 class DeepEPCombineAsyncRefinedRecompute(object):
