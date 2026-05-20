@@ -183,6 +183,11 @@ class TestRRDeepEPCombine(unittest.TestCase):
         x_copy = x.clone()
         x_copy.stop_gradient = False
 
+        # Clear accumulated gradients before each run
+        if mock_token_probs_raw.grad is not None:
+            mock_token_probs_raw.clear_gradient()
+        layer.clear_gradients()
+
         mock_token_probs = F.softmax(mock_token_probs_raw, axis=-1)
 
         out = layer(x_copy, mock_token_indices, mock_token_probs)
