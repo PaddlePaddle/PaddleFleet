@@ -71,6 +71,11 @@ def rr_recompute_update(
         if isinstance(config.recompute_modules, list):
             use_rr_deepep_combine = True
         elif isinstance(config.recompute_modules, dict):
+            if config.recompute_method != "first_n":
+                raise ValueError(
+                    "recompute_modules dict mode for moe_combine RR requires "
+                    "recompute_method='first_n', got '{}'.".format(config.recompute_method)
+                )
             use_rr_deepep_combine = not need_recompute_in_first_n(
                 layer_number,
                 config,
@@ -187,6 +192,18 @@ class TestRRRecomputeUpdate(unittest.TestCase):
             )
         self.assertIn("moe_shared_expert_overlap", str(cm.exception))
 
+    def test_raises_when_dict_mode_with_uniform_method(self):
+        """Should raise ValueError when recompute_modules is dict but recompute_method is not 'first_n'."""
+        config = self._make_config(
+            recompute_modules={"moe_combine": 4},
+            recompute_granularity="full",
+            recompute_method="uniform",
+            recompute_num_layers=1,
+        )
+        with self.assertRaises(ValueError) as cm:
+            rr_recompute_update(config, 0, in_full_recompute=True, in_mlp_recompute=False)
+        self.assertIn("first_n", str(cm.exception))
+
 
 @unittest.skipUnless(_has_deep_ep(), "DeepEP not available")
 class TestDeepEPCombineAsyncRefinedRecompute(unittest.TestCase):
@@ -225,7 +242,6 @@ class TestDeepEPCombineAsyncRefinedRecompute(unittest.TestCase):
                 MagicMock(),  # group
                 {"handle": MagicMock()},  # states
                 None,  # fn = None
-                True,  # is_first_fwd
             )
         self.assertIn("fn must not be None", str(cm.exception))
 

@@ -573,8 +573,8 @@ class DeepEPCombineAsyncRefinedRecompute(object):
         tracer = framework._dygraph_tracer()
         is_first_fwd = not tracer._has_grad
         if is_first_fwd:
-            fwd_output, fn_out = self._first_fwd(x, group, states, fn, is_first_fwd, *fn_args)
-            self._hold_tensors_queue.put({"res_output": fwd_output})
+            fwd_output, fn_out = self._first_fwd(x, group, states, fn, *fn_args)
+            self._hold_tensors_queue.put({"res_output": fwd_output.detach()})
             return (fwd_output,) + fn_out
         else:
             if self._hold_tensors_queue.empty():
@@ -589,7 +589,7 @@ class DeepEPCombineAsyncRefinedRecompute(object):
             return output
 
     @paddle.no_grad()
-    def _first_fwd(self, x, group, states, fn, is_first_fwd, *fn_args):
+    def _first_fwd(self, x, group, states, fn, *fn_args):
         """_first_fwd"""
         combined_x = fused_combine_forward_func(
             x,
@@ -602,7 +602,7 @@ class DeepEPCombineAsyncRefinedRecompute(object):
             raise ValueError(
                 "[DeepEPCombineAsyncRefinedRecompute] fn must not be None when using RefinedRecompute."
             )
-        bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
+        bwf, fn_out = manual_backward(fn, True, *fn_args)
 
         wait_for_deepep(group.id)
 

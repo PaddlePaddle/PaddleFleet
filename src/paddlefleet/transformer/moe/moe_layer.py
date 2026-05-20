@@ -452,6 +452,11 @@ class MoELayer(nn.Layer):
             if isinstance(self.config.recompute_modules, list):
                 self.use_rr_deepep_combine = True
             elif isinstance(self.config.recompute_modules, dict):
+                if self.config.recompute_method != "first_n":
+                    raise ValueError(
+                        "recompute_modules dict mode for moe_combine RR requires "
+                        "recompute_method='first_n', got '{}'.".format(self.config.recompute_method)
+                    )
                 self.use_rr_deepep_combine = not need_recompute_in_first_n(
                     self.layer_number,
                     self.config,
@@ -884,7 +889,8 @@ class MoELayer(nn.Layer):
     def compute_combine(self, hidden_states, async_finish=False):
         if self.moe_use_fusion_node:
             hidden_states = self.token_dispatcher._comm_manager.combine(
-                hidden_states, None, async_finish=async_finish
+                hidden_states, None, async_finish=async_finish,
+                use_rr_deepep_combine=self.use_rr_deepep_combine,
             )
         else:
             hidden_states = self.combine(hidden_states)
