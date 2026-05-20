@@ -13,11 +13,11 @@
 # limitations under the License.
 
 import inspect
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-import warnings
 import paddle
 from paddle import nn
 from paddle.base.core import CUDAGraph
@@ -147,7 +147,7 @@ def autocudagraph(
                         f"input shapes or continuously creating new instances without clearing cache. "
                         f"Consider stabilizing inputs, increasing max_graphs, or calling .clear_cache().",
                         category=RuntimeWarning,
-                        stacklevel=2
+                        stacklevel=2,
                     )
                     return func(*args, **kwargs)
                 state_registry[key] = CUDAGraphContext()
