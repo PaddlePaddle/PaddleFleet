@@ -1297,12 +1297,6 @@ class DSAttention(FleetLayer):
                 0
             )  # [1, 1, sq, sk]
         elif attention_mask is not None:
-            assert list(attention_mask.shape) == [
-                indexer_hidden.shape[0],
-                1,
-                indexer_seq_len,
-                indexer_seq_len,
-            ]
             mask = attention_mask.squeeze(1)
             indexer_float_mask = paddle.zeros_like(
                 mask, dtype="float32"
