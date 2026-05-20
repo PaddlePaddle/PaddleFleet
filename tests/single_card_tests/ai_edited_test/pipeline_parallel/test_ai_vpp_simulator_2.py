@@ -89,6 +89,30 @@ class ColorManager:
         return ColorMap()
 
 
+class Pyplot:
+    def __init__(self):
+        self.cm = ColorManager()
+
+    def subplots(self, *args, **kwargs):
+        del args, kwargs
+        return Figure(), Axis()
+
+    def tight_layout(self):
+        pass
+
+    def savefig(self, path):
+        with open(path, "wb") as output:
+            output.write(b"plot")
+
+    def Circle(self, *args, **kwargs):
+        return Circle(*args, **kwargs)
+
+
+class Patches:
+    def Rectangle(self, *args, **kwargs):
+        return Rectangle(*args, **kwargs)
+
+
 class Rectangle:
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -109,9 +133,31 @@ class ScaledRange(list):
         return self.__mul__(value)
 
 
+def ensure_vpp_simulator_importable():
+    try:
+        from paddlefleet.pipeline_parallel import vpp_simulator
+    except ModuleNotFoundError as exc:
+        if exc.name != "matplotlib":
+            raise
+        matplotlib = types.ModuleType("matplotlib")
+        pyplot = types.ModuleType("matplotlib.pyplot")
+        patches = types.ModuleType("matplotlib.patches")
+        pyplot.cm = ColorManager()
+        pyplot.subplots = lambda *args, **kwargs: (Figure(), Axis())
+        pyplot.tight_layout = lambda: None
+        pyplot.savefig = lambda path: open(path, "wb").write(b"plot")
+        pyplot.Circle = Circle
+        patches.Rectangle = Rectangle
+        sys.modules["matplotlib"] = matplotlib
+        sys.modules["matplotlib.pyplot"] = pyplot
+        sys.modules["matplotlib.patches"] = patches
+        from paddlefleet.pipeline_parallel import vpp_simulator
+    return vpp_simulator
+
+
 class TestVPPSimulatorEdgeBranches(unittest.TestCase):
     def test_compute_bubble_rate_empty_schedule(self):
-        from paddlefleet.pipeline_parallel.vpp_simulator import VPPSimulator
+        VPPSimulator = ensure_vpp_simulator_importable().VPPSimulator
 
         simulator = VPPSimulator(pp_degree=2, vpp_degree=1, num_acc_steps=2)
         simulator._is_scheduled = True
@@ -120,7 +166,7 @@ class TestVPPSimulatorEdgeBranches(unittest.TestCase):
         self.assertEqual(simulator.compute_bubble_rate(), 0.0)
 
     def test_get_preorder_chunk_unknown_chunk_type(self):
-        from paddlefleet.pipeline_parallel.vpp_simulator import VPPSimulator
+        VPPSimulator = ensure_vpp_simulator_importable().VPPSimulator
 
         class UnknownChunk:
             chunk_type = "unknown"
@@ -134,10 +180,11 @@ class TestVPPSimulatorEdgeBranches(unittest.TestCase):
             simulator._get_preorder_chunk(UnknownChunk())
 
     def test_global_recorder_can_be_reset_to_none(self):
-        from paddlefleet.pipeline_parallel.vpp_simulator import (
-            PPChunkRecorder,
-            get_global_pp_recorder,
-            set_global_pp_chunk_recorder,
+        vpp_simulator = ensure_vpp_simulator_importable()
+        PPChunkRecorder = vpp_simulator.PPChunkRecorder
+        get_global_pp_recorder = vpp_simulator.get_global_pp_recorder
+        set_global_pp_chunk_recorder = (
+            vpp_simulator.set_global_pp_chunk_recorder
         )
 
         recorder = PPChunkRecorder(2, 1, 2, 4, 0, 0)
@@ -150,69 +197,42 @@ class TestVPPSimulatorEdgeBranches(unittest.TestCase):
 
 class TestVPPSimulatorDrawWithMatplotlibStubs(unittest.TestCase):
     def setUp(self):
-        self.saved_modules = {
-            name: sys.modules.get(name)
-            for name in (
-                "matplotlib",
-                "matplotlib.pyplot",
-                "matplotlib.patches",
-            )
-        }
-        matplotlib = types.ModuleType("matplotlib")
-        pyplot = types.ModuleType("matplotlib.pyplot")
-        patches = types.ModuleType("matplotlib.patches")
-        pyplot.cm = ColorManager()
-        pyplot.subplots = lambda *args, **kwargs: (Figure(), Axis())
-        pyplot.tight_layout = lambda: None
-
-        def savefig(path):
-            with open(path, "wb") as output:
-                output.write(b"plot")
-
-        pyplot.savefig = savefig
-        pyplot.Circle = Circle
-        patches.Rectangle = Rectangle
-        sys.modules["matplotlib"] = matplotlib
-        sys.modules["matplotlib.pyplot"] = pyplot
-        sys.modules["matplotlib.patches"] = patches
+        self.vpp_simulator = ensure_vpp_simulator_importable()
+        self.original_plt = self.vpp_simulator.plt
+        self.original_patches = self.vpp_simulator.patches
+        self.original_range = getattr(self.vpp_simulator, "range", None)
+        self.vpp_simulator.plt = Pyplot()
+        self.vpp_simulator.patches = Patches()
+        self.vpp_simulator.range = lambda *args: ScaledRange(
+            builtins.range(*args)
+        )
 
     def tearDown(self):
-        for name, module in self.saved_modules.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
+        self.vpp_simulator.plt = self.original_plt
+        self.vpp_simulator.patches = self.original_patches
+        if self.original_range is None:
+            delattr(self.vpp_simulator, "range")
+        else:
+            self.vpp_simulator.range = self.original_range
 
     def test_draw_chunks_writes_schedule_image(self):
-        from paddlefleet.pipeline_parallel import vpp_simulator
-
-        original_range = getattr(vpp_simulator, "range", None)
-        vpp_simulator.range = lambda *args: ScaledRange(builtins.range(*args))
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                old_cwd = os.getcwd()
-                os.chdir(tmpdir)
-                try:
-                    vpp_simulator.VPPSimulator(
-                        pp_degree=2, vpp_degree=2, num_acc_steps=4
-                    ).draw_chunks()
-                    self.assertTrue(os.path.exists("pipeline_schedule.png"))
-                finally:
-                    os.chdir(old_cwd)
-        finally:
-            if original_range is None:
-                delattr(vpp_simulator, "range")
-            else:
-                vpp_simulator.range = original_range
-
-    def test_draw_balls_writes_balls_image(self):
-        from paddlefleet.pipeline_parallel.vpp_simulator import VPPSimulator
-
         with tempfile.TemporaryDirectory() as tmpdir:
             old_cwd = os.getcwd()
             os.chdir(tmpdir)
             try:
-                VPPSimulator(
+                self.vpp_simulator.VPPSimulator(
+                    pp_degree=2, vpp_degree=2, num_acc_steps=4
+                ).draw_chunks()
+                self.assertTrue(os.path.exists("pipeline_schedule.png"))
+            finally:
+                os.chdir(old_cwd)
+
+    def test_draw_balls_writes_balls_image(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                self.vpp_simulator.VPPSimulator(
                     pp_degree=2, vpp_degree=2, num_acc_steps=4
                 ).draw_balls()
                 self.assertTrue(os.path.exists("balls.png"))
