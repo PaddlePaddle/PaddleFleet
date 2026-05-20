@@ -440,9 +440,10 @@ class MoELayer(nn.Layer):
             self.config.recompute_modules is not None
             and "moe_combine" in self.config.recompute_modules
         ):
-            assert self.config.recompute_granularity is not None, (
-                "rr must be used when recompute is enabled"
-            )
+            if self.config.recompute_granularity is None:
+                raise ValueError(
+                    "recompute_granularity must be set when moe_combine RR is enabled."
+                )
             if isinstance(self.config.recompute_modules, list):
                 self.use_rr_deepep_combine = True
             elif isinstance(self.config.recompute_modules, dict):
@@ -451,9 +452,10 @@ class MoELayer(nn.Layer):
                     self.config,
                     self.config.recompute_modules["moe_combine"],
                 )
-        if (not in_full_recompute) and (not in_mlp_recompute):
-            assert not self.use_rr_deepep_combine, (
-                "If the transformer or MoE does not use recompute, enabling rr for moe_combine is meaningless."
+        if (not in_full_recompute) and (not in_mlp_recompute) and self.use_rr_deepep_combine:
+            raise ValueError(
+                "Enabling rr for moe_combine is meaningless when neither full_recompute "
+                "nor mlp_recompute is active."
             )
 
     def _init_expert_parallel(self):

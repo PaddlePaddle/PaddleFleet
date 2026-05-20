@@ -574,10 +574,14 @@ class DeepEPCombineAsyncRefinedRecompute(object):
         is_first_fwd = not tracer._has_grad
         if is_first_fwd:
             fwd_output, fn_out = self._first_fwd(x, group, states, fn, is_first_fwd, *fn_args)
-            self._hold_tensors_queue.put({"res_output": fwd_output, "fn_out": fn_out})
+            self._hold_tensors_queue.put({"res_output": fwd_output})
             return (fwd_output,) + fn_out
         else:
-            assert not self._hold_tensors_queue.empty(), "Queue should not be empty for the second forward pass."
+            if self._hold_tensors_queue.empty():
+                raise RuntimeError(
+                    "[DeepEPCombineAsyncRefinedRecompute] Queue is empty during the second forward "
+                    "(recompute) pass. This usually indicates a first-forward / recompute-forward call count mismatch."
+                )
             hold_tensors = self._hold_tensors_queue.get()
             output = self._second_fwd(
                 hold_tensors, x, group, states, fn, *fn_args
@@ -594,7 +598,10 @@ class DeepEPCombineAsyncRefinedRecompute(object):
             async_finish=True,
         )
 
-        assert fn is not None, "use DeepEPCombineAsyncRefinedRecompute, but fn is None."
+        if fn is None:
+            raise ValueError(
+                "[DeepEPCombineAsyncRefinedRecompute] fn must not be None when using RefinedRecompute."
+            )
         bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
 
         wait_for_deepep(group.id)
@@ -684,6 +691,10 @@ if HAVE_DEEP_EP:
         states = {}
         states["handle"] = handle
         if combine_overlap_handle is None:
+            if use_rr_deepep_combine:
+                raise ValueError(
+                    "use_rr_deepep_combine requires combine_overlap_handle to be provided (not None)."
+                )
             return DeepEPCombine.apply(
                 x,
                 group,
@@ -710,9 +721,10 @@ if HAVE_DEEP_EP:
                 combine_overlap_handle["fn_out"] = fn_out
                 return combined_x
             else:
-                assert _rr_fusedcombined is not None, (
-                    "_rr_fusedcombined must be provided when use_rr_deepep_combine is True with combine_overlap_handle."
-                )
+                if _rr_fusedcombined is None:
+                    raise ValueError(
+                        "_rr_fusedcombined must be provided when use_rr_deepep_combine is True with combine_overlap_handle."
+                    )
                 combined_x, *fn_out = _rr_fusedcombined(
                     x,
                     group,
