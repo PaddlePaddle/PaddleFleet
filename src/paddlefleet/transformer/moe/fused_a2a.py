@@ -705,11 +705,16 @@ if HAVE_DEEP_EP:
                 moe_ep_barrier=moe_ep_barrier,
             )
         else:
-            assert previous_event is None
-            assert isinstance(combine_overlap_handle, dict)
-            assert "fn" in combine_overlap_handle
-            assert "fn_args" in combine_overlap_handle
-            assert isinstance(combine_overlap_handle["fn_args"], tuple)
+            if previous_event is not None:
+                raise ValueError("previous_event must be None when combine_overlap_handle is provided.")
+            if not isinstance(combine_overlap_handle, dict):
+                raise TypeError("combine_overlap_handle must be a dict.")
+            if "fn" not in combine_overlap_handle:
+                raise ValueError("combine_overlap_handle must contain 'fn' key.")
+            if "fn_args" not in combine_overlap_handle:
+                raise ValueError("combine_overlap_handle must contain 'fn_args' key.")
+            if not isinstance(combine_overlap_handle["fn_args"], tuple):
+                raise TypeError("combine_overlap_handle['fn_args'] must be a tuple.")
             if not use_rr_deepep_combine:
                 combined_x, *fn_out = DeepEPCombineAsync.apply(
                     x,

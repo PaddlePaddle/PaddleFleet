@@ -457,6 +457,11 @@ class MoELayer(nn.Layer):
                         "recompute_modules dict mode for moe_combine RR requires "
                         "recompute_method='first_n', got '{}'.".format(self.config.recompute_method)
                     )
+                if not hasattr(self, "layer_number"):
+                    raise ValueError(
+                        "layer_number must be set before rr_recompute_update is called in dict mode. "
+                        "Ensure set_layer_number() is called first."
+                    )
                 self.use_rr_deepep_combine = not need_recompute_in_first_n(
                     self.layer_number,
                     self.config,

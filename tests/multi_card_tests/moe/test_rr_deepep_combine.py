@@ -39,6 +39,7 @@ try:
         fused_combine,
         fused_dispatch,
     )
+    from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 except ImportError:
     print(
         "Failed to import from paddlefleet.transformer.moe.fused_a2a.",
@@ -184,8 +185,7 @@ class TestRRDeepEPCombine(unittest.TestCase):
         x_copy.stop_gradient = False
 
         # Clear accumulated gradients before each run
-        if mock_token_probs_raw.grad is not None:
-            mock_token_probs_raw.clear_gradient()
+        mock_token_probs_raw.clear_gradient()
         layer.clear_gradients()
 
         mock_token_probs = F.softmax(mock_token_probs_raw, axis=-1)
@@ -227,6 +227,9 @@ class TestRRDeepEPCombine(unittest.TestCase):
         np.testing.assert_array_equal(ori_x_grad, rr_x_grad)
         np.testing.assert_array_equal(ori_weight_grad, rr_weight_grad)
         np.testing.assert_array_equal(ori_probs_grad, rr_probs_grad)
+
+        # Verify all RR queues are fully consumed
+        global_rr_queue_log.check()
 
         print("\nTest passed: All gradients with and without Refined Recompute are consistent.")
 
