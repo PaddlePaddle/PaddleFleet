@@ -666,6 +666,7 @@ if HAVE_DEEP_EP:
         x,
         group,
         handle,
+        *,
         _rr_fusedcombined=None,
         previous_event=None,
         combine_overlap_handle=None,

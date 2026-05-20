@@ -31,13 +31,16 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 def _has_deep_ep():
-    """Check whether DeepEP runtime is available."""
+    """Check whether DeepEP runtime with RR support is available."""
     try:
-        from paddlefleet.transformer.moe.fused_a2a import (
-            DeepEPCombineAsyncRefinedRecompute,
-        )
+        from paddlefleet.transformer.moe.fused_a2a import fused_combine
+        import inspect
 
-        return True
+        if fused_combine is None:
+            return False
+        # Check that fused_combine has the RR parameters (new API)
+        sig = inspect.signature(fused_combine)
+        return "use_rr_deepep_combine" in sig.parameters
     except (ImportError, ModuleNotFoundError):
         return False
 

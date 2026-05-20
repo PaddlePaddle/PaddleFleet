@@ -611,10 +611,9 @@ class _DeepEPManager(_DispatchManager):
             hidden_states,
             self.group,
             self.handle,
-            self._rr_fusedcombined,
-            None,
-            combine_overlap_handle,
-            async_finish,
+            _rr_fusedcombined=self._rr_fusedcombined,
+            combine_overlap_handle=combine_overlap_handle,
+            async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
             use_rr_deepep_combine=use_rr_deepep_combine,
         )
