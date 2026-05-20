@@ -239,7 +239,14 @@ class TestPP(unittest.TestCase):
         pp.pprint(rst)
 
         if judge_machine_type() == "H":
-            assert overlap_loss._md5sum() == "14052829ee7ced24f3b794e6eadf5c00"
+            actual_md5 = overlap_loss._md5sum()
+            expected_md5 = "14052829ee7ced24f3b794e6eadf5c00"
+            print(
+                f"PP loss MD5 - Actual: {actual_md5}, Expected: {expected_md5}"
+            )
+            assert actual_md5 == expected_md5, (
+                f"PP loss MD5 mismatch! Actual: {actual_md5}, Expected: {expected_md5}"
+            )
             if paddle.distributed.get_rank() == 0:
                 baseline = {
                     "_layers.shared_layers.embed.embedding.embed_tokens.weight": "3ee515720ce20d3ed1866c3d3c4037a9",

@@ -42,6 +42,7 @@ class MockTransformerConfig:
         self.topk_group = 1
 
         # Router Specific Parameters
+        self.init_method = paddle.nn.initializer.Normal(mean=0.0, std=0.02)
         self.topk_method = "noaux_tc"
         self.norm_topk_prob = True
         self.routed_scaling_factor = 1.0
