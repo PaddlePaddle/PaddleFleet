@@ -468,6 +468,12 @@ class TransformerConfig(ModelParallelConfig):
     learned TopK Routing. E.g., if num_hidden_layers=32 and moe_n_hash_layers=4,
     layers 28-31 (0-indexed) use HashRouter. 0 means all layers use TopKRouter."""
 
+    moe_hash_router_pad_token_id: int = 0
+    """Token ID treated as padding by HashRouter. Padding tokens receive zero routing
+    weight and expert index -1. Defaults to 0 (Megatron-LM / most PaddlePaddle model
+    convention). Set to the tokenizer's actual pad_token_id when it differs (e.g.
+    LLaMA uses eos_token_id as pad)."""
+
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
 

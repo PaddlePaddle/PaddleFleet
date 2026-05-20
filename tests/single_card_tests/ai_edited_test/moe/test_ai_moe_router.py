@@ -610,6 +610,49 @@ class TestHashRouter(unittest.TestCase):
             mask_np[0].sum(), 0.0, "Padding token mask should be 0"
         )
 
+    def test_custom_pad_token_id(self):
+        """moe_hash_router_pad_token_id config field should override default 0."""
+        # Use pad_token_id=1 so token_id=1 is masked and token_id=0 is valid
+        router, _ = self._make_router(
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_hash_router_pad_token_id=1,
+        )
+        B, S = 1, 3
+        # token 0 is BOS (valid), token 1 is pad (masked), token 5 is normal
+        input_ids = paddle.to_tensor([[0, 1, 5]], dtype="int64")
+        hidden = self._dummy_hidden(B, S)
+
+        _, top_gate, top_idx, _, _, _, _, _ = router(
+            hidden, input_ids=input_ids
+        )
+        top_gate_np = top_gate.numpy()
+        top_idx_np = top_idx.numpy()
+
+        # token_id=0 should be VALID (non-zero weight)
+        self.assertGreater(
+            top_gate_np[0].sum(),
+            0.0,
+            "token_id=0 should be routed when pad_token_id=1",
+        )
+        # token_id=1 should be MASKED (weight=0, idx=-1)
+        np.testing.assert_array_equal(
+            top_gate_np[1],
+            [0.0, 0.0],
+            err_msg="token_id=1 should be masked when pad_token_id=1",
+        )
+        np.testing.assert_array_equal(
+            top_idx_np[1],
+            [-1, -1],
+            err_msg="token_id=1 should have idx=-1 when pad_token_id=1",
+        )
+        # token_id=5 should be VALID
+        self.assertGreater(
+            top_gate_np[2].sum(),
+            0.0,
+            "token_id=5 should be routed",
+        )
+
     def test_output_shapes(self):
         """Output tensors should have expected shapes."""
         num_experts, k = 4, 2

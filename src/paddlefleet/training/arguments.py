@@ -35,6 +35,16 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
             "the last 2 MoE layers."
         ),
     )
+    parser.add_argument(
+        "--moe-hash-router-pad-token-id",
+        type=int,
+        default=0,
+        help=(
+            "Token ID treated as padding by HashRouter (default: 0). "
+            "Set to the tokenizer pad_token_id when it differs from 0 "
+            "(e.g. LLaMA uses eos_token_id as pad)."
+        ),
+    )
 
     # Custom arguments.
     if extra_args_provider is not None:

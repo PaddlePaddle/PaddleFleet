@@ -888,15 +888,10 @@ class HashRouter(nn.Layer):
     All selected experts receive equal weight (1 / num_experts_per_tok when
     ``norm_topk_prob`` is True, otherwise 1.0), scaled by ``routed_scaling_factor``.
 
-    Padding tokens (token_id == 0) are masked out: their weights and mask are 0
-    and their expert indices are set to -1.
-
-    .. note::
-        The padding-token detection assumes pad_token_id == 0, which matches
-        Megatron-LM convention and most PaddlePaddle models.  If your tokenizer
-        uses a different pad ID, this masking will either miss real padding or
-        suppress valid BOS tokens.  Future work can expose a
-        moe_hash_router_pad_token_id config field to override this.
+    Padding tokens are masked out: their routing weights are 0 and expert indices
+    are -1.  The pad token ID defaults to 0 (Megatron-LM / most PaddlePaddle model
+    convention) and is configurable via
+    TransformerConfig.moe_hash_router_pad_token_id.
 
     This router produces the same 8-tuple output as TopKRouter so it can be used
     as a drop-in replacement inside MoELayer.
@@ -920,6 +915,7 @@ class HashRouter(nn.Layer):
         self.norm_topk_prob = config.norm_topk_prob
         self.routed_scaling_factor = config.routed_scaling_factor
         self.sequence_parallel = config.sequence_parallel
+        self.pad_token_id = getattr(config, "moe_hash_router_pad_token_id", 0)
         self._layer_number = layer_number
         # HashRouter has no learned parameters
         self._cast_to_low_precision = False
@@ -1005,10 +1001,10 @@ class HashRouter(nn.Layer):
         )  # [B*S, K]
 
         # ------------------------------------------------------------------ #
-        # Padding mask: token_id == 0 → weight=0, idx=-1                      #
+        # Padding mask: token_id == pad_token_id → weight=0, idx=-1           #
         # ------------------------------------------------------------------ #
         valid_mask = (
-            (flat_ids != 0).cast(paddle.float32).unsqueeze(-1)
+            (flat_ids != self.pad_token_id).cast(paddle.float32).unsqueeze(-1)
         )  # [B*S, 1]
         top_gate = top_gate * valid_mask
         topk_idx = topk_idx.masked_fill(
