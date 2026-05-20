@@ -249,6 +249,9 @@ class DotProductAttention(FleetLayer):
         past_key_values=None,
         layer_idx=None,
         use_cache: bool = False,
+        # DSA-specific parameters (ignored by DotProductAttention)
+        x: Tensor | None = None,
+        qr: Tensor | None = None,
     ):
         """Forward."""
         assert attention_bias is None, (
@@ -576,6 +579,9 @@ class CPDotProductAttention(FleetLayer):
         past_key_values=None,
         layer_idx=None,
         use_cache: bool = False,
+        # DSA-specific parameters
+        x: Tensor | None = None,
+        qr: Tensor | None = None,
     ):
         """Forward."""
         assert packed_seq_params is None, (

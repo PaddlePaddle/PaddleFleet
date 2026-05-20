@@ -17,7 +17,6 @@ import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 from pathlib import Path
 
 import backends
@@ -121,7 +120,22 @@ def _generate_version_info():
             _workspace_root, base_branch
         )
         commit_short = packages_commit[:8]
-        date_str = datetime.now().strftime("%Y%m%d")
+        # Use the commit's committer date (merge time) instead of current build time
+        date_str = (
+            subprocess.check_output(
+                [
+                    "git",
+                    "log",
+                    "-1",
+                    "--format=%cd",
+                    "--date=format:%Y%m%d",
+                    packages_commit,
+                ],
+                cwd=_workspace_root,
+            )
+            .strip()
+            .decode("utf-8")
+        )
         if base_branch.startswith("release/"):
             final_version = f"{base_version}.post{date_str}+{commit_short}"
         else:

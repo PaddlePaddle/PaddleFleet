@@ -57,7 +57,10 @@ from paddlefleet.transformer.block_attn_res import (
     BlockAttnResSublayersSpec,
 )
 from paddlefleet.transformer.dsa_attention import (
-    MLASelfAttentionWithDSA,
+    DSAIndexer,
+    DSAIndexerSublayersSpec,
+    DSAttention,
+    DSAttentionSublayersSpec,
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.gated_delta_net import (
@@ -174,24 +177,51 @@ def get_attention_spec(
         )
     elif attention_layer_type == "multi_latent_attention":
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-        # Decide attention class: DSA variant if dsa_index_n_heads is configured
+        # Decide attention class: always MLASelfAttention (DSA is a pluggable core_attention)
+        attn_cls = MLASelfAttention
+        # Gated attention
+        gated_attention = getattr(config, "gated_attention", False)
+
+        # Decide core_attention: DSAttention if dsa_index_n_heads is configured, else standard
         use_dsa = (
             config is not None
             and getattr(config, "dsa_index_n_heads", None) is not None
         )
-        attn_cls = MLASelfAttentionWithDSA if use_dsa else MLASelfAttention
-        # Gated attention
-        gated_attention = getattr(config, "gated_attention", False)
+
+        if use_dsa:
+            # DSA Indexer sublayers spec (duplicated linear, NOT tensor-parallel)
+            dsa_indexer_sublayers = DSAIndexerSublayersSpec(
+                linear_wq_b=backend.linear(),
+                linear_wk=backend.linear(),
+                k_norm=paddle.nn.LayerNorm,  # LayerNorm (not RMSNorm) for Indexer K
+                linear_weights_proj=backend.linear(),
+            )
+            # DSAttention as core_attention (pluggable component)
+            core_attention = LayerSpec(
+                layer=DSAttention,
+                sublayers_spec=DSAttentionSublayersSpec(
+                    indexer=LayerSpec(
+                        layer=DSAIndexer,
+                        sublayers_spec=dsa_indexer_sublayers,
+                    ),
+                ),
+            )
+        else:
+            # Standard core_attention
+            core_attention = backend.core_attention()
+
         return LayerSpec(
             layer=attn_cls,
-            extra_kwargs={"attn_mask_type": attn_mask_type},
+            extra_kwargs={
+                "attn_mask_type": attn_mask_type,
+            },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
                 q_a_proj=backend.column_parallel_linear(),
                 q_b_proj=backend.column_parallel_linear(),
                 kv_a_proj_with_mqa=backend.column_parallel_linear(),
                 kv_b_proj=backend.column_parallel_linear(),
-                core_attention=backend.core_attention(),
+                core_attention=core_attention,
                 o_proj=backend.row_parallel_linear(),
                 q_a_layernorm=qk_norm_standard if use_qk_norm else IdentityOp,
                 kv_a_layernorm=qk_norm_standard if use_qk_norm else IdentityOp,
