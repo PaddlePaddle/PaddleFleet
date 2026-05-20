@@ -12,34 +12,15 @@ on:
       commit:
         required: true
         type: string
-      cuda:
-        required: false
-        type: choice
-        default: 'ALL'
-        options:
-          - ALL
-          - "CUDA12.6"
-          - "CUDA12.9"
-          - "CUDA13.0"
-      python:
-        required: false
-        type: choice
-        default: 'ALL'
-        options:
-          - ALL
-          - "3.10"
-          - "3.11"
-          - "3.12"
-          - "3.13"
 
 
 permissions: read-all
 
 
 env:
-  PR_ID: ${{ github.event.pull_request.number || '0' }}
-  COMMIT_ID: ${{ github.event.pull_request.head.sha || github.sha }}
-  BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
+  PR_ID: '0'
+  COMMIT_ID: ${{ github.sha }}
+  BRANCH: ${{ github.ref_name }}
 
 defaults:
   run:
@@ -53,9 +34,10 @@ jobs:
       clone_dir: manual
       ref: ${{ inputs.commit }}
       commit: ${{ inputs.commit }}
+      submodules: 'false'
 
   publish-wheel:
-    name: Publish wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
+    name: Manual build fleet (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
     needs: clone
     if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
@@ -63,25 +45,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python_version: ["3.10", "3.11", "3.12", "3.13"]
+        python_version: ["3.12"]
         cuda:
-          - {CUDA_VERSION: CUDA12.6, IMAGE_TAG: cuda12.6-cudnn9.5-trt10.5-gcc11, bos_CUDA: cu126}
-          - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129}
           - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130}
     env:
-      TASK: PaddleFleet-nightly-${{ matrix.cuda.CUDA_VERSION }}
+      TASK: PaddleFleet-manual
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
+      CCACHE_DIR: "/home/data/shared/.ccache/l1" # L1 cache on machine shared dir
+      CCACHE_SECONDARY_STORAGE: "file:///home/data/cfs/.ccache/l2" # L2 cache on cfs
+      CCACHE_MAXSIZE: 50G
+      CCACHE_LIMIT_MULTIPLE: 0.8
       UV_HTTP_TIMEOUT: 600
       no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
     steps:
       - name: Check docker image and run container
         id: check-skip
         run: |
-          if ! [[ ( "${{ inputs.python }}" == "ALL" || "${{ inputs.python }}" == "${{ matrix.python_version }}" ) && ( "${{ inputs.cuda }}" == "ALL" || "${{ inputs.cuda }}" == "${{ matrix.cuda.CUDA_VERSION }}" ) ]]; then
-            echo "no_build=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
           docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:${{ matrix.cuda.IMAGE_TAG }}"
           docker pull $docker_image
           container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
@@ -89,12 +69,17 @@ jobs:
           docker run -d -t --name ${container_name} \
             -v "/home/data/cfs:/home/data/cfs" \
             -v "/home/data/cfs/.cache:/home/.cache" \
+            -v "/home/data/shared:/home/data/shared" \
             -v ${{ github.workspace }}/../../..:/root \
             -v ${{ github.workspace }}/../../../proxy:/root/proxy \
             -v ${{ github.workspace }}:/workspace \
             -e no_proxy \
             -e CACHE_DIR \
             -e PIP_CACHE_DIR \
+            -e CCACHE_DIR \
+            -e CCACHE_SECONDARY_STORAGE \
+            -e CCACHE_MAXSIZE \
+            -e CCACHE_LIMIT_MULTIPLE \
             -e UV_HTTP_TIMEOUT \
             -e PR_ID \
             -e COMMIT_ID \
@@ -106,7 +91,6 @@ jobs:
             -w /workspace --network=host $docker_image
 
       - name: Install PaddleFleet
-        if: steps.check-skip.outputs.no_build != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
@@ -128,7 +112,6 @@ jobs:
           '
 
       - name: Build wheel
-        if: steps.check-skip.outputs.no_build != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
@@ -138,10 +121,10 @@ jobs:
           git submodule update --init --recursive
           export IS_NVIDIA=True
           uv build --wheel -v
+          # uv build --wheel --package paddlefleet-ops -v
           '
 
       - name: Upload wheel
-        if: steps.check-skip.outputs.no_build != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
@@ -150,10 +133,11 @@ jobs:
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
-          fleet_whl=$(ls -t *.whl | head -1)
-          echo "fleet_whl=${fleet_whl}"
-          python ../bos/BosClient.py ${fleet_whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}
-          echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${{ matrix.cuda.bos_CUDA }}/${fleet_whl}"
+          for whl in paddlefleet-*.whl; do
+            echo "Uploading ${whl}"
+            python ../bos/BosClient.py ${whl} paddle-github-action/PaddleFleet/manual/${{ inputs.commit }}/
+            echo "https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${{ inputs.commit }}/${whl}"
+          done
           '
 
       - name: Cleanup

@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from paddlefleet.ops.utils import (
+from paddlefleet_ops.utils import (
     HardwareIncompatibleBlocker,
     ModuleContext,
     clean_module_namespace,
@@ -126,13 +126,13 @@ class TestPatchModuleNamespace(unittest.TestCase):
         test_mod = "_test_patch_mod"
         sys.modules[test_mod] = MagicMock()
 
-        patch_module_namespace(test_mod, "paddlefleet.ops.")
+        patch_module_namespace(test_mod, "paddlefleet_ops.")
 
         self.assertNotIn(test_mod, sys.modules)
-        self.assertIn("paddlefleet.ops." + test_mod, sys.modules)
+        self.assertIn("paddlefleet_ops." + test_mod, sys.modules)
 
         # Clean up
-        del sys.modules["paddlefleet.ops." + test_mod]
+        del sys.modules["paddlefleet_ops." + test_mod]
 
     def test_patch_with_submodules(self):
         """Test patching a module with submodules."""
@@ -174,29 +174,29 @@ class TestHardwareIncompatibleBlocker(unittest.TestCase):
 
     def test_blocked_module_raises(self):
         """Test that blocked module raises RuntimeError."""
-        error_messages = {"paddlefleet.ops.blocked_lib": "not supported"}
+        error_messages = {"paddlefleet_ops.blocked_lib": "not supported"}
         blocker = HardwareIncompatibleBlocker(error_messages)
 
         with self.assertRaises(RuntimeError) as ctx:
-            blocker.find_spec("paddlefleet.ops.blocked_lib", None, None)
+            blocker.find_spec("paddlefleet_ops.blocked_lib", None, None)
         self.assertIn("not supported", str(ctx.exception))
 
     def test_blocked_submodule_raises(self):
         """Test that blocked submodule raises RuntimeError."""
-        error_messages = {"paddlefleet.ops.blocked_lib": "not supported"}
+        error_messages = {"paddlefleet_ops.blocked_lib": "not supported"}
         blocker = HardwareIncompatibleBlocker(error_messages)
 
         with self.assertRaises(RuntimeError):
             blocker.find_spec(
-                "paddlefleet.ops.blocked_lib.submodule", None, None
+                "paddlefleet_ops.blocked_lib.submodule", None, None
             )
 
     def test_allowed_module_passes(self):
         """Test that non-blocked module returns None (no spec)."""
-        error_messages = {"paddlefleet.ops.blocked_lib": "not supported"}
+        error_messages = {"paddlefleet_ops.blocked_lib": "not supported"}
         blocker = HardwareIncompatibleBlocker(error_messages)
 
-        result = blocker.find_spec("paddlefleet.ops.safe_lib", None, None)
+        result = blocker.find_spec("paddlefleet_ops.safe_lib", None, None)
         self.assertIsNone(result)
 
 

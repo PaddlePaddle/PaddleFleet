@@ -30,6 +30,10 @@ from paddle.distributed.fleet.meta_parallel import (
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet import tensor_parallel
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
@@ -349,6 +353,17 @@ class MultiTokenPredictionLayer(FleetLayer):
             mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.astype(
                 hidden_states.dtype
             )
+
+            if (
+                get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                # In EB dataflow and CP size > 1, mtp_hidden_inputs_mask is [b, s, 1];
+                # we need to scatter it to [b, s/cp, 1] here.
+                mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
+                    mtp_hidden_inputs_mask, axis=1
+                )
+
             hidden_states = hidden_states * mtp_hidden_inputs_mask
         # At the (k - 1)-th MTP layer, concatenates the i-th token's hidden_states
         # and the (i + K)-th token's embedding, and combine them with linear projection.
@@ -522,6 +537,42 @@ class MultiTokenPredictionLayer(FleetLayer):
         )
         # Save and clear backbone input_ids so it doesn't leak into MTP transformer layers
         origin_input_ids = dict_args.pop("input_ids", None)
+
+        # Trim rotary_pos_emb to main decoder length (remove MTP extra positions)
+        # rotary_pos_emb includes extra positions beyond the main decoder length;
+        # MTP's internal transformer_layer processes main-length sequences only.
+        # Compute main_seq_len from the split hidden_states shape.
+        n = self.config.num_nextn_predict_layers
+        if self.config.sequence_parallel:
+            main_seq_len = (
+                hidden_states_concat.shape[0]
+                // (n + 1)
+                * self.config.tensor_model_parallel_size
+            )
+        else:
+            # Non-SP: MTP parts are concatenated on batch dim (axis=0),
+            # so shape[1] is already the per-part sequence length.
+            main_seq_len = hidden_states_concat.shape[1]
+        origin_rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
+        if origin_rotary_pos_emb is not None:
+            if self.config.sequence_parallel:
+                dict_args["rotary_pos_emb"] = origin_rotary_pos_emb[
+                    :main_seq_len
+                ]
+            else:
+                dict_args["rotary_pos_emb"] = origin_rotary_pos_emb[
+                    :, :main_seq_len
+                ]
+        origin_rotary_pos_cos = dict_args.get("rotary_pos_cos", None)
+        if origin_rotary_pos_cos is not None:
+            dict_args["rotary_pos_cos"] = origin_rotary_pos_cos[
+                :, :main_seq_len
+            ]
+        origin_rotary_pos_sin = dict_args.get("rotary_pos_sin", None)
+        if origin_rotary_pos_sin is not None:
+            dict_args["rotary_pos_sin"] = origin_rotary_pos_sin[
+                :, :main_seq_len
+            ]
         # Shape check: mtp_startend_row_indices_all [B, num_nextn, S, 1],
         #              mtp_hidden_inputs_mask_all   [B, num_nextn, S]
         if mtp_startend_row_indices_all is not None:
@@ -607,12 +658,20 @@ class MultiTokenPredictionLayer(FleetLayer):
             # New dataflow: get the mask for this layer's depth, shape [B, 1, S, 1]
             mtp_mask = None
             if mtp_startend_row_indices_all is not None:
-                mtp_mask = mtp_startend_row_indices_all[
-                    :,
-                    self.layer_number : self.layer_number + 1,
-                    :,
-                    :,
-                ]
+                if self.config.gpt_model_use_experimental_version:
+                    mtp_mask = mtp_startend_row_indices_all[
+                        :,
+                        self.layer_number : self.layer_number + 1,
+                        :,
+                        :,
+                    ]
+                else:
+                    mtp_mask = mtp_startend_row_indices_all[
+                        :,
+                        self.layer_number : self.layer_number + 1,
+                        :,
+                        :1,
+                    ]
                 dict_args["attn_mask_startend_row_indices"] = mtp_mask
 
             # New dataflow: get hidden inputs mask for this layer's depth, shape [B, 1, S]
@@ -664,6 +723,13 @@ class MultiTokenPredictionLayer(FleetLayer):
             dict_args["input_ids"] = origin_input_ids
         else:
             dict_args.pop("input_ids", None)
+        # Restore rotary_pos_emb/cos/sin to full length
+        if origin_rotary_pos_emb is not None:
+            dict_args["rotary_pos_emb"] = origin_rotary_pos_emb
+        if origin_rotary_pos_cos is not None:
+            dict_args["rotary_pos_cos"] = origin_rotary_pos_cos
+        if origin_rotary_pos_sin is not None:
+            dict_args["rotary_pos_sin"] = origin_rotary_pos_sin
         # Clean up per-depth slice key
         dict_args.pop("mtp_hidden_inputs_mask", None)
         if origin_start_row_indices is not None:

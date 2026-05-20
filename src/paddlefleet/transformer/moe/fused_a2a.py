@@ -14,19 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
+from paddlefleet_ops import is_deep_ep_available, is_hybrid_ep_available
 
-from paddlefleet.ops import is_deep_ep_available
-
+from .fp8_utils import FP8_ALIGN
 from .moe_utils import manual_backward
 
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():
-        from paddlefleet.ops import deep_ep
+        from paddlefleet_ops import deep_ep
     else:
         from paddle.distributed.communication import deep_ep
 
@@ -34,7 +33,15 @@ if is_deep_ep_available():
 else:
     HAVE_DEEP_EP = False
 
+if is_hybrid_ep_available():
+    from paddlefleet_ops import hybrid_ep
+
+    HAVE_HYBRID_EP = True
+else:
+    HAVE_HYBRID_EP = False
+
 _buffer = None
+_hybrid_ep_buffer = None
 
 
 def barrier_ep(ep_group):
@@ -73,13 +80,13 @@ def configure_buffer(num_sms=None, dispatch_config=None, combine_config=None):
             Trailing values may be omitted to use the defaults.
         combine_config (List[int]): Same as above, but for combine kernels.
     """
-    if num_sms is not None:
+    if num_sms is not None and HAVE_DEEP_EP:
         deep_ep.Buffer.set_num_sms(num_sms)
-    if dispatch_config is not None:
+    if dispatch_config is not None and HAVE_DEEP_EP:
         deep_ep.Buffer.get_dispatch_config = staticmethod(
             lambda _: deep_ep.Config(deep_ep.Buffer.num_sms, *dispatch_config)
         )
-    if combine_config is not None:
+    if combine_config is not None and HAVE_DEEP_EP:
         deep_ep.Buffer.get_combine_config = staticmethod(
             lambda _: deep_ep.Config(deep_ep.Buffer.num_sms, *combine_config)
         )
@@ -121,6 +128,84 @@ def get_buffer(group: Group, hidden_bytes: int):
     ):
         _buffer = deep_ep.Buffer(group, num_nvl_bytes, num_rdma_bytes)
     return _buffer
+
+
+def reset_hybrid_ep_buffer():
+    """Reset the shared HybridEP communication buffer."""
+    global _hybrid_ep_buffer
+
+    _hybrid_ep_buffer = None
+
+
+def _need_new_hybrid_ep_buffer(
+    group: Group,
+    hidden_dim: int,
+    max_num_of_tokens_per_rank: int,
+    num_local_experts: int,
+    num_sms_dispatch_api: int | None,
+    num_sms_combine_api: int | None,
+    num_sms_preprocessing_api: int | None,
+):
+    if _hybrid_ep_buffer is None:
+        return True
+
+    config = _hybrid_ep_buffer.config
+    need_new_buffer = (
+        _hybrid_ep_buffer.group != group
+        or config.hidden_dim != hidden_dim
+        or config.max_num_of_tokens_per_rank < max_num_of_tokens_per_rank
+        or config.num_of_experts_per_rank != num_local_experts
+    )
+    if num_sms_dispatch_api is not None:
+        need_new_buffer |= (
+            _hybrid_ep_buffer.num_sms_dispatch_api != num_sms_dispatch_api
+        )
+    if num_sms_combine_api is not None:
+        need_new_buffer |= (
+            _hybrid_ep_buffer.num_sms_combine_api != num_sms_combine_api
+        )
+    if num_sms_preprocessing_api is not None:
+        need_new_buffer |= (
+            _hybrid_ep_buffer.num_sms_preprocessing_api
+            != num_sms_preprocessing_api
+        )
+    return need_new_buffer
+
+
+def get_hybrid_ep_buffer(
+    group: Group,
+    hidden_dim: int,
+    max_num_of_tokens_per_rank: int,
+    num_local_experts: int,
+    load_cached_kernels: bool = True,
+    num_sms_dispatch_api: int | None = None,
+    num_sms_combine_api: int | None = None,
+    num_sms_preprocessing_api: int | None = None,
+):
+    """Get or create the shared HybridEP communication buffer."""
+    global _hybrid_ep_buffer
+
+    if _need_new_hybrid_ep_buffer(
+        group,
+        hidden_dim,
+        max_num_of_tokens_per_rank,
+        num_local_experts,
+        num_sms_dispatch_api,
+        num_sms_combine_api,
+        num_sms_preprocessing_api,
+    ):
+        _hybrid_ep_buffer = hybrid_ep.HybridEPBuffer(
+            group=group,
+            hidden_dim=hidden_dim,
+            max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
+            num_local_experts=num_local_experts,
+            use_fp8=False,
+            num_sms_dispatch_api=num_sms_dispatch_api,
+            num_sms_combine_api=num_sms_combine_api,
+            num_sms_preprocessing_api=num_sms_preprocessing_api,
+            load_cached_kernels=load_cached_kernels,
+        )
+    return _hybrid_ep_buffer
 
 
 def fused_dispatch_forward_func(
@@ -274,8 +359,8 @@ def fused_combine_backward_func(
     return grad_x
 
 
-class FusedDispatch(PyLayer):
-    """Fused dispatch operation for MoE routing combining computation and communication."""
+class DeepEPDispatch(PyLayer):
+    """DeepEP dispatch operation for MoE routing and expert parallel communication."""
 
     @staticmethod
     def forward(
@@ -290,6 +375,7 @@ class FusedDispatch(PyLayer):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         moe_ep_barrier: bool = True,
+        use_ue8m0: bool = False,
     ):
         """Forward pass of fused dispatch."""
         if fp8_dispatch:
@@ -299,6 +385,7 @@ class FusedDispatch(PyLayer):
                 input_transpose=False,
                 output_scale_transpose=True,
                 return_transpose_only=False,
+                using_ue8m0_scale=use_ue8m0,
             )
             scale = scale.T.contiguous()
             x = (x_fp8, scale)
@@ -341,8 +428,8 @@ class FusedDispatch(PyLayer):
         )
 
 
-class FusedCombine(PyLayer):
-    """Fused combine operation for MoE output combining computation and communication."""
+class DeepEPCombine(PyLayer):
+    """DeepEP combine operation for restoring MoE outputs across expert parallel ranks."""
 
     @staticmethod
     def forward(
@@ -383,8 +470,8 @@ class FusedCombine(PyLayer):
         )
 
 
-class FusedCombineAsync(PyLayer):
-    """FusedCombineAsync."""
+class DeepEPCombineAsync(PyLayer):
+    """DeepEP combine with shared expert overlap."""
 
     @staticmethod
     def forward(
@@ -404,7 +491,7 @@ class FusedCombineAsync(PyLayer):
             async_finish=True,
         )
 
-        assert fn is not None, "use FusedCombineAsync async, but fn is None."
+        assert fn is not None, "use DeepEPCombineAsync async, but fn is None."
         ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
 
         ctx.handle = states["handle"]
@@ -443,6 +530,7 @@ if HAVE_DEEP_EP:
         async_finish=False,
         allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
+        use_ue8m0: bool = False,
     ):
         """Perform fused dispatch operation if deep_ep is available.
 
@@ -456,9 +544,9 @@ if HAVE_DEEP_EP:
             moe_ep_barrier: Whether to use barrier for expert parallelism
 
         Returns:
-            Result of FusedDispatch
+            Result of DeepEPDispatch
         """
-        return FusedDispatch.apply(
+        return DeepEPDispatch.apply(
             x.contiguous(),
             token_indices,
             token_probs,
@@ -468,7 +556,8 @@ if HAVE_DEEP_EP:
             fp8_dispatch,
             async_finish,
             allocate_on_comm_stream,
-            moe_ep_barrier=moe_ep_barrier,
+            moe_ep_barrier,
+            use_ue8m0,
         )
 
     def fused_combine(
@@ -491,12 +580,12 @@ if HAVE_DEEP_EP:
             moe_ep_barrier: Whether to use barrier for expert parallelism
 
         Returns:
-            Result of FusedCombine
+            Result of DeepEPCombine
         """
         states = {}
         states["handle"] = handle
         if combine_overlap_handle is None:
-            return FusedCombine.apply(
+            return DeepEPCombine.apply(
                 x,
                 group,
                 states,
@@ -510,7 +599,7 @@ if HAVE_DEEP_EP:
             assert "fn" in combine_overlap_handle
             assert "fn_args" in combine_overlap_handle
             assert isinstance(combine_overlap_handle["fn_args"], tuple)
-            combined_x, *fn_out = FusedCombineAsync.apply(
+            combined_x, *fn_out = DeepEPCombineAsync.apply(
                 x,
                 group,
                 states,
@@ -524,6 +613,133 @@ if HAVE_DEEP_EP:
 else:
     fused_dispatch = None
     fused_combine = None
+
+
+class HybridEPDispatch(PyLayer):
+    """Fused HybridEP dispatch bridge for Paddle autograd."""
+
+    @staticmethod
+    def forward(
+        ctx, x, token_indices, token_probs, manager, fp8_dispatch=False
+    ):
+        recv_x, recv_token_probs, scale = manager._dispatch_with_permute_impl(
+            x, token_indices, token_probs, use_fp8=fp8_dispatch
+        )
+        ctx.buffer = manager._active_buffer
+        ctx.handle = manager.handle
+        ctx.token_indices = token_indices
+        ctx.hidden_dtype = x.dtype
+        ctx.use_fp8_dispatch = fp8_dispatch
+        ctx.set_grad_in_dtype_consistent(False)
+        return recv_x, recv_token_probs, scale
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_token_probs, grad_scale=None):
+        del grad_scale
+        if grad_output.dtype != ctx.hidden_dtype:
+            grad_output = grad_output.astype(ctx.hidden_dtype)
+        grad_x, grad_dense_probs = ctx.buffer.combine_with_unpermute(
+            hidden=grad_output.contiguous(),
+            probs=None
+            if grad_token_probs is None
+            else grad_token_probs.astype("float32"),
+            handle=ctx.handle,
+            pad_multiple=FP8_ALIGN if ctx.use_fp8_dispatch else None,
+        )
+        grad_probs = None
+        if grad_dense_probs is not None:
+            grad_probs = paddle.take_along_axis(
+                grad_dense_probs,
+                ctx.token_indices,
+                axis=-1,
+            )
+        return grad_x, None, grad_probs
+
+
+def _replay_hybrid_ep_dispatch_backward(
+    buffer,
+    handle,
+    grad_output,
+    num_permuted_tokens,
+    use_fp8_dispatch,
+):
+    replay_handle = handle
+    if use_fp8_dispatch:
+        replay_config = buffer.update_template_config(
+            hidden_dim=grad_output.shape[-1],
+            num_of_tokens_per_rank=handle[6],
+            num_local_experts=handle[7].num_of_experts_per_rank,
+            use_fp8=False,
+        )
+        replay_handle = (
+            *handle[:7],
+            replay_config,
+            handle[8],
+        )
+    grad_x, _, _, _, _ = buffer.dispatch_with_permute(
+        hidden=grad_output.contiguous(),
+        handle=replay_handle,
+        num_permuted_tokens=num_permuted_tokens,
+        pad_multiple=FP8_ALIGN if use_fp8_dispatch else None,
+        non_blocking=False,
+    )
+    return grad_x[:num_permuted_tokens]
+
+
+class HybridEPCombine(PyLayer):
+    """Fused HybridEP combine bridge for Paddle autograd."""
+
+    @staticmethod
+    def forward(ctx, x, manager):
+        handle = manager.handle
+        use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
+        combined_x, _ = manager._active_buffer.combine_with_unpermute(
+            hidden=x,
+            handle=handle,
+            pad_multiple=FP8_ALIGN if use_fp8_dispatch else None,
+        )
+        combined_x.stop_gradient = False
+        ctx.buffer = manager._active_buffer
+        ctx.handle = handle
+        ctx.use_fp8_dispatch = use_fp8_dispatch
+        ctx.num_permuted_tokens = x.shape[0]
+        return combined_x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_x = _replay_hybrid_ep_dispatch_backward(
+            ctx.buffer,
+            ctx.handle,
+            grad_output,
+            ctx.num_permuted_tokens,
+            ctx.use_fp8_dispatch,
+        )
+        return grad_x
+
+
+def hybrid_ep_dispatch(
+    x,
+    token_indices,
+    token_probs,
+    manager,
+    fp8_dispatch: bool = False,
+):
+    """Perform HybridEP dispatch_with_permute with explicit Paddle autograd."""
+    return HybridEPDispatch.apply(
+        x.contiguous(),
+        token_indices,
+        token_probs,
+        manager,
+        fp8_dispatch,
+    )
+
+
+def hybrid_ep_combine(x, manager):
+    """Perform HybridEP combine_with_unpermute with explicit Paddle autograd."""
+    return HybridEPCombine.apply(
+        x,
+        manager,
+    )
 
 
 class DispatchNode:

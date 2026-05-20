@@ -206,7 +206,7 @@ class LanguageLoss(FleetLayer):
                 "fused_linear_ce_loss_chunk is incompatible with tensor parallel "
                 "parallel_output=True (ParallelCrossEntropy path)."
             )
-            from paddlefleet.ops.triton_ops.fused_linear_cross_entropy import (
+            from paddlefleet.triton_ops.fused_linear_cross_entropy import (
                 LigerFusedLinearCrossEntropyFunction,
             )
 
@@ -376,6 +376,12 @@ class LanguageLoss(FleetLayer):
 
     def _forward(self, logits: Tensor | tuple, labels: Tensor):
         if (
+            get_context_parallel_world_size() > 1
+            and self.config.experimental_dataflow
+        ):
+            # In EB data flow and CP size > 1, scatter labels to cp local
+            labels = ContextParallelScatterOp.apply(labels, axis=1)
+        if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules
         ):
@@ -412,9 +418,29 @@ class LanguageLoss(FleetLayer):
                         # Align with EB: compute per-token loss matrix and reduce
                         # with global sum/count instead of going through forward_impl
                         # which applies line-wise loss.
+
+                        if get_context_parallel_world_size() > 1:
+                            # In EB data flow and CP size > 1, since we do not use _forward
+                            # we need to scatter labels to cp local here.
+                            labels_cur_depth = ContextParallelScatterOp.apply(
+                                labels_cur_depth, axis=1
+                            )
+
                         loss_matrix_cur_depth = self.loss_func(
                             logits_cur_depth.cast("float32"), labels_cur_depth
                         )
+
+                        if get_context_parallel_world_size() > 1:
+                            # In EB data flow and CP size > 1, loss and labels need to be gathered back.
+                            loss_matrix_cur_depth = (
+                                ContextParallelGatherOp.apply(
+                                    loss_matrix_cur_depth, axis=1
+                                )
+                            )
+                            labels_cur_depth = ContextParallelGatherOp.apply(
+                                labels_cur_depth, axis=1
+                            )
+
                         lossmask_cur_depth = (
                             labels_cur_depth != self.ignored_index
                         ).cast(paddle.float32)
@@ -434,7 +460,6 @@ class LanguageLoss(FleetLayer):
                             labels_cur_depth,
                         )
                     mtp_loss.append(loss_cur_depth)
-                    paddle.device.cuda.empty_cache()
             else:
                 lm_loss = self._forward(logits[0], lm_labels)
                 if get_tensor_model_parallel_world_size() > 1:
@@ -655,7 +680,6 @@ class MTPLanguageLoss(LanguageLoss):
                 labels_cur_depth,
             )
             mtp_loss.append(loss_cur_depth)
-            paddle.device.cuda.empty_cache()
 
         dict_args.pop("mtp_logits")
         dict_args["mtp_loss"] = mtp_loss

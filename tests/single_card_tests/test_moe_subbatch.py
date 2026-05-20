@@ -167,7 +167,6 @@ class TestSubbatch(unittest.TestCase):
         params = {
             "use_fp8_mlp": True,
             # "moe_deep_gemm": True,
-            "moe_grouped_gemm": False,
             "recompute_moe_gate_up": True,
             "dequant_input": True,
             "moe_expert_fusion": True,
