@@ -452,6 +452,8 @@ class MoELayer(nn.Layer):
             if isinstance(self.config.recompute_modules, list):
                 self.use_rr_deepep_combine = True
             elif isinstance(self.config.recompute_modules, dict):
+                # dict mode only supports first_n: uniform applies recompute to all layers
+                # (use list mode instead), block is not yet implemented but can be extended.
                 if self.config.recompute_method != "first_n":
                     raise ValueError(
                         "recompute_modules dict mode for moe_combine RR requires "

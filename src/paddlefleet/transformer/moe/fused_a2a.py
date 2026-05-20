@@ -602,8 +602,10 @@ class DeepEPCombineAsyncRefinedRecompute(object):
             raise ValueError(
                 "[DeepEPCombineAsyncRefinedRecompute] fn must not be None when using RefinedRecompute."
             )
-        bwf, fn_out = manual_backward(fn, True, *fn_args)
+        _, fn_out = manual_backward(fn, True, *fn_args)
 
+        # After wait, the handle in states still holds metadata needed for backward
+        # (same pattern as DeepEPCombineAsync). Do not remove this wait.
         wait_for_deepep(group.id)
 
         return combined_x, fn_out
