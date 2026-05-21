@@ -121,6 +121,8 @@ def _apply_rotary_pos_emb_bshd(
     rope_theta: float = 10000.0,
     time_major: bool = False,
     sp_group: Group = None,
+    inverse: bool = False,
+    mla_output_remove_interleaving: bool = False,
 ) -> Tensor | tuple[Tensor, ...]:
     """Apply rotary positional embedding to input tensor T.
 
@@ -276,6 +278,8 @@ def _apply_rotary_pos_emb_bshd(
         # second part is sine component, need to change signs with _rotate_half method
         cos_ = (paddle.cos(freqs) * mscale).to(t.dtype)
         sin_ = (paddle.sin(freqs) * mscale).to(t.dtype)
+        if inverse:
+            sin_ = -sin_
         if len(cos_.shape) < len(t.shape):
             # [b,s,h]->[b,s,1,h]
             # Use pre-computed unsqueeze_dim if available (for SP case),
@@ -290,6 +294,13 @@ def _apply_rotary_pos_emb_bshd(
             rotate_t.reshape_(t.shape)
 
         t = (t * cos_) + (rotate_t * sin_)
+
+        if multi_latent_attention and mla_output_remove_interleaving:
+            half = t.shape[-1] // 2
+            x1 = t[..., :half]
+            x2 = t[..., half:]
+            t = paddle.stack([x1, x2], axis=-1).flatten(start_axis=-2)
+
         result = paddle.cat((t, t_pass), axis=-1)
 
     if high_precision_rope:
@@ -365,6 +376,8 @@ def _apply_rotary_pos_emb_thd(
     high_precision_rope: bool = False,
     rope_theta: float = 10000.0,
     time_major: bool = False,
+    inverse: bool = False,
+    mla_output_remove_interleaving: bool = False,
 ) -> Tensor | tuple[Tensor, ...]:
     """A baseline implementation of applying RoPE for `thd` format.
 
@@ -498,6 +511,8 @@ def apply_rotary_pos_emb(
     cp_group: Group = None,
     sp_group: Group = None,
     position_ids: Tensor | None = None,
+    inverse: bool = False,
+    mla_output_remove_interleaving: bool = False,
 ):
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
@@ -523,15 +538,20 @@ def apply_rotary_pos_emb(
         mscale (float): Scaling factor.
         cp_group (Group): Context parallel group.
         position_ids (Tensor | None): Position indices.
+        inverse (bool): If True, negate sin to apply inverse RoPE rotation.
+        mla_output_remove_interleaving (bool): If True, un-interleave the output
+            after MLA-style RoPE (used by DSv4 Hybrid for inverse RoPE on output).
     """
     rope_kwargs = {
-        "apply_rope_fusion": config.apply_rope_fusion,
+        "apply_rope_fusion": config.apply_rope_fusion if not inverse else False,
         "rotary_interleaved": config.rotary_interleaved,
         "multi_latent_attention": config.multi_latent_attention,
         "high_precision_rope": config.high_precision_rope,
         "rope_theta": config.rope_theta,
         "time_major": config.sequence_parallel,
         "sp_group": sp_group,
+        "inverse": inverse,
+        "mla_output_remove_interleaving": mla_output_remove_interleaving,
     }
     if cu_seqlens is None:
         return _apply_rotary_pos_emb_bshd(
