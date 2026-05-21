@@ -4,7 +4,6 @@ on:
   pull_request:
     types: [opened, synchronize]
     branches: [develop, release/**]
-  merge_group:
 
 permissions: read-all
 

@@ -6,6 +6,6 @@ pull_request_rules:
       - or:
           - base=develop
           - base~=^release/
-      - updated-at<48 hours ago
+      - updated-at<24 hours ago
     actions:
-      queue:
+      update:
