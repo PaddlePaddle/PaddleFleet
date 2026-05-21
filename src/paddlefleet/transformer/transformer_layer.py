@@ -32,6 +32,9 @@ from paddle.distributed.fleet.meta_parallel import (
 from paddle.distributed.fleet.utils import recompute
 from paddlefleet_ops import is_deep_ep_available
 
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     need_full_recompute,
@@ -513,12 +516,16 @@ class TransformerLayer(nn.Layer):
                 and dict_args["input_ids"] is not None
             ):
                 full_input_ids = dict_args["input_ids"]
-                if (
-                    full_input_ids.shape[-1]
-                    > hidden_states.shape[
-                        0 if self.config.sequence_parallel else 1
-                    ]
-                ):
+
+                # In EB dataflow and CP size > 1，shape of hidden_states is [b, s/cp, h]
+                # but input_ids' shape is [b, s], so we need to get full seq_len here
+                seq_lens = hidden_states.shape[
+                    0 if self.config.sequence_parallel else 1
+                ]
+                if get_context_parallel_world_size() > 1:
+                    seq_lens *= get_context_parallel_world_size()
+
+                if full_input_ids.shape[-1] > seq_lens:
                     decoder_input_ids = full_input_ids[
                         :, : -self.config.num_nextn_predict_layers
                     ].contiguous()
@@ -695,20 +702,33 @@ class TransformerLayer(nn.Layer):
 
             # Self-attention (skip internal bda residual)
             with profile("attn"):
-                hidden_states, context = self._forward_attention(
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                    context=context,
-                    context_mask=context_mask,
-                    rotary_pos_emb=rotary_pos_emb,
-                    rotary_pos_cos=rotary_pos_cos,
-                    rotary_pos_sin=rotary_pos_sin,
-                    position_ids=position_ids,
-                    attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
-                    block_attention_residuals=True,
-                )
+                if hasattr(
+                    self.self_attn.core_attention.config, "forward_meta"
+                ):
+                    forward_meta = (
+                        self.self_attn.core_attention.config.forward_meta
+                    )
+                    need_do_attention = not (
+                        forward_meta.max_len_tensor_cpu[1] <= 0
+                        and forward_meta.max_len_tensor_cpu[2] <= 0
+                    )
+                else:
+                    need_do_attention = True
+                if need_do_attention:
+                    hidden_states, context = self._forward_attention(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                        context=context,
+                        context_mask=context_mask,
+                        rotary_pos_emb=rotary_pos_emb,
+                        rotary_pos_cos=rotary_pos_cos,
+                        rotary_pos_sin=rotary_pos_sin,
+                        position_ids=position_ids,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                        block_attention_residuals=True,
+                    )
 
             # Accumulate attn output into partial_block
             if (
@@ -740,20 +760,33 @@ class TransformerLayer(nn.Layer):
         else:
             self._log_md5(hidden_states, "input", self.layer_number)
             with profile("attn"):
-                hidden_states, context = self._forward_attention(
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                    context=context,
-                    context_mask=context_mask,
-                    rotary_pos_emb=rotary_pos_emb,
-                    rotary_pos_cos=rotary_pos_cos,
-                    rotary_pos_sin=rotary_pos_sin,
-                    position_ids=position_ids,
-                    attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
-                    in_recompute=self.full_recompute,
-                )
+                if hasattr(
+                    self.self_attn.core_attention.config, "forward_meta"
+                ):
+                    forward_meta = (
+                        self.self_attn.core_attention.config.forward_meta
+                    )
+                    need_do_attention = not (
+                        forward_meta.max_len_tensor_cpu[1] <= 0
+                        and forward_meta.max_len_tensor_cpu[2] <= 0
+                    )
+                else:
+                    need_do_attention = True
+                if need_do_attention:
+                    hidden_states, context = self._forward_attention(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                        context=context,
+                        context_mask=context_mask,
+                        rotary_pos_emb=rotary_pos_emb,
+                        rotary_pos_cos=rotary_pos_cos,
+                        rotary_pos_sin=rotary_pos_sin,
+                        position_ids=position_ids,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                        in_recompute=self.full_recompute,
+                    )
             self._log_md5(
                 hidden_states, "post_attn_residual", self.layer_number
             )
