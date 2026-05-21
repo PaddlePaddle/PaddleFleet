@@ -136,14 +136,85 @@ class TestDeepEPCombineAsyncRefinedRecomputeInit(unittest.TestCase):
 
     def test_second_fwd_empty_queue_raises(self):
         """Second forward with empty queue raises RuntimeError."""
+        from unittest.mock import PropertyMock
+
         from paddle import framework
 
         rr = DeepEPCombineAsyncRefinedRecompute()
+        tracer = framework._dygraph_tracer()
         # Simulate recompute pass (has_grad=True means second forward)
-        with patch.object(framework._dygraph_tracer(), "_has_grad", True):
+        # Use PropertyMock since _has_grad is a property without a deleter
+        with patch.object(
+            type(tracer),
+            "_has_grad",
+            new_callable=PropertyMock,
+            return_value=True,
+        ):
             with self.assertRaises(RuntimeError) as ctx:
                 rr.forward(MagicMock(), MagicMock(), {}, fn=lambda: None)
             self.assertIn("Queue is empty", str(ctx.exception))
+
+
+try:
+    from paddlefleet.transformer.moe.token_dispatcher import _DeepEPManager
+
+    HAS_DEEP_EP_MANAGER = True
+except (ImportError, RuntimeError):
+    HAS_DEEP_EP_MANAGER = False
+
+
+@unittest.skipUnless(HAS_DEEP_EP_MANAGER, "DeepEP Manager not available")
+class TestDeepEPManagerCombineRR(unittest.TestCase):
+    """Tests _DeepEPManager.combine() use_rr_deepep_combine branch."""
+
+    def _make_manager(self):
+        """Create a _DeepEPManager with mocked dependencies."""
+        with patch(
+            "paddlefleet.transformer.moe.token_dispatcher.fused_dispatch",
+            new=MagicMock(),
+        ):
+            manager = _DeepEPManager(
+                group=MagicMock(),
+                router_topk=2,
+                num_experts=8,
+                num_local_experts=4,
+                moe_ep_barrier=False,
+            )
+        manager.handle = MagicMock()
+        return manager
+
+    def test_rr_creates_instance_when_none(self):
+        """combine() creates DeepEPCombineAsyncRefinedRecompute when _rr_fusedcombined is None."""
+        manager = self._make_manager()
+        self.assertIsNone(manager._rr_fusedcombined)
+        overlap_handle = {"fn": lambda: None, "fn_args": ()}
+        # fused_combine will be called but we mock it to avoid actual dispatch
+        with patch(
+            "paddlefleet.transformer.moe.token_dispatcher.fused_combine",
+            return_value=MagicMock(),
+        ):
+            manager.combine(
+                MagicMock(),
+                combine_overlap_handle=overlap_handle,
+                use_rr_deepep_combine=True,
+            )
+        self.assertIsInstance(
+            manager._rr_fusedcombined, DeepEPCombineAsyncRefinedRecompute
+        )
+
+    def test_rr_type_mismatch_raises(self):
+        """combine() raises RuntimeError when _rr_fusedcombined has wrong type."""
+        manager = self._make_manager()
+        # Set _rr_fusedcombined to a wrong type
+        manager._rr_fusedcombined = "not_the_right_type"
+        overlap_handle = {"fn": lambda: None, "fn_args": ()}
+        with self.assertRaises(RuntimeError) as ctx:
+            manager.combine(
+                MagicMock(),
+                combine_overlap_handle=overlap_handle,
+                use_rr_deepep_combine=True,
+            )
+        self.assertIn("_rr_fusedcombined type mismatch", str(ctx.exception))
 
 
 try:
@@ -265,6 +336,21 @@ class TestRRRecomputeUpdate(unittest.TestCase):
         self.assertIn(
             "meaningless when neither full_recompute", str(ctx.exception)
         )
+
+    @patch("paddlefleet.transformer.moe.moe_layer.need_recompute_in_first_n")
+    def test_dict_mode_sets_flag_via_need_recompute(self, mock_need_recompute):
+        """Dict mode uses need_recompute_in_first_n to decide use_rr_deepep_combine."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        # When need_recompute_in_first_n returns False, use_rr_deepep_combine = True
+        mock_need_recompute.return_value = False
+        mock = self._make_moe_layer_mock(
+            recompute_modules={"moe_combine": 4}, layer_number=5
+        )
+        MoELayer.rr_recompute_update(
+            mock, in_full_recompute=True, in_mlp_recompute=False
+        )
+        self.assertTrue(mock.use_rr_deepep_combine)
 
 
 if __name__ == "__main__":

@@ -20,11 +20,12 @@ import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
+
+from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 from paddlefleet_ops import is_deep_ep_available, is_hybrid_ep_available
 
 from .fp8_utils import FP8_ALIGN
 from .moe_utils import manual_backward
-from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():
@@ -560,7 +561,7 @@ class DeepEPCombineAsyncFunctor(PyLayer):
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 
 
-class DeepEPCombineAsyncRefinedRecompute(object):
+class DeepEPCombineAsyncRefinedRecompute:
     """RefinedRecompute class for deepep fused_combine with overlap."""
 
     def __init__(self):

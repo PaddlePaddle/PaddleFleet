@@ -22,13 +22,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
-import paddlefleet_ops
 from paddle import framework, nn
 from paddle.autograd import PyLayer
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
     ScatterOp,
 )
+
+import paddlefleet_ops
 
 if TYPE_CHECKING:
     from paddle.distributed.fleet.meta_parallel import LayerSpec
@@ -37,8 +38,8 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils
-from paddlefleet.transformer.utils import profile
 from paddlefleet.recompute_utils import need_recompute_in_first_n
+from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
 from .fused_a2a import configure_buffer
@@ -460,9 +461,7 @@ class MoELayer(nn.Layer):
                 if self.config.recompute_method != "first_n":
                     raise ValueError(
                         "recompute_modules dict mode for moe_combine RR requires "
-                        "recompute_method='first_n', got '{}'.".format(
-                            self.config.recompute_method
-                        )
+                        f"recompute_method='first_n', got '{self.config.recompute_method}'."
                     )
                 if not hasattr(self, "layer_number"):
                     raise ValueError(

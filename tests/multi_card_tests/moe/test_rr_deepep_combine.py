@@ -23,9 +23,9 @@ Run with: paddle.distributed.launch --gpus=0,1,2,3,4,5,6,7 test_rr_deepep_combin
 """
 
 import os
+import random
 import sys
 import unittest
-import random
 
 # Enable coverage in subprocess when WITH_COVERAGE is set
 if os.environ.get("WITH_COVERAGE") == "ON":
@@ -40,16 +40,16 @@ if os.environ.get("WITH_COVERAGE") == "ON":
 import numpy as np
 import paddle
 import paddle.nn.functional as F
+from paddle.distributed import fleet
 from paddle.distributed.fleet.utils import recompute
-import paddle.distributed.fleet as fleet
 
 try:
+    from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
     from paddlefleet.transformer.moe.fused_a2a import (
         DeepEPCombineAsyncRefinedRecompute,
         fused_combine,
         fused_dispatch,
     )
-    from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 except ImportError:
     print(
         "Failed to import from paddlefleet.transformer.moe.fused_a2a.",
