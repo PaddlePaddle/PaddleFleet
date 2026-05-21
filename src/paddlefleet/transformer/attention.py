@@ -204,6 +204,7 @@ class Attention(FleetLayer, ABC):
         attention_type: str,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
+        is_mtp_layer: bool = False,
     ):
         super().__init__(config=config)
 
@@ -211,6 +212,7 @@ class Attention(FleetLayer, ABC):
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
+        self.is_mtp_layer = is_mtp_layer
 
         # For normal attention without groups, num_key_value_heads == num_attention_heads,
         # so these two will be the same
@@ -633,6 +635,7 @@ class SelfAttention(Attention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
+        is_mtp_layer: bool = False,
     ):
         super().__init__(
             config=config,
@@ -642,6 +645,7 @@ class SelfAttention(Attention):
             attention_type="self",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
 
         self.gated_attention = getattr(self.config, "gated_attention", False)
@@ -867,6 +871,7 @@ class CrossAttention(Attention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
+        is_mtp_layer: bool = False,
     ):
         super().__init__(
             config=config,
@@ -876,6 +881,7 @@ class CrossAttention(Attention):
             attention_type="cross",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
 
         if self.config.num_key_value_heads != self.config.num_attention_heads:
