@@ -467,7 +467,7 @@ class ExpertsGroupGemmContiguousNode:
                         x,
                         expert_w1,
                         o1,
-                        self.tokens_per_expert_indices,
+                        self.m_indices,
                     )
                 else:
                     o1 = paddle.incubate.nn.functional.batched_gemm(
@@ -506,10 +506,10 @@ class ExpertsGroupGemmContiguousNode:
         self, x, expert_w1, num_expert, tokens_per_expert, scale=None
     ):
         self.tokens_per_expert = tokens_per_expert
-        if self.moe_deep_gemm:
-            self.tokens_per_expert_indices = self.gen_m_indices(
-                self.tokens_per_expert
-            )
+        if self.moe_deep_gemm or self.moe_grouped_gemm:
+            self.m_indices = self.gen_m_indices(self.tokens_per_expert)
+        else:
+            self.m_indices = None
         if not self.use_fp8_mlp:
             return self.fwd_gate_up_bf16(x, expert_w1)
         else:
@@ -524,9 +524,6 @@ class ExpertsGroupGemmContiguousNode:
         o1 = x * w1
         [m_sum, n] = [m_sum, k] * [num_groups, k, n] (m_sum = sum(tokens_per_expert))
         """
-
-        if self.moe_expert_fusion:
-            self.m_indices = self.gen_m_indices(tokens_per_expert)
         # concat w1, shape is [num_groups, n, k]
 
         if hasattr(self, "grouped_gemm_experts"):
@@ -639,7 +636,7 @@ class ExpertsGroupGemmContiguousNode:
                         o2,
                         expert_w2,
                         o3,
-                        self.tokens_per_expert_indices,
+                        self.m_indices,
                     )
                 else:
                     o3 = paddle.incubate.nn.functional.batched_gemm(
@@ -772,7 +769,7 @@ class ExpertsGroupGemmContiguousNode:
                         unzipped_grad,
                         expert_w2,
                         do2_s,
-                        self.tokens_per_expert_indices,
+                        self.m_indices,
                     )
                 else:
                     do2_s = paddle.incubate.nn.functional.batched_gemm(
@@ -957,7 +954,7 @@ class ExpertsGroupGemmContiguousNode:
                         do1,
                         expert_w1,
                         dx,
-                        self.tokens_per_expert_indices,
+                        self.m_indices,
                     )
                 else:
                     dx = paddle.incubate.nn.functional.batched_gemm(
@@ -1449,11 +1446,8 @@ class ExpertsGroupGemmContiguousNode:
             self.tokens_per_expert_tensor = paddle.to_tensor(
                 self.tokens_per_expert, dtype="int64"
             )
-            if self.moe_deep_gemm:
-                self.tokens_per_expert_indices = paddle.repeat_interleave(
-                    paddle.arange(len(self.tokens_per_expert)),
-                    paddle.to_tensor(self.tokens_per_expert),
-                ).cast("int32")
+            if self.moe_deep_gemm or self.moe_grouped_gemm:
+                self.m_indices = self.gen_m_indices(self.tokens_per_expert)
 
             tmp_out_grad = out_grad._slice(s_idx, e_idx)
             tmp_unzipped_probs = unzipped_probs._slice(s_idx, e_idx)
@@ -1475,11 +1469,8 @@ class ExpertsGroupGemmContiguousNode:
             self.o1 = o1
 
         self.tokens_per_expert = tokens_per_expert
-        if self.moe_deep_gemm:
-            self.tokens_per_expert_indices = paddle.repeat_interleave(
-                paddle.arange(len(self.tokens_per_expert)),
-                paddle.to_tensor(self.tokens_per_expert),
-            ).cast("int32")
+        if self.moe_deep_gemm or self.moe_grouped_gemm:
+            self.m_indices = self.gen_m_indices(self.tokens_per_expert)
         probs_grad = paddle.concat(probs_grad, axis=0)
         return out_grad, probs_grad
 
