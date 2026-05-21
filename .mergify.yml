@@ -1,0 +1,12 @@
+pull_request_rules:
+  - name: auto add to merge queue
+    conditions:
+      - check-success=Test
+      - check-success=Test-release
+      - approved-reviews-by>=1
+      - or:
+        - base=develop
+        - base~=^release/
+      - updated-at<24 hours ago
+    actions:
+      queue:

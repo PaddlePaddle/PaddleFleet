@@ -20,8 +20,9 @@ PADDLE_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}")/../" && pwd )"
 # If you want to add monitoring file modifications, please perform the. github/CODEOWNERS operation
 
 approval_line=`curl -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/PaddlePaddle/PaddleFleet/pulls/${PR_ID}/reviews?per_page=10000`
-git_files=`git diff --numstat upstream/$BRANCH| wc -l`
-git_count=`git diff --numstat upstream/$BRANCH| awk '{sum+=$1}END{print sum}'`
+MERGE_BASE=$(git merge-base HEAD upstream/$BRANCH)
+git_files=`git diff --numstat ${MERGE_BASE} | wc -l`
+git_count=`git diff --numstat ${MERGE_BASE} | awk '{sum+=$1}END{print sum}'`
 failed_num=1
 echo_list=()
 
@@ -60,7 +61,7 @@ CODESTYLE_FILES=(
     "pyproject.toml"
 )
 for FILE in "${CODESTYLE_FILES[@]}"; do
-    HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "^${FILE}" || true)
+    HAS_MODIFIED=$(git diff --name-only ${MERGE_BASE} | grep "^${FILE}" || true)
     if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
         echo_line="You must be approved by one of ${CODESTYLE_APPROVERS} for changes in ${FILE}.\n"
         APPROVER_LIST=(${CODESTYLE_APPROVERS})
@@ -76,7 +77,7 @@ MODELCONFIG_FILES=(
     "src/paddlefleet/transformer/transformer_config.py"
 )
 for FILE in "${MODELCONFIG_FILES[@]}"; do
-    HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "^${FILE}" || true)
+    HAS_MODIFIED=$(git diff --name-only ${MERGE_BASE} | grep "^${FILE}" || true)
     if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
         echo_line="You must be approved by two of ${MODELCONFIG_APPROVERS} for changes in ${FILE}.\n"
         APPROVER_LIST=(${MODELCONFIG_APPROVERS})
@@ -87,7 +88,7 @@ done
 
 CUSTOMOP_APPROVERS="risemeup1 From00"
 CUSTOMOP_DIR="packages/paddlefleet_ops/src/paddlefleet_ops/_extensions"
-HAS_MODIFIED_CUSTOMOP=$(git diff --name-only upstream/$BRANCH | grep "^${CUSTOMOP_DIR}/" || true)
+HAS_MODIFIED_CUSTOMOP=$(git diff --name-only ${MERGE_BASE} | grep "^${CUSTOMOP_DIR}/" || true)
 if [ "${HAS_MODIFIED_CUSTOMOP}" != "" ] && [ "${PR_ID}" != "" ]; then
     echo_line="You must be approved by one of ${CUSTOMOP_APPROVERS} for changes in ${CUSTOMOP_DIR}.\n"
     APPROVER_LIST=(${CUSTOMOP_APPROVERS})
@@ -97,7 +98,7 @@ fi
 
 
 CHECKREQ_APPROVERS="risemeup1 swgu98"
-files=$(git diff --name-status upstream/$BRANCH)
+files=$(git diff --name-status ${MERGE_BASE})
 while read -r status file; do
     if [[ "$status" == "A" ]] && [[ "$(basename "$file")" == "requirements.txt" ]]; then
         echo_line="You must be approved by one of ${CHECKREQ_APPROVERS} for newly added \"$file\".\n"
@@ -114,7 +115,7 @@ PACKAGING_PATTERNS=(
     "^pyproject\.toml$"
 )
 for PATTERN in "${PACKAGING_PATTERNS[@]}"; do
-    HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "${PATTERN}" || true)
+    HAS_MODIFIED=$(git diff --name-only ${MERGE_BASE} | grep "${PATTERN}" || true)
     if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
         echo_line="You must be approved by one of ${PACKAGING_APPROVERS} for changes in packaging-related files (${PATTERN}).\n"
         APPROVER_LIST=(${PACKAGING_APPROVERS})
