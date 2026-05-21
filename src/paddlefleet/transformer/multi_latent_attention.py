@@ -371,12 +371,15 @@ class MultiLatentAttention(Attention):
         # Query, Key, and Value
         # =====================
         # Get the query, key and value tensors based on the type of attention
+        # Also get q_compressed for DSA indexer (if enabled)
 
-        query, key, value, _, _ = self.get_query_key_value_tensors(
-            hidden_states,
-            key_value_states,
-            position_ids,
-            packed_seq_params,
+        query, key, value, q_compressed, kv_compressed = (
+            self.get_query_key_value_tensors(
+                hidden_states,
+                key_value_states,
+                position_ids,
+                packed_seq_params,
+            )
         )
 
         layer_num = getattr(self, "layer_number", -1)
@@ -418,6 +421,9 @@ class MultiLatentAttention(Attention):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention,
+                # DSA-specific parameters
+                x=hidden_states,
+                qr=q_compressed,
             )
         else:
             # Static batching attention kernel.
@@ -432,6 +438,9 @@ class MultiLatentAttention(Attention):
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention
                 and in_recompute,
+                # DSA-specific parameters
+                x=hidden_states,
+                qr=q_compressed,
             )
 
         _log(core_attn_out, "core_attn_out", layer_num)

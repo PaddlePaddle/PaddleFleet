@@ -16,7 +16,7 @@
 Unit tests for Latent MoE feature.
 
 Covers new code in:
-  - src/paddlefleet/transformer/transformer_config.py  (use_latent_moe, moe_latent_size)
+  - src/paddlefleet/transformer/transformer_config.py  (moe_latent_size)
   - src/paddlefleet/transformer/moe/moe_layer.py       (__init__, dispatch_preprocess,
                                                          aux_loss_compute, forward)
 
@@ -134,27 +134,19 @@ def _make_moe_layer(config, pg_collection=None):
 
 
 class TestLatentMoEConfig(unittest.TestCase):
-    """Verify that the new config fields exist and have the correct defaults."""
-
-    def test_use_latent_moe_defaults_false(self):
-        config = _make_moe_config()
-        self.assertFalse(config.use_latent_moe)
+    """Verify that the latent MoE config field has the correct defaults."""
 
     def test_moe_latent_size_defaults_none(self):
         config = _make_moe_config()
         self.assertIsNone(config.moe_latent_size)
 
-    def test_set_use_latent_moe_true(self):
-        config = _make_moe_config(use_latent_moe=True, moe_latent_size=32)
-        self.assertTrue(config.use_latent_moe)
+    def test_set_positive_moe_latent_size(self):
+        config = _make_moe_config(moe_latent_size=32)
         self.assertEqual(config.moe_latent_size, 32)
 
-    def test_use_latent_moe_true_without_latent_size(self):
-        """use_latent_moe=True with moe_latent_size=None is a valid config;
-        MoELayer should disable latent mode in this case."""
-        config = _make_moe_config(use_latent_moe=True, moe_latent_size=None)
-        self.assertTrue(config.use_latent_moe)
-        self.assertIsNone(config.moe_latent_size)
+    def test_set_non_positive_moe_latent_size(self):
+        config = _make_moe_config(moe_latent_size=0)
+        self.assertEqual(config.moe_latent_size, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -189,22 +181,36 @@ class TestLatentMoEInit(unittest.TestCase):
             return _make_moe_layer(config)
 
     def test_latent_moe_disabled_by_default(self):
-        """Default config → use_latent_moe=False, no projection layers."""
+        """Default config has no projection layers."""
         layer = self._run_init(_make_moe_config())
         self.assertFalse(layer.use_latent_moe)
         self.assertFalse(hasattr(layer, "fc1_latent_proj"))
         self.assertFalse(hasattr(layer, "fc2_latent_proj"))
 
     def test_latent_moe_disabled_when_size_is_none(self):
-        """use_latent_moe=True but moe_latent_size=None → disabled."""
-        config = _make_moe_config(use_latent_moe=True, moe_latent_size=None)
+        """moe_latent_size=None disables latent MoE."""
+        config = _make_moe_config(moe_latent_size=None)
+        layer = self._run_init(config)
+        self.assertFalse(layer.use_latent_moe)
+        self.assertFalse(hasattr(layer, "fc1_latent_proj"))
+
+    def test_latent_moe_disabled_when_size_is_zero(self):
+        """moe_latent_size=0 disables latent MoE."""
+        config = _make_moe_config(moe_latent_size=0)
+        layer = self._run_init(config)
+        self.assertFalse(layer.use_latent_moe)
+        self.assertFalse(hasattr(layer, "fc1_latent_proj"))
+
+    def test_latent_moe_disabled_when_size_is_negative(self):
+        """moe_latent_size<0 disables latent MoE."""
+        config = _make_moe_config(moe_latent_size=-1)
         layer = self._run_init(config)
         self.assertFalse(layer.use_latent_moe)
         self.assertFalse(hasattr(layer, "fc1_latent_proj"))
 
     def test_latent_moe_enabled(self):
-        """use_latent_moe=True + moe_latent_size=32 → layers created correctly."""
-        config = _make_moe_config(use_latent_moe=True, moe_latent_size=32)
+        """moe_latent_size=32 creates latent projection layers."""
+        config = _make_moe_config(moe_latent_size=32)
         layer = self._run_init(config)
         self.assertTrue(layer.use_latent_moe)
         # fc1: hidden_size → latent_size
@@ -222,7 +228,7 @@ class TestLatentMoEInit(unittest.TestCase):
 
     def test_latent_moe_sets_expert_hidden_size(self):
         """Enabling latent MoE must reduce the expert input hidden_size."""
-        config = _make_moe_config(use_latent_moe=True, moe_latent_size=32)
+        config = _make_moe_config(moe_latent_size=32)
         layer = self._run_init(config)
         # Experts must operate on latent_size, not hidden_size
         for expert in layer.experts:
@@ -244,7 +250,6 @@ class TestLatentMoEInit(unittest.TestCase):
     def test_latent_moe_shared_experts_use_original_hidden_size(self):
         """shared_experts must use original hidden_size, not moe_latent_size."""
         config = _make_moe_config(
-            use_latent_moe=True,
             moe_latent_size=32,
             n_shared_experts=2,
         )
@@ -269,7 +274,7 @@ class TestLatentMoEInit(unittest.TestCase):
 
 
 class TestDispatchPreprocessLatent(unittest.TestCase):
-    """Test the use_latent_moe branch in dispatch_preprocess."""
+    """Test the latent MoE branch in dispatch_preprocess."""
 
     def _make_stub(self, use_latent_moe, hidden_size=64, latent_size=32):
         """Build a minimal layer-like object for unbound method testing."""
@@ -337,7 +342,7 @@ class TestDispatchPreprocessLatent(unittest.TestCase):
 
 
 class TestAuxLossComputeLatent(unittest.TestCase):
-    """Test the use_latent_moe branch in aux_loss_compute."""
+    """Test the latent MoE branch in aux_loss_compute."""
 
     def _make_stub(self, use_latent_moe, hidden_size=64, latent_size=32):
         stub = MagicMock()
@@ -570,7 +575,7 @@ class TestForwardLatent(unittest.TestCase):
 
     def test_forward_with_latent_moe_applies_both_projections(self):
         """
-        With use_latent_moe=True:
+        With latent MoE enabled:
           - hidden_states must be projected to latent_size before expert computation
           - output must be projected back to hidden_size after expert computation
         """
@@ -599,7 +604,7 @@ class TestForwardLatent(unittest.TestCase):
 
     def test_forward_without_latent_moe_skips_projections(self):
         """
-        Without use_latent_moe, hidden_states must flow through at full hidden_size.
+        Without latent MoE, hidden_states must flow through at full hidden_size.
         """
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
@@ -751,7 +756,7 @@ class TestForwardLatent(unittest.TestCase):
 
 
 class TestCustomForwardLatent(unittest.TestCase):
-    """Test the use_latent_moe branches in custom_forward."""
+    """Test the latent MoE branches in custom_forward."""
 
     def _make_stub(self, use_latent_moe, hidden_size=64, latent_size=32):
         bs_seq = 8
@@ -804,7 +809,7 @@ class TestCustomForwardLatent(unittest.TestCase):
 
 
 class TestFusionMoeForwardLatent(unittest.TestCase):
-    """Test the use_latent_moe branches in fusion_moe_forward."""
+    """Test the latent MoE branches in fusion_moe_forward."""
 
     def _make_stub(self, use_latent_moe, hidden_size=64, latent_size=32):
         bs_seq = 8

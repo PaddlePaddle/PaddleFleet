@@ -119,6 +119,10 @@ tests:
   - test_case: [tests/multi_card_tests/ai_edited_test/models/test_ai_language_loss.py]
     products:
       - num_gpus: 2
+  # transformer: DSA sequence_parallel (TP=2)
+  - test_case: [tests/multi_card_tests/transformer/test_dsa_attention_sp.py]
+    products:
+      - num_gpus: 2
   # default fallback for remaining multi_card_tests
   - test_case: [tests/multi_card_tests/pipeline_parallel/*.py]
     products:

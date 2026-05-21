@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Script to download and install paddlefleet_ops wheel based on local git state.
-# Requires CUDA_VERSION environment variable (CUDA13.0 or CUDA12.9)
+# Automatically detects the current CUDA version. Only CUDA 13.0 and CUDA 12.9 are supported.
 
 set -e
 
@@ -38,31 +38,48 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Check CUDA_VERSION environment variable
-CUDA_VERSION="${CUDA_VERSION:-}"
-if [[ -z "$CUDA_VERSION" ]]; then
-    print_error "CUDA_VERSION environment variable is not set"
-    print_info "Usage: CUDA_VERSION=CUDA130 ci/install_ops_wheel.sh"
-    print_info "Supported values: CUDA130, CUDA129"
+# Detect CUDA version from the current environment
+detect_cuda_version() {
+    local cuda_ver=""
+    # Try nvcc first
+    if command -v nvcc &>/dev/null; then
+        cuda_ver=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')
+    # Fallback to nvidia-smi
+    elif command -v nvidia-smi &>/dev/null; then
+        cuda_ver=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+')
+    # Fallback to CUDA_HOME/CUDA_PATH
+    elif [[ -n "${CUDA_HOME:-}" ]]; then
+        cuda_ver=$("${CUDA_HOME}/bin/nvcc" --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+')
+    elif [[ -n "${CUDA_PATH:-}" ]]; then
+        cuda_ver=$("${CUDA_PATH}/bin/nvcc" --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+')
+    fi
+    echo "$cuda_ver"
+}
+
+DETECTED_CUDA_VERSION=$(detect_cuda_version)
+if [[ -z "$DETECTED_CUDA_VERSION" ]]; then
+    print_error "Cannot detect CUDA version. Please ensure CUDA toolkit is installed (nvcc or nvidia-smi available)."
     exit 1
 fi
 
-# Map CUDA_VERSION to bos_CUDA suffix
-case "$CUDA_VERSION" in
-    "CUDA130")
+print_info "Detected CUDA version: $DETECTED_CUDA_VERSION"
+
+# Check if the detected CUDA version is supported
+case "$DETECTED_CUDA_VERSION" in
+    "13.0")
         CUDA_SUFFIX="cu130"
         ;;
-    "CUDA129")
+    "12.9")
         CUDA_SUFFIX="cu129"
         ;;
     *)
-        print_error "Unsupported CUDA_VERSION: $CUDA_VERSION"
-        print_info "Supported values: CUDA130, CUDA129"
+        print_error "Unsupported CUDA version: $DETECTED_CUDA_VERSION"
+        print_error "Only CUDA 13.0 and CUDA 12.9 are supported."
         exit 1
         ;;
 esac
 
-print_info "Using CUDA version: $CUDA_VERSION (suffix: $CUDA_SUFFIX)"
+print_info "Using CUDA version: $DETECTED_CUDA_VERSION (suffix: $CUDA_SUFFIX)"
 
 # Get workspace root (assuming this script is run from the repository root)
 WORKSPACE_ROOT="$(git rev-parse --show-toplevel)"
