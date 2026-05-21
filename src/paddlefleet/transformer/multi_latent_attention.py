@@ -505,7 +505,7 @@ class MultiLatentAttention(Attention):
                 kv_compressed=kv_compressed,
                 k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
-                wv_b=wv_b,
+                v_b_proj_weight=wv_b,
             )
         else:
             # Static batching attention kernel.
@@ -527,7 +527,7 @@ class MultiLatentAttention(Attention):
                 kv_compressed=kv_compressed,
                 k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
-                wv_b=wv_b,
+                v_b_proj_weight=wv_b,
             )
 
         _log(core_attn_out, "core_attn_out", layer_num)
