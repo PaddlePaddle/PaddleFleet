@@ -41,6 +41,37 @@ _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 # Lazy-loaded EC FusedMoETopk Triton kernel for bit-exact alignment
 _FusedMoETopk = None
 
+# MiniMax alignment side-channel: FusedGateDetachMatmul.backward stores the
+# raw fp32 router gate wgrad here so the PaddleFormers optimizer wrapper can
+# replay the gate AdamW step in fp32 before bf16 copyback.  The runtime
+# workspace patch used an equivalent module-level dict; source owns it now.
+_MINIMAX_ROUTER_GATE_FP32_WGRAD = {}
+
+
+def _minimax_env_flag(name, default=True):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.lower() not in {"0", "false", "off", "no"}
+
+
+def _minimax_router_source_alignment_enabled():
+    return _minimax_env_flag("MINIMAX_PADDLE_ROUTER_SOURCE_ALIGNMENT", True)
+
+
+def _minimax_router_gate_wgrad_alignment_enabled():
+    return _minimax_env_flag("MINIMAX_PADDLE_ROUTER_GATE_FP32_WGRAD", True)
+
+
+def _minimax_peek_router_gate_fp32_wgrad():
+    if not _MINIMAX_ROUTER_GATE_FP32_WGRAD:
+        return None
+    return next(iter(_MINIMAX_ROUTER_GATE_FP32_WGRAD.values()))
+
+
+def _minimax_clear_router_gate_fp32_wgrad():
+    _MINIMAX_ROUTER_GATE_FP32_WGRAD.clear()
+
 
 def _get_fused_moe_topk():
     global _FusedMoETopk
@@ -86,6 +117,29 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     def backward(ctx, y_grad):
         x, w = ctx.saved_tensor()
         assert ctx.dtype == y_grad.dtype, "dtype not match"
+
+        if _minimax_router_gate_wgrad_alignment_enabled():
+            x_fp32 = x.cast(ctx.dtype)
+            w_fp32 = w.cast(ctx.dtype)
+            if not x.stop_gradient:
+                # Forward is y = x @ w.  Use explicit NN-GEMM for dx to match
+                # Torch's router gate backward kernel choice.
+                x_g = paddle.matmul(y_grad, w_fp32.T.contiguous())
+                x_grad = x_g.cast(x.dtype)
+            else:
+                x_grad = None
+
+            if not w.stop_gradient:
+                # Store raw fp32 wgrad [E, H] for source-owned optimizer replay.
+                wgrad_for_param = paddle.matmul(y_grad.cast("float32").T, x_fp32)
+                _MINIMAX_ROUTER_GATE_FP32_WGRAD[w.data_ptr()] = wgrad_for_param
+                # Autograd bookkeeping still receives a dtype-compatible grad
+                # for the saved transposed weight tensor [H, E].
+                w_grad = paddle.transpose(wgrad_for_param, [1, 0]).cast(w.dtype)
+            else:
+                w_grad = None
+            return x_grad, w_grad
+
         x_g, w_g = matmul_grad(
             x.cast(ctx.dtype),
             w.cast(ctx.dtype),
@@ -627,7 +681,118 @@ class TopKRouter(StandardMoERouter):
     def set_layer_number(self, layer_number):
         self._layer_number = layer_number
 
+    def _minimax_unified_forward(self, input, input_ids=None):
+        """MiniMax Paddle↔Megatron alignment router path.
+
+        This source-owned path mirrors Megatron's sparse-first routing op tree
+        for the current MiniMax config and returns the same tuple contract as
+        the native TopKRouter.forward.  It intentionally deposits tracked
+        tensors on the router instance for workspace probes; those attributes do
+        not affect training semantics.
+        """
+        if len(input.shape) == 3:
+            _, _, d_model = input.shape
+            input = input.reshape([-1, d_model])
+        elif len(input.shape) == 2:
+            raise ValueError(
+                "The input tensor must have 3 dimensions "
+                "[batch_size, sequence_length, hidden_size], "
+                f"got shape {input.shape}"
+            )
+
+        with paddle.amp.auto_cast(False):
+            # Torch stores the router gate model weight in bf16 after optimizer
+            # copyback and casts to fp32 for matmul.  Paddle keeps this param in
+            # fp32, so simulate bf16 copyback before the fp32 matmul.
+            weight_bf16_sim = self.weight.cast("bfloat16").cast(self.weight.dtype)
+            logits = gate_detach_matmul(
+                input,
+                weight_bf16_sim.T,
+                True,
+                self.config.moe_router_force_load_balancing,
+            )
+
+        if logits.dtype != paddle.float32:
+            logits = logits.cast("float32")
+
+        expert_bias = None
+        if self.topk_method == "noaux_tc":
+            expert_bias = getattr(self, "e_score_correction_bias", None)
+
+        topk = int(self.num_experts_per_tok)
+        with paddle.amp.auto_cast(False):
+            scores_full = self.gate_score_func(logits)
+            if expert_bias is not None:
+                bias_detached = expert_bias.detach()
+                if bias_detached.dtype != paddle.float32:
+                    bias_detached = bias_detached.cast("float32")
+                scores_for_choice = scores_full + bias_detached.unsqueeze(0)
+                _, top_idx = paddle.topk(scores_for_choice, k=topk, axis=-1, sorted=True)
+                scores = paddle.take_along_axis(scores_full, top_idx, axis=1)
+            else:
+                scores, top_idx = paddle.topk(scores_full, k=topk, axis=-1, sorted=True)
+
+            if self.norm_topk_prob and topk > 1:
+                denom = scores.sum(axis=-1, keepdim=True) + 1e-20
+                top_gate = scores / denom
+            else:
+                top_gate = scores
+
+            if abs(float(self.routed_scaling_factor) - 1.0) > 1e-6:
+                top_gate = top_gate * float(self.routed_scaling_factor)
+
+            probs_preorder = top_gate
+            top_idx_preorder = top_idx
+
+            if topk > 1:
+                reorder = paddle.argsort(top_gate, axis=-1, descending=True)
+                top_idx = paddle.take_along_axis(top_idx, reorder, axis=1)
+                top_gate = paddle.take_along_axis(top_gate, reorder, axis=1)
+
+            probs = paddle.zeros_like(logits).put_along_axis(top_idx, top_gate, axis=1)
+            mask = paddle.zeros_like(logits).put_along_axis(
+                top_idx, paddle.ones_like(top_gate), axis=1
+            )
+
+        if self.topk_method == "noaux_tc":
+            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
+            with paddle.no_grad():
+                self.expert_usage += exp_counts
+
+        # Probe-only side channel consumed by workspace observers.
+        self._minimax_router_side_channel = {
+            "logits": logits,
+            "scores_full": scores_full,
+            "probs_preorder": probs_preorder,
+            "top_idx_preorder": top_idx_preorder,
+        }
+
+        return (
+            None,
+            top_gate,
+            top_idx,
+            probs,
+            mask,
+            None,
+            None,
+            None,
+        )
+
     def forward(self, input, input_ids=None):
+        eligible = (
+            _minimax_router_source_alignment_enabled()
+            and self.scoring_func == "sigmoid"
+            and bool(self.norm_topk_prob)
+            and self.topk_method in {"greedy", "noaux_tc"}
+            and int(self.n_group or 1) == 1
+            and int(self.topk_group if self.topk_group is not None else 1) in {0, 1}
+            and float(getattr(self.config, "router_aux_loss_coef", 0.0) or 0.0) == 0.0
+            and float(getattr(self.config, "router_z_loss_coef", 0.0) or 0.0) == 0.0
+            and not self.routed_scaling_factor_learnable
+        )
+        if eligible:
+            return self._minimax_unified_forward(input, input_ids=input_ids)
+
         if len(input.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape
