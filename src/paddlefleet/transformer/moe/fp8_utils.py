@@ -506,7 +506,7 @@ class ExpertsGroupGemmContiguousNode:
         self, x, expert_w1, num_expert, tokens_per_expert, scale=None
     ):
         self.tokens_per_expert = tokens_per_expert
-        if self.moe_deep_gemm or self.moe_grouped_gemm:
+        if self.moe_deep_gemm or self.moe_expert_fusion:
             self.m_indices = self.gen_m_indices(self.tokens_per_expert)
         else:
             self.m_indices = None
@@ -1446,7 +1446,7 @@ class ExpertsGroupGemmContiguousNode:
             self.tokens_per_expert_tensor = paddle.to_tensor(
                 self.tokens_per_expert, dtype="int64"
             )
-            if self.moe_deep_gemm or self.moe_grouped_gemm:
+            if self.moe_deep_gemm or self.moe_expert_fusion:
                 self.m_indices = self.gen_m_indices(self.tokens_per_expert)
 
             tmp_out_grad = out_grad._slice(s_idx, e_idx)
@@ -1469,7 +1469,7 @@ class ExpertsGroupGemmContiguousNode:
             self.o1 = o1
 
         self.tokens_per_expert = tokens_per_expert
-        if self.moe_deep_gemm or self.moe_grouped_gemm:
+        if self.moe_deep_gemm or self.moe_expert_fusion:
             self.m_indices = self.gen_m_indices(self.tokens_per_expert)
         probs_grad = paddle.concat(probs_grad, axis=0)
         return out_grad, probs_grad
