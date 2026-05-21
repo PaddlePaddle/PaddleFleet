@@ -1,11 +1,11 @@
-name: Check GPFS Keyword
+name: Check Forbidden Keyword
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
-  check-gpfs:
-    name: Check GPFS keyword
+  check-forbidden-keyword:
+    name: Check Forbidden keyword
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -13,23 +13,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check for GPFS keyword in PR
+      - name: Check for keyword keyword in PR
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.base_ref }}
+          FORBIDDEN_KEYWORD: ${{ vars.FORBIDDEN_KEYWORD }}
         run: |
           FOUND=0
 
           # Check PR title
-          if echo "${PR_TITLE}" | grep -qi "gpfs"; then
-            echo "ERROR: PR title contains forbidden keyword 'gpfs': ${PR_TITLE}"
+          if echo "${PR_TITLE}" | grep -qi "${FORBIDDEN_KEYWORD}"; then
+            echo "ERROR: PR title contains forbidden keyword '${FORBIDDEN_KEYWORD}': ${PR_TITLE}"
             FOUND=1
           fi
 
           # Check PR body
-          if echo "${PR_BODY}" | grep -qi "gpfs"; then
-            echo "ERROR: PR description contains forbidden keyword 'gpfs'"
+          if echo "${PR_BODY}" | grep -qi "${FORBIDDEN_KEYWORD}"; then
+            echo "ERROR: PR description contains forbidden keyword '${FORBIDDEN_KEYWORD}'"
             FOUND=1
           fi
 
@@ -39,16 +40,16 @@ jobs:
           CHANGED_FILES=$(git diff --name-only ${MERGE_BASE})
 
           while IFS= read -r file; do
-            if [ -f "$file" ] && grep -qi "gpfs" "$file"; then
-              echo "ERROR: File '${file}' contains forbidden keyword 'gpfs'"
+            if [ -f "$file" ] && grep -qi "${FORBIDDEN_KEYWORD}" "$file"; then
+              echo "ERROR: File '${file}' contains forbidden keyword '${FORBIDDEN_KEYWORD}'"
               FOUND=1
             fi
           done <<< "${CHANGED_FILES}"
 
           if [ "${FOUND}" == "1" ]; then
             echo "--------"
-            echo "PR contains forbidden keyword 'gpfs' (case-insensitive)."
-            echo "Please remove all occurrences of 'gpfs'/'GPFS'/'Gpfs' etc. before merging."
+            echo "PR contains forbidden keyword (case-insensitive)."
+            echo "Please remove all occurrences before merging."
             exit 1
           fi
 
