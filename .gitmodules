@@ -9,7 +9,7 @@
 	url = https://github.com/PFCCLab/quack.git
 [submodule "third_party/sonic-moe"]
 	path = packages/paddlefleet_ops/third_party/sonic-moe
-	url = https://github.com/A-nnonymous/supersonic-moe.git
+	url = https://github.com/PFCCLab/supersonic-moe.git
 [submodule "third_party/flash-attention"]
 	path = packages/paddlefleet_ops/third_party/flash-attention
 	url = https://github.com/PaddlePaddle/flash-attention.git
