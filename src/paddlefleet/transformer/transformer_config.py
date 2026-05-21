@@ -565,6 +565,28 @@ class TransformerConfig(ModelParallelConfig):
     """ Indicates whether this is a hybrid model. """
 
     ####################
+    # Hyper-Connection (mHC) Configuration
+    ####################
+    enable_hyper_connections: bool = False
+    """Enable mHC (Manifold-Constrained Hyper-Connections) residual connections."""
+
+    num_residual_streams: int = 4
+    """Number of residual streams (n in mHC paper)."""
+
+    mhc_sinkhorn_iterations: int = 20
+    """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
+
+    mhc_init_gating_factor: float = 0.01
+    """Initial value of Gating Factor (alpha in paper)."""
+
+    mhc_recompute_layer_num: int | None = None
+    """Number of layers per mHC recompute block.
+
+    When set, every `mhc_recompute_layer_num` layers form a recompute block.
+    If None, all layers in the transformer block share a single recompute block.
+    Must be a positive integer when set."""
+
+    ####################
     # miscellaneous
     ####################
     clone_scatter_output_in_embedding: bool = True
@@ -896,3 +918,19 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
+
+        # Hyper-connection (mHC) validation
+        if self.enable_hyper_connections:
+            if self.num_nextn_predict_layers > 0 or self.mtp_num_layers > 0:
+                raise ValueError(
+                    "enable_hyper_connections is not compatible with "
+                    "Multi-Token Prediction (MTP). Please disable MTP when "
+                    "using hyper connections."
+                )
+            if self.mhc_recompute_layer_num is not None and (
+                not isinstance(self.mhc_recompute_layer_num, int)
+                or self.mhc_recompute_layer_num < 1
+            ):
+                raise ValueError(
+                    "mhc_recompute_layer_num must be a positive integer."
+                )
