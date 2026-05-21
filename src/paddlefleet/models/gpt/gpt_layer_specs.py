@@ -545,7 +545,7 @@ def get_gpt_mtp_layers_spec_for_backend(
             transformer_layer_spec = get_gpt_layer_local_spec(
                 config=config,
                 num_experts=None,
-                moe_grouped_gemm=False,
+                moe_expert_fusion=False,
                 use_qk_norm=config.use_qk_norm,
                 multi_latent_attention=config.multi_latent_attention,
                 normalization=config.normalization,
