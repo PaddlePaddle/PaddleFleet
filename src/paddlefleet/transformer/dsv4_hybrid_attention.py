@@ -312,6 +312,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             attention_type="self",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
 
         self.q_lora_rank = config.q_lora_rank
