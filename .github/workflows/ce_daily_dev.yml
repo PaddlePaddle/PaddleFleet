@@ -181,6 +181,8 @@ jobs:
           export COVERAGE_RCFILE=/paddle/PaddleFleet/ci/.coveragerc
           export WITH_COVERAGE=ON
           bash ci/single_card_test.sh
+
+          sleep 24h
           '
 
       - name: Single card sonic moe test
