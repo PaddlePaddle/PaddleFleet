@@ -741,33 +741,33 @@ class MlpNode:
         expert_fusion=True 时 FP8 权重以 stacked 形式存在 experts[0] 上（所有专家堆叠），
         回退后每个专家需要独立的权重切片。此上下文管理器临时设置并在退出时恢复/清理。
         """
+        expert_id_offset = self.moe_rank * self.num_experts_per_device
+
+        def has_fp8_weight(expert):
+            weight = expert.up_gate_proj.weight
+            return getattr(weight, "fp8_weight_stacked", None) is not None
+
         if not (
-            len(self.experts) > 1
-            and getattr(
-                self.experts[0].up_gate_proj.weight, "fp8_weight_stacked", None
-            )
-            is not None
-            and getattr(
-                self.experts[1].up_gate_proj.weight, "fp8_weight_stacked", None
-            )
-            is None
+            self.num_experts_per_device > 1
+            and has_fp8_weight(self.experts[expert_id_offset])
+            and not has_fp8_weight(self.experts[expert_id_offset + 1])
         ):
             yield
             return
 
-        w1 = self.experts[0].up_gate_proj.weight
-        w2 = self.experts[0].down_proj.weight
+        w1 = self.experts[expert_id_offset].up_gate_proj.weight
+        w2 = self.experts[expert_id_offset].down_proj.weight
         w1_weight, w1_scale = w1.fp8_weight_stacked, w1.fp8_scale_stacked
         w2_weight, w2_scale = w2.fp8_weight_stacked, w2.fp8_scale_stacked
 
         def slice_expert(t):
-            chunk_size = t.shape[0] // len(self.experts)
+            chunk_size = t.shape[0] // self.num_experts_per_device
             return t._slice(
                 chunk_size * expert_id, chunk_size * (expert_id + 1)
             )
 
-        cur_w1 = self.experts[expert_id].up_gate_proj.weight
-        cur_w2 = self.experts[expert_id].down_proj.weight
+        cur_w1 = self.experts[expert_id_offset + expert_id].up_gate_proj.weight
+        cur_w2 = self.experts[expert_id_offset + expert_id].down_proj.weight
         cur_w1.fp8_weight_stacked = slice_expert(w1_weight)
         cur_w1.fp8_scale_stacked = slice_expert(w1_scale)
         cur_w1.fp8_weight_stacked_transpose = None

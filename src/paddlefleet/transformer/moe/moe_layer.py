@@ -225,6 +225,9 @@ class MoELayer(nn.Layer):
                 self.config.hidden_size,
                 bias_attr=self.config.use_bias,
             )
+            # Override default XavierUniform with config init methods
+            self.config.init_method(self.fc1_latent_proj.weight)
+            self.config.output_layer_init_method(self.fc2_latent_proj.weight)
             # Update expert config to use latent size
             routed_expert_config.hidden_size = self.config.moe_latent_size
         self.moe_group = pg_collection.ep
