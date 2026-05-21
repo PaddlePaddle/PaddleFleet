@@ -3,10 +3,9 @@ pull_request_rules:
     conditions:
       - check-success=Test
       - check-success=Test-release
-      - approved-reviews-by>=1
       - or:
           - base=develop
           - base~=^release/
-      - updated-at<24 hours ago
+      - updated-at<48 hours ago
     actions:
       queue:
