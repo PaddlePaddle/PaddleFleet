@@ -1,1 +1,550 @@
-IyBDb3B5cmlnaHQgKGMpIDIwMjYgUGFkZGxlUGFkZGxlIEF1dGhvcnMuIEFsbCBSaWdodHMgUmVzZXJ2ZWQuCiMKIyBMaWNlbnNlZCB1bmRlciB0aGUgQXBhY2hlIExpY2Vuc2UsIFZlcnNpb24gMi4wICh0aGUgIkxpY2Vuc2UiKTsKIyB5b3UgbWF5IG5vdCB1c2UgdGhpcyBmaWxlIGV4Y2VwdCBpbiBjb21wbGlhbmNlIHdpdGggdGhlIExpY2Vuc2UuCiMgWW91IG1heSBvYnRhaW4gYSBjb3B5IG9mIHRoZSBMaWNlbnNlIGF0CiMKIyAgICAgaHR0cDovL3d3dy5hcGFjaGUub3JnL2xpY2Vuc2VzL0xJQ0VOU0UtMi4wCiMKIyBVbmxlc3MgcmVxdWlyZWQgYnkgYXBwbGljYWJsZSBsYXcgb3IgYWdyZWVkIHRvIGluIHdyaXRpbmcsIHNvZnR3YXJlCiMgZGlzdHJpYnV0ZWQgdW5kZXIgdGhlIExpY2Vuc2UgaXMgZGlzdHJpYnV0ZWQgb24gYW4gIkFTIElTIiBCQVNJUywKIyBXSVRIT1VUIFdBUlJBTlRJRVMgT1IgQ09ORElUSU9OUyBPRiBBTlkgS0lORCwgZWl0aGVyIGV4cHJlc3Mgb3IgaW1wbGllZC4KIyBTZWUgdGhlIExpY2Vuc2UgZm9yIHRoZSBzcGVjaWZpYyBsYW5ndWFnZSBnb3Zlcm5pbmcgcGVybWlzc2lvbnMgYW5kCiMgbGltaXRhdGlvbnMgdW5kZXIgdGhlIExpY2Vuc2UuCmltcG9ydCBvcwppbXBvcnQgc3lzCmltcG9ydCB1bml0dGVzdAoKUkVQT19ST09UID0gb3MucGF0aC5kaXJuYW1lKAogICAgb3MucGF0aC5kaXJuYW1lKAogICAgICAgIG9zLnBhdGguZGlybmFtZSgKICAgICAgICAgICAgb3MucGF0aC5kaXJuYW1lKG9zLnBhdGguZGlybmFtZShvcy5wYXRoLmFic3BhdGgoX19maWxlX18pKSkKICAgICAgICApCiAgICApCikKc3lzLnBhdGguaW5zZXJ0KDAsIG9zLnBhdGguam9pbihSRVBPX1JPT1QsICJzcmMiKSkKCmltcG9ydCBwYWRkbGUKCmZyb20gcGFkZGxlZmxlZXQucGlwZWxpbmVfcGFyYWxsZWwucHBfdXRpbHMgaW1wb3J0ICgKICAgIGZvdXJfZGlyZWN0aW9uc19wMnBfY29tbXVuaWNhdGlvbiBhcyBmZCwKKQpmcm9tIHBhZGRsZWZsZWV0LnBpcGVsaW5lX3BhcmFsbGVsLnBwX3V0aWxzLnV0aWxzIGltcG9ydCBwYWRkbGVfMl9udW1iZXIKCgpjbGFzcyBSZXF1ZXN0OgogICAgZGVmIF9faW5pdF9fKHNlbGYsIGNhbGxzLCBuYW1lKToKICAgICAgICBzZWxmLmNhbGxzID0gY2FsbHMKICAgICAgICBzZWxmLm5hbWUgPSBuYW1lCiAgICAgICAgc2VsZi53YWl0X2NhbGxlZCA9IEZhbHNlCgogICAgZGVmIHdhaXQoc2VsZik6CiAgICAgICAgc2VsZi53YWl0X2NhbGxlZCA9IFRydWUKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoInJlcXVlc3Rfd2FpdCIsIHNlbGYubmFtZSkpCgoKY2xhc3MgUHJvY2Vzc0dyb3VwOgogICAgZGVmIF9faW5pdF9fKHNlbGYsIGNhbGxzKToKICAgICAgICBzZWxmLmNhbGxzID0gY2FsbHMKCiAgICBkZWYgc2VuZF9wYXJ0aWFsX29uX2NhbGNfc3RyZWFtKHNlbGYsIHRlbnNvciwgZHN0LCBucmFua3MsIHJhbmtfaWQpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgic2VuZF9wYXJ0aWFsX29uX2NhbGNfc3RyZWFtIiwgZHN0LCBucmFua3MsIHJhbmtfaWQpKQogICAgICAgIHJldHVybiBSZXF1ZXN0KHNlbGYuY2FsbHMsICJzZW5kX3BhcnRpYWxfb25fY2FsY19zdHJlYW0iKQoKICAgIGRlZiBzZW5kX3BhcnRpYWwoc2VsZiwgdGVuc29yLCBkc3QsIG5yYW5rcywgcmFua19pZCk6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJzZW5kX3BhcnRpYWwiLCBkc3QsIG5yYW5rcywgcmFua19pZCkpCiAgICAgICAgcmV0dXJuIFJlcXVlc3Qoc2VsZi5jYWxscywgInNlbmRfcGFydGlhbCIpCgogICAgZGVmIHJlY3ZfcGFydGlhbF9vbl9jYWxjX3N0cmVhbShzZWxmLCB0ZW5zb3IsIHNyYywgbnJhbmtzLCByYW5rX2lkKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoInJlY3ZfcGFydGlhbF9vbl9jYWxjX3N0cmVhbSIsIHNyYywgbnJhbmtzLCByYW5rX2lkKSkKICAgICAgICByZXR1cm4gUmVxdWVzdChzZWxmLmNhbGxzLCAicmVjdl9wYXJ0aWFsX29uX2NhbGNfc3RyZWFtIikKCiAgICBkZWYgcmVjdl9wYXJ0aWFsKHNlbGYsIHRlbnNvciwgc3JjLCBucmFua3MsIHJhbmtfaWQpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgicmVjdl9wYXJ0aWFsIiwgc3JjLCBucmFua3MsIHJhbmtfaWQpKQogICAgICAgIHJldHVybiBSZXF1ZXN0KHNlbGYuY2FsbHMsICJyZWN2X3BhcnRpYWwiKQoKICAgIGRlZiBhbGxfZ2F0aGVyX3BhcnRpYWxfb25fY2FsY19zdHJlYW0oc2VsZiwgb3V0LCB0ZW5zb3IsIG5yYW5rcywgcmFua19pZCk6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJhbGxfZ2F0aGVyX3BhcnRpYWxfb25fY2FsY19zdHJlYW0iLCBucmFua3MsIHJhbmtfaWQpKQogICAgICAgIHJldHVybiBSZXF1ZXN0KHNlbGYuY2FsbHMsICJhbGxfZ2F0aGVyX3BhcnRpYWxfb25fY2FsY19zdHJlYW0iKQoKICAgIGRlZiBhbGxfZ2F0aGVyX3BhcnRpYWwoc2VsZiwgb3V0LCB0ZW5zb3IsIG5yYW5rcywgcmFua19pZCk6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJhbGxfZ2F0aGVyX3BhcnRpYWwiLCBucmFua3MsIHJhbmtfaWQpKQogICAgICAgIHJldHVybiBSZXF1ZXN0KHNlbGYuY2FsbHMsICJhbGxfZ2F0aGVyX3BhcnRpYWwiKQoKCmNsYXNzIEdyb3VwOgogICAgaWQgPSAxMQogICAgcmFuayA9IDAKICAgIHJhbmtzID0gWzAsIDFdCiAgICBiYWNrZW5kID0gIm5jY2wiCgogICAgZGVmIF9faW5pdF9fKHNlbGYsIGNhbGxzLCBtZW1iZXI9VHJ1ZSk6CiAgICAgICAgc2VsZi5jYWxscyA9IGNhbGxzCiAgICAgICAgc2VsZi5fbWVtYmVyID0gbWVtYmVyCiAgICAgICAgc2VsZi5wcm9jZXNzX2dyb3VwID0gUHJvY2Vzc0dyb3VwKGNhbGxzKQoKICAgIGRlZiBpc19tZW1iZXIoc2VsZik6CiAgICAgICAgcmV0dXJuIHNlbGYuX21lbWJlcgoKICAgIGRlZiBnZXRfZ3JvdXBfcmFuayhzZWxmLCByYW5rKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoImdldF9ncm91cF9yYW5rIiwgcmFuaykpCiAgICAgICAgcmV0dXJuIHJhbmsgKyAyMDAKCgpjbGFzcyBIQ0c6CiAgICBkZWYgX19pbml0X18oc2VsZiwgY2FsbHMpOgogICAgICAgIHNlbGYuY2FsbHMgPSBjYWxscwogICAgICAgIHNlbGYuc2VuZF9uZXh0X2dyb3VwID0gR3JvdXAoY2FsbHMpCiAgICAgICAgc2VsZi5zZW5kX3ByZXZfZ3JvdXAgPSBHcm91cChjYWxscykKICAgICAgICBzZWxmLnJlY3ZfbmV4dF9ncm91cCA9IEdyb3VwKGNhbGxzKQogICAgICAgIHNlbGYucmVjdl9wcmV2X2dyb3VwID0gR3JvdXAoY2FsbHMpCiAgICAgICAgc2VsZi5waXBlX2dyb3VwID0gR3JvdXAoY2FsbHMpCiAgICAgICAgc2VsZi5tb2RlbF9ncm91cCA9IEdyb3VwKGNhbGxzKQoKICAgIGRlZiBnZXRfcDJwX2dyb3VwcyhzZWxmKToKICAgICAgICByZXR1cm4gKAogICAgICAgICAgICBzZWxmLnNlbmRfbmV4dF9ncm91cCwKICAgICAgICAgICAgc2VsZi5zZW5kX3ByZXZfZ3JvdXAsCiAgICAgICAgICAgIHNlbGYucmVjdl9uZXh0X2dyb3VwLAogICAgICAgICAgICBzZWxmLnJlY3ZfcHJldl9ncm91cCwKICAgICAgICApCgogICAgZGVmIGdldF9waXBlX3BhcmFsbGVsX2dyb3VwKHNlbGYpOgogICAgICAgIHJldHVybiBzZWxmLnBpcGVfZ3JvdXAKCiAgICBkZWYgZ2V0X21vZGVsX3BhcmFsbGVsX2dyb3VwKHNlbGYpOgogICAgICAgIHJldHVybiBzZWxmLm1vZGVsX2dyb3VwCgogICAgZGVmIGdldF9tb2RlbF9wYXJhbGxlbF93b3JsZF9zaXplKHNlbGYpOgogICAgICAgIHJldHVybiAyCgogICAgZGVmIGdldF9tb2RlbF9wYXJhbGxlbF9yYW5rKHNlbGYpOgogICAgICAgIHJldHVybiAxCgogICAgZGVmIF9nZXRfcDJwX3ByZXZfcmFuayhzZWxmKToKICAgICAgICByZXR1cm4gNAoKICAgIGRlZiBfZ2V0X3AycF9uZXh0X3Jhbmsoc2VsZik6CiAgICAgICAgcmV0dXJuIDUKCgpjbGFzcyBUaW1lckl0ZW06CiAgICBkZWYgX19pbml0X18oc2VsZiwgY2FsbHMsIG5hbWUpOgogICAgICAgIHNlbGYuY2FsbHMgPSBjYWxscwogICAgICAgIHNlbGYubmFtZSA9IG5hbWUKCiAgICBkZWYgc3RhcnQoc2VsZik6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJ0aW1lcl9zdGFydCIsIHNlbGYubmFtZSkpCgogICAgZGVmIHN0b3Aoc2VsZik6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJ0aW1lcl9zdG9wIiwgc2VsZi5uYW1lKSkKCgpjbGFzcyBUaW1lcnM6CiAgICBkZWYgX19pbml0X18oc2VsZiwgY2FsbHMpOgogICAgICAgIHNlbGYuY2FsbHMgPSBjYWxscwoKICAgIGRlZiBfX2NhbGxfXyhzZWxmLCBuYW1lKToKICAgICAgICByZXR1cm4gVGltZXJJdGVtKHNlbGYuY2FsbHMsIG5hbWUpCgoKY2xhc3MgRm91ckRpcmVjdGlvbnNTdGF0ZVRlc3QodW5pdHRlc3QuVGVzdENhc2UpOgogICAgZGVmIHNldFVwKHNlbGYpOgogICAgICAgIHNlbGYuY2FsbHMgPSBbXQogICAgICAgIHNlbGYuaGNnID0gSENHKHNlbGYuY2FsbHMpCiAgICAgICAgc2VsZi5vbGRfaGNnID0gZmQuX2hjZwogICAgICAgIHNlbGYub2xkX2VuYWJsZSA9IGZkLl9lbmFibGVfcGFydGlhbF9zZW5kX3JlY3YKICAgICAgICBzZWxmLm9sZF9zeW5jX3NlbmQgPSBmZC5fc3luY19zZW5kCiAgICAgICAgc2VsZi5vbGRfdGltZXJzID0gZmQuX3RpbWVycwogICAgICAgIHNlbGYub2xkX3NlbmQgPSBwYWRkbGUuZGlzdHJpYnV0ZWQuc2VuZAogICAgICAgIHNlbGYub2xkX3JlY3YgPSBwYWRkbGUuZGlzdHJpYnV0ZWQucmVjdgogICAgICAgIHNlbGYub2xkX2lzZW5kID0gcGFkZGxlLmRpc3RyaWJ1dGVkLmlzZW5kCiAgICAgICAgc2VsZi5vbGRfaXJlY3YgPSBwYWRkbGUuZGlzdHJpYnV0ZWQuaXJlY3YKICAgICAgICBzZWxmLm9sZF93YWl0ID0gcGFkZGxlLmRpc3RyaWJ1dGVkLndhaXQKICAgICAgICBzZWxmLm9sZF9zZW5kX3BhcnRpYWwgPSBmZC5zZW5kX3BhcnRpYWwKICAgICAgICBzZWxmLm9sZF9yZWN2X3BhcnRpYWwgPSBmZC5yZWN2X3BhcnRpYWwKICAgICAgICBzZWxmLm9sZF9hbGxnYXRoZXJfcGFydGlhbCA9IGZkLmFsbGdhdGhlcl9wYXJ0aWFsCiAgICAgICAgc2VsZi5vbGRfaW5fZHluYW1pY19tb2RlID0gZmQuZnJhbWV3b3JrLmluX2R5bmFtaWNfbW9kZQogICAgICAgIGZkLl9oY2cgPSBzZWxmLmhjZwogICAgICAgIGZkLl9lbmFibGVfcGFydGlhbF9zZW5kX3JlY3YgPSBUcnVlCiAgICAgICAgZmQuZnJhbWV3b3JrLmluX2R5bmFtaWNfbW9kZSA9IGxhbWJkYTogVHJ1ZQoKICAgIGRlZiB0ZWFyRG93bihzZWxmKToKICAgICAgICBmZC5faGNnID0gc2VsZi5vbGRfaGNnCiAgICAgICAgZmQuX2VuYWJsZV9wYXJ0aWFsX3NlbmRfcmVjdiA9IHNlbGYub2xkX2VuYWJsZQogICAgICAgIGZkLl9zeW5jX3NlbmQgPSBzZWxmLm9sZF9zeW5jX3NlbmQKICAgICAgICBmZC5fdGltZXJzID0gc2VsZi5vbGRfdGltZXJzCiAgICAgICAgcGFkZGxlLmRpc3RyaWJ1dGVkLnNlbmQgPSBzZWxmLm9sZF9zZW5kCiAgICAgICAgcGFkZGxlLmRpc3RyaWJ1dGVkLnJlY3YgPSBzZWxmLm9sZF9yZWN2CiAgICAgICAgcGFkZGxlLmRpc3RyaWJ1dGVkLmlzZW5kID0gc2VsZi5vbGRfaXNlbmQKICAgICAgICBwYWRkbGUuZGlzdHJpYnV0ZWQuaXJlY3YgPSBzZWxmLm9sZF9pcmVjdgogICAgICAgIHBhZGRsZS5kaXN0cmlidXRlZC53YWl0ID0gc2VsZi5vbGRfd2FpdAogICAgICAgIGZkLnNlbmRfcGFydGlhbCA9IHNlbGYub2xkX3NlbmRfcGFydGlhbAogICAgICAgIGZkLnJlY3ZfcGFydGlhbCA9IHNlbGYub2xkX3JlY3ZfcGFydGlhbAogICAgICAgIGZkLmFsbGdhdGhlcl9wYXJ0aWFsID0gc2VsZi5vbGRfYWxsZ2F0aGVyX3BhcnRpYWwKICAgICAgICBmZC5mcmFtZXdvcmsuaW5fZHluYW1pY19tb2RlID0gc2VsZi5vbGRfaW5fZHluYW1pY19tb2RlCgogICAgZGVmIF90ZW5zb3Ioc2VsZiwgc2hhcGU9KDIsIDIpLCBkdHlwZT0iZmxvYXQzMiIpOgogICAgICAgIHRlbnNvciA9IHBhZGRsZS5vbmVzKHNoYXBlLCBkdHlwZT1kdHlwZSkKICAgICAgICB0ZW5zb3Iuc3RvcF9ncmFkaWVudCA9IEZhbHNlCiAgICAgICAgcmV0dXJuIHRlbnNvcgoKICAgIGRlZiBfZmlsbChzZWxmLCB0ZW5zb3IsIHZhbHVlcyk6CiAgICAgICAgdGVuc29yLnNldF92YWx1ZShwYWRkbGUudG9fdGVuc29yKHZhbHVlcywgZHR5cGU9dGVuc29yLmR0eXBlKSkKCiAgICBkZWYgX21ldGEoc2VsZiwgdHVwbGVfcmVjdj1GYWxzZSwgdHVwbGVfc2VuZD1GYWxzZSk6CiAgICAgICAgbWV0YSA9IGZkLlNlbmRSZWN2TWV0YSgpCiAgICAgICAgaWYgdHVwbGVfcmVjdjoKICAgICAgICAgICAgbWV0YS5yZWN2X3NoYXBlX21lc3NhZ2UgPSAoWzIsIDJdLCBbMSwgNF0pCiAgICAgICAgICAgIG1ldGEucmVjdl9kdHlwZV9tZXNzYWdlID0gKAogICAgICAgICAgICAgICAgcGFkZGxlXzJfbnVtYmVyKHBhZGRsZS5mbG9hdDMyKSwKICAgICAgICAgICAgICAgIHBhZGRsZV8yX251bWJlcihwYWRkbGUuZmxvYXQxNiksCiAgICAgICAgICAgICkKICAgICAgICAgICAgbWV0YS5yZWN2X3N0b3BfZ3JhZGllbnQgPSAoRmFsc2UsIFRydWUpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgbWV0YS5yZWN2X3NoYXBlX21lc3NhZ2UgPSBbMiwgMl0KICAgICAgICAgICAgbWV0YS5yZWN2X2R0eXBlX21lc3NhZ2UgPSBwYWRkbGVfMl9udW1iZXIocGFkZGxlLmZsb2F0MzIpCiAgICAgICAgICAgIG1ldGEucmVjdl9zdG9wX2dyYWRpZW50ID0gRmFsc2UKICAgICAgICBpZiB0dXBsZV9zZW5kOgogICAgICAgICAgICBtZXRhLnNlbmRfc2hhcGVfbWVzc2FnZSA9IChbMiwgMl0sIFs0LCAxXSkKICAgICAgICAgICAgbWV0YS5zZW5kX2R0eXBlX21lc3NhZ2UgPSAoCiAgICAgICAgICAgICAgICBwYWRkbGVfMl9udW1iZXIocGFkZGxlLmZsb2F0MzIpLAogICAgICAgICAgICAgICAgcGFkZGxlXzJfbnVtYmVyKHBhZGRsZS5pbnQ2NCksCiAgICAgICAgICAgICkKICAgICAgICBlbHNlOgogICAgICAgICAgICBtZXRhLnNlbmRfc2hhcGVfbWVzc2FnZSA9IFsyLCAyXQogICAgICAgICAgICBtZXRhLnNlbmRfZHR5cGVfbWVzc2FnZSA9IHBhZGRsZV8yX251bWJlcihwYWRkbGUuZmxvYXQzMikKICAgICAgICByZXR1cm4gbWV0YQoKCmNsYXNzIFRlc3RGb3VyRGlyZWN0aW9uc01ldGFBbmRQYXJ0aWFsKEZvdXJEaXJlY3Rpb25zU3RhdGVUZXN0KToKICAgIGRlZiB0ZXN0X2luaXRpYWxpemVfYW5kX3JlY3ZfbWV0YV9zaW5nbGVfYW5kX3R1cGxlKHNlbGYpOgogICAgICAgIGZkLmluaXRpYWxpemVfcDJwX2dyb3VwcyhzZWxmLmhjZywgZW5hYmxlX3BhcnRpYWxfc2VuZF9yZWN2PUZhbHNlKQogICAgICAgIHNlbGYuYXNzZXJ0SXMoZmQuX2hjZywgc2VsZi5oY2cpCiAgICAgICAgc2VsZi5hc3NlcnRGYWxzZShmZC5fZW5hYmxlX3BhcnRpYWxfc2VuZF9yZWN2KQogICAgICAgIGZkLl9lbmFibGVfcGFydGlhbF9zZW5kX3JlY3YgPSBUcnVlCgogICAgICAgIHNpbmdsZV92YWx1ZXMgPSBbCiAgICAgICAgICAgIFswXSwKICAgICAgICAgICAgWzJdLAogICAgICAgICAgICBbMywgNF0sCiAgICAgICAgICAgIFtwYWRkbGVfMl9udW1iZXIocGFkZGxlLmZsb2F0MzIpXSwKICAgICAgICAgICAgWzFdLAogICAgICAgIF0KCiAgICAgICAgZGVmIHJlY3Zfc2luZ2xlKHRlbnNvciwgc3JjLCBncm91cCk6CiAgICAgICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgicmVjdl9zaW5nbGUiLCBzcmMsIGdyb3VwIGlzIHNlbGYuaGNnLnBpcGVfZ3JvdXApKQogICAgICAgICAgICBzZWxmLl9maWxsKHRlbnNvciwgc2luZ2xlX3ZhbHVlcy5wb3AoMCkpCgogICAgICAgIHBhZGRsZS5kaXN0cmlidXRlZC5yZWN2ID0gcmVjdl9zaW5nbGUKICAgICAgICBtZXRhID0gZmQuU2VuZFJlY3ZNZXRhKCkKICAgICAgICBtZXRhLnJlY3ZfbWV0YShzZWxmLmhjZy5waXBlX2dyb3VwKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobWV0YS5yZWN2X3NoYXBlX21lc3NhZ2UsIFszLCA0XSkKICAgICAgICBzZWxmLmFzc2VydFRydWUobWV0YS5yZWN2X3N0b3BfZ3JhZGllbnQpCgogICAgICAgIHR1cGxlX3ZhbHVlcyA9IFsKICAgICAgICAgICAgWzFdLAogICAgICAgICAgICBbMl0sCiAgICAgICAgICAgIFsxXSwKICAgICAgICAgICAgWzVdLAogICAgICAgICAgICBbcGFkZGxlXzJfbnVtYmVyKHBhZGRsZS5pbnQ2NCldLAogICAgICAgICAgICBbMF0sCiAgICAgICAgICAgIFsyXSwKICAgICAgICAgICAgWzIsIDNdLAogICAgICAgICAgICBbcGFkZGxlXzJfbnVtYmVyKHBhZGRsZS5mbG9hdDE2KV0sCiAgICAgICAgICAgIFsxXSwKICAgICAgICBdCgogICAgICAgIGRlZiByZWN2X3R1cGxlKHRlbnNvciwgc3JjLCBncm91cCk6CiAgICAgICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgicmVjdl90dXBsZSIsIHNyYywgZ3JvdXAgaXMgc2VsZi5oY2cucGlwZV9ncm91cCkpCiAgICAgICAgICAgIHNlbGYuX2ZpbGwodGVuc29yLCB0dXBsZV92YWx1ZXMucG9wKDApKQoKICAgICAgICBwYWRkbGUuZGlzdHJpYnV0ZWQucmVjdiA9IHJlY3ZfdHVwbGUKICAgICAgICBtZXRhID0gZmQuU2VuZFJlY3ZNZXRhKCkKICAgICAgICBtZXRhLnJlY3ZfbWV0YShzZWxmLmhjZy5waXBlX2dyb3VwKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobWV0YS5yZWN2X3NoYXBlX21lc3NhZ2UsIChbNV0sIFsyLCAzXSkpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChtZXRhLnJlY3Zfc3RvcF9ncmFkaWVudCwgKEZhbHNlLCBUcnVlKSkKCiAgICBkZWYgdGVzdF9zZW5kX3JlY3ZfcGFydGlhbF9hbmRfaW52YWxpZF9wYXRocyhzZWxmKToKICAgICAgICB0ZW5zb3IgPSBzZWxmLl90ZW5zb3IoWzRdLCAiZmxvYXQzMiIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCgKICAgICAgICAgICAgZmQuc2VuZF9wYXJ0aWFsKAogICAgICAgICAgICAgICAgdGVuc29yLAogICAgICAgICAgICAgICAgZHN0PTEsCiAgICAgICAgICAgICAgICBucmFua3M9MiwKICAgICAgICAgICAgICAgIHJhbmtfaWQ9MSwKICAgICAgICAgICAgICAgIGdyb3VwPXNlbGYuaGNnLnNlbmRfbmV4dF9ncm91cCwKICAgICAgICAgICAgKS5uYW1lLAogICAgICAgICAgICAic2VuZF9wYXJ0aWFsX29uX2NhbGNfc3RyZWFtIiwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCgKICAgICAgICAgICAgZmQucmVjdl9wYXJ0aWFsKAogICAgICAgICAgICAgICAgdGVuc29yLAogICAgICAgICAgICAgICAgc3JjPTAsCiAgICAgICAgICAgICAgICBucmFua3M9MiwKICAgICAgICAgICAgICAgIHJhbmtfaWQ9MSwKICAgICAgICAgICAgICAgIGdyb3VwPXNlbGYuaGNnLnJlY3ZfcHJldl9ncm91cCwKICAgICAgICAgICAgKS5uYW1lLAogICAgICAgICAgICAicmVjdl9wYXJ0aWFsX29uX2NhbGNfc3RyZWFtIiwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCgKICAgICAgICAgICAgZmQuc2VuZF9wYXJ0aWFsKAogICAgICAgICAgICAgICAgdGVuc29yLAogICAgICAgICAgICAgICAgZHN0PTAsCiAgICAgICAgICAgICAgICBucmFua3M9MiwKICAgICAgICAgICAgICAgIHJhbmtfaWQ9MCwKICAgICAgICAgICAgICAgIGdyb3VwPXNlbGYuaGNnLnNlbmRfcHJldl9ncm91cCwKICAgICAgICAgICAgICAgIHVzZV9jYWxjX3N0cmVhbT1GYWxzZSwKICAgICAgICAgICAgKS5uYW1lLAogICAgICAgICAgICAic2VuZF9wYXJ0aWFsIiwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCgKICAgICAgICAgICAgZmQucmVjdl9wYXJ0aWFsKAogICAgICAgICAgICAgICAgdGVuc29yLAogICAgICAgICAgICAgICAgc3JjPTEsCiAgICAgICAgICAgICAgICBucmFua3M9MiwKICAgICAgICAgICAgICAgIHJhbmtfaWQ9MCwKICAgICAgICAgICAgICAgIGdyb3VwPXNlbGYuaGNnLnJlY3ZfbmV4dF9ncm91cCwKICAgICAgICAgICAgICAgIHVzZV9jYWxjX3N0cmVhbT1GYWxzZSwKICAgICAgICAgICAgKS5uYW1lLAogICAgICAgICAgICAicmVjdl9wYXJ0aWFsIiwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCgKICAgICAgICAgICAgZmQuYWxsZ2F0aGVyX3BhcnRpYWwoCiAgICAgICAgICAgICAgICB0ZW5zb3IsIG5yYW5rcz0yLCByYW5rX2lkPTEsIGdyb3VwPXNlbGYuaGNnLm1vZGVsX2dyb3VwCiAgICAgICAgICAgICkubmFtZSwKICAgICAgICAgICAgImFsbF9nYXRoZXJfcGFydGlhbF9vbl9jYWxjX3N0cmVhbSIsCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoCiAgICAgICAgICAgIGZkLmFsbGdhdGhlcl9wYXJ0aWFsKAogICAgICAgICAgICAgICAgdGVuc29yLAogICAgICAgICAgICAgICAgbnJhbmtzPTIsCiAgICAgICAgICAgICAgICByYW5rX2lkPTEsCiAgICAgICAgICAgICAgICBncm91cD1zZWxmLmhjZy5tb2RlbF9ncm91cCwKICAgICAgICAgICAgICAgIHVzZV9jYWxjX3N0cmVhbT1GYWxzZSwKICAgICAgICAgICAgKS5uYW1lLAogICAgICAgICAgICAiYWxsX2dhdGhlcl9wYXJ0aWFsIiwKICAgICAgICApCgogICAgICAgIGZkLl9lbmFibGVfcGFydGlhbF9zZW5kX3JlY3YgPSBGYWxzZQogICAgICAgIGNhbGxzID0gW10KCiAgICAgICAgZGVmIGlzZW5kKHZhbHVlLCBkc3QsIGdyb3VwKToKICAgICAgICAgICAgY2FsbHMuYXBwZW5kKCgiaXNlbmQiLCBkc3QpKQogICAgICAgICAgICByZXR1cm4gUmVxdWVzdChzZWxmLmNhbGxzLCAiaXNlbmQiKQoKICAgICAgICBkZWYgcmVjdih2YWx1ZSwgc3JjLCBncm91cCk6CiAgICAgICAgICAgIGNhbGxzLmFwcGVuZCgoInJlY3YiLCBzcmMpKQogICAgICAgICAgICByZXR1cm4gUmVxdWVzdChzZWxmLmNhbGxzLCAicmVjdiIpCgogICAgICAgIGRlZiBpcmVjdih2YWx1ZSwgc3JjLCBncm91cCk6CiAgICAgICAgICAgIGNhbGxzLmFwcGVuZCgoImlyZWN2Iiwgc3JjKSkKICAgICAgICAgICAgcmV0dXJuIFJlcXVlc3Qoc2VsZi5jYWxscywgImlyZWN2IikKCiAgICAgICAgcGFkZGxlLmRpc3RyaWJ1dGVkLmlzZW5kID0gaXNlbmQKICAgICAgICBwYWRkbGUuZGlzdHJpYnV0ZWQucmVjdiA9IHJlY3YKICAgICAgICBwYWRkbGUuZGlzdHJpYnV0ZWQuaXJlY3YgPSBpcmVjdgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZmQuc2VuZF9wYXJ0aWFsKHRlbnNvciwgZHN0PTEsIGdyb3VwPXNlbGYuaGNnLnNlbmRfbmV4dF9ncm91cCkubmFtZSwgImlzZW5kIikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGZkLnJlY3ZfcGFydGlhbCh0ZW5zb3IsIHNyYz0wLCBncm91cD1zZWxmLmhjZy5yZWN2X3ByZXZfZ3JvdXApLm5hbWUsICJyZWN2IikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKAogICAgICAgICAgICBmZC5yZWN2X3BhcnRpYWwoCiAgICAgICAgICAgICAgICB0ZW5zb3IsCiAgICAgICAgICAgICAgICBzcmM9MCwKICAgICAgICAgICAgICAgIGdyb3VwPXNlbGYuaGNnLnJlY3ZfcHJldl9ncm91cCwKICAgICAgICAgICAgICAgIHVzZV9jYWxjX3N0cmVhbT1GYWxzZSwKICAgICAgICAgICAgKS5uYW1lLAogICAgICAgICAgICAiaXJlY3YiLAogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydElzKGZkLmFsbGdhdGhlcl9wYXJ0aWFsKHRlbnNvciwgbnJhbmtzPTIpLCB0ZW5zb3IpCiAgICAgICAgbm9uX21lbWJlciA9IEdyb3VwKHNlbGYuY2FsbHMsIG1lbWJlcj1GYWxzZSkKICAgICAgICBzZWxmLmFzc2VydElzTm9uZShmZC5zZW5kX3BhcnRpYWwodGVuc29yLCBncm91cD1ub25fbWVtYmVyKSkKICAgICAgICBzZWxmLmFzc2VydElzTm9uZShmZC5yZWN2X3BhcnRpYWwodGVuc29yLCBncm91cD1ub25fbWVtYmVyKSkKICAgICAgICBmZC5fZW5hYmxlX3BhcnRpYWxfc2VuZF9yZWN2ID0gVHJ1ZQogICAgICAgIHdpdGggc2VsZi5hc3NlcnRSYWlzZXMoQXNzZXJ0aW9uRXJyb3IpOgogICAgICAgICAgICBmZC5faXNfdmFsaWRfc2VuZF9yZWN2X3BhcnRpYWwocGFkZGxlLmVtcHR5KFswXSksIDIpCgoKY2xhc3MgVGVzdEZvdXJEaXJlY3Rpb25zSGVscGVyQ29yZShGb3VyRGlyZWN0aW9uc1N0YXRlVGVzdCk6CiAgICBkZWYgX2luc3RhbGxfbGlnaHR3ZWlnaHRfb3BzKHNlbGYpOgogICAgICAgIGRlZiBzZW5kX3BhcnRpYWwodGVuc29yLCBkc3Q9MCwgbnJhbmtzPTEsIHJhbmtfaWQ9MCwgZ3JvdXA9Tm9uZSwgdXNlX2NhbGNfc3RyZWFtPVRydWUpOgogICAgICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoInNlbmRfcGFydGlhbCIsIGRzdCwgbnJhbmtzLCByYW5rX2lkLCB1c2VfY2FsY19zdHJlYW0pKQogICAgICAgICAgICByZXR1cm4gUmVxdWVzdChzZWxmLmNhbGxzLCBmInNlbmQte2RzdH0iKQoKICAgICAgICBkZWYgcmVjdl9wYXJ0aWFsKHRlbnNvciwgc3JjPTAsIG5yYW5rcz0xLCByYW5rX2lkPTAsIGdyb3VwPU5vbmUsIHVzZV9jYWxjX3N0cmVhbT1UcnVlKToKICAgICAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJyZWN2X3BhcnRpYWwiLCBzcmMsIG5yYW5rcywgcmFua19pZCwgdXNlX2NhbGNfc3RyZWFtKSkKICAgICAgICAgICAgcmV0dXJuIFJlcXVlc3Qoc2VsZi5jYWxscywgZiJyZWN2LXtzcmN9IikKCiAgICAgICAgZGVmIGFsbGdhdGhlcl9wYXJ0aWFsKHRlbnNvciwgbnJhbmtzPTEsIHJhbmtfaWQ9MCwgZ3JvdXA9Tm9uZSwgdXNlX2NhbGNfc3RyZWFtPVRydWUpOgogICAgICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoImFsbGdhdGhlcl9wYXJ0aWFsIiwgbnJhbmtzLCByYW5rX2lkLCB1c2VfY2FsY19zdHJlYW0pKQogICAgICAgICAgICByZXR1cm4gUmVxdWVzdChzZWxmLmNhbGxzLCAiYWxsZ2F0aGVyIikKCiAgICAgICAgZGVmIHdhaXQodGVuc29yLCB1c2VfY2FsY19zdHJlYW09VHJ1ZSk6CiAgICAgICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCgid2FpdCIsIHR1cGxlKHRlbnNvci5zaGFwZSksIHVzZV9jYWxjX3N0cmVhbSkpCgogICAgICAgIGZkLnNlbmRfcGFydGlhbCA9IHNlbmRfcGFydGlhbAogICAgICAgIGZkLnJlY3ZfcGFydGlhbCA9IHJlY3ZfcGFydGlhbAogICAgICAgIGZkLmFsbGdhdGhlcl9wYXJ0aWFsID0gYWxsZ2F0aGVyX3BhcnRpYWwKICAgICAgICBwYWRkbGUuZGlzdHJpYnV0ZWQud2FpdCA9IHdhaXQKCiAgICBkZWYgdGVzdF9wMnBfaGVscGVyX2FzeW5jX2FuZF9zeW5jX2JyYW5jaGVzKHNlbGYpOgogICAgICAgIHNlbGYuX2luc3RhbGxfbGlnaHR3ZWlnaHRfb3BzKCkKICAgICAgICBmZC5fc3luY19zZW5kID0gRmFsc2UKICAgICAgICBtZXRhID0gc2VsZi5fbWV0YSh0dXBsZV9yZWN2PVRydWUsIHR1cGxlX3NlbmQ9VHJ1ZSkKICAgICAgICByZWN2X3ByZXYsIHJlY3ZfbmV4dCA9IGZkLl9wMnBfaGVscGVyKAogICAgICAgICAgICAoc2VsZi5fdGVuc29yKFsyLCAyXSksIHNlbGYuX3RlbnNvcihbNCwgMV0pKSwKICAgICAgICAgICAgKHNlbGYuX3RlbnNvcihbMiwgMl0pLCBzZWxmLl90ZW5zb3IoWzEsIDRdKSksCiAgICAgICAgICAgIHJlY3ZfcHJldj1UcnVlLAogICAgICAgICAgICByZWN2X25leHQ9VHJ1ZSwKICAgICAgICAgICAgc3luY19yZWN2PUZhbHNlLAogICAgICAgICAgICBzZW5kX3JlY3ZfbWV0YT1tZXRhLAogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGxlbihyZWN2X3ByZXYpLCAyKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGVuKHJlY3ZfbmV4dCksIDIpCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKGFueShjYWxsWzBdID09ICJyZXF1ZXN0X3dhaXQiIGZvciBjYWxsIGluIHNlbGYuY2FsbHMpKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoCiAgICAgICAgICAgIGxlbihbY2FsbCBmb3IgY2FsbCBpbiBzZWxmLmNhbGxzIGlmIGNhbGxbMF0gPT0gImFsbGdhdGhlcl9wYXJ0aWFsIl0pLAogICAgICAgICAgICA0LAogICAgICAgICkKCiAgICAgICAgc2VsZi5jYWxscy5jbGVhcigpCiAgICAgICAgZmQuX3N5bmNfc2VuZCA9IFRydWUKICAgICAgICBtZXRhID0gc2VsZi5fbWV0YSh0dXBsZV9yZWN2PUZhbHNlLCB0dXBsZV9zZW5kPUZhbHNlKQogICAgICAgIHJlY3ZfcHJldiwgcmVjdl9uZXh0ID0gZmQuX3AycF9oZWxwZXIoCiAgICAgICAgICAgIHNlbGYuX3RlbnNvcihbMiwgMl0pLAogICAgICAgICAgICBzZWxmLl90ZW5zb3IoWzIsIDJdKSwKICAgICAgICAgICAgcmVjdl9wcmV2PVRydWUsCiAgICAgICAgICAgIHJlY3ZfbmV4dD1UcnVlLAogICAgICAgICAgICBzeW5jX3JlY3Y9VHJ1ZSwKICAgICAgICAgICAgc2VuZF9yZWN2X21ldGE9bWV0YSwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChyZWN2X3ByZXYuc2hhcGUsIFsyLCAyXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHJlY3ZfbmV4dC5zaGFwZSwgWzIsIDJdKQogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZShhbnkoY2FsbFswXSA9PSAid2FpdCIgZm9yIGNhbGwgaW4gc2VsZi5jYWxscykpCgoKY2xhc3MgVGVzdEZvdXJEaXJlY3Rpb25zUHVibGljSGVscGVyKEZvdXJEaXJlY3Rpb25zU3RhdGVUZXN0KToKICAgIGRlZiBzZXRVcChzZWxmKToKICAgICAgICBzdXBlcigpLnNldFVwKCkKICAgICAgICBmZC5fdGltZXJzID0gVGltZXJzKHNlbGYuY2FsbHMpCiAgICAgICAgc2VsZi5vbGRfaGVscGVyID0gZmQuX3AycF9oZWxwZXIKCiAgICAgICAgZGVmIGhlbHBlcigKICAgICAgICAgICAgdGVuc29yX3NlbmRfbmV4dCwKICAgICAgICAgICAgdGVuc29yX3NlbmRfcHJldiwKICAgICAgICAgICAgcmVjdl9wcmV2LAogICAgICAgICAgICByZWN2X25leHQsCiAgICAgICAgICAgIHN5bmNfcmVjdj1UcnVlLAogICAgICAgICAgICBzZW5kX3JlY3ZfbWV0YT1Ob25lLAogICAgICAgICk6CiAgICAgICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKAogICAgICAgICAgICAgICAgKAogICAgICAgICAgICAgICAgICAgICJwMnBfaGVscGVyIiwKICAgICAgICAgICAgICAgICAgICB0ZW5zb3Jfc2VuZF9uZXh0IGlzIG5vdCBOb25lLAogICAgICAgICAgICAgICAgICAgIHRlbnNvcl9zZW5kX3ByZXYgaXMgbm90IE5vbmUsCiAgICAgICAgICAgICAgICAgICAgcmVjdl9wcmV2LAogICAgICAgICAgICAgICAgICAgIHJlY3ZfbmV4dCwKICAgICAgICAgICAgICAgICAgICBzeW5jX3JlY3YsCiAgICAgICAgICAgICAgICApCiAgICAgICAgICAgICkKICAgICAgICAgICAgcHJldiA9IHBhZGRsZS5vbmVzKFsxXSwgZHR5cGU9ImZsb2F0MzIiKSBpZiByZWN2X3ByZXYgZWxzZSBOb25lCiAgICAgICAgICAgIG54dCA9IHBhZGRsZS5vbmVzKFsxXSwgZHR5cGU9ImZsb2F0MzIiKSBpZiByZWN2X25leHQgZWxzZSBOb25lCiAgICAgICAgICAgIHJldHVybiBwcmV2LCBueHQKCiAgICAgICAgZmQuX3AycF9oZWxwZXIgPSBoZWxwZXIKICAgICAgICBwYWRkbGUuZGlzdHJpYnV0ZWQuc2VuZCA9IGxhbWJkYSB0ZW5zb3IsIGRzdCwgZ3JvdXA6IHNlbGYuY2FsbHMuYXBwZW5kKCgic2VuZCIsIGRzdCkpCiAgICAgICAgcGFkZGxlLmRpc3RyaWJ1dGVkLnJlY3YgPSBsYW1iZGEgdGVuc29yLCBzcmMsIGdyb3VwOiBzZWxmLl9maWxsKHRlbnNvciwgWzBdKQoKICAgIGRlZiB0ZWFyRG93bihzZWxmKToKICAgICAgICBmZC5fcDJwX2hlbHBlciA9IHNlbGYub2xkX2hlbHBlcgogICAgICAgIHN1cGVyKCkudGVhckRvd24oKQoKICAgIGRlZiBfcHJlcGFyZWRfaGVscGVyKHNlbGYpOgogICAgICAgIGhlbHBlciA9IGZkLlAycEhlbHBlcih1c2VfY2FjaGU9VHJ1ZSkKICAgICAgICBoZWxwZXIuX3NlbmRfcmVjdl9tZXRhLnJlY3Zfc2hhcGVfbWVzc2FnZSA9IFsxXQogICAgICAgIGhlbHBlci5fc2VuZF9yZWN2X21ldGEucmVjdl9kdHlwZV9tZXNzYWdlID0gcGFkZGxlXzJfbnVtYmVyKHBhZGRsZS5mbG9hdDMyKQogICAgICAgIGhlbHBlci5fc2VuZF9yZWN2X21ldGEucmVjdl9zdG9wX2dyYWRpZW50ID0gRmFsc2UKICAgICAgICBoZWxwZXIuX3NlbmRfcmVjdl9tZXRhLnNlbmRfc2hhcGVfbWVzc2FnZSA9IFsxXQogICAgICAgIGhlbHBlci5fc2VuZF9yZWN2X21ldGEuc2VuZF9kdHlwZV9tZXNzYWdlID0gcGFkZGxlXzJfbnVtYmVyKHBhZGRsZS5mbG9hdDMyKQogICAgICAgIGhlbHBlci5fc2VuZF9yZWN2X21ldGEuaGFzX3JlY3ZfbWV0YSA9IFRydWUKICAgICAgICBoZWxwZXIuX3NlbmRfcmVjdl9tZXRhLmhhc19zZW5kX21ldGEgPSBUcnVlCiAgICAgICAgcmV0dXJuIGhlbHBlcgoKICAgIGRlZiB0ZXN0X3B1YmxpY19tZXRob2RzX2NvdmVyX3N0YWdlX3Nob3J0Y3V0c19hbmRfdHJhbnNmZXJzKHNlbGYpOgogICAgICAgIGhlbHBlciA9IHNlbGYuX3ByZXBhcmVkX2hlbHBlcigpCiAgICAgICAgdGVuc29yID0gc2VsZi5fdGVuc29yKFsxXSkKICAgICAgICBzZWxmLmFzc2VydElzTm9uZShoZWxwZXIucmVjdl9mb3J3YXJkKHBwX2ZpcnN0X3N0YWdlPVRydWUpKQogICAgICAgIHNlbGYuYXNzZXJ0SXNOb3ROb25lKGhlbHBlci5yZWN2X2ZvcndhcmQocHBfZmlyc3Rfc3RhZ2U9RmFsc2UsIHN5bmNfcmVjdj1GYWxzZSkpCiAgICAgICAgc2VsZi5hc3NlcnRJc05vbmUoaGVscGVyLnJlY3ZfYmFja3dhcmQocHBfbGFzdF9zdGFnZT1UcnVlKSkKICAgICAgICBzZWxmLmFzc2VydElzTm90Tm9uZShoZWxwZXIucmVjdl9iYWNrd2FyZChwcF9sYXN0X3N0YWdlPUZhbHNlKSkKICAgICAgICBoZWxwZXIuc2VuZF9mb3J3YXJkKHRlbnNvciwgcHBfbGFzdF9zdGFnZT1UcnVlKQogICAgICAgIGhlbHBlci5zZW5kX2ZvcndhcmQodGVuc29yLCBwcF9sYXN0X3N0YWdlPUZhbHNlKQogICAgICAgIGhlbHBlci5zZW5kX2JhY2t3YXJkKHRlbnNvciwgcHBfZmlyc3Rfc3RhZ2U9VHJ1ZSkKICAgICAgICBoZWxwZXIuc2VuZF9iYWNrd2FyZCh0ZW5zb3IsIHBwX2ZpcnN0X3N0YWdlPUZhbHNlKQogICAgICAgIHNlbGYuYXNzZXJ0SXNOb25lKGhlbHBlci5zZW5kX2ZvcndhcmRfcmVjdl9iYWNrd2FyZCh0ZW5zb3IsIHBwX2xhc3Rfc3RhZ2U9VHJ1ZSkpCiAgICAgICAgc2VsZi5hc3NlcnRJc05vdE5vbmUoaGVscGVyLnNlbmRfZm9yd2FyZF9yZWN2X2JhY2t3YXJkKHRlbnNvciwgcHBfbGFzdF9zdGFnZT1GYWxzZSkpCiAgICAgICAgc2VsZi5hc3NlcnRJc05vbmUoaGVscGVyLnNlbmRfYmFja3dhcmRfcmVjdl9mb3J3YXJkKHRlbnNvciwgcHBfZmlyc3Rfc3RhZ2U9VHJ1ZSkpCiAgICAgICAgc2VsZi5hc3NlcnRJc05vdE5vbmUoaGVscGVyLnNlbmRfYmFja3dhcmRfcmVjdl9mb3J3YXJkKHRlbnNvciwgcHBfZmlyc3Rfc3RhZ2U9RmFsc2UpKQogICAgICAgIHByZXYsIG54dCA9IGhlbHBlci5zZW5kX2ZvcndhcmRfYmFja3dhcmRfcmVjdl9mb3J3YXJkX2JhY2t3YXJkKAogICAgICAgICAgICB0ZW5zb3IsIHRlbnNvciwgcmVjdl9wcmV2PVRydWUsIHJlY3ZfbmV4dD1UcnVlCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0SXNOb3ROb25lKHByZXYpCiAgICAgICAgc2VsZi5hc3NlcnRJc05vdE5vbmUobnh0KQogICAgICAgIHNlbGYuYXNzZXJ0SXNOb25lKGhlbHBlci5zZW5kX2ZvcndhcmRfcmVjdl9mb3J3YXJkKE5vbmUsIHJlY3ZfcHJldj1GYWxzZSkpCiAgICAgICAgc2VsZi5hc3NlcnRJc05vdE5vbmUoaGVscGVyLnNlbmRfZm9yd2FyZF9yZWN2X2ZvcndhcmQodGVuc29yLCByZWN2X3ByZXY9VHJ1ZSkpCiAgICAgICAgc2VsZi5hc3NlcnRJc05vbmUoaGVscGVyLnNlbmRfYmFja3dhcmRfcmVjdl9iYWNrd2FyZCh0ZW5zb3IsIHJlY3ZfbmV4dD1GYWxzZSkpCiAgICAgICAgc2VsZi5hc3NlcnRJc05vdE5vbmUoaGVscGVyLnNlbmRfYmFja3dhcmRfcmVjdl9iYWNrd2FyZCh0ZW5zb3IsIHJlY3ZfbmV4dD1UcnVlKSkKICAgICAgICBzZWxmLmFzc2VydFRydWUoYW55KGNhbGxbMF0gPT0gInRpbWVyX3N0YXJ0IiBmb3IgY2FsbCBpbiBzZWxmLmNhbGxzKSkKCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgdW5pdHRlc3QubWFpbigpCg==
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import sys
+import unittest
+
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+    )
+)
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+import paddle
+
+from paddlefleet.pipeline_parallel.pp_utils import (
+    four_directions_p2p_communication as fd,
+)
+from paddlefleet.pipeline_parallel.pp_utils.utils import paddle_2_number
+
+
+class Request:
+    def __init__(self, calls, name):
+        self.calls = calls
+        self.name = name
+        self.wait_called = False
+
+    def wait(self):
+        self.wait_called = True
+        self.calls.append(("request_wait", self.name))
+
+
+class ProcessGroup:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def send_partial_on_calc_stream(self, tensor, dst, nranks, rank_id):
+        self.calls.append(("send_partial_on_calc_stream", dst, nranks, rank_id))
+        return Request(self.calls, "send_partial_on_calc_stream")
+
+    def send_partial(self, tensor, dst, nranks, rank_id):
+        self.calls.append(("send_partial", dst, nranks, rank_id))
+        return Request(self.calls, "send_partial")
+
+    def recv_partial_on_calc_stream(self, tensor, src, nranks, rank_id):
+        self.calls.append(("recv_partial_on_calc_stream", src, nranks, rank_id))
+        return Request(self.calls, "recv_partial_on_calc_stream")
+
+    def recv_partial(self, tensor, src, nranks, rank_id):
+        self.calls.append(("recv_partial", src, nranks, rank_id))
+        return Request(self.calls, "recv_partial")
+
+    def all_gather_partial_on_calc_stream(self, out, tensor, nranks, rank_id):
+        self.calls.append(
+            ("all_gather_partial_on_calc_stream", nranks, rank_id)
+        )
+        return Request(self.calls, "all_gather_partial_on_calc_stream")
+
+    def all_gather_partial(self, out, tensor, nranks, rank_id):
+        self.calls.append(("all_gather_partial", nranks, rank_id))
+        return Request(self.calls, "all_gather_partial")
+
+
+class Group:
+    id = 11
+    rank = 0
+    ranks = [0, 1]
+    backend = "nccl"
+
+    def __init__(self, calls, member=True):
+        self.calls = calls
+        self._member = member
+        self.process_group = ProcessGroup(calls)
+
+    def is_member(self):
+        return self._member
+
+    def get_group_rank(self, rank):
+        self.calls.append(("get_group_rank", rank))
+        return rank + 200
+
+
+class HCG:
+    def __init__(self, calls):
+        self.calls = calls
+        self.send_next_group = Group(calls)
+        self.send_prev_group = Group(calls)
+        self.recv_next_group = Group(calls)
+        self.recv_prev_group = Group(calls)
+        self.pipe_group = Group(calls)
+        self.model_group = Group(calls)
+
+    def get_p2p_groups(self):
+        return (
+            self.send_next_group,
+            self.send_prev_group,
+            self.recv_next_group,
+            self.recv_prev_group,
+        )
+
+    def get_pipe_parallel_group(self):
+        return self.pipe_group
+
+    def get_model_parallel_group(self):
+        return self.model_group
+
+    def get_model_parallel_world_size(self):
+        return 2
+
+    def get_model_parallel_rank(self):
+        return 1
+
+    def _get_p2p_prev_rank(self):
+        return 4
+
+    def _get_p2p_next_rank(self):
+        return 5
+
+
+class TimerItem:
+    def __init__(self, calls, name):
+        self.calls = calls
+        self.name = name
+
+    def start(self):
+        self.calls.append(("timer_start", self.name))
+
+    def stop(self):
+        self.calls.append(("timer_stop", self.name))
+
+
+class Timers:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def __call__(self, name):
+        return TimerItem(self.calls, name)
+
+
+class FourDirectionsStateTest(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        self.hcg = HCG(self.calls)
+        self.old_hcg = fd._hcg
+        self.old_enable = fd._enable_partial_send_recv
+        self.old_sync_send = fd._sync_send
+        self.old_timers = fd._timers
+        self.old_send = paddle.distributed.send
+        self.old_recv = paddle.distributed.recv
+        self.old_isend = paddle.distributed.isend
+        self.old_irecv = paddle.distributed.irecv
+        self.old_wait = paddle.distributed.wait
+        self.old_send_partial = fd.send_partial
+        self.old_recv_partial = fd.recv_partial
+        self.old_allgather_partial = fd.allgather_partial
+        self.old_in_dynamic_mode = fd.framework.in_dynamic_mode
+        fd._hcg = self.hcg
+        fd._enable_partial_send_recv = True
+        fd.framework.in_dynamic_mode = lambda: True
+
+    def tearDown(self):
+        fd._hcg = self.old_hcg
+        fd._enable_partial_send_recv = self.old_enable
+        fd._sync_send = self.old_sync_send
+        fd._timers = self.old_timers
+        paddle.distributed.send = self.old_send
+        paddle.distributed.recv = self.old_recv
+        paddle.distributed.isend = self.old_isend
+        paddle.distributed.irecv = self.old_irecv
+        paddle.distributed.wait = self.old_wait
+        fd.send_partial = self.old_send_partial
+        fd.recv_partial = self.old_recv_partial
+        fd.allgather_partial = self.old_allgather_partial
+        fd.framework.in_dynamic_mode = self.old_in_dynamic_mode
+
+    def _tensor(self, shape=(2, 2), dtype="float32"):
+        tensor = paddle.ones(shape, dtype=dtype)
+        tensor.stop_gradient = False
+        return tensor
+
+    def _fill(self, tensor, values):
+        tensor.set_value(paddle.to_tensor(values, dtype=tensor.dtype))
+
+    def _meta(self, tuple_recv=False, tuple_send=False):
+        meta = fd.SendRecvMeta()
+        if tuple_recv:
+            meta.recv_shape_message = ([2, 2], [1, 4])
+            meta.recv_dtype_message = (
+                paddle_2_number(paddle.float32),
+                paddle_2_number(paddle.float16),
+            )
+            meta.recv_stop_gradient = (False, True)
+        else:
+            meta.recv_shape_message = [2, 2]
+            meta.recv_dtype_message = paddle_2_number(paddle.float32)
+            meta.recv_stop_gradient = False
+        if tuple_send:
+            meta.send_shape_message = ([2, 2], [4, 1])
+            meta.send_dtype_message = (
+                paddle_2_number(paddle.float32),
+                paddle_2_number(paddle.int64),
+            )
+        else:
+            meta.send_shape_message = [2, 2]
+            meta.send_dtype_message = paddle_2_number(paddle.float32)
+        return meta
+
+
+class TestFourDirectionsMetaAndPartial(FourDirectionsStateTest):
+    def test_initialize_and_recv_meta_single_and_tuple(self):
+        fd.initialize_p2p_groups(self.hcg, enable_partial_send_recv=False)
+        self.assertIs(fd._hcg, self.hcg)
+        self.assertFalse(fd._enable_partial_send_recv)
+        fd._enable_partial_send_recv = True
+
+        single_values = [
+            [0],
+            [2],
+            [3, 4],
+            [paddle_2_number(paddle.float32)],
+            [1],
+        ]
+
+        def recv_single(tensor, src, group):
+            self.calls.append(
+                ("recv_single", src, group is self.hcg.pipe_group)
+            )
+            self._fill(tensor, single_values.pop(0))
+
+        paddle.distributed.recv = recv_single
+        meta = fd.SendRecvMeta()
+        meta.recv_meta(self.hcg.pipe_group)
+        self.assertEqual(meta.recv_shape_message, [3, 4])
+        self.assertTrue(meta.recv_stop_gradient)
+
+        tuple_values = [
+            [1],
+            [2],
+            [1],
+            [5],
+            [paddle_2_number(paddle.int64)],
+            [0],
+            [2],
+            [2, 3],
+            [paddle_2_number(paddle.float16)],
+            [1],
+        ]
+
+        def recv_tuple(tensor, src, group):
+            self.calls.append(("recv_tuple", src, group is self.hcg.pipe_group))
+            self._fill(tensor, tuple_values.pop(0))
+
+        paddle.distributed.recv = recv_tuple
+        meta = fd.SendRecvMeta()
+        meta.recv_meta(self.hcg.pipe_group)
+        self.assertEqual(meta.recv_shape_message, ([5], [2, 3]))
+        self.assertEqual(meta.recv_stop_gradient, (False, True))
+
+    def test_send_recv_partial_and_invalid_paths(self):
+        tensor = self._tensor([4], "float32")
+        self.assertEqual(
+            fd.send_partial(
+                tensor,
+                dst=1,
+                nranks=2,
+                rank_id=1,
+                group=self.hcg.send_next_group,
+            ).name,
+            "send_partial_on_calc_stream",
+        )
+        self.assertEqual(
+            fd.recv_partial(
+                tensor,
+                src=0,
+                nranks=2,
+                rank_id=1,
+                group=self.hcg.recv_prev_group,
+            ).name,
+            "recv_partial_on_calc_stream",
+        )
+        self.assertEqual(
+            fd.send_partial(
+                tensor,
+                dst=0,
+                nranks=2,
+                rank_id=0,
+                group=self.hcg.send_prev_group,
+                use_calc_stream=False,
+            ).name,
+            "send_partial",
+        )
+        self.assertEqual(
+            fd.recv_partial(
+                tensor,
+                src=1,
+                nranks=2,
+                rank_id=0,
+                group=self.hcg.recv_next_group,
+                use_calc_stream=False,
+            ).name,
+            "recv_partial",
+        )
+        self.assertEqual(
+            fd.allgather_partial(
+                tensor, nranks=2, rank_id=1, group=self.hcg.model_group
+            ).name,
+            "all_gather_partial_on_calc_stream",
+        )
+        self.assertEqual(
+            fd.allgather_partial(
+                tensor,
+                nranks=2,
+                rank_id=1,
+                group=self.hcg.model_group,
+                use_calc_stream=False,
+            ).name,
+            "all_gather_partial",
+        )
+
+        fd._enable_partial_send_recv = False
+        calls = []
+
+        def isend(value, dst, group):
+            calls.append(("isend", dst))
+            return Request(self.calls, "isend")
+
+        def recv(value, src, group):
+            calls.append(("recv", src))
+            return Request(self.calls, "recv")
+
+        def irecv(value, src, group):
+            calls.append(("irecv", src))
+            return Request(self.calls, "irecv")
+
+        paddle.distributed.isend = isend
+        paddle.distributed.recv = recv
+        paddle.distributed.irecv = irecv
+        self.assertEqual(
+            fd.send_partial(tensor, dst=1, group=self.hcg.send_next_group).name,
+            "isend",
+        )
+        self.assertEqual(
+            fd.recv_partial(tensor, src=0, group=self.hcg.recv_prev_group).name,
+            "recv",
+        )
+        self.assertEqual(
+            fd.recv_partial(
+                tensor,
+                src=0,
+                group=self.hcg.recv_prev_group,
+                use_calc_stream=False,
+            ).name,
+            "irecv",
+        )
+        self.assertIs(fd.allgather_partial(tensor, nranks=2), tensor)
+        non_member = Group(self.calls, member=False)
+        self.assertIsNone(fd.send_partial(tensor, group=non_member))
+        self.assertIsNone(fd.recv_partial(tensor, group=non_member))
+        fd._enable_partial_send_recv = True
+        with self.assertRaises(AssertionError):
+            fd._is_valid_send_recv_partial(paddle.empty([0]), 2)
+
+
+class TestFourDirectionsHelperCore(FourDirectionsStateTest):
+    def _install_lightweight_ops(self):
+        def send_partial(
+            tensor, dst=0, nranks=1, rank_id=0, group=None, use_calc_stream=True
+        ):
+            self.calls.append(
+                ("send_partial", dst, nranks, rank_id, use_calc_stream)
+            )
+            return Request(self.calls, f"send-{dst}")
+
+        def recv_partial(
+            tensor, src=0, nranks=1, rank_id=0, group=None, use_calc_stream=True
+        ):
+            self.calls.append(
+                ("recv_partial", src, nranks, rank_id, use_calc_stream)
+            )
+            return Request(self.calls, f"recv-{src}")
+
+        def allgather_partial(
+            tensor, nranks=1, rank_id=0, group=None, use_calc_stream=True
+        ):
+            self.calls.append(
+                ("allgather_partial", nranks, rank_id, use_calc_stream)
+            )
+            return Request(self.calls, "allgather")
+
+        def wait(tensor, use_calc_stream=True):
+            self.calls.append(("wait", tuple(tensor.shape), use_calc_stream))
+
+        fd.send_partial = send_partial
+        fd.recv_partial = recv_partial
+        fd.allgather_partial = allgather_partial
+        paddle.distributed.wait = wait
+
+    def test_p2p_helper_async_and_sync_branches(self):
+        self._install_lightweight_ops()
+        fd._sync_send = False
+        meta = self._meta(tuple_recv=True, tuple_send=True)
+        recv_prev, recv_next = fd._p2p_helper(
+            (self._tensor([2, 2]), self._tensor([4, 1])),
+            (self._tensor([2, 2]), self._tensor([1, 4])),
+            recv_prev=True,
+            recv_next=True,
+            sync_recv=False,
+            send_recv_meta=meta,
+        )
+        self.assertEqual(len(recv_prev), 2)
+        self.assertEqual(len(recv_next), 2)
+        self.assertTrue(any(call[0] == "request_wait" for call in self.calls))
+        self.assertEqual(
+            len(
+                [call for call in self.calls if call[0] == "allgather_partial"]
+            ),
+            4,
+        )
+
+        self.calls.clear()
+        fd._sync_send = True
+        meta = self._meta(tuple_recv=False, tuple_send=False)
+        recv_prev, recv_next = fd._p2p_helper(
+            self._tensor([2, 2]),
+            self._tensor([2, 2]),
+            recv_prev=True,
+            recv_next=True,
+            sync_recv=True,
+            send_recv_meta=meta,
+        )
+        self.assertEqual(recv_prev.shape, [2, 2])
+        self.assertEqual(recv_next.shape, [2, 2])
+        self.assertTrue(any(call[0] == "wait" for call in self.calls))
+
+
+class TestFourDirectionsPublicHelper(FourDirectionsStateTest):
+    def setUp(self):
+        super().setUp()
+        fd._timers = Timers(self.calls)
+        self.old_helper = fd._p2p_helper
+
+        def helper(
+            tensor_send_next,
+            tensor_send_prev,
+            recv_prev,
+            recv_next,
+            sync_recv=True,
+            send_recv_meta=None,
+        ):
+            self.calls.append(
+                (
+                    "p2p_helper",
+                    tensor_send_next is not None,
+                    tensor_send_prev is not None,
+                    recv_prev,
+                    recv_next,
+                    sync_recv,
+                )
+            )
+            prev = paddle.ones([1], dtype="float32") if recv_prev else None
+            nxt = paddle.ones([1], dtype="float32") if recv_next else None
+            return prev, nxt
+
+        fd._p2p_helper = helper
+        paddle.distributed.send = lambda tensor, dst, group: self.calls.append(
+            ("send", dst)
+        )
+        paddle.distributed.recv = lambda tensor, src, group: self._fill(
+            tensor, [0]
+        )
+
+    def tearDown(self):
+        fd._p2p_helper = self.old_helper
+        super().tearDown()
+
+    def _prepared_helper(self):
+        helper = fd.P2pHelper(use_cache=True)
+        helper._send_recv_meta.recv_shape_message = [1]
+        helper._send_recv_meta.recv_dtype_message = paddle_2_number(
+            paddle.float32
+        )
+        helper._send_recv_meta.recv_stop_gradient = False
+        helper._send_recv_meta.send_shape_message = [1]
+        helper._send_recv_meta.send_dtype_message = paddle_2_number(
+            paddle.float32
+        )
+        helper._send_recv_meta.has_recv_meta = True
+        helper._send_recv_meta.has_send_meta = True
+        return helper
+
+    def test_public_methods_cover_stage_shortcuts_and_transfers(self):
+        helper = self._prepared_helper()
+        tensor = self._tensor([1])
+        self.assertIsNone(helper.recv_forward(pp_first_stage=True))
+        self.assertIsNotNone(
+            helper.recv_forward(pp_first_stage=False, sync_recv=False)
+        )
+        self.assertIsNone(helper.recv_backward(pp_last_stage=True))
+        self.assertIsNotNone(helper.recv_backward(pp_last_stage=False))
+        helper.send_forward(tensor, pp_last_stage=True)
+        helper.send_forward(tensor, pp_last_stage=False)
+        helper.send_backward(tensor, pp_first_stage=True)
+        helper.send_backward(tensor, pp_first_stage=False)
+        self.assertIsNone(
+            helper.send_forward_recv_backward(tensor, pp_last_stage=True)
+        )
+        self.assertIsNotNone(
+            helper.send_forward_recv_backward(tensor, pp_last_stage=False)
+        )
+        self.assertIsNone(
+            helper.send_backward_recv_forward(tensor, pp_first_stage=True)
+        )
+        self.assertIsNotNone(
+            helper.send_backward_recv_forward(tensor, pp_first_stage=False)
+        )
+        prev, nxt = helper.send_forward_backward_recv_forward_backward(
+            tensor, tensor, recv_prev=True, recv_next=True
+        )
+        self.assertIsNotNone(prev)
+        self.assertIsNotNone(nxt)
+        self.assertIsNone(
+            helper.send_forward_recv_forward(None, recv_prev=False)
+        )
+        self.assertIsNotNone(
+            helper.send_forward_recv_forward(tensor, recv_prev=True)
+        )
+        self.assertIsNone(
+            helper.send_backward_recv_backward(tensor, recv_next=False)
+        )
+        self.assertIsNotNone(
+            helper.send_backward_recv_backward(tensor, recv_next=True)
+        )
+        self.assertTrue(any(call[0] == "timer_start" for call in self.calls))
+
+
+if __name__ == "__main__":
+    unittest.main()

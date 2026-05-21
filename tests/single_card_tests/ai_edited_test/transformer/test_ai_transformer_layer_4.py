@@ -1,1 +1,333 @@
-IyBDb3B5cmlnaHQgKGMpIDIwMjYgUGFkZGxlUGFkZGxlIEF1dGhvcnMuIEFsbCBSaWdodHMgUmVzZXJ2ZWQuCiMKIyBMaWNlbnNlZCB1bmRlciB0aGUgQXBhY2hlIExpY2Vuc2UsIFZlcnNpb24gMi4wICh0aGUgIkxpY2Vuc2UiKTsKIyB5b3UgbWF5IG5vdCB1c2UgdGhpcyBmaWxlIGV4Y2VwdCBpbiBjb21wbGlhbmNlIHdpdGggdGhlIExpY2Vuc2UuCiMgWW91IG1heSBvYnRhaW4gYSBjb3B5IG9mIHRoZSBMaWNlbnNlIGF0CiMKIyAgICAgaHR0cDovL3d3dy5hcGFjaGUub3JnL2xpY2Vuc2VzL0xJQ0VOU0UtMi4wCiMKIyBVbmxlc3MgcmVxdWlyZWQgYnkgYXBwbGljYWJsZSBsYXcgb3IgYWdyZWVkIHRvIGluIHdyaXRpbmcsIHNvZnR3YXJlCiMgZGlzdHJpYnV0ZWQgdW5kZXIgdGhlIExpY2Vuc2UgaXMgZGlzdHJpYnV0ZWQgb24gYW4gIkFTIElTIiBCQVNJUywKIyBXSVRIT1VUIFdBUlJBTlRJRVMgT1IgQ09ORElUSU9OUyBPRiBBTlkgS0lORCwgZWl0aGVyIGV4cHJlc3Mgb3IgaW1wbGllZC4KIyBTZWUgdGhlIExpY2Vuc2UgZm9yIHRoZSBzcGVjaWZpYyBsYW5ndWFnZSBnb3Zlcm5pbmcgcGVybWlzc2lvbnMgYW5kCiMgbGltaXRhdGlvbnMgdW5kZXIgdGhlIExpY2Vuc2UuCmltcG9ydCBvcwppbXBvcnQgc3lzCmltcG9ydCB1bml0dGVzdAoKUkVQT19ST09UID0gb3MucGF0aC5kaXJuYW1lKAogICAgb3MucGF0aC5kaXJuYW1lKAogICAgICAgIG9zLnBhdGguZGlybmFtZShvcy5wYXRoLmRpcm5hbWUob3MucGF0aC5hYnNwYXRoKF9fZmlsZV9fKSkpCiAgICApCikKc3lzLnBhdGguaW5zZXJ0KDAsIG9zLnBhdGguam9pbihSRVBPX1JPT1QsICJzcmMiKSkKCmltcG9ydCBwYWRkbGUKCmZyb20gcGFkZGxlZmxlZXQudHJhbnNmb3JtZXIgaW1wb3J0IHRyYW5zZm9ybWVyX2xheWVyCmZyb20gcGFkZGxlZmxlZXQudHJhbnNmb3JtZXIubW9lLm1vZV9sYXllciBpbXBvcnQgTW9FTGF5ZXIKZnJvbSBwYWRkbGVmbGVldC50cmFuc2Zvcm1lci50cmFuc2Zvcm1lcl9sYXllciBpbXBvcnQgKAogICAgVHJhbnNmb3JtZXJMYXllck5vZGUsCiAgICBUcmFuc2Zvcm1lckxheWVyT3ZlcmxhcHBlZFNjaGVkdWxlTm9kZSwKKQoKCmNsYXNzIFRpbnlDb25maWc6CiAgICBkZWYgX19pbml0X18oc2VsZiwgbmV4dG49Tm9uZSwgd2VpZ2h0X29ubHk9RmFsc2UpOgogICAgICAgIHNlbGYubnVtX25leHRuX3ByZWRpY3RfbGF5ZXJzID0gbmV4dG4KICAgICAgICBzZWxmLm10cF9sb2FkX3dlaWdodF9vbmx5ID0gd2VpZ2h0X29ubHkKCgpjbGFzcyBSZWFsRGVuc2VMYXllcjoKICAgIGZ1bGxfcmVjb21wdXRlID0gRmFsc2UKICAgIG1scCA9IG9iamVjdCgpCgogICAgZGVmIF9faW5pdF9fKHNlbGYsIHdpdGhfY29udGV4dD1GYWxzZSk6CiAgICAgICAgc2VsZi53aXRoX2NvbnRleHQgPSB3aXRoX2NvbnRleHQKICAgICAgICBzZWxmLmF0dG5fZmxhZ3MgPSBbXQogICAgICAgIHNlbGYubWxwX2ZsYWdzID0gW10KCiAgICBkZWYgY29tcHV0ZV9hdHRlbnRpb24oc2VsZiwgaW5wdXRzLCBpc19maXJzdF9md2Q9RmFsc2UpOgogICAgICAgIHNlbGYuYXR0bl9mbGFncy5hcHBlbmQoaXNfZmlyc3RfZndkKQogICAgICAgIGhpZGRlbl9zdGF0ZXMgPSBpbnB1dHNbImhpZGRlbl9zdGF0ZXMiXSAqIDIuMAogICAgICAgIGNvbnRleHQgPSBOb25lCiAgICAgICAgaWYgc2VsZi53aXRoX2NvbnRleHQ6CiAgICAgICAgICAgIGNvbnRleHQgPSBoaWRkZW5fc3RhdGVzICsgMS4wCiAgICAgICAgICAgIGNvbnRleHQuc3RvcF9ncmFkaWVudCA9IFRydWUKICAgICAgICByZXR1cm4gaGlkZGVuX3N0YXRlcywgY29udGV4dAoKICAgIGRlZiBjb21wdXRlX21scChzZWxmLCBoaWRkZW5fc3RhdGVzLCBpc19maXJzdF9md2Q9RmFsc2UpOgogICAgICAgIHNlbGYubWxwX2ZsYWdzLmFwcGVuZChpc19maXJzdF9md2QpCiAgICAgICAgcmV0dXJuIGhpZGRlbl9zdGF0ZXMgKiAzLjAKCgpjbGFzcyBGYWtlU2NoZWR1bGVOb2RlOgogICAgZGVmIF9faW5pdF9fKHNlbGYsIGZ3ZF9mdW5jLCBuYW1lPSIiKToKICAgICAgICBzZWxmLmZ3ZF9mdW5jID0gZndkX2Z1bmMKICAgICAgICBzZWxmLm5hbWUgPSBuYW1lCiAgICAgICAgc2VsZi5mb3J3YXJkX2NhbGxzID0gW10KICAgICAgICBzZWxmLmJhY2t3YXJkX2NhbGxzID0gW10KCiAgICBkZWYgZm9yd2FyZChzZWxmLCBpbnB1dHM9KCksICoqa3dhcmdzKToKICAgICAgICBzZWxmLmZvcndhcmRfY2FsbHMuYXBwZW5kKChpbnB1dHMsIGt3YXJncykpCiAgICAgICAgcmV0dXJuIHNlbGYuZndkX2Z1bmMoaW5wdXRzLCAqKmt3YXJncykKCiAgICBkZWYgYmFja3dhcmQoc2VsZiwgb3V0cHV0X2dyYWQ9Tm9uZSwgc2NhbGVyPU5vbmUpOgogICAgICAgIGRlbCBzY2FsZXIKICAgICAgICBzZWxmLmJhY2t3YXJkX2NhbGxzLmFwcGVuZChvdXRwdXRfZ3JhZCkKICAgICAgICBncmFkID0gc2VsZi5fZmlyc3RfdGVuc29yKG91dHB1dF9ncmFkKQogICAgICAgIGlmIHNlbGYubmFtZSA9PSAicG9zdF9wcm9jZXNzX2NvbXB1dGUiOgogICAgICAgICAgICByZXR1cm4gZ3JhZCwgZ3JhZAogICAgICAgIGlmIHNlbGYubmFtZSA9PSAiYXV4X2xvc3NfY29tcHV0ZSI6CiAgICAgICAgICAgIHJldHVybiBncmFkLCBncmFkLCBncmFkLCBncmFkCiAgICAgICAgaWYgc2VsZi5uYW1lIGluICgiZGlzcGF0Y2hfY29tcHV0ZSIsICJkaXNwYXRjaF9wcmVwcm9jZXNzX2NvbXB1dGUiKToKICAgICAgICAgICAgcmV0dXJuIGdyYWQsIGdyYWQsIGdyYWQKICAgICAgICByZXR1cm4gZ3JhZAoKICAgIGRlZiBfZmlyc3RfdGVuc29yKHNlbGYsIHZhbHVlKToKICAgICAgICBpZiBpc2luc3RhbmNlKHZhbHVlLCAobGlzdCwgdHVwbGUpKToKICAgICAgICAgICAgcmV0dXJuIHNlbGYuX2ZpcnN0X3RlbnNvcih2YWx1ZVswXSkKICAgICAgICByZXR1cm4gdmFsdWUKCgpjbGFzcyBGYWtlRXZlbnQ6CiAgICBkZWYgX19pbml0X18oc2VsZiwgY2FsbHMpOgogICAgICAgIHNlbGYuY2FsbHMgPSBjYWxscwoKICAgIGRlZiBjYWxjX3N0cmVhbV93YWl0KHNlbGYsIGdyb3VwX2lkKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoImNhbGNfc3RyZWFtX3dhaXQiLCBncm91cF9pZCkpCgoKY2xhc3MgRmFrZURlZXBFUDoKICAgIGRlZiBfX2luaXRfXyhzZWxmLCBjYWxscyk6CiAgICAgICAgc2VsZi5jYWxscyA9IGNhbGxzCgogICAgZGVmIGdldF9ldmVudF9mcm9tX2NvbW1fc3RyZWFtKHNlbGYsIGdyb3VwX2lkKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgoImdldF9ldmVudCIsIGdyb3VwX2lkKSkKICAgICAgICByZXR1cm4gRmFrZUV2ZW50KHNlbGYuY2FsbHMpCgoKY2xhc3MgRmFrZUdyb3VwOgogICAgaWQgPSAyMwoKCmNsYXNzIEZha2VDb21tTWFuYWdlcjoKICAgIGRlZiBfX2luaXRfXyhzZWxmKToKICAgICAgICBzZWxmLmdyb3VwID0gRmFrZUdyb3VwKCkKCgpjbGFzcyBGYWtlVG9rZW5EaXNwYXRjaGVyOgogICAgZGVmIF9faW5pdF9fKHNlbGYpOgogICAgICAgIHNlbGYuX2NvbW1fbWFuYWdlciA9IEZha2VDb21tTWFuYWdlcigpCgoKY2xhc3MgRmFrZU1vRShNb0VMYXllcik6CiAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgc2VsZi50b2tlbl9kaXNwYXRjaGVyID0gRmFrZVRva2VuRGlzcGF0Y2hlcigpCgogICAgZGVmIGNvbXB1dGVfZ2F0ZShzZWxmLCBoaWRkZW5fc3RhdGVzKToKICAgICAgICByZXR1cm4gKAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgMS4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgMi4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgMy4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgNC4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgNS4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgNi4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgNy4wLAogICAgICAgICkKCiAgICBkZWYgY29tcHV0ZV9kaXNwYXRjaChzZWxmLCBhcmdzLCBhc3luY19maW5pc2g9RmFsc2UpOgogICAgICAgIGhpZGRlbl9zdGF0ZXMsIHRva2VuX2luZGljZXMsIHRva2VuX3dlaWdodHMgPSBhcmdzCiAgICAgICAgZGVsIGFzeW5jX2ZpbmlzaCwgdG9rZW5faW5kaWNlcywgdG9rZW5fd2VpZ2h0cwogICAgICAgIHJldHVybiBoaWRkZW5fc3RhdGVzICsgMi4wCgogICAgZGVmIGNvbXB1dGVfZXhwZXJ0cyhzZWxmLCBoaWRkZW5fc3RhdGVzLCBpc19maXJzdF9md2Q9RmFsc2UpOgogICAgICAgIGRlbCBpc19maXJzdF9md2QKICAgICAgICByZXR1cm4gaGlkZGVuX3N0YXRlcyAqIDIuMAoKICAgIGRlZiBjb21wdXRlX2NvbWJpbmUoc2VsZiwgaGlkZGVuX3N0YXRlcywgYXN5bmNfZmluaXNoPUZhbHNlKToKICAgICAgICBkZWwgYXN5bmNfZmluaXNoCiAgICAgICAgcmV0dXJuIGhpZGRlbl9zdGF0ZXMgKyAzLjAKCiAgICBkZWYgYXV4X2xvc3NfY29tcHV0ZShzZWxmLCBhcmdzKToKICAgICAgICBoaWRkZW5fc3RhdGVzLCBhdXhfbG9zcywgel9sb3NzLCByZXNpZHVhbHMgPSBhcmdzCiAgICAgICAgZGVsIGF1eF9sb3NzLCB6X2xvc3MsIHJlc2lkdWFscwogICAgICAgIHJldHVybiBoaWRkZW5fc3RhdGVzICsgNC4wCgoKY2xhc3MgU3BhcnNlTGF5ZXI6CiAgICBkZWYgX19pbml0X18oc2VsZiwgZnVsbF9yZWNvbXB1dGU9RmFsc2UpOgogICAgICAgIHNlbGYuZnVsbF9yZWNvbXB1dGUgPSBmdWxsX3JlY29tcHV0ZQogICAgICAgIHNlbGYubWxwID0gRmFrZU1vRSgpCgogICAgZGVmIGNvbXB1dGVfYXR0ZW50aW9uKHNlbGYsIGlucHV0cywgaXNfZmlyc3RfZndkPUZhbHNlKToKICAgICAgICBoaWRkZW5fc3RhdGVzID0gaW5wdXRzWyJoaWRkZW5fc3RhdGVzIl0KICAgICAgICBpZiBpc19maXJzdF9md2Q6CiAgICAgICAgICAgIGhpZGRlbl9zdGF0ZXMgPSBoaWRkZW5fc3RhdGVzICsgMS4wCiAgICAgICAgcmV0dXJuIGhpZGRlbl9zdGF0ZXMgKiAyLjAsIE5vbmUKCiAgICBkZWYgcHJlX3Byb2Nlc3NfY29tcHV0ZShzZWxmLCBoaWRkZW5fc3RhdGVzKToKICAgICAgICByZXR1cm4gKAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgMS4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgMi4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgMy4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgNC4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgNS4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgNi4wLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzICsgNy4wLAogICAgICAgICkKCiAgICBkZWYgZGlzcGF0Y2hfcHJlcHJvY2Vzc19jb21wdXRlKHNlbGYsIGFyZ3MpOgogICAgICAgIGhpZGRlbl9zdGF0ZXMsIHRvcGtfd2VpZ2h0cywgdG9wa19pbmRpY2VzID0gYXJncwogICAgICAgIHJldHVybiBoaWRkZW5fc3RhdGVzICsgMS4wLCB0b3BrX2luZGljZXMsIHRvcGtfd2VpZ2h0cwoKICAgIGRlZiBwb3N0X3Byb2Nlc3NfY29tcHV0ZShzZWxmLCBhcmdzLCBpc19maXJzdF9md2Q9RmFsc2UpOgogICAgICAgIG1scF9vdXRwdXQsIHJlc2lkdWFsID0gYXJncwogICAgICAgIG91dHB1dCA9IG1scF9vdXRwdXQgKyByZXNpZHVhbAogICAgICAgIGlmIGlzX2ZpcnN0X2Z3ZDoKICAgICAgICAgICAgb3V0cHV0LnN0b3BfZ3JhZGllbnQgPSBGYWxzZQogICAgICAgIHJldHVybiBvdXRwdXQKCgpjbGFzcyBUZXN0VHJhbnNmb3JtZXJMYXllckRlbnNlU2NoZWR1bGUodW5pdHRlc3QuVGVzdENhc2UpOgogICAgZGVmIHRlc3RfZGVuc2VfZm9yd2FyZF9iYWNrd2FyZF91c2VzX3JlYWxfc2NoZWR1bGVfbm9kZXMoc2VsZik6CiAgICAgICAgbGF5ZXIgPSBSZWFsRGVuc2VMYXllcigpCiAgICAgICAgbm9kZSA9IFRyYW5zZm9ybWVyTGF5ZXJOb2RlKGxheWVyLCBUaW55Q29uZmlnKCksIG5hbWU9ImRlbnNlIikKICAgICAgICBoaWRkZW5fc3RhdGVzID0gcGFkZGxlLm9uZXMoWzIsIDJdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgaGlkZGVuX3N0YXRlcy5zdG9wX2dyYWRpZW50ID0gRmFsc2UKCiAgICAgICAgcmVzdWx0ID0gbm9kZS5mb3J3YXJkKHsiaGlkZGVuX3N0YXRlcyI6IGhpZGRlbl9zdGF0ZXN9KQogICAgICAgIGdyYWRzID0gbm9kZS5iYWNrd2FyZChwYWRkbGUub25lcyhbMiwgMl0sIGR0eXBlPSJmbG9hdDMyIikpCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0WyJoaWRkZW5fc3RhdGVzIl0ubnVtcHkoKS50b2xpc3QoKSwgW1s2LjAsIDYuMF0sIFs2LjAsIDYuMF1dKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZ3JhZHNbMF0ubnVtcHkoKS50b2xpc3QoKSwgW1s2LjAsIDYuMF0sIFs2LjAsIDYuMF1dKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGF5ZXIuYXR0bl9mbGFncywgW0ZhbHNlXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGxheWVyLm1scF9mbGFncywgW0ZhbHNlXSkKCiAgICBkZWYgdGVzdF9kZW5zZV9mb3J3YXJkX3ByZXNlcnZlc19vcHRpb25hbF9jb250ZXh0KHNlbGYpOgogICAgICAgIG5vZGUgPSBUcmFuc2Zvcm1lckxheWVyTm9kZShSZWFsRGVuc2VMYXllcih3aXRoX2NvbnRleHQ9VHJ1ZSksIFRpbnlDb25maWcoKSkKICAgICAgICByZXN1bHQgPSBub2RlLmZvcndhcmQoCiAgICAgICAgICAgIHsiaGlkZGVuX3N0YXRlcyI6IHBhZGRsZS5vbmVzKFsxLCAyXSwgZHR5cGU9ImZsb2F0MzIiKX0KICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0SW4oImNvbnRleHQiLCByZXN1bHQpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChyZXN1bHRbImNvbnRleHQiXS5udW1weSgpLnRvbGlzdCgpLCBbWzMuMCwgMy4wXV0pCgogICAgZGVmIHRlc3RfZGVuc2VfZnVsbF9yZWNvbXB1dGVfcnVuc19jYWNoZWRfZm9yd2FyZHMoc2VsZik6CiAgICAgICAgb3JpZ2luYWxfc2NoZWR1bGVfbm9kZSA9IHRyYW5zZm9ybWVyX2xheWVyLlNjaGVkdWxlTm9kZQogICAgICAgIHRyYW5zZm9ybWVyX2xheWVyLlNjaGVkdWxlTm9kZSA9IEZha2VTY2hlZHVsZU5vZGUKICAgICAgICB0cnk6CiAgICAgICAgICAgIGxheWVyID0gUmVhbERlbnNlTGF5ZXIoKQogICAgICAgICAgICBsYXllci5mdWxsX3JlY29tcHV0ZSA9IFRydWUKICAgICAgICAgICAgbm9kZSA9IFRyYW5zZm9ybWVyTGF5ZXJOb2RlKGxheWVyLCBUaW55Q29uZmlnKCkpCiAgICAgICAgICAgIHJlc3VsdCA9IG5vZGUuZm9yd2FyZCgKICAgICAgICAgICAgICAgIHsiaGlkZGVuX3N0YXRlcyI6IHBhZGRsZS5vbmVzKFsxLCAxXSwgZHR5cGU9ImZsb2F0MzIiKX0KICAgICAgICAgICAgKQogICAgICAgICAgICBncmFkcyA9IG5vZGUuYmFja3dhcmQocGFkZGxlLm9uZXMoWzEsIDFdLCBkdHlwZT0iZmxvYXQzMiIpKQogICAgICAgIGZpbmFsbHk6CiAgICAgICAgICAgIHRyYW5zZm9ybWVyX2xheWVyLlNjaGVkdWxlTm9kZSA9IG9yaWdpbmFsX3NjaGVkdWxlX25vZGUKCiAgICAgICAgc2VsZi5hc3NlcnRJbigiaGlkZGVuX3N0YXRlcyIsIHJlc3VsdCkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGdyYWRzLnNoYXBlLCBbMSwgMV0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChsZW4obm9kZS5hdHRuX25vZGUuZm9yd2FyZF9jYWxscyksIDIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChsZW4obm9kZS5tbHBfbm9kZS5mb3J3YXJkX2NhbGxzKSwgMikKCgpjbGFzcyBUZXN0VHJhbnNmb3JtZXJMYXllclNwYXJzZVNjaGVkdWxlKHVuaXR0ZXN0LlRlc3RDYXNlKToKICAgIGRlZiBzZXRVcChzZWxmKToKICAgICAgICBzZWxmLm9yaWdpbmFsX3NjaGVkdWxlX25vZGUgPSB0cmFuc2Zvcm1lcl9sYXllci5TY2hlZHVsZU5vZGUKICAgICAgICBzZWxmLm9yaWdpbmFsX2RlZXBfZXAgPSBnZXRhdHRyKHRyYW5zZm9ybWVyX2xheWVyLCAiZGVlcF9lcCIsIE5vbmUpCiAgICAgICAgc2VsZi5jYWxscyA9IFtdCiAgICAgICAgdHJhbnNmb3JtZXJfbGF5ZXIuU2NoZWR1bGVOb2RlID0gRmFrZVNjaGVkdWxlTm9kZQogICAgICAgIHRyYW5zZm9ybWVyX2xheWVyLmRlZXBfZXAgPSBGYWtlRGVlcEVQKHNlbGYuY2FsbHMpCgogICAgZGVmIHRlYXJEb3duKHNlbGYpOgogICAgICAgIHRyYW5zZm9ybWVyX2xheWVyLlNjaGVkdWxlTm9kZSA9IHNlbGYub3JpZ2luYWxfc2NoZWR1bGVfbm9kZQogICAgICAgIGlmIHNlbGYub3JpZ2luYWxfZGVlcF9lcCBpcyBOb25lOgogICAgICAgICAgICBkZWxhdHRyKHRyYW5zZm9ybWVyX2xheWVyLCAiZGVlcF9lcCIpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgdHJhbnNmb3JtZXJfbGF5ZXIuZGVlcF9lcCA9IHNlbGYub3JpZ2luYWxfZGVlcF9lcAoKICAgIGRlZiB0ZXN0X3NwYXJzZV9mb3J3YXJkX2JhY2t3YXJkX3dhaXRzX2Zvcl9kaXNwYXRjaF9hbmRfY29tYmluZShzZWxmKToKICAgICAgICBub2RlID0gVHJhbnNmb3JtZXJMYXllck5vZGUoU3BhcnNlTGF5ZXIoZnVsbF9yZWNvbXB1dGU9VHJ1ZSksIFRpbnlDb25maWcoKSkKICAgICAgICBoaWRkZW5fc3RhdGVzID0gcGFkZGxlLm9uZXMoWzEsIDJdLCBkdHlwZT0iZmxvYXQzMiIpCgogICAgICAgIHJlc3VsdCA9IG5vZGUuZm9yd2FyZCh7ImhpZGRlbl9zdGF0ZXMiOiBoaWRkZW5fc3RhdGVzfSkKICAgICAgICBncmFkcyA9IG5vZGUuYmFja3dhcmQocGFkZGxlLm9uZXMoWzEsIDJdLCBkdHlwZT0iZmxvYXQzMiIpKQoKICAgICAgICBzZWxmLmFzc2VydEluKCJoaWRkZW5fc3RhdGVzIiwgcmVzdWx0KQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZ3JhZHMuc2hhcGUsIFsxLCAyXSkKICAgICAgICBzZWxmLmFzc2VydEdyZWF0ZXJFcXVhbCgKICAgICAgICAgICAgbGVuKFtjYWxsIGZvciBjYWxsIGluIHNlbGYuY2FsbHMgaWYgY2FsbFswXSA9PSAiY2FsY19zdHJlYW1fd2FpdCJdKSwKICAgICAgICAgICAgMiwKICAgICAgICApCgogICAgZGVmIHRlc3Rfc3BhcnNlX292ZXJsYXBwZWRfZm9yd2FyZF9iYWNrd2FyZF9pbnRlcmxlYXZlc19ldmVudHMoc2VsZik6CiAgICAgICAgZm9yd2FyZF9ub2RlID0gVHJhbnNmb3JtZXJMYXllck5vZGUoU3BhcnNlTGF5ZXIoKSwgVGlueUNvbmZpZygpKQogICAgICAgIGJhY2t3YXJkX25vZGUgPSBUcmFuc2Zvcm1lckxheWVyTm9kZShTcGFyc2VMYXllcihmdWxsX3JlY29tcHV0ZT1UcnVlKSwgVGlueUNvbmZpZygpKQogICAgICAgIGJhY2t3YXJkX25vZGUuYXR0bl9yZWNvbXB1dGVfYXJncyA9IHsKICAgICAgICAgICAgImhpZGRlbl9zdGF0ZXMiOiBwYWRkbGUub25lcyhbMSwgMl0sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICB9CiAgICAgICAgYmFja3dhcmRfbm9kZS5tbHBfcmVjb21wdXRlX2FyZ3MgPSBwYWRkbGUub25lcyhbMSwgMl0sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICBiYWNrd2FyZF9ub2RlLnBvc3RfcHJvY2Vzc19yZWNvbXB1dGVfYXJncyA9ICgKICAgICAgICAgICAgcGFkZGxlLm9uZXMoWzEsIDJdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBwYWRkbGUub25lcyhbMSwgMl0sIGR0eXBlPSJmbG9hdDMyIiksCiAgICAgICAgKQogICAgICAgIG92ZXJsYXBwZWQgPSBUcmFuc2Zvcm1lckxheWVyT3ZlcmxhcHBlZFNjaGVkdWxlTm9kZShmb3J3YXJkX25vZGUsIGJhY2t3YXJkX25vZGUpCgogICAgICAgIHJlc3VsdCwgZ3JhZHMgPSBvdmVybGFwcGVkLmZvcndhcmRfYmFja3dhcmQoCiAgICAgICAgICAgIHsiaGlkZGVuX3N0YXRlcyI6IHBhZGRsZS5vbmVzKFsxLCAyXSwgZHR5cGU9ImZsb2F0MzIiKX0sCiAgICAgICAgICAgIHBhZGRsZS5vbmVzKFsxLCAyXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0SW4oImhpZGRlbl9zdGF0ZXMiLCByZXN1bHQpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChncmFkcy5zaGFwZSwgWzEsIDJdKQogICAgICAgIHNlbGYuYXNzZXJ0R3JlYXRlckVxdWFsKAogICAgICAgICAgICBsZW4oW2NhbGwgZm9yIGNhbGwgaW4gc2VsZi5jYWxscyBpZiBjYWxsWzBdID09ICJnZXRfZXZlbnQiXSksIDQKICAgICAgICApCgogICAgZGVmIHRlc3Rfb3ZlcmxhcHBlZF9mYWxsYmFja19yZXN0b3Jlc19tdHBfaW5wdXRzX2FuZF9ncmFkcyhzZWxmKToKICAgICAgICBmb3J3YXJkX25vZGUgPSBUcmFuc2Zvcm1lckxheWVyTm9kZShSZWFsRGVuc2VMYXllcigpLCBUaW55Q29uZmlnKCkpCiAgICAgICAgYmFja3dhcmRfbm9kZSA9IFRyYW5zZm9ybWVyTGF5ZXJOb2RlKFJlYWxEZW5zZUxheWVyKCksIFRpbnlDb25maWcoKSkKICAgICAgICBjb25maWcgPSBUaW55Q29uZmlnKG5leHRuPTEsIHdlaWdodF9vbmx5PUZhbHNlKQogICAgICAgIGZvcndhcmRfbm9kZS5jb25maWcgPSBjb25maWcKICAgICAgICBiYWNrd2FyZF9ub2RlLmNvbmZpZyA9IGNvbmZpZwoKICAgICAgICBkZWYgZm9yd2FyZF9mdW5jKGlucHV0cyk6CiAgICAgICAgICAgIHJldHVybiB7ImhpZGRlbl9zdGF0ZXMiOiBpbnB1dHNbImhpZGRlbl9zdGF0ZXMiXSArIDEuMH0KCiAgICAgICAgZGVmIGJhY2t3YXJkX2Z1bmMob3V0cHV0X2dyYWQpOgogICAgICAgICAgICBkZWwgb3V0cHV0X2dyYWQKICAgICAgICAgICAgcmV0dXJuIChwYWRkbGUub25lcyhbMV0sIGR0eXBlPSJmbG9hdDMyIiksKQoKICAgICAgICBmb3J3YXJkX25vZGUuZm9yd2FyZCA9IGZvcndhcmRfZnVuYwogICAgICAgIGJhY2t3YXJkX25vZGUuYmFja3dhcmQgPSBiYWNrd2FyZF9mdW5jCiAgICAgICAgb3ZlcmxhcHBlZCA9IFRyYW5zZm9ybWVyTGF5ZXJPdmVybGFwcGVkU2NoZWR1bGVOb2RlKGZvcndhcmRfbm9kZSwgYmFja3dhcmRfbm9kZSkKICAgICAgICBtdHBfZ3JhZCA9IHBhZGRsZS5mdWxsKFsxXSwgNS4wLCBkdHlwZT0iZmxvYXQzMiIpCgogICAgICAgIHJlc3VsdCwgZ3JhZHMgPSBvdmVybGFwcGVkLmZvcndhcmRfYmFja3dhcmQoCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICJoaWRkZW5fc3RhdGVzIjogcGFkZGxlLm9uZXMoWzFdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICAgICAgImRlY29kZXJfaW5wdXRfMCI6IHBhZGRsZS5mdWxsKFsxXSwgMy4wLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICB9LAogICAgICAgICAgICBbcGFkZGxlLm9uZXMoWzFdLCBkdHlwZT0iZmxvYXQzMiIpLCBtdHBfZ3JhZF0sCiAgICAgICAgKQoKICAgICAgICBzZWxmLmFzc2VydEluKCJkZWNvZGVyX2lucHV0XzAiLCByZXN1bHQpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChsZW4oZ3JhZHMpLCAyKQogICAgICAgIHNlbGYuYXNzZXJ0SXMoZ3JhZHNbMV0sIG10cF9ncmFkKQoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICB1bml0dGVzdC5tYWluKCkK
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import sys
+import unittest
+
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+import paddle
+
+from paddlefleet.transformer import transformer_layer
+from paddlefleet.transformer.moe.moe_layer import MoELayer
+from paddlefleet.transformer.transformer_layer import (
+    TransformerLayerNode,
+    TransformerLayerOverlappedScheduleNode,
+)
+
+
+class TinyConfig:
+    def __init__(self, nextn=None, weight_only=False):
+        self.num_nextn_predict_layers = nextn
+        self.mtp_load_weight_only = weight_only
+
+
+class RealDenseLayer:
+    full_recompute = False
+    mlp = object()
+
+    def __init__(self, with_context=False):
+        self.with_context = with_context
+        self.attn_flags = []
+        self.mlp_flags = []
+
+    def compute_attention(self, inputs, is_first_fwd=False):
+        self.attn_flags.append(is_first_fwd)
+        hidden_states = inputs["hidden_states"] * 2.0
+        context = None
+        if self.with_context:
+            context = hidden_states + 1.0
+            context.stop_gradient = True
+        return hidden_states, context
+
+    def compute_mlp(self, hidden_states, is_first_fwd=False):
+        self.mlp_flags.append(is_first_fwd)
+        return hidden_states * 3.0
+
+
+class FakeScheduleNode:
+    def __init__(self, fwd_func, name=""):
+        self.fwd_func = fwd_func
+        self.name = name
+        self.forward_calls = []
+        self.backward_calls = []
+
+    def forward(self, inputs=(), **kwargs):
+        self.forward_calls.append((inputs, kwargs))
+        return self.fwd_func(inputs, **kwargs)
+
+    def backward(self, output_grad=None, scaler=None):
+        del scaler
+        self.backward_calls.append(output_grad)
+        grad = self._first_tensor(output_grad)
+        if self.name == "post_process_compute":
+            return grad, grad
+        if self.name == "aux_loss_compute":
+            return grad, grad, grad, grad
+        if self.name in ("dispatch_compute", "dispatch_preprocess_compute"):
+            return grad, grad, grad
+        return grad
+
+    def _first_tensor(self, value):
+        if isinstance(value, (list, tuple)):
+            return self._first_tensor(value[0])
+        return value
+
+
+class FakeEvent:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def calc_stream_wait(self, group_id):
+        self.calls.append(("calc_stream_wait", group_id))
+
+
+class FakeDeepEP:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def get_event_from_comm_stream(self, group_id):
+        self.calls.append(("get_event", group_id))
+        return FakeEvent(self.calls)
+
+
+class FakeGroup:
+    id = 23
+
+
+class FakeCommManager:
+    def __init__(self):
+        self.group = FakeGroup()
+
+
+class FakeTokenDispatcher:
+    def __init__(self):
+        self._comm_manager = FakeCommManager()
+
+
+class FakeMoE(MoELayer):
+    def __init__(self):
+        self.token_dispatcher = FakeTokenDispatcher()
+
+    def compute_gate(self, hidden_states):
+        return (
+            hidden_states,
+            hidden_states + 1.0,
+            hidden_states + 2.0,
+            hidden_states + 3.0,
+            hidden_states + 4.0,
+            hidden_states + 5.0,
+            hidden_states + 6.0,
+            hidden_states + 7.0,
+        )
+
+    def compute_dispatch(self, args, async_finish=False):
+        hidden_states, token_indices, token_weights = args
+        del async_finish, token_indices, token_weights
+        return hidden_states + 2.0
+
+    def compute_experts(self, hidden_states, is_first_fwd=False):
+        del is_first_fwd
+        return hidden_states * 2.0
+
+    def compute_combine(self, hidden_states, async_finish=False):
+        del async_finish
+        return hidden_states + 3.0
+
+    def aux_loss_compute(self, args):
+        hidden_states, aux_loss, z_loss, residuals = args
+        del aux_loss, z_loss, residuals
+        return hidden_states + 4.0
+
+
+class SparseLayer:
+    def __init__(self, full_recompute=False):
+        self.full_recompute = full_recompute
+        self.mlp = FakeMoE()
+
+    def compute_attention(self, inputs, is_first_fwd=False):
+        hidden_states = inputs["hidden_states"]
+        if is_first_fwd:
+            hidden_states = hidden_states + 1.0
+        return hidden_states * 2.0, None
+
+    def pre_process_compute(self, hidden_states):
+        return (
+            hidden_states + 1.0,
+            hidden_states + 2.0,
+            hidden_states + 3.0,
+            hidden_states + 4.0,
+            hidden_states + 5.0,
+            hidden_states + 6.0,
+            hidden_states + 7.0,
+        )
+
+    def dispatch_preprocess_compute(self, args):
+        hidden_states, topk_weights, topk_indices = args
+        return hidden_states + 1.0, topk_indices, topk_weights
+
+    def post_process_compute(self, args, is_first_fwd=False):
+        mlp_output, residual = args
+        output = mlp_output + residual
+        if is_first_fwd:
+            output.stop_gradient = False
+        return output
+
+
+class TestTransformerLayerDenseSchedule(unittest.TestCase):
+    def test_dense_forward_backward_uses_real_schedule_nodes(self):
+        layer = RealDenseLayer()
+        node = TransformerLayerNode(layer, TinyConfig(), name="dense")
+        hidden_states = paddle.ones([2, 2], dtype="float32")
+        hidden_states.stop_gradient = False
+
+        result = node.forward({"hidden_states": hidden_states})
+        grads = node.backward(paddle.ones([2, 2], dtype="float32"))
+
+        self.assertEqual(
+            result["hidden_states"].numpy().tolist(), [[6.0, 6.0], [6.0, 6.0]]
+        )
+        self.assertEqual(grads[0].numpy().tolist(), [[6.0, 6.0], [6.0, 6.0]])
+        self.assertEqual(layer.attn_flags, [False])
+        self.assertEqual(layer.mlp_flags, [False])
+
+    def test_dense_forward_preserves_optional_context(self):
+        node = TransformerLayerNode(
+            RealDenseLayer(with_context=True), TinyConfig()
+        )
+        result = node.forward(
+            {"hidden_states": paddle.ones([1, 2], dtype="float32")}
+        )
+
+        self.assertIn("context", result)
+        self.assertEqual(result["context"].numpy().tolist(), [[3.0, 3.0]])
+
+    def test_dense_full_recompute_runs_cached_forwards(self):
+        original_schedule_node = transformer_layer.ScheduleNode
+        transformer_layer.ScheduleNode = FakeScheduleNode
+        try:
+            layer = RealDenseLayer()
+            layer.full_recompute = True
+            node = TransformerLayerNode(layer, TinyConfig())
+            result = node.forward(
+                {"hidden_states": paddle.ones([1, 1], dtype="float32")}
+            )
+            grads = node.backward(paddle.ones([1, 1], dtype="float32"))
+        finally:
+            transformer_layer.ScheduleNode = original_schedule_node
+
+        self.assertIn("hidden_states", result)
+        self.assertEqual(grads.shape, [1, 1])
+        self.assertEqual(len(node.attn_node.forward_calls), 2)
+        self.assertEqual(len(node.mlp_node.forward_calls), 2)
+
+
+class TestTransformerLayerSparseSchedule(unittest.TestCase):
+    def setUp(self):
+        self.original_schedule_node = transformer_layer.ScheduleNode
+        self.original_deep_ep = getattr(transformer_layer, "deep_ep", None)
+        self.calls = []
+        transformer_layer.ScheduleNode = FakeScheduleNode
+        transformer_layer.deep_ep = FakeDeepEP(self.calls)
+
+    def tearDown(self):
+        transformer_layer.ScheduleNode = self.original_schedule_node
+        if self.original_deep_ep is None:
+            delattr(transformer_layer, "deep_ep")
+        else:
+            transformer_layer.deep_ep = self.original_deep_ep
+
+    def test_sparse_forward_backward_waits_for_dispatch_and_combine(self):
+        node = TransformerLayerNode(
+            SparseLayer(full_recompute=True), TinyConfig()
+        )
+        hidden_states = paddle.ones([1, 2], dtype="float32")
+
+        result = node.forward({"hidden_states": hidden_states})
+        grads = node.backward(paddle.ones([1, 2], dtype="float32"))
+
+        self.assertIn("hidden_states", result)
+        self.assertEqual(grads.shape, [1, 2])
+        self.assertGreaterEqual(
+            len([call for call in self.calls if call[0] == "calc_stream_wait"]),
+            2,
+        )
+
+    def test_sparse_overlapped_forward_backward_interleaves_events(self):
+        forward_node = TransformerLayerNode(SparseLayer(), TinyConfig())
+        backward_node = TransformerLayerNode(
+            SparseLayer(full_recompute=True), TinyConfig()
+        )
+        backward_node.attn_recompute_args = {
+            "hidden_states": paddle.ones([1, 2], dtype="float32")
+        }
+        backward_node.mlp_recompute_args = paddle.ones([1, 2], dtype="float32")
+        backward_node.post_process_recompute_args = (
+            paddle.ones([1, 2], dtype="float32"),
+            paddle.ones([1, 2], dtype="float32"),
+        )
+        overlapped = TransformerLayerOverlappedScheduleNode(
+            forward_node, backward_node
+        )
+
+        result, grads = overlapped.forward_backward(
+            {"hidden_states": paddle.ones([1, 2], dtype="float32")},
+            paddle.ones([1, 2], dtype="float32"),
+        )
+
+        self.assertIn("hidden_states", result)
+        self.assertEqual(grads.shape, [1, 2])
+        self.assertGreaterEqual(
+            len([call for call in self.calls if call[0] == "get_event"]), 4
+        )
+
+    def test_overlapped_fallback_restores_mtp_inputs_and_grads(self):
+        forward_node = TransformerLayerNode(RealDenseLayer(), TinyConfig())
+        backward_node = TransformerLayerNode(RealDenseLayer(), TinyConfig())
+        config = TinyConfig(nextn=1, weight_only=False)
+        forward_node.config = config
+        backward_node.config = config
+
+        def forward_func(inputs):
+            return {"hidden_states": inputs["hidden_states"] + 1.0}
+
+        def backward_func(output_grad):
+            del output_grad
+            return (paddle.ones([1], dtype="float32"),)
+
+        forward_node.forward = forward_func
+        backward_node.backward = backward_func
+        overlapped = TransformerLayerOverlappedScheduleNode(
+            forward_node, backward_node
+        )
+        mtp_grad = paddle.full([1], 5.0, dtype="float32")
+
+        result, grads = overlapped.forward_backward(
+            {
+                "hidden_states": paddle.ones([1], dtype="float32"),
+                "decoder_input_0": paddle.full([1], 3.0, dtype="float32"),
+            },
+            [paddle.ones([1], dtype="float32"), mtp_grad],
+        )
+
+        self.assertIn("decoder_input_0", result)
+        self.assertEqual(len(grads), 2)
+        self.assertIs(grads[1], mtp_grad)
+
+
+if __name__ == "__main__":
+    unittest.main()

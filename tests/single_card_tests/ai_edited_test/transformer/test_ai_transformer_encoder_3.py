@@ -1,1 +1,342 @@
-IyBDb3B5cmlnaHQgKGMpIDIwMjYgUGFkZGxlUGFkZGxlIEF1dGhvcnMuIEFsbCBSaWdodHMgUmVzZXJ2ZWQuCiMKIyBMaWNlbnNlZCB1bmRlciB0aGUgQXBhY2hlIExpY2Vuc2UsIFZlcnNpb24gMi4wICh0aGUgIkxpY2Vuc2UiKTsKIyB5b3UgbWF5IG5vdCB1c2UgdGhpcyBmaWxlIGV4Y2VwdCBpbiBjb21wbGlhbmNlIHdpdGggdGhlIExpY2Vuc2UuCiMgWW91IG1heSBvYnRhaW4gYSBjb3B5IG9mIHRoZSBMaWNlbnNlIGF0CiMKIyAgICAgaHR0cDovL3d3dy5hcGFjaGUub3JnL2xpY2Vuc2VzL0xJQ0VOU0UtMi4wCiMKIyBVbmxlc3MgcmVxdWlyZWQgYnkgYXBwbGljYWJsZSBsYXcgb3IgYWdyZWVkIHRvIGluIHdyaXRpbmcsIHNvZnR3YXJlCiMgZGlzdHJpYnV0ZWQgdW5kZXIgdGhlIExpY2Vuc2UgaXMgZGlzdHJpYnV0ZWQgb24gYW4gIkFTIElTIiBCQVNJUywKIyBXSVRIT1VUIFdBUlJBTlRJRVMgT1IgQ09ORElUSU9OUyBPRiBBTlkgS0lORCwgZWl0aGVyIGV4cHJlc3Mgb3IgaW1wbGllZC4KIyBTZWUgdGhlIExpY2Vuc2UgZm9yIHRoZSBzcGVjaWZpYyBsYW5ndWFnZSBnb3Zlcm5pbmcgcGVybWlzc2lvbnMgYW5kCiMgbGltaXRhdGlvbnMgdW5kZXIgdGhlIExpY2Vuc2UuCmltcG9ydCBvcwppbXBvcnQgc3lzCmltcG9ydCB1bml0dGVzdAoKaW1wb3J0IHBhZGRsZQoKUkVQT19ST09UID0gb3MucGF0aC5kaXJuYW1lKAogICAgb3MucGF0aC5kaXJuYW1lKAogICAgICAgIG9zLnBhdGguZGlybmFtZShvcy5wYXRoLmRpcm5hbWUob3MucGF0aC5hYnNwYXRoKF9fZmlsZV9fKSkpCiAgICApCikKc3lzLnBhdGguaW5zZXJ0KDAsIG9zLnBhdGguam9pbihSRVBPX1JPT1QsICJzcmMiKSkKCmZyb20gcGFkZGxlIGltcG9ydCBubgpmcm9tIHBhZGRsZS5kaXN0cmlidXRlZC5mbGVldC5tZXRhX3BhcmFsbGVsIGltcG9ydCAoCiAgICBTY2hlZHVsZUNodW5rLAogICAgU2NoZWR1bGVOb2RlLAogICAgU2hhcmVkTGF5ZXJEZXNjLAopCgpmcm9tIHBhZGRsZWZsZWV0LnRyYW5zZm9ybWVyIGltcG9ydCB0cmFuc2Zvcm1lcl9lbmNvZGVyCmZyb20gcGFkZGxlZmxlZXQudHJhbnNmb3JtZXIudHJhbnNmb3JtZXJfZW5jb2RlciBpbXBvcnQgVHJhbnNmb3JtZXJFbmNvZGVyCmZyb20gcGFkZGxlZmxlZXQudHJhbnNmb3JtZXIudHJhbnNmb3JtZXJfbGF5ZXIgaW1wb3J0IFRyYW5zZm9ybWVyTGF5ZXJOb2RlCgoKY2xhc3MgVmFsdWU6CiAgICBkZWYgX19pbml0X18oc2VsZiwgbmFtZT0iIik6CiAgICAgICAgc2VsZi5rZXkgPSBuYW1lCiAgICAgICAgc2VsZi5nbG9iYWxfZXhwZXJ0X2lkX29mZnNldCA9IE5vbmUKICAgICAgICBzZWxmLmxheWVyX2NudCA9IE5vbmUKCgpjbGFzcyBDb25maWc6CiAgICBkZWYgX19pbml0X18oc2VsZiwgbW9kZWxfdHlwZT0iIik6CiAgICAgICAgc2VsZi5tb2RlbF90eXBlID0gbW9kZWxfdHlwZQoKCmNsYXNzIExpZ2h0d2VpZ2h0RW5jb2RlcihUcmFuc2Zvcm1lckVuY29kZXIpOgogICAgZGVmIF9faW5pdF9fKHNlbGYsIGtleXMsIG1vZGFsPU5vbmUsIG1vZGVsX3R5cGU9IiIpOgogICAgICAgIHNlbGYubW9kYWwgPSBtb2RhbAogICAgICAgIHNlbGYuY29uZmlnID0gQ29uZmlnKG1vZGVsX3R5cGUpCiAgICAgICAgc2VsZi5fa2V5cyA9IGtleXMKICAgICAgICBzZWxmLl9zZXF1ZW50aWFsX2xheWVycyA9IFtdCiAgICAgICAgc2VsZi5fcGlwZWxpbmVfbmFtZV9tYXBwaW5nID0gTm9uZQogICAgICAgIHNlbGYubGF5ZXJzID0gW10KICAgICAgICBzZWxmLl9zdGFnZV9pZCA9IDAKICAgICAgICBzZWxmLl9zdGFnZV9mb3JfaW5kZXggPSAwCiAgICAgICAgc2VsZi5sb2FkZWRfc3RhdGUgPSBOb25lCgogICAgZGVmIGdldF9zdGFnZV9mcm9tX2luZGV4KHNlbGYsIGlkeCk6CiAgICAgICAgZGVsIGlkeAogICAgICAgIHJldHVybiBzZWxmLl9zdGFnZV9mb3JfaW5kZXgKCiAgICBkZWYgX3BhcmVudF9zdGF0ZV9kaWN0KHNlbGYsICphcmdzLCAqKmt3YXJncyk6CiAgICAgICAgZGVsIGFyZ3MsIGt3YXJncwogICAgICAgIHJldHVybiB7a2V5OiBWYWx1ZShrZXkpIGZvciBrZXkgaW4gc2VsZi5fa2V5c30KCiAgICBkZWYgX3BhcmVudF9zZXRfc3RhdGVfZGljdChzZWxmLCBzdGF0ZV9kaWN0LCAqYXJncywgKiprd2FyZ3MpOgogICAgICAgIGRlbCBhcmdzLCBrd2FyZ3MKICAgICAgICBzZWxmLmxvYWRlZF9zdGF0ZSA9IGRpY3Qoc3RhdGVfZGljdCkKICAgICAgICByZXR1cm4gImxvYWRlZCIKCiAgICBkZWYgX3BhcmVudF9zaGFyZGVkX3N0YXRlX2RpY3Qoc2VsZiwgKmFyZ3MsICoqa3dhcmdzKToKICAgICAgICBkZWwgYXJncywga3dhcmdzCiAgICAgICAgcmVzdWx0ID0ge2tleTogVmFsdWUoa2V5KSBmb3Iga2V5IGluIHNlbGYuX2tleXN9CiAgICAgICAgaWYgIjIuZXhwZXJ0cy4xLndlaWdodCIgaW4gcmVzdWx0OgogICAgICAgICAgICByZXN1bHRbIjIuZXhwZXJ0cy4xLndlaWdodCJdLmdsb2JhbF9leHBlcnRfaWRfb2Zmc2V0ID0gNAogICAgICAgIGlmICIyLmxheWVyX25vcm0ud2VpZ2h0IiBpbiByZXN1bHQ6CiAgICAgICAgICAgIHJlc3VsdFsiMi5sYXllcl9ub3JtLndlaWdodCJdLmxheWVyX2NudCA9IDcKICAgICAgICByZXR1cm4gcmVzdWx0CgoKY2xhc3MgUGFyZW50TWV0aG9kczoKICAgIGRlZiBfX2luaXRfXyhzZWxmLCBzdGF0ZV9kaWN0X2Z1bmMsIHNldF9zdGF0ZV9kaWN0X2Z1bmMsIHNoYXJkZWRfZnVuYyk6CiAgICAgICAgc2VsZi5fc3RhdGVfZGljdF9mdW5jID0gc3RhdGVfZGljdF9mdW5jCiAgICAgICAgc2VsZi5fc2V0X3N0YXRlX2RpY3RfZnVuYyA9IHNldF9zdGF0ZV9kaWN0X2Z1bmMKICAgICAgICBzZWxmLl9zaGFyZGVkX2Z1bmMgPSBzaGFyZGVkX2Z1bmMKCiAgICBkZWYgc3RhdGVfZGljdChzZWxmLCAqYXJncywgKiprd2FyZ3MpOgogICAgICAgIHJldHVybiBzZWxmLl9zdGF0ZV9kaWN0X2Z1bmMoKmFyZ3MsICoqa3dhcmdzKQoKICAgIGRlZiBzZXRfc3RhdGVfZGljdChzZWxmLCAqYXJncywgKiprd2FyZ3MpOgogICAgICAgIHJldHVybiBzZWxmLl9zZXRfc3RhdGVfZGljdF9mdW5jKCphcmdzLCAqKmt3YXJncykKCiAgICBkZWYgc2hhcmRlZF9zdGF0ZV9kaWN0KHNlbGYsICphcmdzLCAqKmt3YXJncyk6CiAgICAgICAgcmV0dXJuIHNlbGYuX3NoYXJkZWRfZnVuYygqYXJncywgKiprd2FyZ3MpCgoKY2xhc3MgRHVtbXlFbWJlZGRpbmcobm4uTGF5ZXIpOgogICAgZGVmIGZvcndhcmQoc2VsZiwgKmFyZ3MsICoqa3dhcmdzKToKICAgICAgICBkZWwgYXJncywga3dhcmdzCgoKY2xhc3MgRm9yd2FyZE5vZGUoU2NoZWR1bGVOb2RlKToKICAgIGRlZiBfX2luaXRfXyhzZWxmLCBkZWx0YSk6CiAgICAgICAgc3VwZXIoKS5fX2luaXRfXyhsYW1iZGEgaW5wdXRzOiBpbnB1dHMsIG5hbWU9ImZvcndhcmRfbm9kZSIpCiAgICAgICAgc2VsZi5kZWx0YSA9IGRlbHRhCgogICAgZGVmIGZvcndhcmQoc2VsZiwgaW5wdXRzKToKICAgICAgICByZXR1cm4geyJoaWRkZW5fc3RhdGVzIjogaW5wdXRzWyJoaWRkZW5fc3RhdGVzIl0gKyBzZWxmLmRlbHRhfQoKCmNsYXNzIEJhY2t3YXJkTm9kZShTY2hlZHVsZU5vZGUpOgogICAgZGVmIF9faW5pdF9fKHNlbGYsIGRlbHRhKToKICAgICAgICBzdXBlcigpLl9faW5pdF9fKGxhbWJkYSBpbnB1dHM6IGlucHV0cywgbmFtZT0iYmFja3dhcmRfbm9kZSIpCiAgICAgICAgc2VsZi5kZWx0YSA9IGRlbHRhCgogICAgZGVmIGJhY2t3YXJkKHNlbGYsIGdyYWRzKToKICAgICAgICByZXR1cm4gZ3JhZHNbMF0gKyBzZWxmLmRlbHRhCgoKY2xhc3MgVGlueUNvbmZpZzoKICAgIG51bV9uZXh0bl9wcmVkaWN0X2xheWVycyA9IE5vbmUKICAgIG10cF9sb2FkX3dlaWdodF9vbmx5ID0gRmFsc2UKCgpjbGFzcyBPdmVybGFwTm9kZShUcmFuc2Zvcm1lckxheWVyTm9kZSk6CiAgICBkZWYgX19pbml0X18oc2VsZiwgZGVsdGEpOgogICAgICAgIHNlbGYuZGVsdGEgPSBkZWx0YQogICAgICAgIHNlbGYuY29uZmlnID0gVGlueUNvbmZpZygpCiAgICAgICAgc2VsZi5faXNfc3BhcnNlID0gRmFsc2UKICAgICAgICBzZWxmLmZ1bGxfcmVjb21wdXRlID0gRmFsc2UKCiAgICBkZWYgZm9yd2FyZChzZWxmLCBpbnB1dHMpOgogICAgICAgIHJldHVybiB7ImhpZGRlbl9zdGF0ZXMiOiBpbnB1dHNbImhpZGRlbl9zdGF0ZXMiXSArIHNlbGYuZGVsdGF9CgogICAgZGVmIGJhY2t3YXJkKHNlbGYsIGdyYWRzKToKICAgICAgICByZXR1cm4gZ3JhZHMgKyBzZWxmLmRlbHRhCgoKY2xhc3MgTG9zc05vZGU6CiAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgc2VsZi5iYWNrd2FyZF9zY2FsZXJzID0gW10KICAgICAgICBzZWxmLmZvcndhcmRfaW5wdXRzID0gW10KCiAgICBkZWYgZm9yd2FyZChzZWxmLCBpbnB1dHMpOgogICAgICAgIHNlbGYuZm9yd2FyZF9pbnB1dHMuYXBwZW5kKGlucHV0cykKICAgICAgICBpZiBpc2luc3RhbmNlKGlucHV0cywgdHVwbGUpOgogICAgICAgICAgICByZXR1cm4gaW5wdXRzWzBdLnN1bSgpCiAgICAgICAgcmV0dXJuIGlucHV0c1siaGlkZGVuX3N0YXRlcyJdLnN1bSgpCgogICAgZGVmIGJhY2t3YXJkKHNlbGYsIHNjYWxlcj1Ob25lKToKICAgICAgICBzZWxmLmJhY2t3YXJkX3NjYWxlcnMuYXBwZW5kKHNjYWxlcikKICAgICAgICByZXR1cm4gKHBhZGRsZS5vbmVzKFsxXSwgZHR5cGU9ImZsb2F0MzIiKSwpCgoKY2xhc3MgUDJQSGFuZGxlOgogICAgZGVmIF9faW5pdF9fKHNlbGYpOgogICAgICAgIHNlbGYuY2FsbHMgPSBbXQoKICAgIGRlZiBmb3J3YXJkX2hhbmRsZV93YWl0KHNlbGYpOgogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCJmb3J3YXJkX3dhaXQiKQoKICAgIGRlZiBiYWNrd2FyZF9oYW5kbGVfd2FpdChzZWxmKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgiYmFja3dhcmRfd2FpdCIpCgogICAgZGVmIGZvcndhcmRfYXN5bmNfY29tbShzZWxmLCB2YWx1ZSk6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJmb3J3YXJkX2FzeW5jIiwgaXNpbnN0YW5jZSh2YWx1ZSwgdHVwbGUpKSkKCiAgICBkZWYgYmFja3dhcmRfYXN5bmNfY29tbShzZWxmLCB2YWx1ZSk6CiAgICAgICAgc2VsZi5jYWxscy5hcHBlbmQoKCJiYWNrd2FyZF9hc3luYyIsIHZhbHVlLnNoYXBlKSkKCgpjbGFzcyBUZXN0VHJhbnNmb3JtZXJFbmNvZGVyUGlwZWxpbmVNYXBwaW5nTm9Nb2NrKHVuaXR0ZXN0LlRlc3RDYXNlKToKICAgIGRlZiBzZXRVcChzZWxmKToKICAgICAgICBzZWxmLm9yaWdpbmFsX3N1cGVyID0gZ2V0YXR0cih0cmFuc2Zvcm1lcl9lbmNvZGVyLCAic3VwZXIiLCBOb25lKQoKICAgIGRlZiB0ZWFyRG93bihzZWxmKToKICAgICAgICBpZiBzZWxmLm9yaWdpbmFsX3N1cGVyIGlzIE5vbmU6CiAgICAgICAgICAgIGlmIGhhc2F0dHIodHJhbnNmb3JtZXJfZW5jb2RlciwgInN1cGVyIik6CiAgICAgICAgICAgICAgICBkZWxhdHRyKHRyYW5zZm9ybWVyX2VuY29kZXIsICJzdXBlciIpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgdHJhbnNmb3JtZXJfZW5jb2Rlci5zdXBlciA9IHNlbGYub3JpZ2luYWxfc3VwZXIKCiAgICBkZWYgX2luc3RhbGxfcGFyZW50KHNlbGYsIG1vZGVsKToKICAgICAgICB0cmFuc2Zvcm1lcl9lbmNvZGVyLnN1cGVyID0gbGFtYmRhOiBQYXJlbnRNZXRob2RzKAogICAgICAgICAgICBtb2RlbC5fcGFyZW50X3N0YXRlX2RpY3QsCiAgICAgICAgICAgIG1vZGVsLl9wYXJlbnRfc2V0X3N0YXRlX2RpY3QsCiAgICAgICAgICAgIG1vZGVsLl9wYXJlbnRfc2hhcmRlZF9zdGF0ZV9kaWN0LAogICAgICAgICkKCiAgICBkZWYgdGVzdF9vdmVybGFwcGVkX2ZvcndhcmRfYmFja3dhcmRfd2l0aF9sb3NzX2FuZF9wMnBfaGFuZGxlKHNlbGYpOgogICAgICAgIG1vZGVsID0gTGlnaHR3ZWlnaHRFbmNvZGVyKFtdKQogICAgICAgIGZvcndhcmRfbG9zcyA9IExvc3NOb2RlKCkKICAgICAgICBiYWNrd2FyZF9sb3NzID0gTG9zc05vZGUoKQogICAgICAgIGhhbmRsZSA9IFAyUEhhbmRsZSgpCgogICAgICAgIGZvcndhcmRfaW5wdXRzLCBsb3NzLCBncmFkcyA9IG1vZGVsLm92ZXJsYXBwZWRfZm9yd2FyZF9iYWNrd2FyZCgKICAgICAgICAgICAgU2NoZWR1bGVDaHVuayhbRm9yd2FyZE5vZGUoMS4wKSwgT3ZlcmxhcE5vZGUoMi4wKSwgRm9yd2FyZE5vZGUoMy4wKV0pLAogICAgICAgICAgICB7ImhpZGRlbl9zdGF0ZXMiOiBwYWRkbGUub25lcyhbMV0sIGR0eXBlPSJmbG9hdDMyIil9LAogICAgICAgICAgICBmb3J3YXJkX2xvc3MsCiAgICAgICAgICAgIFNjaGVkdWxlQ2h1bmsoW0JhY2t3YXJkTm9kZSg1LjApLCBPdmVybGFwTm9kZSg0LjApLCBCYWNrd2FyZE5vZGUoNi4wKV0pLAogICAgICAgICAgICBiYWNrd2FyZF9sb3NzLAogICAgICAgICAgICBOb25lLAogICAgICAgICAgICBzY2FsZXI9InNjYWxlIiwKICAgICAgICAgICAgcDJwX2FzeW5jX2hhbmRsZT1oYW5kbGUsCiAgICAgICAgKQoKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGxvc3MubnVtcHkoKS5pdGVtKCksIDcuMCkKICAgICAgICBzZWxmLmFzc2VydFRydWUoaXNpbnN0YW5jZShmb3J3YXJkX2lucHV0cywgdHVwbGUpKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZm9yd2FyZF9pbnB1dHNbMF0ubnVtcHkoKS50b2xpc3QoKSwgWzcuMF0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChncmFkcy5udW1weSgpLml0ZW0oKSwgMTYuMCkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGJhY2t3YXJkX2xvc3MuYmFja3dhcmRfc2NhbGVycywgWyJzY2FsZSJdKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoaGFuZGxlLmNhbGxzWzA6Ml0sIFsiZm9yd2FyZF93YWl0IiwgImJhY2t3YXJkX3dhaXQiXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGhhbmRsZS5jYWxsc1syXVswXSwgImZvcndhcmRfYXN5bmMiKQoKICAgIGRlZiB0ZXN0X3NldF9waXBlbGluZV9tYXBwaW5nX2hhbmRsZXNfdmlydHVhbF9hbmRfc2hhcmVkX25hbWVzKHNlbGYpOgogICAgICAgIHNoYXJlZCA9IFNoYXJlZExheWVyRGVzYygKICAgICAgICAgICAgImVtYmVkIiwgRHVtbXlFbWJlZGRpbmcsIHNoYXJlZF93ZWlnaHRfYXR0cj0iZW1iZWRkaW5nX3dlaWdodCIKICAgICAgICApCiAgICAgICAgbW9kZWwgPSBMaWdodHdlaWdodEVuY29kZXIoCiAgICAgICAgICAgIFsKICAgICAgICAgICAgICAgICIwLjAud2VpZ2h0IiwKICAgICAgICAgICAgICAgICIwLnRhaWwud2VpZ2h0IiwKICAgICAgICAgICAgICAgICJzaGFyZWRfbGF5ZXJzLmVtYmVkLndlaWdodCIsCiAgICAgICAgICAgICAgICAicGxhaW4uYmlhcyIsCiAgICAgICAgICAgIF0KICAgICAgICApCiAgICAgICAgbW9kZWwubGF5ZXJzID0gW3NoYXJlZF0KICAgICAgICBtb2RlbC5fc2VxdWVudGlhbF9sYXllcnMgPSBbCiAgICAgICAgICAgIHsibGF5ZXIiOiBzaGFyZWQsICJuYW1lX3ByZWZpeCI6ICJtb2RlbC5lbWJlZCJ9LAogICAgICAgICAgICB7ImxheWVyIjogb2JqZWN0KCksICJuYW1lX3ByZWZpeCI6ICJtb2RlbC5sYXllcnMuMSJ9LAogICAgICAgIF0KICAgICAgICBzZWxmLl9pbnN0YWxsX3BhcmVudChtb2RlbCkKCiAgICAgICAgbWFwcGluZyA9IG1vZGVsLl9zZXRfcGlwZWxpbmVfbmFtZV9tYXBwaW5nKCkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChtYXBwaW5nWyJtb2RlbC5lbWJlZC53ZWlnaHQiXSwgInNoYXJlZF9sYXllcnMuZW1iZWQud2VpZ2h0IikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKG1hcHBpbmdbIm1vZGVsLmxheWVycy4xLndlaWdodCJdLCAiMC50YWlsLndlaWdodCIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChtYXBwaW5nWyJwbGFpbi5iaWFzIl0sICJwbGFpbi5iaWFzIikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKAogICAgICAgICAgICBtb2RlbC5fcHBfdG9fc2luZ2xlX21hcHBpbmdbIjAuMC53ZWlnaHQiXSwgIm1vZGVsLmVtYmVkLndlaWdodCIKICAgICAgICApCgogICAgZGVmIHRlc3Rfc2hhcmVkX2xheWVyX3ByZWZpeF9yZXF1aXJlc19jdXJyZW50X3N0YWdlKHNlbGYpOgogICAgICAgIHNoYXJlZCA9IFNoYXJlZExheWVyRGVzYygKICAgICAgICAgICAgImVtYmVkIiwgRHVtbXlFbWJlZGRpbmcsIHNoYXJlZF93ZWlnaHRfYXR0cj0iZW1iZWRkaW5nX3dlaWdodCIKICAgICAgICApCiAgICAgICAgbW9kZWwgPSBMaWdodHdlaWdodEVuY29kZXIoW10pCiAgICAgICAgbW9kZWwubGF5ZXJzID0gW3NoYXJlZF0KICAgICAgICBtb2RlbC5fc2VxdWVudGlhbF9sYXllcnMgPSBbCiAgICAgICAgICAgIHsibGF5ZXIiOiBzaGFyZWQsICJuYW1lX3ByZWZpeCI6ICJtb2RlbC5lbWJlZCJ9CiAgICAgICAgXQogICAgICAgIG1vZGVsLl9zdGFnZV9pZCA9IDAKICAgICAgICBtb2RlbC5fc3RhZ2VfZm9yX2luZGV4ID0gMQoKICAgICAgICB3aXRoIHNlbGYuYXNzZXJ0UmFpc2VzKFZhbHVlRXJyb3IpOgogICAgICAgICAgICBtb2RlbC5nZXRfc2hhcmRsYXllcl9wcmVmaXgoWyJzaGFyZWRfbGF5ZXJzIiwgImVtYmVkIiwgIndlaWdodCJdKQoKICAgIGRlZiB0ZXN0X3N0YXRlX2FuZF9zZXRfc3RhdGVfZGljdF9hcHBseV9iaWRpcmVjdGlvbmFsX21hcHBpbmcoc2VsZik6CiAgICAgICAgbW9kZWwgPSBMaWdodHdlaWdodEVuY29kZXIoCiAgICAgICAgICAgIFsiMC53ZWlnaHQiLCAiZXh0cmEuYmlhcyJdLAogICAgICAgICAgICBtb2RlbF90eXBlPSJxd2VuM181IiwKICAgICAgICApCiAgICAgICAgbW9kZWwuX3NlcXVlbnRpYWxfbGF5ZXJzID0gWwogICAgICAgICAgICB7ImxheWVyIjogb2JqZWN0KCksICJuYW1lX3ByZWZpeCI6ICJtb2RlbC5sYXllcnMuMCJ9CiAgICAgICAgXQogICAgICAgIHNlbGYuX2luc3RhbGxfcGFyZW50KG1vZGVsKQoKICAgICAgICBzdGF0ZSA9IG1vZGVsLnN0YXRlX2RpY3QoKQogICAgICAgIHNlbGYuYXNzZXJ0SW4oIm1vZGVsLmxheWVycy4wLndlaWdodCIsIHN0YXRlKQogICAgICAgIHNlbGYuYXNzZXJ0SW4oImV4dHJhLmJpYXMiLCBzdGF0ZSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHN0YXRlWyJtb2RlbC5sYXllcnMuMC53ZWlnaHQiXS5rZXksICJtb2RlbC5sYXllcnMuMC53ZWlnaHQiKQoKICAgICAgICByZXN1bHQgPSBtb2RlbC5zZXRfc3RhdGVfZGljdCgKICAgICAgICAgICAgeyJtb2RlbC5sYXllcnMuMC53ZWlnaHQiOiBWYWx1ZSgic2luZ2xlIiksICJpZ25vcmVkIjogVmFsdWUoIngiKX0KICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChyZXN1bHQsICJsb2FkZWQiKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGlzdChtb2RlbC5sb2FkZWRfc3RhdGUua2V5cygpKSwgWyIwLndlaWdodCJdKQoKICAgIGRlZiB0ZXN0X2NoZWNrX3NoYXJlZF9tb2RlbF9zdGF0ZV9kZXRlY3RzX2R1cGxpY2F0ZV90ZW5zb3JfaWRlbnRpdHkoc2VsZik6CiAgICAgICAgbW9kZWwgPSBMaWdodHdlaWdodEVuY29kZXIoWyIwLndlaWdodCJdKQogICAgICAgIHZhbHVlID0gVmFsdWUoInNoYXJlZCIpCiAgICAgICAgbW9kZWwuX3BpcGVsaW5lX25hbWVfbWFwcGluZyA9IHsKICAgICAgICAgICAgIm1vZGVsLmxheWVycy4wLndlaWdodCI6ICIwLndlaWdodCIsCiAgICAgICAgICAgICJtb2RlbC5zaGFyZWQud2VpZ2h0IjogIjAud2VpZ2h0IiwKICAgICAgICB9CiAgICAgICAgbW9kZWwuX3BwX3RvX3NpbmdsZV9tYXBwaW5nID0gewogICAgICAgICAgICAiMC53ZWlnaHQiOiAibW9kZWwubGF5ZXJzLjAud2VpZ2h0IiwKICAgICAgICAgICAgInNoYXJlZF9sYXllcnMuZW1iZWQud2VpZ2h0IjogIm1vZGVsLnNoYXJlZC53ZWlnaHQiLAogICAgICAgIH0KICAgICAgICB0cmFuc2Zvcm1lcl9lbmNvZGVyLnN1cGVyID0gbGFtYmRhOiBQYXJlbnRNZXRob2RzKAogICAgICAgICAgICBsYW1iZGE6IHsiMC53ZWlnaHQiOiB2YWx1ZSwgInNoYXJlZF9sYXllcnMuZW1iZWQud2VpZ2h0IjogdmFsdWV9LAogICAgICAgICAgICBtb2RlbC5fcGFyZW50X3NldF9zdGF0ZV9kaWN0LAogICAgICAgICAgICBtb2RlbC5fcGFyZW50X3NoYXJkZWRfc3RhdGVfZGljdCwKICAgICAgICApCgogICAgICAgIG1pc3NpbmcgPSBtb2RlbC5fY2hlY2tfc2hhcmVkX21vZGVsX3N0YXRlKCkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChtaXNzaW5nLCB7InNoYXJlZF9sYXllcnMuZW1iZWQud2VpZ2h0IjogIjAud2VpZ2h0In0pCgogICAgZGVmIHRlc3Rfc2hhcmRlZF9zdGF0ZV9kaWN0X3JlbWFwc19hbmRfcmVuYW1lc19leHBlcnRfYW5kX2xheWVyX2tleXMoc2VsZik6CiAgICAgICAgbW9kZWwgPSBMaWdodHdlaWdodEVuY29kZXIoCiAgICAgICAgICAgIFsiMC53ZWlnaHQiLCAiMi5leHBlcnRzLjEud2VpZ2h0IiwgIjIubGF5ZXJfbm9ybS53ZWlnaHQiXSwKICAgICAgICAgICAgbW9kZWxfdHlwZT0icXdlbjNfdmwiLAogICAgICAgICkKICAgICAgICBtb2RlbC5fc2VxdWVudGlhbF9sYXllcnMgPSBbCiAgICAgICAgICAgIHsibGF5ZXIiOiBvYmplY3QoKSwgIm5hbWVfcHJlZml4IjogIm1vZGVsLmxheWVycy4wIn0sCiAgICAgICAgICAgIHsibGF5ZXIiOiBvYmplY3QoKSwgIm5hbWVfcHJlZml4IjogIm1vZGVsLmxheWVycy4xIn0sCiAgICAgICAgICAgIHsibGF5ZXIiOiBvYmplY3QoKSwgIm5hbWVfcHJlZml4IjogIm1vZGVsLmxheWVycy4yIn0sCiAgICAgICAgXQogICAgICAgIHNlbGYuX2luc3RhbGxfcGFyZW50KG1vZGVsKQoKICAgICAgICBzaGFyZGVkID0gbW9kZWwuc2hhcmRlZF9zdGF0ZV9kaWN0KCkKCiAgICAgICAgc2VsZi5hc3NlcnRJbigibW9kZWwubGF5ZXJzLjAud2VpZ2h0Iiwgc2hhcmRlZCkKICAgICAgICBzZWxmLmFzc2VydEluKCJtb2RlbC5sYXllcnMuMi5leHBlcnRzLjUud2VpZ2h0Iiwgc2hhcmRlZCkKICAgICAgICBzZWxmLmFzc2VydEluKCJtb2RlbC5sYXllcnMuMi5sYXllcl9ub3JtLndlaWdodF9sYXllcl83Iiwgc2hhcmRlZCkKICAgICAgICBzZWxmLmFzc2VydEZhbHNlKAogICAgICAgICAgICBoYXNhdHRyKHNoYXJkZWRbIm1vZGVsLmxheWVycy4yLmV4cGVydHMuNS53ZWlnaHQiXSwgImdsb2JhbF9leHBlcnRfaWRfb2Zmc2V0IikKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRGYWxzZSgKICAgICAgICAgICAgaGFzYXR0cihzaGFyZGVkWyJtb2RlbC5sYXllcnMuMi5sYXllcl9ub3JtLndlaWdodF9sYXllcl83Il0sICJsYXllcl9jbnQiKQogICAgICAgICkKCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgdW5pdHRlc3QubWFpbigpCg==
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import sys
+import unittest
+
+import paddle
+
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+from paddle import nn
+from paddle.distributed.fleet.meta_parallel import (
+    ScheduleChunk,
+    ScheduleNode,
+    SharedLayerDesc,
+)
+
+from paddlefleet.transformer import transformer_encoder
+from paddlefleet.transformer.transformer_encoder import TransformerEncoder
+from paddlefleet.transformer.transformer_layer import TransformerLayerNode
+
+
+class Value:
+    def __init__(self, name=""):
+        self.key = name
+        self.global_expert_id_offset = None
+        self.layer_cnt = None
+
+
+class Config:
+    def __init__(self, model_type=""):
+        self.model_type = model_type
+
+
+class LightweightEncoder(TransformerEncoder):
+    def __init__(self, keys, modal=None, model_type=""):
+        self.modal = modal
+        self.config = Config(model_type)
+        self._keys = keys
+        self._sequential_layers = []
+        self._pipeline_name_mapping = None
+        self.layers = []
+        self._stage_id = 0
+        self._stage_for_index = 0
+        self.loaded_state = None
+
+    def get_stage_from_index(self, idx):
+        del idx
+        return self._stage_for_index
+
+    def _parent_state_dict(self, *args, **kwargs):
+        del args, kwargs
+        return {key: Value(key) for key in self._keys}
+
+    def _parent_set_state_dict(self, state_dict, *args, **kwargs):
+        del args, kwargs
+        self.loaded_state = dict(state_dict)
+        return "loaded"
+
+    def _parent_sharded_state_dict(self, *args, **kwargs):
+        del args, kwargs
+        result = {key: Value(key) for key in self._keys}
+        if "2.experts.1.weight" in result:
+            result["2.experts.1.weight"].global_expert_id_offset = 4
+        if "2.layer_norm.weight" in result:
+            result["2.layer_norm.weight"].layer_cnt = 7
+        return result
+
+
+class ParentMethods:
+    def __init__(self, state_dict_func, set_state_dict_func, sharded_func):
+        self._state_dict_func = state_dict_func
+        self._set_state_dict_func = set_state_dict_func
+        self._sharded_func = sharded_func
+
+    def state_dict(self, *args, **kwargs):
+        return self._state_dict_func(*args, **kwargs)
+
+    def set_state_dict(self, *args, **kwargs):
+        return self._set_state_dict_func(*args, **kwargs)
+
+    def sharded_state_dict(self, *args, **kwargs):
+        return self._sharded_func(*args, **kwargs)
+
+
+class DummyEmbedding(nn.Layer):
+    def forward(self, *args, **kwargs):
+        del args, kwargs
+
+
+class ForwardNode(ScheduleNode):
+    def __init__(self, delta):
+        super().__init__(lambda inputs: inputs, name="forward_node")
+        self.delta = delta
+
+    def forward(self, inputs):
+        return {"hidden_states": inputs["hidden_states"] + self.delta}
+
+
+class BackwardNode(ScheduleNode):
+    def __init__(self, delta):
+        super().__init__(lambda inputs: inputs, name="backward_node")
+        self.delta = delta
+
+    def backward(self, grads):
+        return grads[0] + self.delta
+
+
+class TinyConfig:
+    num_nextn_predict_layers = None
+    mtp_load_weight_only = False
+
+
+class OverlapNode(TransformerLayerNode):
+    def __init__(self, delta):
+        self.delta = delta
+        self.config = TinyConfig()
+        self._is_sparse = False
+        self.full_recompute = False
+
+    def forward(self, inputs):
+        return {"hidden_states": inputs["hidden_states"] + self.delta}
+
+    def backward(self, grads):
+        return grads + self.delta
+
+
+class LossNode:
+    def __init__(self):
+        self.backward_scalers = []
+        self.forward_inputs = []
+
+    def forward(self, inputs):
+        self.forward_inputs.append(inputs)
+        if isinstance(inputs, tuple):
+            return inputs[0].sum()
+        return inputs["hidden_states"].sum()
+
+    def backward(self, scaler=None):
+        self.backward_scalers.append(scaler)
+        return (paddle.ones([1], dtype="float32"),)
+
+
+class P2PHandle:
+    def __init__(self):
+        self.calls = []
+
+    def forward_handle_wait(self):
+        self.calls.append("forward_wait")
+
+    def backward_handle_wait(self):
+        self.calls.append("backward_wait")
+
+    def forward_async_comm(self, value):
+        self.calls.append(("forward_async", isinstance(value, tuple)))
+
+    def backward_async_comm(self, value):
+        self.calls.append(("backward_async", value.shape))
+
+
+class TestTransformerEncoderPipelineMappingNoMock(unittest.TestCase):
+    def setUp(self):
+        self.original_super = getattr(transformer_encoder, "super", None)
+
+    def tearDown(self):
+        if self.original_super is None:
+            if hasattr(transformer_encoder, "super"):
+                delattr(transformer_encoder, "super")
+        else:
+            transformer_encoder.super = self.original_super
+
+    def _install_parent(self, model):
+        transformer_encoder.super = lambda: ParentMethods(
+            model._parent_state_dict,
+            model._parent_set_state_dict,
+            model._parent_sharded_state_dict,
+        )
+
+    def test_overlapped_forward_backward_with_loss_and_p2p_handle(self):
+        model = LightweightEncoder([])
+        forward_loss = LossNode()
+        backward_loss = LossNode()
+        handle = P2PHandle()
+
+        forward_inputs, loss, grads = model.overlapped_forward_backward(
+            ScheduleChunk(
+                [ForwardNode(1.0), OverlapNode(2.0), ForwardNode(3.0)]
+            ),
+            {"hidden_states": paddle.ones([1], dtype="float32")},
+            forward_loss,
+            ScheduleChunk(
+                [BackwardNode(5.0), OverlapNode(4.0), BackwardNode(6.0)]
+            ),
+            backward_loss,
+            None,
+            scaler="scale",
+            p2p_async_handle=handle,
+        )
+
+        self.assertEqual(loss.numpy().item(), 7.0)
+        self.assertTrue(isinstance(forward_inputs, tuple))
+        self.assertEqual(forward_inputs[0].numpy().tolist(), [7.0])
+        self.assertEqual(grads.numpy().item(), 16.0)
+        self.assertEqual(backward_loss.backward_scalers, ["scale"])
+        self.assertEqual(handle.calls[0:2], ["forward_wait", "backward_wait"])
+        self.assertEqual(handle.calls[2][0], "forward_async")
+
+    def test_set_pipeline_mapping_handles_virtual_and_shared_names(self):
+        shared = SharedLayerDesc(
+            "embed", DummyEmbedding, shared_weight_attr="embedding_weight"
+        )
+        model = LightweightEncoder(
+            [
+                "0.0.weight",
+                "0.tail.weight",
+                "shared_layers.embed.weight",
+                "plain.bias",
+            ]
+        )
+        model.layers = [shared]
+        model._sequential_layers = [
+            {"layer": shared, "name_prefix": "model.embed"},
+            {"layer": object(), "name_prefix": "model.layers.1"},
+        ]
+        self._install_parent(model)
+
+        mapping = model._set_pipeline_name_mapping()
+
+        self.assertEqual(
+            mapping["model.embed.weight"], "shared_layers.embed.weight"
+        )
+        self.assertEqual(mapping["model.layers.1.weight"], "0.tail.weight")
+        self.assertEqual(mapping["plain.bias"], "plain.bias")
+        self.assertEqual(
+            model._pp_to_single_mapping["0.0.weight"], "model.embed.weight"
+        )
+
+    def test_shared_layer_prefix_requires_current_stage(self):
+        shared = SharedLayerDesc(
+            "embed", DummyEmbedding, shared_weight_attr="embedding_weight"
+        )
+        model = LightweightEncoder([])
+        model.layers = [shared]
+        model._sequential_layers = [
+            {"layer": shared, "name_prefix": "model.embed"}
+        ]
+        model._stage_id = 0
+        model._stage_for_index = 1
+
+        with self.assertRaises(ValueError):
+            model.get_shardlayer_prefix(["shared_layers", "embed", "weight"])
+
+    def test_state_and_set_state_dict_apply_bidirectional_mapping(self):
+        model = LightweightEncoder(
+            ["0.weight", "extra.bias"],
+            model_type="qwen3_5",
+        )
+        model._sequential_layers = [
+            {"layer": object(), "name_prefix": "model.layers.0"}
+        ]
+        self._install_parent(model)
+
+        state = model.state_dict()
+        self.assertIn("model.layers.0.weight", state)
+        self.assertIn("extra.bias", state)
+        self.assertEqual(
+            state["model.layers.0.weight"].key, "model.layers.0.weight"
+        )
+
+        result = model.set_state_dict(
+            {"model.layers.0.weight": Value("single"), "ignored": Value("x")}
+        )
+        self.assertEqual(result, "loaded")
+        self.assertEqual(list(model.loaded_state.keys()), ["0.weight"])
+
+    def test_check_shared_model_state_detects_duplicate_tensor_identity(self):
+        model = LightweightEncoder(["0.weight"])
+        value = Value("shared")
+        model._pipeline_name_mapping = {
+            "model.layers.0.weight": "0.weight",
+            "model.shared.weight": "0.weight",
+        }
+        model._pp_to_single_mapping = {
+            "0.weight": "model.layers.0.weight",
+            "shared_layers.embed.weight": "model.shared.weight",
+        }
+        transformer_encoder.super = lambda: ParentMethods(
+            lambda: {"0.weight": value, "shared_layers.embed.weight": value},
+            model._parent_set_state_dict,
+            model._parent_sharded_state_dict,
+        )
+
+        missing = model._check_shared_model_state()
+
+        self.assertEqual(missing, {"shared_layers.embed.weight": "0.weight"})
+
+    def test_sharded_state_dict_remaps_and_renames_expert_and_layer_keys(self):
+        model = LightweightEncoder(
+            ["0.weight", "2.experts.1.weight", "2.layer_norm.weight"],
+            model_type="qwen3_vl",
+        )
+        model._sequential_layers = [
+            {"layer": object(), "name_prefix": "model.layers.0"},
+            {"layer": object(), "name_prefix": "model.layers.1"},
+            {"layer": object(), "name_prefix": "model.layers.2"},
+        ]
+        self._install_parent(model)
+
+        sharded = model.sharded_state_dict()
+
+        self.assertIn("model.layers.0.weight", sharded)
+        self.assertIn("model.layers.2.experts.5.weight", sharded)
+        self.assertIn("model.layers.2.layer_norm.weight_layer_7", sharded)
+        self.assertFalse(
+            hasattr(
+                sharded["model.layers.2.experts.5.weight"],
+                "global_expert_id_offset",
+            )
+        )
+        self.assertFalse(
+            hasattr(
+                sharded["model.layers.2.layer_norm.weight_layer_7"], "layer_cnt"
+            )
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

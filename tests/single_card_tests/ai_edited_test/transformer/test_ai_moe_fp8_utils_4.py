@@ -1,1 +1,307 @@
-IyBDb3B5cmlnaHQgKGMpIDIwMjYgUGFkZGxlUGFkZGxlIEF1dGhvcnMuIEFsbCBSaWdodHMgUmVzZXJ2ZWQuCiMKIyBMaWNlbnNlZCB1bmRlciB0aGUgQXBhY2hlIExpY2Vuc2UsIFZlcnNpb24gMi4wICh0aGUgIkxpY2Vuc2UiKTsKIyB5b3UgbWF5IG5vdCB1c2UgdGhpcyBmaWxlIGV4Y2VwdCBpbiBjb21wbGlhbmNlIHdpdGggdGhlIExpY2Vuc2UuCiMgWW91IG1heSBvYnRhaW4gYSBjb3B5IG9mIHRoZSBMaWNlbnNlIGF0CiMKIyAgICAgaHR0cDovL3d3dy5hcGFjaGUub3JnL2xpY2Vuc2VzL0xJQ0VOU0UtMi4wCiMKIyBVbmxlc3MgcmVxdWlyZWQgYnkgYXBwbGljYWJsZSBsYXcgb3IgYWdyZWVkIHRvIGluIHdyaXRpbmcsIHNvZnR3YXJlCiMgZGlzdHJpYnV0ZWQgdW5kZXIgdGhlIExpY2Vuc2UgaXMgZGlzdHJpYnV0ZWQgb24gYW4gIkFTIElTIiBCQVNJUywKIyBXSVRIT1VUIFdBUlJBTlRJRVMgT1IgQ09ORElUSU9OUyBPRiBBTlkgS0lORCwgZWl0aGVyIGV4cHJlc3Mgb3IgaW1wbGllZC4KIyBTZWUgdGhlIExpY2Vuc2UgZm9yIHRoZSBzcGVjaWZpYyBsYW5ndWFnZSBnb3Zlcm5pbmcgcGVybWlzc2lvbnMgYW5kCiMgbGltaXRhdGlvbnMgdW5kZXIgdGhlIExpY2Vuc2UuCmltcG9ydCBvcwppbXBvcnQgc3lzCmltcG9ydCB1bml0dGVzdAoKUkVQT19ST09UID0gb3MucGF0aC5kaXJuYW1lKAogICAgb3MucGF0aC5kaXJuYW1lKAogICAgICAgIG9zLnBhdGguZGlybmFtZShvcy5wYXRoLmRpcm5hbWUob3MucGF0aC5hYnNwYXRoKF9fZmlsZV9fKSkpCiAgICApCikKc3lzLnBhdGguaW5zZXJ0KDAsIG9zLnBhdGguam9pbihSRVBPX1JPT1QsICJzcmMiKSkKCmltcG9ydCBwYWRkbGUKCmZyb20gcGFkZGxlZmxlZXQudHJhbnNmb3JtZXIubW9lIGltcG9ydCBmcDhfdXRpbHMKZnJvbSBwYWRkbGVmbGVldC50cmFuc2Zvcm1lci5tb2UuZnA4X3V0aWxzIGltcG9ydCBFeHBlcnRzR3JvdXBHZW1tQ29udGlndW91c05vZGUKCgpjbGFzcyBDYXBhYmlsaXR5OgogICAgZGVmIF9faW5pdF9fKHNlbGYsIG1ham9yKToKICAgICAgICBzZWxmLm1ham9yID0gbWFqb3IKCiAgICBkZWYgX19jYWxsX18oc2VsZik6CiAgICAgICAgcmV0dXJuIChzZWxmLm1ham9yLCAwKQoKCmNsYXNzIFF1YW50UmVjb3JkZXI6CiAgICBkZWYgX19pbml0X18oc2VsZiwgY2FsbHMsIG5hbWUpOgogICAgICAgIHNlbGYuY2FsbHMgPSBjYWxscwogICAgICAgIHNlbGYubmFtZSA9IG5hbWUKCiAgICBkZWYgX19jYWxsX18oc2VsZiwgd2VpZ2h0cywgdXNlX3BvdzJfc2NhbGUsIHVzZV91ZThtMCwgc2NhbGVfdHJhbnNwb3NlKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCgKICAgICAgICAgICAgKHNlbGYubmFtZSwgbGVuKHdlaWdodHMpLCB1c2VfcG93Ml9zY2FsZSwgdXNlX3VlOG0wLCBzY2FsZV90cmFuc3Bvc2UpCiAgICAgICAgKQogICAgICAgIHdlaWdodCA9IHBhZGRsZS5hcmFuZ2UoOCwgZHR5cGU9ImZsb2F0MzIiKS5yZXNoYXBlKFsyLCA0XSkKICAgICAgICBzY2FsZSA9IHBhZGRsZS5hcmFuZ2UoNiwgZHR5cGU9ImZsb2F0MzIiKS5yZXNoYXBlKFsyLCAzXSkKICAgICAgICByZXR1cm4gd2VpZ2h0LCBzY2FsZQoKCmNsYXNzIERlZXBHZW1tUmVjb3JkZXI6CiAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgc2VsZi5jYWxscyA9IFtdCgogICAgZGVmIGZwOF9nZW1tX250KHNlbGYsIHhfcGFpciwgd19wYWlyLCBvdXQsICphcmdzLCAqKmt3YXJncyk6CiAgICAgICAgZGVsIGFyZ3MsIGt3YXJncwogICAgICAgIHNlbGYuY2FsbHMuYXBwZW5kKCh4X3BhaXJbMF0uc2hhcGUsIHdfcGFpclswXS5zaGFwZSwgb3V0LnNoYXBlKSkKICAgICAgICBvdXQuc2V0X3ZhbHVlKHBhZGRsZS5vbmVzKG91dC5zaGFwZSwgZHR5cGU9b3V0LmR0eXBlKSkKCgpjbGFzcyBJbmN1YmF0ZUZ1bmN0aW9uYWw6CiAgICBkZWYgX19pbml0X18oc2VsZiwgb3JpZ2luYWwsIGNhbGxzKToKICAgICAgICBzZWxmLm9yaWdpbmFsID0gb3JpZ2luYWwKICAgICAgICBzZWxmLmNhbGxzID0gY2FsbHMKCiAgICBkZWYgX19nZXRhdHRyX18oc2VsZiwgbmFtZSk6CiAgICAgICAgcmV0dXJuIGdldGF0dHIoc2VsZi5vcmlnaW5hbCwgbmFtZSkKCiAgICBkZWYgZnA4X2dlbW1fYmxvY2t3aXNlKHNlbGYsICoqa3dhcmdzKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZChrd2FyZ3MpCiAgICAgICAgb3V0ID0ga3dhcmdzLmdldCgib3V0IikKICAgICAgICBpZiBvdXQgaXMgbm90IE5vbmU6CiAgICAgICAgICAgIG91dC5zZXRfdmFsdWUocGFkZGxlLmZ1bGwob3V0LnNoYXBlLCAyLjAsIGR0eXBlPW91dC5kdHlwZSkpCiAgICAgICAgICAgIHJldHVybiBvdXQKICAgICAgICBhID0ga3dhcmdzWyJhIl0KICAgICAgICBiID0ga3dhcmdzWyJiIl0KICAgICAgICByZXR1cm4gcGFkZGxlLmZ1bGwoW2Euc2hhcGVbMF0sIGIuc2hhcGVbMF1dLCAzLjAsIGR0eXBlPWt3YXJnc1sib3V0X2R0eXBlIl0pCgoKY2xhc3MgV2VpZ2h0OgogICAgZGVmIF9faW5pdF9fKHNlbGYsIHNoYXBlKToKICAgICAgICBzZWxmLnNoYXBlID0gc2hhcGUKICAgICAgICBzZWxmLmdyYWQgPSBOb25lCiAgICAgICAgc2VsZi5zdG9wX2dyYWRpZW50ID0gRmFsc2UKICAgICAgICBzZWxmLmhvb2tfY2FsbGVkID0gRmFsc2UKCiAgICBkZWYgX2FwcGx5X2JhY2t3YXJkX2hvb2soc2VsZik6CiAgICAgICAgc2VsZi5ob29rX2NhbGxlZCA9IFRydWUKCgpjbGFzcyBFeHBlcnQ6CiAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgc2VsZi51cF9nYXRlX3Byb2ogPSBQcm9qZWN0aW9uKFsyLCA0XSkKICAgICAgICBzZWxmLmRvd25fcHJvaiA9IFByb2plY3Rpb24oWzQsIDJdKQoKCmNsYXNzIFByb2plY3Rpb246CiAgICBkZWYgX19pbml0X18oc2VsZiwgc2hhcGUpOgogICAgICAgIHNlbGYud2VpZ2h0ID0gV2VpZ2h0KHNoYXBlKQoKCmNsYXNzIEN1c3RvbU1hcDoKICAgIGRlZiBfX2luaXRfXyhzZWxmKToKICAgICAgICBzZWxmLmV4cGVydHMgPSBbRXhwZXJ0KCksIE5vbmUsIEV4cGVydCgpXQogICAgICAgIHNlbGYuZ3JvdXBlZF9nZW1tX2V4cGVydHMgPSBHcm91cGVkV2VpZ2h0cygpCgoKY2xhc3MgR3JvdXBlZFdlaWdodHM6CiAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgc2VsZi53ZWlnaHQxID0gV2VpZ2h0KFsyLCAyLCA0XSkKICAgICAgICBzZWxmLndlaWdodDIgPSBXZWlnaHQoWzIsIDQsIDJdKQoKCmNsYXNzIEFzeW5jVGFzazoKICAgIGRlZiBfX2luaXRfXyhzZWxmKToKICAgICAgICBzZWxmLndhaXRfY2FsbGVkID0gRmFsc2UKCiAgICBkZWYgd2FpdChzZWxmKToKICAgICAgICBzZWxmLndhaXRfY2FsbGVkID0gVHJ1ZQoKCmNsYXNzIFRlc3RGUDhVdGlsaXR5RXh0cmFOb01vY2sodW5pdHRlc3QuVGVzdENhc2UpOgogICAgZGVmIHNldFVwKHNlbGYpOgogICAgICAgIHNlbGYub2xkX2NhcGFiaWxpdHkgPSBwYWRkbGUuZGV2aWNlLmN1ZGEuZ2V0X2RldmljZV9jYXBhYmlsaXR5CiAgICAgICAgc2VsZi5vbGRfc3RhY2sgPSBnZXRhdHRyKGZwOF91dGlscywgImZ1c2Vfc3RhY2tfZnA4X3F1YW50IiwgTm9uZSkKICAgICAgICBzZWxmLm9sZF9zdGFja190ID0gZ2V0YXR0cihmcDhfdXRpbHMsICJmdXNlX3N0YWNrX3RyYW5zcG9zZV9mcDhfcXVhbnQiLCBOb25lKQogICAgICAgIHNlbGYub2xkX2RlZXBfZ2VtbSA9IGdldGF0dHIoZnA4X3V0aWxzLCAiZGVlcF9nZW1tIiwgTm9uZSkKICAgICAgICBzZWxmLm9sZF9mdW5jdGlvbmFsID0gcGFkZGxlLmluY3ViYXRlLm5uLmZ1bmN0aW9uYWwKCiAgICBkZWYgdGVhckRvd24oc2VsZik6CiAgICAgICAgcGFkZGxlLmRldmljZS5jdWRhLmdldF9kZXZpY2VfY2FwYWJpbGl0eSA9IHNlbGYub2xkX2NhcGFiaWxpdHkKICAgICAgICBpZiBzZWxmLm9sZF9zdGFjayBpcyBOb25lOgogICAgICAgICAgICBpZiBoYXNhdHRyKGZwOF91dGlscywgImZ1c2Vfc3RhY2tfZnA4X3F1YW50Iik6CiAgICAgICAgICAgICAgICBkZWxhdHRyKGZwOF91dGlscywgImZ1c2Vfc3RhY2tfZnA4X3F1YW50IikKICAgICAgICBlbHNlOgogICAgICAgICAgICBmcDhfdXRpbHMuZnVzZV9zdGFja19mcDhfcXVhbnQgPSBzZWxmLm9sZF9zdGFjawogICAgICAgIGlmIHNlbGYub2xkX3N0YWNrX3QgaXMgTm9uZToKICAgICAgICAgICAgaWYgaGFzYXR0cihmcDhfdXRpbHMsICJmdXNlX3N0YWNrX3RyYW5zcG9zZV9mcDhfcXVhbnQiKToKICAgICAgICAgICAgICAgIGRlbGF0dHIoZnA4X3V0aWxzLCAiZnVzZV9zdGFja190cmFuc3Bvc2VfZnA4X3F1YW50IikKICAgICAgICBlbHNlOgogICAgICAgICAgICBmcDhfdXRpbHMuZnVzZV9zdGFja190cmFuc3Bvc2VfZnA4X3F1YW50ID0gc2VsZi5vbGRfc3RhY2tfdAogICAgICAgIGlmIHNlbGYub2xkX2RlZXBfZ2VtbSBpcyBOb25lOgogICAgICAgICAgICBpZiBoYXNhdHRyKGZwOF91dGlscywgImRlZXBfZ2VtbSIpOgogICAgICAgICAgICAgICAgZGVsYXR0cihmcDhfdXRpbHMsICJkZWVwX2dlbW0iKQogICAgICAgIGVsc2U6CiAgICAgICAgICAgIGZwOF91dGlscy5kZWVwX2dlbW0gPSBzZWxmLm9sZF9kZWVwX2dlbW0KICAgICAgICBwYWRkbGUuaW5jdWJhdGUubm4uZnVuY3Rpb25hbCA9IHNlbGYub2xkX2Z1bmN0aW9uYWwKCiAgICBkZWYgdGVzdF9mdXNlZF9zdGFja19xdWFudF93aXRob3V0X2NhY2hlX3JlY29yZHNfdHJhbnNwb3NlX2FuZF91ZThtMChzZWxmKToKICAgICAgICBjYWxscyA9IFtdCiAgICAgICAgcGFkZGxlLmRldmljZS5jdWRhLmdldF9kZXZpY2VfY2FwYWJpbGl0eSA9IENhcGFiaWxpdHkoMTApCiAgICAgICAgZnA4X3V0aWxzLmZ1c2Vfc3RhY2tfZnA4X3F1YW50ID0gUXVhbnRSZWNvcmRlcihjYWxscywgInN0YWNrIikKICAgICAgICBmcDhfdXRpbHMuZnVzZV9zdGFja190cmFuc3Bvc2VfZnA4X3F1YW50ID0gUXVhbnRSZWNvcmRlcihjYWxscywgInRyYW5zcG9zZSIpCiAgICAgICAgd2VpZ2h0cyA9IFtwYWRkbGUub25lcyhbMiwgMl0sIGR0eXBlPSJmbG9hdDMyIildCgogICAgICAgIHdlaWdodCwgc2NhbGUgPSBmcDhfdXRpbHMuZnVzZWRfc3RhY2tfcXVhbnRfd2l0aG91dF9jYWNoZSgKICAgICAgICAgICAgd2VpZ2h0cywgdHJhbnNwb3NlPVRydWUsIHVzZV91ZThtMD1UcnVlCiAgICAgICAgKQogICAgICAgIHdlaWdodDIsIHNjYWxlMiA9IGZwOF91dGlscy5mdXNlZF9zdGFja19xdWFudF93aXRob3V0X2NhY2hlKAogICAgICAgICAgICB3ZWlnaHRzLCB0cmFuc3Bvc2U9RmFsc2UsIHVzZV91ZThtMD1GYWxzZQogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCh3ZWlnaHQuc2hhcGUsIFsyLCA0XSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHNjYWxlLnNoYXBlLCBbMywgMl0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCh3ZWlnaHQyLnNoYXBlLCBbMiwgNF0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChzY2FsZTIuc2hhcGUsIFsyLCAzXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGNhbGxzWzBdLCAoInRyYW5zcG9zZSIsIDEsIFRydWUsIFRydWUsIFRydWUpKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoY2FsbHNbMV0sICgic3RhY2siLCAxLCBUcnVlLCBGYWxzZSwgRmFsc2UpKQoKICAgIGRlZiB0ZXN0X3RpbGV3aXNlX3F1YW50X2VtcHR5X2JyYW5jaF92YWxpZGF0ZXNfYWxpZ25tZW50KHNlbGYpOgogICAgICAgIGVtcHR5ID0gcGFkZGxlLmVtcHR5KFswLCAxMjhdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgeF9mcDgsIHhfc2NhbGUgPSBmcDhfdXRpbHMudGlsZXdpc2VfcXVhbnQoZW1wdHkpCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoeF9mcDguc2hhcGUsIFswLCAxMjhdKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoeF9zY2FsZS5zaGFwZSwgWzAsIDFdKQogICAgICAgIHdpdGggc2VsZi5hc3NlcnRSYWlzZXMoQXNzZXJ0aW9uRXJyb3IpOgogICAgICAgICAgICBmcDhfdXRpbHMudGlsZXdpc2VfcXVhbnQocGFkZGxlLmVtcHR5KFswLCAxMjddLCBkdHlwZT0iZmxvYXQzMiIpKQoKICAgIGRlZiB0ZXN0X3NwbGl0X2dyb3VwX2dlbW1fc2tpcHNfZW1wdHlfZXhwZXJ0c19hbmRfYWxpZ25zX3NjYWxlcyhzZWxmKToKICAgICAgICByZWNvcmRlciA9IERlZXBHZW1tUmVjb3JkZXIoKQogICAgICAgIGZwOF91dGlscy5kZWVwX2dlbW0gPSByZWNvcmRlcgogICAgICAgIHggPSBwYWRkbGUub25lcyhbMywgMl0sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICB4X3NjYWxlID0gcGFkZGxlLm9uZXMoWzMsIDJdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgd2VpZ2h0cyA9IHBhZGRsZS5vbmVzKFszLCAyLCAyXSwgZHR5cGU9ImZsb2F0MzIiKQogICAgICAgIHNjYWxlcyA9IHBhZGRsZS5vbmVzKFszLCAyLCAyXSwgZHR5cGU9ImZsb2F0MzIiKQogICAgICAgIG91dCA9IHBhZGRsZS56ZXJvcyhbMywgMl0sIGR0eXBlPSJmbG9hdDMyIikKCiAgICAgICAgcmVzdWx0ID0gZnA4X3V0aWxzLnNwbGl0X2dyb3VwX2dlbW0oCiAgICAgICAgICAgIHgsIHhfc2NhbGUsIHdlaWdodHMsIHNjYWxlcywgWzEsIDAsIDJdLCBvdXQsIHVzZV91ZThtMD1UcnVlCiAgICAgICAgKQoKICAgICAgICBzZWxmLmFzc2VydElzKHJlc3VsdCwgb3V0KQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGVuKHJlY29yZGVyLmNhbGxzKSwgMikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKG91dC5udW1weSgpLnRvbGlzdCgpLCBbWzEuMCwgMS4wXSwgWzEuMCwgMS4wXSwgWzEuMCwgMS4wXV0pCgogICAgZGVmIHRlc3Rfa2l0Y2hlbl9nZW1tX2VtcHR5X2FuZF9ub25fZW1wdHlfcGF0aHMoc2VsZik6CiAgICAgICAgY2FsbHMgPSBbXQogICAgICAgIHBhZGRsZS5pbmN1YmF0ZS5ubi5mdW5jdGlvbmFsID0gSW5jdWJhdGVGdW5jdGlvbmFsKHNlbGYub2xkX2Z1bmN0aW9uYWwsIGNhbGxzKQogICAgICAgIGVtcHR5ID0gcGFkZGxlLmVtcHR5KFswLCAyXSwgZHR5cGU9ImZsb2F0MzIiKQogICAgICAgIHdlaWdodCA9IHBhZGRsZS5vbmVzKFszLCAyXSwgZHR5cGU9ImZsb2F0MzIiKQogICAgICAgIG91dCA9IHBhZGRsZS5vbmVzKFswLCAzXSwgZHR5cGU9ImZsb2F0MzIiKQoKICAgICAgICByZXN1bHQgPSBmcDhfdXRpbHMua2l0Y2hlbl9nZW1tKGVtcHR5LCBlbXB0eSwgd2VpZ2h0LCB3ZWlnaHQsIFRydWUsIEZhbHNlLCBvdXQ9b3V0KQogICAgICAgIG5vbl9lbXB0eSA9IGZwOF91dGlscy5raXRjaGVuX2dlbW0oCiAgICAgICAgICAgIHBhZGRsZS5vbmVzKFsyLCAyXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgcGFkZGxlLm9uZXMoWzIsIDFdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICB3ZWlnaHQsCiAgICAgICAgICAgIHBhZGRsZS5vbmVzKFszLCAxXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgRmFsc2UsCiAgICAgICAgICAgIFRydWUsCiAgICAgICAgICAgIHJ0bl9kdHlwZT1wYWRkbGUuZmxvYXQzMiwKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0LnNoYXBlLCBbMCwgM10pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChub25fZW1wdHkubnVtcHkoKS50b2xpc3QoKSwgW1szLjAsIDMuMCwgMy4wXSwgWzMuMCwgMy4wLCAzLjBdXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGNhbGxzWzBdWyJhY2N1bXVsYXRlIl0sIEZhbHNlKQoKCmNsYXNzIFRlc3RFeHBlcnRzR3JvdXBHZW1tTm9kZUV4dHJhTm9Nb2NrKHVuaXR0ZXN0LlRlc3RDYXNlKToKICAgIGRlZiB0ZXN0X2NhY2hlX3Jlc2V0X2FuZF9lbXB0eV9mb3J3YXJkX3BhdGhzKHNlbGYpOgogICAgICAgIG5vZGUgPSBFeHBlcnRzR3JvdXBHZW1tQ29udGlndW91c05vZGUoQ3VzdG9tTWFwKCksIHVzZV9mcDhfbWxwPUZhbHNlKQogICAgICAgIHRlbnNvcnMgPSBbWzEsIDJdLCBwYWRkbGUuYXJhbmdlKDIpLCAiaW5wdXQiLCAiZnA4IiwgInNjYWxlIiwgIm8xIl0KICAgICAgICBub2RlLnNldF9jYWNoZWRfdGVuc29ycyh0ZW5zb3JzKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobm9kZS5jYWNoZWRfdGVuc29ycygpLCB0ZW5zb3JzKQogICAgICAgIG5vZGUuY2xlYXJfY2FjaGVkX3RlbnNvcnMoKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobm9kZS5jYWNoZWRfdGVuc29ycygpLCBbTm9uZSwgTm9uZSwgTm9uZSwgTm9uZSwgTm9uZSwgTm9uZV0pCgogICAgICAgIG5vZGUudG9rZW5zX3Blcl9leHBlcnQgPSBbMCwgMF0KICAgICAgICBlbXB0eSA9IHBhZGRsZS5lbXB0eShbMCwgMl0sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICBleHBlcnRfdzEgPSBbcGFkZGxlLm9uZXMoWzIsIDRdLCBkdHlwZT0iZmxvYXQzMiIpXQogICAgICAgIGdhdGVfdXAgPSBub2RlLmZ3ZF9nYXRlX3VwX2JmMTYoZW1wdHksIGV4cGVydF93MSkKICAgICAgICBkb3duID0gbm9kZS5md2RfZG93bl9iZjE2KAogICAgICAgICAgICBwYWRkbGUuZW1wdHkoWzAsIDRdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBwYWRkbGUuZW1wdHkoWzBdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBbcGFkZGxlLm9uZXMoWzIsIDJdLCBkdHlwZT0iZmxvYXQzMiIpXSwKICAgICAgICApCiAgICAgICAgZHggPSBub2RlLmJ3ZF9nYXRlX3VwX2lucHV0X2JmMTYoCiAgICAgICAgICAgIHBhZGRsZS5lbXB0eShbMCwgNF0sIGR0eXBlPSJmbG9hdDMyIiksCiAgICAgICAgICAgIFtwYWRkbGUub25lcyhbMiwgNF0sIGR0eXBlPSJmbG9hdDMyIildLAogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChnYXRlX3VwLnNoYXBlLCBbMCwgNF0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChkb3duLnNoYXBlLCBbMCwgMl0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChkeC5zaGFwZSwgWzAsIDJdKQogICAgICAgIG5vZGUucmVzZXRfc3RhdGUoKQogICAgICAgIHNlbGYuYXNzZXJ0SXNOb25lKG5vZGUudG9rZW5zX3Blcl9leHBlcnQpCgogICAgZGVmIHRlc3RfYmFja3dhcmRfZW1wdHlfaW5pdGlhbGl6ZXNfc3BsaXRfYW5kX2dyb3VwZWRfd2VpZ2h0X2dyYWRzKHNlbGYpOgogICAgICAgIHNwbGl0X25vZGUgPSBFeHBlcnRzR3JvdXBHZW1tQ29udGlndW91c05vZGUoQ3VzdG9tTWFwKCksIHVzZV9mcDhfbWxwPUZhbHNlKQogICAgICAgIHNwbGl0X25vZGUudG9rZW5zX3Blcl9leHBlcnQgPSBbMCwgMF0KICAgICAgICBkeCwgcHJvYnNfZ3JhZCA9IHNwbGl0X25vZGUuYmFja3dhcmQoCiAgICAgICAgICAgIHBhZGRsZS5lbXB0eShbMCwgMl0sIGR0eXBlPSJmbG9hdDMyIiksCiAgICAgICAgICAgIHBhZGRsZS5lbXB0eShbMF0sIGR0eXBlPSJmbG9hdDMyIiksCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZHguc2hhcGUsIFswLCAyXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHByb2JzX2dyYWQuc2hhcGUsIFswLCAxXSkKICAgICAgICBzZWxmLmFzc2VydElzTm90Tm9uZShzcGxpdF9ub2RlLmV4cGVydHNbMF0uZG93bl9wcm9qLndlaWdodC5ncmFkKQogICAgICAgIHNlbGYuYXNzZXJ0SXNOb3ROb25lKHNwbGl0X25vZGUuZXhwZXJ0c1syXS51cF9nYXRlX3Byb2oud2VpZ2h0LmdyYWQpCgogICAgICAgIGdyb3VwZWRfbm9kZSA9IEV4cGVydHNHcm91cEdlbW1Db250aWd1b3VzTm9kZSgKICAgICAgICAgICAgQ3VzdG9tTWFwKCksIHVzZV9mcDhfbWxwPUZhbHNlLCBtb2VfZXhwZXJ0X2Z1c2lvbj1UcnVlCiAgICAgICAgKQogICAgICAgIGdyb3VwZWRfbm9kZS50b2tlbnNfcGVyX2V4cGVydCA9IFswLCAwXQogICAgICAgIHRhc2sgPSBBc3luY1Rhc2soKQoKICAgICAgICBkZWYgYTJhKHZhbHVlKToKICAgICAgICAgICAgcmV0dXJuIHZhbHVlICsgMS4wLCB0YXNrCgogICAgICAgIGdyb3VwZWRfZHgsIGdyb3VwZWRfcHJvYnNfZ3JhZCA9IGdyb3VwZWRfbm9kZS5iYWNrd2FyZCgKICAgICAgICAgICAgcGFkZGxlLmVtcHR5KFswLCAyXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgcGFkZGxlLmVtcHR5KFswXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgYTJhX2FzeW5jX2ZuPWEyYSwKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZSh0YXNrLndhaXRfY2FsbGVkKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZ3JvdXBlZF9keC5zaGFwZSwgWzAsIDJdKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZ3JvdXBlZF9wcm9ic19ncmFkLnNoYXBlLCBbMCwgMV0pCiAgICAgICAgc2VsZi5hc3NlcnRJc05vdE5vbmUoZ3JvdXBlZF9ub2RlLmdyb3VwZWRfZ2VtbV9leHBlcnRzLndlaWdodDEuZ3JhZCkKICAgICAgICBzZWxmLmFzc2VydElzTm90Tm9uZShncm91cGVkX25vZGUuZ3JvdXBlZF9nZW1tX2V4cGVydHMud2VpZ2h0Mi5ncmFkKQoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICB1bml0dGVzdC5tYWluKCkK
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import sys
+import unittest
+
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+import paddle
+
+from paddlefleet.transformer.moe import fp8_utils
+from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
+
+
+class Capability:
+    def __init__(self, major):
+        self.major = major
+
+    def __call__(self):
+        return (self.major, 0)
+
+
+class QuantRecorder:
+    def __init__(self, calls, name):
+        self.calls = calls
+        self.name = name
+
+    def __call__(self, weights, use_pow2_scale, use_ue8m0, scale_transpose):
+        self.calls.append(
+            (
+                self.name,
+                len(weights),
+                use_pow2_scale,
+                use_ue8m0,
+                scale_transpose,
+            )
+        )
+        weight = paddle.arange(8, dtype="float32").reshape([2, 4])
+        scale = paddle.arange(6, dtype="float32").reshape([2, 3])
+        return weight, scale
+
+
+class DeepGemmRecorder:
+    def __init__(self):
+        self.calls = []
+
+    def fp8_gemm_nt(self, x_pair, w_pair, out, *args, **kwargs):
+        del args, kwargs
+        self.calls.append((x_pair[0].shape, w_pair[0].shape, out.shape))
+        out.set_value(paddle.ones(out.shape, dtype=out.dtype))
+
+
+class IncubateFunctional:
+    def __init__(self, original, calls):
+        self.original = original
+        self.calls = calls
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+    def fp8_gemm_blockwise(self, **kwargs):
+        self.calls.append(kwargs)
+        out = kwargs.get("out")
+        if out is not None:
+            out.set_value(paddle.full(out.shape, 2.0, dtype=out.dtype))
+            return out
+        a = kwargs["a"]
+        b = kwargs["b"]
+        return paddle.full(
+            [a.shape[0], b.shape[0]], 3.0, dtype=kwargs["out_dtype"]
+        )
+
+
+class Weight:
+    def __init__(self, shape):
+        self.shape = shape
+        self.grad = None
+        self.stop_gradient = False
+        self.hook_called = False
+
+    def _apply_backward_hook(self):
+        self.hook_called = True
+
+
+class Expert:
+    def __init__(self):
+        self.up_gate_proj = Projection([2, 4])
+        self.down_proj = Projection([4, 2])
+
+
+class Projection:
+    def __init__(self, shape):
+        self.weight = Weight(shape)
+
+
+class CustomMap:
+    def __init__(self):
+        self.experts = [Expert(), None, Expert()]
+        self.grouped_gemm_experts = GroupedWeights()
+
+
+class GroupedWeights:
+    def __init__(self):
+        self.weight1 = Weight([2, 2, 4])
+        self.weight2 = Weight([2, 4, 2])
+
+
+class AsyncTask:
+    def __init__(self):
+        self.wait_called = False
+
+    def wait(self):
+        self.wait_called = True
+
+
+class TestFP8UtilityExtraNoMock(unittest.TestCase):
+    def setUp(self):
+        self.old_capability = paddle.device.cuda.get_device_capability
+        self.old_stack = getattr(fp8_utils, "fuse_stack_fp8_quant", None)
+        self.old_stack_t = getattr(
+            fp8_utils, "fuse_stack_transpose_fp8_quant", None
+        )
+        self.old_deep_gemm = getattr(fp8_utils, "deep_gemm", None)
+        self.old_functional = paddle.incubate.nn.functional
+
+    def tearDown(self):
+        paddle.device.cuda.get_device_capability = self.old_capability
+        if self.old_stack is None:
+            if hasattr(fp8_utils, "fuse_stack_fp8_quant"):
+                delattr(fp8_utils, "fuse_stack_fp8_quant")
+        else:
+            fp8_utils.fuse_stack_fp8_quant = self.old_stack
+        if self.old_stack_t is None:
+            if hasattr(fp8_utils, "fuse_stack_transpose_fp8_quant"):
+                delattr(fp8_utils, "fuse_stack_transpose_fp8_quant")
+        else:
+            fp8_utils.fuse_stack_transpose_fp8_quant = self.old_stack_t
+        if self.old_deep_gemm is None:
+            if hasattr(fp8_utils, "deep_gemm"):
+                delattr(fp8_utils, "deep_gemm")
+        else:
+            fp8_utils.deep_gemm = self.old_deep_gemm
+        paddle.incubate.nn.functional = self.old_functional
+
+    def test_fused_stack_quant_without_cache_records_transpose_and_ue8m0(self):
+        calls = []
+        paddle.device.cuda.get_device_capability = Capability(10)
+        fp8_utils.fuse_stack_fp8_quant = QuantRecorder(calls, "stack")
+        fp8_utils.fuse_stack_transpose_fp8_quant = QuantRecorder(
+            calls, "transpose"
+        )
+        weights = [paddle.ones([2, 2], dtype="float32")]
+
+        weight, scale = fp8_utils.fused_stack_quant_without_cache(
+            weights, transpose=True, use_ue8m0=True
+        )
+        weight2, scale2 = fp8_utils.fused_stack_quant_without_cache(
+            weights, transpose=False, use_ue8m0=False
+        )
+
+        self.assertEqual(weight.shape, [2, 4])
+        self.assertEqual(scale.shape, [3, 2])
+        self.assertEqual(weight2.shape, [2, 4])
+        self.assertEqual(scale2.shape, [2, 3])
+        self.assertEqual(calls[0], ("transpose", 1, True, True, True))
+        self.assertEqual(calls[1], ("stack", 1, True, False, False))
+
+    def test_tilewise_quant_empty_branch_validates_alignment(self):
+        empty = paddle.empty([0, 128], dtype="float32")
+        x_fp8, x_scale = fp8_utils.tilewise_quant(empty)
+
+        self.assertEqual(x_fp8.shape, [0, 128])
+        self.assertEqual(x_scale.shape, [0, 1])
+        with self.assertRaises(AssertionError):
+            fp8_utils.tilewise_quant(paddle.empty([0, 127], dtype="float32"))
+
+    def test_split_group_gemm_skips_empty_experts_and_aligns_scales(self):
+        recorder = DeepGemmRecorder()
+        fp8_utils.deep_gemm = recorder
+        x = paddle.ones([3, 2], dtype="float32")
+        x_scale = paddle.ones([3, 2], dtype="float32")
+        weights = paddle.ones([3, 2, 2], dtype="float32")
+        scales = paddle.ones([3, 2, 2], dtype="float32")
+        out = paddle.zeros([3, 2], dtype="float32")
+
+        result = fp8_utils.split_group_gemm(
+            x, x_scale, weights, scales, [1, 0, 2], out, use_ue8m0=True
+        )
+
+        self.assertIs(result, out)
+        self.assertEqual(len(recorder.calls), 2)
+        self.assertEqual(
+            out.numpy().tolist(), [[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]]
+        )
+
+    def test_kitchen_gemm_empty_and_non_empty_paths(self):
+        calls = []
+        paddle.incubate.nn.functional = IncubateFunctional(
+            self.old_functional, calls
+        )
+        empty = paddle.empty([0, 2], dtype="float32")
+        weight = paddle.ones([3, 2], dtype="float32")
+        out = paddle.ones([0, 3], dtype="float32")
+
+        result = fp8_utils.kitchen_gemm(
+            empty, empty, weight, weight, True, False, out=out
+        )
+        non_empty = fp8_utils.kitchen_gemm(
+            paddle.ones([2, 2], dtype="float32"),
+            paddle.ones([2, 1], dtype="float32"),
+            weight,
+            paddle.ones([3, 1], dtype="float32"),
+            False,
+            True,
+            rtn_dtype=paddle.float32,
+        )
+
+        self.assertEqual(result.shape, [0, 3])
+        self.assertEqual(
+            non_empty.numpy().tolist(), [[3.0, 3.0, 3.0], [3.0, 3.0, 3.0]]
+        )
+        self.assertEqual(calls[0]["accumulate"], False)
+
+
+class TestExpertsGroupGemmNodeExtraNoMock(unittest.TestCase):
+    def test_cache_reset_and_empty_forward_paths(self):
+        node = ExpertsGroupGemmContiguousNode(CustomMap(), use_fp8_mlp=False)
+        tensors = [[1, 2], paddle.arange(2), "input", "fp8", "scale", "o1"]
+        node.set_cached_tensors(tensors)
+        self.assertEqual(node.cached_tensors(), tensors)
+        node.clear_cached_tensors()
+        self.assertEqual(
+            node.cached_tensors(), [None, None, None, None, None, None]
+        )
+
+        node.tokens_per_expert = [0, 0]
+        empty = paddle.empty([0, 2], dtype="float32")
+        expert_w1 = [paddle.ones([2, 4], dtype="float32")]
+        gate_up = node.fwd_gate_up_bf16(empty, expert_w1)
+        down = node.fwd_down_bf16(
+            paddle.empty([0, 4], dtype="float32"),
+            paddle.empty([0], dtype="float32"),
+            [paddle.ones([2, 2], dtype="float32")],
+        )
+        dx = node.bwd_gate_up_input_bf16(
+            paddle.empty([0, 4], dtype="float32"),
+            [paddle.ones([2, 4], dtype="float32")],
+        )
+
+        self.assertEqual(gate_up.shape, [0, 4])
+        self.assertEqual(down.shape, [0, 2])
+        self.assertEqual(dx.shape, [0, 2])
+        node.reset_state()
+        self.assertIsNone(node.tokens_per_expert)
+
+    def test_backward_empty_initializes_split_and_grouped_weight_grads(self):
+        split_node = ExpertsGroupGemmContiguousNode(
+            CustomMap(), use_fp8_mlp=False
+        )
+        split_node.tokens_per_expert = [0, 0]
+        dx, probs_grad = split_node.backward(
+            paddle.empty([0, 2], dtype="float32"),
+            paddle.empty([0], dtype="float32"),
+        )
+        self.assertEqual(dx.shape, [0, 2])
+        self.assertEqual(probs_grad.shape, [0, 1])
+        self.assertIsNotNone(split_node.experts[0].down_proj.weight.grad)
+        self.assertIsNotNone(split_node.experts[2].up_gate_proj.weight.grad)
+
+        grouped_node = ExpertsGroupGemmContiguousNode(
+            CustomMap(), use_fp8_mlp=False, moe_expert_fusion=True
+        )
+        grouped_node.tokens_per_expert = [0, 0]
+        task = AsyncTask()
+
+        def a2a(value):
+            return value + 1.0, task
+
+        grouped_dx, grouped_probs_grad = grouped_node.backward(
+            paddle.empty([0, 2], dtype="float32"),
+            paddle.empty([0], dtype="float32"),
+            a2a_async_fn=a2a,
+        )
+
+        self.assertTrue(task.wait_called)
+        self.assertEqual(grouped_dx.shape, [0, 2])
+        self.assertEqual(grouped_probs_grad.shape, [0, 1])
+        self.assertIsNotNone(grouped_node.grouped_gemm_experts.weight1.grad)
+        self.assertIsNotNone(grouped_node.grouped_gemm_experts.weight2.grad)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,1 +1,412 @@
-IyBDb3B5cmlnaHQgKGMpIDIwMjYgUGFkZGxlUGFkZGxlIEF1dGhvcnMuIEFsbCBSaWdodHMgUmVzZXJ2ZWQuCiMKIyBMaWNlbnNlZCB1bmRlciB0aGUgQXBhY2hlIExpY2Vuc2UsIFZlcnNpb24gMi4wICh0aGUgIkxpY2Vuc2UiKTsKIyB5b3UgbWF5IG5vdCB1c2UgdGhpcyBmaWxlIGV4Y2VwdCBpbiBjb21wbGlhbmNlIHdpdGggdGhlIExpY2Vuc2UuCiMgWW91IG1heSBvYnRhaW4gYSBjb3B5IG9mIHRoZSBMaWNlbnNlIGF0CiMKIyAgICAgaHR0cDovL3d3dy5hcGFjaGUub3JnL2xpY2Vuc2VzL0xJQ0VOU0UtMi4wCiMKIyBVbmxlc3MgcmVxdWlyZWQgYnkgYXBwbGljYWJsZSBsYXcgb3IgYWdyZWVkIHRvIGluIHdyaXRpbmcsIHNvZnR3YXJlCiMgZGlzdHJpYnV0ZWQgdW5kZXIgdGhlIExpY2Vuc2UgaXMgZGlzdHJpYnV0ZWQgb24gYW4gIkFTIElTIiBCQVNJUywKIyBXSVRIT1VUIFdBUlJBTlRJRVMgT1IgQ09ORElUSU9OUyBPRiBBTlkgS0lORCwgZWl0aGVyIGV4cHJlc3Mgb3IgaW1wbGllZC4KIyBTZWUgdGhlIExpY2Vuc2UgZm9yIHRoZSBzcGVjaWZpYyBsYW5ndWFnZSBnb3Zlcm5pbmcgcGVybWlzc2lvbnMgYW5kCiMgbGltaXRhdGlvbnMgdW5kZXIgdGhlIExpY2Vuc2UuCmltcG9ydCBvcwppbXBvcnQgc3lzCmltcG9ydCB1bml0dGVzdApmcm9tIGNvbGxlY3Rpb25zIGltcG9ydCBuYW1lZHR1cGxlCgpSRVBPX1JPT1QgPSBvcy5wYXRoLmRpcm5hbWUoCiAgICBvcy5wYXRoLmRpcm5hbWUoCiAgICAgICAgb3MucGF0aC5kaXJuYW1lKAogICAgICAgICAgICBvcy5wYXRoLmRpcm5hbWUob3MucGF0aC5kaXJuYW1lKG9zLnBhdGguYWJzcGF0aChfX2ZpbGVfXykpKQogICAgICAgICkKICAgICkKKQpzeXMucGF0aC5pbnNlcnQoMCwgb3MucGF0aC5qb2luKFJFUE9fUk9PVCwgInNyYyIpKQoKaW1wb3J0IHBhZGRsZQoKZnJvbSBwYWRkbGVmbGVldC5tb2RlbHMubXVsdGltb2RhbCBpbXBvcnQgbGxhdmFfbW9kZWwKZnJvbSBwYWRkbGVmbGVldC5tb2RlbHMubXVsdGltb2RhbC5sbGF2YV9tb2RlbCBpbXBvcnQgTExhVkFNb2RlbCwgcGl4ZWxfc2h1ZmZsZQoKCmNsYXNzIE1pbmltYWxMTGFWQToKICAgIGRlZiBfcHJlcHJvY2Vzc19kYXRhKHNlbGYsICphcmdzLCAqKmt3YXJncyk6CiAgICAgICAgcmV0dXJuIExMYVZBTW9kZWwuX3ByZXByb2Nlc3NfZGF0YShzZWxmLCAqYXJncywgKiprd2FyZ3MpCgogICAgZGVmIF9wcm9jZXNzX2VtYmVkZGluZ190b2tlbl9wYXJhbGxlbChzZWxmLCAqYXJncywgKiprd2FyZ3MpOgogICAgICAgIHJldHVybiBMTGFWQU1vZGVsLl9wcm9jZXNzX2VtYmVkZGluZ190b2tlbl9wYXJhbGxlbCgKICAgICAgICAgICAgc2VsZiwgKmFyZ3MsICoqa3dhcmdzCiAgICAgICAgKQoKICAgIGRlZiBfYXBwbHlfdGlsZV90YWdnaW5nKHNlbGYsICphcmdzLCAqKmt3YXJncyk6CiAgICAgICAgcmV0dXJuIExMYVZBTW9kZWwuX2FwcGx5X3RpbGVfdGFnZ2luZyhzZWxmLCAqYXJncywgKiprd2FyZ3MpCgoKY2xhc3MgSW5mZXJlbmNlQ29udGV4dDoKICAgIGRlZiBfX2luaXRfXyhzZWxmLCBpbWFnZV90b2tlbnNfY291bnQ9Tm9uZSk6CiAgICAgICAgc2VsZi5rZXlfdmFsdWVfbWVtb3J5X2RpY3QgPSB7fQogICAgICAgIGlmIGltYWdlX3Rva2Vuc19jb3VudCBpcyBub3QgTm9uZToKICAgICAgICAgICAgc2VsZi5rZXlfdmFsdWVfbWVtb3J5X2RpY3RbImltYWdlX3Rva2Vuc19jb3VudCJdID0gaW1hZ2VfdG9rZW5zX2NvdW50CgoKY2xhc3MgUmVjb3JkaW5nVmlzaW9uTW9kZWw6CiAgICBkZWYgX19pbml0X18oc2VsZiwgb3V0cHV0LCBjbGFzc190b2tlbl9sZW49MCk6CiAgICAgICAgc2VsZi5vdXRwdXQgPSBvdXRwdXQKICAgICAgICBzZWxmLmNsYXNzX3Rva2VuX2xlbiA9IGNsYXNzX3Rva2VuX2xlbgogICAgICAgIHNlbGYuaW5wdXRzID0gW10KICAgICAgICBzZWxmLl9pc19mc2RwX21hbmFnZWRfbW9kdWxlID0gRmFsc2UKCiAgICBkZWYgX19jYWxsX18oc2VsZiwgaW1hZ2VzKToKICAgICAgICBzZWxmLmlucHV0cy5hcHBlbmQoaW1hZ2VzKQogICAgICAgIHJldHVybiBzZWxmLm91dHB1dAoKCmNsYXNzIFJlY29yZGluZ1Byb2plY3Rpb246CiAgICBkZWYgX19pbml0X18oc2VsZiwgb2Zmc2V0PTAuMCk6CiAgICAgICAgc2VsZi5vZmZzZXQgPSBvZmZzZXQKICAgICAgICBzZWxmLmlucHV0cyA9IFtdCgogICAgZGVmIF9fY2FsbF9fKHNlbGYsIGVtYmVkZGluZ3MpOgogICAgICAgIHNlbGYuaW5wdXRzLmFwcGVuZChlbWJlZGRpbmdzKQogICAgICAgIHJldHVybiBlbWJlZGRpbmdzICsgc2VsZi5vZmZzZXQKCgpjbGFzcyBSZWNvcmRpbmdMYW5ndWFnZU1vZGVsOgogICAgZGVmIF9faW5pdF9fKHNlbGYpOgogICAgICAgIHNlbGYuZW1iZWRkaW5nX2lucHV0cyA9IFtdCiAgICAgICAgc2VsZi5mb3J3YXJkX2lucHV0cyA9IFtdCgogICAgZGVmIGVtYmVkZGluZyhzZWxmLCBpbnB1dF9pZHMsIHBvc2l0aW9uX2lkcz1Ob25lKToKICAgICAgICBzZWxmLmVtYmVkZGluZ19pbnB1dHMuYXBwZW5kKChpbnB1dF9pZHMsIHBvc2l0aW9uX2lkcykpCiAgICAgICAgdmFsdWVzID0gcGFkZGxlLmNhc3QoaW5wdXRfaWRzLCAiZmxvYXQzMiIpLnVuc3F1ZWV6ZSgtMSkKICAgICAgICB2YWx1ZXMgPSBwYWRkbGUuY29uY2F0KFt2YWx1ZXMsIHZhbHVlcyArIDAuNV0sIGF4aXM9LTEpCiAgICAgICAgcmV0dXJuIHZhbHVlcy50cmFuc3Bvc2UoWzEsIDAsIDJdKS5jb250aWd1b3VzKCkKCiAgICBkZWYgX19jYWxsX18oc2VsZiwgKiprd2FyZ3MpOgogICAgICAgIHNlbGYuZm9yd2FyZF9pbnB1dHMuYXBwZW5kKGt3YXJncykKICAgICAgICByZXR1cm4ga3dhcmdzCgoKZGVmIG1ha2VfcHJlcHJvY2Vzc19tb2RlbCgpOgogICAgbW9kZWwgPSBNaW5pbWFsTExhVkEoKQogICAgbW9kZWwuYWRkX2RlY29kZXIgPSBUcnVlCiAgICBtb2RlbC5wcmVfcHJvY2VzcyA9IFRydWUKICAgIG1vZGVsLnBvc3RfcHJvY2VzcyA9IFRydWUKICAgIG1vZGVsLmltZ19zZXFfbGVuID0gMgogICAgbW9kZWwuX2xhbmd1YWdlX2lzX3BpcGVsaW5lX3BhcmFsbGVsID0gRmFsc2UKICAgIG1vZGVsLl9sYW5ndWFnZV9tYXhfc2VxdWVuY2VfbGVuZ3RoID0gMTYKICAgIG1vZGVsLmNvbnRleHRfcGFyYWxsZWxfbG0gPSAxCiAgICBtb2RlbC52aXNpb25fbW9kZWwgPSBNaW5pbWFsTExhVkEoKQogICAgcmV0dXJuIG1vZGVsCgoKY2xhc3MgVGVzdExMYVZBUHJlcHJvY2Vzc05vTW9jayh1bml0dGVzdC5UZXN0Q2FzZSk6CiAgICBkZWYgdGVzdF9wcmVwcm9jZXNzX21pZGRsZV9jaHVua19hbmRfaW5mZXJlbmNlX2NhY2hlX3JldHVybl9lYXJseShzZWxmKToKICAgICAgICBtb2RlbCA9IE1pbmltYWxMTGFWQSgpCiAgICAgICAgbW9kZWwuYWRkX2RlY29kZXIgPSBUcnVlCiAgICAgICAgbW9kZWwucHJlX3Byb2Nlc3MgPSBGYWxzZQogICAgICAgIG1vZGVsLnBvc3RfcHJvY2VzcyA9IEZhbHNlCiAgICAgICAgcmVzdWx0ID0gTExhVkFNb2RlbC5fcHJlcHJvY2Vzc19kYXRhKAogICAgICAgICAgICBtb2RlbCwKICAgICAgICAgICAgTm9uZSwKICAgICAgICAgICAgTm9uZSwKICAgICAgICAgICAgcGFkZGxlLnRvX3RlbnNvcihbWzEsIC0yMDAsIDJdXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgIEZhbHNlLAogICAgICAgICAgICBOb25lLAogICAgICAgICAgICAtMjAwLAogICAgICAgICAgICBwYWRkbGUudG9fdGVuc29yKFsxXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0LCAoTm9uZSwgTm9uZSwgTm9uZSkpCgogICAgICAgIG1vZGVsLnByZV9wcm9jZXNzID0gVHJ1ZQogICAgICAgIG1vZGVsLnBvc3RfcHJvY2VzcyA9IFRydWUKICAgICAgICBsYW5ndWFnZV9lbWJlZGRpbmdzID0gcGFkZGxlLm9uZXMoWzEsIDMsIDJdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgbG9zc19tYXNrID0gcGFkZGxlLm9uZXMoWzEsIDNdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgbGFiZWxzID0gcGFkZGxlLnRvX3RlbnNvcihbWzEwLCAxMSwgMTJdXSwgZHR5cGU9ImludDY0IikKICAgICAgICByZXN1bHQgPSBMTGFWQU1vZGVsLl9wcmVwcm9jZXNzX2RhdGEoCiAgICAgICAgICAgIG1vZGVsLAogICAgICAgICAgICBOb25lLAogICAgICAgICAgICBsYW5ndWFnZV9lbWJlZGRpbmdzLAogICAgICAgICAgICBwYWRkbGUudG9fdGVuc29yKFtbMSwgMiwgM11dLCBkdHlwZT0iaW50NjQiKSwKICAgICAgICAgICAgbG9zc19tYXNrLAogICAgICAgICAgICBsYWJlbHMsCiAgICAgICAgICAgIFRydWUsCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgIC0yMDAsCiAgICAgICAgICAgIHBhZGRsZS50b190ZW5zb3IoW10sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydElzKHJlc3VsdFswXSwgbGFuZ3VhZ2VfZW1iZWRkaW5ncykKICAgICAgICBzZWxmLmFzc2VydElzKHJlc3VsdFsxXSwgbG9zc19tYXNrKQogICAgICAgIHNlbGYuYXNzZXJ0SXMocmVzdWx0WzJdLCBsYWJlbHMpCgogICAgZGVmIHRlc3RfcHJlcHJvY2Vzc19leHBhbmRzX2ltYWdlX3Rva2VuX2FuZF90cnVuY2F0ZXNfb3V0cHV0cyhzZWxmKToKICAgICAgICBtb2RlbCA9IG1ha2VfcHJlcHJvY2Vzc19tb2RlbCgpCiAgICAgICAgbW9kZWwuX2xhbmd1YWdlX21heF9zZXF1ZW5jZV9sZW5ndGggPSAzCiAgICAgICAgaW5wdXRfaWRzID0gcGFkZGxlLnRvX3RlbnNvcihbWzUsIC0yMDAsIDZdXSwgZHR5cGU9ImludDY0IikKICAgICAgICBsYW5ndWFnZV9lbWJlZGRpbmdzID0gcGFkZGxlLnRvX3RlbnNvcigKICAgICAgICAgICAgW1tbNS4wLCA1LjVdLCBbMC4wLCAwLjVdLCBbNi4wLCA2LjVdXV0sIGR0eXBlPSJmbG9hdDMyIgogICAgICAgICkKICAgICAgICBpbWFnZV9lbWJlZGRpbmdzID0gcGFkZGxlLnRvX3RlbnNvcigKICAgICAgICAgICAgW1tbMjAuMCwgMjAuNV1dLCBbWzIxLjAsIDIxLjVdXV0sIGR0eXBlPSJmbG9hdDMyIgogICAgICAgICkKICAgICAgICBsYWJlbHMgPSBwYWRkbGUudG9fdGVuc29yKFtbNTAsIDUxLCA1Ml1dLCBkdHlwZT0iaW50NjQiKQogICAgICAgIGxvc3NfbWFzayA9IHBhZGRsZS5vbmVzKFsxLCAzXSwgZHR5cGU9ImZsb2F0MzIiKQoKICAgICAgICBmaW5hbF9lbWJlZGRpbmcsIGZpbmFsX2xhYmVscywgZmluYWxfbG9zc19tYXNrID0gTExhVkFNb2RlbC5fcHJlcHJvY2Vzc19kYXRhKAogICAgICAgICAgICBtb2RlbCwKICAgICAgICAgICAgaW1hZ2VfZW1iZWRkaW5ncywKICAgICAgICAgICAgbGFuZ3VhZ2VfZW1iZWRkaW5ncywKICAgICAgICAgICAgaW5wdXRfaWRzLAogICAgICAgICAgICBsb3NzX21hc2ssCiAgICAgICAgICAgIGxhYmVscywKICAgICAgICAgICAgRmFsc2UsCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgIC0yMDAsCiAgICAgICAgICAgIHBhZGRsZS50b190ZW5zb3IoWzFdLCBkdHlwZT0iaW50NjQiKSwKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZmluYWxfZW1iZWRkaW5nLnNoYXBlLCBbMywgMSwgMl0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChmaW5hbF9sYWJlbHMuc2hhcGUsIFsxLCAzXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGZpbmFsX2xvc3NfbWFzay5zaGFwZSwgWzEsIDNdKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoCiAgICAgICAgICAgIGZpbmFsX2VtYmVkZGluZ1s6LCAwLCA6XS5udW1weSgpLnRvbGlzdCgpLAogICAgICAgICAgICBbWzUuMCwgNS41XSwgWzIwLjAsIDIwLjVdLCBbMjEuMCwgMjEuNV1dLAogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGZpbmFsX2xvc3NfbWFzay5udW1weSgpLnRvbGlzdCgpLCBbWzAuMCwgMC4wLCAwLjBdXSkKCiAgICBkZWYgdGVzdF9wcmVwcm9jZXNzX3BpcGVsaW5lX3BhZGRpbmdfYW5kX2R1bW15X2ZzZHBfaW1hZ2Uoc2VsZik6CiAgICAgICAgbW9kZWwgPSBtYWtlX3ByZXByb2Nlc3NfbW9kZWwoKQogICAgICAgIG1vZGVsLl9sYW5ndWFnZV9pc19waXBlbGluZV9wYXJhbGxlbCA9IFRydWUKICAgICAgICBtb2RlbC5fbGFuZ3VhZ2VfbWF4X3NlcXVlbmNlX2xlbmd0aCA9IDUKICAgICAgICBtb2RlbC52aXNpb25fbW9kZWwuX2lzX2ZzZHBfbWFuYWdlZF9tb2R1bGUgPSBUcnVlCiAgICAgICAgaW5wdXRfaWRzID0gcGFkZGxlLnRvX3RlbnNvcihbWzcsIDhdXSwgZHR5cGU9ImludDY0IikKICAgICAgICBsYW5ndWFnZV9lbWJlZGRpbmdzID0gcGFkZGxlLnRvX3RlbnNvcihbW1s3LjAsIDcuNV0sIFs4LjAsIDguNV1dXSwgZHR5cGU9ImZsb2F0MzIiKQogICAgICAgIGltYWdlX2VtYmVkZGluZ3MgPSBwYWRkbGUub25lcyhbMSwgMSwgMl0sIGR0eXBlPSJmbG9hdDMyIikKCiAgICAgICAgZmluYWxfZW1iZWRkaW5nLCBmaW5hbF9sYWJlbHMsIGZpbmFsX2xvc3NfbWFzayA9IExMYVZBTW9kZWwuX3ByZXByb2Nlc3NfZGF0YSgKICAgICAgICAgICAgbW9kZWwsCiAgICAgICAgICAgIGltYWdlX2VtYmVkZGluZ3MsCiAgICAgICAgICAgIGxhbmd1YWdlX2VtYmVkZGluZ3MsCiAgICAgICAgICAgIGlucHV0X2lkcywKICAgICAgICAgICAgcGFkZGxlLm9uZXMoWzEsIDJdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBOb25lLAogICAgICAgICAgICBGYWxzZSwKICAgICAgICAgICAgTm9uZSwKICAgICAgICAgICAgLTIwMCwKICAgICAgICAgICAgcGFkZGxlLnRvX3RlbnNvcihbXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgKQoKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGZpbmFsX2VtYmVkZGluZy5zaGFwZSwgWzUsIDEsIDJdKQogICAgICAgIHNlbGYuYXNzZXJ0SXNOb25lKGZpbmFsX2xhYmVscykKICAgICAgICBzZWxmLmFzc2VydElzTm9uZShmaW5hbF9sb3NzX21hc2spCgogICAgZGVmIHRlc3RfcHJlcHJvY2Vzc19yZWplY3RzX21pc21hdGNoZWRfbGFiZWxzX2FuZF9sb3NzX21hc2soc2VsZik6CiAgICAgICAgbW9kZWwgPSBtYWtlX3ByZXByb2Nlc3NfbW9kZWwoKQogICAgICAgIHdpdGggc2VsZi5hc3NlcnRSYWlzZXMoQXNzZXJ0aW9uRXJyb3IpOgogICAgICAgICAgICBMTGFWQU1vZGVsLl9wcmVwcm9jZXNzX2RhdGEoCiAgICAgICAgICAgICAgICBtb2RlbCwKICAgICAgICAgICAgICAgIHBhZGRsZS5vbmVzKFsyLCAxLCAyXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgICAgIHBhZGRsZS5vbmVzKFsxLCAzLCAyXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgICAgIHBhZGRsZS50b190ZW5zb3IoW1s1LCAtMjAwLCA2XV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICAgICAgICAgcGFkZGxlLm9uZXMoWzEsIDNdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICAgICAgcGFkZGxlLm9uZXMoWzEsIDJdLCBkdHlwZT0iaW50NjQiKSwKICAgICAgICAgICAgICAgIEZhbHNlLAogICAgICAgICAgICAgICAgTm9uZSwKICAgICAgICAgICAgICAgIC0yMDAsCiAgICAgICAgICAgICAgICBwYWRkbGUudG9fdGVuc29yKFsxXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgICAgICkKCgpjbGFzcyBUZXN0TExhVkFUb2tlblBhcmFsbGVsQW5kVGFnZ2luZ05vTW9jayh1bml0dGVzdC5UZXN0Q2FzZSk6CiAgICBkZWYgdGVzdF9wcm9jZXNzX2VtYmVkZGluZ190b2tlbl9wYXJhbGxlbF9taWRkbGVfYW5kX2Fzc2VydGlvbnMoc2VsZik6CiAgICAgICAgbW9kZWwgPSBNaW5pbWFsTExhVkEoKQogICAgICAgIG1vZGVsLnByZV9wcm9jZXNzID0gRmFsc2UKICAgICAgICBtb2RlbC5wb3N0X3Byb2Nlc3MgPSBGYWxzZQogICAgICAgIGVtYmVkZGluZ3MgPSBwYWRkbGUub25lcyhbNCwgMSwgMl0sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICBsYWJlbHMgPSBwYWRkbGUub25lcyhbMSwgNF0sIGR0eXBlPSJpbnQ2NCIpCiAgICAgICAgbG9zc19tYXNrID0gcGFkZGxlLm9uZXMoWzEsIDRdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgcGFja2VkID0geyJtYXJrZXIiOiBUcnVlfQogICAgICAgIHJlc3VsdCA9IExMYVZBTW9kZWwuX3Byb2Nlc3NfZW1iZWRkaW5nX3Rva2VuX3BhcmFsbGVsKAogICAgICAgICAgICBtb2RlbCwgZW1iZWRkaW5ncywgbGFiZWxzLCBsb3NzX21hc2ssIHBhY2tlZAogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydElzKHJlc3VsdFswXSwgZW1iZWRkaW5ncykKICAgICAgICBzZWxmLmFzc2VydElzKHJlc3VsdFszXSwgcGFja2VkKQoKICAgICAgICBtb2RlbC5wcmVfcHJvY2VzcyA9IFRydWUKICAgICAgICBtb2RlbC5wb3N0X3Byb2Nlc3MgPSBUcnVlCiAgICAgICAgbW9kZWwuY29udGV4dF9wYXJhbGxlbF9sbSA9IDEKICAgICAgICBtb2RlbC5zZXF1ZW5jZV9wYXJhbGxlbF9sbSA9IFRydWUKICAgICAgICBtb2RlbC50ZW5zb3JfbW9kZWxfcGFyYWxsZWxfc2l6ZV9sbSA9IDIKICAgICAgICBtb2RlbC50cF9jb21tX292ZXJsYXBfbG0gPSBGYWxzZQogICAgICAgIHdpdGggc2VsZi5hc3NlcnRSYWlzZXMoQXNzZXJ0aW9uRXJyb3IpOgogICAgICAgICAgICBMTGFWQU1vZGVsLl9wcm9jZXNzX2VtYmVkZGluZ190b2tlbl9wYXJhbGxlbCgKICAgICAgICAgICAgICAgIG1vZGVsLCBwYWRkbGUub25lcyhbMywgMSwgMl0sIGR0eXBlPSJmbG9hdDMyIiksIE5vbmUsIE5vbmUsIE5vbmUKICAgICAgICAgICAgKQogICAgICAgIHJlc3VsdCA9IExMYVZBTW9kZWwuX3Byb2Nlc3NfZW1iZWRkaW5nX3Rva2VuX3BhcmFsbGVsKAogICAgICAgICAgICBtb2RlbCwgcGFkZGxlLm9uZXMoWzQsIDEsIDJdLCBkdHlwZT0iZmxvYXQzMiIpLCBOb25lLCBOb25lLCBOb25lCiAgICAgICAgKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0WzBdLnNoYXBlLCBbNCwgMSwgMl0pCgogICAgICAgIG1vZGVsLnRwX2NvbW1fb3ZlcmxhcF9sbSA9IFRydWUKICAgICAgICBtb2RlbC5fbGFuZ3VhZ2VfbWF4X3NlcXVlbmNlX2xlbmd0aCA9IDYKICAgICAgICB3aXRoIHNlbGYuYXNzZXJ0UmFpc2VzKEFzc2VydGlvbkVycm9yKToKICAgICAgICAgICAgTExhVkFNb2RlbC5fcHJvY2Vzc19lbWJlZGRpbmdfdG9rZW5fcGFyYWxsZWwoCiAgICAgICAgICAgICAgICBtb2RlbCwgcGFkZGxlLm9uZXMoWzQsIDEsIDJdLCBkdHlwZT0iZmxvYXQzMiIpLCBOb25lLCBOb25lLCBOb25lCiAgICAgICAgICAgICkKCiAgICBkZWYgdGVzdF9hcHBseV90aWxlX3RhZ2dpbmdfcHJlcGVuZHNfdGFnc19hbmRfcmVqZWN0c19tdWx0aXBsZV9pbWFnZXMoc2VsZik6CiAgICAgICAgbW9kZWwgPSBNaW5pbWFsTExhVkEoKQogICAgICAgIG1vZGVsLl90aWxlX3RhZ3MgPSBbWzEwMSwgMTAyXSwgWzIwMSwgMjAyXSwgWzk5OSwgMTAwMF1dCiAgICAgICAgbW9kZWwubGFuZ3VhZ2VfbW9kZWwgPSBSZWNvcmRpbmdMYW5ndWFnZU1vZGVsKCkKICAgICAgICBpbWFnZV9lbWJlZGRpbmdzID0gcGFkZGxlLnRvX3RlbnNvcigKICAgICAgICAgICAgWwogICAgICAgICAgICAgICAgW1sxLjAsIDEuNV0sIFsyLjAsIDIuNV1dLAogICAgICAgICAgICAgICAgW1szLjAsIDMuNV0sIFs0LjAsIDQuNV1dLAogICAgICAgICAgICAgICAgW1s1LjAsIDUuNV0sIFs2LjAsIDYuNV1dLAogICAgICAgICAgICBdLAogICAgICAgICAgICBkdHlwZT0iZmxvYXQzMiIsCiAgICAgICAgKQoKICAgICAgICByZXN1bHQgPSBMTGFWQU1vZGVsLl9hcHBseV90aWxlX3RhZ2dpbmcoCiAgICAgICAgICAgIG1vZGVsLCBpbWFnZV9lbWJlZGRpbmdzLCBwYWRkbGUudG9fdGVuc29yKFsyXSwgZHR5cGU9ImludDY0IikKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0LnNoYXBlLCBbNSwgMiwgMl0pCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKHBhZGRsZS5hbGxjbG9zZShyZXN1bHRbMjpdLCBpbWFnZV9lbWJlZGRpbmdzKSkKICAgICAgICB3aXRoIHNlbGYuYXNzZXJ0UmFpc2VzKEFzc2VydGlvbkVycm9yKToKICAgICAgICAgICAgTExhVkFNb2RlbC5fYXBwbHlfdGlsZV90YWdnaW5nKAogICAgICAgICAgICAgICAgbW9kZWwsIGltYWdlX2VtYmVkZGluZ3MsIHBhZGRsZS50b190ZW5zb3IoWzEsIDFdLCBkdHlwZT0iaW50NjQiKQogICAgICAgICAgICApCgoKY2xhc3MgVGVzdExMYVZBRm9yd2FyZE5vTW9jayh1bml0dGVzdC5UZXN0Q2FzZSk6CiAgICBkZWYgdGVzdF9mb3J3YXJkX2VuY29kZXJfb25seV9wcm9qZWN0c19pbWFnZV9lbWJlZGRpbmdzKHNlbGYpOgogICAgICAgIG1vZGVsID0gTWluaW1hbExMYVZBKCkKICAgICAgICBtb2RlbC5hZGRfZW5jb2RlciA9IFRydWUKICAgICAgICBtb2RlbC5hZGRfZGVjb2RlciA9IEZhbHNlCiAgICAgICAgbW9kZWwuX2Ryb3BfdmlzaW9uX2NsYXNzX3Rva2VuID0gVHJ1ZQogICAgICAgIG1vZGVsLl9waXhlbF9zaHVmZmxlID0gRmFsc2UKICAgICAgICBtb2RlbC5fdGlsZV90YWdzID0gTm9uZQogICAgICAgIG1vZGVsLmltYWdlX3Rva2VuX2luZGV4ID0gLTIwMAogICAgICAgIHZpc2lvbl9vdXRwdXQgPSBwYWRkbGUudG9fdGVuc29yKAogICAgICAgICAgICBbW1swLjAsIDAuNV0sIFsxLjAsIDEuNV0sIFsyLjAsIDIuNV1dXSwgZHR5cGU9ImZsb2F0MzIiCiAgICAgICAgKQogICAgICAgIG1vZGVsLnZpc2lvbl9tb2RlbCA9IFJlY29yZGluZ1Zpc2lvbk1vZGVsKHZpc2lvbl9vdXRwdXQsIGNsYXNzX3Rva2VuX2xlbj0xKQogICAgICAgIG1vZGVsLnZpc2lvbl9wcm9qZWN0aW9uID0gUmVjb3JkaW5nUHJvamVjdGlvbihvZmZzZXQ9MTAuMCkKICAgICAgICBsb3NzX21hc2sgPSBwYWRkbGUub25lcyhbMSwgM10sIGR0eXBlPSJmbG9hdDMyIikKCiAgICAgICAgb3V0cHV0LCByZXR1cm5lZF9sb3NzX21hc2sgPSBMTGFWQU1vZGVsLmZvcndhcmQoCiAgICAgICAgICAgIG1vZGVsLAogICAgICAgICAgICBpbWFnZXM9cGFkZGxlLm9uZXMoWzEsIDMsIDQsIDRdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBpbnB1dF9pZHM9cGFkZGxlLnRvX3RlbnNvcihbWzUsIC0yMDAsIDZdXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgICAgIHBvc2l0aW9uX2lkcz1wYWRkbGUudG9fdGVuc29yKFtbMCwgMSwgMl1dLCBkdHlwZT0iaW50NjQiKSwKICAgICAgICAgICAgYXR0ZW50aW9uX21hc2s9Tm9uZSwKICAgICAgICAgICAgbGFiZWxzPU5vbmUsCiAgICAgICAgICAgIGxvc3NfbWFzaz1sb3NzX21hc2ssCiAgICAgICAgKQoKICAgICAgICBzZWxmLmFzc2VydElzKHJldHVybmVkX2xvc3NfbWFzaywgbG9zc19tYXNrKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwob3V0cHV0LnNoYXBlLCBbMiwgMSwgMl0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChvdXRwdXRbOiwgMCwgOl0ubnVtcHkoKS50b2xpc3QoKSwgW1sxMS4wLCAxMS41XSwgWzEyLjAsIDEyLjVdXSkKCiAgICBkZWYgdGVzdF9mb3J3YXJkX2RlY29kZXJfdXNlc19lbmNvZGVyX2hpZGRlbl9zdGF0ZV9hbmRfbGFuZ3VhZ2VfbW9kZWwoc2VsZik6CiAgICAgICAgbW9kZWwgPSBtYWtlX3ByZXByb2Nlc3NfbW9kZWwoKQogICAgICAgIG1vZGVsLmFkZF9lbmNvZGVyID0gRmFsc2UKICAgICAgICBtb2RlbC5hZGRfZGVjb2RlciA9IFRydWUKICAgICAgICBtb2RlbC5zZXF1ZW5jZV9wYXJhbGxlbF9sbSA9IEZhbHNlCiAgICAgICAgbW9kZWwuZW5jb2Rlcl9oaWRkZW5fc3RhdGUgPSBwYWRkbGUudG9fdGVuc29yKAogICAgICAgICAgICBbW1syMC4wLCAyMC41XV0sIFtbMjEuMCwgMjEuNV1dXSwgZHR5cGU9ImZsb2F0MzIiCiAgICAgICAgKQogICAgICAgIG1vZGVsLmltYWdlX3Rva2VuX2luZGV4ID0gLTIwMAogICAgICAgIG1vZGVsLmxhbmd1YWdlX21vZGVsID0gUmVjb3JkaW5nTGFuZ3VhZ2VNb2RlbCgpCgogICAgICAgIG91dHB1dCwgbmV3X2xvc3NfbWFzayA9IExMYVZBTW9kZWwuZm9yd2FyZCgKICAgICAgICAgICAgbW9kZWwsCiAgICAgICAgICAgIGltYWdlcz1Ob25lLAogICAgICAgICAgICBpbnB1dF9pZHM9cGFkZGxlLnRvX3RlbnNvcihbWzUsIC0yMDAsIDZdXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgICAgIHBvc2l0aW9uX2lkcz1wYWRkbGUudG9fdGVuc29yKFtbMCwgMSwgMl1dLCBkdHlwZT0iaW50NjQiKSwKICAgICAgICAgICAgYXR0ZW50aW9uX21hc2s9Tm9uZSwKICAgICAgICAgICAgbGFiZWxzPXBhZGRsZS50b190ZW5zb3IoW1s1MCwgNTEsIDUyXV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICAgICBsb3NzX21hc2s9cGFkZGxlLm9uZXMoWzEsIDNdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBudW1faW1hZ2VfdGlsZXM9cGFkZGxlLnRvX3RlbnNvcihbMV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChuZXdfbG9zc19tYXNrLnNoYXBlLCBbMSwgNF0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChsZW4obW9kZWwubGFuZ3VhZ2VfbW9kZWwuZm9yd2FyZF9pbnB1dHMpLCAxKQogICAgICAgIHNlbGYuYXNzZXJ0SXMob3V0cHV0LCBtb2RlbC5sYW5ndWFnZV9tb2RlbC5mb3J3YXJkX2lucHV0c1swXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKG91dHB1dFsiZGVjb2Rlcl9pbnB1dCJdLnNoYXBlLCBbNCwgMSwgMl0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChvdXRwdXRbImxhYmVscyJdLnNoYXBlLCBbNCwgMV0pCgogICAgZGVmIHRlc3RfZm9yd2FyZF9pbmZlcmVuY2VfY2FjaGVfc2tpcHNfdmlzaW9uX2FuZF9wcm9jZXNzZXNfbGFuZ3VhZ2Uoc2VsZik6CiAgICAgICAgbW9kZWwgPSBtYWtlX3ByZXByb2Nlc3NfbW9kZWwoKQogICAgICAgIG1vZGVsLmFkZF9lbmNvZGVyID0gVHJ1ZQogICAgICAgIG1vZGVsLmFkZF9kZWNvZGVyID0gVHJ1ZQogICAgICAgIG1vZGVsLnNlcXVlbmNlX3BhcmFsbGVsX2xtID0gRmFsc2UKICAgICAgICBtb2RlbC5pbWFnZV90b2tlbl9pbmRleCA9IC0yMDAKICAgICAgICBtb2RlbC5sYW5ndWFnZV9tb2RlbCA9IFJlY29yZGluZ0xhbmd1YWdlTW9kZWwoKQogICAgICAgIG1vZGVsLnZpc2lvbl9tb2RlbCA9IFJlY29yZGluZ1Zpc2lvbk1vZGVsKHBhZGRsZS5vbmVzKFsxLCAyLCAyXSwgZHR5cGU9ImZsb2F0MzIiKSkKICAgICAgICBjb250ZXh0ID0gSW5mZXJlbmNlQ29udGV4dChpbWFnZV90b2tlbnNfY291bnQ9MikKCiAgICAgICAgb3V0cHV0LCBuZXdfbG9zc19tYXNrID0gTExhVkFNb2RlbC5mb3J3YXJkKAogICAgICAgICAgICBtb2RlbCwKICAgICAgICAgICAgaW1hZ2VzPXBhZGRsZS5vbmVzKFsxLCAzLCA0LCA0XSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgaW5wdXRfaWRzPXBhZGRsZS50b190ZW5zb3IoW1s1LCA2LCA3XV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICAgICBwb3NpdGlvbl9pZHM9cGFkZGxlLnRvX3RlbnNvcihbWzAsIDEsIDJdXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgICAgIGF0dGVudGlvbl9tYXNrPU5vbmUsCiAgICAgICAgICAgIGxhYmVscz1wYWRkbGUudG9fdGVuc29yKFtbNTAsIDUxLCA1Ml1dLCBkdHlwZT0iaW50NjQiKSwKICAgICAgICAgICAgbG9zc19tYXNrPXBhZGRsZS5vbmVzKFsxLCAzXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgaW5mZXJlbmNlX2NvbnRleHQ9Y29udGV4dCwKICAgICAgICAgICAgbnVtX2ltYWdlX3RpbGVzPXBhZGRsZS50b190ZW5zb3IoW10sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChtb2RlbC52aXNpb25fbW9kZWwuaW5wdXRzLCBbXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKG5ld19sb3NzX21hc2suc2hhcGUsIFsxLCAzXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKG91dHB1dFsiZGVjb2Rlcl9pbnB1dCJdLnNoYXBlLCBbMSwgMywgMl0pCgoKY2xhc3MgVGVzdExMYVZBRXh0cmFVdGlsaXR5Tm9Nb2NrKHVuaXR0ZXN0LlRlc3RDYXNlKToKICAgIGRlZiB0ZXN0X3BpeGVsX3NodWZmbGVfdmVyc2lvbnNfZGlmZmVyX29uX2xhcmdlcl9ncmlkKHNlbGYpOgogICAgICAgIHggPSBwYWRkbGUuYXJhbmdlKDY0LCBkdHlwZT0iZmxvYXQzMiIpLnJlc2hhcGUoWzEsIDE2LCA0XSkKICAgICAgICB2ZXJzaW9uX29uZSA9IHBpeGVsX3NodWZmbGUoeCwgc2NhbGVfZmFjdG9yPTAuNSwgdmVyc2lvbj0xKQogICAgICAgIHZlcnNpb25fdHdvID0gcGl4ZWxfc2h1ZmZsZSh4LCBzY2FsZV9mYWN0b3I9MC41LCB2ZXJzaW9uPTIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCh2ZXJzaW9uX29uZS5zaGFwZSwgWzEsIDQsIDE2XSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKHZlcnNpb25fdHdvLnNoYXBlLCBbMSwgNCwgMTZdKQogICAgICAgIHNlbGYuYXNzZXJ0RmFsc2UocGFkZGxlLmFsbGNsb3NlKHZlcnNpb25fb25lLCB2ZXJzaW9uX3R3bykpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbCh2ZXJzaW9uX29uZS5udW1lbCgpLCB4Lm51bWVsKCkpCgogICAgZGVmIHRlc3RfbG9hZF9zdGF0ZV9ob29rc19wcmVzZXJ2ZV91bm1hdGNoZWRfa2V5cyhzZWxmKToKICAgICAgICBpbmNvbXBhdGlibGVfdHlwZSA9IG5hbWVkdHVwbGUoIkluY29tcGF0aWJsZUtleXMiLCBbIm1pc3Npbmdfa2V5cyIsICJ1bmV4cGVjdGVkX2tleXMiXSkKICAgICAgICBpbmNvbXBhdGlibGUgPSBpbmNvbXBhdGlibGVfdHlwZSgKICAgICAgICAgICAgbWlzc2luZ19rZXlzPVsiYS53ZWlnaHQiLCAiYi53ZWlnaHQiLCAiYy5leHRyYV9zdGF0ZSJdLAogICAgICAgICAgICB1bmV4cGVjdGVkX2tleXM9WyJ1bmV4cGVjdGVkLmV4dHJhX3N0YXRlIiwgInVuZXhwZWN0ZWQud2VpZ2h0Il0sCiAgICAgICAgKQogICAgICAgIGxsYXZhX21vZGVsLl9sb2FkX3N0YXRlX2RpY3RfaG9va19pZ25vcmVfcGFyYW1fbmFtZXMoCiAgICAgICAgICAgIFsiYi53ZWlnaHQiLCAibm90LnByZXNlbnQiXSwgTm9uZSwgaW5jb21wYXRpYmxlCiAgICAgICAgKQogICAgICAgIGxsYXZhX21vZGVsLl9sb2FkX3N0YXRlX2RpY3RfaG9va19pZ25vcmVfZXh0cmFfc3RhdGUoTm9uZSwgaW5jb21wYXRpYmxlKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoaW5jb21wYXRpYmxlLm1pc3Npbmdfa2V5cywgWyJhLndlaWdodCJdKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoaW5jb21wYXRpYmxlLnVuZXhwZWN0ZWRfa2V5cywgWyJ1bmV4cGVjdGVkLndlaWdodCJdKQoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICB1bml0dGVzdC5tYWluKCkK
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import sys
+import unittest
+from collections import namedtuple
+
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+    )
+)
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+import paddle
+
+from paddlefleet.models.multimodal import llava_model
+from paddlefleet.models.multimodal.llava_model import LLaVAModel, pixel_shuffle
+
+
+class MinimalLLaVA:
+    def _preprocess_data(self, *args, **kwargs):
+        return LLaVAModel._preprocess_data(self, *args, **kwargs)
+
+    def _process_embedding_token_parallel(self, *args, **kwargs):
+        return LLaVAModel._process_embedding_token_parallel(
+            self, *args, **kwargs
+        )
+
+    def _apply_tile_tagging(self, *args, **kwargs):
+        return LLaVAModel._apply_tile_tagging(self, *args, **kwargs)
+
+
+class InferenceContext:
+    def __init__(self, image_tokens_count=None):
+        self.key_value_memory_dict = {}
+        if image_tokens_count is not None:
+            self.key_value_memory_dict["image_tokens_count"] = (
+                image_tokens_count
+            )
+
+
+class RecordingVisionModel:
+    def __init__(self, output, class_token_len=0):
+        self.output = output
+        self.class_token_len = class_token_len
+        self.inputs = []
+        self._is_fsdp_managed_module = False
+
+    def __call__(self, images):
+        self.inputs.append(images)
+        return self.output
+
+
+class RecordingProjection:
+    def __init__(self, offset=0.0):
+        self.offset = offset
+        self.inputs = []
+
+    def __call__(self, embeddings):
+        self.inputs.append(embeddings)
+        return embeddings + self.offset
+
+
+class RecordingLanguageModel:
+    def __init__(self):
+        self.embedding_inputs = []
+        self.forward_inputs = []
+
+    def embedding(self, input_ids, position_ids=None):
+        self.embedding_inputs.append((input_ids, position_ids))
+        values = paddle.cast(input_ids, "float32").unsqueeze(-1)
+        values = paddle.concat([values, values + 0.5], axis=-1)
+        return values.transpose([1, 0, 2]).contiguous()
+
+    def __call__(self, **kwargs):
+        self.forward_inputs.append(kwargs)
+        return kwargs
+
+
+def make_preprocess_model():
+    model = MinimalLLaVA()
+    model.add_decoder = True
+    model.pre_process = True
+    model.post_process = True
+    model.img_seq_len = 2
+    model._language_is_pipeline_parallel = False
+    model._language_max_sequence_length = 16
+    model.context_parallel_lm = 1
+    model.vision_model = MinimalLLaVA()
+    return model
+
+
+class TestLLaVAPreprocessNoMock(unittest.TestCase):
+    def test_preprocess_middle_chunk_and_inference_cache_return_early(self):
+        model = MinimalLLaVA()
+        model.add_decoder = True
+        model.pre_process = False
+        model.post_process = False
+        result = LLaVAModel._preprocess_data(
+            model,
+            None,
+            None,
+            paddle.to_tensor([[1, -200, 2]], dtype="int64"),
+            None,
+            None,
+            False,
+            None,
+            -200,
+            paddle.to_tensor([1], dtype="int64"),
+        )
+        self.assertEqual(result, (None, None, None))
+
+        model.pre_process = True
+        model.post_process = True
+        language_embeddings = paddle.ones([1, 3, 2], dtype="float32")
+        loss_mask = paddle.ones([1, 3], dtype="float32")
+        labels = paddle.to_tensor([[10, 11, 12]], dtype="int64")
+        result = LLaVAModel._preprocess_data(
+            model,
+            None,
+            language_embeddings,
+            paddle.to_tensor([[1, 2, 3]], dtype="int64"),
+            loss_mask,
+            labels,
+            True,
+            None,
+            -200,
+            paddle.to_tensor([], dtype="int64"),
+        )
+        self.assertIs(result[0], language_embeddings)
+        self.assertIs(result[1], loss_mask)
+        self.assertIs(result[2], labels)
+
+    def test_preprocess_expands_image_token_and_truncates_outputs(self):
+        model = make_preprocess_model()
+        model._language_max_sequence_length = 3
+        input_ids = paddle.to_tensor([[5, -200, 6]], dtype="int64")
+        language_embeddings = paddle.to_tensor(
+            [[[5.0, 5.5], [0.0, 0.5], [6.0, 6.5]]], dtype="float32"
+        )
+        image_embeddings = paddle.to_tensor(
+            [[[20.0, 20.5]], [[21.0, 21.5]]], dtype="float32"
+        )
+        labels = paddle.to_tensor([[50, 51, 52]], dtype="int64")
+        loss_mask = paddle.ones([1, 3], dtype="float32")
+
+        final_embedding, final_labels, final_loss_mask = (
+            LLaVAModel._preprocess_data(
+                model,
+                image_embeddings,
+                language_embeddings,
+                input_ids,
+                loss_mask,
+                labels,
+                False,
+                None,
+                -200,
+                paddle.to_tensor([1], dtype="int64"),
+            )
+        )
+
+        self.assertEqual(final_embedding.shape, [3, 1, 2])
+        self.assertEqual(final_labels.shape, [1, 3])
+        self.assertEqual(final_loss_mask.shape, [1, 3])
+        self.assertEqual(
+            final_embedding[:, 0, :].numpy().tolist(),
+            [[5.0, 5.5], [20.0, 20.5], [21.0, 21.5]],
+        )
+        self.assertEqual(final_loss_mask.numpy().tolist(), [[0.0, 0.0, 0.0]])
+
+    def test_preprocess_pipeline_padding_and_dummy_fsdp_image(self):
+        model = make_preprocess_model()
+        model._language_is_pipeline_parallel = True
+        model._language_max_sequence_length = 5
+        model.vision_model._is_fsdp_managed_module = True
+        input_ids = paddle.to_tensor([[7, 8]], dtype="int64")
+        language_embeddings = paddle.to_tensor(
+            [[[7.0, 7.5], [8.0, 8.5]]], dtype="float32"
+        )
+        image_embeddings = paddle.ones([1, 1, 2], dtype="float32")
+
+        final_embedding, final_labels, final_loss_mask = (
+            LLaVAModel._preprocess_data(
+                model,
+                image_embeddings,
+                language_embeddings,
+                input_ids,
+                paddle.ones([1, 2], dtype="float32"),
+                None,
+                False,
+                None,
+                -200,
+                paddle.to_tensor([], dtype="int64"),
+            )
+        )
+
+        self.assertEqual(final_embedding.shape, [5, 1, 2])
+        self.assertIsNone(final_labels)
+        self.assertIsNone(final_loss_mask)
+
+    def test_preprocess_rejects_mismatched_labels_and_loss_mask(self):
+        model = make_preprocess_model()
+        with self.assertRaises(AssertionError):
+            LLaVAModel._preprocess_data(
+                model,
+                paddle.ones([2, 1, 2], dtype="float32"),
+                paddle.ones([1, 3, 2], dtype="float32"),
+                paddle.to_tensor([[5, -200, 6]], dtype="int64"),
+                paddle.ones([1, 3], dtype="float32"),
+                paddle.ones([1, 2], dtype="int64"),
+                False,
+                None,
+                -200,
+                paddle.to_tensor([1], dtype="int64"),
+            )
+
+
+class TestLLaVATokenParallelAndTaggingNoMock(unittest.TestCase):
+    def test_process_embedding_token_parallel_middle_and_assertions(self):
+        model = MinimalLLaVA()
+        model.pre_process = False
+        model.post_process = False
+        embeddings = paddle.ones([4, 1, 2], dtype="float32")
+        labels = paddle.ones([1, 4], dtype="int64")
+        loss_mask = paddle.ones([1, 4], dtype="float32")
+        packed = {"marker": True}
+        result = LLaVAModel._process_embedding_token_parallel(
+            model, embeddings, labels, loss_mask, packed
+        )
+        self.assertIs(result[0], embeddings)
+        self.assertIs(result[3], packed)
+
+        model.pre_process = True
+        model.post_process = True
+        model.context_parallel_lm = 1
+        model.sequence_parallel_lm = True
+        model.tensor_model_parallel_size_lm = 2
+        model.tp_comm_overlap_lm = False
+        with self.assertRaises(AssertionError):
+            LLaVAModel._process_embedding_token_parallel(
+                model, paddle.ones([3, 1, 2], dtype="float32"), None, None, None
+            )
+        result = LLaVAModel._process_embedding_token_parallel(
+            model, paddle.ones([4, 1, 2], dtype="float32"), None, None, None
+        )
+        self.assertEqual(result[0].shape, [4, 1, 2])
+
+        model.tp_comm_overlap_lm = True
+        model._language_max_sequence_length = 6
+        with self.assertRaises(AssertionError):
+            LLaVAModel._process_embedding_token_parallel(
+                model, paddle.ones([4, 1, 2], dtype="float32"), None, None, None
+            )
+
+    def test_apply_tile_tagging_prepends_tags_and_rejects_multiple_images(self):
+        model = MinimalLLaVA()
+        model._tile_tags = [[101, 102], [201, 202], [999, 1000]]
+        model.language_model = RecordingLanguageModel()
+        image_embeddings = paddle.to_tensor(
+            [
+                [[1.0, 1.5], [2.0, 2.5]],
+                [[3.0, 3.5], [4.0, 4.5]],
+                [[5.0, 5.5], [6.0, 6.5]],
+            ],
+            dtype="float32",
+        )
+
+        result = LLaVAModel._apply_tile_tagging(
+            model, image_embeddings, paddle.to_tensor([2], dtype="int64")
+        )
+
+        self.assertEqual(result.shape, [5, 2, 2])
+        self.assertTrue(paddle.allclose(result[2:], image_embeddings))
+        with self.assertRaises(AssertionError):
+            LLaVAModel._apply_tile_tagging(
+                model, image_embeddings, paddle.to_tensor([1, 1], dtype="int64")
+            )
+
+
+class TestLLaVAForwardNoMock(unittest.TestCase):
+    def test_forward_encoder_only_projects_image_embeddings(self):
+        model = MinimalLLaVA()
+        model.add_encoder = True
+        model.add_decoder = False
+        model._drop_vision_class_token = True
+        model._pixel_shuffle = False
+        model._tile_tags = None
+        model.image_token_index = -200
+        vision_output = paddle.to_tensor(
+            [[[0.0, 0.5], [1.0, 1.5], [2.0, 2.5]]], dtype="float32"
+        )
+        model.vision_model = RecordingVisionModel(
+            vision_output, class_token_len=1
+        )
+        model.vision_projection = RecordingProjection(offset=10.0)
+        loss_mask = paddle.ones([1, 3], dtype="float32")
+
+        output, returned_loss_mask = LLaVAModel.forward(
+            model,
+            images=paddle.ones([1, 3, 4, 4], dtype="float32"),
+            input_ids=paddle.to_tensor([[5, -200, 6]], dtype="int64"),
+            position_ids=paddle.to_tensor([[0, 1, 2]], dtype="int64"),
+            attention_mask=None,
+            labels=None,
+            loss_mask=loss_mask,
+        )
+
+        self.assertIs(returned_loss_mask, loss_mask)
+        self.assertEqual(output.shape, [2, 1, 2])
+        self.assertEqual(
+            output[:, 0, :].numpy().tolist(), [[11.0, 11.5], [12.0, 12.5]]
+        )
+
+    def test_forward_decoder_uses_encoder_hidden_state_and_language_model(self):
+        model = make_preprocess_model()
+        model.add_encoder = False
+        model.add_decoder = True
+        model.sequence_parallel_lm = False
+        model.encoder_hidden_state = paddle.to_tensor(
+            [[[20.0, 20.5]], [[21.0, 21.5]]], dtype="float32"
+        )
+        model.image_token_index = -200
+        model.language_model = RecordingLanguageModel()
+
+        output, new_loss_mask = LLaVAModel.forward(
+            model,
+            images=None,
+            input_ids=paddle.to_tensor([[5, -200, 6]], dtype="int64"),
+            position_ids=paddle.to_tensor([[0, 1, 2]], dtype="int64"),
+            attention_mask=None,
+            labels=paddle.to_tensor([[50, 51, 52]], dtype="int64"),
+            loss_mask=paddle.ones([1, 3], dtype="float32"),
+            num_image_tiles=paddle.to_tensor([1], dtype="int64"),
+        )
+
+        self.assertEqual(new_loss_mask.shape, [1, 4])
+        self.assertEqual(len(model.language_model.forward_inputs), 1)
+        self.assertIs(output, model.language_model.forward_inputs[0])
+        self.assertEqual(output["decoder_input"].shape, [4, 1, 2])
+        self.assertEqual(output["labels"].shape, [4, 1])
+
+    def test_forward_inference_cache_skips_vision_and_processes_language(self):
+        model = make_preprocess_model()
+        model.add_encoder = True
+        model.add_decoder = True
+        model.sequence_parallel_lm = False
+        model.image_token_index = -200
+        model.language_model = RecordingLanguageModel()
+        model.vision_model = RecordingVisionModel(
+            paddle.ones([1, 2, 2], dtype="float32")
+        )
+        context = InferenceContext(image_tokens_count=2)
+
+        output, new_loss_mask = LLaVAModel.forward(
+            model,
+            images=paddle.ones([1, 3, 4, 4], dtype="float32"),
+            input_ids=paddle.to_tensor([[5, 6, 7]], dtype="int64"),
+            position_ids=paddle.to_tensor([[0, 1, 2]], dtype="int64"),
+            attention_mask=None,
+            labels=paddle.to_tensor([[50, 51, 52]], dtype="int64"),
+            loss_mask=paddle.ones([1, 3], dtype="float32"),
+            inference_context=context,
+            num_image_tiles=paddle.to_tensor([], dtype="int64"),
+        )
+
+        self.assertEqual(model.vision_model.inputs, [])
+        self.assertEqual(new_loss_mask.shape, [1, 3])
+        self.assertEqual(output["decoder_input"].shape, [1, 3, 2])
+
+
+class TestLLaVAExtraUtilityNoMock(unittest.TestCase):
+    def test_pixel_shuffle_versions_differ_on_larger_grid(self):
+        x = paddle.arange(64, dtype="float32").reshape([1, 16, 4])
+        version_one = pixel_shuffle(x, scale_factor=0.5, version=1)
+        version_two = pixel_shuffle(x, scale_factor=0.5, version=2)
+        self.assertEqual(version_one.shape, [1, 4, 16])
+        self.assertEqual(version_two.shape, [1, 4, 16])
+        self.assertFalse(paddle.allclose(version_one, version_two))
+        self.assertEqual(version_one.numel(), x.numel())
+
+    def test_load_state_hooks_preserve_unmatched_keys(self):
+        incompatible_type = namedtuple(
+            "IncompatibleKeys", ["missing_keys", "unexpected_keys"]
+        )
+        incompatible = incompatible_type(
+            missing_keys=["a.weight", "b.weight", "c.extra_state"],
+            unexpected_keys=["unexpected.extra_state", "unexpected.weight"],
+        )
+        llava_model._load_state_dict_hook_ignore_param_names(
+            ["b.weight", "not.present"], None, incompatible
+        )
+        llava_model._load_state_dict_hook_ignore_extra_state(None, incompatible)
+        self.assertEqual(incompatible.missing_keys, ["a.weight"])
+        self.assertEqual(incompatible.unexpected_keys, ["unexpected.weight"])
+
+
+if __name__ == "__main__":
+    unittest.main()

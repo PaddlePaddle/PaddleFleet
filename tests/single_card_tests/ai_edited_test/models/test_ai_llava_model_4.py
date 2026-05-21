@@ -1,1 +1,412 @@
-IyBDb3B5cmlnaHQgKGMpIDIwMjYgUGFkZGxlUGFkZGxlIEF1dGhvcnMuIEFsbCBSaWdodHMgUmVzZXJ2ZWQuCiMKIyBMaWNlbnNlZCB1bmRlciB0aGUgQXBhY2hlIExpY2Vuc2UsIFZlcnNpb24gMi4wICh0aGUgIkxpY2Vuc2UiKTsKIyB5b3UgbWF5IG5vdCB1c2UgdGhpcyBmaWxlIGV4Y2VwdCBpbiBjb21wbGlhbmNlIHdpdGggdGhlIExpY2Vuc2UuCiMgWW91IG1heSBvYnRhaW4gYSBjb3B5IG9mIHRoZSBMaWNlbnNlIGF0CiMKIyAgICAgaHR0cDovL3d3dy5hcGFjaGUub3JnL2xpY2Vuc2VzL0xJQ0VOU0UtMi4wCiMKIyBVbmxlc3MgcmVxdWlyZWQgYnkgYXBwbGljYWJsZSBsYXcgb3IgYWdyZWVkIHRvIGluIHdyaXRpbmcsIHNvZnR3YXJlCiMgZGlzdHJpYnV0ZWQgdW5kZXIgdGhlIExpY2Vuc2UgaXMgZGlzdHJpYnV0ZWQgb24gYW4gIkFTIElTIiBCQVNJUywKIyBXSVRIT1VUIFdBUlJBTlRJRVMgT1IgQ09ORElUSU9OUyBPRiBBTlkgS0lORCwgZWl0aGVyIGV4cHJlc3Mgb3IgaW1wbGllZC4KIyBTZWUgdGhlIExpY2Vuc2UgZm9yIHRoZSBzcGVjaWZpYyBsYW5ndWFnZSBnb3Zlcm5pbmcgcGVybWlzc2lvbnMgYW5kCiMgbGltaXRhdGlvbnMgdW5kZXIgdGhlIExpY2Vuc2UuCmltcG9ydCBvcwppbXBvcnQgc3lzCmltcG9ydCB0eXBlcwppbXBvcnQgdW5pdHRlc3QKClJFUE9fUk9PVCA9IG9zLnBhdGguZGlybmFtZSgKICAgIG9zLnBhdGguZGlybmFtZSgKICAgICAgICBvcy5wYXRoLmRpcm5hbWUob3MucGF0aC5kaXJuYW1lKG9zLnBhdGguYWJzcGF0aChfX2ZpbGVfXykpKQogICAgKQopCnN5cy5wYXRoLmluc2VydCgwLCBvcy5wYXRoLmpvaW4oUkVQT19ST09ULCAic3JjIikpCgppbXBvcnQgcGFkZGxlCgpmcm9tIHBhZGRsZWZsZWV0Lm1vZGVscy5tdWx0aW1vZGFsIGltcG9ydCBsbGF2YV9tb2RlbApmcm9tIHBhZGRsZWZsZWV0Lm1vZGVscy5tdWx0aW1vZGFsLmxsYXZhX21vZGVsIGltcG9ydCBMTGFWQU1vZGVsCgoKY2xhc3MgQ29uZmlnOgogICAgZGVmIF9faW5pdF9fKHNlbGYsIG1vZGVsX3R5cGU9ImNsaXAiKToKICAgICAgICBzZWxmLmxhbmd1YWdlX21vZGVsX3R5cGUgPSAiIgogICAgICAgIHNlbGYuc2VxdWVuY2VfcGFyYWxsZWwgPSBGYWxzZQogICAgICAgIHNlbGYudHBfY29tbV9vdmVybGFwID0gRmFsc2UKICAgICAgICBzZWxmLmNvbnRleHRfcGFyYWxsZWxfc2l6ZSA9IDEKICAgICAgICBzZWxmLnRlbnNvcl9tb2RlbF9wYXJhbGxlbF9zaXplID0gMQogICAgICAgIHNlbGYucGlwZWxpbmVfbW9kZWxfcGFyYWxsZWxfc2l6ZSA9IDEKICAgICAgICBzZWxmLnZpc2lvbl9tb2RlbF90eXBlID0gbW9kZWxfdHlwZQogICAgICAgIHNlbGYuaGlkZGVuX3NpemUgPSAyCgoKY2xhc3MgUEdDb2xsZWN0aW9uOgogICAgdHAgPSBOb25lCgoKY2xhc3MgUmVjb3JkaW5nR1BUOgogICAgY2FsbHMgPSBbXQoKICAgIGRlZiBfX2luaXRfXyhzZWxmLCAqKmt3YXJncyk6CiAgICAgICAgc2VsZi5rd2FyZ3MgPSBrd2FyZ3MKICAgICAgICBSZWNvcmRpbmdHUFQuY2FsbHMuYXBwZW5kKGt3YXJncykKCiAgICBkZWYgc2hhcmVkX2VtYmVkZGluZ19vcl9vdXRwdXRfd2VpZ2h0KHNlbGYpOgogICAgICAgIHJldHVybiAic2hhcmVkIgoKCmNsYXNzIFJlY29yZGluZ0NsaXA6CiAgICBjYWxscyA9IFtdCgogICAgZGVmIF9faW5pdF9fKHNlbGYsICphcmdzLCAqKmt3YXJncyk6CiAgICAgICAgc2VsZi5hcmdzID0gYXJncwogICAgICAgIHNlbGYua3dhcmdzID0ga3dhcmdzCiAgICAgICAgc2VsZi5jbGFzc190b2tlbl9sZW4gPSBrd2FyZ3MuZ2V0KCJjbGFzc190b2tlbl9sZW4iLCAxKQogICAgICAgIFJlY29yZGluZ0NsaXAuY2FsbHMuYXBwZW5kKGt3YXJncykKCiAgICBkZWYgcGFyYW1ldGVycyhzZWxmKToKICAgICAgICByZXR1cm4gW10KCiAgICBkZWYgc2V0X2lucHV0X3RlbnNvcihzZWxmLCB2YWx1ZSk6CiAgICAgICAgc2VsZi5pbnB1dF90ZW5zb3IgPSB2YWx1ZQoKCmNsYXNzIFJlY29yZGluZ1JhZGlvKFJlY29yZGluZ0NsaXApOgogICAgY2FsbHMgPSBbXQoKICAgIGRlZiBfX2luaXRfXyhzZWxmLCAqYXJncywgKiprd2FyZ3MpOgogICAgICAgIHN1cGVyKCkuX19pbml0X18oKmFyZ3MsICoqa3dhcmdzKQogICAgICAgIFJlY29yZGluZ1JhZGlvLmNhbGxzLmFwcGVuZChrd2FyZ3MpCgoKY2xhc3MgUmVjb3JkaW5nUHJvamVjdG9yOgogICAgY2FsbHMgPSBbXQoKICAgIGRlZiBfX2luaXRfXyhzZWxmLCAqYXJncywgKiprd2FyZ3MpOgogICAgICAgIHNlbGYuYXJncyA9IGFyZ3MKICAgICAgICBzZWxmLmt3YXJncyA9IGt3YXJncwogICAgICAgIFJlY29yZGluZ1Byb2plY3Rvci5jYWxscy5hcHBlbmQoKGFyZ3MsIGt3YXJncykpCgogICAgZGVmIHN0YXRlX2RpY3Qoc2VsZik6CiAgICAgICAgcmV0dXJuIHsid2VpZ2h0Ijogb2JqZWN0KCksICJiaWFzIjogb2JqZWN0KCl9CgogICAgZGVmIHBhcmFtZXRlcnMoc2VsZik6CiAgICAgICAgcmV0dXJuIFtdCgoKY2xhc3MgTWluaW1hbExMYVZBOgogICAgZGVmIF9wcm9jZXNzX2VtYmVkZGluZ190b2tlbl9wYXJhbGxlbChzZWxmLCAqYXJncywgKiprd2FyZ3MpOgogICAgICAgIHJldHVybiBMTGFWQU1vZGVsLl9wcm9jZXNzX2VtYmVkZGluZ190b2tlbl9wYXJhbGxlbChzZWxmLCAqYXJncywgKiprd2FyZ3MpCgogICAgZGVmIF9wcmVwcm9jZXNzX2RhdGEoc2VsZiwgKmFyZ3MsICoqa3dhcmdzKToKICAgICAgICByZXR1cm4gTExhVkFNb2RlbC5fcHJlcHJvY2Vzc19kYXRhKHNlbGYsICphcmdzLCAqKmt3YXJncykKCiAgICBkZWYgX2FwcGx5X3RpbGVfdGFnZ2luZyhzZWxmLCAqYXJncywgKiprd2FyZ3MpOgogICAgICAgIHJldHVybiBMTGFWQU1vZGVsLl9hcHBseV90aWxlX3RhZ2dpbmcoc2VsZiwgKmFyZ3MsICoqa3dhcmdzKQoKCmNsYXNzIFJlY29yZGluZ0xhbmd1YWdlTW9kZWw6CiAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgc2VsZi5mb3J3YXJkX2lucHV0cyA9IFtdCiAgICAgICAgc2VsZi5lbWJlZGRpbmdfaW5wdXRzID0gW10KCiAgICBkZWYgZW1iZWRkaW5nKHNlbGYsIGlucHV0X2lkcywgcG9zaXRpb25faWRzPU5vbmUpOgogICAgICAgIHNlbGYuZW1iZWRkaW5nX2lucHV0cy5hcHBlbmQoKGlucHV0X2lkcywgcG9zaXRpb25faWRzKSkKICAgICAgICB2YWx1ZXMgPSBwYWRkbGUuY2FzdChpbnB1dF9pZHMsICJmbG9hdDMyIikudW5zcXVlZXplKC0xKQogICAgICAgIHZhbHVlcyA9IHBhZGRsZS5jb25jYXQoW3ZhbHVlcywgdmFsdWVzICsgMC41XSwgYXhpcz0tMSkKICAgICAgICByZXR1cm4gdmFsdWVzLnRyYW5zcG9zZShbMSwgMCwgMl0pLmNvbnRpZ3VvdXMoKQoKICAgIGRlZiBfX2NhbGxfXyhzZWxmLCAqKmt3YXJncyk6CiAgICAgICAgc2VsZi5mb3J3YXJkX2lucHV0cy5hcHBlbmQoa3dhcmdzKQogICAgICAgIHJldHVybiBrd2FyZ3MKCgpjbGFzcyBSZWNvcmRpbmdWaXNpb25Nb2RlbDoKICAgIGRlZiBfX2luaXRfXyhzZWxmLCBvdXRwdXQpOgogICAgICAgIHNlbGYub3V0cHV0ID0gb3V0cHV0CiAgICAgICAgc2VsZi5jbGFzc190b2tlbl9sZW4gPSAwCiAgICAgICAgc2VsZi5pbnB1dHMgPSBbXQoKICAgIGRlZiBfX2NhbGxfXyhzZWxmLCBpbWFnZXMpOgogICAgICAgIHNlbGYuaW5wdXRzLmFwcGVuZChpbWFnZXMpCiAgICAgICAgcmV0dXJuIHNlbGYub3V0cHV0CgoKY2xhc3MgUmVjb3JkaW5nUHJvamVjdGlvbjoKICAgIGRlZiBfX2NhbGxfXyhzZWxmLCBlbWJlZGRpbmdzKToKICAgICAgICByZXR1cm4gZW1iZWRkaW5nc1s6LCA6LCA6Ml0gKyAxMC4wCgoKY2xhc3MgVGVzdExMYVZBSW5pdEFuZEV4dHJhQnJhbmNoZXNOb01vY2sodW5pdHRlc3QuVGVzdENhc2UpOgogICAgZGVmIHNldFVwKHNlbGYpOgogICAgICAgIHNlbGYub2xkX2dwdCA9IGxsYXZhX21vZGVsLkdQVE1vZGVsCiAgICAgICAgc2VsZi5vbGRfY2xpcCA9IGxsYXZhX21vZGVsLkNMSVBWaVRNb2RlbAogICAgICAgIHNlbGYub2xkX3JhZGlvID0gbGxhdmFfbW9kZWwuUkFESU9WaVRNb2RlbAogICAgICAgIHNlbGYub2xkX3Byb2plY3RvciA9IGxsYXZhX21vZGVsLk11bHRpbW9kYWxQcm9qZWN0b3IKICAgICAgICBzZWxmLm9sZF9wZyA9IGxsYXZhX21vZGVsLlByb2Nlc3NHcm91cENvbGxlY3Rpb24KICAgICAgICBzZWxmLm9sZF9oZiA9IGxsYXZhX21vZGVsLmhhc19jb25maWdfbG9nZ2VyX2VuYWJsZWQKICAgICAgICBzZWxmLm9sZF9sb2dfY29uZmlnID0gbGxhdmFfbW9kZWwubG9nX2NvbmZpZ190b19kaXNrCiAgICAgICAgc2VsZi5vbGRfbnVtX2VtYmVkZGluZ3MgPSBsbGF2YV9tb2RlbC5nZXRfbnVtX2ltYWdlX2VtYmVkZGluZ3MKICAgICAgICBSZWNvcmRpbmdHUFQuY2FsbHMgPSBbXQogICAgICAgIFJlY29yZGluZ0NsaXAuY2FsbHMgPSBbXQogICAgICAgIFJlY29yZGluZ1JhZGlvLmNhbGxzID0gW10KICAgICAgICBSZWNvcmRpbmdQcm9qZWN0b3IuY2FsbHMgPSBbXQogICAgICAgIGxsYXZhX21vZGVsLkdQVE1vZGVsID0gUmVjb3JkaW5nR1BUCiAgICAgICAgbGxhdmFfbW9kZWwuQ0xJUFZpVE1vZGVsID0gUmVjb3JkaW5nQ2xpcAogICAgICAgIGxsYXZhX21vZGVsLlJBRElPVmlUTW9kZWwgPSBSZWNvcmRpbmdSYWRpbwogICAgICAgIGxsYXZhX21vZGVsLk11bHRpbW9kYWxQcm9qZWN0b3IgPSBSZWNvcmRpbmdQcm9qZWN0b3IKICAgICAgICBsbGF2YV9tb2RlbC5Qcm9jZXNzR3JvdXBDb2xsZWN0aW9uLnVzZV9tcHVfcHJvY2Vzc19ncm91cHMgPSBsYW1iZGE6IFBHQ29sbGVjdGlvbigpCiAgICAgICAgbGxhdmFfbW9kZWwuaGFzX2NvbmZpZ19sb2dnZXJfZW5hYmxlZCA9IGxhbWJkYSBjb25maWc6IFRydWUKICAgICAgICBzZWxmLmxvZ2dlZCA9IFtdCiAgICAgICAgbGxhdmFfbW9kZWwubG9nX2NvbmZpZ190b19kaXNrID0gbGFtYmRhICphcmdzLCAqKmt3YXJnczogc2VsZi5sb2dnZWQuYXBwZW5kKChhcmdzLCBrd2FyZ3MpKQogICAgICAgIGxsYXZhX21vZGVsLmdldF9udW1faW1hZ2VfZW1iZWRkaW5ncyA9IGxhbWJkYSAqYXJncywgKiprd2FyZ3M6IDQKCiAgICBkZWYgdGVhckRvd24oc2VsZik6CiAgICAgICAgbGxhdmFfbW9kZWwuR1BUTW9kZWwgPSBzZWxmLm9sZF9ncHQKICAgICAgICBsbGF2YV9tb2RlbC5DTElQVmlUTW9kZWwgPSBzZWxmLm9sZF9jbGlwCiAgICAgICAgbGxhdmFfbW9kZWwuUkFESU9WaVRNb2RlbCA9IHNlbGYub2xkX3JhZGlvCiAgICAgICAgbGxhdmFfbW9kZWwuTXVsdGltb2RhbFByb2plY3RvciA9IHNlbGYub2xkX3Byb2plY3RvcgogICAgICAgIGxsYXZhX21vZGVsLlByb2Nlc3NHcm91cENvbGxlY3Rpb24gPSBzZWxmLm9sZF9wZwogICAgICAgIGxsYXZhX21vZGVsLmhhc19jb25maWdfbG9nZ2VyX2VuYWJsZWQgPSBzZWxmLm9sZF9oZgogICAgICAgIGxsYXZhX21vZGVsLmxvZ19jb25maWdfdG9fZGlzayA9IHNlbGYub2xkX2xvZ19jb25maWcKICAgICAgICBsbGF2YV9tb2RlbC5nZXRfbnVtX2ltYWdlX2VtYmVkZGluZ3MgPSBzZWxmLm9sZF9udW1fZW1iZWRkaW5ncwoKICAgIGRlZiBfYnVpbGRfbW9kZWwoc2VsZiwgdmlzaW9uX3R5cGU9ImNsaXAiLCAqKmt3YXJncyk6CiAgICAgICAgcmV0dXJuIExMYVZBTW9kZWwoCiAgICAgICAgICAgIENvbmZpZygpLAogICAgICAgICAgICBvYmplY3QoKSwKICAgICAgICAgICAgOCwKICAgICAgICAgICAgMTYsCiAgICAgICAgICAgIENvbmZpZyh2aXNpb25fdHlwZSksCiAgICAgICAgICAgIG9iamVjdCgpLAogICAgICAgICAgICBGYWxzZSwKICAgICAgICAgICAgQ29uZmlnKCksCiAgICAgICAgICAgIG9iamVjdCgpLAogICAgICAgICAgICBwZ19jb2xsZWN0aW9uPVBHQ29sbGVjdGlvbigpLAogICAgICAgICAgICAqKmt3YXJncywKICAgICAgICApCgogICAgZGVmIHRlc3RfaW5pdF9jbGlwX3JhZGlvX3NpZ2xpcF9hbmRfcGFyYWxsZWxfYXNzZXJ0aW9uX3BhdGhzKHNlbGYpOgogICAgICAgIG1vZGVsID0gc2VsZi5fYnVpbGRfbW9kZWwoInNpZ2xpcCIpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChtb2RlbC5pbWdfc2VxX2xlbiwgNCkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKFJlY29yZGluZ0NsaXAuY2FsbHNbLTFdWyJjbGFzc190b2tlbl9sZW4iXSwgMCkKICAgICAgICBzZWxmLmFzc2VydFRydWUoc2VsZi5sb2dnZWQpCgogICAgICAgIHJhZGlvID0gc2VsZi5fYnVpbGRfbW9kZWwoInJhZGlvLWciLCBwaXhlbF9zaHVmZmxlPVRydWUpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChSZWNvcmRpbmdSYWRpby5jYWxsc1stMV1bImNsYXNzX3Rva2VuX2xlbiJdLCA1KQogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZShSZWNvcmRpbmdSYWRpby5jYWxsc1stMV1bImVtYmVkZGVyX2JpYXMiXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKFJlY29yZGluZ1Byb2plY3Rvci5jYWxsc1stMV1bMF1bM10sIDgpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChyYWRpby5zaGFyZWRfZW1iZWRkaW5nX29yX291dHB1dF93ZWlnaHQoKSwgInNoYXJlZCIpCgogICAgICAgIHJhZGlvX3BsYWluID0gc2VsZi5fYnVpbGRfbW9kZWwoInJhZGlvIikKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKFJlY29yZGluZ1JhZGlvLmNhbGxzWy0xXVsiY2xhc3NfdG9rZW5fbGVuIl0sIDgpCiAgICAgICAgc2VsZi5hc3NlcnRGYWxzZShSZWNvcmRpbmdSYWRpby5jYWxsc1stMV1bImVtYmVkZGVyX2JpYXMiXSkKICAgICAgICBzZWxmLmFzc2VydElzKHJhZGlvX3BsYWluLnZpc2lvbl9tb2RlbC5rd2FyZ3NbImxuX3Bvc3RfaW1wbCJdLCBOb25lKQogICAgICAgIHNlbGYuYXNzZXJ0RmFsc2UoUmVjb3JkaW5nUmFkaW8uY2FsbHNbLTFdWyJ1c2VfbWFza190b2tlbiJdKQoKICAgICAgICBjcmFkaW8gPSBzZWxmLl9idWlsZF9tb2RlbCgKICAgICAgICAgICAgImNyYWRpby1nIiwgYWxsb3dfbWlzc2luZ192aXNpb25fcHJvamVjdGlvbl9jaGVja3BvaW50PVRydWUKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChSZWNvcmRpbmdSYWRpby5jYWxsc1stMV1bImNsYXNzX3Rva2VuX2xlbiJdLCA4KQogICAgICAgIHNlbGYuYXNzZXJ0RmFsc2UoUmVjb3JkaW5nUmFkaW8uY2FsbHNbLTFdWyJlbWJlZGRlcl9iaWFzIl0pCiAgICAgICAgc2VsZi5hc3NlcnRJcyhjcmFkaW8udmlzaW9uX21vZGVsLmt3YXJnc1sibG5fcG9zdF9pbXBsIl0sIE5vbmUpCiAgICAgICAgc2VsZi5hc3NlcnRGYWxzZShSZWNvcmRpbmdSYWRpby5jYWxsc1stMV1bInVzZV9tYXNrX3Rva2VuIl0pCgogICAgICAgIGJhZF9jb25maWcgPSBDb25maWcoKQogICAgICAgIGJhZF9jb25maWcuc2VxdWVuY2VfcGFyYWxsZWwgPSBUcnVlCiAgICAgICAgd2l0aCBzZWxmLmFzc2VydFJhaXNlcyhBc3NlcnRpb25FcnJvcik6CiAgICAgICAgICAgIExMYVZBTW9kZWwoCiAgICAgICAgICAgICAgICBiYWRfY29uZmlnLAogICAgICAgICAgICAgICAgb2JqZWN0KCksCiAgICAgICAgICAgICAgICA4LAogICAgICAgICAgICAgICAgMTYsCiAgICAgICAgICAgICAgICBDb25maWcoImNsaXAiKSwKICAgICAgICAgICAgICAgIG9iamVjdCgpLAogICAgICAgICAgICAgICAgRmFsc2UsCiAgICAgICAgICAgICAgICBDb25maWcoKSwKICAgICAgICAgICAgICAgIG9iamVjdCgpLAogICAgICAgICAgICAgICAgcGdfY29sbGVjdGlvbj1QR0NvbGxlY3Rpb24oKSwKICAgICAgICAgICAgKQoKICAgIGRlZiB0ZXN0X3Byb2Nlc3NfZW1iZWRkaW5nX2NvbnRleHRfcGFyYWxsZWxfYnJhbmNoZXMoc2VsZik6CiAgICAgICAgbW9kZWwgPSBNaW5pbWFsTExhVkEoKQogICAgICAgIG1vZGVsLnByZV9wcm9jZXNzID0gVHJ1ZQogICAgICAgIG1vZGVsLnBvc3RfcHJvY2VzcyA9IFRydWUKICAgICAgICBtb2RlbC5zZXF1ZW5jZV9wYXJhbGxlbF9sbSA9IFRydWUKICAgICAgICBtb2RlbC50ZW5zb3JfbW9kZWxfcGFyYWxsZWxfc2l6ZV9sbSA9IDIKICAgICAgICBtb2RlbC5jb250ZXh0X3BhcmFsbGVsX2xtID0gMgogICAgICAgIG1vZGVsLnRwX2NvbW1fb3ZlcmxhcF9sbSA9IEZhbHNlCiAgICAgICAgZW1iZWRkaW5ncyA9IHBhZGRsZS5vbmVzKFsyLCA4LCAyXSwgZHR5cGU9ImZsb2F0MzIiKQoKICAgICAgICByZXN1bHQgPSBtb2RlbC5fcHJvY2Vzc19lbWJlZGRpbmdfdG9rZW5fcGFyYWxsZWwoZW1iZWRkaW5ncywgTm9uZSwgTm9uZSwgTm9uZSkKICAgICAgICBzZWxmLmFzc2VydElzKHJlc3VsdFswXSwgZW1iZWRkaW5ncykKCiAgICAgICAgbW9kZWwuc2VxdWVuY2VfcGFyYWxsZWxfbG0gPSBGYWxzZQogICAgICAgIHJlc3VsdCA9IG1vZGVsLl9wcm9jZXNzX2VtYmVkZGluZ190b2tlbl9wYXJhbGxlbChlbWJlZGRpbmdzLCBOb25lLCBOb25lLCBOb25lKQogICAgICAgIHNlbGYuYXNzZXJ0SXMocmVzdWx0WzBdLCBlbWJlZGRpbmdzKQoKICAgICAgICBtb2RlbC5zZXF1ZW5jZV9wYXJhbGxlbF9sbSA9IFRydWUKICAgICAgICBtb2RlbC5jb250ZXh0X3BhcmFsbGVsX2xtID0gMQogICAgICAgIG1vZGVsLnRwX2NvbW1fb3ZlcmxhcF9sbSA9IFRydWUKICAgICAgICBtb2RlbC5fbGFuZ3VhZ2VfbWF4X3NlcXVlbmNlX2xlbmd0aCA9IDE2CiAgICAgICAgd2l0aCBzZWxmLmFzc2VydFJhaXNlcyhBc3NlcnRpb25FcnJvcik6CiAgICAgICAgICAgIG1vZGVsLl9wcm9jZXNzX2VtYmVkZGluZ190b2tlbl9wYXJhbGxlbCgKICAgICAgICAgICAgICAgIHBhZGRsZS5vbmVzKFs0LCAyLCAyXSwgZHR5cGU9ImZsb2F0MzIiKSwgTm9uZSwgTm9uZSwgTm9uZQogICAgICAgICAgICApCgogICAgZGVmIHRlc3RfaGZfbGFuZ3VhZ2VfYW5kX3Zpc2lvbl9tb2RlbF9icmFuY2hlcyhzZWxmKToKICAgICAgICBjYWxscyA9IFtdCiAgICAgICAgbW9kdWxlID0gdHlwZXMuTW9kdWxlVHlwZSgicGFkZGxlZmxlZXQubW9kZWxzLmh1Z2dpbmdmYWNlLm1vZHVsZSIpCgogICAgICAgIGRlZiBidWlsZF9oZl9tb2RlbChjb25maWcsIG1vZGVsX3R5cGU9Tm9uZSk6CiAgICAgICAgICAgIGNhbGxzLmFwcGVuZCgoY29uZmlnLCBtb2RlbF90eXBlKSkKICAgICAgICAgICAgcmV0dXJuIFJlY29yZGluZ0dQVCgpCgogICAgICAgIG1vZHVsZS5idWlsZF9oZl9tb2RlbCA9IGJ1aWxkX2hmX21vZGVsCiAgICAgICAgb2xkX21vZHVsZSA9IHN5cy5tb2R1bGVzLmdldCgicGFkZGxlZmxlZXQubW9kZWxzLmh1Z2dpbmdmYWNlLm1vZHVsZSIpCiAgICAgICAgaGFkX21vZHVsZSA9ICJwYWRkbGVmbGVldC5tb2RlbHMuaHVnZ2luZ2ZhY2UubW9kdWxlIiBpbiBzeXMubW9kdWxlcwogICAgICAgIHRyeToKICAgICAgICAgICAgc3lzLm1vZHVsZXNbInBhZGRsZWZsZWV0Lm1vZGVscy5odWdnaW5nZmFjZS5tb2R1bGUiXSA9IG1vZHVsZQogICAgICAgICAgICBsYW5ndWFnZV9jb25maWcgPSBDb25maWcoKQogICAgICAgICAgICBsYW5ndWFnZV9jb25maWcubGFuZ3VhZ2VfbW9kZWxfdHlwZSA9ICJoZjovL3RpbnktbG0iCiAgICAgICAgICAgIExMYVZBTW9kZWwoCiAgICAgICAgICAgICAgICBsYW5ndWFnZV9jb25maWcsCiAgICAgICAgICAgICAgICBvYmplY3QoKSwKICAgICAgICAgICAgICAgIDgsCiAgICAgICAgICAgICAgICAxNiwKICAgICAgICAgICAgICAgIENvbmZpZygiaGY6Ly90aW55LXZpc2lvbiIpLAogICAgICAgICAgICAgICAgb2JqZWN0KCksCiAgICAgICAgICAgICAgICBGYWxzZSwKICAgICAgICAgICAgICAgIENvbmZpZygpLAogICAgICAgICAgICAgICAgb2JqZWN0KCksCiAgICAgICAgICAgICAgICBwZ19jb2xsZWN0aW9uPVBHQ29sbGVjdGlvbigpLAogICAgICAgICAgICApCiAgICAgICAgZmluYWxseToKICAgICAgICAgICAgaWYgaGFkX21vZHVsZToKICAgICAgICAgICAgICAgIHN5cy5tb2R1bGVzWyJwYWRkbGVmbGVldC5tb2RlbHMuaHVnZ2luZ2ZhY2UubW9kdWxlIl0gPSBvbGRfbW9kdWxlCiAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICBzeXMubW9kdWxlcy5wb3AoInBhZGRsZWZsZWV0Lm1vZGVscy5odWdnaW5nZmFjZS5tb2R1bGUiLCBOb25lKQoKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGNhbGxzWzBdWzFdLCAiaGY6Ly90aW55LWxtIikKICAgICAgICBzZWxmLmFzc2VydElzTm9uZShjYWxsc1sxXVsxXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGNhbGxzWzJdWzFdLCAiaGY6Ly90aW55LXZpc2lvbiIpCgogICAgZGVmIHRlc3RfZm9yd2FyZF9kZWZhdWx0X3RpbGVzX2NhY2hlX3JldXNlX2FuZF9wYXJhbGxlbF9wcm9jZXNzaW5nKHNlbGYpOgogICAgICAgIG1vZGVsID0gTWluaW1hbExMYVZBKCkKICAgICAgICBtb2RlbC5hZGRfZW5jb2RlciA9IFRydWUKICAgICAgICBtb2RlbC5hZGRfZGVjb2RlciA9IFRydWUKICAgICAgICBtb2RlbC5wcmVfcHJvY2VzcyA9IFRydWUKICAgICAgICBtb2RlbC5wb3N0X3Byb2Nlc3MgPSBUcnVlCiAgICAgICAgbW9kZWwuX2Ryb3BfdmlzaW9uX2NsYXNzX3Rva2VuID0gRmFsc2UKICAgICAgICBtb2RlbC5fcGl4ZWxfc2h1ZmZsZSA9IEZhbHNlCiAgICAgICAgbW9kZWwuX3RpbGVfdGFncyA9IE5vbmUKICAgICAgICBtb2RlbC5pbWFnZV90b2tlbl9pbmRleCA9IC0yMDAKICAgICAgICBtb2RlbC5pbWdfc2VxX2xlbiA9IDEKICAgICAgICBtb2RlbC5fbGFuZ3VhZ2VfaXNfcGlwZWxpbmVfcGFyYWxsZWwgPSBGYWxzZQogICAgICAgIG1vZGVsLl9sYW5ndWFnZV9tYXhfc2VxdWVuY2VfbGVuZ3RoID0gNAogICAgICAgIG1vZGVsLmNvbnRleHRfcGFyYWxsZWxfbG0gPSAxCiAgICAgICAgbW9kZWwuc2VxdWVuY2VfcGFyYWxsZWxfbG0gPSBUcnVlCiAgICAgICAgbW9kZWwudGVuc29yX21vZGVsX3BhcmFsbGVsX3NpemVfbG0gPSAxCiAgICAgICAgbW9kZWwudHBfY29tbV9vdmVybGFwX2xtID0gRmFsc2UKICAgICAgICBtb2RlbC5sYW5ndWFnZV9tb2RlbCA9IFJlY29yZGluZ0xhbmd1YWdlTW9kZWwoKQogICAgICAgIG1vZGVsLnZpc2lvbl9tb2RlbCA9IFJlY29yZGluZ1Zpc2lvbk1vZGVsKAogICAgICAgICAgICBwYWRkbGUuYXJhbmdlKDIsIGR0eXBlPSJmbG9hdDMyIikucmVzaGFwZShbMSwgMSwgMl0pCiAgICAgICAgKQogICAgICAgIG1vZGVsLnZpc2lvbl9wcm9qZWN0aW9uID0gUmVjb3JkaW5nUHJvamVjdGlvbigpCiAgICAgICAgY29udGV4dCA9IHR5cGUoIkNvbnRleHQiLCAoKSwgeyJrZXlfdmFsdWVfbWVtb3J5X2RpY3QiOiB7fX0pKCkKCiAgICAgICAgb3V0cHV0LCBsb3NzX21hc2sgPSBMTGFWQU1vZGVsLmZvcndhcmQoCiAgICAgICAgICAgIG1vZGVsLAogICAgICAgICAgICBpbWFnZXM9cGFkZGxlLm9uZXMoWzEsIDMsIDIsIDJdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBpbnB1dF9pZHM9cGFkZGxlLnRvX3RlbnNvcihbWzUsIC0yMDAsIDZdXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgICAgIHBvc2l0aW9uX2lkcz1wYWRkbGUudG9fdGVuc29yKFtbMCwgMSwgMl1dLCBkdHlwZT0iaW50NjQiKSwKICAgICAgICAgICAgYXR0ZW50aW9uX21hc2s9Tm9uZSwKICAgICAgICAgICAgbGFiZWxzPXBhZGRsZS50b190ZW5zb3IoW1s1MCwgNTEsIDUyXV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICAgICBsb3NzX21hc2s9cGFkZGxlLm9uZXMoWzEsIDNdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBpbmZlcmVuY2VfY29udGV4dD1jb250ZXh0LAogICAgICAgICAgICBudW1faW1hZ2VfdGlsZXM9Tm9uZSwKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0SXMob3V0cHV0LCBtb2RlbC5sYW5ndWFnZV9tb2RlbC5mb3J3YXJkX2lucHV0c1swXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGxvc3NfbWFzay5zaGFwZSwgWzEsIDNdKQogICAgICAgIHNlbGYuYXNzZXJ0SW4oImltYWdlX3Rva2Vuc19jb3VudCIsIGNvbnRleHQua2V5X3ZhbHVlX21lbW9yeV9kaWN0KQoKICAgICAgICBjYWNoZWRfb3V0cHV0LCBfID0gTExhVkFNb2RlbC5mb3J3YXJkKAogICAgICAgICAgICBtb2RlbCwKICAgICAgICAgICAgaW1hZ2VzPXBhZGRsZS5vbmVzKFsxLCAzLCAyLCAyXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgaW5wdXRfaWRzPXBhZGRsZS50b190ZW5zb3IoW1s3LCA4XV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICAgICBwb3NpdGlvbl9pZHM9cGFkZGxlLnRvX3RlbnNvcihbWzAsIDFdXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgICAgIGF0dGVudGlvbl9tYXNrPU5vbmUsCiAgICAgICAgICAgIGxhYmVscz1wYWRkbGUudG9fdGVuc29yKFtbNzAsIDcxXV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICAgICBsb3NzX21hc2s9cGFkZGxlLm9uZXMoWzEsIDJdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBpbmZlcmVuY2VfY29udGV4dD1jb250ZXh0LAogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRJcyhjYWNoZWRfb3V0cHV0LCBtb2RlbC5sYW5ndWFnZV9tb2RlbC5mb3J3YXJkX2lucHV0c1stMV0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChsZW4obW9kZWwudmlzaW9uX21vZGVsLmlucHV0cyksIDEpCgogICAgZGVmIHRlc3RfZm9yd2FyZF9ub19pbWFnZXNfcGl4ZWxfc2h1ZmZsZV90aWxlX3RhZ3NfYW5kX2NhY2hlX2NvdW50KHNlbGYpOgogICAgICAgIG1vZGVsID0gTWluaW1hbExMYVZBKCkKICAgICAgICBtb2RlbC5hZGRfZW5jb2RlciA9IFRydWUKICAgICAgICBtb2RlbC5hZGRfZGVjb2RlciA9IFRydWUKICAgICAgICBtb2RlbC5wcmVfcHJvY2VzcyA9IFRydWUKICAgICAgICBtb2RlbC5wb3N0X3Byb2Nlc3MgPSBUcnVlCiAgICAgICAgbW9kZWwuX2Ryb3BfdmlzaW9uX2NsYXNzX3Rva2VuID0gRmFsc2UKICAgICAgICBtb2RlbC5fcGl4ZWxfc2h1ZmZsZSA9IFRydWUKICAgICAgICBtb2RlbC5fdGlsZV90YWdzID0gW1sxMDEsIDEwMiwgMTAzLCAxMDRdLCBbOTk5LCAxMDAwLCAxMDAxLCAxMDAyXV0KICAgICAgICBtb2RlbC5pbWFnZV90b2tlbl9pbmRleCA9IC0yMDAKICAgICAgICBtb2RlbC5pbWdfc2VxX2xlbiA9IDgKICAgICAgICBtb2RlbC5fbGFuZ3VhZ2VfaXNfcGlwZWxpbmVfcGFyYWxsZWwgPSBGYWxzZQogICAgICAgIG1vZGVsLl9sYW5ndWFnZV9tYXhfc2VxdWVuY2VfbGVuZ3RoID0gOAogICAgICAgIG1vZGVsLmNvbnRleHRfcGFyYWxsZWxfbG0gPSAxCiAgICAgICAgbW9kZWwuc2VxdWVuY2VfcGFyYWxsZWxfbG0gPSBGYWxzZQogICAgICAgIG1vZGVsLmxhbmd1YWdlX21vZGVsID0gUmVjb3JkaW5nTGFuZ3VhZ2VNb2RlbCgpCiAgICAgICAgbW9kZWwudmlzaW9uX21vZGVsID0gUmVjb3JkaW5nVmlzaW9uTW9kZWwoCiAgICAgICAgICAgIHBhZGRsZS5hcmFuZ2UoNjQsIGR0eXBlPSJmbG9hdDMyIikucmVzaGFwZShbMSwgMTYsIDRdKQogICAgICAgICkKICAgICAgICBtb2RlbC52aXNpb25fcHJvamVjdGlvbiA9IFJlY29yZGluZ1Byb2plY3Rpb24oKQogICAgICAgIGNvbnRleHQgPSB0eXBlKCJDb250ZXh0IiwgKCksIHsia2V5X3ZhbHVlX21lbW9yeV9kaWN0Ijoge319KSgpCgogICAgICAgIG91dHB1dCwgbG9zc19tYXNrID0gTExhVkFNb2RlbC5mb3J3YXJkKAogICAgICAgICAgICBtb2RlbCwKICAgICAgICAgICAgaW1hZ2VzPXBhZGRsZS5vbmVzKFsxLCAzLCA0LCA0XSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgaW5wdXRfaWRzPXBhZGRsZS50b190ZW5zb3IoW1s1LCAtMjAwLCA2XV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICAgICBwb3NpdGlvbl9pZHM9cGFkZGxlLnRvX3RlbnNvcihbWzAsIDEsIDJdXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgICAgIGF0dGVudGlvbl9tYXNrPU5vbmUsCiAgICAgICAgICAgIGxhYmVscz1wYWRkbGUudG9fdGVuc29yKFtbNTAsIDUxLCA1Ml1dLCBkdHlwZT0iaW50NjQiKSwKICAgICAgICAgICAgbG9zc19tYXNrPXBhZGRsZS5vbmVzKFsxLCAzXSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgaW5mZXJlbmNlX2NvbnRleHQ9Y29udGV4dCwKICAgICAgICAgICAgbnVtX2ltYWdlX3RpbGVzPXBhZGRsZS50b190ZW5zb3IoWzFdLCBkdHlwZT0iaW50NjQiKSwKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0SW4oImltYWdlX3Rva2Vuc19jb3VudCIsIGNvbnRleHQua2V5X3ZhbHVlX21lbW9yeV9kaWN0KQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGVuKG1vZGVsLmxhbmd1YWdlX21vZGVsLmZvcndhcmRfaW5wdXRzKSwgMSkKICAgICAgICBzZWxmLmFzc2VydElzKG91dHB1dCwgbW9kZWwubGFuZ3VhZ2VfbW9kZWwuZm9yd2FyZF9pbnB1dHNbMF0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChsb3NzX21hc2suc2hhcGVbMF0sIDEpCgogICAgICAgIG1vZGVsLmFkZF9kZWNvZGVyID0gRmFsc2UKICAgICAgICBlbXB0eV9vdXRwdXQsIF8gPSBMTGFWQU1vZGVsLmZvcndhcmQoCiAgICAgICAgICAgIG1vZGVsLAogICAgICAgICAgICBpbWFnZXM9cGFkZGxlLmVtcHR5KFswLCAzLCA0LCA0XSwgZHR5cGU9ImZsb2F0MzIiKSwKICAgICAgICAgICAgaW5wdXRfaWRzPXBhZGRsZS50b190ZW5zb3IoW1s3LCA4XV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICAgICBwb3NpdGlvbl9pZHM9cGFkZGxlLnRvX3RlbnNvcihbWzAsIDFdXSwgZHR5cGU9ImludDY0IiksCiAgICAgICAgICAgIGF0dGVudGlvbl9tYXNrPU5vbmUsCiAgICAgICAgICAgIGxhYmVscz1Ob25lLAogICAgICAgICAgICBsb3NzX21hc2s9Tm9uZSwKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChlbXB0eV9vdXRwdXQuc2hhcGUsIFswLCAwLCAwXSkKCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgdW5pdHRlc3QubWFpbigpCg==
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import sys
+import types
+import unittest
+
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+import paddle
+
+from paddlefleet.models.multimodal import llava_model
+from paddlefleet.models.multimodal.llava_model import LLaVAModel
+
+
+class Config:
+    def __init__(self, model_type="clip"):
+        self.language_model_type = ""
+        self.sequence_parallel = False
+        self.tp_comm_overlap = False
+        self.context_parallel_size = 1
+        self.tensor_model_parallel_size = 1
+        self.pipeline_model_parallel_size = 1
+        self.vision_model_type = model_type
+        self.hidden_size = 2
+
+
+class PGCollection:
+    tp = None
+
+
+class RecordingGPT:
+    calls = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        RecordingGPT.calls.append(kwargs)
+
+    def shared_embedding_or_output_weight(self):
+        return "shared"
+
+
+class RecordingClip:
+    calls = []
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.class_token_len = kwargs.get("class_token_len", 1)
+        RecordingClip.calls.append(kwargs)
+
+    def parameters(self):
+        return []
+
+    def set_input_tensor(self, value):
+        self.input_tensor = value
+
+
+class RecordingRadio(RecordingClip):
+    calls = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        RecordingRadio.calls.append(kwargs)
+
+
+class RecordingProjector:
+    calls = []
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        RecordingProjector.calls.append((args, kwargs))
+
+    def state_dict(self):
+        return {"weight": object(), "bias": object()}
+
+    def parameters(self):
+        return []
+
+
+class MinimalLLaVA:
+    def _process_embedding_token_parallel(self, *args, **kwargs):
+        return LLaVAModel._process_embedding_token_parallel(
+            self, *args, **kwargs
+        )
+
+    def _preprocess_data(self, *args, **kwargs):
+        return LLaVAModel._preprocess_data(self, *args, **kwargs)
+
+    def _apply_tile_tagging(self, *args, **kwargs):
+        return LLaVAModel._apply_tile_tagging(self, *args, **kwargs)
+
+
+class RecordingLanguageModel:
+    def __init__(self):
+        self.forward_inputs = []
+        self.embedding_inputs = []
+
+    def embedding(self, input_ids, position_ids=None):
+        self.embedding_inputs.append((input_ids, position_ids))
+        values = paddle.cast(input_ids, "float32").unsqueeze(-1)
+        values = paddle.concat([values, values + 0.5], axis=-1)
+        return values.transpose([1, 0, 2]).contiguous()
+
+    def __call__(self, **kwargs):
+        self.forward_inputs.append(kwargs)
+        return kwargs
+
+
+class RecordingVisionModel:
+    def __init__(self, output):
+        self.output = output
+        self.class_token_len = 0
+        self.inputs = []
+
+    def __call__(self, images):
+        self.inputs.append(images)
+        return self.output
+
+
+class RecordingProjection:
+    def __call__(self, embeddings):
+        return embeddings[:, :, :2] + 10.0
+
+
+class TestLLaVAInitAndExtraBranchesNoMock(unittest.TestCase):
+    def setUp(self):
+        self.old_gpt = llava_model.GPTModel
+        self.old_clip = llava_model.CLIPViTModel
+        self.old_radio = llava_model.RADIOViTModel
+        self.old_projector = llava_model.MultimodalProjector
+        self.old_pg = llava_model.ProcessGroupCollection
+        self.old_hf = llava_model.has_config_logger_enabled
+        self.old_log_config = llava_model.log_config_to_disk
+        self.old_num_embeddings = llava_model.get_num_image_embeddings
+        RecordingGPT.calls = []
+        RecordingClip.calls = []
+        RecordingRadio.calls = []
+        RecordingProjector.calls = []
+        llava_model.GPTModel = RecordingGPT
+        llava_model.CLIPViTModel = RecordingClip
+        llava_model.RADIOViTModel = RecordingRadio
+        llava_model.MultimodalProjector = RecordingProjector
+        llava_model.ProcessGroupCollection.use_mpu_process_groups = (
+            lambda: PGCollection()
+        )
+        llava_model.has_config_logger_enabled = lambda config: True
+        self.logged = []
+        llava_model.log_config_to_disk = (
+            lambda *args, **kwargs: self.logged.append((args, kwargs))
+        )
+        llava_model.get_num_image_embeddings = lambda *args, **kwargs: 4
+
+    def tearDown(self):
+        llava_model.GPTModel = self.old_gpt
+        llava_model.CLIPViTModel = self.old_clip
+        llava_model.RADIOViTModel = self.old_radio
+        llava_model.MultimodalProjector = self.old_projector
+        llava_model.ProcessGroupCollection = self.old_pg
+        llava_model.has_config_logger_enabled = self.old_hf
+        llava_model.log_config_to_disk = self.old_log_config
+        llava_model.get_num_image_embeddings = self.old_num_embeddings
+
+    def _build_model(self, vision_type="clip", **kwargs):
+        return LLaVAModel(
+            Config(),
+            object(),
+            8,
+            16,
+            Config(vision_type),
+            object(),
+            False,
+            Config(),
+            object(),
+            pg_collection=PGCollection(),
+            **kwargs,
+        )
+
+    def test_init_clip_radio_siglip_and_parallel_assertion_paths(self):
+        model = self._build_model("siglip")
+        self.assertEqual(model.img_seq_len, 4)
+        self.assertEqual(RecordingClip.calls[-1]["class_token_len"], 0)
+        self.assertTrue(self.logged)
+
+        radio = self._build_model("radio-g", pixel_shuffle=True)
+        self.assertEqual(RecordingRadio.calls[-1]["class_token_len"], 5)
+        self.assertTrue(RecordingRadio.calls[-1]["embedder_bias"])
+        self.assertEqual(RecordingProjector.calls[-1][0][3], 8)
+        self.assertEqual(radio.shared_embedding_or_output_weight(), "shared")
+
+        radio_plain = self._build_model("radio")
+        self.assertEqual(RecordingRadio.calls[-1]["class_token_len"], 8)
+        self.assertFalse(RecordingRadio.calls[-1]["embedder_bias"])
+        self.assertIs(radio_plain.vision_model.kwargs["ln_post_impl"], None)
+        self.assertFalse(RecordingRadio.calls[-1]["use_mask_token"])
+
+        cradio = self._build_model(
+            "cradio-g", allow_missing_vision_projection_checkpoint=True
+        )
+        self.assertEqual(RecordingRadio.calls[-1]["class_token_len"], 8)
+        self.assertFalse(RecordingRadio.calls[-1]["embedder_bias"])
+        self.assertIs(cradio.vision_model.kwargs["ln_post_impl"], None)
+        self.assertFalse(RecordingRadio.calls[-1]["use_mask_token"])
+
+        bad_config = Config()
+        bad_config.sequence_parallel = True
+        with self.assertRaises(AssertionError):
+            LLaVAModel(
+                bad_config,
+                object(),
+                8,
+                16,
+                Config("clip"),
+                object(),
+                False,
+                Config(),
+                object(),
+                pg_collection=PGCollection(),
+            )
+
+    def test_process_embedding_context_parallel_branches(self):
+        model = MinimalLLaVA()
+        model.pre_process = True
+        model.post_process = True
+        model.sequence_parallel_lm = True
+        model.tensor_model_parallel_size_lm = 2
+        model.context_parallel_lm = 2
+        model.tp_comm_overlap_lm = False
+        embeddings = paddle.ones([2, 8, 2], dtype="float32")
+
+        result = model._process_embedding_token_parallel(
+            embeddings, None, None, None
+        )
+        self.assertIs(result[0], embeddings)
+
+        model.sequence_parallel_lm = False
+        result = model._process_embedding_token_parallel(
+            embeddings, None, None, None
+        )
+        self.assertIs(result[0], embeddings)
+
+        model.sequence_parallel_lm = True
+        model.context_parallel_lm = 1
+        model.tp_comm_overlap_lm = True
+        model._language_max_sequence_length = 16
+        with self.assertRaises(AssertionError):
+            model._process_embedding_token_parallel(
+                paddle.ones([4, 2, 2], dtype="float32"), None, None, None
+            )
+
+    def test_hf_language_and_vision_model_branches(self):
+        calls = []
+        module = types.ModuleType("paddlefleet.models.huggingface.module")
+
+        def build_hf_model(config, model_type=None):
+            calls.append((config, model_type))
+            return RecordingGPT()
+
+        module.build_hf_model = build_hf_model
+        old_module = sys.modules.get("paddlefleet.models.huggingface.module")
+        had_module = "paddlefleet.models.huggingface.module" in sys.modules
+        try:
+            sys.modules["paddlefleet.models.huggingface.module"] = module
+            language_config = Config()
+            language_config.language_model_type = "hf://tiny-lm"
+            LLaVAModel(
+                language_config,
+                object(),
+                8,
+                16,
+                Config("hf://tiny-vision"),
+                object(),
+                False,
+                Config(),
+                object(),
+                pg_collection=PGCollection(),
+            )
+        finally:
+            if had_module:
+                sys.modules["paddlefleet.models.huggingface.module"] = (
+                    old_module
+                )
+            else:
+                sys.modules.pop("paddlefleet.models.huggingface.module", None)
+
+        self.assertEqual(calls[0][1], "hf://tiny-lm")
+        self.assertIsNone(calls[1][1])
+        self.assertEqual(calls[2][1], "hf://tiny-vision")
+
+    def test_forward_default_tiles_cache_reuse_and_parallel_processing(self):
+        model = MinimalLLaVA()
+        model.add_encoder = True
+        model.add_decoder = True
+        model.pre_process = True
+        model.post_process = True
+        model._drop_vision_class_token = False
+        model._pixel_shuffle = False
+        model._tile_tags = None
+        model.image_token_index = -200
+        model.img_seq_len = 1
+        model._language_is_pipeline_parallel = False
+        model._language_max_sequence_length = 4
+        model.context_parallel_lm = 1
+        model.sequence_parallel_lm = True
+        model.tensor_model_parallel_size_lm = 1
+        model.tp_comm_overlap_lm = False
+        model.language_model = RecordingLanguageModel()
+        model.vision_model = RecordingVisionModel(
+            paddle.arange(2, dtype="float32").reshape([1, 1, 2])
+        )
+        model.vision_projection = RecordingProjection()
+        context = type("Context", (), {"key_value_memory_dict": {}})()
+
+        output, loss_mask = LLaVAModel.forward(
+            model,
+            images=paddle.ones([1, 3, 2, 2], dtype="float32"),
+            input_ids=paddle.to_tensor([[5, -200, 6]], dtype="int64"),
+            position_ids=paddle.to_tensor([[0, 1, 2]], dtype="int64"),
+            attention_mask=None,
+            labels=paddle.to_tensor([[50, 51, 52]], dtype="int64"),
+            loss_mask=paddle.ones([1, 3], dtype="float32"),
+            inference_context=context,
+            num_image_tiles=None,
+        )
+
+        self.assertIs(output, model.language_model.forward_inputs[0])
+        self.assertEqual(loss_mask.shape, [1, 3])
+        self.assertIn("image_tokens_count", context.key_value_memory_dict)
+
+        cached_output, _ = LLaVAModel.forward(
+            model,
+            images=paddle.ones([1, 3, 2, 2], dtype="float32"),
+            input_ids=paddle.to_tensor([[7, 8]], dtype="int64"),
+            position_ids=paddle.to_tensor([[0, 1]], dtype="int64"),
+            attention_mask=None,
+            labels=paddle.to_tensor([[70, 71]], dtype="int64"),
+            loss_mask=paddle.ones([1, 2], dtype="float32"),
+            inference_context=context,
+        )
+
+        self.assertIs(cached_output, model.language_model.forward_inputs[-1])
+        self.assertEqual(len(model.vision_model.inputs), 1)
+
+    def test_forward_no_images_pixel_shuffle_tile_tags_and_cache_count(self):
+        model = MinimalLLaVA()
+        model.add_encoder = True
+        model.add_decoder = True
+        model.pre_process = True
+        model.post_process = True
+        model._drop_vision_class_token = False
+        model._pixel_shuffle = True
+        model._tile_tags = [[101, 102, 103, 104], [999, 1000, 1001, 1002]]
+        model.image_token_index = -200
+        model.img_seq_len = 8
+        model._language_is_pipeline_parallel = False
+        model._language_max_sequence_length = 8
+        model.context_parallel_lm = 1
+        model.sequence_parallel_lm = False
+        model.language_model = RecordingLanguageModel()
+        model.vision_model = RecordingVisionModel(
+            paddle.arange(64, dtype="float32").reshape([1, 16, 4])
+        )
+        model.vision_projection = RecordingProjection()
+        context = type("Context", (), {"key_value_memory_dict": {}})()
+
+        output, loss_mask = LLaVAModel.forward(
+            model,
+            images=paddle.ones([1, 3, 4, 4], dtype="float32"),
+            input_ids=paddle.to_tensor([[5, -200, 6]], dtype="int64"),
+            position_ids=paddle.to_tensor([[0, 1, 2]], dtype="int64"),
+            attention_mask=None,
+            labels=paddle.to_tensor([[50, 51, 52]], dtype="int64"),
+            loss_mask=paddle.ones([1, 3], dtype="float32"),
+            inference_context=context,
+            num_image_tiles=paddle.to_tensor([1], dtype="int64"),
+        )
+
+        self.assertIn("image_tokens_count", context.key_value_memory_dict)
+        self.assertEqual(len(model.language_model.forward_inputs), 1)
+        self.assertIs(output, model.language_model.forward_inputs[0])
+        self.assertEqual(loss_mask.shape[0], 1)
+
+        model.add_decoder = False
+        empty_output, _ = LLaVAModel.forward(
+            model,
+            images=paddle.empty([0, 3, 4, 4], dtype="float32"),
+            input_ids=paddle.to_tensor([[7, 8]], dtype="int64"),
+            position_ids=paddle.to_tensor([[0, 1]], dtype="int64"),
+            attention_mask=None,
+            labels=None,
+            loss_mask=None,
+        )
+        self.assertEqual(empty_output.shape, [0, 0, 0])
+
+
+if __name__ == "__main__":
+    unittest.main()

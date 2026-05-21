@@ -1,1 +1,389 @@
-IyBDb3B5cmlnaHQgKGMpIDIwMjYgUGFkZGxlUGFkZGxlIEF1dGhvcnMuIEFsbCBSaWdodHMgUmVzZXJ2ZWQuCiMKIyBMaWNlbnNlZCB1bmRlciB0aGUgQXBhY2hlIExpY2Vuc2UsIFZlcnNpb24gMi4wICh0aGUgIkxpY2Vuc2UiKTsKIyB5b3UgbWF5IG5vdCB1c2UgdGhpcyBmaWxlIGV4Y2VwdCBpbiBjb21wbGlhbmNlIHdpdGggdGhlIExpY2Vuc2UuCiMgWW91IG1heSBvYnRhaW4gYSBjb3B5IG9mIHRoZSBMaWNlbnNlIGF0CiMKIyAgICAgaHR0cDovL3d3dy5hcGFjaGUub3JnL2xpY2Vuc2VzL0xJQ0VOU0UtMi4wCiMKIyBVbmxlc3MgcmVxdWlyZWQgYnkgYXBwbGljYWJsZSBsYXcgb3IgYWdyZWVkIHRvIGluIHdyaXRpbmcsIHNvZnR3YXJlCiMgZGlzdHJpYnV0ZWQgdW5kZXIgdGhlIExpY2Vuc2UgaXMgZGlzdHJpYnV0ZWQgb24gYW4gIkFTIElTIiBCQVNJUywKIyBXSVRIT1VUIFdBUlJBTlRJRVMgT1IgQ09ORElUSU9OUyBPRiBBTlkgS0lORCwgZWl0aGVyIGV4cHJlc3Mgb3IgaW1wbGllZC4KIyBTZWUgdGhlIExpY2Vuc2UgZm9yIHRoZSBzcGVjaWZpYyBsYW5ndWFnZSBnb3Zlcm5pbmcgcGVybWlzc2lvbnMgYW5kCiMgbGltaXRhdGlvbnMgdW5kZXIgdGhlIExpY2Vuc2UuCmltcG9ydCBvcwppbXBvcnQgc3lzCmltcG9ydCB1bml0dGVzdAoKUkVQT19ST09UID0gb3MucGF0aC5kaXJuYW1lKAogICAgb3MucGF0aC5kaXJuYW1lKAogICAgICAgIG9zLnBhdGguZGlybmFtZShvcy5wYXRoLmRpcm5hbWUob3MucGF0aC5hYnNwYXRoKF9fZmlsZV9fKSkpCiAgICApCikKc3lzLnBhdGguaW5zZXJ0KDAsIG9zLnBhdGguam9pbihSRVBPX1JPT1QsICJzcmMiKSkKCmltcG9ydCBwYWRkbGUKCmZyb20gcGFkZGxlZmxlZXQudHJhbnNmb3JtZXIubW9lIGltcG9ydCBtb2VfbGF5ZXIKZnJvbSBwYWRkbGVmbGVldC50cmFuc2Zvcm1lci5tb2UubW9lX2xheWVyIGltcG9ydCBNb0VMYXllcgoKCmNsYXNzIFBsYWluOgogICAgcGFzcwoKCmNsYXNzIEZha2VTdHJlYW06CiAgICBjdWRhX3N0cmVhbSA9IDEyMwoKCmNsYXNzIEZha2VDdWRhOgogICAgQHN0YXRpY21ldGhvZAogICAgZGVmIGN1cnJlbnRfc3RyZWFtKCk6CiAgICAgICAgcmV0dXJuIEZha2VTdHJlYW0oKQoKCmNsYXNzIEZha2VHYXRoZXI6CiAgICBjYWxscyA9IFtdCgogICAgQHN0YXRpY21ldGhvZAogICAgZGVmIGFwcGx5KHgpOgogICAgICAgIEZha2VHYXRoZXIuY2FsbHMuYXBwZW5kKHgpCiAgICAgICAgcmV0dXJuIHggKyAxLjAKCgpjbGFzcyBGYWtlU2NhdHRlcjoKICAgIGNhbGxzID0gW10KCiAgICBAc3RhdGljbWV0aG9kCiAgICBkZWYgYXBwbHkoeCk6CiAgICAgICAgRmFrZVNjYXR0ZXIuY2FsbHMuYXBwZW5kKHgpCiAgICAgICAgcmV0dXJuIHggKyAyLjAKCgpjbGFzcyBGYWtlQ29tbU1hbmFnZXI6CiAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgc2VsZi5kaXNwYXRjaGVkX3Byb2JzID0gcGFkZGxlLm9uZXMoWzIsIDJdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgc2VsZi5kaXNwYXRjaGVkX2luZGljZXMgPSBwYWRkbGUudG9fdGVuc29yKAogICAgICAgICAgICBbWzAsIDFdLCBbMSwgMF1dLCBkdHlwZT0iaW50NjQiCiAgICAgICAgKQogICAgICAgIHNlbGYudG9rZW5zX3Blcl9leHBlcnQgPSBwYWRkbGUudG9fdGVuc29yKFsyLCAyXSwgZHR5cGU9ImludDY0IikKICAgICAgICBzZWxmLmNvbWJpbmVfY2FsbHMgPSBbXQoKICAgIGRlZiBjb21iaW5lKHNlbGYsIGhpZGRlbl9zdGF0ZXMsIGhhbmRsZSwgYXN5bmNfZmluaXNoPUZhbHNlKToKICAgICAgICBzZWxmLmNvbWJpbmVfY2FsbHMuYXBwZW5kKChoaWRkZW5fc3RhdGVzLCBoYW5kbGUsIGFzeW5jX2ZpbmlzaCkpCiAgICAgICAgcmV0dXJuIGhpZGRlbl9zdGF0ZXMgKyAzLjAKCgpjbGFzcyBGYWtlVG9rZW5EaXNwYXRjaGVyOgogICAgZGVmIF9faW5pdF9fKHNlbGYpOgogICAgICAgIHNlbGYuX2NvbW1fbWFuYWdlciA9IEZha2VDb21tTWFuYWdlcigpCgogICAgZGVmIHRva2VuX2Rpc3BhdGNoX292ZXJsYXAoCiAgICAgICAgc2VsZiwKICAgICAgICBoaWRkZW5fc3RhdGVzLAogICAgICAgIHRva2VuX2luZGljZXMsCiAgICAgICAgdG9rZW5fd2VpZ2h0cywKICAgICAgICBmcDhfZGlzcGF0Y2gsCiAgICAgICAgYXN5bmNfZmluaXNoPUZhbHNlLAogICAgICAgIHVzZV91ZThtMD1GYWxzZSwKICAgICk6CiAgICAgICAgZGVsIHRva2VuX2luZGljZXMsIHRva2VuX3dlaWdodHMsIGZwOF9kaXNwYXRjaCwgYXN5bmNfZmluaXNoLCB1c2VfdWU4bTAKICAgICAgICByZXR1cm4gaGlkZGVuX3N0YXRlcyArIDEuMCwgImZwOC1oYW5kbGUiCgoKY2xhc3MgRmFrZVdlaWdodEJveDoKICAgIGRlZiBfX2luaXRfXyhzZWxmKToKICAgICAgICBzZWxmLndlaWdodDEgPSBwYWRkbGUub25lcyhbMiwgNCwgM10sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICBzZWxmLndlaWdodDIgPSBwYWRkbGUub25lcyhbMiwgMywgNF0sIGR0eXBlPSJmbG9hdDMyIikKCgpjbGFzcyBGYWtlVXBQcm9qZWN0aW9uOgogICAgY2FsbHMgPSBbXQoKICAgIEBzdGF0aWNtZXRob2QKICAgIGRlZiBhcHBseSgqYXJncywgKiprd2FyZ3MpOgogICAgICAgIEZha2VVcFByb2plY3Rpb24uY2FsbHMuYXBwZW5kKChhcmdzLCBrd2FyZ3MpKQogICAgICAgIHggPSBhcmdzWzBdCiAgICAgICAgcmV0dXJuIHggKyAxMC4wLCB4ICsgMjAuMAoKCmNsYXNzIEZha2VEb3duUHJvamVjdGlvbjoKICAgIGNhbGxzID0gW10KCiAgICBAc3RhdGljbWV0aG9kCiAgICBkZWYgYXBwbHkoKmFyZ3MsICoqa3dhcmdzKToKICAgICAgICBGYWtlRG93blByb2plY3Rpb24uY2FsbHMuYXBwZW5kKChhcmdzLCBrd2FyZ3MpKQogICAgICAgIHkxID0gYXJnc1swXQogICAgICAgIHJldHVybiB5MSArIDMwLjAKCgpjbGFzcyBGYWtlRnVzaW9uTW9lUHlMYXllcjoKICAgIGNhbGxzID0gW10KCiAgICBAc3RhdGljbWV0aG9kCiAgICBkZWYgYXBwbHkoKmFyZ3MsICoqa3dhcmdzKToKICAgICAgICBGYWtlRnVzaW9uTW9lUHlMYXllci5jYWxscy5hcHBlbmQoKGFyZ3MsIGt3YXJncykpCiAgICAgICAgcmV0dXJuIGFyZ3NbMF0gKyA0MC4wCgoKY2xhc3MgRmFrZUxhdGVudFByb2o6CiAgICBkZWYgX19pbml0X18oc2VsZiwgZGVsdGEpOgogICAgICAgIHNlbGYuZGVsdGEgPSBkZWx0YQogICAgICAgIHNlbGYuY2FsbHMgPSBbXQoKICAgIGRlZiBfX2NhbGxfXyhzZWxmLCB4KToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZCh4KQogICAgICAgIHJldHVybiB4ICsgc2VsZi5kZWx0YQoKCmNsYXNzIFRlc3RNb0VMYXllckV4dHJhRXhlY3V0YWJsZUJyYW5jaGVzTm9Nb2NrKHVuaXR0ZXN0LlRlc3RDYXNlKToKICAgIGRlZiBzZXRVcChzZWxmKToKICAgICAgICBzZWxmLm9sZF9nYXRoZXIgPSBtb2VfbGF5ZXIuR2F0aGVyT3AKICAgICAgICBzZWxmLm9sZF9zY2F0dGVyID0gbW9lX2xheWVyLlNjYXR0ZXJPcAogICAgICAgIHNlbGYub2xkX2N1ZGEgPSBwYWRkbGUuZGV2aWNlLmN1ZGEKICAgICAgICBzZWxmLm9sZF9hY3RpdmF0aW9uX3R5cGUgPSBnZXRhdHRyKG1vZV9sYXllciwgIkFjdGl2YXRpb25UeXBlIiwgTm9uZSkKICAgICAgICBzZWxmLm9sZF91cCA9IGdldGF0dHIobW9lX2xheWVyLCAiX1VwUHJvamVjdGlvbiIsIE5vbmUpCiAgICAgICAgc2VsZi5vbGRfZG93biA9IGdldGF0dHIobW9lX2xheWVyLCAiX0Rvd25Qcm9qZWN0aW9uIiwgTm9uZSkKICAgICAgICBzZWxmLm9sZF9jb3VudF9jdW1zdW0gPSBtb2VfbGF5ZXIuY291bnRfY3Vtc3VtCiAgICAgICAgc2VsZi5vbGRfZmlsdGVyX3Njb3JlcyA9IG1vZV9sYXllci5maWx0ZXJfc2NvcmVzCiAgICAgICAgc2VsZi5vbGRfbWV0YWRhdGEgPSBtb2VfbGF5ZXIuZnVzZWRfZXhwZXJ0X3BhcmFsbGVsX1RDX3RvcGtfcm91dGVyX21ldGFkYXRhCiAgICAgICAgc2VsZi5vbGRfZnVzaW9uID0gbW9lX2xheWVyLkZ1c2lvbk1vZVB5TGF5ZXIKCiAgICBkZWYgdGVhckRvd24oc2VsZik6CiAgICAgICAgbW9lX2xheWVyLkdhdGhlck9wID0gc2VsZi5vbGRfZ2F0aGVyCiAgICAgICAgbW9lX2xheWVyLlNjYXR0ZXJPcCA9IHNlbGYub2xkX3NjYXR0ZXIKICAgICAgICBwYWRkbGUuZGV2aWNlLmN1ZGEgPSBzZWxmLm9sZF9jdWRhCiAgICAgICAgaWYgc2VsZi5vbGRfYWN0aXZhdGlvbl90eXBlIGlzIE5vbmU6CiAgICAgICAgICAgIGlmIGhhc2F0dHIobW9lX2xheWVyLCAiQWN0aXZhdGlvblR5cGUiKToKICAgICAgICAgICAgICAgIGRlbGF0dHIobW9lX2xheWVyLCAiQWN0aXZhdGlvblR5cGUiKQogICAgICAgIGVsc2U6CiAgICAgICAgICAgIG1vZV9sYXllci5BY3RpdmF0aW9uVHlwZSA9IHNlbGYub2xkX2FjdGl2YXRpb25fdHlwZQogICAgICAgIGlmIHNlbGYub2xkX3VwIGlzIE5vbmU6CiAgICAgICAgICAgIGlmIGhhc2F0dHIobW9lX2xheWVyLCAiX1VwUHJvamVjdGlvbiIpOgogICAgICAgICAgICAgICAgZGVsYXR0cihtb2VfbGF5ZXIsICJfVXBQcm9qZWN0aW9uIikKICAgICAgICBlbHNlOgogICAgICAgICAgICBtb2VfbGF5ZXIuX1VwUHJvamVjdGlvbiA9IHNlbGYub2xkX3VwCiAgICAgICAgaWYgc2VsZi5vbGRfZG93biBpcyBOb25lOgogICAgICAgICAgICBpZiBoYXNhdHRyKG1vZV9sYXllciwgIl9Eb3duUHJvamVjdGlvbiIpOgogICAgICAgICAgICAgICAgZGVsYXR0cihtb2VfbGF5ZXIsICJfRG93blByb2plY3Rpb24iKQogICAgICAgIGVsc2U6CiAgICAgICAgICAgIG1vZV9sYXllci5fRG93blByb2plY3Rpb24gPSBzZWxmLm9sZF9kb3duCiAgICAgICAgbW9lX2xheWVyLmNvdW50X2N1bXN1bSA9IHNlbGYub2xkX2NvdW50X2N1bXN1bQogICAgICAgIG1vZV9sYXllci5maWx0ZXJfc2NvcmVzID0gc2VsZi5vbGRfZmlsdGVyX3Njb3JlcwogICAgICAgIG1vZV9sYXllci5mdXNlZF9leHBlcnRfcGFyYWxsZWxfVENfdG9wa19yb3V0ZXJfbWV0YWRhdGEgPSBzZWxmLm9sZF9tZXRhZGF0YQogICAgICAgIG1vZV9sYXllci5GdXNpb25Nb2VQeUxheWVyID0gc2VsZi5vbGRfZnVzaW9uCgogICAgZGVmIGluc3RhbGxfc29uaWNfc3R1YnMoc2VsZik6CiAgICAgICAgcGFkZGxlLmRldmljZS5jdWRhID0gRmFrZUN1ZGEKICAgICAgICBtb2VfbGF5ZXIuQWN0aXZhdGlvblR5cGUgPSBsYW1iZGEgbmFtZTogbmFtZQogICAgICAgIG1vZV9sYXllci5fVXBQcm9qZWN0aW9uID0gRmFrZVVwUHJvamVjdGlvbgogICAgICAgIG1vZV9sYXllci5fRG93blByb2plY3Rpb24gPSBGYWtlRG93blByb2plY3Rpb24KCiAgICAgICAgZGVmIGZha2VfZmlsdGVyX3Njb3Jlcyhwcm9icywgaW5kaWNlcyk6CiAgICAgICAgICAgIHJldHVybiBwcm9icyArIGluZGljZXMuYXN0eXBlKCJmbG9hdDMyIikKCiAgICAgICAgZGVmIGZha2VfY291bnRfY3Vtc3VtKGluZGljZXMsIGV4cGVydF9jb3VudCwgZG9fY3Vtc3VtPVRydWUpOgogICAgICAgICAgICBkZWwgaW5kaWNlcywgZG9fY3Vtc3VtCiAgICAgICAgICAgIGZyZXEgPSBwYWRkbGUub25lcyhbZXhwZXJ0X2NvdW50XSwgZHR5cGU9ImludDY0IikKICAgICAgICAgICAgb2Zmc2V0ID0gcGFkZGxlLmFyYW5nZShleHBlcnRfY291bnQgKyAxLCBkdHlwZT0iaW50NjQiKQogICAgICAgICAgICByZXR1cm4gZnJlcSwgb2Zmc2V0CgogICAgICAgIGRlZiBmYWtlX21ldGFkYXRhKGluZGljZXMsIG9mZnNldHMsIGspOgogICAgICAgICAgICBmbGF0X2NvdW50ID0gaW5kaWNlcy5zaGFwZVswXSAqIGsKICAgICAgICAgICAgZ2F0aGVyID0gcGFkZGxlLmFyYW5nZShpbmRpY2VzLnNoYXBlWzBdLCBkdHlwZT0iaW50NjQiKQogICAgICAgICAgICBzY2F0dGVyID0gcGFkZGxlLmFyYW5nZShmbGF0X2NvdW50LCBkdHlwZT0iaW50NjQiKQogICAgICAgICAgICByZXZlcnNlID0gcGFkZGxlLmFyYW5nZShmbGF0X2NvdW50LCBkdHlwZT0iaW50NjQiKQogICAgICAgICAgICBhY3RpdmUgPSBwYWRkbGUuYXJhbmdlKGluZGljZXMuc2hhcGVbMF0gKyAxLCBkdHlwZT0iaW50NjQiKQogICAgICAgICAgICByZXR1cm4gb2Zmc2V0cywgZ2F0aGVyLCBzY2F0dGVyLCByZXZlcnNlLCBhY3RpdmUKCiAgICAgICAgbW9lX2xheWVyLmZpbHRlcl9zY29yZXMgPSBmYWtlX2ZpbHRlcl9zY29yZXMKICAgICAgICBtb2VfbGF5ZXIuY291bnRfY3Vtc3VtID0gZmFrZV9jb3VudF9jdW1zdW0KICAgICAgICBtb2VfbGF5ZXIuZnVzZWRfZXhwZXJ0X3BhcmFsbGVsX1RDX3RvcGtfcm91dGVyX21ldGFkYXRhID0gZmFrZV9tZXRhZGF0YQoKICAgIGRlZiB0ZXN0X2NvbXB1dGVfZ2F0ZV91c2VzX2dhdGhlcl9mb3Jfc2luZ2xlX2NhcmRfc2VxdWVuY2VfcGFyYWxsZWwoc2VsZik6CiAgICAgICAgbW9lX2xheWVyLkdhdGhlck9wID0gRmFrZUdhdGhlcgogICAgICAgIEZha2VHYXRoZXIuY2FsbHMgPSBbXQogICAgICAgIG1vZGVsID0gUGxhaW4oKQogICAgICAgIG1vZGVsLmV4cGVydF9tb2RlbF9wYXJhbGxlbF9zaXplID0gMQogICAgICAgIG1vZGVsLnNlcXVlbmNlX3BhcmFsbGVsID0gVHJ1ZQoKICAgICAgICBjbGFzcyBHYXRlOgogICAgICAgICAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgICAgICAgICBzZWxmLmhpZGRlbiA9IE5vbmUKICAgICAgICAgICAgICAgIHNlbGYuaW5wdXRfaWRzID0gTm9uZQoKICAgICAgICAgICAgZGVmIF9fY2FsbF9fKHNlbGYsIGhpZGRlbl9zdGF0ZXMsIGlucHV0X2lkcz1Ob25lKToKICAgICAgICAgICAgICAgIHNlbGYuaGlkZGVuID0gaGlkZGVuX3N0YXRlcwogICAgICAgICAgICAgICAgc2VsZi5pbnB1dF9pZHMgPSBpbnB1dF9pZHMKICAgICAgICAgICAgICAgIHJldHVybiAiZ2F0ZS1yZXN1bHQiCgogICAgICAgIG1vZGVsLmdhdGUgPSBHYXRlKCkKICAgICAgICBoaWRkZW4gPSBwYWRkbGUub25lcyhbMiwgM10sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICBpbnB1dF9pZHMgPSBwYWRkbGUudG9fdGVuc29yKFs3LCA4XSwgZHR5cGU9ImludDY0IikKCiAgICAgICAgcmVzdWx0ID0gTW9FTGF5ZXIuY29tcHV0ZV9nYXRlKG1vZGVsLCBoaWRkZW4sIGlucHV0X2lkcz1pbnB1dF9pZHMpCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwocmVzdWx0LCAiZ2F0ZS1yZXN1bHQiKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoRmFrZUdhdGhlci5jYWxsc1swXS5udW1weSgpLnRvbGlzdCgpLCBoaWRkZW4ubnVtcHkoKS50b2xpc3QoKSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKG1vZGVsLmdhdGUuaGlkZGVuLm51bXB5KCkudG9saXN0KCksIChoaWRkZW4gKyAxLjApLm51bXB5KCkudG9saXN0KCkpCiAgICAgICAgc2VsZi5hc3NlcnRJcyhtb2RlbC5nYXRlLmlucHV0X2lkcywgaW5wdXRfaWRzKQoKICAgIGRlZiB0ZXN0X2F1eF9sb3NzX2NvbXB1dGVfc2NhdHRlcl9zaGFyZWRfYW5kX2xhdGVudF9wYXRocyhzZWxmKToKICAgICAgICBtb2VfbGF5ZXIuU2NhdHRlck9wID0gRmFrZVNjYXR0ZXIKICAgICAgICBGYWtlU2NhdHRlci5jYWxscyA9IFtdCiAgICAgICAgbW9kZWwgPSBQbGFpbigpCiAgICAgICAgbW9kZWwudXNlX2xhdGVudF9tb2UgPSBUcnVlCiAgICAgICAgbW9kZWwuZmMyX2xhdGVudF9wcm9qID0gRmFrZUxhdGVudFByb2ooMS4wKQogICAgICAgIG1vZGVsLnRyYWluaW5nID0gVHJ1ZQogICAgICAgIG1vZGVsLnJvdXRlcl9hdXhfbG9zc19jb2VmID0gMC41CiAgICAgICAgbW9kZWwuc2hhcmVkX2V4cGVydHMgPSBsYW1iZGEgcmVzaWR1YWxzOiAocmVzaWR1YWxzICsgNC4wLCkKICAgICAgICBtb2RlbC5leHBlcnRfbW9kZWxfcGFyYWxsZWxfc2l6ZSA9IDEKICAgICAgICBtb2RlbC5zZXF1ZW5jZV9wYXJhbGxlbCA9IFRydWUKICAgICAgICBoaWRkZW4gPSBwYWRkbGUub25lcyhbNCwgMl0sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICByZXNpZHVhbHMgPSBwYWRkbGUuemVyb3MoWzIsIDIsIDJdLCBkdHlwZT0iZmxvYXQzMiIpCgogICAgICAgIG91dCA9IE1vRUxheWVyLmF1eF9sb3NzX2NvbXB1dGUoCiAgICAgICAgICAgIG1vZGVsLAogICAgICAgICAgICAoaGlkZGVuLCBwYWRkbGUudG9fdGVuc29yKFswLjVdKSwgcGFkZGxlLnRvX3RlbnNvcihbMC4yNV0pLCByZXNpZHVhbHMpLAogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChvdXQuc2hhcGUsIFsyLCAyLCAyXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGxlbihGYWtlU2NhdHRlci5jYWxscyksIDEpCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKGZsb2F0KG91dC5zdW0oKSkgPiAwLjApCgogICAgZGVmIHRlc3RfY29tcHV0ZV9kaXNwYXRjaF9leHBlcnRzX2FuZF9jb21iaW5lX3BhdGhzKHNlbGYpOgogICAgICAgIG1vZGVsID0gUGxhaW4oKQogICAgICAgIG1vZGVsLm1vZV91c2VfZnVzaW9uX25vZGUgPSBUcnVlCiAgICAgICAgbW9kZWwudXNlX2h5YnJpZF9lcF9iYWNrZW5kID0gRmFsc2UKICAgICAgICBtb2RlbC5fdXNlX2h5YnJpZF9lcF9mdXNpb24gPSBsYW1iZGE6IEZhbHNlCiAgICAgICAgbW9kZWwudG9rZW5fZGlzcGF0Y2hlciA9IEZha2VUb2tlbkRpc3BhdGNoZXIoKQogICAgICAgIG1vZGVsLmZwOF9kaXNwYXRjaCA9IEZhbHNlCiAgICAgICAgbW9kZWwudXNlX3VlOG0wID0gRmFsc2UKICAgICAgICBtb2RlbC5mcDggPSBGYWxzZQogICAgICAgIG1vZGVsLm1vZV9kZWVwX2dlbW0gPSBGYWxzZQogICAgICAgIG1vZGVsLnJlY29tcHV0ZV9tb2VfZ2F0ZV91cCA9IEZhbHNlCiAgICAgICAgbW9kZWwucmVjb21wdXRlX21vZV9wcmVtdXRlID0gRmFsc2UKICAgICAgICBtb2RlbC5mcDhfd2dyYWQgPSBGYWxzZQogICAgICAgIG1vZGVsLnVzZV9hdXRvX3N1YmJhdGNoID0gRmFsc2UKICAgICAgICBtb2RlbC5tb2VfZXhwZXJ0X2Z1c2lvbiA9IEZhbHNlCiAgICAgICAgbW9kZWwubW9lX3N1YmJhdGNoX3Rva2VuX251bV9hZnRlcl9kaXNwYXRjaCA9IE5vbmUKICAgICAgICBtb2RlbC5tb2Vfc3ViYmF0Y2hfZGlhZyA9IEZhbHNlCiAgICAgICAgbW9kZWwuZHdfcDJwX292ZXJsYXAgPSBGYWxzZQogICAgICAgIG1vZGVsLm51bV9leHBlcnRzX3Blcl90b2sgPSAyCiAgICAgICAgbW9lX2xheWVyLkZ1c2lvbk1vZVB5TGF5ZXIgPSBGYWtlRnVzaW9uTW9lUHlMYXllcgogICAgICAgIEZha2VGdXNpb25Nb2VQeUxheWVyLmNhbGxzID0gW10KICAgICAgICBoaWRkZW4gPSBwYWRkbGUub25lcyhbMiwgM10sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICBpbmRpY2VzID0gcGFkZGxlLnRvX3RlbnNvcihbWzAsIDFdLCBbMSwgMF1dLCBkdHlwZT0iaW50NjQiKQogICAgICAgIHdlaWdodHMgPSBwYWRkbGUub25lcyhbMiwgMl0sIGR0eXBlPSJmbG9hdDMyIikKCiAgICAgICAgZGlzcGF0Y2hlZCA9IE1vRUxheWVyLmNvbXB1dGVfZGlzcGF0Y2goCiAgICAgICAgICAgIG1vZGVsLCAoaGlkZGVuLCBpbmRpY2VzLCB3ZWlnaHRzKSwgYXN5bmNfZmluaXNoPVRydWUKICAgICAgICApCiAgICAgICAgZXhwZXJ0X291dCA9IE1vRUxheWVyLmNvbXB1dGVfZXhwZXJ0cyhtb2RlbCwgZGlzcGF0Y2hlZCwgaXNfZmlyc3RfZndkPVRydWUpCiAgICAgICAgY29tYmluZWQgPSBNb0VMYXllci5jb21wdXRlX2NvbWJpbmUobW9kZWwsIGV4cGVydF9vdXQsIGFzeW5jX2ZpbmlzaD1UcnVlKQoKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGRpc3BhdGNoZWRbMV0uc2hhcGUsIFsyLCAyXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGV4cGVydF9vdXQubnVtcHkoKS50b2xpc3QoKSwgKGhpZGRlbiArIDQxLjApLm51bXB5KCkudG9saXN0KCkpCiAgICAgICAgc2VsZi5hc3NlcnRGYWxzZShleHBlcnRfb3V0LnN0b3BfZ3JhZGllbnQpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChjb21iaW5lZC5udW1weSgpLnRvbGlzdCgpLCAoZXhwZXJ0X291dCArIDMuMCkubnVtcHkoKS50b2xpc3QoKSkKCiAgICAgICAgZGVuc2VfbW9kZWwgPSBQbGFpbigpCiAgICAgICAgZGVuc2VfbW9kZWwubW9lX3VzZV9mdXNpb25fbm9kZSA9IEZhbHNlCiAgICAgICAgZGVuc2VfbW9kZWwucm91dGVkX2V4cGVydHNfY29tcHV0ZSA9IGxhbWJkYSB4OiB4ICsgNS4wCiAgICAgICAgZGVuc2VfbW9kZWwuY29tYmluZSA9IGxhbWJkYSB4OiB4ICsgNi4wCiAgICAgICAgZGVuc2VfZXhwZXJ0ID0gTW9FTGF5ZXIuY29tcHV0ZV9leHBlcnRzKGRlbnNlX21vZGVsLCAoaGlkZGVuLCBOb25lKSkKICAgICAgICBkZW5zZV9jb21iaW5lZCA9IE1vRUxheWVyLmNvbXB1dGVfY29tYmluZShkZW5zZV9tb2RlbCwgZGVuc2VfZXhwZXJ0KQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZGVuc2VfY29tYmluZWQubnVtcHkoKS50b2xpc3QoKSwgKGhpZGRlbiArIDExLjApLm51bXB5KCkudG9saXN0KCkpCgogICAgZGVmIHRlc3RfZnVzaW9uX21vZV9mb3J3YXJkX3NvbmljX2JyYW5jaF91c2VzX3Byb2plY3Rpb25fc3R1YnMoc2VsZik6CiAgICAgICAgc2VsZi5pbnN0YWxsX3NvbmljX3N0dWJzKCkKICAgICAgICBGYWtlVXBQcm9qZWN0aW9uLmNhbGxzID0gW10KICAgICAgICBGYWtlRG93blByb2plY3Rpb24uY2FsbHMgPSBbXQogICAgICAgIG1vZGVsID0gUGxhaW4oKQogICAgICAgIG1vZGVsLnVzZV9sYXRlbnRfbW9lID0gVHJ1ZQogICAgICAgIG1vZGVsLmZjMV9sYXRlbnRfcHJvaiA9IEZha2VMYXRlbnRQcm9qKDEuMCkKICAgICAgICBtb2RlbC5mYzJfbGF0ZW50X3Byb2ogPSBGYWtlTGF0ZW50UHJvaigyLjApCiAgICAgICAgbW9kZWwubGF5ZXJfbnVtYmVyID0gMwogICAgICAgIG1vZGVsLm1vZV9ncm91cCA9IE5vbmUKICAgICAgICBtb2RlbC5udW1fZXhwZXJ0c19wZXJfdG9rID0gMgogICAgICAgIG1vZGVsLm51bV9leHBlcnRzX3Blcl9kZXZpY2UgPSAyCiAgICAgICAgbW9kZWwudXNlX2h5YnJpZF9lcF9iYWNrZW5kID0gRmFsc2UKICAgICAgICBtb2RlbC5tb2VfdXNlX2Z1c2lvbl9ub2RlID0gVHJ1ZQogICAgICAgIG1vZGVsLnVzaW5nX3NvbmljX21vZSA9IFRydWUKICAgICAgICBtb2RlbC5ncm91cGVkX2dlbW1fZXhwZXJ0cyA9IEZha2VXZWlnaHRCb3goKQogICAgICAgIG1vZGVsLnRva2VuX2Rpc3BhdGNoZXIgPSBGYWtlVG9rZW5EaXNwYXRjaGVyKCkKICAgICAgICBtb2RlbC5fdXNlX2h5YnJpZF9lcF9mdXNpb24gPSBsYW1iZGE6IEZhbHNlCiAgICAgICAgbW9kZWwuZGlzcGF0Y2ggPSBsYW1iZGEgaGlkZGVuX3N0YXRlcywgcHJvYnMsIHJvdXRpbmdfbWFwLCB0b3BrX3dlaWdodHMsIHRvcGtfaW5kaWNlczogKGhpZGRlbl9zdGF0ZXMgKyAxLjAsICJoYW5kbGUiKQogICAgICAgIGhpZGRlbiA9IHBhZGRsZS5vbmVzKFsyLCAzXSwgZHR5cGU9ImZsb2F0MzIiKQogICAgICAgIHByb2JzID0gcGFkZGxlLm9uZXMoWzIsIDJdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgcm91dGluZyA9IHBhZGRsZS5vbmVzKFsyLCAyXSwgZHR5cGU9ImJvb2wiKQoKICAgICAgICBvdXQgPSBNb0VMYXllci5mdXNpb25fbW9lX2ZvcndhcmQoCiAgICAgICAgICAgIG1vZGVsLCBoaWRkZW4sIHByb2JzLCByb3V0aW5nLCBjb21iaW5lX292ZXJsYXBfaGFuZGxlPU5vbmUKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwob3V0Lm51bXB5KCkudG9saXN0KCksIChoaWRkZW4gKyA0Ny4wKS5udW1weSgpLnRvbGlzdCgpKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGVuKEZha2VVcFByb2plY3Rpb24uY2FsbHMpLCAxKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGVuKEZha2VEb3duUHJvamVjdGlvbi5jYWxscyksIDEpCgogICAgZGVmIHRlc3Rfc2luZ2xlX2NhcmRfZ3JvdXBlZF9nZW1tX3NvbmljX2JyYW5jaF91c2VzX3Byb2plY3Rpb25fc3R1YnMoc2VsZik6CiAgICAgICAgc2VsZi5pbnN0YWxsX3NvbmljX3N0dWJzKCkKICAgICAgICBGYWtlVXBQcm9qZWN0aW9uLmNhbGxzID0gW10KICAgICAgICBGYWtlRG93blByb2plY3Rpb24uY2FsbHMgPSBbXQogICAgICAgIG1vZGVsID0gUGxhaW4oKQogICAgICAgIG1vZGVsLnVzaW5nX3NvbmljX21vZSA9IFRydWUKICAgICAgICBtb2RlbC5udW1fZXhwZXJ0c19wZXJfdG9rID0gMgogICAgICAgIG1vZGVsLm51bV9leHBlcnRzX3Blcl9kZXZpY2UgPSAyCiAgICAgICAgbW9kZWwuZ3JvdXBlZF9nZW1tX2V4cGVydHMgPSBGYWtlV2VpZ2h0Qm94KCkKICAgICAgICBoaWRkZW4gPSBwYWRkbGUub25lcyhbMiwgM10sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICByb3V0aW5nID0gcGFkZGxlLnRvX3RlbnNvcihbWzEsIDFdLCBbMSwgMV1dLCBkdHlwZT0iYm9vbCIpCiAgICAgICAgcHJvYnMgPSBwYWRkbGUudG9fdGVuc29yKFtbMC43LCAwLjNdLCBbMC40LCAwLjZdXSwgZHR5cGU9ImZsb2F0MzIiKQoKICAgICAgICBvdXQgPSBNb0VMYXllci5fZm9yd2FyZF9zaW5nbGVfY2FyZF9ncm91cGVkX2dlbW1fbW9lKAogICAgICAgICAgICBtb2RlbCwgaGlkZGVuLCByb3V0aW5nLCBwcm9icwogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChvdXQubnVtcHkoKS50b2xpc3QoKSwgKGhpZGRlbiArIDQwLjApLm51bXB5KCkudG9saXN0KCkpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChsZW4oRmFrZVVwUHJvamVjdGlvbi5jYWxscyksIDEpCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChsZW4oRmFrZURvd25Qcm9qZWN0aW9uLmNhbGxzKSwgMSkKCiAgICBkZWYgdGVzdF9mcDhfcXVhbnRfd2VpZ2h0X2dyb3VwZWRfaW5kaXZpZHVhbF9tb2RlX3JhaXNlcyhzZWxmKToKICAgICAgICBtb2RlbCA9IFBsYWluKCkKICAgICAgICBtb2RlbC5tb2VfdXNlX2Z1c2lvbl9ub2RlID0gVHJ1ZQogICAgICAgIG1vZGVsLmZwOCA9IFRydWUKICAgICAgICBtb2RlbC5ncm91cGVkX2dlbW1fZXhwZXJ0cyA9IEZha2VXZWlnaHRCb3goKQogICAgICAgIG1vZGVsLnVzZV91ZThtMCA9IEZhbHNlCgogICAgICAgIHdpdGggc2VsZi5hc3NlcnRSYWlzZXMoTm90SW1wbGVtZW50ZWRFcnJvcik6CiAgICAgICAgICAgIE1vRUxheWVyLmZwOF9xdWFudF93ZWlnaHQobW9kZWwsIGJhdGNoX21vZGU9RmFsc2UpCgoKaWYgX19uYW1lX18gPT0gIl9fbWFpbl9fIjoKICAgIHVuaXR0ZXN0Lm1haW4oKQo=
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import sys
+import unittest
+
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+import paddle
+
+from paddlefleet.transformer.moe import moe_layer
+from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+
+class Plain:
+    pass
+
+
+class FakeStream:
+    cuda_stream = 123
+
+
+class FakeCuda:
+    @staticmethod
+    def current_stream():
+        return FakeStream()
+
+
+class FakeGather:
+    calls = []
+
+    @staticmethod
+    def apply(x):
+        FakeGather.calls.append(x)
+        return x + 1.0
+
+
+class FakeScatter:
+    calls = []
+
+    @staticmethod
+    def apply(x):
+        FakeScatter.calls.append(x)
+        return x + 2.0
+
+
+class FakeCommManager:
+    def __init__(self):
+        self.dispatched_probs = paddle.ones([2, 2], dtype="float32")
+        self.dispatched_indices = paddle.to_tensor(
+            [[0, 1], [1, 0]], dtype="int64"
+        )
+        self.tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        self.combine_calls = []
+
+    def combine(self, hidden_states, handle, async_finish=False):
+        self.combine_calls.append((hidden_states, handle, async_finish))
+        return hidden_states + 3.0
+
+
+class FakeTokenDispatcher:
+    def __init__(self):
+        self._comm_manager = FakeCommManager()
+
+    def token_dispatch_overlap(
+        self,
+        hidden_states,
+        token_indices,
+        token_weights,
+        fp8_dispatch,
+        async_finish=False,
+        use_ue8m0=False,
+    ):
+        del token_indices, token_weights, fp8_dispatch, async_finish, use_ue8m0
+        return hidden_states + 1.0, "fp8-handle"
+
+
+class FakeWeightBox:
+    def __init__(self):
+        self.weight1 = paddle.ones([2, 4, 3], dtype="float32")
+        self.weight2 = paddle.ones([2, 3, 4], dtype="float32")
+
+
+class FakeUpProjection:
+    calls = []
+
+    @staticmethod
+    def apply(*args, **kwargs):
+        FakeUpProjection.calls.append((args, kwargs))
+        x = args[0]
+        return x + 10.0, x + 20.0
+
+
+class FakeDownProjection:
+    calls = []
+
+    @staticmethod
+    def apply(*args, **kwargs):
+        FakeDownProjection.calls.append((args, kwargs))
+        y1 = args[0]
+        return y1 + 30.0
+
+
+class FakeFusionMoePyLayer:
+    calls = []
+
+    @staticmethod
+    def apply(*args, **kwargs):
+        FakeFusionMoePyLayer.calls.append((args, kwargs))
+        return args[0] + 40.0
+
+
+class FakeLatentProj:
+    def __init__(self, delta):
+        self.delta = delta
+        self.calls = []
+
+    def __call__(self, x):
+        self.calls.append(x)
+        return x + self.delta
+
+
+class TestMoELayerExtraExecutableBranchesNoMock(unittest.TestCase):
+    def setUp(self):
+        self.old_gather = moe_layer.GatherOp
+        self.old_scatter = moe_layer.ScatterOp
+        self.old_cuda = paddle.device.cuda
+        self.old_activation_type = getattr(moe_layer, "ActivationType", None)
+        self.old_up = getattr(moe_layer, "_UpProjection", None)
+        self.old_down = getattr(moe_layer, "_DownProjection", None)
+        self.old_count_cumsum = moe_layer.count_cumsum
+        self.old_filter_scores = moe_layer.filter_scores
+        self.old_metadata = (
+            moe_layer.fused_expert_parallel_TC_topk_router_metadata
+        )
+        self.old_fusion = moe_layer.FusionMoePyLayer
+
+    def tearDown(self):
+        moe_layer.GatherOp = self.old_gather
+        moe_layer.ScatterOp = self.old_scatter
+        paddle.device.cuda = self.old_cuda
+        if self.old_activation_type is None:
+            if hasattr(moe_layer, "ActivationType"):
+                delattr(moe_layer, "ActivationType")
+        else:
+            moe_layer.ActivationType = self.old_activation_type
+        if self.old_up is None:
+            if hasattr(moe_layer, "_UpProjection"):
+                delattr(moe_layer, "_UpProjection")
+        else:
+            moe_layer._UpProjection = self.old_up
+        if self.old_down is None:
+            if hasattr(moe_layer, "_DownProjection"):
+                delattr(moe_layer, "_DownProjection")
+        else:
+            moe_layer._DownProjection = self.old_down
+        moe_layer.count_cumsum = self.old_count_cumsum
+        moe_layer.filter_scores = self.old_filter_scores
+        moe_layer.fused_expert_parallel_TC_topk_router_metadata = (
+            self.old_metadata
+        )
+        moe_layer.FusionMoePyLayer = self.old_fusion
+
+    def install_sonic_stubs(self):
+        paddle.device.cuda = FakeCuda
+        moe_layer.ActivationType = lambda name: name
+        moe_layer._UpProjection = FakeUpProjection
+        moe_layer._DownProjection = FakeDownProjection
+
+        def fake_filter_scores(probs, indices):
+            return probs + indices.astype("float32")
+
+        def fake_count_cumsum(indices, expert_count, do_cumsum=True):
+            del indices, do_cumsum
+            freq = paddle.ones([expert_count], dtype="int64")
+            offset = paddle.arange(expert_count + 1, dtype="int64")
+            return freq, offset
+
+        def fake_metadata(indices, offsets, k):
+            flat_count = indices.shape[0] * k
+            gather = paddle.arange(indices.shape[0], dtype="int64")
+            scatter = paddle.arange(flat_count, dtype="int64")
+            reverse = paddle.arange(flat_count, dtype="int64")
+            active = paddle.arange(indices.shape[0] + 1, dtype="int64")
+            return offsets, gather, scatter, reverse, active
+
+        moe_layer.filter_scores = fake_filter_scores
+        moe_layer.count_cumsum = fake_count_cumsum
+        moe_layer.fused_expert_parallel_TC_topk_router_metadata = fake_metadata
+
+    def test_compute_gate_uses_gather_for_single_card_sequence_parallel(self):
+        moe_layer.GatherOp = FakeGather
+        FakeGather.calls = []
+        model = Plain()
+        model.expert_model_parallel_size = 1
+        model.sequence_parallel = True
+
+        class Gate:
+            def __init__(self):
+                self.hidden = None
+                self.input_ids = None
+
+            def __call__(self, hidden_states, input_ids=None):
+                self.hidden = hidden_states
+                self.input_ids = input_ids
+                return "gate-result"
+
+        model.gate = Gate()
+        hidden = paddle.ones([2, 3], dtype="float32")
+        input_ids = paddle.to_tensor([7, 8], dtype="int64")
+
+        result = MoELayer.compute_gate(model, hidden, input_ids=input_ids)
+
+        self.assertEqual(result, "gate-result")
+        self.assertEqual(
+            FakeGather.calls[0].numpy().tolist(), hidden.numpy().tolist()
+        )
+        self.assertEqual(
+            model.gate.hidden.numpy().tolist(), (hidden + 1.0).numpy().tolist()
+        )
+        self.assertIs(model.gate.input_ids, input_ids)
+
+    def test_aux_loss_compute_scatter_shared_and_latent_paths(self):
+        moe_layer.ScatterOp = FakeScatter
+        FakeScatter.calls = []
+        model = Plain()
+        model.use_latent_moe = True
+        model.fc2_latent_proj = FakeLatentProj(1.0)
+        model.training = True
+        model.router_aux_loss_coef = 0.5
+        model.shared_experts = lambda residuals: (residuals + 4.0,)
+        model.expert_model_parallel_size = 1
+        model.sequence_parallel = True
+        hidden = paddle.ones([4, 2], dtype="float32")
+        residuals = paddle.zeros([2, 2, 2], dtype="float32")
+
+        out = MoELayer.aux_loss_compute(
+            model,
+            (
+                hidden,
+                paddle.to_tensor([0.5]),
+                paddle.to_tensor([0.25]),
+                residuals,
+            ),
+        )
+
+        self.assertEqual(out.shape, [2, 2, 2])
+        self.assertEqual(len(FakeScatter.calls), 1)
+        self.assertTrue(float(out.sum()) > 0.0)
+
+    def test_compute_dispatch_experts_and_combine_paths(self):
+        model = Plain()
+        model.moe_use_fusion_node = True
+        model.use_hybrid_ep_backend = False
+        model._use_hybrid_ep_fusion = lambda: False
+        model.token_dispatcher = FakeTokenDispatcher()
+        model.fp8_dispatch = False
+        model.use_ue8m0 = False
+        model.fp8 = False
+        model.moe_deep_gemm = False
+        model.recompute_moe_gate_up = False
+        model.recompute_moe_premute = False
+        model.fp8_wgrad = False
+        model.use_auto_subbatch = False
+        model.moe_expert_fusion = False
+        model.moe_subbatch_token_num_after_dispatch = None
+        model.moe_subbatch_diag = False
+        model.dw_p2p_overlap = False
+        model.num_experts_per_tok = 2
+        moe_layer.FusionMoePyLayer = FakeFusionMoePyLayer
+        FakeFusionMoePyLayer.calls = []
+        hidden = paddle.ones([2, 3], dtype="float32")
+        indices = paddle.to_tensor([[0, 1], [1, 0]], dtype="int64")
+        weights = paddle.ones([2, 2], dtype="float32")
+
+        dispatched = MoELayer.compute_dispatch(
+            model, (hidden, indices, weights), async_finish=True
+        )
+        expert_out = MoELayer.compute_experts(
+            model, dispatched, is_first_fwd=True
+        )
+        combined = MoELayer.compute_combine(
+            model, expert_out, async_finish=True
+        )
+
+        self.assertEqual(dispatched[1].shape, [2, 2])
+        self.assertEqual(
+            expert_out.numpy().tolist(), (hidden + 41.0).numpy().tolist()
+        )
+        self.assertFalse(expert_out.stop_gradient)
+        self.assertEqual(
+            combined.numpy().tolist(), (expert_out + 3.0).numpy().tolist()
+        )
+
+        dense_model = Plain()
+        dense_model.moe_use_fusion_node = False
+        dense_model.routed_experts_compute = lambda x: x + 5.0
+        dense_model.combine = lambda x: x + 6.0
+        dense_expert = MoELayer.compute_experts(dense_model, (hidden, None))
+        dense_combined = MoELayer.compute_combine(dense_model, dense_expert)
+        self.assertEqual(
+            dense_combined.numpy().tolist(), (hidden + 11.0).numpy().tolist()
+        )
+
+    def test_fusion_moe_forward_sonic_branch_uses_projection_stubs(self):
+        self.install_sonic_stubs()
+        FakeUpProjection.calls = []
+        FakeDownProjection.calls = []
+        model = Plain()
+        model.use_latent_moe = True
+        model.fc1_latent_proj = FakeLatentProj(1.0)
+        model.fc2_latent_proj = FakeLatentProj(2.0)
+        model.layer_number = 3
+        model.moe_group = None
+        model.num_experts_per_tok = 2
+        model.num_experts_per_device = 2
+        model.use_hybrid_ep_backend = False
+        model.moe_use_fusion_node = True
+        model.using_sonic_moe = True
+        model.grouped_gemm_experts = FakeWeightBox()
+        model.token_dispatcher = FakeTokenDispatcher()
+        model._use_hybrid_ep_fusion = lambda: False
+        model.dispatch = (
+            lambda hidden_states,
+            probs,
+            routing_map,
+            topk_weights,
+            topk_indices: (hidden_states + 1.0, "handle")
+        )
+        hidden = paddle.ones([2, 3], dtype="float32")
+        probs = paddle.ones([2, 2], dtype="float32")
+        routing = paddle.ones([2, 2], dtype="bool")
+
+        out = MoELayer.fusion_moe_forward(
+            model, hidden, probs, routing, combine_overlap_handle=None
+        )
+
+        self.assertEqual(out.numpy().tolist(), (hidden + 47.0).numpy().tolist())
+        self.assertEqual(len(FakeUpProjection.calls), 1)
+        self.assertEqual(len(FakeDownProjection.calls), 1)
+
+    def test_single_card_grouped_gemm_sonic_branch_uses_projection_stubs(self):
+        self.install_sonic_stubs()
+        FakeUpProjection.calls = []
+        FakeDownProjection.calls = []
+        model = Plain()
+        model.using_sonic_moe = True
+        model.num_experts_per_tok = 2
+        model.num_experts_per_device = 2
+        model.grouped_gemm_experts = FakeWeightBox()
+        hidden = paddle.ones([2, 3], dtype="float32")
+        routing = paddle.to_tensor([[1, 1], [1, 1]], dtype="bool")
+        probs = paddle.to_tensor([[0.7, 0.3], [0.4, 0.6]], dtype="float32")
+
+        out = MoELayer._forward_single_card_grouped_gemm_moe(
+            model, hidden, routing, probs
+        )
+
+        self.assertEqual(out.numpy().tolist(), (hidden + 40.0).numpy().tolist())
+        self.assertEqual(len(FakeUpProjection.calls), 1)
+        self.assertEqual(len(FakeDownProjection.calls), 1)
+
+    def test_fp8_quant_weight_grouped_individual_mode_raises(self):
+        model = Plain()
+        model.moe_use_fusion_node = True
+        model.fp8 = True
+        model.grouped_gemm_experts = FakeWeightBox()
+        model.use_ue8m0 = False
+
+        with self.assertRaises(NotImplementedError):
+            MoELayer.fp8_quant_weight(model, batch_mode=False)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,1 +1,424 @@
-IyBDb3B5cmlnaHQgKGMpIDIwMjYgUGFkZGxlUGFkZGxlIEF1dGhvcnMuIEFsbCBSaWdodHMgUmVzZXJ2ZWQuCiMKIyBMaWNlbnNlZCB1bmRlciB0aGUgQXBhY2hlIExpY2Vuc2UsIFZlcnNpb24gMi4wICh0aGUgIkxpY2Vuc2UiKTsKIyB5b3UgbWF5IG5vdCB1c2UgdGhpcyBmaWxlIGV4Y2VwdCBpbiBjb21wbGlhbmNlIHdpdGggdGhlIExpY2Vuc2UuCiMgWW91IG1heSBvYnRhaW4gYSBjb3B5IG9mIHRoZSBMaWNlbnNlIGF0CiMKIyAgICAgaHR0cDovL3d3dy5hcGFjaGUub3JnL2xpY2Vuc2VzL0xJQ0VOU0UtMi4wCiMKIyBVbmxlc3MgcmVxdWlyZWQgYnkgYXBwbGljYWJsZSBsYXcgb3IgYWdyZWVkIHRvIGluIHdyaXRpbmcsIHNvZnR3YXJlCiMgZGlzdHJpYnV0ZWQgdW5kZXIgdGhlIExpY2Vuc2UgaXMgZGlzdHJpYnV0ZWQgb24gYW4gIkFTIElTIiBCQVNJUywKIyBXSVRIT1VUIFdBUlJBTlRJRVMgT1IgQ09ORElUSU9OUyBPRiBBTlkgS0lORCwgZWl0aGVyIGV4cHJlc3Mgb3IgaW1wbGllZC4KIyBTZWUgdGhlIExpY2Vuc2UgZm9yIHRoZSBzcGVjaWZpYyBsYW5ndWFnZSBnb3Zlcm5pbmcgcGVybWlzc2lvbnMgYW5kCiMgbGltaXRhdGlvbnMgdW5kZXIgdGhlIExpY2Vuc2UuCmltcG9ydCBvcwppbXBvcnQgc3lzCmltcG9ydCB1bml0dGVzdAoKUkVQT19ST09UID0gb3MucGF0aC5kaXJuYW1lKAogICAgb3MucGF0aC5kaXJuYW1lKAogICAgICAgIG9zLnBhdGguZGlybmFtZShvcy5wYXRoLmRpcm5hbWUob3MucGF0aC5hYnNwYXRoKF9fZmlsZV9fKSkpCiAgICApCikKc3lzLnBhdGguaW5zZXJ0KDAsIG9zLnBhdGguam9pbihSRVBPX1JPT1QsICJzcmMiKSkKCmltcG9ydCBwYWRkbGUKZnJvbSBwYWRkbGUuZGlzdHJpYnV0ZWQuZmxlZXQubWV0YV9wYXJhbGxlbCBpbXBvcnQgTGF5ZXJTcGVjCgpmcm9tIHBhZGRsZWZsZWV0LnRyYW5zZm9ybWVyIGltcG9ydCB0cmFuc2Zvcm1lcl9sYXllcgpmcm9tIHBhZGRsZWZsZWV0LnRyYW5zZm9ybWVyLm1vZS5tb2VfbGF5ZXIgaW1wb3J0IE1vRUxheWVyCmZyb20gcGFkZGxlZmxlZXQudHJhbnNmb3JtZXIudHJhbnNmb3JtZXJfbGF5ZXIgaW1wb3J0ICgKICAgIFRyYW5zZm9ybWVyTGF5ZXIsCiAgICBUcmFuc2Zvcm1lckxheWVyTm9kZSwKICAgIFRyYW5zZm9ybWVyTGF5ZXJTdWJsYXllcnNTcGVjLAogICAgVHJhbnNmb3JtZXJMYXllcldpdGhPdmVybGFwLAopCgoKY2xhc3MgUGxhaW46CiAgICBwYXNzCgoKY2xhc3MgUEdDb2xsZWN0aW9uOgogICAgdHAgPSBOb25lCgoKY2xhc3MgTm9uSWRlbnRpdHlMYXllcjoKICAgIGRlZiBfX2NhbGxfXyhzZWxmLCB4KToKICAgICAgICByZXR1cm4geCArIDEuMAoKCmNsYXNzIFVua25vd25NTFA6CiAgICBkZWYgc2V0X2xheWVyX251bWJlcihzZWxmLCBsYXllcl9udW1iZXIpOgogICAgICAgIHNlbGYubGF5ZXJfbnVtYmVyID0gbGF5ZXJfbnVtYmVyCgogICAgZGVmIF9fY2FsbF9fKHNlbGYsIHgpOgogICAgICAgIHJldHVybiB4ICsgMS4wLCBOb25lCgoKY2xhc3MgRmFrZUJEQToKICAgIGRlZiBfX2NhbGxfXyhzZWxmLCB0cmFpbmluZywgYmlhc19kcm9wb3V0X2Z1c2lvbik6CiAgICAgICAgZGVsIHRyYWluaW5nLCBiaWFzX2Ryb3BvdXRfZnVzaW9uCgogICAgICAgIGRlZiBhcHBseShvdXRwdXRfd2l0aF9iaWFzLCByZXNpZHVhbCwgaGlkZGVuX2Ryb3BvdXRfcHJvYik6CiAgICAgICAgICAgIGRlbCBoaWRkZW5fZHJvcG91dF9wcm9iCiAgICAgICAgICAgIGlmIGlzaW5zdGFuY2Uob3V0cHV0X3dpdGhfYmlhcywgZGljdCk6CiAgICAgICAgICAgICAgICB2YWx1ZSA9IG91dHB1dF93aXRoX2JpYXMuZ2V0KCJoaWRkZW5fc3RhdGVzIiwgcmVzaWR1YWwpCiAgICAgICAgICAgICAgICBiaWFzID0gb3V0cHV0X3dpdGhfYmlhcy5nZXQoImJpYXMiLCBOb25lKQogICAgICAgICAgICBlbGlmIGlzaW5zdGFuY2Uob3V0cHV0X3dpdGhfYmlhcywgdHVwbGUpOgogICAgICAgICAgICAgICAgdmFsdWUsIGJpYXMgPSBvdXRwdXRfd2l0aF9iaWFzCiAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICB2YWx1ZSwgYmlhcyA9IG91dHB1dF93aXRoX2JpYXMsIE5vbmUKICAgICAgICAgICAgaWYgYmlhcyBpcyBub3QgTm9uZToKICAgICAgICAgICAgICAgIHZhbHVlID0gdmFsdWUgKyBiaWFzCiAgICAgICAgICAgIHJldHVybiB2YWx1ZSArIHJlc2lkdWFsCgogICAgICAgIHJldHVybiBhcHBseQoKCmNsYXNzIFR1cGxlQXR0ZW50aW9uOgogICAgZGVmIF9fY2FsbF9fKHNlbGYsIHgsICoqa3dhcmdzKToKICAgICAgICBzZWxmLmt3YXJncyA9IGt3YXJncwogICAgICAgIHJldHVybiB4ICsgMi4wLCBwYWRkbGUub25lc19saWtlKHgpCgoKY2xhc3MgQ29udGV4dENyb3NzQXR0ZW50aW9uOgogICAgZGVmIF9fY2FsbF9fKHNlbGYsIHgsICoqa3dhcmdzKToKICAgICAgICBzZWxmLmt3YXJncyA9IGt3YXJncwogICAgICAgIHJldHVybiB7ImhpZGRlbl9zdGF0ZXMiOiB4ICsgMy4wLCAiY29udGV4dCI6IHggKyA0LjB9CgoKY2xhc3MgRmFrZU1vRUZvck1scChNb0VMYXllcik6CiAgICBkZWYgX19pbml0X18oc2VsZik6CiAgICAgICAgc2VsZi5jYWxscyA9IFtdCgogICAgZGVmIF9fY2FsbF9fKHNlbGYsIHgsIGlucHV0X2lkcz1Ob25lKToKICAgICAgICBzZWxmLmNhbGxzLmFwcGVuZChpbnB1dF9pZHMpCiAgICAgICAgcmV0dXJuIHggKyAyLjAsIHBhZGRsZS5vbmVzX2xpa2UoeCkKCgpjbGFzcyBGYWtlT3ZlcmxhcE1MUDoKICAgIGRlZiBfX2luaXRfXyhzZWxmKToKICAgICAgICBzZWxmLmRpc3BhdGNoX2NhbGxzID0gW10KCiAgICBkZWYgY29tcHV0ZV9nYXRlKHNlbGYsIGhpZGRlbl9zdGF0ZXMpOgogICAgICAgIHJldHVybiAoCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgIGhpZGRlbl9zdGF0ZXMgKyAxLjAsCiAgICAgICAgICAgIGhpZGRlbl9zdGF0ZXMgKyAyLjAsCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgICAgIHBhZGRsZS50b190ZW5zb3IoWzAuMjVdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICAgICBwYWRkbGUudG9fdGVuc29yKFswLjVdLCBkdHlwZT0iZmxvYXQzMiIpLAogICAgICAgICkKCiAgICBkZWYgZGlzcGF0Y2hfcHJlcHJvY2VzcyhzZWxmLCBhcmdzKToKICAgICAgICBzZWxmLmRpc3BhdGNoX2NhbGxzLmFwcGVuZChhcmdzKQogICAgICAgIGhpZGRlbl9zdGF0ZXMsIHRvcGtfd2VpZ2h0cywgdG9wa19pbmRpY2VzID0gYXJncwogICAgICAgIHJldHVybiBoaWRkZW5fc3RhdGVzICsgMy4wLCB0b3BrX2luZGljZXMgKyAxLjAsIHRvcGtfd2VpZ2h0cyArIDEuMAoKCmNsYXNzIEluaXRDb25maWc6CiAgICBkZWYgX19pbml0X18oc2VsZiwgY3BfY29tbV90eXBlLCByZWNvbXB1dGVfbW9kdWxlcywgcmVjb21wdXRlX21ldGhvZD0iYmxvY2siKToKICAgICAgICBzZWxmLmdwdF9tb2RlbF91c2VfZXhwZXJpbWVudGFsX3ZlcnNpb24gPSBGYWxzZQogICAgICAgIHNlbGYuaGlkZGVuX2Ryb3BvdXRfcHJvYiA9IDAuMAogICAgICAgIHNlbGYuc2VxdWVuY2VfcGFyYWxsZWwgPSBGYWxzZQogICAgICAgIHNlbGYudGVuc29yX21vZGVsX3BhcmFsbGVsX3NpemUgPSAxCiAgICAgICAgc2VsZi5oaWRkZW5fc2l6ZSA9IDIKICAgICAgICBzZWxmLnJtc19ub3JtX2VwcyA9IDFlLTUKICAgICAgICBzZWxmLmNvbnRleHRfcGFyYWxsZWxfc2l6ZSA9IDIKICAgICAgICBzZWxmLmNwX2NvbW1fdHlwZSA9IGNwX2NvbW1fdHlwZQogICAgICAgIHNlbGYucmVjb21wdXRlX2dyYW51bGFyaXR5ID0gInNlbGVjdGl2ZSIKICAgICAgICBzZWxmLnJlY29tcHV0ZV9tb2R1bGVzID0gcmVjb21wdXRlX21vZHVsZXMKICAgICAgICBzZWxmLnJlY29tcHV0ZV9udW1fbGF5ZXJzID0gMQogICAgICAgIHNlbGYucmVjb21wdXRlX21ldGhvZCA9IHJlY29tcHV0ZV9tZXRob2QKICAgICAgICBzZWxmLmJsb2NrX2F0dGVudGlvbl9yZXNpZHVhbHMgPSBGYWxzZQogICAgICAgIHNlbGYuYXR0bl9yZXNfYmxvY2tfc2l6ZSA9IDQKICAgICAgICBzZWxmLm51bV9lbXB0eV9sYXllcnNfYWRkX2luX2hlYWQgPSAwCiAgICAgICAgc2VsZi5udW1faGlkZGVuX2xheWVycyA9IDIKICAgICAgICBzZWxmLm51bV9lbXB0eV9sYXllcnNfYWRkX2luX3RhaWwgPSAwCiAgICAgICAgc2VsZi52aXJ0dWFsX3BpcGVsaW5lX21vZGVsX3BhcmFsbGVsX3NpemUgPSBOb25lCiAgICAgICAgc2VsZi5waXBlbGluZV9tb2RlbF9wYXJhbGxlbF9zaXplID0gMQogICAgICAgIHNlbGYuYmlhc19kcm9wb3V0X2Z1c2lvbiA9IEZhbHNlCgoKY2xhc3MgVGlueUNvbmZpZzoKICAgIG51bV9uZXh0bl9wcmVkaWN0X2xheWVycyA9IDEKICAgIG10cF9sb2FkX3dlaWdodF9vbmx5ID0gRmFsc2UKCgpjbGFzcyBEZW5zZUxheWVyOgogICAgZnVsbF9yZWNvbXB1dGUgPSBGYWxzZQogICAgbWxwID0gb2JqZWN0KCkKCiAgICBkZWYgY29tcHV0ZV9hdHRlbnRpb24oc2VsZiwgaW5wdXRzLCBpc19maXJzdF9md2Q9RmFsc2UpOgogICAgICAgIGRlbCBpc19maXJzdF9md2QKICAgICAgICByZXR1cm4gaW5wdXRzWyJoaWRkZW5fc3RhdGVzIl0gKyAxLjAsIE5vbmUKCiAgICBkZWYgY29tcHV0ZV9tbHAoc2VsZiwgaGlkZGVuX3N0YXRlcywgaXNfZmlyc3RfZndkPUZhbHNlKToKICAgICAgICBkZWwgaXNfZmlyc3RfZndkCiAgICAgICAgcmV0dXJuIGhpZGRlbl9zdGF0ZXMgKyAyLjAKCgpjbGFzcyBGYWtlU2NoZWR1bGVOb2RlOgogICAgZGVmIF9faW5pdF9fKHNlbGYsIGZ3ZF9mdW5jLCBuYW1lPSIiKToKICAgICAgICBzZWxmLmZ3ZF9mdW5jID0gZndkX2Z1bmMKICAgICAgICBzZWxmLm5hbWUgPSBuYW1lCgogICAgZGVmIGZvcndhcmQoc2VsZiwgaW5wdXRzPSgpLCAqKmt3YXJncyk6CiAgICAgICAgcmV0dXJuIHNlbGYuZndkX2Z1bmMoaW5wdXRzLCAqKmt3YXJncykKCiAgICBkZWYgYmFja3dhcmQoc2VsZiwgb3V0cHV0X2dyYWQ9Tm9uZSwgc2NhbGVyPU5vbmUpOgogICAgICAgIGRlbCBzY2FsZXIKICAgICAgICBpZiBpc2luc3RhbmNlKG91dHB1dF9ncmFkLCAobGlzdCwgdHVwbGUpKToKICAgICAgICAgICAgcmV0dXJuIChvdXRwdXRfZ3JhZFswXSwpCiAgICAgICAgcmV0dXJuIChvdXRwdXRfZ3JhZCwpCgoKY2xhc3MgVGVzdFRyYW5zZm9ybWVyTGF5ZXJDb25zdHJ1Y3RvckFuZEhlbHBlcnModW5pdHRlc3QuVGVzdENhc2UpOgogICAgZGVmIHNldFVwKHNlbGYpOgogICAgICAgIHNlbGYub2xkX2J1aWxkX3NwZWNfbGF5ZXIgPSB0cmFuc2Zvcm1lcl9sYXllci5idWlsZF9zcGVjX2xheWVyCiAgICAgICAgc2VsZi5vbGRfcmVjb21wdXRlID0gdHJhbnNmb3JtZXJfbGF5ZXIucmVjb21wdXRlCiAgICAgICAgc2VsZi5vbGRfbG9nX2xheWVyX21kNSA9IFRyYW5zZm9ybWVyTGF5ZXIuX0xPR19MQVlFUl9NRDUKICAgICAgICBzZWxmLm9sZF9leHBlcmltZW50YWwgPSBUcmFuc2Zvcm1lckxheWVyLl9ncHRfbW9kZWxfdXNlX2V4cGVyaW1lbnRhbF92ZXJzaW9uCgogICAgZGVmIHRlYXJEb3duKHNlbGYpOgogICAgICAgIHRyYW5zZm9ybWVyX2xheWVyLmJ1aWxkX3NwZWNfbGF5ZXIgPSBzZWxmLm9sZF9idWlsZF9zcGVjX2xheWVyCiAgICAgICAgdHJhbnNmb3JtZXJfbGF5ZXIucmVjb21wdXRlID0gc2VsZi5vbGRfcmVjb21wdXRlCiAgICAgICAgVHJhbnNmb3JtZXJMYXllci5fTE9HX0xBWUVSX01ENSA9IHNlbGYub2xkX2xvZ19sYXllcl9tZDUKICAgICAgICBUcmFuc2Zvcm1lckxheWVyLl9ncHRfbW9kZWxfdXNlX2V4cGVyaW1lbnRhbF92ZXJzaW9uID0gc2VsZi5vbGRfZXhwZXJpbWVudGFsCgogICAgZGVmIF9zcGVjKHNlbGYpOgogICAgICAgIHJldHVybiBUcmFuc2Zvcm1lckxheWVyU3VibGF5ZXJzU3BlYygKICAgICAgICAgICAgaW5wdXRfbGF5ZXJub3JtPU5vbklkZW50aXR5TGF5ZXIsCiAgICAgICAgICAgIHNlbGZfYXR0bj1UdXBsZUF0dGVudGlvbiwKICAgICAgICAgICAgc2VsZl9hdHRuX2JkYT1GYWtlQkRBLAogICAgICAgICAgICBwcmVfY3Jvc3NfYXR0bl9sYXllcm5vcm09Tm9uSWRlbnRpdHlMYXllciwKICAgICAgICAgICAgY3Jvc3NfYXR0ZW50aW9uPUNvbnRleHRDcm9zc0F0dGVudGlvbiwKICAgICAgICAgICAgY3Jvc3NfYXR0bl9iZGE9RmFrZUJEQSwKICAgICAgICAgICAgcG9zdF9hdHRlbnRpb25fbGF5ZXJub3JtPU5vbklkZW50aXR5TGF5ZXIsCiAgICAgICAgICAgIG1scD1MYXllclNwZWMoVW5rbm93bk1MUCksCiAgICAgICAgICAgIG1scF9iZGE9RmFrZUJEQSwKICAgICAgICAgICAgYmxvY2tfYXR0bl9yZXM9Tm9uSWRlbnRpdHlMYXllciwKICAgICAgICApCgogICAgZGVmIF9pbnN0YWxsX2J1aWxkX3N0dWIoc2VsZik6CiAgICAgICAgZGVmIGJ1aWxkKHNwZWMsICphcmdzLCAqKmt3YXJncyk6CiAgICAgICAgICAgIGRlbCBhcmdzCiAgICAgICAgICAgIGlmIGlzaW5zdGFuY2Uoc3BlYywgTGF5ZXJTcGVjKToKICAgICAgICAgICAgICAgIGxheWVyID0gc3BlYy5sYXllcigpCiAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICBsYXllciA9IHNwZWMoKQogICAgICAgICAgICBsYXllci5pbml0X2t3YXJncyA9IGt3YXJncwogICAgICAgICAgICByZXR1cm4gbGF5ZXIKCiAgICAgICAgdHJhbnNmb3JtZXJfbGF5ZXIuYnVpbGRfc3BlY19sYXllciA9IGJ1aWxkCgogICAgZGVmIHRlc3RfaW5pdF9jb3ZlcnNfY3BfbGlzdF91bmtub3duX21scF9hbmRfc2VsZWN0aXZlX2xpc3Qoc2VsZik6CiAgICAgICAgc2VsZi5faW5zdGFsbF9idWlsZF9zdHViKCkKICAgICAgICBjb25maWcgPSBJbml0Q29uZmlnKFsiemVybyIsICJvbmUiXSwgWyJub3JtIiwgIm1scCJdKQoKICAgICAgICBsYXllciA9IFRyYW5zZm9ybWVyTGF5ZXIoCiAgICAgICAgICAgIGNvbmZpZywgc2VsZi5fc3BlYygpLCBsYXllcl9udW1iZXI9MCwgcGdfY29sbGVjdGlvbj1QR0NvbGxlY3Rpb24oKQogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKGxheWVyLnJlY29tcHV0ZV9pbnB1dF9sYXllcm5vcm0pCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKGxheWVyLnJlY29tcHV0ZV9wb3N0X2F0dGVudGlvbl9sYXllcm5vcm0pCiAgICAgICAgc2VsZi5hc3NlcnRUcnVlKGxheWVyLnJlY29tcHV0ZV9tbHApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChsYXllci5zZWxmX2F0dG4uaW5pdF9rd2FyZ3NbImNwX2NvbW1fdHlwZSJdLCAiemVybyIpCgogICAgZGVmIHRlc3RfaW5pdF9jb3ZlcnNfY3Bfc3RyaW5nX2FuZF9zZWxlY3RpdmVfZGljdChzZWxmKToKICAgICAgICBzZWxmLl9pbnN0YWxsX2J1aWxkX3N0dWIoKQogICAgICAgIGNvbmZpZyA9IEluaXRDb25maWcoInJpbmciLCB7Im5vcm0iOiAxLCAibWxwIjogMX0sICJmaXJzdF9uIikKCiAgICAgICAgbGF5ZXIgPSBUcmFuc2Zvcm1lckxheWVyKAogICAgICAgICAgICBjb25maWcsIHNlbGYuX3NwZWMoKSwgbGF5ZXJfbnVtYmVyPTAsIHBnX2NvbGxlY3Rpb249UEdDb2xsZWN0aW9uKCkKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZShsYXllci5yZWNvbXB1dGVfaW5wdXRfbGF5ZXJub3JtKQogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZShsYXllci5yZWNvbXB1dGVfcG9zdF9hdHRlbnRpb25fbGF5ZXJub3JtKQogICAgICAgIHNlbGYuYXNzZXJ0VHJ1ZShsYXllci5yZWNvbXB1dGVfbWxwKQogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGF5ZXIuc2VsZl9hdHRuLmluaXRfa3dhcmdzWyJjcF9jb21tX3R5cGUiXSwgInJpbmciKQoKICAgIGRlZiB0ZXN0X2ZvcndhcmRfYXR0ZW50aW9uX2NvbnRleHRfYW5kX2Jsb2NrX3Jlc2lkdWFsX2JyYW5jaGVzKHNlbGYpOgogICAgICAgIG1vZGVsID0gUGxhaW4oKQogICAgICAgIG1vZGVsLnJlY29tcHV0ZV9pbnB1dF9sYXllcm5vcm0gPSBGYWxzZQogICAgICAgIG1vZGVsLmlucHV0X2xheWVybm9ybSA9IE5vbklkZW50aXR5TGF5ZXIoKQogICAgICAgIG1vZGVsLnNlbGZfYXR0biA9IFR1cGxlQXR0ZW50aW9uKCkKICAgICAgICBtb2RlbC5wcmVfY3Jvc3NfYXR0bl9sYXllcm5vcm0gPSBOb25JZGVudGl0eUxheWVyKCkKICAgICAgICBtb2RlbC5jcm9zc19hdHRlbnRpb24gPSBDb250ZXh0Q3Jvc3NBdHRlbnRpb24oKQogICAgICAgIG1vZGVsLmNyb3NzX2F0dG5fYmRhID0gRmFrZUJEQSgpCiAgICAgICAgbW9kZWwuaGlkZGVuX2Ryb3BvdXRfcHJvYiA9IDAuMAogICAgICAgIG1vZGVsLnRyYWluaW5nID0gRmFsc2UKICAgICAgICBtb2RlbC5jb25maWcgPSBQbGFpbigpCiAgICAgICAgbW9kZWwuY29uZmlnLmJpYXNfZHJvcG91dF9mdXNpb24gPSBGYWxzZQogICAgICAgIG1vZGVsLmxheWVyX251bWJlciA9IDUKICAgICAgICBtb2RlbC5fbG9nX21kNSA9IGxhbWJkYSAqYXJncywgKiprd2FyZ3M6IE5vbmUKICAgICAgICBoaWRkZW5fc3RhdGVzID0gcGFkZGxlLm9uZXMoWzIsIDJdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgaGlkZGVuX3N0YXRlcy5zdG9wX2dyYWRpZW50ID0gRmFsc2UKCiAgICAgICAgb3V0cHV0LCBjb250ZXh0ID0gVHJhbnNmb3JtZXJMYXllci5fZm9yd2FyZF9hdHRlbnRpb24oCiAgICAgICAgICAgIG1vZGVsLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzLAogICAgICAgICAgICBibG9ja19hdHRlbnRpb25fcmVzaWR1YWxzPVRydWUsCiAgICAgICAgICAgIGlzX2ZpcnN0X2Z3ZD1UcnVlLAogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChvdXRwdXQuc2hhcGUsIFsyLCAyXSkKICAgICAgICBzZWxmLmFzc2VydEVxdWFsKGNvbnRleHQuc2hhcGUsIFsyLCAyXSkKICAgICAgICBzZWxmLmFzc2VydEZhbHNlKG91dHB1dC5zdG9wX2dyYWRpZW50KQoKICAgIGRlZiB0ZXN0X2ZvcndhcmRfbWxwX3JlY29tcHV0ZV9tZDVfYmxvY2tfYW5kX2ZpcnN0X2ZvcndhcmRfYnJhbmNoZXMoc2VsZik6CiAgICAgICAgdHJhbnNmb3JtZXJfbGF5ZXIucmVjb21wdXRlID0gbGFtYmRhIGZ1bmMsICphcmdzLCAqKmt3YXJnczogZnVuYygKICAgICAgICAgICAgKmFyZ3MsICoqa3dhcmdzCiAgICAgICAgKQogICAgICAgIFRyYW5zZm9ybWVyTGF5ZXIuX0xPR19MQVlFUl9NRDUgPSBUcnVlCiAgICAgICAgVHJhbnNmb3JtZXJMYXllci5fZ3B0X21vZGVsX3VzZV9leHBlcmltZW50YWxfdmVyc2lvbiA9IFRydWUKICAgICAgICBtb2RlbCA9IFBsYWluKCkKICAgICAgICBtb2RlbC5yZWNvbXB1dGVfcG9zdF9hdHRlbnRpb25fbGF5ZXJub3JtID0gRmFsc2UKICAgICAgICBtb2RlbC5wb3N0X2F0dGVudGlvbl9sYXllcm5vcm0gPSBOb25JZGVudGl0eUxheWVyKCkKICAgICAgICBtb2RlbC5tbHAgPSBGYWtlTW9FRm9yTWxwKCkKICAgICAgICBtb2RlbC5tbHBfYmRhID0gRmFrZUJEQSgpCiAgICAgICAgbW9kZWwuaGlkZGVuX2Ryb3BvdXRfcHJvYiA9IDAuMAogICAgICAgIG1vZGVsLnRyYWluaW5nID0gRmFsc2UKICAgICAgICBtb2RlbC5jb25maWcgPSBQbGFpbigpCiAgICAgICAgbW9kZWwuY29uZmlnLmJpYXNfZHJvcG91dF9mdXNpb24gPSBGYWxzZQogICAgICAgIG1vZGVsLmxheWVyX251bWJlciA9IDcKICAgICAgICBtb2RlbC5fbG9nX21kNSA9IGxhbWJkYSAqYXJncywgKiprd2FyZ3M6IE5vbmUKICAgICAgICBoaWRkZW5fc3RhdGVzID0gcGFkZGxlLm9uZXMoWzIsIDJdLCBkdHlwZT0iZmxvYXQzMiIpCiAgICAgICAgaGlkZGVuX3N0YXRlcy5zdG9wX2dyYWRpZW50ID0gRmFsc2UKICAgICAgICBtb2RlbC5yZWNvbXB1dGVfbWxwID0gVHJ1ZQoKICAgICAgICByZWNvbXB1dGVkID0gVHJhbnNmb3JtZXJMYXllci5fZm9yd2FyZF9tbHAoCiAgICAgICAgICAgIG1vZGVsLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzLAogICAgICAgICAgICBpc19maXJzdF9md2Q9VHJ1ZSwKICAgICAgICAgICAgaW5wdXRfaWRzPXBhZGRsZS50b190ZW5zb3IoW1sxLCAyXV0sIGR0eXBlPSJpbnQ2NCIpLAogICAgICAgICkKCiAgICAgICAgbW9kZWwucmVjb21wdXRlX21scCA9IEZhbHNlCiAgICAgICAgYmxvY2tfb3V0cHV0ID0gVHJhbnNmb3JtZXJMYXllci5fZm9yd2FyZF9tbHAoCiAgICAgICAgICAgIG1vZGVsLAogICAgICAgICAgICBoaWRkZW5fc3RhdGVzLAogICAgICAgICAgICBpc19maXJzdF9md2Q9VHJ1ZSwKICAgICAgICAgICAgYmxvY2tfYXR0ZW50aW9uX3Jlc2lkdWFscz1UcnVlLAogICAgICAgICkKCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChyZWNvbXB1dGVkLnNoYXBlLCBbMiwgMl0pCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChibG9ja19vdXRwdXQuc2hhcGUsIFsyLCAyXSkKICAgICAgICBzZWxmLmFzc2VydEZhbHNlKGJsb2NrX291dHB1dC5zdG9wX2dyYWRpZW50KQoKICAgIGRlZiB0ZXN0X2ZvcndhcmRfaW1wbF90dXBsZV9jb250ZXh0X2FuZF9ibG9ja19jYXN0X2JyYW5jaGVzKHNlbGYpOgogICAgICAgIG1vZGVsID0gUGxhaW4oKQogICAgICAgIG1vZGVsLmNvbmZpZyA9IFBsYWluKCkKICAgICAgICBtb2RlbC5jb25maWcuYmxvY2tfYXR0ZW50aW9uX3Jlc2lkdWFscyA9IEZhbHNlCiAgICAgICAgbW9kZWwubGF5ZXJfbnVtYmVyID0gMQogICAgICAgIG1vZGVsLm1scCA9IG9iamVjdCgpCiAgICAgICAgbW9kZWwuZnVsbF9yZWNvbXB1dGUgPSBGYWxzZQogICAgICAgIG1vZGVsLl9sb2dfbWQ1ID0gbGFtYmRhICphcmdzLCAqKmt3YXJnczogTm9uZQogICAgICAgIG1vZGVsLl9mb3J3YXJkX2F0dGVudGlvbiA9IGxhbWJkYSAqKmt3YXJnczogKAogICAgICAgICAgICBrd2FyZ3NbImhpZGRlbl9zdGF0ZXMiXSArIDEuMCwKICAgICAgICAgICAga3dhcmdzWyJoaWRkZW5fc3RhdGVzIl0gKyAyLjAsCiAgICAgICAgKQogICAgICAgIG1vZGVsLl9mb3J3YXJkX21scCA9IGxhbWJkYSBoaWRkZW5fc3RhdGVzLCAqKmt3YXJnczogaGlkZGVuX3N0YXRlcyArIDMuMAoKICAgICAgICBvdXRwdXQsIGNvbnRleHQgPSBUcmFuc2Zvcm1lckxheWVyLl9mb3J3YXJkX2ltcGwoCiAgICAgICAgICAgIG1vZGVsLCBwYWRkbGUub25lcyhbMSwgMl0sIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChjb250ZXh0LnNoYXBlLCBbMSwgMl0pCgogICAgICAgIGZvcndhcmRfbW9kZWwgPSBQbGFpbigpCiAgICAgICAgZm9yd2FyZF9tb2RlbC5jb25maWcgPSBQbGFpbigpCiAgICAgICAgZm9yd2FyZF9tb2RlbC5jb25maWcubnVtX25leHRuX3ByZWRpY3RfbGF5ZXJzID0gTm9uZQogICAgICAgIGZvcndhcmRfbW9kZWwuY29uZmlnLmJsb2NrX2F0dGVudGlvbl9yZXNpZHVhbHMgPSBGYWxzZQogICAgICAgIGZvcndhcmRfbW9kZWwuZnVsbF9yZWNvbXB1dGUgPSBGYWxzZQogICAgICAgIGZvcndhcmRfbW9kZWwuX2ZvcndhcmRfaW1wbCA9IGxhbWJkYSAqKmt3YXJnczogKAogICAgICAgICAgICBrd2FyZ3NbImhpZGRlbl9zdGF0ZXMiXSArIDEuMCwKICAgICAgICAgICAga3dhcmdzWyJoaWRkZW5fc3RhdGVzIl0gKyAyLjAsCiAgICAgICAgKQogICAgICAgIHJlc3VsdCA9IFRyYW5zZm9ybWVyTGF5ZXIuZm9yd2FyZCgKICAgICAgICAgICAgZm9yd2FyZF9tb2RlbCwgeyJoaWRkZW5fc3RhdGVzIjogcGFkZGxlLm9uZXMoWzEsIDJdLCBkdHlwZT0iZmxvYXQzMiIpfQogICAgICAgICkKICAgICAgICBzZWxmLmFzc2VydEluKCJjb250ZXh0IiwgcmVzdWx0KQoKICAgICAgICBibG9ja19tb2RlbCA9IFBsYWluKCkKICAgICAgICBibG9ja19tb2RlbC5jb25maWcgPSBQbGFpbigpCiAgICAgICAgYmxvY2tfbW9kZWwuY29uZmlnLmJsb2NrX2F0dGVudGlvbl9yZXNpZHVhbHMgPSBUcnVlCiAgICAgICAgYmxvY2tfbW9kZWwubGF5ZXJfbnVtYmVyID0gMQogICAgICAgIGJsb2NrX21vZGVsLmF0dG5fcmVzX2Jsb2NrX3NpemUgPSA0CiAgICAgICAgYmxvY2tfbW9kZWwubWxwID0gb2JqZWN0KCkKICAgICAgICBibG9ja19tb2RlbC5ibG9ja19hdHRuX3Jlc19iZWZvcmVfYXR0ZW50aW9uID0gbGFtYmRhIHBhcnRpYWwsIGJsb2NrczogcGFydGlhbAogICAgICAgIGJsb2NrX21vZGVsLmJsb2NrX2F0dG5fcmVzX2JlZm9yZV9tbHAgPSBsYW1iZGEgcGFydGlhbCwgYmxvY2tzOiBwYXJ0aWFsCiAgICAgICAgYmxvY2tfbW9kZWwuX2ZvcndhcmRfYXR0ZW50aW9uID0gbGFtYmRhICoqa3dhcmdzOiAoCiAgICAgICAgICAgIGt3YXJnc1siaGlkZGVuX3N0YXRlcyJdLmNhc3QoImJmbG9hdDE2IiksCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgKQogICAgICAgIGJsb2NrX21vZGVsLl9mb3J3YXJkX21scCA9IGxhbWJkYSBoaWRkZW5fc3RhdGVzLCAqKmt3YXJnczogaGlkZGVuX3N0YXRlcy5jYXN0KAogICAgICAgICAgICAiZmxvYXQzMiIKICAgICAgICApCiAgICAgICAgYmxvY2tfb3V0cHV0ID0gVHJhbnNmb3JtZXJMYXllci5fZm9yd2FyZF9pbXBsKAogICAgICAgICAgICBibG9ja19tb2RlbCwgcGFkZGxlLm9uZXMoWzEsIDJdLCBkdHlwZT0iZmxvYXQzMiIpLCBibG9ja3M9W10KICAgICAgICApCiAgICAgICAgc2VsZi5hc3NlcnRFcXVhbChibG9ja19vdXRwdXQuc2hhcGUsIFsxLCAyXSkKCiAgICBkZWYgdGVzdF9vdmVybGFwX2hlbHBlcl9tZXRob2RzX2RyaXZlX21vZV9wYXRocyhzZWxmKToKICAgICAgICBtb2RlbCA9IFBsYWluKCkKICAgICAgICBtb2RlbC5tbHAgPSBGYWtlT3ZlcmxhcE1MUCgpCiAgICAgICAgbW9kZWwucG9zdF9hdHRlbnRpb25fbGF5ZXJub3JtID0gTm9uSWRlbnRpdHlMYXllcigpCiAgICAgICAgbW9kZWwubWxwX2JkYSA9IEZha2VCREEoKQogICAgICAgIG1vZGVsLnRyYWluaW5nID0gRmFsc2UKICAgICAgICBtb2RlbC5oaWRkZW5fZHJvcG91dF9wcm9iID0gMC4wCiAgICAgICAgbW9kZWwuY29uZmlnID0gUGxhaW4oKQogICAgICAgIG1vZGVsLmNvbmZpZy5iaWFzX2Ryb3BvdXRfZnVzaW9uID0gRmFsc2UKICAgICAgICBtb2RlbC5fZm9yd2FyZF9hdHRlbnRpb24gPSBsYW1iZGEgKiprd2FyZ3M6ICgKICAgICAgICAgICAga3dhcmdzWyJoaWRkZW5fc3RhdGVzIl0gKyAxLjAsCiAgICAgICAgICAgIE5vbmUsCiAgICAgICAgKQogICAgICAgIG1vZGVsLl9mb3J3YXJkX21scCA9IGxhbWJkYSBoaWRkZW5fc3RhdGVzLCAqKmt3YXJnczogaGlkZGVuX3N0YXRlcyArIDIuMAogICAgICAgIGhpZGRlbl9zdGF0ZXMgPSBwYWRkbGUub25lcyhbMSwgMl0sIGR0eXBlPSJmbG9hdDMyIikKCiAgICAgICAgYXR0bl9vdXQsIF8gPSBUcmFuc2Zvcm1lckxheWVyV2l0aE92ZXJsYXAuY29tcHV0ZV9hdHRlbnRpb24oCiAgICAgICAgICAgIG1vZGVsLCB7ImhpZGRlbl9zdGF0ZXMiOiBoaWRkZW5fc3RhdGVzfSwgaXNfZmlyc3RfZndkPVRydWUKICAgICAgICApCiAgICAgICAgbWxwX291dCA9IFRyYW5zZm9ybWVyTGF5ZXJXaXRoT3ZlcmxhcC5jb21wdXRlX21scCgKICAgICAgICAgICAgbW9kZWwsIGF0dG5fb3V0LCBpc19maXJzdF9md2Q9VHJ1ZQogICAgICAgICkKICAgICAgICBwcmVwcm9jZXNzZWQgPSBUcmFuc2Zvcm1lckxheWVyV2l0aE92ZXJsYXAucHJlX3Byb2Nlc3NfY29tcHV0ZSgKICAgICAgICAgICAgbW9kZWwsIGhpZGRlbl9zdGF0ZXMKICAgICAgICApCiAgICAgICAgZGlzcGF0Y2hlZCA9IFRyYW5zZm9ybWVyTGF5ZXJXaXRoT3ZlcmxhcC5kaXNwYXRjaF9wcmVwcm9jZXNzX2NvbXB1dGUoCiAgICAgICAgICAgIG1vZGVsLCAocHJlcHJvY2Vzc2VkWzFdLCBwcmVwcm9jZXNzZWRbM10sIHByZXByb2Nlc3NlZFs0XSkKICAgICAgICApCiAgICAgICAgcG9zdCA9IFRyYW5zZm9ybWVyTGF5ZXJXaXRoT3ZlcmxhcC5wb3N0X3Byb2Nlc3NfY29tcHV0ZSgKICAgICAgICAgICAgbW9kZWwsIChtbHBfb3V0LCBoaWRkZW5fc3RhdGVzKSwgaXNfZmlyc3RfZndkPVRydWUKICAgICAgICApCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwoZGlzcGF0Y2hlZFswXS5zaGFwZSwgWzEsIDJdKQogICAgICAgIHNlbGYuYXNzZXJ0RmFsc2UocG9zdC5zdG9wX2dyYWRpZW50KQoKICAgIGRlZiB0ZXN0X2RlbnNlX25vZGVfYmFja3dhcmRfcmVzdG9yZXNfbXRwX2dyYWRzKHNlbGYpOgogICAgICAgIG9yaWdpbmFsX3NjaGVkdWxlX25vZGUgPSB0cmFuc2Zvcm1lcl9sYXllci5TY2hlZHVsZU5vZGUKICAgICAgICB0cmFuc2Zvcm1lcl9sYXllci5TY2hlZHVsZU5vZGUgPSBGYWtlU2NoZWR1bGVOb2RlCiAgICAgICAgdHJ5OgogICAgICAgICAgICBub2RlID0gVHJhbnNmb3JtZXJMYXllck5vZGUoRGVuc2VMYXllcigpLCBUaW55Q29uZmlnKCkpCiAgICAgICAgICAgIG10cF9ncmFkID0gcGFkZGxlLmZ1bGwoWzEsIDJdLCA1LjAsIGR0eXBlPSJmbG9hdDMyIikKICAgICAgICAgICAgZ3JhZHMgPSBub2RlLmJhY2t3YXJkKFtwYWRkbGUub25lcyhbMSwgMl0sIGR0eXBlPSJmbG9hdDMyIiksIG10cF9ncmFkXSkKICAgICAgICBmaW5hbGx5OgogICAgICAgICAgICB0cmFuc2Zvcm1lcl9sYXllci5TY2hlZHVsZU5vZGUgPSBvcmlnaW5hbF9zY2hlZHVsZV9ub2RlCgogICAgICAgIHNlbGYuYXNzZXJ0RXF1YWwobGVuKGdyYWRzKSwgMikKICAgICAgICBzZWxmLmFzc2VydElzKGdyYWRzWzFdLCBtdHBfZ3JhZCkKCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgdW5pdHRlc3QubWFpbigpCg==
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import sys
+import unittest
+
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+import paddle
+from paddle.distributed.fleet.meta_parallel import LayerSpec
+
+from paddlefleet.transformer import transformer_layer
+from paddlefleet.transformer.moe.moe_layer import MoELayer
+from paddlefleet.transformer.transformer_layer import (
+    TransformerLayer,
+    TransformerLayerNode,
+    TransformerLayerSublayersSpec,
+    TransformerLayerWithOverlap,
+)
+
+
+class Plain:
+    pass
+
+
+class PGCollection:
+    tp = None
+
+
+class NonIdentityLayer:
+    def __call__(self, x):
+        return x + 1.0
+
+
+class UnknownMLP:
+    def set_layer_number(self, layer_number):
+        self.layer_number = layer_number
+
+    def __call__(self, x):
+        return x + 1.0, None
+
+
+class FakeBDA:
+    def __call__(self, training, bias_dropout_fusion):
+        del training, bias_dropout_fusion
+
+        def apply(output_with_bias, residual, hidden_dropout_prob):
+            del hidden_dropout_prob
+            if isinstance(output_with_bias, dict):
+                value = output_with_bias.get("hidden_states", residual)
+                bias = output_with_bias.get("bias", None)
+            elif isinstance(output_with_bias, tuple):
+                value, bias = output_with_bias
+            else:
+                value, bias = output_with_bias, None
+            if bias is not None:
+                value = value + bias
+            return value + residual
+
+        return apply
+
+
+class TupleAttention:
+    def __call__(self, x, **kwargs):
+        self.kwargs = kwargs
+        return x + 2.0, paddle.ones_like(x)
+
+
+class ContextCrossAttention:
+    def __call__(self, x, **kwargs):
+        self.kwargs = kwargs
+        return {"hidden_states": x + 3.0, "context": x + 4.0}
+
+
+class FakeMoEForMlp(MoELayer):
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, x, input_ids=None):
+        self.calls.append(input_ids)
+        return x + 2.0, paddle.ones_like(x)
+
+
+class FakeOverlapMLP:
+    def __init__(self):
+        self.dispatch_calls = []
+
+    def compute_gate(self, hidden_states):
+        return (
+            None,
+            hidden_states + 1.0,
+            hidden_states + 2.0,
+            None,
+            None,
+            None,
+            paddle.to_tensor([0.25], dtype="float32"),
+            paddle.to_tensor([0.5], dtype="float32"),
+        )
+
+    def dispatch_preprocess(self, args):
+        self.dispatch_calls.append(args)
+        hidden_states, topk_weights, topk_indices = args
+        return hidden_states + 3.0, topk_indices + 1.0, topk_weights + 1.0
+
+
+class InitConfig:
+    def __init__(
+        self, cp_comm_type, recompute_modules, recompute_method="block"
+    ):
+        self.gpt_model_use_experimental_version = False
+        self.hidden_dropout_prob = 0.0
+        self.sequence_parallel = False
+        self.tensor_model_parallel_size = 1
+        self.hidden_size = 2
+        self.rms_norm_eps = 1e-5
+        self.context_parallel_size = 2
+        self.cp_comm_type = cp_comm_type
+        self.recompute_granularity = "selective"
+        self.recompute_modules = recompute_modules
+        self.recompute_num_layers = 1
+        self.recompute_method = recompute_method
+        self.block_attention_residuals = False
+        self.attn_res_block_size = 4
+        self.num_empty_layers_add_in_head = 0
+        self.num_hidden_layers = 2
+        self.num_empty_layers_add_in_tail = 0
+        self.virtual_pipeline_model_parallel_size = None
+        self.pipeline_model_parallel_size = 1
+        self.bias_dropout_fusion = False
+
+
+class TinyConfig:
+    num_nextn_predict_layers = 1
+    mtp_load_weight_only = False
+
+
+class DenseLayer:
+    full_recompute = False
+    mlp = object()
+
+    def compute_attention(self, inputs, is_first_fwd=False):
+        del is_first_fwd
+        return inputs["hidden_states"] + 1.0, None
+
+    def compute_mlp(self, hidden_states, is_first_fwd=False):
+        del is_first_fwd
+        return hidden_states + 2.0
+
+
+class FakeScheduleNode:
+    def __init__(self, fwd_func, name=""):
+        self.fwd_func = fwd_func
+        self.name = name
+
+    def forward(self, inputs=(), **kwargs):
+        return self.fwd_func(inputs, **kwargs)
+
+    def backward(self, output_grad=None, scaler=None):
+        del scaler
+        if isinstance(output_grad, (list, tuple)):
+            return (output_grad[0],)
+        return (output_grad,)
+
+
+class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
+    def setUp(self):
+        self.old_build_spec_layer = transformer_layer.build_spec_layer
+        self.old_recompute = transformer_layer.recompute
+        self.old_log_layer_md5 = TransformerLayer._LOG_LAYER_MD5
+        self.old_experimental = (
+            TransformerLayer._gpt_model_use_experimental_version
+        )
+
+    def tearDown(self):
+        transformer_layer.build_spec_layer = self.old_build_spec_layer
+        transformer_layer.recompute = self.old_recompute
+        TransformerLayer._LOG_LAYER_MD5 = self.old_log_layer_md5
+        TransformerLayer._gpt_model_use_experimental_version = (
+            self.old_experimental
+        )
+
+    def _spec(self):
+        return TransformerLayerSublayersSpec(
+            input_layernorm=NonIdentityLayer,
+            self_attn=TupleAttention,
+            self_attn_bda=FakeBDA,
+            pre_cross_attn_layernorm=NonIdentityLayer,
+            cross_attention=ContextCrossAttention,
+            cross_attn_bda=FakeBDA,
+            post_attention_layernorm=NonIdentityLayer,
+            mlp=LayerSpec(UnknownMLP),
+            mlp_bda=FakeBDA,
+            block_attn_res=NonIdentityLayer,
+        )
+
+    def _install_build_stub(self):
+        def build(spec, *args, **kwargs):
+            del args
+            if isinstance(spec, LayerSpec):
+                layer = spec.layer()
+            else:
+                layer = spec()
+            layer.init_kwargs = kwargs
+            return layer
+
+        transformer_layer.build_spec_layer = build
+
+    def test_init_covers_cp_list_unknown_mlp_and_selective_list(self):
+        self._install_build_stub()
+        config = InitConfig(["zero", "one"], ["norm", "mlp"])
+
+        layer = TransformerLayer(
+            config, self._spec(), layer_number=0, pg_collection=PGCollection()
+        )
+
+        self.assertTrue(layer.recompute_input_layernorm)
+        self.assertTrue(layer.recompute_post_attention_layernorm)
+        self.assertTrue(layer.recompute_mlp)
+        self.assertEqual(layer.self_attn.init_kwargs["cp_comm_type"], "zero")
+
+    def test_init_covers_cp_string_and_selective_dict(self):
+        self._install_build_stub()
+        config = InitConfig("ring", {"norm": 1, "mlp": 1}, "first_n")
+
+        layer = TransformerLayer(
+            config, self._spec(), layer_number=0, pg_collection=PGCollection()
+        )
+
+        self.assertTrue(layer.recompute_input_layernorm)
+        self.assertTrue(layer.recompute_post_attention_layernorm)
+        self.assertTrue(layer.recompute_mlp)
+        self.assertEqual(layer.self_attn.init_kwargs["cp_comm_type"], "ring")
+
+    def test_forward_attention_context_and_block_residual_branches(self):
+        model = Plain()
+        model.recompute_input_layernorm = False
+        model.input_layernorm = NonIdentityLayer()
+        model.self_attn = TupleAttention()
+        model.pre_cross_attn_layernorm = NonIdentityLayer()
+        model.cross_attention = ContextCrossAttention()
+        model.cross_attn_bda = FakeBDA()
+        model.hidden_dropout_prob = 0.0
+        model.training = False
+        model.config = Plain()
+        model.config.bias_dropout_fusion = False
+        model.layer_number = 5
+        model._log_md5 = lambda *args, **kwargs: None
+        hidden_states = paddle.ones([2, 2], dtype="float32")
+        hidden_states.stop_gradient = False
+
+        output, context = TransformerLayer._forward_attention(
+            model,
+            hidden_states,
+            block_attention_residuals=True,
+            is_first_fwd=True,
+        )
+
+        self.assertEqual(output.shape, [2, 2])
+        self.assertEqual(context.shape, [2, 2])
+        self.assertFalse(output.stop_gradient)
+
+    def test_forward_mlp_recompute_md5_block_and_first_forward_branches(self):
+        transformer_layer.recompute = lambda func, *args, **kwargs: func(
+            *args, **kwargs
+        )
+        TransformerLayer._LOG_LAYER_MD5 = True
+        TransformerLayer._gpt_model_use_experimental_version = True
+        model = Plain()
+        model.recompute_post_attention_layernorm = False
+        model.post_attention_layernorm = NonIdentityLayer()
+        model.mlp = FakeMoEForMlp()
+        model.mlp_bda = FakeBDA()
+        model.hidden_dropout_prob = 0.0
+        model.training = False
+        model.config = Plain()
+        model.config.bias_dropout_fusion = False
+        model.layer_number = 7
+        model._log_md5 = lambda *args, **kwargs: None
+        hidden_states = paddle.ones([2, 2], dtype="float32")
+        hidden_states.stop_gradient = False
+        model.recompute_mlp = True
+
+        recomputed = TransformerLayer._forward_mlp(
+            model,
+            hidden_states,
+            is_first_fwd=True,
+            input_ids=paddle.to_tensor([[1, 2]], dtype="int64"),
+        )
+
+        model.recompute_mlp = False
+        block_output = TransformerLayer._forward_mlp(
+            model,
+            hidden_states,
+            is_first_fwd=True,
+            block_attention_residuals=True,
+        )
+
+        self.assertEqual(recomputed.shape, [2, 2])
+        self.assertEqual(block_output.shape, [2, 2])
+        self.assertFalse(block_output.stop_gradient)
+
+    def test_forward_impl_tuple_context_and_block_cast_branches(self):
+        model = Plain()
+        model.config = Plain()
+        model.config.block_attention_residuals = False
+        model.layer_number = 1
+        model.mlp = object()
+        model.full_recompute = False
+        model._log_md5 = lambda *args, **kwargs: None
+        model._forward_attention = lambda **kwargs: (
+            kwargs["hidden_states"] + 1.0,
+            kwargs["hidden_states"] + 2.0,
+        )
+        model._forward_mlp = lambda hidden_states, **kwargs: hidden_states + 3.0
+
+        output, context = TransformerLayer._forward_impl(
+            model, paddle.ones([1, 2], dtype="float32")
+        )
+        self.assertEqual(context.shape, [1, 2])
+
+        forward_model = Plain()
+        forward_model.config = Plain()
+        forward_model.config.num_nextn_predict_layers = None
+        forward_model.config.block_attention_residuals = False
+        forward_model.full_recompute = False
+        forward_model._forward_impl = lambda **kwargs: (
+            kwargs["hidden_states"] + 1.0,
+            kwargs["hidden_states"] + 2.0,
+        )
+        result = TransformerLayer.forward(
+            forward_model,
+            {"hidden_states": paddle.ones([1, 2], dtype="float32")},
+        )
+        self.assertIn("context", result)
+
+        block_model = Plain()
+        block_model.config = Plain()
+        block_model.config.block_attention_residuals = True
+        block_model.layer_number = 1
+        block_model.attn_res_block_size = 4
+        block_model.mlp = object()
+        block_model.block_attn_res_before_attention = (
+            lambda partial, blocks: partial
+        )
+        block_model.block_attn_res_before_mlp = lambda partial, blocks: partial
+        block_model._forward_attention = lambda **kwargs: (
+            kwargs["hidden_states"].cast("bfloat16"),
+            None,
+        )
+        block_model._forward_mlp = (
+            lambda hidden_states, **kwargs: hidden_states.cast("float32")
+        )
+        block_output = TransformerLayer._forward_impl(
+            block_model, paddle.ones([1, 2], dtype="float32"), blocks=[]
+        )
+        self.assertEqual(block_output.shape, [1, 2])
+
+    def test_overlap_helper_methods_drive_moe_paths(self):
+        model = Plain()
+        model.mlp = FakeOverlapMLP()
+        model.post_attention_layernorm = NonIdentityLayer()
+        model.mlp_bda = FakeBDA()
+        model.training = False
+        model.hidden_dropout_prob = 0.0
+        model.config = Plain()
+        model.config.bias_dropout_fusion = False
+        model._forward_attention = lambda **kwargs: (
+            kwargs["hidden_states"] + 1.0,
+            None,
+        )
+        model._forward_mlp = lambda hidden_states, **kwargs: hidden_states + 2.0
+        hidden_states = paddle.ones([1, 2], dtype="float32")
+
+        attn_out, _ = TransformerLayerWithOverlap.compute_attention(
+            model, {"hidden_states": hidden_states}, is_first_fwd=True
+        )
+        mlp_out = TransformerLayerWithOverlap.compute_mlp(
+            model, attn_out, is_first_fwd=True
+        )
+        preprocessed = TransformerLayerWithOverlap.pre_process_compute(
+            model, hidden_states
+        )
+        dispatched = TransformerLayerWithOverlap.dispatch_preprocess_compute(
+            model, (preprocessed[1], preprocessed[3], preprocessed[4])
+        )
+        post = TransformerLayerWithOverlap.post_process_compute(
+            model, (mlp_out, hidden_states), is_first_fwd=True
+        )
+
+        self.assertEqual(dispatched[0].shape, [1, 2])
+        self.assertFalse(post.stop_gradient)
+
+    def test_dense_node_backward_restores_mtp_grads(self):
+        original_schedule_node = transformer_layer.ScheduleNode
+        transformer_layer.ScheduleNode = FakeScheduleNode
+        try:
+            node = TransformerLayerNode(DenseLayer(), TinyConfig())
+            mtp_grad = paddle.full([1, 2], 5.0, dtype="float32")
+            grads = node.backward(
+                [paddle.ones([1, 2], dtype="float32"), mtp_grad]
+            )
+        finally:
+            transformer_layer.ScheduleNode = original_schedule_node
+
+        self.assertEqual(len(grads), 2)
+        self.assertIs(grads[1], mtp_grad)
+
+
+if __name__ == "__main__":
+    unittest.main()
