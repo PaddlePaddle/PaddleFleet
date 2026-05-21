@@ -5,8 +5,8 @@ pull_request_rules:
       - check-success=Test-release
       - approved-reviews-by>=1
       - or:
-        - base=develop
-        - base~=^release/
+          - base=develop
+          - base~=^release/
       - updated-at<24 hours ago
     actions:
       queue:
