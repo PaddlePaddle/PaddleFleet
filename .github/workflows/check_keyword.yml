@@ -18,7 +18,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.base_ref }}
-          FORBIDDEN_KEYWORD: ${{ vars.FORBIDDEN_KEYWORD }}
+          FORBIDDEN_KEYWORD: ${{ secrets.FORBIDDEN_KEYWORD }}
         run: |
           FOUND=0
 
