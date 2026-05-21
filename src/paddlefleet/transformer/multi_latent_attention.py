@@ -437,7 +437,7 @@ class MultiLatentAttention(Attention):
         # Query, Key, and Value
         # =====================
         # Get the query, key and value tensors based on the type of attention
-
+        # Also get q_compressed for DSA indexer (if enabled)
         query, key, value, q_compressed, kv_compressed, k_pos_emb = (
             self.get_query_key_value_tensors(
                 hidden_states,
@@ -474,8 +474,8 @@ class MultiLatentAttention(Attention):
 
         if (
             hasattr(self.core_attention.config, "forward_meta")
-            and self.core_attention.config.forward_meta.max_len_tensor_cpu[1]
-            <= 0
+            and self.core_attention.config.forward_meta.max_len_tensor_cpu[2]
+            > 0
         ):  # decode mode
             # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
             # q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
@@ -520,6 +520,10 @@ class MultiLatentAttention(Attention):
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention
                 and in_recompute,
+                # DSA-specific parameters
+                x=hidden_states,
+                qr=q_compressed,
+                # fastdeploy support
                 kv_compressed=kv_compressed,
                 k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
@@ -995,7 +999,7 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
-                if self.config.gpt_model_use_experimental_version or True:
+                if self.config.gpt_model_use_experimental_version:
                     from paddlefleet.transformer.transformer_layer import (
                         TransformerLayer,
                     )
