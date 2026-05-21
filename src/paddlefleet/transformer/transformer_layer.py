@@ -30,6 +30,7 @@ from paddle.distributed.fleet.meta_parallel import (
     build_spec_layer,
 )
 from paddle.distributed.fleet.utils import recompute
+from paddlefleet_ops import is_deep_ep_available
 
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
@@ -45,7 +46,6 @@ from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.utils import profile
 from paddlefleet.utils import log_single_rank
-from paddlefleet_ops import is_deep_ep_available
 
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():

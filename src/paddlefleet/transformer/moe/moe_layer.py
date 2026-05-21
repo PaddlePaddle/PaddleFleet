@@ -22,14 +22,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
+import paddlefleet_ops
 from paddle import framework, nn
 from paddle.autograd import PyLayer
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
     ScatterOp,
 )
-
-import paddlefleet_ops
 
 if TYPE_CHECKING:
     from paddle.distributed.fleet.meta_parallel import LayerSpec
