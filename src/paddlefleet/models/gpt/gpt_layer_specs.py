@@ -361,22 +361,20 @@ def get_gpt_layer_local_spec(
                 "Only base TransformerLayer can be overlapped."
             )
             transformer_cls = TransformerLayerWithOverlap
-
-    if multi_latent_attention:
+    exp_variant = getattr(config, "experimental_attention_variant", None)
+    if exp_variant == "dsv4_hybrid":
         # Route to DSv4 Hybrid if configured
-        exp_variant = getattr(config, "experimental_attention_variant", None)
-        if exp_variant == "dsv4_hybrid":
-            self_attn_spec = get_attention_spec(
-                config=config,
-                attention_layer_type="dsv4_hybrid_attention",
-                attn_mask_type=AttnMaskType.causal,
-            )
-        else:
-            self_attn_spec = get_attention_spec(
-                config=config,
-                attention_layer_type="multi_latent_attention",
-                attn_mask_type=AttnMaskType.causal,
-            )
+        self_attn_spec = get_attention_spec(
+            config=config,
+            attention_layer_type="dsv4_hybrid_attention",
+            attn_mask_type=AttnMaskType.causal,
+        )
+    elif multi_latent_attention:
+        self_attn_spec = get_attention_spec(
+            config=config,
+            attention_layer_type="multi_latent_attention",
+            attn_mask_type=AttnMaskType.causal,
+        )
     else:
         self_attn_spec = get_attention_spec(
             config=config,

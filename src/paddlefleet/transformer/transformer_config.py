@@ -963,11 +963,6 @@ class TransformerConfig(ModelParallelConfig):
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
-            if not self.multi_latent_attention:
-                raise ValueError(
-                    "experimental_attention_variant='dsv4_hybrid' requires "
-                    "multi_latent_attention=True."
-                )
             if self.csa_compress_ratios is None:
                 raise ValueError(
                     "experimental_attention_variant='dsv4_hybrid' requires "
