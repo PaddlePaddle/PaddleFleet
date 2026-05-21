@@ -150,7 +150,13 @@ class RotaryEmbedding(nn.Layer):
     ) -> Tensor:
         """Generates matrix of frequencies based on positions in the sequence,
         used to create positional encodings"""
-        seq = paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
+        if position_ids is not None:
+            seq = position_ids[0] if position_ids.ndim == 2 else position_ids
+            seq = seq.astype(self.inv_freq.dtype)
+        else:
+            seq = (
+                paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
+            )
 
         if self.seq_len_interpolation_factor is not None:
             seq *= 1 / self.seq_len_interpolation_factor
@@ -160,11 +166,16 @@ class RotaryEmbedding(nn.Layer):
         return freqs
 
     def get_cos_sin(
-        self, max_seq_len: int, offset: int = 0
+        self,
+        max_seq_len: int,
+        offset: int = 0,
+        position_ids: Tensor = None,
     ) -> (Tensor, Tensor):
         """Cosine and sine values for RoPE are precomputed for all positions up to the maximum
         sequence length"""
-        freqs = self.get_freqs_non_repeated(max_seq_len, offset)
+        freqs = self.get_freqs_non_repeated(
+            max_seq_len, offset, position_ids=position_ids
+        )
         cos = paddle.cos(freqs)
         sin = paddle.sin(freqs)
         return cos, sin
