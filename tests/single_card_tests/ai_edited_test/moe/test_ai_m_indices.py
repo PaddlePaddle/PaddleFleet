@@ -45,7 +45,6 @@ class TestMIndicesChanges(unittest.TestCase):
     def _make_node(
         self,
         moe_deep_gemm=False,
-        moe_grouped_gemm=False,
         moe_expert_fusion=False,
     ):
         """Helper to create an ExpertsGroupGemmContiguousNode with mocked experts."""
@@ -58,17 +57,14 @@ class TestMIndicesChanges(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=moe_grouped_gemm,
             moe_deep_gemm=moe_deep_gemm,
+            moe_expert_fusion=moe_expert_fusion,
         )
-        node.moe_expert_fusion = moe_expert_fusion
         return node
 
     def test_fwd_gate_up_m_indices_with_moe_expert_fusion(self):
         """Test fwd_gate_up generates m_indices when moe_expert_fusion=True."""
-        node = self._make_node(
-            moe_deep_gemm=False, moe_grouped_gemm=False, moe_expert_fusion=True
-        )
+        node = self._make_node(moe_deep_gemm=False, moe_expert_fusion=True)
         tokens_per_expert = [2, 1, 3]
         x = paddle.randn([6, 8], dtype="float32")
         expert_w1 = [paddle.randn([8, 16], dtype="float32") for _ in range(3)]
@@ -83,9 +79,7 @@ class TestMIndicesChanges(unittest.TestCase):
 
     def test_fwd_gate_up_m_indices_with_moe_deep_gemm(self):
         """Test fwd_gate_up generates m_indices when moe_deep_gemm=True."""
-        node = self._make_node(
-            moe_deep_gemm=True, moe_grouped_gemm=True, moe_expert_fusion=False
-        )
+        node = self._make_node(moe_deep_gemm=True, moe_expert_fusion=False)
         tokens_per_expert = [1, 2, 0]
         x = paddle.randn([3, 8], dtype="bfloat16")
         expert_w1 = paddle.randn([3, 8, 16], dtype="bfloat16")
@@ -104,9 +98,7 @@ class TestMIndicesChanges(unittest.TestCase):
 
     def test_fwd_gate_up_m_indices_none_when_neither(self):
         """Test fwd_gate_up sets m_indices=None when neither flag is set."""
-        node = self._make_node(
-            moe_deep_gemm=False, moe_grouped_gemm=False, moe_expert_fusion=False
-        )
+        node = self._make_node(moe_deep_gemm=False, moe_expert_fusion=False)
         tokens_per_expert = [2, 1, 3]
         x = paddle.randn([6, 8], dtype="float32")
         expert_w1 = [paddle.randn([8, 16], dtype="float32") for _ in range(3)]
@@ -128,10 +120,9 @@ class TestMIndicesChanges(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=True,
-            moe_grouped_gemm=True,
             moe_deep_gemm=False,
+            moe_expert_fusion=True,
         )
-        node.moe_expert_fusion = True
         tokens_per_expert = [3, 2]
         x = paddle.randn([5, 8], dtype="bfloat16")
         expert_w1 = paddle.randn([2, 8, 16], dtype="bfloat16")
@@ -157,9 +148,7 @@ class TestMIndicesChanges(unittest.TestCase):
 
     def test_fwd_down_bf16_uses_m_indices(self):
         """Test fwd_down_bf16 uses self.m_indices for deep_gemm path."""
-        node = self._make_node(
-            moe_deep_gemm=True, moe_grouped_gemm=True, moe_expert_fusion=False
-        )
+        node = self._make_node(moe_deep_gemm=True, moe_expert_fusion=False)
         tokens_per_expert = [2, 1, 0]
         node.tokens_per_expert = tokens_per_expert
         node.m_indices = node.gen_m_indices(tokens_per_expert)
@@ -185,9 +174,7 @@ class TestMIndicesChanges(unittest.TestCase):
 
     def test_bwd_down_input_bf16_uses_m_indices(self):
         """Test bwd_down_input_bf16 uses self.m_indices for deep_gemm path."""
-        node = self._make_node(
-            moe_deep_gemm=True, moe_grouped_gemm=True, moe_expert_fusion=False
-        )
+        node = self._make_node(moe_deep_gemm=True, moe_expert_fusion=False)
         tokens_per_expert = [2, 1, 0]
         node.tokens_per_expert = tokens_per_expert
         node.m_indices = node.gen_m_indices(tokens_per_expert)
@@ -222,9 +209,7 @@ class TestMIndicesChanges(unittest.TestCase):
 
     def test_bwd_gate_up_input_bf16_uses_m_indices(self):
         """Test bwd_gate_up_input_bf16 uses self.m_indices for deep_gemm path."""
-        node = self._make_node(
-            moe_deep_gemm=True, moe_grouped_gemm=True, moe_expert_fusion=False
-        )
+        node = self._make_node(moe_deep_gemm=True, moe_expert_fusion=False)
         tokens_per_expert = [2, 1, 0]
         node.tokens_per_expert = tokens_per_expert
         node.m_indices = node.gen_m_indices(tokens_per_expert)
@@ -251,11 +236,10 @@ class TestMIndicesChanges(unittest.TestCase):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=False,
-            moe_grouped_gemm=False,
             moe_deep_gemm=False,
             moe_subbatch_token_num_after_dispatch=128,
+            moe_expert_fusion=True,
         )
-        node.moe_expert_fusion = True
         node.expert_id = 0
         total_rows = 256
         node.tokens_per_expert = [total_rows]
