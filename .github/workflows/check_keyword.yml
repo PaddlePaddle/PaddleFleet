@@ -1,36 +1,40 @@
 name: Check Forbidden Keyword
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
-
 jobs:
   check-forbidden-keyword:
     name: Check Forbidden keyword
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout PR code
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-
-      - name: Check for keyword keyword in PR
+      - name: Check for forbidden keyword in PR
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
-          BASE_REF: ${{ github.base_ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           FORBIDDEN_KEYWORD: ${{ secrets.FORBIDDEN_KEYWORD }}
         run: |
+          if [ -z "${FORBIDDEN_KEYWORD}" ]; then
+            echo "FORBIDDEN_KEYWORD is not set, skipping check."
+            exit 0
+          fi
+
           FOUND=0
 
           # Check PR title
           if echo "${PR_TITLE}" | grep -qi "${FORBIDDEN_KEYWORD}"; then
-            echo "ERROR: PR title contains forbidden keyword '${FORBIDDEN_KEYWORD}': ${PR_TITLE}"
+            echo "ERROR: PR title contains forbidden keyword: ${PR_TITLE}"
             FOUND=1
           fi
 
           # Check PR body
           if echo "${PR_BODY}" | grep -qi "${FORBIDDEN_KEYWORD}"; then
-            echo "ERROR: PR description contains forbidden keyword '${FORBIDDEN_KEYWORD}'"
+            echo "ERROR: PR description contains forbidden keyword"
             FOUND=1
           fi
 
@@ -41,7 +45,7 @@ jobs:
 
           while IFS= read -r file; do
             if [ -f "$file" ] && grep -qi "${FORBIDDEN_KEYWORD}" "$file"; then
-              echo "ERROR: File '${file}' contains forbidden keyword '${FORBIDDEN_KEYWORD}'"
+              echo "ERROR: File '${file}' contains forbidden keyword"
               FOUND=1
             fi
           done <<< "${CHANGED_FILES}"
