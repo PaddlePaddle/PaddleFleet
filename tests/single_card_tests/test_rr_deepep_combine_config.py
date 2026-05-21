@@ -353,5 +353,281 @@ class TestRRRecomputeUpdate(unittest.TestCase):
         self.assertTrue(mock.use_rr_deepep_combine)
 
 
+@unittest.skipUnless(HAS_DEEP_EP, "DeepEP not available")
+class TestDeepEPCombineAsyncFunctor(unittest.TestCase):
+    """Tests DeepEPCombineAsyncFunctor forward and backward (lines 538-561)."""
+
+    def test_functor_forward(self):
+        """DeepEPCombineAsyncFunctor.forward returns combined_x + fn_out."""
+        import paddle
+
+        from paddlefleet.transformer.moe.fused_a2a import (
+            DeepEPCombineAsyncFunctor,
+        )
+
+        hold_tensors = {"res_output": paddle.to_tensor([1.0, 2.0, 3.0])}
+        x = paddle.to_tensor([4.0, 5.0, 6.0])
+        group = MagicMock()
+        group.id = 0
+        states = {"handle": MagicMock()}
+        fn_arg = paddle.to_tensor([7.0])
+
+        mock_fn_out = (paddle.to_tensor([10.0]),)
+
+        with patch(
+            "paddlefleet.transformer.moe.fused_a2a.manual_backward",
+            return_value=(MagicMock(), mock_fn_out),
+        ):
+            result = DeepEPCombineAsyncFunctor.apply(
+                hold_tensors, x, group, states, fn_arg, fn=lambda *a: None
+            )
+
+        # Result should be (combined_x, *fn_out)
+        self.assertIsNotNone(result)
+
+    def test_functor_backward(self):
+        """DeepEPCombineAsyncFunctor.backward returns grad_x + fn_args_grads."""
+        import paddle
+
+        from paddlefleet.transformer.moe.fused_a2a import (
+            DeepEPCombineAsyncFunctor,
+        )
+
+        # Directly invoke the backward static method with a mock context
+        mock_ctx = MagicMock()
+        mock_ctx.group = MagicMock()
+        mock_ctx.group.id = 0
+        mock_ctx.handle = MagicMock()
+        mock_ctx.bwf = MagicMock(return_value=(paddle.to_tensor([0.1]),))
+
+        grad_output = paddle.to_tensor([1.0, 1.0])
+        fn_out_grad = paddle.to_tensor([0.5])
+
+        with (
+            patch(
+                "paddlefleet.transformer.moe.fused_a2a.fused_combine_backward_func",
+                return_value=paddle.to_tensor([0.5, 0.5]),
+            ),
+            patch(
+                "paddlefleet.transformer.moe.fused_a2a.wait_for_deepep",
+            ),
+        ):
+            result = DeepEPCombineAsyncFunctor.backward(
+                mock_ctx, grad_output, fn_out_grad
+            )
+
+        # Should return (grad_x,) + fn_args_grads
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)  # grad_x + one fn_arg grad
+        mock_ctx.bwf.assert_called_once_with(fn_out_grad)
+
+
+@unittest.skipUnless(HAS_DEEP_EP, "DeepEP not available")
+class TestDeepEPCombineAsyncRefinedRecomputeRuntime(unittest.TestCase):
+    """Tests DeepEPCombineAsyncRefinedRecompute runtime paths (lines 582-627)."""
+
+    def test_first_fwd_path(self):
+        """First forward path: queues detached output."""
+        from unittest.mock import PropertyMock
+
+        import paddle
+        from paddle import framework
+
+        from paddlefleet.transformer.moe.fused_a2a import (
+            DeepEPCombineAsyncRefinedRecompute,
+        )
+
+        rr = DeepEPCombineAsyncRefinedRecompute()
+        tracer = framework._dygraph_tracer()
+
+        x = paddle.to_tensor([1.0, 2.0])
+        group = MagicMock()
+        group.id = 0
+        states = {"handle": MagicMock()}
+        fn_arg = paddle.to_tensor([3.0])
+
+        mock_combined = paddle.to_tensor([5.0, 6.0])
+        mock_fn_out = (paddle.to_tensor([10.0]),)
+
+        # is_first_fwd = not _has_grad; _has_grad=False means first fwd
+        with (
+            patch.object(
+                type(tracer),
+                "_has_grad",
+                new_callable=PropertyMock,
+                return_value=False,
+            ),
+            patch(
+                "paddlefleet.transformer.moe.fused_a2a.fused_combine_forward_func",
+                return_value=mock_combined,
+            ),
+            patch(
+                "paddlefleet.transformer.moe.fused_a2a.manual_backward",
+                return_value=(None, mock_fn_out),
+            ),
+            patch(
+                "paddlefleet.transformer.moe.fused_a2a.wait_for_deepep",
+            ),
+        ):
+            result = rr.forward(x, group, states, fn_arg, fn=lambda *a: None)
+
+        # Should return (fwd_output, *fn_out)
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        # Queue should have the detached tensor
+        self.assertFalse(rr._hold_tensors_queue.empty())
+
+    def test_second_fwd_path(self):
+        """Second forward path: pops from queue and calls _second_fwd."""
+        from unittest.mock import PropertyMock
+
+        import paddle
+        from paddle import framework
+
+        from paddlefleet.transformer.moe.fused_a2a import (
+            DeepEPCombineAsyncRefinedRecompute,
+        )
+
+        rr = DeepEPCombineAsyncRefinedRecompute()
+        tracer = framework._dygraph_tracer()
+
+        # Pre-populate queue (simulating first fwd already ran)
+        rr._hold_tensors_queue.put({"res_output": paddle.to_tensor([5.0, 6.0])})
+
+        x = paddle.to_tensor([1.0, 2.0])
+        group = MagicMock()
+        group.id = 0
+        states = {"handle": MagicMock()}
+        fn_arg = paddle.to_tensor([3.0])
+
+        mock_result = (paddle.to_tensor([7.0, 8.0]),)
+
+        # is_first_fwd = not _has_grad; _has_grad=True means second fwd
+        with (
+            patch.object(
+                type(tracer),
+                "_has_grad",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch(
+                "paddlefleet.transformer.moe.fused_a2a.DeepEPCombineAsyncFunctor.apply",
+                return_value=mock_result,
+            ),
+        ):
+            result = rr.forward(x, group, states, fn_arg, fn=lambda *a: None)
+
+        self.assertEqual(result, mock_result)
+        self.assertTrue(rr._hold_tensors_queue.empty())
+
+    def test_first_fwd_fn_none_raises(self):
+        """_first_fwd raises ValueError when fn is None."""
+        from unittest.mock import PropertyMock
+
+        import paddle
+        from paddle import framework
+
+        from paddlefleet.transformer.moe.fused_a2a import (
+            DeepEPCombineAsyncRefinedRecompute,
+        )
+
+        rr = DeepEPCombineAsyncRefinedRecompute()
+        tracer = framework._dygraph_tracer()
+
+        x = paddle.to_tensor([1.0, 2.0])
+        group = MagicMock()
+        group.id = 0
+        states = {"handle": MagicMock()}
+
+        mock_combined = paddle.to_tensor([5.0, 6.0])
+
+        with (
+            patch.object(
+                type(tracer),
+                "_has_grad",
+                new_callable=PropertyMock,
+                return_value=False,
+            ),
+            patch(
+                "paddlefleet.transformer.moe.fused_a2a.fused_combine_forward_func",
+                return_value=mock_combined,
+            ),
+        ):
+            with self.assertRaises(ValueError) as ctx:
+                rr.forward(x, group, states, fn=None)
+            self.assertIn("fn must not be None", str(ctx.exception))
+
+    def test_call_delegates_to_forward(self):
+        """__call__ delegates to forward."""
+        from paddlefleet.transformer.moe.fused_a2a import (
+            DeepEPCombineAsyncRefinedRecompute,
+        )
+
+        rr = DeepEPCombineAsyncRefinedRecompute()
+        mock_result = MagicMock()
+        with patch.object(rr, "forward", return_value=mock_result) as m:
+            result = rr(1, 2, 3, fn="test")
+            m.assert_called_once_with(1, 2, 3, fn="test")
+        self.assertEqual(result, mock_result)
+
+
+@unittest.skipUnless(HAS_DEEP_EP, "DeepEP not available")
+class TestFusedCombineRRBranch(unittest.TestCase):
+    """Tests fused_combine() RR branch that calls _rr_fusedcombined (lines 750-758)."""
+
+    def test_rr_branch_calls_fusedcombined(self):
+        """fused_combine with use_rr_deepep_combine calls _rr_fusedcombined."""
+        import paddle
+
+        mock_combined = paddle.to_tensor([1.0, 2.0])
+        mock_fn_out = [paddle.to_tensor([3.0])]
+        mock_rr = MagicMock(return_value=(mock_combined, *mock_fn_out))
+
+        overlap_handle = {"fn": lambda: None, "fn_args": ()}
+
+        result = fused_combine(
+            x=MagicMock(),
+            group=MagicMock(),
+            handle=MagicMock(),
+            combine_overlap_handle=overlap_handle,
+            use_rr_deepep_combine=True,
+            _rr_fusedcombined=mock_rr,
+        )
+
+        mock_rr.assert_called_once()
+        self.assertEqual(overlap_handle["fn_out"], mock_fn_out)
+        # result should be combined_x
+        self.assertTrue(paddle.equal_all(result, mock_combined).item())
+
+    def test_rr_branch_with_fn_args(self):
+        """fused_combine RR branch passes fn_args correctly."""
+        import paddle
+
+        mock_combined = paddle.to_tensor([1.0])
+        fn_arg_1 = paddle.to_tensor([10.0])
+        fn_arg_2 = paddle.to_tensor([20.0])
+        mock_rr = MagicMock(return_value=(mock_combined,))
+
+        overlap_handle = {
+            "fn": lambda *a: None,
+            "fn_args": (fn_arg_1, fn_arg_2),
+        }
+
+        fused_combine(
+            x=MagicMock(),
+            group=MagicMock(),
+            handle=MagicMock(),
+            combine_overlap_handle=overlap_handle,
+            use_rr_deepep_combine=True,
+            _rr_fusedcombined=mock_rr,
+        )
+
+        # Verify fn_args were unpacked in the call
+        call_args = mock_rr.call_args
+        # positional args: x, group, states, *fn_args
+        # fn_args should be unpacked as positional
+        self.assertEqual(len(call_args[0]), 5)  # x, group, states, arg1, arg2
+
+
 if __name__ == "__main__":
     unittest.main()
