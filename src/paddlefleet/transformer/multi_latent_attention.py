@@ -1058,7 +1058,7 @@ class MLASelfAttention(MultiLatentAttention):
             rotary_pos_emb,
             rotary_pos_cos,
             rotary_pos_sin,
-            position_ids
+            position_ids,
         )
 
         return query, key, value, q_compressed, kv_compressed, k_pos_emb
