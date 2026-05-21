@@ -544,6 +544,7 @@ def get_gpt_mtp_layers_spec_for_backend(
             use_qk_norm=config.use_qk_norm,
             multi_latent_attention=config.multi_latent_attention,
             normalization=config.normalization,
+            is_mtp_layer=True,
         )
     else:
         transformer_layer_spec = spec[-1]
