@@ -534,41 +534,37 @@ def get_gpt_mtp_layers_spec_for_backend(
 ) -> list[LayerSpec]:
     assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
 
-    if config.use_dense_mtp and config.n_routed_experts is not None:
-        # When use_dense_mtp is enabled, build a dense transformer layer spec
-        # (num_experts=None) for MTP layers instead of copying the MoE decoder layer.
-        transformer_layer_spec = get_gpt_layer_local_spec(
-            config=config,
-            num_experts=None,
-            moe_expert_fusion=False,
-            use_qk_norm=config.use_qk_norm,
-            multi_latent_attention=config.multi_latent_attention,
-            normalization=config.normalization,
-            is_mtp_layer=True,
-        )
-    else:
-        transformer_layer_spec = spec[-1]
-
-    mtp_layer_spec_func = partial(
-        get_mtp_layer_spec_for_backend,
-        config=config,
-        transformer_layer_spec=transformer_layer_spec,
-        backend=backend,
-    )
-
     if config.mtp_num_layers > 0:
         mtp_num_layers = config.mtp_num_layers
     else:
-        mtp_num_layers = (
-            config.num_nextn_predict_layers
-            if config.num_nextn_predict_layers
-            else 0
-        )
+        mtp_num_layers = config.num_nextn_predict_layers or 0
 
     mtp_layer_specs = []
     for i in range(mtp_num_layers):
-        mtp_layer_specs.append(mtp_layer_spec_func(layer_number=i))
+        if config.use_dense_mtp and config.n_routed_experts is not None:
+            transformer_layer_spec = get_gpt_layer_local_spec(
+                config=config,
+                num_experts=None,
+                moe_grouped_gemm=False,
+                use_qk_norm=config.use_qk_norm,
+                multi_latent_attention=config.multi_latent_attention,
+                normalization=config.normalization,
+                layer_number=i,  # ← MTP 的相对编号
+                is_mtp_layer=True,  # ← 关键
+            )
+        else:
+            # 复用最后一个 MoE layer 的 spec 这条路径若启用，需要单独构造
+            # 一个带 is_mtp_layer=True 的版本，不能直接复用 spec[-1]
+            transformer_layer_spec = spec[-1]
 
+        mtp_layer_specs.append(
+            get_mtp_layer_spec_for_backend(
+                config=config,
+                transformer_layer_spec=transformer_layer_spec,
+                backend=backend,
+                layer_number=i,
+            )
+        )
     return mtp_layer_specs
 
 
