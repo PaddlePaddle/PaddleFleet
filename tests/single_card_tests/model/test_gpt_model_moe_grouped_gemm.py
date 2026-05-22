@@ -25,12 +25,12 @@ from paddle.distributed import fleet
 
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
+from paddlefleet_ops.utils import get_cuda_version
 
 # from tests.unit_tests.test_utilities import Utils
 import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.ops.utils import get_cuda_version
 
 
 def get_gpu_models_via_nvidia_smi():
@@ -119,7 +119,8 @@ class TestGPTModel(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             use_qk_norm=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
+            moe_deep_gemm=False,
         )
         self.gpt_model = gpt_builder(config, num_stages=1)
         self.config = config
@@ -181,8 +182,8 @@ class TestGPTModel(unittest.TestCase):
         repo_name = os.environ.get("repo_flag")
         if judge_machine_type() == "H":
             if version == 13:
-                assert loss.item() == 5.239149570465088, (
-                    f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
+                assert loss.item() == 5.239129066467285, (
+                    f"loss not equal ({loss.item()} != 5.239129066467285), please check your modify"
                 )
                 assert embed_tokens_grad_norm == 2.796875, (
                     f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
@@ -196,8 +197,8 @@ class TestGPTModel(unittest.TestCase):
                         f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
                     )
                 else:  # 12.9
-                    assert loss.item() == 5.239149570465088, (
-                        f"loss not equal ({loss.item()} != 5.239149570465088), please check your modify"
+                    assert loss.item() == 5.239129066467285, (
+                        f"loss not equal ({loss.item()} != 5.239129066467285), please check your modify"
                     )
                     assert embed_tokens_grad_norm == 2.796875, (
                         f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"

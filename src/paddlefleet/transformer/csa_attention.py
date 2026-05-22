@@ -340,20 +340,26 @@ def unfused_compressed_sparse_attn(
             "bnsh,bskh->bnsk", q.cast("float32"), kv_gathered.cast("float32")
         )
         * softmax_scale
-    )
+    )  # [b, np, sq, topk]
 
     # Mask invalid positions (topk_indices < 0) with -inf
-    invalid_mask = (topk_indices < 0).unsqueeze(1)
+    invalid_mask = (topk_indices < 0).unsqueeze(1)  # [b, 1, sq, topk]
     scores = scores.masked_fill(invalid_mask, float("-inf"))
 
+    # Softmax with attention sink
+    # sink: [np] -> [1, np, 1, 1]
     sink = attn_sink.reshape([1, np_heads, 1, 1])
-    scores_max = scores.max(axis=-1, keepdim=True)
+    # Compute stable softmax: max over scores and sink
+    scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
     scores_max = paddle.maximum(scores_max, sink)
-    exp_scores = paddle.exp(scores - scores_max)
-    exp_sink = paddle.exp(sink - scores_max)
-    sum_exp = exp_scores.sum(axis=-1, keepdim=True) + exp_sink
-    attn_weights = exp_scores / sum_exp
 
+    exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
+    exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
+
+    sum_exp = exp_scores.sum(axis=-1, keepdim=True) + exp_sink  # [b, np, sq, 1]
+    attn_weights = exp_scores / sum_exp  # [b, np, sq, topk]
+
+    # Weighted sum: [b, np, sq, topk] x [b, sq, topk, hn] -> [b, np, sq, hn]
     output = paddle.einsum(
         "bnsk,bskh->bnsh", attn_weights, kv_gathered.cast("float32")
     )

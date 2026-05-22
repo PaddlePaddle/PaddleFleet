@@ -26,7 +26,7 @@ from paddlefleet.transformer.moe.moe_layer import MoELayer, MoESublayers
 def get_moe_layer_spec_for_backend(
     backend: BackendSpecProvider,
     num_experts: int | None = None,
-    moe_grouped_gemm: bool | None = False,
+    moe_expert_fusion: bool | None = False,
 ) -> LayerSpec:
     """Helper function to get layer spec for MoE"""
     assert num_experts is not None

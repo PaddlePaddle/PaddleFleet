@@ -52,7 +52,7 @@ def _make_config(**overrides):
         "fp8": False,
         "fp8_wgrad": False,
         "router_aux_loss_coef": 0.01,
-        "moe_grouped_gemm": False,
+        "moe_expert_fusion": False,
         "moe_deep_gemm": False,
         "moe_ep_barrier": True,
         "moe_use_fusion_node": False,
@@ -317,7 +317,7 @@ class TestMoELayerForwardLogging(unittest.TestCase):
         layer.shared_experts = None
         layer.moe_shared_expert_overlap = False
         layer.moe_use_fusion_node = False
-        layer.moe_grouped_gemm = False
+        layer.moe_expert_fusion = False
         layer.training = False
         layer.router_aux_loss_coef = None
         layer.use_latent_moe = False

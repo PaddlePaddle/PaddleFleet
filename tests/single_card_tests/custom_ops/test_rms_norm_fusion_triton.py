@@ -51,7 +51,7 @@ class TestRMSNormFusionTriton(unittest.TestCase):
 
         # Triton
         paddle.enable_compat(scope={"triton"}, silent=True)
-        from paddlefleet.ops.triton_ops import RMSNormFusionTriton
+        from paddlefleet.triton_ops import RMSNormFusionTriton
 
         y1 = RMSNormFusionTriton.apply(
             x, self.ref_norm.weight, self.config.rms_norm_eps

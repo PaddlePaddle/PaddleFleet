@@ -16,8 +16,7 @@ import unittest
 
 import numpy as np
 import paddle
-
-from paddlefleet.ops import router_metadata
+from paddlefleet_ops import router_metadata
 
 
 def expert_parallel_TC_topk_router_metadata(

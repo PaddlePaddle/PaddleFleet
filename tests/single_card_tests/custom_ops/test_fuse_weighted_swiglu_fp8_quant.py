@@ -20,8 +20,8 @@ import paddle.incubate.nn.functional as F
 
 paddle.enable_compat()
 
-from paddlefleet.ops import deep_gemm, fuse_weighted_swiglu_fp8_quant
-from paddlefleet.ops.deep_gemm.testing import (
+from paddlefleet_ops import deep_gemm, fuse_weighted_swiglu_fp8_quant
+from paddlefleet_ops.deep_gemm.testing import (
     get_arch_major,
 )
 

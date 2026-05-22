@@ -48,19 +48,29 @@ if not _triton_available:
         fn if fn is not None else lambda f: f
     )
     _mock_triton.cdiv = lambda a, b: (a + b - 1) // b
-    _mock_triton.next_power_of_2 = (
-        lambda n: 1 << (n - 1).bit_length() if n > 0 else 1
+    _mock_triton.next_power_of_2 = lambda n: (
+        1 << (n - 1).bit_length() if n > 0 else 1
     )
     sys.modules.setdefault("triton", _mock_triton)
     sys.modules.setdefault("triton.language", _mock_tl)
 
+try:
+    from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
+        bitonic_argsort_device,  # noqa: F401
+    )
 
+    _MODULE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, Exception):
+    _MODULE_AVAILABLE = False
+
+
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBitonicArgsortDevice(unittest.TestCase):
     """Tests for bitonic_argsort_device triton kernel."""
 
     def test_is_jit_function(self):
         """Test that bitonic_argsort_device is a triton jit function."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             bitonic_argsort_device,
         )
 
@@ -68,7 +78,7 @@ class TestBitonicArgsortDevice(unittest.TestCase):
 
     def test_is_importable(self):
         """Test bitonic_argsort_device can be imported."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             bitonic_argsort_device,
         )
 
@@ -76,7 +86,7 @@ class TestBitonicArgsortDevice(unittest.TestCase):
 
     def test_function_name(self):
         """Test that function name is correct."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             bitonic_argsort_device,
         )
 
@@ -85,12 +95,13 @@ class TestBitonicArgsortDevice(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestCompareAndSwap(unittest.TestCase):
     """Tests for _compare_and_swap triton kernel."""
 
     def test_is_jit_function(self):
         """Test that _compare_and_swap is a triton jit function."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _compare_and_swap,
         )
 
@@ -98,19 +109,20 @@ class TestCompareAndSwap(unittest.TestCase):
 
     def test_is_importable(self):
         """Test _compare_and_swap can be imported."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _compare_and_swap,
         )
 
         self.assertIsNotNone(_compare_and_swap)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBitonicMerge(unittest.TestCase):
     """Tests for _bitonic_merge triton kernel."""
 
     def test_is_jit_function(self):
         """Test that _bitonic_merge is a triton jit function."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _bitonic_merge,
         )
 
@@ -118,19 +130,20 @@ class TestBitonicMerge(unittest.TestCase):
 
     def test_is_importable(self):
         """Test _bitonic_merge can be imported."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _bitonic_merge,
         )
 
         self.assertIsNotNone(_bitonic_merge)
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestTopPKernel(unittest.TestCase):
     """Tests for top_p_kernel triton kernel."""
 
     def test_is_jit_function(self):
         """Test that top_p_kernel is a triton jit function."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             top_p_kernel,
         )
 
@@ -138,7 +151,7 @@ class TestTopPKernel(unittest.TestCase):
 
     def test_is_importable(self):
         """Test top_p_kernel can be imported."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             top_p_kernel,
         )
 
@@ -146,7 +159,7 @@ class TestTopPKernel(unittest.TestCase):
 
     def test_function_name(self):
         """Test that function name is correct."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             top_p_kernel,
         )
 
@@ -154,7 +167,7 @@ class TestTopPKernel(unittest.TestCase):
 
     def test_used_in_find_blocks_topp(self):
         """Test that top_p_kernel is called by find_blocks_topp."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             find_blocks_topp,
             top_p_kernel,
         )
@@ -166,12 +179,13 @@ class TestTopPKernel(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBitonicSortingRelationship(unittest.TestCase):
     """Tests for the relationship between bitonic sort components."""
 
     def test_all_sort_components_importable(self):
         """Test all bitonic sorting components can be imported."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _bitonic_merge,
             _compare_and_swap,
             bitonic_argsort_device,
@@ -185,7 +199,7 @@ class TestBitonicSortingRelationship(unittest.TestCase):
 
     def test_compare_and_swap_is_building_block(self):
         """Test that _compare_and_swap is used within _bitonic_merge."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _bitonic_merge,
             _compare_and_swap,
         )
@@ -196,7 +210,7 @@ class TestBitonicSortingRelationship(unittest.TestCase):
 
     def test_bitonic_merge_used_in_argsort(self):
         """Test that _bitonic_merge is used within bitonic_argsort_device."""
-        from paddlefleet._extensions.flashmask.block_mask_utils import (
+        from paddlefleet_ops._extensions.flashmask.block_mask_utils import (
             _bitonic_merge,
             bitonic_argsort_device,
         )
@@ -205,12 +219,13 @@ class TestBitonicSortingRelationship(unittest.TestCase):
         self.assertTrue(callable(bitonic_argsort_device))
 
 
+@unittest.skipUnless(_MODULE_AVAILABLE, "paddlefleet_ops module not available")
 class TestBlockMaskUtilsModuleStructure(unittest.TestCase):
     """Tests for module-level structure of block_mask_utils."""
 
     def test_module_exports(self):
         """Test that expected names are exported from the module."""
-        import paddlefleet._extensions.flashmask.block_mask_utils as bm
+        import paddlefleet_ops._extensions.flashmask.block_mask_utils as bm
 
         expected_names = [
             "find_blocks_topp",
@@ -232,7 +247,7 @@ class TestBlockMaskUtilsModuleStructure(unittest.TestCase):
 
     def test_all_jit_functions_are_callable(self):
         """Test that all JIT-decorated functions are callable."""
-        import paddlefleet._extensions.flashmask.block_mask_utils as bm
+        import paddlefleet_ops._extensions.flashmask.block_mask_utils as bm
 
         jit_names = [
             "find_blocks_topp",

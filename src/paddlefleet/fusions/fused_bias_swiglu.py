@@ -78,9 +78,12 @@ def swiglu_back(g, y):
             chain rule and the derivative of the SiLU activation function.
     """
     if paddle.is_compiled_with_cuda():
-        from paddlefleet.ops import fused_swiglu_bwd
+        from paddlefleet_ops import fused_swiglu_bwd
 
         return fused_swiglu_bwd(g, y)
+    elif paddle.is_compiled_with_xpu():
+        dx, _ = paddle._C_ops.swiglu_grad(y, None, g)
+        return dx
     else:
         raise NotImplementedError(
             "fused_swiglu_bwd is not implemented for non-CUDA backends."

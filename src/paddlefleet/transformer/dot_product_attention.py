@@ -29,13 +29,13 @@ logger = logging.getLogger(__name__)
 
 import paddle
 from paddle import Tensor
-
-from paddlefleet.context_parallel_utils import flashmask_attention_cp
-from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
-from paddlefleet.ops.flash_mask_facade import (
+from paddlefleet_ops.flash_mask_facade import (
     flash_attention,
     flashmask_attention,
 )
+
+from paddlefleet.context_parallel_utils import flashmask_attention_cp
+from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.refined_recompute import (
@@ -235,6 +235,9 @@ class DotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
+        # DSA-specific parameters (ignored by DotProductAttention)
+        x: Tensor | None = None,
+        qr: Tensor | None = None,
     ):
         """Forward."""
         assert attention_bias is None, (
@@ -245,12 +248,6 @@ class DotProductAttention(FleetLayer):
         ), "flashmask_use_varlen does not support refined recompute now."
         bsz, q_len, num_heads, q_head_dim = query.shape
         v_head_dim = value.shape[-1]
-
-        # EC-compatible flash attention path for alignment mode
-        if self.config.gpt_model_use_experimental_version:
-            return self._ec_compatible_flash_attention(
-                query, key, value, attn_mask_startend_row_indices
-            )
 
         use_eager = self.config._attn_implementation == "eager"
 
@@ -556,6 +553,9 @@ class CPDotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
+        # DSA-specific parameters
+        x: Tensor | None = None,
+        qr: Tensor | None = None,
     ):
         """Forward."""
         assert packed_seq_params is None, (
@@ -597,24 +597,29 @@ class CPDotProductAttention(FleetLayer):
                 axis=-1,
             )
         elif attn_mask_startend_row_indices.shape[-1] == 2:
-            b, k_heads, k_seqlen, _ = attn_mask_startend_row_indices.shape
-            append_indices = paddle.to_tensor(
-                np.arange(seq_len),
-                dtype=attn_mask_startend_row_indices.dtype,
-            )
-            append_indices = append_indices.reshape(1, 1, seq_len, 1)
-            append_indices_expand0 = append_indices.expand(
-                b, k_heads, k_seqlen, 1
-            )
-            append_indices_expand1 = append_indices_expand0.clone()
-            attn_mask_startend_row_indices = paddle.concat(
-                [
-                    attn_mask_startend_row_indices,
-                    append_indices_expand0,
-                    append_indices_expand1,
-                ],
-                axis=-1,
-            )
+            if self.config.experimental_dataflow:
+                # In EB dataflow, attn_mask_startend_row_indices.shape[-1] == 2
+                # means attn_mask_startend_row_indices is ready, do not need to concat
+                pass
+            else:
+                b, k_heads, k_seqlen, _ = attn_mask_startend_row_indices.shape
+                append_indices = paddle.to_tensor(
+                    np.arange(seq_len),
+                    dtype=attn_mask_startend_row_indices.dtype,
+                )
+                append_indices = append_indices.reshape(1, 1, seq_len, 1)
+                append_indices_expand0 = append_indices.expand(
+                    b, k_heads, k_seqlen, 1
+                )
+                append_indices_expand1 = append_indices_expand0.clone()
+                attn_mask_startend_row_indices = paddle.concat(
+                    [
+                        attn_mask_startend_row_indices,
+                        append_indices_expand0,
+                        append_indices_expand1,
+                    ],
+                    axis=-1,
+                )
         else:
             raise ValueError(
                 "Invalid attention mask shape, when using context parallel, attn_mask_startend_row_indices.shape[-1] must be either 1 or 2"

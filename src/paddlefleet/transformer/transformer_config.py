@@ -175,6 +175,9 @@ class TransformerConfig(ModelParallelConfig):
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
     MLP layer)."""
 
+    moe_routed_expert_use_bias: bool | None = None
+    """Override whether routed MoE expert MLP layers include bias terms. If None, use use_bias."""
+
     attention_bias: bool = False
     """Include a bias term in QKV projections."""
 
@@ -371,7 +374,7 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
-    Options are 'allgather','alltoall' and 'deepep'."""
+    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -436,7 +439,7 @@ class TransformerConfig(ModelParallelConfig):
     moe_dequant_input: bool = False
     """Whether to dequantize input."""
 
-    moe_expert_fusion: bool = True
+    moe_expert_fusion: bool = False
     """Whether to fuse experts."""
 
     moe_subbatch_token_num_before_dispatch: int | None = None
@@ -453,9 +456,6 @@ class TransformerConfig(ModelParallelConfig):
     """When True, print auto_subbatch diagnostic info (path, subbatch_rows, zip_unzip_fusion)
     after each forward/backward pass. Useful for debugging memory behavior."""
 
-    moe_grouped_gemm: bool = False
-    """Whether to use grouped gemm."""
-
     router_z_loss_coef: float = None
     """Scaling coefficient for z-loss. Default is None."""
 
@@ -471,19 +471,15 @@ class TransformerConfig(ModelParallelConfig):
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
-    moe_deep_gemm: bool = False
+    moe_deep_gemm: bool = True
     """Whether to use DeepGEMM for the bf16 grouped-gemm MoE path. This option only takes effect when
-    ``moe_grouped_gemm=True`` and fp8 is disabled, it is ignored when fp8 is enabled."""
+    ``moe_expert_fusion=True`` and fp8 is disabled, it is ignored when fp8 is enabled."""
 
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""
 
-    use_latent_moe: bool = False
-    """Whether to use latent MoE. When enabled, adds projection layers
-    to compress hidden states before routing and decompress after."""
-
     moe_latent_size: int | None = None
-    """The latent dimension size for latent MoE. Only used when use_latent_moe is True."""
+    """The latent dimension size for latent MoE. Positive values enable latent MoE."""
 
     ##################
     # Context Parallel
@@ -508,6 +504,12 @@ class TransformerConfig(ModelParallelConfig):
 
     fp8_wgrad: bool = True
     """Whether to use fp8 wgrad."""
+
+    dw_p2p_overlap: bool = False
+    """Whether to overlap p2p communication and matmul kernel in pp parallel on Blackwell."""
+
+    use_ue8m0: bool = False
+    """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
 
     ####################
     # initialization
@@ -797,6 +799,7 @@ class TransformerConfig(ModelParallelConfig):
         "indexer_loss_coeff": "dsa_indexer_loss_coeff",
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
+        "indexer_rope_interleave": "dsa_indexer_rotary_interleaved",
         # CSA / DSv4 Hybrid field mapping
         "csa_window_size": "csa_window_size",
         "csa_compress_ratios": "csa_compress_ratios",

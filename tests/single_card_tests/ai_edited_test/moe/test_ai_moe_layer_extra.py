@@ -46,7 +46,8 @@ def _make_moe_config(**overrides):
         "tensor_model_parallel_size": 1,
         "moe_token_dispatcher_type": "alltoall",
         "moe_use_fusion_node": False,
-        "moe_grouped_gemm": False,
+        "moe_expert_fusion": False,
+        "moe_deep_gemm": False,
         "moe_ep_barrier": True,
         "fp8": None,
         "fp8_wgrad": True,
@@ -105,7 +106,7 @@ def _make_moe_sublayers():
 
 def _setup_moe_mocks(
     mock_utils,
-    mock_paddlefleet,
+    mock_paddlefleet_ops,
     mock_version,
     mock_expert,
     mock_shared,
@@ -115,7 +116,7 @@ def _setup_moe_mocks(
     """Common mock setup for MoELayer tests."""
     mock_utils.get_pg_size.return_value = ep_size
     mock_utils.get_pg_rank.return_value = ep_rank
-    mock_paddlefleet.ops.is_sonic_moe_available.return_value = False
+    mock_paddlefleet_ops.is_sonic_moe_available.return_value = False
     mock_version.cuda.return_value = "12.2"
     mock_expert.return_value = paddle.nn.Layer()
     mock_shared.return_value = paddle.nn.Layer()
@@ -126,25 +127,76 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
 
 
 class TestMoELayerInitSharedExperts(unittest.TestCase):
-    pass
     """Extra tests for MoELayer shared experts."""
+
+    def test_shared_expert_gate_weight_uses_config_init_method(self):
+        """Test shared expert gate weight is initialized by config.init_method."""
+        from paddlefleet.transformer.mlp import MLPSublayersSpec
+        from paddlefleet.transformer.moe.moe_shared_expert import (
+            StandardMLPSharedExpert,
+        )
+
+        def init_gate_weight(tensor):
+            tensor.set_value(paddle.ones(tensor.shape, dtype=tensor.dtype))
+
+        init_method = MagicMock(side_effect=init_gate_weight)
+        config = _make_moe_config(
+            hidden_size=4,
+            intermediate_size=8,
+            moe_intermediate_size=8,
+            moe_shared_expert_gate=True,
+            init_method=init_method,
+        )
+
+        def fake_mlp_init(
+            self,
+            config,
+            sublayers_spec,
+            is_expert=False,
+            input_size=None,
+            intermediate_size=None,
+            hidden_size=None,
+            tp_group=None,
+        ):
+            paddle.nn.Layer.__init__(self)
+            self.config = config
+
+        with patch(
+            "paddlefleet.transformer.moe.moe_shared_expert.MLP.__init__",
+            new=fake_mlp_init,
+        ):
+            shared_expert = StandardMLPSharedExpert(
+                config,
+                moe_intermediate_size=config.moe_intermediate_size,
+                is_expert=True,
+                mlp_spec=MLPSublayersSpec(),
+            )
+
+        self.assertEqual(init_method.call_count, 1)
+        self.assertIs(init_method.call_args[0][0], shared_expert.gate_weight)
+        self.assertTrue(
+            paddle.allclose(
+                shared_expert.gate_weight,
+                paddle.ones(shared_expert.gate_weight.shape),
+            )
+        )
 
 
 class TestMoELayerInitExpertParallelParse(unittest.TestCase):
     """Tests for _init_expert_parallel internals."""
 
     @patch("paddlefleet.transformer.moe.moe_layer.paddle.version")
-    @patch("paddlefleet.transformer.moe.moe_layer.paddlefleet")
+    @patch("paddlefleet.transformer.moe.moe_layer.paddlefleet_ops")
     @patch("paddlefleet.transformer.moe.moe_layer.utils")
     def test_num_experts_less_than_ep_raises(
-        self, mock_utils, mock_paddlefleet, mock_version
+        self, mock_utils, mock_paddlefleet_ops, mock_version
     ):
         """Test that num_experts < expert_model_parallel_size raises."""
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         mock_utils.get_pg_size.return_value = 4
         mock_utils.get_pg_rank.return_value = 0
-        mock_paddlefleet.ops.is_sonic_moe_available.return_value = False
+        mock_paddlefleet_ops.is_sonic_moe_available.return_value = False
         mock_version.cuda.return_value = "12.2"
 
         config = _make_moe_config(
@@ -158,17 +210,17 @@ class TestMoELayerInitExpertParallelParse(unittest.TestCase):
             MoELayer(config, sublayers=sublayers, pg_collection=pg_collection)
 
     @patch("paddlefleet.transformer.moe.moe_layer.paddle.version")
-    @patch("paddlefleet.transformer.moe.moe_layer.paddlefleet")
+    @patch("paddlefleet.transformer.moe.moe_layer.paddlefleet_ops")
     @patch("paddlefleet.transformer.moe.moe_layer.utils")
     def test_num_experts_not_divisible_by_ep_raises(
-        self, mock_utils, mock_paddlefleet, mock_version
+        self, mock_utils, mock_paddlefleet_ops, mock_version
     ):
         """Test that num_experts % expert_model_parallel_size != 0 raises."""
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         mock_utils.get_pg_size.return_value = 3
         mock_utils.get_pg_rank.return_value = 0
-        mock_paddlefleet.ops.is_sonic_moe_available.return_value = False
+        mock_paddlefleet_ops.is_sonic_moe_available.return_value = False
         mock_version.cuda.return_value = "12.2"
 
         config = _make_moe_config(

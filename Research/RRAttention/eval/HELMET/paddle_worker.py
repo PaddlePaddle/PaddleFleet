@@ -23,7 +23,7 @@ from paddleformers.generation import GenerationConfig
 
 def disable_unavailable_deep_ep():
     try:
-        import paddlefleet.ops as fleet_ops
+        import paddlefleet_ops as fleet_ops
     except Exception:
         return
 
@@ -32,7 +32,7 @@ def disable_unavailable_deep_ep():
         return
 
     try:
-        from paddlefleet.ops import deep_ep  # noqa: F401
+        from paddlefleet_ops import deep_ep  # noqa: F401
     except Exception as exc:
         print(
             f"[paddle_worker] disable unavailable DeepEP: {exc}",

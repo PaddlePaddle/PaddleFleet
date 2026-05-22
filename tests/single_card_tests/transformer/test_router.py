@@ -42,6 +42,7 @@ class MockTransformerConfig:
         self.topk_group = 1
 
         # Router Specific Parameters
+        self.init_method = paddle.nn.initializer.Normal(mean=0.0, std=0.02)
         self.topk_method = "noaux_tc"
         self.norm_topk_prob = True
         self.routed_scaling_factor = 1.0
@@ -86,7 +87,9 @@ class TestRouterComponents(unittest.TestCase):
         """
         B, D_in, D_out = 4, 16, 8
         x = paddle.randn([B, D_in], dtype="float32")
-        w = paddle.randn([D_in, D_out], dtype="float32")
+        # FusedGateDetachMatmul.forward does w = w.T internally, so pass w as [D_out, D_in].
+        # The op is equivalent to F.linear(x, w.T) = x @ w, i.e. x @ [D_in, D_out].
+        w = paddle.randn([D_out, D_in], dtype="float32")
 
         x.stop_gradient = False
         w.stop_gradient = False
@@ -102,7 +105,8 @@ class TestRouterComponents(unittest.TestCase):
         w.clear_grad()
 
         # 2. Paddle Native Operator Path (Baseline)
-        y_ref = F.linear(x, w)
+        # FusedGateDetachMatmul(x, w) == F.linear(x, w.T) == x @ w (Paddle matmul convention)
+        y_ref = F.linear(x, w.T)
         loss_ref = y_ref.sum()
         loss_ref.backward()
 

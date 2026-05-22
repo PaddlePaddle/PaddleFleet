@@ -73,11 +73,11 @@ class TestGPTConfigDefaults(unittest.TestCase):
         config = GPTConfig()
         self.assertFalse(config.tie_word_embeddings)
 
-    def test_default_moe_grouped_gemm(self):
+    def test_default_moe_expert_fusion(self):
         from paddlefleet.models.gpt.gpt_config import GPTConfig
 
         config = GPTConfig()
-        self.assertFalse(config.moe_grouped_gemm)
+        self.assertFalse(config.moe_expert_fusion)
 
     def test_default_parallel_output(self):
         from paddlefleet.models.gpt.gpt_config import GPTConfig
@@ -174,7 +174,7 @@ class TestGPTConfigInheritance(unittest.TestCase):
             "rope_scaling",
             "max_sequence_length",
             "tie_word_embeddings",
-            "moe_grouped_gemm",
+            "moe_expert_fusion",
             "parallel_output",
             "layer_types",
         }
@@ -226,7 +226,7 @@ class TestGPTConfigEdgeCases(unittest.TestCase):
             rope_scaling=4.0,
             max_sequence_length=4096,
             tie_word_embeddings=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             parallel_output=False,
         )
         self.assertEqual(config.vocab_size, 50000)
@@ -236,7 +236,7 @@ class TestGPTConfigEdgeCases(unittest.TestCase):
         self.assertEqual(config.rope_scaling, 4.0)
         self.assertEqual(config.max_sequence_length, 4096)
         self.assertTrue(config.tie_word_embeddings)
-        self.assertTrue(config.moe_grouped_gemm)
+        self.assertTrue(config.moe_expert_fusion)
         self.assertFalse(config.parallel_output)
 
 

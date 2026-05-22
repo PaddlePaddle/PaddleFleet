@@ -21,7 +21,7 @@ import paddle
 from paddle import Tensor, framework
 
 try:
-    from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
+    from paddlefleet_ops import deep_gemm as paddlefleet_deep_gemm
 except (ImportError, RuntimeError):
     pass
 try:

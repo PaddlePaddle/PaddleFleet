@@ -34,7 +34,12 @@ from paddlefleet.jit import jit_fuser
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.utils import get_pg_size, nvtx_range_pop, nvtx_range_push
+from paddlefleet.utils import (
+    get_pg_rank,
+    get_pg_size,
+    nvtx_range_pop,
+    nvtx_range_push,
+)
 
 from .paddle_norm import get_norm_extra_args
 
@@ -255,6 +260,90 @@ class GatedDeltaNet(FleetLayer):
             )(A)
             paddle.assign(paddle.log(A), self.A_log)
 
+    def _build_padding_mask(
+        self,
+        attention_mask: paddle.Tensor | None,
+        attn_mask_startend_row_indices: paddle.Tensor | None,
+        batch: int,
+        seq_len: int,
+    ) -> paddle.Tensor | None:
+        """Derive a padding mask (1.0=valid, 0.0=padding) for GDN."""
+        is_sp = self.config.sequence_parallel and self.sp_size > 1
+
+        if attention_mask is not None and attention_mask.ndim == 2:
+            full_seq = attention_mask.shape[-1]
+            if is_sp:
+                if full_seq != seq_len:
+                    # Shape mismatch under SP – fall through to startend indices.
+                    pass
+                else:
+                    # attention_mask is [b, full_s], slice to local chunk
+                    seq_len_local = seq_len // self.sp_size
+                    tp_rank = get_pg_rank(self.pg_collection.tp)
+                    offset = tp_rank * seq_len_local
+                    local_mask = attention_mask[
+                        :, offset : offset + seq_len_local
+                    ]
+                    if local_mask.astype("bool").all():
+                        return None
+                    return local_mask.astype(paddle.float32).T.unsqueeze(-1)
+            else:
+                if full_seq == seq_len:
+                    mask = attention_mask.unsqueeze(-1).astype(paddle.float32)
+                    if mask.all():
+                        return None
+                    return mask
+                # full_seq != seq_len: attention_mask shape does not match the
+                # current sequence length (e.g. stale mask from a previous stage).
+                # Fall through to try attn_mask_startend_row_indices instead.
+
+        if attn_mask_startend_row_indices is not None:
+            indices = attn_mask_startend_row_indices[:, 0, :, 0]
+            full_seq = indices.shape[-1]
+
+            if is_sp:
+                if full_seq != seq_len:
+                    # Shape mismatch under SP – cannot derive valid mask.
+                    pass
+                else:
+                    seq_len_local = seq_len // self.sp_size
+                    tp_rank = get_pg_rank(self.pg_collection.tp)
+                    offset = tp_rank * seq_len_local
+                    local_indices = indices[:, offset : offset + seq_len_local]
+                    seq_positions = paddle.arange(
+                        offset,
+                        offset + seq_len_local,
+                        dtype=local_indices.dtype,
+                    )
+                    valid = (local_indices > seq_positions.unsqueeze(0)).astype(
+                        paddle.float32
+                    )
+                    if valid.all():
+                        return None
+                    return valid.T.unsqueeze(-1)
+            else:
+                seq_positions = paddle.arange(full_seq, dtype=indices.dtype)
+                valid = (indices > seq_positions.unsqueeze(0)).astype(
+                    paddle.float32
+                )
+                if valid.all():
+                    return None
+                return valid.unsqueeze(-1)
+
+        if (
+            attention_mask is not None
+            or attn_mask_startend_row_indices is not None
+        ):
+            raise ValueError(
+                f"GatedDeltaNet._build_padding_mask: could not derive a valid "
+                f"padding mask from the provided inputs "
+                f"(attention_mask.shape={list(attention_mask.shape) if attention_mask is not None else None}, "
+                f"attn_mask_startend_row_indices.shape="
+                f"{list(attn_mask_startend_row_indices.shape) if attn_mask_startend_row_indices is not None else None}, "
+                f"seq_len={seq_len})."
+            )
+        return None
+
     def forward(
         self,
         hidden_states: paddle.Tensor,
@@ -291,6 +380,17 @@ class GatedDeltaNet(FleetLayer):
         else:
             # Input is [b, s, h]
             batch, seq_len, _ = hidden_states.shape
+
+        attn_mask_startend_row_indices = kwargs.get(
+            "attn_mask_startend_row_indices", None
+        )
+        padding_mask = self._build_padding_mask(
+            attention_mask, attn_mask_startend_row_indices, batch, seq_len
+        )
+        if padding_mask is not None:
+            hidden_states = hidden_states * padding_mask.astype(
+                hidden_states.dtype
+            )
 
         # Input projection
         nvtx_range_push(suffix="in_proj")

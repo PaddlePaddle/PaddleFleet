@@ -65,7 +65,14 @@ from paddlefleet.transformer.csa_attention import (
     CSAIndexerSublayersSpec,
 )
 from paddlefleet.transformer.dsa_attention import (
-    MLASelfAttentionWithDSA,
+    DSAIndexer,
+    DSAIndexerSublayersSpec,
+    DSAttention,
+    DSAttentionSublayersSpec,
+)
+from paddlefleet.transformer.dsv4_hybrid_attention import (
+    DSv4HybridSelfAttention,
+    DSv4HybridSelfAttentionSublayersSpec,
 )
 from paddlefleet.transformer.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
@@ -186,24 +193,51 @@ def get_attention_spec(
         )
     elif attention_layer_type == "multi_latent_attention":
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-        # Decide attention class: DSA variant if index_n_heads is configured
-        use_dsa = (
-            config is not None
-            and getattr(config, "index_n_heads", None) is not None
-        )
-        attn_cls = MLASelfAttentionWithDSA if use_dsa else MLASelfAttention
+        # Decide attention class: always MLASelfAttention (DSA is a pluggable core_attention)
+        attn_cls = MLASelfAttention
         # Gated attention
         gated_attention = getattr(config, "gated_attention", False)
+
+        # Decide core_attention: DSAttention if dsa_index_n_heads is configured, else standard
+        use_dsa = (
+            config is not None
+            and getattr(config, "dsa_index_n_heads", None) is not None
+        )
+
+        if use_dsa:
+            # DSA Indexer sublayers spec (duplicated linear, NOT tensor-parallel)
+            dsa_indexer_sublayers = DSAIndexerSublayersSpec(
+                linear_wq_b=backend.linear(),
+                linear_wk=backend.linear(),
+                k_norm=paddle.nn.LayerNorm,  # LayerNorm (not RMSNorm) for Indexer K
+                linear_weights_proj=backend.linear(),
+            )
+            # DSAttention as core_attention (pluggable component)
+            core_attention = LayerSpec(
+                layer=DSAttention,
+                sublayers_spec=DSAttentionSublayersSpec(
+                    indexer=LayerSpec(
+                        layer=DSAIndexer,
+                        sublayers_spec=dsa_indexer_sublayers,
+                    ),
+                ),
+            )
+        else:
+            # Standard core_attention
+            core_attention = backend.core_attention()
+
         return LayerSpec(
             layer=attn_cls,
-            extra_kwargs={"attn_mask_type": attn_mask_type},
+            extra_kwargs={
+                "attn_mask_type": attn_mask_type,
+            },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
                 q_a_proj=backend.column_parallel_linear(),
                 q_b_proj=backend.column_parallel_linear(),
                 kv_a_proj_with_mqa=backend.column_parallel_linear(),
                 kv_b_proj=backend.column_parallel_linear(),
-                core_attention=backend.core_attention(),
+                core_attention=core_attention,
                 o_proj=backend.row_parallel_linear(),
                 q_a_layernorm=qk_norm_standard if use_qk_norm else IdentityOp,
                 kv_a_layernorm=qk_norm_standard if use_qk_norm else IdentityOp,
@@ -273,7 +307,7 @@ def get_attention_spec(
 def get_gpt_layer_local_spec(
     config: TransformerConfig | None = None,
     num_experts: int | None = None,
-    moe_grouped_gemm: bool | None = False,
+    moe_expert_fusion: bool | None = False,
     use_qk_norm: bool | None = False,
     multi_latent_attention: bool | None = False,
     normalization: str | None = None,
@@ -287,7 +321,7 @@ def get_gpt_layer_local_spec(
 
     Args:
         num_experts (int, optional): Number of experts. Defaults to None.
-        moe_grouped_gemm (bool, optional): To use Grouped GEMM. Defaults to False.
+        moe_expert_fusion (bool, optional): To use Grouped GEMM. Defaults to False.
         use_qk_norm (bool, optional): To use layernorm for queries/keys. Defaults to False.
         fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
         qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
@@ -310,7 +344,7 @@ def get_gpt_layer_local_spec(
     mlp = get_mlp_layer_spec_for_backend(
         backend=backend,
         num_experts=num_experts,
-        moe_grouped_gemm=moe_grouped_gemm,
+        moe_expert_fusion=moe_expert_fusion,
     )
 
     block_attn_res = IdentityOp
@@ -382,7 +416,7 @@ def get_gpt_layer_local_spec(
 def get_mlp_layer_spec_for_backend(
     backend: BackendSpecProvider,
     num_experts: int | None = None,
-    moe_grouped_gemm: bool | None = False,
+    moe_expert_fusion: bool | None = False,
 ) -> LayerSpec:
     """Helper function to get layer spec for MLP/MoE"""
 
@@ -409,7 +443,7 @@ def get_mlp_layer_spec_for_backend(
         return get_moe_layer_spec_for_backend(
             backend=backend,
             num_experts=num_experts,
-            moe_grouped_gemm=moe_grouped_gemm,
+            moe_expert_fusion=moe_expert_fusion,
         )
 
 
@@ -423,7 +457,7 @@ def get_gpt_decoder_layers_spec(
         get_gpt_layer_local_spec,
         config=config,
         num_experts=None,
-        moe_grouped_gemm=False,
+        moe_expert_fusion=False,
         use_qk_norm=config.use_qk_norm,
         multi_latent_attention=config.multi_latent_attention,
         normalization=normalization,
@@ -434,7 +468,7 @@ def get_gpt_decoder_layers_spec(
         get_gpt_layer_local_spec,
         config=config,
         num_experts=config.n_routed_experts,
-        moe_grouped_gemm=config.moe_grouped_gemm,
+        moe_expert_fusion=config.moe_expert_fusion,
         use_qk_norm=config.use_qk_norm,
         multi_latent_attention=config.multi_latent_attention,
         normalization=normalization,
@@ -506,7 +540,7 @@ def get_gpt_mtp_layers_spec_for_backend(
         transformer_layer_spec = get_gpt_layer_local_spec(
             config=config,
             num_experts=None,
-            moe_grouped_gemm=False,
+            moe_expert_fusion=False,
             use_qk_norm=config.use_qk_norm,
             multi_latent_attention=config.multi_latent_attention,
             normalization=config.normalization,
