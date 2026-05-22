@@ -986,20 +986,18 @@ class TransformerConfig(ModelParallelConfig):
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
-            if not self.multi_latent_attention:
-                raise ValueError(
-                    "experimental_attention_variant='dsv4_hybrid' requires "
-                    "multi_latent_attention=True."
-                )
             if self.csa_compress_ratios is None:
                 raise ValueError(
                     "experimental_attention_variant='dsv4_hybrid' requires "
                     "csa_compress_ratios to be set."
                 )
-            if len(self.csa_compress_ratios) != self.num_hidden_layers:
+            if (
+                len(self.csa_compress_ratios)
+                != self.num_hidden_layers + self.num_nextn_predict_layers
+            ):
                 raise ValueError(
                     f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
-                    f"must equal num_hidden_layers ({self.num_hidden_layers})."
+                    f"must equal num_hidden_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
                 )
             valid_ratios = {0, 4, 128}
             for i, r in enumerate(self.csa_compress_ratios):

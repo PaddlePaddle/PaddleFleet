@@ -96,6 +96,7 @@ class DSv4HybridAttention(Attention):
         attention_type: str,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
+        is_mtp_layer: bool = False,
     ):
         super().__init__(
             config=config,
@@ -105,6 +106,7 @@ class DSv4HybridAttention(Attention):
             attn_mask_type=attn_mask_type,
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
 
         self.num_attention_heads = config.num_attention_heads
@@ -116,8 +118,11 @@ class DSv4HybridAttention(Attention):
         self.val_hidden_size = self.v_head_dim
 
         # Per-layer compress ratio
-        compress_ratio = config.csa_compress_ratios[layer_number - 1]
-
+        if is_mtp_layer:
+            layer_idx = self.config.num_hidden_layers + layer_number
+            compress_ratio = self.config.csa_compress_ratios[layer_idx]
+        else:
+            compress_ratio = self.config.csa_compress_ratios[layer_number]
         # Per-layer RoPE (potentially different base for compressed layers)
         rope_base = getattr(config, "rotary_base", 10000)
         if compress_ratio > 1:
@@ -297,7 +302,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         attn_mask_type: AttnMaskType,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
-        **kwargs,
+        is_mtp_layer: bool = False,
     ):
         super().__init__(
             config=config,
@@ -307,6 +312,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             attention_type="self",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
 
         self.q_lora_rank = config.q_lora_rank

@@ -110,6 +110,7 @@ def get_attention_spec(
     config: TransformerConfig,
     attention_layer_type: str,
     attn_mask_type: AttnMaskType = AttnMaskType.causal,
+    is_mtp_layer: bool = False,
 ) -> LayerSpec:
     """Build the self_attn LayerSpec based on attention_layer_type.
 
@@ -282,7 +283,10 @@ def get_attention_spec(
 
         return LayerSpec(
             layer=DSv4HybridSelfAttention,
-            extra_kwargs={"attn_mask_type": attn_mask_type},
+            extra_kwargs={
+                "attn_mask_type": attn_mask_type,
+                "is_mtp_layer": is_mtp_layer,
+            },
             sublayers_spec=DSv4HybridSelfAttentionSublayersSpec(
                 linear_q_down_proj=backend.linear(),
                 linear_q_up_proj=backend.column_parallel_linear(),
@@ -311,6 +315,7 @@ def get_gpt_layer_local_spec(
     layer_number: int | None = 1,
     attention_layer_type: str = "self_attention",
     attn_mask_type: AttnMaskType = AttnMaskType.causal,
+    is_mtp_layer: bool = False,
 ) -> LayerSpec:
     """Use this spec for an implementation using only layers in Fleet-Core.
 
@@ -373,22 +378,21 @@ def get_gpt_layer_local_spec(
                 "Only base TransformerLayer can be overlapped."
             )
             transformer_cls = TransformerLayerWithOverlap
-
-    if multi_latent_attention:
+    exp_variant = getattr(config, "experimental_attention_variant", None)
+    if exp_variant == "dsv4_hybrid":
         # Route to DSv4 Hybrid if configured
-        exp_variant = getattr(config, "experimental_attention_variant", None)
-        if exp_variant == "dsv4_hybrid":
-            self_attn_spec = get_attention_spec(
-                config=config,
-                attention_layer_type="dsv4_hybrid_attention",
-                attn_mask_type=AttnMaskType.causal,
-            )
-        else:
-            self_attn_spec = get_attention_spec(
-                config=config,
-                attention_layer_type="multi_latent_attention",
-                attn_mask_type=AttnMaskType.causal,
-            )
+        self_attn_spec = get_attention_spec(
+            config=config,
+            attention_layer_type="dsv4_hybrid_attention",
+            attn_mask_type=AttnMaskType.causal,
+            is_mtp_layer=is_mtp_layer,
+        )
+    elif multi_latent_attention:
+        self_attn_spec = get_attention_spec(
+            config=config,
+            attention_layer_type="multi_latent_attention",
+            attn_mask_type=AttnMaskType.causal,
+        )
     else:
         self_attn_spec = get_attention_spec(
             config=config,
@@ -555,40 +559,39 @@ def get_gpt_mtp_layers_spec_for_backend(
 ) -> list[LayerSpec]:
     assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
 
-    if config.use_dense_mtp and config.n_routed_experts is not None:
-        # When use_dense_mtp is enabled, build a dense transformer layer spec
-        # (num_experts=None) for MTP layers instead of copying the MoE decoder layer.
-        transformer_layer_spec = get_gpt_layer_local_spec(
-            config=config,
-            num_experts=None,
-            moe_expert_fusion=False,
-            use_qk_norm=config.use_qk_norm,
-            multi_latent_attention=config.multi_latent_attention,
-            normalization=config.normalization,
-        )
-    else:
-        transformer_layer_spec = spec[-1]
-
-    mtp_layer_spec_func = partial(
-        get_mtp_layer_spec_for_backend,
-        config=config,
-        transformer_layer_spec=transformer_layer_spec,
-        backend=backend,
-    )
-
     if config.mtp_num_layers > 0:
         mtp_num_layers = config.mtp_num_layers
     else:
-        mtp_num_layers = (
-            config.num_nextn_predict_layers
-            if config.num_nextn_predict_layers
-            else 0
-        )
+        mtp_num_layers = config.num_nextn_predict_layers or 0
 
     mtp_layer_specs = []
     for i in range(mtp_num_layers):
-        mtp_layer_specs.append(mtp_layer_spec_func(layer_number=i))
+        if config.use_dense_mtp and config.n_routed_experts is not None:
+            num_experts = None
+            moe_expert_fusion = False
+        else:
+            num_experts = config.n_routed_experts
+            moe_expert_fusion = config.moe_expert_fusion
 
+        transformer_layer_spec = get_gpt_layer_local_spec(
+            config=config,
+            num_experts=num_experts,
+            moe_expert_fusion=moe_expert_fusion,
+            use_qk_norm=config.use_qk_norm,
+            multi_latent_attention=config.multi_latent_attention,
+            normalization=config.normalization,
+            layer_number=i,
+            is_mtp_layer=True,
+        )
+
+        mtp_layer_specs.append(
+            get_mtp_layer_spec_for_backend(
+                config=config,
+                transformer_layer_spec=transformer_layer_spec,
+                backend=backend,
+                layer_number=i,
+            )
+        )
     return mtp_layer_specs
 
 
