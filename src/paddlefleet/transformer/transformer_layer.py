@@ -685,6 +685,24 @@ class TransformerLayer(nn.Layer):
         input_ids: Tensor | None = None,
         **kwargs,
     ):
+        def need_do_attention():
+            if self.training:
+                return True
+            if hasattr(self, "self_attn") and hasattr(
+                self.self_attn, "core_attention"
+            ):
+                core_attn = self.self_attn.core_attention
+                if hasattr(core_attn, "config") and hasattr(
+                    core_attn.config, "forward_meta"
+                ):
+                    fm = core_attn.config.forward_meta
+                    return not (
+                        fm.max_len_tensor_cpu[1] <= 0
+                        and fm.max_len_tensor_cpu[2] <= 0
+                    )
+            else:
+                return True
+
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
         if self.config.block_attention_residuals:
             blocks = kwargs.get("blocks", [])
@@ -702,19 +720,7 @@ class TransformerLayer(nn.Layer):
 
             # Self-attention (skip internal bda residual)
             with profile("attn"):
-                if hasattr(
-                    self.self_attn.core_attention.config, "forward_meta"
-                ):
-                    forward_meta = (
-                        self.self_attn.core_attention.config.forward_meta
-                    )
-                    need_do_attention = not (
-                        forward_meta.max_len_tensor_cpu[1] <= 0
-                        and forward_meta.max_len_tensor_cpu[2] <= 0
-                    )
-                else:
-                    need_do_attention = True
-                if need_do_attention:
+                if need_do_attention():
                     hidden_states, context = self._forward_attention(
                         hidden_states=hidden_states,
                         attention_mask=attention_mask,
@@ -760,19 +766,7 @@ class TransformerLayer(nn.Layer):
         else:
             self._log_md5(hidden_states, "input", self.layer_number)
             with profile("attn"):
-                if hasattr(
-                    self.self_attn.core_attention.config, "forward_meta"
-                ):
-                    forward_meta = (
-                        self.self_attn.core_attention.config.forward_meta
-                    )
-                    need_do_attention = not (
-                        forward_meta.max_len_tensor_cpu[1] <= 0
-                        and forward_meta.max_len_tensor_cpu[2] <= 0
-                    )
-                else:
-                    need_do_attention = True
-                if need_do_attention:
+                if need_do_attention():
                     hidden_states, context = self._forward_attention(
                         hidden_states=hidden_states,
                         attention_mask=attention_mask,

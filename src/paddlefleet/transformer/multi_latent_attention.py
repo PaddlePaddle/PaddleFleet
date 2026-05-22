@@ -89,12 +89,22 @@ def _ec_compatible_rope_apply(
         # we need to get full seq_len here
         seq_len = seq_len * get_context_parallel_world_size()
     # Compute positions from position_ids or default to sequential
-    if position_ids is not None and position_ids.numel() == 1:
-        offset = int(position_ids[0])
-        positions = paddle.arange(0, seq_len, dtype="float32") + offset  # [S]
+    if position_ids is not None:
+        # Handle different position_ids shapes:
+        # - 1D [S]: use directly
+        # - 2D [B, S]: use first batch (assume all batches have same positions)
+        # - 3D: not supported by RotaryEmbedding, use MultimodalRotaryEmbedding instead
+        if position_ids.ndim == 1:
+            positions = position_ids.astype(freqs.dtype)
+        elif position_ids.ndim == 2:
+            # Take first batch, assuming all batches have same position_ids
+            positions = position_ids[0].astype(freqs.dtype)
+        else:
+            # For 3D position_ids (M-RoPE), this function should not be called
+            # Fall back to max_seq_len to avoid cryptic errors
+            positions = paddle.arange(seq_len).astype(freqs.dtype)  # + offset
     else:
-        # Default: sequential positions [0, 1, ..., seq_len-1]
-        positions = paddle.arange(0, seq_len, dtype="float32")  # [S]
+        positions = paddle.arange(seq_len).astype(freqs.dtype)  # + offset
     # freqs_table: [S, D/2]
     freqs_table = paddle.outer(positions, freqs)
     # Expand for batch: [1, S, D/2]
@@ -1000,6 +1010,7 @@ class MLASelfAttention(MultiLatentAttention):
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
                 if self.config.gpt_model_use_experimental_version:
+                    # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
                         TransformerLayer,
                     )
@@ -1014,10 +1025,8 @@ class MLASelfAttention(MultiLatentAttention):
                         rope_base=self.config.rope_theta,  # Must match EC's config.rope_theta
                         position_ids=position_ids,
                     )
-
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)
-
                 else:
                     # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
                     q_pos_emb = apply_rotary_pos_emb(
@@ -1041,6 +1050,7 @@ class MLASelfAttention(MultiLatentAttention):
                         mscale=mscale,
                         cp_group=self.pg_collection.cp,
                     )
+
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
                 k_pe = k_pos_emb
                 query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
