@@ -694,7 +694,7 @@ class TransformerLayer(nn.Layer):
         def need_do_attention():
             # need_do_prefill = forward_meta.max_len_tensor_cpu[1] > 0
             # need_do_decode = forward_meta.max_len_tensor_cpu[2] > 0
-            if hasattr(self, "training") and self.training:
+            if getattr(self, "training", True):
                 return True
             if hasattr(self, "self_attn") and hasattr(
                 self.self_attn, "core_attention"
