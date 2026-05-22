@@ -5,9 +5,6 @@ on:
     types: [opened, edited, reopened, synchronize]
     branches: [develop, release/*]
 
-env:
-  PR_ID: ${{ github.event.pull_request.number || '0' }}
-
 jobs:
   check-pr-description:
     name: Check PR Description
@@ -22,10 +19,16 @@ jobs:
           python-version: '3.10'
       - name: Check if PR description is empty
         id: check-description
+        env:
+          AGILE_PULL_ID: ${{ github.event.pull_request.number }}
+          AGILE_COMPILE_BRANCH: ${{ github.base_ref }}
+          AGILE_CHECKIN_AUTHOR: ${{ github.event.pull_request.user.login }}
+          method: check_pr
+          GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.base_ref }}
         # 使用 GitHub Actions 的内置上下文检查 PR 内容
         run: |
           pip install httpx requests
-          git pull --no-edit origin pull/${PR_ID}/head
           python ci/checkPRTemplate.py
       - name: Check uv.lock is not deleted
         run: |

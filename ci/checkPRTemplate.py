@@ -195,4 +195,4 @@ def main(org, repo, pull_id):
 if __name__ == "__main__":
     AGILE_PULL_ID = os.getenv("AGILE_PULL_ID")
     GITHUB_API_TOKEN = os.getenv("GITHUB_API_TOKEN")
-    main("PaddlePaddle", "Paddle", AGILE_PULL_ID)
+    main("PaddlePaddle", "PaddleFleet", AGILE_PULL_ID)
