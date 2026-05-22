@@ -2,13 +2,8 @@ import os
 import time
 
 import paddle
-import torch
-import torch.nn.functional as F
 
-from .compat import paddle_tilelang_compat_guard
-from .kernel import tilelang_sparse_mla_bwd as sparse_mla_bwd
-from .kernel import tilelang_sparse_mla_fwd as sparse_mla_fwd
-from .kernel.tilelang_sparse_mla import _prepare_inputs_paddle, sparse_attn_tilelang_paddle
+from .compat import enable_tilelang_paddle_compat_before_import, paddle_tilelang_compat_guard
 
 
 DEFAULT_TOPK_PAD_TO = 64
@@ -27,8 +22,11 @@ def _profile_limit():
 
 
 def _profile_sync():
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    try:
+        if paddle.is_compiled_with_cuda():
+            paddle.device.cuda.synchronize()
+    except Exception:
+        pass
 
 
 def _profile_time_ms(fn):
@@ -63,73 +61,80 @@ def _topk_invalid_ratio(topk_idxs):
     return float((topk_idxs == -1).sum().item()) / float(topk_idxs.numel())
 
 
-def _ensure_torch_tensor(name, tensor):
-    if not isinstance(tensor, torch.Tensor):
-        raise TypeError(f"{name} must be a torch.Tensor, got {type(tensor)!r}")
+def _ensure_paddle_tensor(name, tensor):
+    if not isinstance(tensor, paddle.Tensor):
+        raise TypeError(f"{name} must be a paddle.Tensor, got {type(tensor)!r}")
+
+
+def _contiguous(tensor):
+    if hasattr(tensor, "contiguous"):
+        return tensor.contiguous()
+    return tensor
 
 
 def _prepare_topk_idxs(topk_idxs, *, topk_pad_to=DEFAULT_TOPK_PAD_TO):
-    _ensure_torch_tensor("topk_idxs", topk_idxs)
-    if topk_idxs.dim() != 3:
+    _ensure_paddle_tensor("topk_idxs", topk_idxs)
+    if len(topk_idxs.shape) != 3:
         raise ValueError(f"topk_idxs must have shape [B, S, topk], got {tuple(topk_idxs.shape)}")
     if topk_pad_to <= 0:
         raise ValueError(f"topk_pad_to must be positive, got {topk_pad_to}")
 
-    if topk_idxs.dtype != torch.int32:
-        topk_idxs = topk_idxs.to(torch.int32)
-    if not topk_idxs.is_contiguous():
-        topk_idxs = topk_idxs.contiguous()
+    if topk_idxs.dtype != paddle.int32:
+        topk_idxs = topk_idxs.cast("int32")
 
     topk = topk_idxs.shape[-1]
     padded_topk = (topk + topk_pad_to - 1) // topk_pad_to * topk_pad_to
     if padded_topk != topk:
-        topk_idxs = F.pad(topk_idxs, (0, padded_topk - topk), value=-1)
-    return topk_idxs.contiguous()
+        pad = paddle.full(
+            [topk_idxs.shape[0], topk_idxs.shape[1], padded_topk - topk],
+            -1,
+            dtype="int32",
+        )
+        topk_idxs = paddle.concat([topk_idxs, pad], axis=-1)
+    return _contiguous(topk_idxs)
 
 
 def _prepare_attn_sink(attn_sink):
-    _ensure_torch_tensor("attn_sink", attn_sink)
-    if attn_sink.dim() != 1:
+    _ensure_paddle_tensor("attn_sink", attn_sink)
+    if len(attn_sink.shape) != 1:
         raise ValueError(f"attn_sink must have shape [H], got {tuple(attn_sink.shape)}")
-    if attn_sink.dtype != torch.float32:
-        attn_sink = attn_sink.float()
-    return attn_sink.contiguous()
+    if attn_sink.dtype != paddle.float32:
+        attn_sink = attn_sink.cast("float32")
+    return _contiguous(attn_sink)
 
 
 def _prepare_inputs(q, kv, attn_sink, topk_idxs, *, topk_pad_to=DEFAULT_TOPK_PAD_TO):
-    _ensure_torch_tensor("q", q)
-    _ensure_torch_tensor("kv", kv)
-    if q.dim() != 4:
+    _ensure_paddle_tensor("q", q)
+    _ensure_paddle_tensor("kv", kv)
+    if len(q.shape) != 4:
         raise ValueError(f"q must have shape [B, S, H, D], got {tuple(q.shape)}")
-    if kv.dim() != 3:
+    if len(kv.shape) != 3:
         raise ValueError(f"kv must have shape [B, S_kv, D], got {tuple(kv.shape)}")
     if q.shape[0] != kv.shape[0] or q.shape[-1] != kv.shape[-1]:
         raise ValueError(f"q shape {tuple(q.shape)} is incompatible with kv shape {tuple(kv.shape)}")
 
+    topk_idxs = _prepare_topk_idxs(topk_idxs, topk_pad_to=topk_pad_to)
+    if topk_idxs.shape[0] != q.shape[0] or topk_idxs.shape[1] != q.shape[1]:
+        raise ValueError(f"topk_idxs shape {tuple(topk_idxs.shape)} is incompatible with q shape {tuple(q.shape)}")
+
+    attn_sink = _prepare_attn_sink(attn_sink)
+    if attn_sink.shape[0] != q.shape[2]:
+        raise ValueError(f"attn_sink shape {tuple(attn_sink.shape)} is incompatible with q shape {tuple(q.shape)}")
+
     return (
-        q.contiguous(),
-        kv.contiguous(),
-        _prepare_attn_sink(attn_sink),
-        _prepare_topk_idxs(topk_idxs, topk_pad_to=topk_pad_to),
+        _contiguous(q),
+        _contiguous(kv),
+        attn_sink,
+        topk_idxs,
     )
 
 
-def sparse_attn_torch(q, kv, attn_sink, topk_idxs, sm_scale=None):
-    """
-    Torch reference implementation for DSv4 sparse attention.
-
-    Args:
-        q: [B, S, H, D]
-        kv: [B, S_kv, D]
-        attn_sink: [H]
-        topk_idxs: [B, S, topk], -1 means masked entry
-        sm_scale: optional softmax scale
-    Returns:
-        o: [B, S, H, D]
-    """
+def sparse_attn_paddle(q, kv, attn_sink, topk_idxs, sm_scale=None):
+    """Paddle reference implementation for DSv4 sparse attention."""
+    q, kv, attn_sink, topk_idxs = _prepare_inputs(q, kv, attn_sink, topk_idxs)
     q_dtype = q.dtype
-    q = q.float()
-    kv = kv.float()
+    q = q.cast("float32")
+    kv = kv.cast("float32")
 
     b, m, h, d = q.shape
     k_len = kv.shape[1]
@@ -137,66 +142,50 @@ def sparse_attn_torch(q, kv, attn_sink, topk_idxs, sm_scale=None):
     if sm_scale is None:
         sm_scale = (1.0 / d) ** 0.5
 
-    topk_idxs = _prepare_topk_idxs(topk_idxs)
-    if (topk_idxs >= k_len).any():
+    if bool(paddle.any((topk_idxs >= k_len) & (topk_idxs != -1)).item()):
         raise ValueError(f"topk_idxs contains index >= kv length {k_len}")
 
     mask = topk_idxs != -1
-    safe_idxs = topk_idxs.masked_fill(~mask, 0)
+    safe_idxs = paddle.where(mask, topk_idxs, paddle.zeros_like(topk_idxs)).cast("int64")
+    batch_idx = paddle.arange(b, dtype="int64").reshape([b, 1, 1])
+    batch_idx = paddle.expand(batch_idx, [b, m, safe_idxs.shape[-1]])
+    kv_gathered = kv[batch_idx, safe_idxs]
 
-    batch_idx = torch.arange(b, device=q.device).view(b, 1, 1)
-    kv_gathered = kv[batch_idx, safe_idxs.long()]
+    scores = paddle.einsum("bmhd,bmkd->bmhk", q, kv_gathered) * sm_scale
+    mask_expanded = paddle.expand(mask.unsqueeze(2), [b, m, h, mask.shape[-1]])
+    scores = paddle.where(mask_expanded, scores, paddle.full_like(scores, float("-inf")))
 
-    scores = torch.einsum("bmhd,bmkd->bmhk", q, kv_gathered) * sm_scale
-    mask_expanded = mask.unsqueeze(2).expand(-1, -1, h, -1)
-    scores = scores.masked_fill(~mask_expanded, float("-inf"))
+    scores = scores.cast("float32")
+    scores_max = paddle.maximum(
+        paddle.max(scores, axis=-1),
+        paddle.full([b, m, h], -1e30, dtype="float32"),
+    )
+    exp_scores = paddle.exp(scores - scores_max.unsqueeze(-1))
 
-    scores = scores.to(torch.float32)
-    scores_max = scores.max(dim=-1).values.clamp(min=-1e30)
-    exp_scores = torch.exp(scores - scores_max.unsqueeze(-1))
-
-    numerator = torch.einsum("bmhk,bmkd->bmhd", exp_scores, kv_gathered.to(torch.float32))
-    sum_exp = exp_scores.sum(dim=-1)
-    sink_term = torch.exp(_prepare_attn_sink(attn_sink).view(1, 1, h) - scores_max)
+    numerator = paddle.einsum("bmhk,bmkd->bmhd", exp_scores, kv_gathered.cast("float32"))
+    sum_exp = paddle.sum(exp_scores, axis=-1)
+    sink_term = paddle.exp(_prepare_attn_sink(attn_sink).reshape([1, 1, h]) - scores_max)
     denominator = sum_exp + sink_term
 
-    return (numerator / denominator.unsqueeze(-1)).to(q_dtype)
+    return (numerator / denominator.unsqueeze(-1)).cast(q_dtype)
 
 
-def dense_attn_torch(q, kv, attn_sink, topk_idxs, sm_scale=None):
-    """Dense reference implementation using a mask generated from topk_idxs."""
-    q_dtype = q.dtype
-    b, m, h, d = q.shape
-    n = kv.shape[1]
+def _get_sparse_mla_bwd():
+    enable_tilelang_paddle_compat_before_import()
+    from .kernel import tilelang_sparse_mla_bwd as sparse_mla_bwd
 
-    if sm_scale is None:
-        sm_scale = (1.0 / d) ** 0.5
+    return sparse_mla_bwd
 
-    topk_idxs = _prepare_topk_idxs(topk_idxs)
-    attn_mask = torch.zeros(b, m, n, device=q.device, dtype=torch.bool)
 
-    _, _, topk = topk_idxs.shape
-    batch_idx = torch.arange(b, device=q.device).view(b, 1, 1).expand(b, m, topk)
-    seq_idx = torch.arange(m, device=q.device).view(1, m, 1).expand(b, m, topk)
-    valid_mask = topk_idxs != -1
+def _get_sparse_attn_tilelang_paddle():
+    enable_tilelang_paddle_compat_before_import()
+    from .kernel.tilelang_sparse_mla import _prepare_inputs_paddle, sparse_attn_tilelang_paddle
 
-    attn_mask[batch_idx[valid_mask], seq_idx[valid_mask], topk_idxs[valid_mask].long()] = True
-
-    scores = torch.einsum("bmhd,bnd->bmhn", q.float(), kv.float()).to(torch.float32) * sm_scale
-    scores = scores.masked_fill(~attn_mask.unsqueeze(2).expand(-1, -1, h, -1), float("-inf"))
-
-    scores_max = scores.max(dim=-1, keepdim=True).values.clamp(min=-1e30)
-    exp_scores = torch.exp(scores - scores_max)
-
-    numerator = torch.einsum("bmhn,bnd->bmhd", exp_scores, kv.float())
-    sum_exp = exp_scores.sum(dim=-1)
-    sink_term = torch.exp(_prepare_attn_sink(attn_sink).view(1, 1, h) - scores_max.squeeze(-1))
-    denominator = sum_exp + sink_term
-
-    return (numerator / denominator.unsqueeze(-1)).to(q_dtype)
+    return _prepare_inputs_paddle, sparse_attn_tilelang_paddle
 
 
 def _compat_backward_kernel(query, kv_full, attn_sink, output, grad_output, topk_idxs, lse, softmax_scale):
+    sparse_mla_bwd = _get_sparse_mla_bwd()
     with paddle_tilelang_compat_guard():
         return sparse_mla_bwd.sparse_mqa_bwd_interface(
             query,
@@ -220,6 +209,7 @@ class TileLangCompressedSparseAttentionPaddleCompatPyLayer(paddle.autograd.PyLay
         ctx.softmax_scale = float(softmax_scale)
         ctx.topk_pad_to = int(topk_pad_to)
         ctx.attn_sink_dtype = attn_sink.dtype
+        _prepare_inputs_paddle, sparse_attn_tilelang_paddle = _get_sparse_attn_tilelang_paddle()
         profile = _profile_should_log("paddle_compat_forward")
         if profile:
             (query, kv_full, attn_sink, topk_idxs), elapsed_ms = _profile_time_ms(

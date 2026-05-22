@@ -28,7 +28,6 @@ enable_tilelang_paddle_compat_before_import()
 
 import paddle
 import tilelang
-import torch
 from tilelang import language as T
 
 
@@ -192,38 +191,24 @@ def _next_power_of_2(x: int) -> int:
     return 1 << (x - 1).bit_length()
 
 
-def _is_paddle_tensor(tensor) -> bool:
-    return isinstance(tensor, paddle.Tensor)
-
-
 def _zeros_like(tensor, dtype=None):
-    if _is_paddle_tensor(tensor):
-        return paddle.zeros_like(tensor, dtype=dtype)
-    return torch.zeros_like(tensor, dtype=dtype)
+    return paddle.zeros_like(tensor, dtype=dtype)
 
 
 def _empty_like(tensor, dtype=None):
-    if _is_paddle_tensor(tensor):
-        return paddle.empty_like(tensor, dtype=dtype)
-    return torch.empty_like(tensor, dtype=dtype)
+    return paddle.empty_like(tensor, dtype=dtype)
 
 
-def _full(shape, fill_value, device, dtype, like_tensor):
-    if _is_paddle_tensor(like_tensor):
-        return paddle.full(shape, fill_value, dtype=dtype)
-    return torch.full(shape, fill_value, device=device, dtype=dtype)
+def _full(shape, fill_value, dtype):
+    return paddle.full(shape, fill_value, dtype=dtype)
 
 
-def _zeros(shape, device, dtype, like_tensor):
-    if _is_paddle_tensor(like_tensor):
-        return paddle.zeros(shape, dtype=dtype)
-    return torch.zeros(shape, device=device, dtype=dtype)
+def _zeros(shape, dtype):
+    return paddle.zeros(shape, dtype=dtype)
 
 
 def _concat(tensors, axis):
-    if _is_paddle_tensor(tensors[0]):
-        return paddle.concat(tensors, axis=axis)
-    return torch.cat(tensors, dim=axis)
+    return paddle.concat(tensors, axis=axis)
 
 
 def csa_indexer_bwd_interface(
@@ -282,17 +267,13 @@ def csa_indexer_bwd_interface(
     if padded_topk != topk_effective:
         pad = padded_topk - topk_effective
         topk_pad = _full(
-            (batch, seq_len, pad),
+            [batch, seq_len, pad],
             -1,
-            getattr(topk_indices, "device", None),
             topk_indices.dtype,
-            topk_indices,
         )
         grad_pad = _zeros(
-            (batch, seq_len, pad),
-            getattr(grad_scores, "device", None),
+            [batch, seq_len, pad],
             grad_scores.dtype,
-            grad_scores,
         )
         topk_indices = _concat([topk_indices, topk_pad], axis=-1).contiguous()
         grad_scores = _concat([grad_scores, grad_pad], axis=-1).contiguous()
@@ -308,15 +289,15 @@ def csa_indexer_bwd_interface(
     )
 
     grad_q = _empty_like(index_q)
-    grad_weights = _empty_like(weights, dtype="float32" if _is_paddle_tensor(weights) else torch.float32)
-    grad_k_comp = _zeros_like(index_k_comp, dtype="float32" if _is_paddle_tensor(index_k_comp) else torch.float32)
+    grad_weights = _empty_like(weights, dtype="float32")
+    grad_k_comp = _zeros_like(index_k_comp, dtype="float32")
 
     kernel(
         index_q,
         index_k_comp,
-        weights.float().contiguous(),
+        weights.cast("float32").contiguous(),
         topk_indices,
-        grad_scores.float().contiguous(),
+        grad_scores.cast("float32").contiguous(),
         grad_q,
         grad_weights,
         grad_k_comp,

@@ -14,8 +14,8 @@
 
 import unittest
 
-import torch
-import torch.nn.functional as F
+import paddle
+import paddle.nn.functional as F
 
 from paddlefleet.ops.tilelang_dsv4.kernel.tilelang_csa_indexer_bwd import (
     csa_indexer_bwd_interface,
@@ -26,27 +26,31 @@ from paddlefleet.ops.tilelang_dsv4.kernel.tilelang_csa_indexer_fwd import (
 
 
 def ref_csa_indexer_bwd(index_q, weights, index_k_comp, topk_indices, grad_scores):
-    with torch.enable_grad():
-        q = index_q.detach().clone().requires_grad_(True)
-        w = weights.detach().clone().requires_grad_(True)
-        k = index_k_comp.detach().clone().requires_grad_(True)
-        scores = torch.einsum("bshd,btd->bsht", q.float(), k.float())
-        scores = F.relu(scores * (q.shape[-1] ** -0.5))
-        scores = (scores * w.float().unsqueeze(-1)).sum(dim=2)
-        valid = topk_indices >= 0
-        safe_indices = topk_indices.clamp(min=0)
-        selected = torch.gather(scores, dim=-1, index=safe_indices.to(torch.int64))
-        selected = torch.where(valid, selected, torch.zeros_like(selected))
-        loss = (selected * grad_scores.float()).sum()
-        loss.backward()
+    q = index_q.detach().clone()
+    q.stop_gradient = False
+    w = weights.detach().clone()
+    w.stop_gradient = False
+    k = index_k_comp.detach().clone()
+    k.stop_gradient = False
+
+    scores = paddle.einsum("bshd,btd->bsht", q.cast("float32"), k.cast("float32"))
+    scores = F.relu(scores * (q.shape[-1] ** -0.5))
+    scores = (scores * w.cast("float32").unsqueeze(-1)).sum(axis=2)
+    valid = topk_indices >= 0
+    safe_indices = paddle.clip(topk_indices, min=0).cast("int64")
+    selected = paddle.take_along_axis(scores, safe_indices, axis=-1)
+    selected = paddle.where(valid, selected, paddle.zeros_like(selected))
+    loss = (selected * grad_scores.cast("float32")).sum()
+    loss.backward()
     return q.grad, w.grad, k.grad
 
 
 class TestTileLangDSV4CSAIndexerBwd(unittest.TestCase):
     def setUp(self):
-        if not torch.cuda.is_available():
+        if not paddle.is_compiled_with_cuda():
             self.skipTest("CUDA is required for TileLang CSA indexer test")
-        torch.manual_seed(2027)
+        paddle.set_device("gpu")
+        paddle.seed(2027)
 
     def _run_case(self, topk_effective):
         batch = 1
@@ -55,11 +59,10 @@ class TestTileLangDSV4CSAIndexerBwd(unittest.TestCase):
         heads = 64
         dim = 128
         ratio = 4
-        device = "cuda"
 
-        index_q = torch.randn(batch, seq_len, heads, dim, device=device, dtype=torch.bfloat16).contiguous()
-        index_k_comp = torch.randn(batch, seq_len_comp, dim, device=device, dtype=torch.bfloat16).contiguous()
-        weights = torch.randn(batch, seq_len, heads, device=device, dtype=torch.float32).contiguous()
+        index_q = paddle.randn([batch, seq_len, heads, dim], dtype="bfloat16").contiguous()
+        index_k_comp = paddle.randn([batch, seq_len_comp, dim], dtype="bfloat16").contiguous()
+        weights = paddle.randn([batch, seq_len, heads], dtype="float32").contiguous()
 
         topk_indices, _ = csa_indexer_topk_fwd_interface(
             index_q,
@@ -70,8 +73,8 @@ class TestTileLangDSV4CSAIndexerBwd(unittest.TestCase):
             block_K=32,
             num_threads=128,
         )
-        grad_scores = torch.randn(batch, seq_len, topk_effective, device=device, dtype=torch.float32)
-        grad_scores = torch.where(topk_indices >= 0, grad_scores, torch.zeros_like(grad_scores)).contiguous()
+        grad_scores = paddle.randn([batch, seq_len, topk_effective], dtype="float32")
+        grad_scores = paddle.where(topk_indices >= 0, grad_scores, paddle.zeros_like(grad_scores)).contiguous()
 
         out_dq, out_dw, out_dk = csa_indexer_bwd_interface(
             index_q,
@@ -93,9 +96,9 @@ class TestTileLangDSV4CSAIndexerBwd(unittest.TestCase):
         self.assertEqual(tuple(out_dq.shape), tuple(index_q.shape))
         self.assertEqual(tuple(out_dw.shape), tuple(weights.shape))
         self.assertEqual(tuple(out_dk.shape), tuple(index_k_comp.shape))
-        torch.testing.assert_close(out_dq.float().cpu(), ref_dq.float().cpu(), rtol=6e-2, atol=2e-2)
-        torch.testing.assert_close(out_dw.cpu(), ref_dw.cpu(), rtol=6e-2, atol=3e-2)
-        torch.testing.assert_close(out_dk.cpu(), ref_dk.float().cpu(), rtol=6e-2, atol=3e-2)
+        paddle.testing.assert_close(out_dq.cast("float32").cpu(), ref_dq.cast("float32").cpu(), rtol=6e-2, atol=2e-2)
+        paddle.testing.assert_close(out_dw.cpu(), ref_dw.cpu(), rtol=6e-2, atol=3e-2)
+        paddle.testing.assert_close(out_dk.cpu(), ref_dk.cast("float32").cpu(), rtol=6e-2, atol=3e-2)
 
     def test_selected_topk_backward(self):
         self._run_case(topk_effective=2)

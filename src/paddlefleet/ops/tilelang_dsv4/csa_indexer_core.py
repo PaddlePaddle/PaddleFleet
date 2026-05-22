@@ -60,6 +60,20 @@ def _get_csa_indexer_bwd_interface():
     return csa_indexer_bwd_interface
 
 
+def _get_csa_indexer_topk_fwd_interface():
+    enable_tilelang_paddle_compat_before_import()
+    from .kernel.tilelang_csa_indexer_fwd import csa_indexer_topk_fwd_interface
+
+    return csa_indexer_topk_fwd_interface
+
+
+def _get_csa_indexer_bwd_interface():
+    enable_tilelang_paddle_compat_before_import()
+    from .kernel.tilelang_csa_indexer_bwd import csa_indexer_bwd_interface
+
+    return csa_indexer_bwd_interface
+
+
 def _is_paddle_tensor(tensor):
     return isinstance(tensor, paddle.Tensor)
 
