@@ -55,12 +55,14 @@ def _make_config(
     rope_type="rope",
     apply_rope_fusion=False,
     multi_latent_attention=True,
+    num_nextn_predict_layers=0,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
 
     return TransformerConfig(
         num_hidden_layers=num_layers,
+        num_nextn_predict_layers=num_nextn_predict_layers,
         hidden_size=hidden_size,
         num_attention_heads=num_attention_heads,
         params_dtype=paddle.bfloat16,
@@ -311,6 +313,25 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
                     atol=1e-5,
                 ).item()
             )
+
+    def test_mtp_layer_uses_nextn_compress_ratio(self):
+        ratios = [0, 4, 128, 4, 128]
+        config = _make_config(
+            num_layers=4,
+            num_nextn_predict_layers=1,
+            csa_compress_ratios=ratios,
+        )
+        spec = get_attention_spec(
+            config=config,
+            attention_layer_type="dsv4_hybrid_attention",
+            attn_mask_type=AttnMaskType.causal,
+            is_mtp_layer=True,
+        )
+        attn = build_spec_layer(spec, config=config, layer_number=0)
+
+        self.assertEqual(
+            attn.core_attention.compress_ratio, ratios[config.num_hidden_layers]
+        )
 
     def test_yarn_rope_construction(self):
         config = _make_config(rope_type="yarn")
