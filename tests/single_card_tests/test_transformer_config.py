@@ -177,6 +177,141 @@ class TestRoutedScalingFactorConfig(unittest.TestCase):
         self.assertTrue(config.routed_scaling_factor_learnable)
 
 
+class TestDsv4TileLangCSAIndexerConfig(unittest.TestCase):
+    """Tests for the Task 4 TileLang CSA Indexer configuration switches.
+
+    The validation block for these switches is gated on
+    experimental_attention_variant == "dsv4_hybrid", so each negative/positive
+    test sets up that hybrid context.
+    """
+
+    NL = 4
+
+    def _hybrid_kwargs(self, **overrides):
+        kw = dict(
+            num_hidden_layers=self.NL,
+            experimental_attention_variant="dsv4_hybrid",
+            multi_latent_attention=True,
+            csa_compress_ratios=[4] * self.NL,
+            rope_type="yarn",
+        )
+        kw.update(overrides)
+        return kw
+
+    def test_defaults_are_false(self):
+        """All three new switches default to False on a non-hybrid config."""
+        config = TransformerConfig(num_hidden_layers=self.NL)
+        self.assertFalse(config.dsv4_tilelang_enable_csa_indexer)
+        self.assertFalse(config.dsv4_tilelang_csa_indexer_enable_backward)
+        self.assertFalse(config.dsv4_tilelang_csa_indexer_debug_compare)
+
+    def test_transform_rules_contain_new_keys(self):
+        """transform_rules must include the three new HF config.json keys."""
+        rules = TransformerConfig.transform_rules
+        for k in (
+            "dsv4_tilelang_enable_csa_indexer",
+            "dsv4_tilelang_csa_indexer_enable_backward",
+            "dsv4_tilelang_csa_indexer_debug_compare",
+        ):
+            self.assertIn(k, rules)
+            self.assertEqual(rules[k], k)
+
+    def test_enable_csa_indexer_requires_paddle_compat_backend(self):
+        """Enabling the CSA Indexer kernel requires attention_paddle_compat backend."""
+        with self.assertRaises(ValueError):
+            TransformerConfig(
+                **self._hybrid_kwargs(
+                    dsv4_tilelang_enable_csa_indexer=True,
+                )
+            )
+
+    def test_enable_csa_indexer_with_paddle_compat_ok(self):
+        config = TransformerConfig(
+            **self._hybrid_kwargs(
+                dsv4_tilelang_backend="attention_paddle_compat",
+                dsv4_tilelang_enable_csa_indexer=True,
+            )
+        )
+        self.assertTrue(config.dsv4_tilelang_enable_csa_indexer)
+
+    def test_backward_requires_enable_csa_indexer(self):
+        with self.assertRaises(ValueError):
+            TransformerConfig(
+                **self._hybrid_kwargs(
+                    dsv4_tilelang_backend="attention_paddle_compat",
+                    dsv4_tilelang_enable_csa_indexer=False,
+                    dsv4_tilelang_csa_indexer_enable_backward=True,
+                )
+            )
+
+    def test_debug_compare_requires_enable_csa_indexer(self):
+        with self.assertRaises(ValueError):
+            TransformerConfig(
+                **self._hybrid_kwargs(
+                    dsv4_tilelang_backend="attention_paddle_compat",
+                    dsv4_tilelang_enable_csa_indexer=False,
+                    dsv4_tilelang_csa_indexer_debug_compare=True,
+                )
+            )
+
+    def test_full_chain_valid(self):
+        config = TransformerConfig(
+            **self._hybrid_kwargs(
+                dsv4_tilelang_backend="attention_paddle_compat",
+                dsv4_tilelang_enable_csa_indexer=True,
+                dsv4_tilelang_csa_indexer_enable_backward=True,
+                dsv4_tilelang_csa_indexer_debug_compare=True,
+            )
+        )
+        self.assertTrue(config.dsv4_tilelang_enable_csa_indexer)
+        self.assertTrue(config.dsv4_tilelang_csa_indexer_enable_backward)
+        self.assertTrue(config.dsv4_tilelang_csa_indexer_debug_compare)
+
+    def test_switches_independent_of_phase_controls(self):
+        """The new TileLang switches must not modify training-phase fields
+        (csa_dense_mode / dsa_indexer_use_sparse_loss / dsa_indexer_loss_coeff)."""
+        baseline = TransformerConfig(**self._hybrid_kwargs())
+        config = TransformerConfig(
+            **self._hybrid_kwargs(
+                dsv4_tilelang_backend="attention_paddle_compat",
+                dsv4_tilelang_enable_csa_indexer=True,
+                dsv4_tilelang_csa_indexer_enable_backward=True,
+                dsv4_tilelang_csa_indexer_debug_compare=True,
+            )
+        )
+        self.assertEqual(config.csa_dense_mode, baseline.csa_dense_mode)
+        self.assertEqual(
+            config.dsa_indexer_use_sparse_loss,
+            baseline.dsa_indexer_use_sparse_loss,
+        )
+        self.assertEqual(
+            config.dsa_indexer_loss_coeff, baseline.dsa_indexer_loss_coeff
+        )
+
+    def test_from_config_propagates_switches_via_transform_rules(self):
+        """from_config should map HF-style keys via transform_rules."""
+
+        class _AttrDict:
+            def __init__(self, **kw):
+                self.__dict__.update(kw)
+
+        cfg = _AttrDict(
+            **self._hybrid_kwargs(
+                dsv4_tilelang_backend="attention_paddle_compat",
+                dsv4_tilelang_enable_csa_indexer=True,
+                dsv4_tilelang_csa_indexer_enable_backward=True,
+                dsv4_tilelang_csa_indexer_debug_compare=True,
+            )
+        )
+        config = TransformerConfig.from_config(cfg)
+        self.assertTrue(config.dsv4_tilelang_enable_csa_indexer)
+        self.assertTrue(config.dsv4_tilelang_csa_indexer_enable_backward)
+        self.assertTrue(config.dsv4_tilelang_csa_indexer_debug_compare)
+        self.assertEqual(
+            config.dsv4_tilelang_backend, "attention_paddle_compat"
+        )
+
+
 class TestMoETokenDispatcherConfig(unittest.TestCase):
     def test_hybridep_dispatcher_type_is_preserved(self):
         config = TransformerConfig(
