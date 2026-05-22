@@ -485,6 +485,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
+        # Cache input.stop_gradient: ``_new_shared_tensor()`` does not
+        # necessarily preserve this flag, and Paddle's PyLayer contract
+        # requires backward to return None at position 0 iff the original
+        # forward input had stop_gradient=True.
+        ctx.input_stop_gradient = bool(input.stop_gradient)
 
         if sequence_parallel:
             dim_size = list(input.shape)
@@ -515,6 +520,16 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         handle = None
         tp_group = ctx.tp_group
 
+        # Paddle PyLayer contract: when a forward Tensor input has
+        # stop_gradient=True, the corresponding backward return slot MUST be
+        # None. The "input" position (0) is the only one that can carry
+        # stop_gradient=True in normal usage (weight/bias are trainable);
+        # callers that intentionally feed a detached tensor (e.g. for
+        # gradient isolation) rely on this. We must skip grad_input compute
+        # and any input-side collective (all_reduce / reduce_scatter) in
+        # that case, while still computing grad_weight / grad_bias.
+        input_needs_grad = not ctx.input_stop_gradient
+
         if ctx.gradient_accumulation_fusion:
             weight.main_grad = main_grad
 
@@ -544,7 +559,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 total_input = all_gather_buffer
             else:
                 total_input = input
-        grad_input = grad_output.matmul(weight.t())
+        if input_needs_grad:
+            grad_input = grad_output.matmul(weight.t())
+        else:
+            grad_input = None
 
         if ctx.sequence_parallel and wgrad_compute:
             # pylint: disable=possibly-used-before-assignment
@@ -555,7 +573,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 grad_output, total_input
             )
 
-        if ctx.allreduce_dgrad:
+        if ctx.allreduce_dgrad and input_needs_grad:
             # Asynchronous all-reduce
             handle = dist.all_reduce(grad_input, group=tp_group, sync_op=False)
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
@@ -563,16 +581,19 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         if ctx.sequence_parallel:
             assert not ctx.allreduce_dgrad
-            dim_size = list(input.shape)
-            sub_grad_input = paddle.empty(
-                dim_size, dtype=input.dtype, requires_grad=False
-            )
-            # reduce_scatter
-            handle = _reduce_scatter_base(
-                sub_grad_input, grad_input, group=tp_group, sync_op=False
-            )
-            # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
-            # reduce scatter is scheduled before the weight gradient computation
+            if input_needs_grad:
+                dim_size = list(input.shape)
+                sub_grad_input = paddle.empty(
+                    dim_size, dtype=input.dtype, requires_grad=False
+                )
+                # reduce_scatter
+                handle = _reduce_scatter_base(
+                    sub_grad_input, grad_input, group=tp_group, sync_op=False
+                )
+                # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+                # reduce scatter is scheduled before the weight gradient computation
+            else:
+                sub_grad_input = None
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
@@ -617,7 +638,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:
-            handle.wait()
+            if input_needs_grad:
+                handle.wait()
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
             if use_bias:
@@ -625,7 +647,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 return sub_grad_input, grad_weight
 
-        if ctx.allreduce_dgrad:
+        if ctx.allreduce_dgrad and input_needs_grad:
             handle.wait()
 
         # PyLayer requires the number of output in backward
