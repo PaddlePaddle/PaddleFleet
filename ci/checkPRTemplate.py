@@ -197,5 +197,4 @@ if __name__ == "__main__":
     AGILE_PULL_ID = os.getenv("AGILE_PULL_ID")
     GITHUB_API_TOKEN = os.getenv("GITHUB_API_TOKEN")
     print(AGILE_PULL_ID)
-    print(GITHUB_API_TOKEN)
     main("PaddlePaddle", "PaddleFleet", AGILE_PULL_ID)
