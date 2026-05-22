@@ -952,5 +952,302 @@ class TestHCFullPipeline(unittest.TestCase):
         self.assertFalse(paddle.isnan(dict_args["hidden_states"]).any().item())
 
 
+# ==============================================================================
+# Tests for MultiTokenPredictionLayer with enable_hyper_connections
+# ==============================================================================
+
+
+def _make_mtp_hc_config(**overrides):
+    """Create a config with mHC enabled and MTP layers configured."""
+    mtp_hc_defaults = {
+        "enable_hyper_connections": True,
+        "num_residual_streams": 4,
+        "mhc_sinkhorn_iterations": 5,
+        "mhc_init_gating_factor": 0.01,
+        "num_nextn_predict_layers": 2,
+        "train_mtp_only": False,
+        "mtp_load_weight_only": False,
+        "gpt_model_use_experimental_version": False,
+        "experimental_dataflow": False,
+    }
+    mtp_hc_defaults.update(overrides)
+    return _make_config(**mtp_hc_defaults)
+
+
+def _make_mtp_layer(config, layer_number=0):
+    """Create an MTP layer using the spec system."""
+    from paddle.distributed.fleet.meta_parallel import build_spec_layer
+
+    from paddlefleet.models.gpt.gpt_layer_specs import (
+        get_gpt_decoder_layers_spec,
+        get_gpt_mtp_layers_spec,
+    )
+
+    decoder_specs = get_gpt_decoder_layers_spec(config)
+    mtp_specs = get_gpt_mtp_layers_spec(config, decoder_specs)
+    mtp_layer = build_spec_layer(mtp_specs[layer_number])
+    return mtp_layer
+
+
+class TestMTPLayerWithHCConstruction(unittest.TestCase):
+    """Tests for MultiTokenPredictionLayer construction with mHC enabled."""
+
+    def test_mhc_enabled_flag(self):
+        """Layer should have mhc_enabled=True."""
+        config = _make_mtp_hc_config()
+        layer = _make_mtp_layer(config)
+        self.assertTrue(layer.mhc_enabled)
+
+    def test_has_e_proj_and_h_proj(self):
+        """mHC mode should create e_proj and h_proj instead of eh_proj."""
+        config = _make_mtp_hc_config()
+        layer = _make_mtp_layer(config)
+        self.assertIsNotNone(layer.e_proj)
+        self.assertIsNotNone(layer.h_proj)
+        self.assertIsNone(layer.eh_proj)
+
+    def test_has_hc_head_params(self):
+        """mHC mode should create learned contraction parameters."""
+        config = _make_mtp_hc_config()
+        layer = _make_mtp_layer(config)
+        n = config.num_residual_streams
+        hc_dim = config.hidden_size * n
+        self.assertEqual(list(layer.hc_head_fn.shape), [hc_dim, n])
+        self.assertEqual(list(layer.hc_head_base.shape), [n])
+        self.assertEqual(list(layer.hc_head_scale.shape), [1])
+
+    def test_non_mhc_has_eh_proj(self):
+        """Non-mHC mode should create eh_proj instead of e_proj/h_proj."""
+        config = _make_config(num_nextn_predict_layers=2)
+        layer = _make_mtp_layer(config)
+        self.assertIsNotNone(layer.eh_proj)
+        self.assertIsNone(layer.e_proj)
+        self.assertIsNone(layer.h_proj)
+        self.assertFalse(layer.mhc_enabled)
+
+
+class TestMTPLayerWithHCConcatEmbeddings(unittest.TestCase):
+    """Tests for _concat_embeddings in mHC mode."""
+
+    def setUp(self):
+        self.config = _make_mtp_hc_config()
+        self.layer = _make_mtp_layer(self.config)
+        self.layer.eval()
+        self.n = self.config.num_residual_streams
+        self.C = self.config.hidden_size
+        self.S = 4
+        self.B = 2
+
+    def test_output_shape(self):
+        """_concat_embeddings in mHC mode should output [s, b, n*h]."""
+        hidden_states = paddle.randn([self.S, self.B, self.n * self.C])
+        decoder_input = paddle.randn([self.S, self.B, self.C])
+        result = self.layer._concat_embeddings(hidden_states, decoder_input)
+        self.assertEqual(list(result.shape), [self.S, self.B, self.n * self.C])
+
+    def test_output_no_nan(self):
+        """Output should not contain NaN."""
+        hidden_states = paddle.randn([self.S, self.B, self.n * self.C])
+        decoder_input = paddle.randn([self.S, self.B, self.C])
+        result = self.layer._concat_embeddings(hidden_states, decoder_input)
+        self.assertFalse(paddle.isnan(result).any().item())
+
+    def test_with_mask(self):
+        """_concat_embeddings should handle mtp_hidden_inputs_mask."""
+        # Use S==B so that transpose-based mask broadcasting works with seq-first layout
+        S, B = 4, 4
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        decoder_input = paddle.randn([S, B, self.C])
+        # mask shape: [B, 1, S]
+        mask = paddle.ones([B, 1, S])
+        result = self.layer._concat_embeddings(
+            hidden_states, decoder_input, mtp_hidden_inputs_mask=mask
+        )
+        self.assertEqual(list(result.shape), [S, B, self.n * self.C])
+
+    def test_with_zero_mask(self):
+        """Zero mask should zero out hidden state contributions."""
+        S, B = 4, 4
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        decoder_input = paddle.randn([S, B, self.C])
+        mask = paddle.zeros([B, 1, S])
+        result_zero = self.layer._concat_embeddings(
+            hidden_states, decoder_input, mtp_hidden_inputs_mask=mask
+        )
+        self.assertFalse(paddle.isnan(result_zero).any().item())
+
+
+class TestMTPLayerWithHCPostprocess(unittest.TestCase):
+    """Tests for _postprocess in mHC mode."""
+
+    def setUp(self):
+        self.config = _make_mtp_hc_config()
+        self.layer = _make_mtp_layer(self.config)
+        self.layer.eval()
+        self.n = self.config.num_residual_streams
+        self.C = self.config.hidden_size
+
+    def test_postprocess_contracts_to_single_stream(self):
+        """_postprocess should contract [s, b, n*h] to [s, b, h]."""
+        S, B = 4, 2
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        result = self.layer._postprocess(hidden_states)
+        self.assertEqual(list(result.shape), [S, B, self.C])
+
+    def test_postprocess_no_nan(self):
+        """_postprocess output should not contain NaN."""
+        S, B = 4, 2
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        result = self.layer._postprocess(hidden_states)
+        self.assertFalse(paddle.isnan(result).any().item())
+
+    def test_postprocess_gradient_flow(self):
+        """Gradient should flow through _postprocess."""
+        S, B = 4, 2
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        hidden_states.stop_gradient = False
+        result = self.layer._postprocess(hidden_states)
+        loss = result.sum()
+        loss.backward()
+        self.assertIsNotNone(hidden_states.grad)
+        self.assertFalse(paddle.isnan(hidden_states.grad).any().item())
+
+
+class TestMTPLayerWithHCForward(unittest.TestCase):
+    """Tests for MultiTokenPredictionLayer forward with mHC enabled."""
+
+    def setUp(self):
+        self.config = _make_mtp_hc_config()
+        self.layer = _make_mtp_layer(self.config, layer_number=0)
+        self.layer.eval()
+        self.n = self.config.num_residual_streams
+        self.C = self.config.hidden_size
+        self.S = 4
+        self.B = 2
+        self.num_mtp = self.config.num_nextn_predict_layers
+
+    def _make_dict_args(self, with_mhc_multistream=True):
+        """Create dict_args for MTP forward."""
+        total_S = (self.num_mtp + 1) * self.S
+        hidden_states = paddle.randn([total_S, self.B, self.C])
+        dict_args = {
+            "hidden_states": hidden_states,
+            "attention_mask": None,
+        }
+        if with_mhc_multistream:
+            mhc_multistream = paddle.randn([total_S, self.B, self.n * self.C])
+            dict_args["mhc_multistream"] = mhc_multistream
+        return dict_args
+
+    def test_forward_output_shape(self):
+        """Forward with mhc_multistream should produce correct output shape."""
+        dict_args = self._make_dict_args(with_mhc_multistream=True)
+        result = self.layer.forward(dict_args)
+        total_S = (self.num_mtp + 1) * self.S
+        self.assertEqual(
+            list(result["hidden_states"].shape), [total_S, self.B, self.C]
+        )
+
+    def test_forward_no_nan(self):
+        """Forward output should not contain NaN."""
+        dict_args = self._make_dict_args(with_mhc_multistream=True)
+        result = self.layer.forward(dict_args)
+        self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+
+    def test_forward_passes_mhc_multistream_to_next(self):
+        """With layer_number < num_mtp-1, should pass mhc_multistream for next layer."""
+        dict_args = self._make_dict_args(with_mhc_multistream=True)
+        result = self.layer.forward(dict_args)
+        # layer_number=0 < num_mtp-1=1, so mhc_multistream should be in output
+        self.assertIn("mhc_multistream", result)
+
+    def test_forward_last_layer_no_mhc_multistream(self):
+        """Last MTP layer should not pass mhc_multistream."""
+        last_layer = _make_mtp_layer(self.config, layer_number=1)
+        last_layer.eval()
+        dict_args = self._make_dict_args(with_mhc_multistream=True)
+        result = last_layer.forward(dict_args)
+        self.assertNotIn("mhc_multistream", result)
+
+
+class TestMTPLayerWithHCTrainMTPOnly(unittest.TestCase):
+    """Tests for MTP layer with train_mtp_only=True and mHC enabled."""
+
+    def setUp(self):
+        self.config = _make_mtp_hc_config(train_mtp_only=True)
+        self.layer = _make_mtp_layer(self.config, layer_number=0)
+        self.layer.eval()
+        self.n = self.config.num_residual_streams
+        self.C = self.config.hidden_size
+        self.S = 4
+        self.B = 2
+        self.num_mtp = self.config.num_nextn_predict_layers
+
+    def test_train_mtp_only_forward_shape(self):
+        """train_mtp_only with mhc_multistream should produce correct output."""
+        total_S = (self.num_mtp + 1) * self.S
+        hidden_states = paddle.randn([total_S, self.B, self.C])
+        mhc_multistream = paddle.randn([total_S, self.B, self.n * self.C])
+        dict_args = {
+            "hidden_states": hidden_states,
+            "attention_mask": None,
+            "mhc_multistream": mhc_multistream,
+        }
+        result = self.layer.forward(dict_args)
+        self.assertEqual(
+            list(result["hidden_states"].shape), [total_S, self.B, self.C]
+        )
+
+    def test_train_mtp_only_no_nan(self):
+        """train_mtp_only output should not contain NaN."""
+        total_S = (self.num_mtp + 1) * self.S
+        hidden_states = paddle.randn([total_S, self.B, self.C])
+        mhc_multistream = paddle.randn([total_S, self.B, self.n * self.C])
+        dict_args = {
+            "hidden_states": hidden_states,
+            "attention_mask": None,
+            "mhc_multistream": mhc_multistream,
+        }
+        result = self.layer.forward(dict_args)
+        self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+
+
+class TestGetMTPLayerSpecWithHC(unittest.TestCase):
+    """Tests for get_gpt_mtp_layers_spec with mHC enabled."""
+
+    def test_mhc_spec_creates_correct_layer(self):
+        """MTP spec with mHC should create MultiTokenPredictionLayer."""
+        from paddlefleet.models.gpt.gpt_layer_specs import (
+            get_gpt_decoder_layers_spec,
+            get_gpt_mtp_layers_spec,
+        )
+        from paddlefleet.transformer.multi_token_prediction import (
+            MultiTokenPredictionLayer,
+        )
+
+        config = _make_mtp_hc_config()
+        decoder_specs = get_gpt_decoder_layers_spec(config)
+        specs = get_gpt_mtp_layers_spec(config, decoder_specs)
+        self.assertEqual(len(specs), config.num_nextn_predict_layers)
+        for spec in specs:
+            self.assertEqual(spec.layer, MultiTokenPredictionLayer)
+
+    def test_non_mhc_spec_creates_correct_layer(self):
+        """MTP spec without mHC should create MultiTokenPredictionLayer."""
+        from paddlefleet.models.gpt.gpt_layer_specs import (
+            get_gpt_decoder_layers_spec,
+            get_gpt_mtp_layers_spec,
+        )
+        from paddlefleet.transformer.multi_token_prediction import (
+            MultiTokenPredictionLayer,
+        )
+
+        config = _make_config(num_nextn_predict_layers=2)
+        decoder_specs = get_gpt_decoder_layers_spec(config)
+        specs = get_gpt_mtp_layers_spec(config, decoder_specs)
+        self.assertEqual(len(specs), 2)
+        self.assertEqual(specs[0].layer, MultiTokenPredictionLayer)
+
+
 if __name__ == "__main__":
     unittest.main()
