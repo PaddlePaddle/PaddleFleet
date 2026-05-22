@@ -401,7 +401,7 @@ class GPTEmbedding(FleetLayer):
                 rotary_seq_len,
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
-                position_ids=position_ids,
+                position_ids=None if self.training else position_ids,
             )
         elif (
             self.position_embedding_type == "mrope"

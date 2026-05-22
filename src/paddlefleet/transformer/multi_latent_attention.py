@@ -412,6 +412,9 @@ class MultiLatentAttention(Attention):
         q_nope_absorbed = paddle.bmm(q_nope_3d, wk_b).transpose([1, 0, 2])
         # Concat: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
         q_absorbed = paddle.concat([q_nope_absorbed, q_pe_3d], axis=-1)
+        q_absorbed = q_absorbed.reshape(
+            orig_shape[0], orig_shape[1], num_heads, -1
+        )
         return q_absorbed, wv_b
 
     def forward(
@@ -738,7 +741,9 @@ class MLASelfAttention(MultiLatentAttention):
         )
         if self.config.rope_type == "rope":
             rotary_pos_emb = self.rotary_pos_emb(
-                rotary_seq_len, packed_seq=packed_seq, position_ids=position_ids
+                rotary_seq_len,
+                packed_seq=packed_seq,
+                position_ids=None if self.training else position_ids,
             )
         else:
             if self.config.apply_rope_fusion:

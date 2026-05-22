@@ -1232,6 +1232,11 @@ class DSAttention(FleetLayer):
         # DSA-specific parameters
         x: Tensor | None = None,
         qr: Tensor | None = None,
+        # ignore fastdeploy specific parameters
+        kv_compressed: paddle.Tensor = None,
+        k_pos_emb: paddle.Tensor = None,
+        q_absorbed: paddle.Tensor = None,
+        v_b_proj_weight: paddle.Tensor = None,
     ) -> Tensor:
         """Forward pass for Sparse Attention.
 
