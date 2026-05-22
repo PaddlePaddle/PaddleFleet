@@ -1,5 +1,4 @@
 <!-- TemplateReference: https://github.com/PaddlePaddle/Paddle/wiki/PULL-REQUEST-TEMPLATE--REFERENCE -->
-<!-- Demo: https://github.com/PaddlePaddle/Paddle/pull/24810 -->
 
 ### PR Category
 <!-- One of [ User Experience | Execute Infrastructure | Operator Mechanism | Performance Optimization | Distributed Strategy | Parameter Server | Communication Library | Environment Adaptation ] -->

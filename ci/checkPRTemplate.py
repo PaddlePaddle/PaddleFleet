@@ -168,6 +168,7 @@ def pull_request_event_template(event, repo, *args, **kwargs):
             print("ERROR MESSAGE:", check_pr_template_message)
             sys.exit(7)
         else:
+            print("PR template check passed.")
             sys.exit(0)
 
 
