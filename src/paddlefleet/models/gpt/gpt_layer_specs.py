@@ -542,20 +542,22 @@ def get_gpt_mtp_layers_spec_for_backend(
     mtp_layer_specs = []
     for i in range(mtp_num_layers):
         if config.use_dense_mtp and config.n_routed_experts is not None:
-            transformer_layer_spec = get_gpt_layer_local_spec(
-                config=config,
-                num_experts=None,
-                moe_expert_fusion=False,
-                use_qk_norm=config.use_qk_norm,
-                multi_latent_attention=config.multi_latent_attention,
-                normalization=config.normalization,
-                layer_number=i,  # ← MTP 的相对编号
-                is_mtp_layer=True,  # ← 关键
-            )
+            num_experts = None
+            moe_expert_fusion = False
         else:
-            # 复用最后一个 MoE layer 的 spec 这条路径若启用，需要单独构造
-            # 一个带 is_mtp_layer=True 的版本，不能直接复用 spec[-1]
-            transformer_layer_spec = spec[-1]
+            num_experts = config.n_routed_experts
+            moe_expert_fusion = config.moe_expert_fusion
+
+        transformer_layer_spec = get_gpt_layer_local_spec(
+            config=config,
+            num_experts=num_experts,
+            moe_expert_fusion=moe_expert_fusion,
+            use_qk_norm=config.use_qk_norm,
+            multi_latent_attention=config.multi_latent_attention,
+            normalization=config.normalization,
+            layer_number=i,
+            is_mtp_layer=True,
+        )
 
         mtp_layer_specs.append(
             get_mtp_layer_spec_for_backend(

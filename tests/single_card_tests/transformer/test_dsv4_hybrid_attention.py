@@ -19,7 +19,9 @@ from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_attention_spec,
+    get_gpt_decoder_layers_spec,
     get_gpt_layer_local_spec,
+    get_gpt_mtp_layers_spec,
 )
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
@@ -328,6 +330,31 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
             is_mtp_layer=True,
         )
         attn = build_spec_layer(spec, config=config, layer_number=0)
+
+        self.assertEqual(
+            attn.core_attention.compress_ratio, ratios[config.num_hidden_layers]
+        )
+
+    def test_non_dense_mtp_spec_uses_mtp_attention_ratio(self):
+        ratios = [0, 4, 128, 4, 128]
+        config = _make_config(
+            num_layers=4,
+            num_nextn_predict_layers=1,
+            csa_compress_ratios=ratios,
+        )
+        decoder_specs = get_gpt_decoder_layers_spec(
+            config=config,
+            normalization=config.normalization,
+        )
+        mtp_specs = get_gpt_mtp_layers_spec(config=config, spec=decoder_specs)
+        mtp_self_attn_spec = mtp_specs[
+            0
+        ].sublayers_spec.transformer_layer.sublayers_spec.self_attn
+        attn = build_spec_layer(
+            mtp_self_attn_spec,
+            config=config,
+            layer_number=0,
+        )
 
         self.assertEqual(
             attn.core_attention.compress_ratio, ratios[config.num_hidden_layers]
