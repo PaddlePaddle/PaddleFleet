@@ -27,6 +27,7 @@ import math
 from typing import TYPE_CHECKING
 
 import paddle
+import paddle.nn.functional as F
 from paddle import Tensor, nn
 
 from paddlefleet.transformer.layer import FleetLayer
@@ -164,14 +165,17 @@ class HyperConnectionModule(nn.Layer):
         # Learnable scaling factors (Eq. 5 in paper)
         self.alpha_pre = self.create_parameter(
             shape=[1],
+            dtype=self.config.params_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
         self.alpha_post = self.create_parameter(
             shape=[1],
+            dtype=self.config.params_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
         self.alpha_res = self.create_parameter(
             shape=[1],
+            dtype=self.config.params_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
 
@@ -438,6 +442,50 @@ class HyperConnectionModule(nn.Layer):
         contracted = x_streams.mean(axis=-2)
         return contracted
 
+    # ==================== Learned output contraction ====================
+
+    @staticmethod
+    def learned_output_contract(
+        hidden_states: Tensor,
+        head_fn: Tensor,
+        base: Tensor,
+        scale: Tensor,
+        n: int,
+        eps: float,
+    ) -> Tensor:
+        """Learned output contraction: n-stream → 1-stream via sigmoid-gated weighted sum.
+
+        DSv4-style contraction using learnable parameters for gating.
+
+        Args:
+            hidden_states: [..., n*h] multi-stream hidden states
+            head_fn: [n, n*h] learnable weight for gating
+            base: [n] sigmoid bias
+            scale: [1] scaling factor
+            n: number of residual streams
+            eps: epsilon for numerical stability
+
+        Returns:
+            contracted: [..., h] single-stream output
+        """
+        dtype = hidden_states.dtype
+        hidden_states = hidden_states.astype("float32")
+        head_fn = head_fn.astype("float32")
+        base = base.astype("float32")
+        scale = scale.astype("float32")
+
+        rsqrt = paddle.rsqrt(
+            hidden_states.square().mean(-1, keepdim=True) + eps
+        )
+        mixes = F.linear(hidden_states, head_fn) * rsqrt
+        pre = F.sigmoid(mixes * scale + base) + eps
+        y = paddle.sum(
+            pre.unsqueeze(-1)
+            * hidden_states.reshape([*hidden_states.shape[:-1], n, -1]),
+            axis=-2,
+        )
+        return y.astype(dtype)
+
     # ==================== Fused kernel placeholder ====================
 
     def fused_h_res_h_post_bda(
@@ -521,14 +569,85 @@ class HyperConnectionContractLayer(FleetLayer):
 
     Inserted after the last HyperConnectionTransformerLayer in the flat
     LayerDesc list of GPTModel. Receives and returns dict_args.
+
+    Uses learned output contraction (DSv4 style) unconditionally.
+    When MTP is enabled, additionally preserves the pre-contraction multi-stream
+    tensor in dict_args["mhc_multistream"] for use by downstream MTP layers.
     """
 
     def __init__(self, config: TransformerConfig):
         super().__init__(config)
         self.n = config.num_residual_streams
+        self.mtp_enabled = (
+            getattr(config, "num_nextn_predict_layers", 0) > 0
+            or getattr(config, "mtp_num_layers", 0) > 0
+        )
+
+        self.num_mtp = getattr(config, "num_nextn_predict_layers", 0) or 0
+
+        # Learned contraction parameters (DSv4 style, always used)
+        n = self.n
+        hc_dim = config.hidden_size * n
+        self.hc_head_fn = self.create_parameter(
+            shape=[hc_dim, n],
+            dtype=self.config.params_dtype,
+            default_initializer=nn.initializer.XavierUniform(),
+        )
+        self.hc_head_base = self.create_parameter(
+            shape=[n],
+            dtype=self.config.params_dtype,
+            default_initializer=nn.initializer.Constant(0.0),
+        )
+        self.hc_head_scale = self.create_parameter(
+            shape=[1],
+            dtype=self.config.params_dtype,
+            default_initializer=nn.initializer.Constant(1.0),
+        )
+
+        if config.sequence_parallel:
+            self.hc_head_fn.is_distributed = False
+            self.hc_head_base.is_distributed = False
+            self.hc_head_scale.is_distributed = False
 
     def forward(self, dict_args: dict) -> dict:
-        dict_args["hidden_states"] = HyperConnectionModule.output_contract(
-            dict_args["hidden_states"], self.n
-        )
+        hidden_states = dict_args["hidden_states"]
+
+        # When MTP is enabled, preserve multi-stream for MTP input
+        if self.mtp_enabled and self.num_mtp > 0:
+            dict_args["mhc_multistream"] = hidden_states
+
+            # Split into main backbone + MTP chunks
+            chunks = paddle.split(hidden_states, self.num_mtp + 1)
+
+            # Main backbone: learned contraction [s, b, n*h] -> [s, b, h]
+            main_contracted = HyperConnectionModule.learned_output_contract(
+                chunks[0],
+                self.hc_head_fn,
+                self.hc_head_base,
+                self.hc_head_scale,
+                self.n,
+                self.config.rms_norm_eps,
+            )
+
+            # 为了后面MTP slice、取shape的时候兼容,原本也是expand过来的[[s,b,h]...]
+            mtp_contracted = [
+                c[..., : c.shape[-1] // self.n] for c in chunks[1:]
+            ]
+
+            dict_args["hidden_states"] = paddle.concat(
+                [main_contracted, *mtp_contracted]
+            )
+
+        else:
+            # Learned output contraction: [s, b, n*h] -> [s, b, h]
+            dict_args["hidden_states"] = (
+                HyperConnectionModule.learned_output_contract(
+                    hidden_states,
+                    self.hc_head_fn,
+                    self.hc_head_base,
+                    self.hc_head_scale,
+                    self.n,
+                    self.config.rms_norm_eps,
+                )
+            )
         return dict_args

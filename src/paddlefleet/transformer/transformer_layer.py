@@ -1099,11 +1099,13 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         """mHC attention forward: aggregate → layernorm → attention → fused_h_res_h_post_bda."""
         # Save n-stream residual for H_res mixing
         original_residual = hidden_states
+        ori_dtype = hidden_states.dtype
 
         # mHC: aggregate n-stream → 1-stream
         aggregated, h_res, h_post = self.self_attention_hyper_connection(
             hidden_states
         )
+        aggregated = aggregated.to(ori_dtype)
 
         # LayerNorm on aggregated single stream
         if self.recompute_input_layernorm:
@@ -1154,6 +1156,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                     fused=self.config.bias_dropout_fusion,
                 )
             )
+            hidden_states = hidden_states.to(ori_dtype)
 
         # Cross attention (unchanged)
         residual = hidden_states
@@ -1192,9 +1195,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         """mHC MLP forward: aggregate → layernorm → MLP → fused_h_res_h_post_bda."""
         # Save n-stream residual for H_res mixing
         original_residual = hidden_states
+        ori_dtype = hidden_states.dtype
 
         # mHC: aggregate n-stream → 1-stream
         aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
+        aggregated = aggregated.to(ori_dtype)
 
         # LayerNorm on aggregated single stream
         if self.recompute_post_attention_layernorm:
@@ -1258,6 +1263,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 training=self.training,
                 fused=self.config.bias_dropout_fusion,
             )
+            hidden_states = hidden_states.to(ori_dtype)
 
         if is_first_fwd:
             hidden_states.stop_gradient = False

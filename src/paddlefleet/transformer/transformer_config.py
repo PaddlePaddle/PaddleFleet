@@ -921,12 +921,6 @@ class TransformerConfig(ModelParallelConfig):
 
         # Hyper-connection (mHC) validation
         if self.enable_hyper_connections:
-            if self.num_nextn_predict_layers > 0 or self.mtp_num_layers > 0:
-                raise ValueError(
-                    "enable_hyper_connections is not compatible with "
-                    "Multi-Token Prediction (MTP). Please disable MTP when "
-                    "using hyper connections."
-                )
             if self.mhc_recompute_layer_num is not None and (
                 not isinstance(self.mhc_recompute_layer_num, int)
                 or self.mhc_recompute_layer_num < 1
