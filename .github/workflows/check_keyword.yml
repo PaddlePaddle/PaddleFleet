@@ -2,59 +2,66 @@ name: Check Forbidden Keyword
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+
 jobs:
   check-forbidden-keyword:
     name: Check Forbidden keyword
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout PR code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
       - name: Check for forbidden keyword in PR
+        uses: actions/github-script@v7
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
           FORBIDDEN_KEYWORD: ${{ secrets.FORBIDDEN_KEYWORD }}
-        run: |
-          if [ -z "${FORBIDDEN_KEYWORD}" ]; then
-            echo "FORBIDDEN_KEYWORD is not set, skipping check."
-            exit 0
-          fi
+        with:
+          script: |
+            const keyword = process.env.FORBIDDEN_KEYWORD;
+            if (!keyword) {
+              core.info('FORBIDDEN_KEYWORD is not set, skipping check.');
+              return;
+            }
 
-          FOUND=0
+            const regex = new RegExp(keyword, 'i');
+            const errors = [];
+            const pr = context.payload.pull_request;
 
-          # Check PR title
-          if echo "${PR_TITLE}" | grep -qi "${FORBIDDEN_KEYWORD}"; then
-            echo "ERROR: PR title contains forbidden keyword: ${PR_TITLE}"
-            FOUND=1
-          fi
+            // Check PR title
+            if (regex.test(pr.title)) {
+              errors.push(`PR title contains forbidden keyword: ${pr.title}`);
+            }
 
-          # Check PR body
-          if echo "${PR_BODY}" | grep -qi "${FORBIDDEN_KEYWORD}"; then
-            echo "ERROR: PR description contains forbidden keyword"
-            FOUND=1
-          fi
+            // Check PR body
+            if (pr.body && regex.test(pr.body)) {
+              errors.push(`PR description contains forbidden keyword`);
+            }
 
-          # Check changed files content
-          git fetch origin ${BASE_REF}
-          MERGE_BASE=$(git merge-base HEAD origin/${BASE_REF})
-          CHANGED_FILES=$(git diff --name-only ${MERGE_BASE})
+            // Check changed files content via API
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
 
-          while IFS= read -r file; do
-            if [ -f "$file" ] && grep -qi "${FORBIDDEN_KEYWORD}" "$file"; then
-              echo "ERROR: File '${file}' contains forbidden keyword"
-              FOUND=1
-            fi
-          done <<< "${CHANGED_FILES}"
+            for (const file of files) {
+              if (file.status === 'removed') continue;
+              // Check filename
+              if (regex.test(file.filename)) {
+                errors.push(`File name '${file.filename}' contains forbidden keyword`);
+              }
+              // Check patch (diff content)
+              if (file.patch && regex.test(file.patch)) {
+                errors.push(`File '${file.filename}' contains forbidden keyword in changes`);
+              }
+            }
 
-          if [ "${FOUND}" == "1" ]; then
-            echo "--------"
-            echo "PR contains forbidden keyword (case-insensitive)."
-            echo "Please remove all occurrences before merging."
-            exit 1
-          fi
-
-          echo "No forbidden keywords found."
+            if (errors.length > 0) {
+              core.setFailed(
+                '--------\n' +
+                errors.map(e => `ERROR: ${e}`).join('\n') +
+                '\n--------\n' +
+                'PR contains forbidden keyword (case-insensitive).\n' +
+                'Please remove all occurrences before merging.'
+              );
+            } else {
+              core.info('No forbidden keywords found.');
+            }
