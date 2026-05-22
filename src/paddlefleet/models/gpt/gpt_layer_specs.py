@@ -74,10 +74,6 @@ from paddlefleet.transformer.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
     DSv4HybridSelfAttentionSublayersSpec,
 )
-from paddlefleet.transformer.dsv4_hybrid_attention import (
-    DSv4HybridSelfAttention,
-    DSv4HybridSelfAttentionSublayersSpec,
-)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.gated_delta_net import (
     GatedDeltaNet,
