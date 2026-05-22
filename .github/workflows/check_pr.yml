@@ -5,16 +5,14 @@ on:
     types: [opened, edited, reopened, synchronize]
     branches: [develop, release/*]
 
+env:
+  PR_ID: ${{ github.event.pull_request.number || '0' }}
+
 jobs:
   check-pr-description:
     name: Check PR Description
     runs-on: ubuntu-latest
     steps:
-      - name: Check if PR description is empty
-        id: check-description
-        # 使用 GitHub Actions 的内置上下文检查 PR 内容
-        run: |
-          python ci/checkPRTemplate.py
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
@@ -22,6 +20,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.10'
+      - name: Check if PR description is empty
+        id: check-description
+        # 使用 GitHub Actions 的内置上下文检查 PR 内容
+        run: |
+          git pull --no-edit origin pull/${PR_ID}/head
+          python ci/checkPRTemplate.py
       - name: Check uv.lock is not deleted
         run: |
           git diff --name-status origin/${{ github.base_ref }}...HEAD | tee changed_files.txt
