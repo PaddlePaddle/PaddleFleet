@@ -24,6 +24,7 @@ jobs:
         id: check-description
         # 使用 GitHub Actions 的内置上下文检查 PR 内容
         run: |
+          pip install httpx requests
           git pull --no-edit origin pull/${PR_ID}/head
           python ci/checkPRTemplate.py
       - name: Check uv.lock is not deleted
