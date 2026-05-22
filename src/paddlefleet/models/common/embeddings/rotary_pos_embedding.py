@@ -161,12 +161,8 @@ class RotaryEmbedding(nn.Layer):
                 # Take first batch, assuming all batches have same position_ids
                 seq = position_ids[0].astype(self.inv_freq.dtype)
             else:
-                # For 3D position_ids (M-RoPE), this function should not be called
-                # Fall back to max_seq_len to avoid cryptic errors
-                seq = (
-                    paddle.arange(max_seq_len).astype(self.inv_freq.dtype)
-                    + offset
-                )
+                # For 3D position_ids (M-RoPE style), use other rope implementation (e.g., MLaBE)
+                raise ValueError("position_ids must be either 1D or 2D")
         else:
             seq = (
                 paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset

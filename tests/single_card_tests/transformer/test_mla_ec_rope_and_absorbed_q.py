@@ -324,6 +324,122 @@ class TestECRopeBranchFullGPT(unittest.TestCase):
                 self.assertTrue(paddle.isfinite(param.grad).all().item())
         self.assertTrue(has_grad, "Should have gradients after backward")
 
+    def test_forward_ec_rope_with_1d_position_ids(self):
+        """EC rope path with 1D position_ids [S]."""
+        model, config = _build_gpt_model(
+            gpt_model_use_experimental_version=True
+        )
+        model.eval()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 1D position_ids: [S]
+        position_ids = paddle.arange(sequence_length, dtype=paddle.int64)
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+        result = model(dict_args)
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+
+        self.assertEqual(
+            hidden_states.shape,
+            [micro_batch_size, sequence_length, config.vocab_size],
+        )
+
+    def test_3d_position_ids_raises_value_error(self):
+        """3D position_ids should raise ValueError (not supported by RotaryEmbedding)."""
+        model, config = _build_gpt_model(
+            gpt_model_use_experimental_version=True
+        )
+        model.eval()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 3D position_ids: [3, batch, seq_len] - M-RoPE style
+        position_ids = paddle.arange(
+            3 * micro_batch_size * sequence_length, dtype=paddle.int64
+        ).reshape([3, micro_batch_size, sequence_length])
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+
+        with self.assertRaises(ValueError) as context:
+            model(dict_args)
+
+        self.assertIn(
+            "position_ids must be either 1D or 2D", str(context.exception)
+        )
+
+    def test_backward_ec_rope_with_1d_position_ids(self):
+        """Backward through EC rope path with 1D position_ids."""
+        model, config = _build_gpt_model(
+            gpt_model_use_experimental_version=True
+        )
+        model.train()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 1D position_ids: [S]
+        position_ids = paddle.arange(sequence_length, dtype=paddle.int64)
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+        labels = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+        result = model(dict_args)
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+
+        loss = paddle.nn.functional.cross_entropy(
+            hidden_states.reshape([-1, config.vocab_size]), labels.reshape([-1])
+        )
+        loss.backward()
+
+        has_grad = False
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                has_grad = True
+                self.assertTrue(paddle.isfinite(param.grad).all().item())
+        self.assertTrue(has_grad, "Should have gradients after backward")
+
 
 # ---------------------------------------------------------------------------
 # Tests for _compute_absorbed_q branch (fake forward_meta, full GPT model)
@@ -436,6 +552,86 @@ class TestComputeAbsorbedQBranchFullGPT(unittest.TestCase):
         # In decode mode, some layers may skip gradient calculation
         # The important thing is that the forward passes without errors
         # and the loss is finite
+        self.assertTrue(paddle.isfinite(loss).item(), "Loss should be finite")
+
+    def test_forward_decode_mode_with_1d_position_ids(self):
+        """Decode mode with 1D position_ids."""
+        model, config = _build_gpt_model_with_forward_meta(decode_len=1)
+        model.eval()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 1D position_ids: [S]
+        position_ids = paddle.arange(sequence_length, dtype=paddle.int64)
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+        result = model(dict_args)
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+
+        self.assertEqual(
+            hidden_states.shape,
+            [micro_batch_size, sequence_length, config.vocab_size],
+        )
+
+    def test_backward_decode_mode_with_1d_position_ids(self):
+        """Decode mode backward with 1D position_ids."""
+        model, config = _build_gpt_model_with_forward_meta(decode_len=5)
+        model.train()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 1D position_ids: [S]
+        position_ids = paddle.arange(sequence_length, dtype=paddle.int64)
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+        labels = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+        result = model(dict_args)
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+
+        loss = paddle.nn.functional.cross_entropy(
+            hidden_states.reshape([-1, config.vocab_size]), labels.reshape([-1])
+        )
+        loss.backward()
+
+        has_grad = False
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                has_grad = True
+                if not paddle.isfinite(param.grad).all().item():
+                    self.fail(f"Gradient for {name} contains NaN or Inf")
+
         self.assertTrue(paddle.isfinite(loss).item(), "Loss should be finite")
 
 
@@ -555,6 +751,221 @@ class TestCombinedECRopeAndAbsorbedQFullGPT(unittest.TestCase):
         # The important thing is that the forward passes without errors
         # and the loss is finite
         self.assertTrue(paddle.isfinite(loss).item(), "Loss should be finite")
+
+    def test_forward_ec_rope_and_decode_mode_1d_position_ids(self):
+        """EC rope + decode mode with 1D position_ids."""
+        model, config = _build_gpt_model_with_forward_meta(
+            decode_len=1, gpt_model_use_experimental_version=True
+        )
+        model.eval()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 1D position_ids: [S]
+        position_ids = paddle.arange(sequence_length, dtype=paddle.int64)
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+        result = model(dict_args)
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+
+        self.assertEqual(
+            hidden_states.shape,
+            [micro_batch_size, sequence_length, config.vocab_size],
+        )
+
+    def test_backward_ec_rope_and_decode_mode_1d_position_ids(self):
+        """EC rope + decode mode backward with 1D position_ids."""
+        model, config = _build_gpt_model_with_forward_meta(
+            decode_len=3, gpt_model_use_experimental_version=True
+        )
+        model.train()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 1D position_ids: [S]
+        position_ids = paddle.arange(sequence_length, dtype=paddle.int64)
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+        labels = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+        result = model(dict_args)
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+
+        loss = paddle.nn.functional.cross_entropy(
+            hidden_states.reshape([-1, config.vocab_size]), labels.reshape([-1])
+        )
+        loss.backward()
+
+        has_grad = False
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                has_grad = True
+                if not paddle.isfinite(param.grad).all().item():
+                    self.fail(f"Gradient for {name} contains NaN or Inf")
+
+        self.assertTrue(paddle.isfinite(loss).item(), "Loss should be finite")
+
+
+# ---------------------------------------------------------------------------
+# Tests for gpt_model_use_experimental_version=False with different position_ids
+# ---------------------------------------------------------------------------
+
+
+class TestNonExperimentalVersionPositionIds(unittest.TestCase):
+    """Test gpt_model_use_experimental_version=False with 1D and 3D position_ids."""
+
+    def setUp(self):
+        seed = 42
+        random.seed(seed)
+        np.random.seed(seed)
+        paddle.manual_seed(seed)
+
+    def test_forward_with_1d_position_ids(self):
+        """Forward with 1D position_ids [S], non-experimental version."""
+        model, config = _build_gpt_model(
+            gpt_model_use_experimental_version=False
+        )
+        model.eval()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 1D position_ids: [S]
+        position_ids = paddle.arange(sequence_length, dtype=paddle.int64)
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+        result = model(dict_args)
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+
+        self.assertEqual(
+            hidden_states.shape,
+            [micro_batch_size, sequence_length, config.vocab_size],
+        )
+
+    def test_backward_with_1d_position_ids(self):
+        """Backward with 1D position_ids, non-experimental version."""
+        model, config = _build_gpt_model(
+            gpt_model_use_experimental_version=False
+        )
+        model.train()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 1D position_ids: [S]
+        position_ids = paddle.arange(sequence_length, dtype=paddle.int64)
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+        labels = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+        result = model(dict_args)
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+
+        loss = paddle.nn.functional.cross_entropy(
+            hidden_states.reshape([-1, config.vocab_size]), labels.reshape([-1])
+        )
+        loss.backward()
+
+        has_grad = False
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                has_grad = True
+                self.assertTrue(paddle.isfinite(param.grad).all().item())
+        self.assertTrue(has_grad, "Should have gradients after backward")
+
+    def test_3d_position_ids_raises_value_error(self):
+        """3D position_ids should raise ValueError (non-experimental version)."""
+        model, config = _build_gpt_model(
+            gpt_model_use_experimental_version=False
+        )
+        model.eval()
+
+        sequence_length = 16
+        micro_batch_size = 2
+
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        # 3D position_ids: [3, batch, seq_len] - M-RoPE style
+        position_ids = paddle.arange(
+            3 * micro_batch_size * sequence_length, dtype=paddle.int64
+        ).reshape([3, micro_batch_size, sequence_length])
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+
+        with self.assertRaises(ValueError) as context:
+            model(dict_args)
+
+        self.assertIn(
+            "position_ids must be either 1D or 2D", str(context.exception)
+        )
 
 
 if __name__ == "__main__":

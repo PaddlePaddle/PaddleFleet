@@ -100,9 +100,8 @@ def _ec_compatible_rope_apply(
             # Take first batch, assuming all batches have same position_ids
             positions = position_ids[0].astype(freqs.dtype)
         else:
-            # For 3D position_ids (M-RoPE), this function should not be called
-            # Fall back to max_seq_len to avoid cryptic errors
-            positions = paddle.arange(seq_len).astype(freqs.dtype)  # + offset
+            # For 3D position_ids (M-RoPE style), use other rope implementation (e.g., MLaBE)
+            raise ValueError("position_ids must be either 1D or 2D")
     else:
         positions = paddle.arange(seq_len).astype(freqs.dtype)  # + offset
     # freqs_table: [S, D/2]
