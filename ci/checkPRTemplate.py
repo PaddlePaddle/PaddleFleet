@@ -172,7 +172,7 @@ def pull_request_event_template(event, repo, *args, **kwargs):
 
 
 def get_a_pull(pull_id):
-    url = "https://api.github.com/repos/PaddlePaddle/Paddle/pulls/ " + str(
+    url = "https://api.github.com/repos/PaddlePaddle/PaddleFleet/pulls/" + str(
         pull_id
     )
 
