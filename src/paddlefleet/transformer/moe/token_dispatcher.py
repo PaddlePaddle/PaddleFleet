@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
+    DeepEPCombineAsyncRefinedRecompute,
     fused_combine,
     fused_dispatch,
     get_hybrid_ep_buffer,
@@ -395,8 +396,9 @@ class _HybridEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
+        use_rr_deepep_combine: bool = False,
     ) -> paddle.Tensor:
-        del async_finish
+        del async_finish, use_rr_deepep_combine
         if combine_overlap_handle is not None:
             raise NotImplementedError(
                 "HybridEP backend does not support combine overlap in PaddleFleet."
@@ -477,6 +479,7 @@ class _DeepEPManager(_DispatchManager):
             raise ImportError(
                 "DeepEP is not supported in your paddlepaddle whl package."
             )
+        self._rr_fusedcombined = None
 
     def setup_metadata(
         self,
@@ -595,15 +598,27 @@ class _DeepEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
+        use_rr_deepep_combine: bool = False,
     ) -> paddle.Tensor:
+        if combine_overlap_handle is not None and use_rr_deepep_combine:
+            if self._rr_fusedcombined is None:
+                self._rr_fusedcombined = DeepEPCombineAsyncRefinedRecompute()
+            elif not isinstance(
+                self._rr_fusedcombined, DeepEPCombineAsyncRefinedRecompute
+            ):
+                raise RuntimeError(
+                    f"_rr_fusedcombined type mismatch: expected DeepEPCombineAsyncRefinedRecompute, "
+                    f"got {type(self._rr_fusedcombined).__name__}."
+                )
         hidden_states = fused_combine(
             hidden_states,
             self.group,
             self.handle,
-            None,
-            combine_overlap_handle,
-            async_finish,
+            _rr_fusedcombined=self._rr_fusedcombined,
+            combine_overlap_handle=combine_overlap_handle,
+            async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
+            use_rr_deepep_combine=use_rr_deepep_combine,
         )
         # Release the handle after combine operation
         self.handle = None

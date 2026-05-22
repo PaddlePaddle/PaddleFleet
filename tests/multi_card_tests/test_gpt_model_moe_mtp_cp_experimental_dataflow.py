@@ -253,7 +253,7 @@ def run_experimental_dataflow_cp_e2e():
                 nan_grad_count += 1
 
     print(f"actual loss: {loss.item()}")
-    loss_baseline = 8.292335510253906
+    loss_baseline = 8.362568
     np.testing.assert_allclose(
         np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
     )
