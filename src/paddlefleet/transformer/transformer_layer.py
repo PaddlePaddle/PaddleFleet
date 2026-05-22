@@ -407,6 +407,12 @@ class TransformerLayer(nn.Layer):
             )
             self.attn_res_block_size = self.config.attn_res_block_size
 
+        if hasattr(self.mlp, "rr_recompute_update"):
+            self.mlp.rr_recompute_update(
+                in_full_recompute=self.full_recompute,
+                in_mlp_recompute=self.recompute_mlp,
+            )
+
     def build_schedule_node(self):
         return TransformerLayerNode(
             self,
