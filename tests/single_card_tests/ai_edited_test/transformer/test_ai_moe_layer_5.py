@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 import os
 import sys
 import unittest
@@ -22,12 +23,10 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 import paddle
 
+from paddlefleet.gpt_builders import gpt_builder
+from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.transformer.moe import moe_layer
 from paddlefleet.transformer.moe.moe_layer import MoELayer
-
-
-class Plain:
-    pass
 
 
 class FakeStream:
@@ -67,8 +66,16 @@ class FakeCommManager:
         self.tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
         self.combine_calls = []
 
-    def combine(self, hidden_states, handle, async_finish=False):
-        self.combine_calls.append((hidden_states, handle, async_finish))
+    def combine(
+        self,
+        hidden_states,
+        handle,
+        async_finish=False,
+        use_rr_deepep_combine=False,
+    ):
+        self.combine_calls.append(
+            (hidden_states, handle, async_finish, use_rr_deepep_combine)
+        )
         return hidden_states + 3.0
 
 
@@ -132,6 +139,41 @@ class FakeLatentProj:
     def __call__(self, x):
         self.calls.append(x)
         return x + self.delta
+
+
+def build_gpt_model_with_moe():
+    config = GPTConfig(
+        num_hidden_layers=1,
+        hidden_size=8,
+        vocab_size=16,
+        max_sequence_length=8,
+        num_attention_heads=2,
+        intermediate_size=16,
+        n_routed_experts=2,
+        n_shared_experts=0,
+        moe_intermediate_size=16,
+        moe_layer_freq=1,
+        moe_token_dispatcher_type="alltoall",
+        moe_expert_fusion=False,
+        moe_deep_gemm=False,
+        hidden_dropout_prob=0.0,
+        attention_dropout=0.0,
+        init_method=functools.partial(paddle.nn.init.xavier_uniform_, gain=1.0),
+        output_layer_init_method=functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        tie_word_embeddings=False,
+        use_qk_norm=True,
+    )
+    return gpt_builder(config, num_stages=1)
+
+
+def get_gpt_moe_layer():
+    for layer in build_gpt_model_with_moe().run_function:
+        mlp = getattr(layer, "mlp", None)
+        if isinstance(mlp, MoELayer):
+            return mlp
+    raise AssertionError("GPTModel did not create a MoELayer")
 
 
 class TestMoELayerExtraExecutableBranchesNoMock(unittest.TestCase):
@@ -205,16 +247,16 @@ class TestMoELayerExtraExecutableBranchesNoMock(unittest.TestCase):
     def test_compute_gate_uses_gather_for_single_card_sequence_parallel(self):
         moe_layer.GatherOp = FakeGather
         FakeGather.calls = []
-        model = Plain()
-        model.expert_model_parallel_size = 1
+        model = get_gpt_moe_layer()
         model.sequence_parallel = True
 
-        class Gate:
+        class Gate(paddle.nn.Layer):
             def __init__(self):
+                super().__init__()
                 self.hidden = None
                 self.input_ids = None
 
-            def __call__(self, hidden_states, input_ids=None):
+            def forward(self, hidden_states, input_ids=None):
                 self.hidden = hidden_states
                 self.input_ids = input_ids
                 return "gate-result"
@@ -237,7 +279,7 @@ class TestMoELayerExtraExecutableBranchesNoMock(unittest.TestCase):
     def test_aux_loss_compute_scatter_shared_and_latent_paths(self):
         moe_layer.ScatterOp = FakeScatter
         FakeScatter.calls = []
-        model = Plain()
+        model = get_gpt_moe_layer()
         model.use_latent_moe = True
         model.fc2_latent_proj = FakeLatentProj(1.0)
         model.training = True
@@ -263,24 +305,12 @@ class TestMoELayerExtraExecutableBranchesNoMock(unittest.TestCase):
         self.assertTrue(float(out.sum()) > 0.0)
 
     def test_compute_dispatch_experts_and_combine_paths(self):
-        model = Plain()
+        model = get_gpt_moe_layer()
         model.moe_use_fusion_node = True
         model.use_hybrid_ep_backend = False
         model._use_hybrid_ep_fusion = lambda: False
         model.token_dispatcher = FakeTokenDispatcher()
-        model.fp8_dispatch = False
-        model.use_ue8m0 = False
-        model.fp8 = False
-        model.moe_deep_gemm = False
-        model.recompute_moe_gate_up = False
-        model.recompute_moe_premute = False
         model.fp8_wgrad = False
-        model.use_auto_subbatch = False
-        model.moe_expert_fusion = False
-        model.moe_subbatch_token_num_after_dispatch = None
-        model.moe_subbatch_diag = False
-        model.dw_p2p_overlap = False
-        model.num_experts_per_tok = 2
         moe_layer.FusionMoePyLayer = FakeFusionMoePyLayer
         FakeFusionMoePyLayer.calls = []
         hidden = paddle.ones([2, 3], dtype="float32")
@@ -306,10 +336,10 @@ class TestMoELayerExtraExecutableBranchesNoMock(unittest.TestCase):
             combined.numpy().tolist(), (expert_out + 3.0).numpy().tolist()
         )
 
-        dense_model = Plain()
+        dense_model = get_gpt_moe_layer()
         dense_model.moe_use_fusion_node = False
         dense_model.routed_experts_compute = lambda x: x + 5.0
-        dense_model.combine = lambda x: x + 6.0
+        dense_model.combine = lambda x, *args, **kwargs: x + 6.0
         dense_expert = MoELayer.compute_experts(dense_model, (hidden, None))
         dense_combined = MoELayer.compute_combine(dense_model, dense_expert)
         self.assertEqual(
@@ -320,14 +350,10 @@ class TestMoELayerExtraExecutableBranchesNoMock(unittest.TestCase):
         self.install_sonic_stubs()
         FakeUpProjection.calls = []
         FakeDownProjection.calls = []
-        model = Plain()
+        model = get_gpt_moe_layer()
         model.use_latent_moe = True
         model.fc1_latent_proj = FakeLatentProj(1.0)
         model.fc2_latent_proj = FakeLatentProj(2.0)
-        model.layer_number = 3
-        model.moe_group = None
-        model.num_experts_per_tok = 2
-        model.num_experts_per_device = 2
         model.use_hybrid_ep_backend = False
         model.moe_use_fusion_node = True
         model.using_sonic_moe = True
@@ -357,10 +383,8 @@ class TestMoELayerExtraExecutableBranchesNoMock(unittest.TestCase):
         self.install_sonic_stubs()
         FakeUpProjection.calls = []
         FakeDownProjection.calls = []
-        model = Plain()
+        model = get_gpt_moe_layer()
         model.using_sonic_moe = True
-        model.num_experts_per_tok = 2
-        model.num_experts_per_device = 2
         model.grouped_gemm_experts = FakeWeightBox()
         hidden = paddle.ones([2, 3], dtype="float32")
         routing = paddle.to_tensor([[1, 1], [1, 1]], dtype="bool")
@@ -375,7 +399,7 @@ class TestMoELayerExtraExecutableBranchesNoMock(unittest.TestCase):
         self.assertEqual(len(FakeDownProjection.calls), 1)
 
     def test_fp8_quant_weight_grouped_individual_mode_raises(self):
-        model = Plain()
+        model = get_gpt_moe_layer()
         model.moe_use_fusion_node = True
         model.fp8 = True
         model.grouped_gemm_experts = FakeWeightBox()
