@@ -29,7 +29,12 @@ import paddle
 
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.transformer.hyper_connection import HyperConnectionModule
+from paddlefleet.transformer.hyper_connection import (
+    HyperConnectionContractLayer,
+    HyperConnectionExpandLayer,
+    HyperConnectionModule,
+    SinkhornKnopp,
+)
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.transformer.transformer_layer import (
     HyperConnectionTransformerLayer,
@@ -109,6 +114,77 @@ def _make_hc_layer(config, layer_number=1):
     )
 
 
+# ==============================================================================
+# Tests for SinkhornKnopp
+# ==============================================================================
+
+
+class TestSinkhornKnopp(unittest.TestCase):
+    """Tests for SinkhornKnopp doubly stochastic projection."""
+
+    def test_output_shape(self):
+        """Output should have same shape as input."""
+        n = 4
+        x = paddle.randn([2, 3, n, n])
+        result = SinkhornKnopp.apply(x, 20)
+        self.assertEqual(list(result.shape), [2, 3, n, n])
+
+    def test_doubly_stochastic_rows_sum_to_one(self):
+        """Rows of output should sum to approximately 1."""
+        n = 4
+        x = paddle.randn([8, n, n])
+        result = SinkhornKnopp.apply(x, 20)
+        row_sums = result.sum(axis=-1)
+        self.assertTrue(
+            paddle.allclose(row_sums, paddle.ones_like(row_sums), atol=1e-4)
+        )
+
+    def test_doubly_stochastic_cols_sum_to_one(self):
+        """Columns of output should sum to approximately 1."""
+        n = 4
+        x = paddle.randn([8, n, n])
+        result = SinkhornKnopp.apply(x, 20)
+        col_sums = result.sum(axis=-2)
+        self.assertTrue(
+            paddle.allclose(col_sums, paddle.ones_like(col_sums), atol=1e-4)
+        )
+
+    def test_output_non_negative(self):
+        """Output matrix entries should be non-negative."""
+        n = 4
+        x = paddle.randn([8, n, n])
+        result = SinkhornKnopp.apply(x, 20)
+        self.assertTrue((result >= 0).all().item())
+
+    def test_gradient_flows(self):
+        """Gradient should flow through SinkhornKnopp."""
+        n = 4
+        x = paddle.randn([2, n, n])
+        x.stop_gradient = False
+        result = SinkhornKnopp.apply(x, 10)
+        loss = result.sum()
+        loss.backward()
+        self.assertIsNotNone(x.grad)
+        self.assertFalse(paddle.isnan(x.grad).any().item())
+
+    def test_more_iterations_improves_convergence(self):
+        """More Sinkhorn iterations should produce better doubly stochastic matrices."""
+        n = 4
+        x = paddle.randn([8, n, n])
+        result_5 = SinkhornKnopp.apply(x, 5)
+        result_50 = SinkhornKnopp.apply(x, 50)
+
+        # Both should sum to 1 per row, but 50 iters should be closer
+        row_err_5 = (result_5.sum(axis=-1) - 1.0).abs().max().item()
+        row_err_50 = (result_50.sum(axis=-1) - 1.0).abs().max().item()
+        self.assertLessEqual(row_err_50, row_err_5 + 1e-6)
+
+
+# ==============================================================================
+# Tests for HyperConnectionModule
+# ==============================================================================
+
+
 class TestHyperConnectionModule(unittest.TestCase):
     """Tests for HyperConnectionModule."""
 
@@ -123,6 +199,17 @@ class TestHyperConnectionModule(unittest.TestCase):
         self.assertEqual(self.module.hidden_size, self.C)
         self.assertIsNotNone(self.module.mapping_proj)
 
+    def test_construction_params(self):
+        """All learnable parameters should be created."""
+        self.assertIsNotNone(self.module.alpha_pre)
+        self.assertIsNotNone(self.module.alpha_post)
+        self.assertIsNotNone(self.module.alpha_res)
+        self.assertIsNotNone(self.module.bias)
+        self.assertEqual(list(self.module.alpha_pre.shape), [1])
+        self.assertEqual(
+            list(self.module.bias.shape), [self.n * self.n + 2 * self.n]
+        )
+
     def test_forward_output_shapes(self):
         """forward() should return (aggregated, h_res, h_post) with correct shapes."""
         B, S = 2, 4
@@ -132,21 +219,158 @@ class TestHyperConnectionModule(unittest.TestCase):
         self.assertEqual(list(h_res.shape), [B, S, self.n, self.n])
         self.assertEqual(list(h_post.shape), [B, S, self.n])
 
+    def test_forward_3d_input(self):
+        """forward() should work with 3D input [B, S, n*C]."""
+        x = paddle.randn([3, 5, self.n * self.C])
+        aggregated, h_res, h_post = self.module(x)
+        self.assertEqual(list(aggregated.shape), [3, 5, self.C])
+
+    def test_forward_2d_input(self):
+        """forward() should work with 2D input [tokens, n*C]."""
+        x = paddle.randn([10, self.n * self.C])
+        aggregated, h_res, h_post = self.module(x)
+        self.assertEqual(list(aggregated.shape), [10, self.C])
+        self.assertEqual(list(h_res.shape), [10, self.n, self.n])
+        self.assertEqual(list(h_post.shape), [10, self.n])
+
+    # ---------- compute_mappings ----------
+
+    def test_compute_mappings_shapes(self):
+        """compute_mappings should return (h_pre, h_post, h_res) with correct shapes."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.n * self.C])
+        h_pre, h_post, h_res = self.module.compute_mappings(x)
+        self.assertEqual(list(h_pre.shape), [B, S, self.n])
+        self.assertEqual(list(h_post.shape), [B, S, self.n])
+        self.assertEqual(list(h_res.shape), [B, S, self.n, self.n])
+
+    def test_compute_mappings_h_pre_range(self):
+        """h_pre should be in (0, 1) as it uses sigmoid."""
+        x = paddle.randn([4, 8, self.n * self.C])
+        h_pre, _, _ = self.module.compute_mappings(x)
+        self.assertTrue((h_pre > 0).all().item())
+        self.assertTrue((h_pre < 1).all().item())
+
+    def test_compute_mappings_h_post_range(self):
+        """h_post should be in (0, 2) as it uses 2*sigmoid."""
+        x = paddle.randn([4, 8, self.n * self.C])
+        _, h_post, _ = self.module.compute_mappings(x)
+        self.assertTrue((h_post > 0).all().item())
+        self.assertTrue((h_post < 2).all().item())
+
+    def test_compute_mappings_h_res_doubly_stochastic(self):
+        """h_res should be doubly stochastic (rows and cols sum to 1)."""
+        x = paddle.randn([4, 8, self.n * self.C])
+        _, _, h_res = self.module.compute_mappings(x)
+        row_sums = h_res.sum(axis=-1)
+        col_sums = h_res.sum(axis=-2)
+        self.assertTrue(
+            paddle.allclose(row_sums, paddle.ones_like(row_sums), atol=1e-3)
+        )
+        self.assertTrue(
+            paddle.allclose(col_sums, paddle.ones_like(col_sums), atol=1e-3)
+        )
+
+    # ---------- aggregate ----------
+
+    def test_aggregate_shape(self):
+        """aggregate should reduce n*C to C."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.n * self.C])
+        h_pre = paddle.ones([B, S, self.n]) / self.n  # uniform weights
+        result = self.module.aggregate(x, h_pre)
+        self.assertEqual(list(result.shape), [B, S, self.C])
+
+    def test_aggregate_uniform_weights_equals_mean(self):
+        """With uniform h_pre, aggregate should equal mean of streams."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.n * self.C])
+        h_pre = paddle.ones([B, S, self.n]) / self.n
+        result = self.module.aggregate(x, h_pre)
+        # Manually compute mean
+        x_streams = x.reshape([B, S, self.n, self.C])
+        expected = x_streams.mean(axis=-2)
+        self.assertTrue(paddle.allclose(result, expected, atol=1e-5))
+
+    # ---------- apply_h_res ----------
+
+    def test_apply_h_res_shape(self):
+        """apply_h_res should preserve shape [..., n*C]."""
+        B, S = 2, 4
+        h_res = (
+            paddle.eye(self.n)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .expand([B, S, self.n, self.n])
+        )
+        residual = paddle.randn([B, S, self.n * self.C])
+        result = self.module.apply_h_res(h_res, residual)
+        self.assertEqual(list(result.shape), [B, S, self.n * self.C])
+
+    def test_apply_h_res_identity_preserves_input(self):
+        """With identity h_res, output should equal input."""
+        B, S = 2, 4
+        h_res = (
+            paddle.eye(self.n)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .expand([B, S, self.n, self.n])
+        )
+        residual = paddle.randn([B, S, self.n * self.C])
+        result = self.module.apply_h_res(h_res, residual)
+        self.assertTrue(paddle.allclose(result, residual, atol=1e-5))
+
+    # ---------- _apply_h_post ----------
+
+    def test_apply_h_post_standard_shape(self):
+        """_apply_h_post with [..., C] input should return [..., n*C]."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.C])
+        h_post = paddle.ones([B, S, self.n])
+        result = self.module._apply_h_post(x, h_post)
+        self.assertEqual(list(result.shape), [B, S, self.n * self.C])
+
+    def test_apply_h_post_bias_shape(self):
+        """_apply_h_post with [C] bias input should return [..., n*C]."""
+        B, S = 2, 4
+        bias = paddle.randn([self.C])
+        h_post = paddle.ones([B, S, self.n])
+        result = self.module._apply_h_post(bias, h_post)
+        self.assertEqual(list(result.shape), [B, S, self.n * self.C])
+
+    def test_apply_h_post_tuple(self):
+        """apply_h_post with (x, bias) should return (expanded_x, expanded_bias)."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.C])
+        bias = paddle.randn([self.C])
+        h_post = paddle.ones([B, S, self.n])
+        x_out, bias_out = self.module.apply_h_post((x, bias), h_post)
+        self.assertEqual(list(x_out.shape), [B, S, self.n * self.C])
+        self.assertEqual(list(bias_out.shape), [B, S, self.n * self.C])
+
+    def test_apply_h_post_tuple_none_bias(self):
+        """apply_h_post with (x, None) should return (expanded_x, None)."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.C])
+        h_post = paddle.ones([B, S, self.n])
+        x_out, bias_out = self.module.apply_h_post((x, None), h_post)
+        self.assertEqual(list(x_out.shape), [B, S, self.n * self.C])
+        self.assertIsNone(bias_out)
+
+    # ---------- fused_h_res_h_post_bda ----------
+
     def test_fused_h_res_h_post_bda_shape(self):
         """fused_h_res_h_post_bda should return shape [..., n*C]."""
         B, S = 2, 4
         x = paddle.randn([B, S, self.n * self.C])
         aggregated, h_res, h_post = self.module(x)
-
-        # Simulate layer output (attn/mlp output, bias=None)
         layer_output = paddle.randn([B, S, self.C])
-        layer_output_with_bias = (layer_output, None)
 
         result = self.module.fused_h_res_h_post_bda(
             h_res=h_res,
             original_residual=x,
             h_post=h_post,
-            layer_output_with_bias=layer_output_with_bias,
+            layer_output_with_bias=(layer_output, None),
             dropout_prob=0.0,
             training=False,
             fused=False,
@@ -158,21 +382,259 @@ class TestHyperConnectionModule(unittest.TestCase):
         B, S = 2, 4
         x = paddle.randn([B, S, self.n * self.C])
         aggregated, h_res, h_post = self.module(x)
-
         layer_output = paddle.randn([B, S, self.C])
         bias = paddle.randn([self.C])
-        layer_output_with_bias = (layer_output, bias)
 
         result = self.module.fused_h_res_h_post_bda(
             h_res=h_res,
             original_residual=x,
             h_post=h_post,
-            layer_output_with_bias=layer_output_with_bias,
+            layer_output_with_bias=(layer_output, bias),
             dropout_prob=0.0,
             training=False,
             fused=False,
         )
         self.assertEqual(list(result.shape), [B, S, self.n * self.C])
+
+    def test_fused_h_res_h_post_bda_no_nan(self):
+        """fused_h_res_h_post_bda output should not contain NaN."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.n * self.C])
+        aggregated, h_res, h_post = self.module(x)
+        layer_output = paddle.randn([B, S, self.C])
+
+        result = self.module.fused_h_res_h_post_bda(
+            h_res=h_res,
+            original_residual=x,
+            h_post=h_post,
+            layer_output_with_bias=(layer_output, None),
+            dropout_prob=0.0,
+            training=False,
+            fused=False,
+        )
+        self.assertFalse(paddle.isnan(result).any().item())
+
+    # ---------- input_expand / output_contract ----------
+
+    def test_input_expand_shape(self):
+        """input_expand should expand [..., C] to [..., n*C]."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.C])
+        result = HyperConnectionModule.input_expand(x, self.n)
+        self.assertEqual(list(result.shape), [B, S, self.n * self.C])
+
+    def test_input_expand_replication(self):
+        """input_expand should replicate input to each stream."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.C])
+        result = HyperConnectionModule.input_expand(x, self.n)
+        # Each stream should be identical to original
+        streams = result.reshape([B, S, self.n, self.C])
+        for i in range(self.n):
+            self.assertTrue(paddle.allclose(streams[:, :, i, :], x, atol=1e-6))
+
+    def test_output_contract_shape(self):
+        """output_contract should contract [..., n*C] to [..., C]."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.n * self.C])
+        result = HyperConnectionModule.output_contract(x, self.n)
+        self.assertEqual(list(result.shape), [B, S, self.C])
+
+    def test_expand_then_contract_preserves(self):
+        """Expanding then contracting (averaging) should preserve input for uniform streams."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.C])
+        expanded = HyperConnectionModule.input_expand(x, self.n)
+        contracted = HyperConnectionModule.output_contract(expanded, self.n)
+        # Since all streams are copies, mean == original
+        self.assertTrue(paddle.allclose(contracted, x, atol=1e-5))
+
+    # ---------- learned_output_contract ----------
+
+    def test_learned_output_contract_shape(self):
+        """learned_output_contract should contract [..., n*C] to [..., C]."""
+        B, S = 2, 4
+        n = self.n
+        C = self.C
+        x = paddle.randn([B, S, n * C])
+        # F.linear(x, weight) expects weight shape [out_features, in_features]
+        # Here: x is [B, S, n*C], output should be [B, S, n], so weight is [n, n*C]
+        # But F.linear transposes internally: out = x @ weight.T
+        # So weight should be [n, n*C] -> out = [B,S,n*C] @ [n*C, n] = [B,S,n]
+        head_fn = paddle.randn([n * C, n])
+        base = paddle.zeros([n])
+        scale = paddle.ones([1])
+        result = HyperConnectionModule.learned_output_contract(
+            x, head_fn, base, scale, n, 1e-6
+        )
+        self.assertEqual(list(result.shape), [B, S, C])
+
+    def test_learned_output_contract_no_nan(self):
+        """learned_output_contract should not produce NaN."""
+        B, S = 2, 4
+        n = self.n
+        C = self.C
+        x = paddle.randn([B, S, n * C])
+        head_fn = paddle.randn([n * C, n])
+        base = paddle.zeros([n])
+        scale = paddle.ones([1])
+        result = HyperConnectionModule.learned_output_contract(
+            x, head_fn, base, scale, n, 1e-6
+        )
+        self.assertFalse(paddle.isnan(result).any().item())
+
+    # ---------- gradient flow ----------
+
+    def test_full_forward_gradient_flow(self):
+        """Gradient should flow through the entire forward pass."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.n * self.C])
+        x.stop_gradient = False
+        aggregated, h_res, h_post = self.module(x)
+        loss = aggregated.sum()
+        loss.backward()
+        self.assertIsNotNone(x.grad)
+        self.assertFalse(paddle.isnan(x.grad).any().item())
+
+    def test_fused_bda_gradient_flow(self):
+        """Gradient should flow through fused_h_res_h_post_bda."""
+        B, S = 2, 4
+        x = paddle.randn([B, S, self.n * self.C])
+        x.stop_gradient = False
+        aggregated, h_res, h_post = self.module(x)
+        layer_output = paddle.randn([B, S, self.C])
+        layer_output.stop_gradient = False
+
+        result = self.module.fused_h_res_h_post_bda(
+            h_res=h_res,
+            original_residual=x,
+            h_post=h_post,
+            layer_output_with_bias=(layer_output, None),
+            dropout_prob=0.0,
+            training=False,
+            fused=False,
+        )
+        loss = result.sum()
+        loss.backward()
+        self.assertIsNotNone(x.grad)
+        self.assertIsNotNone(layer_output.grad)
+
+
+# ==============================================================================
+# Tests for HyperConnectionExpandLayer and HyperConnectionContractLayer
+# ==============================================================================
+
+
+class TestHyperConnectionExpandLayer(unittest.TestCase):
+    """Tests for HyperConnectionExpandLayer."""
+
+    def setUp(self):
+        self.config = _make_hc_config()
+        self.n = self.config.num_residual_streams
+        self.C = self.config.hidden_size
+        self.layer = HyperConnectionExpandLayer(self.config)
+
+    def test_construction(self):
+        self.assertEqual(self.layer.n, self.n)
+
+    def test_forward_shape(self):
+        """Forward should expand hidden_states from [S, B, C] to [S, B, n*C]."""
+        S, B = 4, 2
+        hidden_states = paddle.randn([S, B, self.C])
+        dict_args = {"hidden_states": hidden_states}
+        result = self.layer.forward(dict_args)
+        self.assertEqual(
+            list(result["hidden_states"].shape), [S, B, self.n * self.C]
+        )
+
+    def test_forward_preserves_other_keys(self):
+        """Forward should not modify other keys in dict_args."""
+        S, B = 4, 2
+        hidden_states = paddle.randn([S, B, self.C])
+        mask = paddle.randn([B, 1, S, S])
+        dict_args = {"hidden_states": hidden_states, "attention_mask": mask}
+        result = self.layer.forward(dict_args)
+        self.assertTrue(paddle.equal_all(result["attention_mask"], mask))
+
+
+class TestHyperConnectionContractLayer(unittest.TestCase):
+    """Tests for HyperConnectionContractLayer."""
+
+    def setUp(self):
+        self.config = _make_hc_config()
+        self.n = self.config.num_residual_streams
+        self.C = self.config.hidden_size
+        self.layer = HyperConnectionContractLayer(self.config)
+
+    def test_construction(self):
+        self.assertEqual(self.layer.n, self.n)
+        self.assertIsNotNone(self.layer.hc_head_fn)
+        self.assertIsNotNone(self.layer.hc_head_base)
+        self.assertIsNotNone(self.layer.hc_head_scale)
+
+    def test_forward_shape(self):
+        """Forward should contract hidden_states from [S, B, n*C] to [S, B, C]."""
+        S, B = 4, 2
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        dict_args = {"hidden_states": hidden_states}
+        result = self.layer.forward(dict_args)
+        self.assertEqual(list(result["hidden_states"].shape), [S, B, self.C])
+
+    def test_forward_no_nan(self):
+        """Forward output should not contain NaN."""
+        S, B = 4, 2
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        dict_args = {"hidden_states": hidden_states}
+        result = self.layer.forward(dict_args)
+        self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+
+    def test_forward_with_mtp_enabled(self):
+        """Forward with MTP should split and contract correctly."""
+        num_mtp = 2
+        config = _make_hc_config(num_nextn_predict_layers=num_mtp)
+        layer = HyperConnectionContractLayer(config)
+        S, B = 6, 2
+        # Total hidden_states: (num_mtp + 1) * S tokens in seq dim
+        total_S = (num_mtp + 1) * S
+        hidden_states = paddle.randn([total_S, B, self.n * self.C])
+        dict_args = {"hidden_states": hidden_states}
+        result = layer.forward(dict_args)
+        # Main part: [S, B, C], MTP parts: [S, B, C] each -> total [3*S, B, C]
+        self.assertEqual(
+            list(result["hidden_states"].shape), [total_S, B, self.C]
+        )
+
+    def test_forward_with_mtp_preserves_multistream(self):
+        """With MTP enabled, should save mhc_multistream in dict_args."""
+        num_mtp = 2
+        config = _make_hc_config(num_nextn_predict_layers=num_mtp)
+        layer = HyperConnectionContractLayer(config)
+        S, B = 6, 2
+        total_S = (num_mtp + 1) * S
+        hidden_states = paddle.randn([total_S, B, self.n * self.C])
+        dict_args = {"hidden_states": hidden_states}
+        result = layer.forward(dict_args)
+        self.assertIn("mhc_multistream", result)
+        self.assertTrue(
+            paddle.equal_all(result["mhc_multistream"], hidden_states)
+        )
+
+    def test_expand_then_contract_pipeline(self):
+        """Expand layer followed by contract layer should produce [S, B, C] output."""
+        S, B = 4, 2
+        expand_layer = HyperConnectionExpandLayer(self.config)
+        hidden_states = paddle.randn([S, B, self.C])
+        dict_args = {"hidden_states": hidden_states}
+        expanded = expand_layer.forward(dict_args)
+        contracted = self.layer.forward(expanded)
+        self.assertEqual(
+            list(contracted["hidden_states"].shape), [S, B, self.C]
+        )
+
+
+# ==============================================================================
+# Tests for HyperConnectionTransformerLayer
+# ==============================================================================
 
 
 class TestHyperConnectionTransformerLayerConstruction(unittest.TestCase):
@@ -214,6 +676,14 @@ class TestHyperConnectionTransformerLayerConstruction(unittest.TestCase):
         layer = _make_hc_layer(config, layer_number=3)
         self.assertEqual(layer.layer_number, 3)
 
+    def test_different_num_residual_streams(self):
+        """Should work with different num_residual_streams values."""
+        for n in [2, 3, 8]:
+            config = _make_hc_config(num_residual_streams=n)
+            layer = _make_hc_layer(config)
+            self.assertEqual(layer.self_attention_hyper_connection.n, n)
+            self.assertEqual(layer.mlp_hyper_connection.n, n)
+
 
 class TestHyperConnectionTransformerLayerForward(unittest.TestCase):
     """Tests for HyperConnectionTransformerLayer forward pass."""
@@ -228,7 +698,6 @@ class TestHyperConnectionTransformerLayerForward(unittest.TestCase):
     def test_forward_output_shape(self):
         """Forward should produce hidden_states with shape [S, B, n*C] (seq-first)."""
         B, S = 2, 4
-        # Transformer layer uses seq-first: [S, B, n*C]
         hidden_states = paddle.randn([S, B, self.n * self.C])
         dict_args = {
             "hidden_states": hidden_states,
@@ -285,6 +754,50 @@ class TestHyperConnectionTransformerLayerForward(unittest.TestCase):
             paddle.allclose(result1["hidden_states"], result2["hidden_states"])
         )
 
+    def test_forward_output_differs_from_input(self):
+        """Output should be different from input (layer transforms data)."""
+        B, S = 2, 4
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        dict_args = {
+            "hidden_states": hidden_states.clone(),
+            "attention_mask": None,
+        }
+        result = self.layer.forward(dict_args)
+        self.assertFalse(
+            paddle.allclose(result["hidden_states"], hidden_states)
+        )
+
+    def test_forward_gradient_flow(self):
+        """Gradient should flow through the full forward pass."""
+        self.layer.train()
+        B, S = 2, 4
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        hidden_states.stop_gradient = False
+        dict_args = {
+            "hidden_states": hidden_states,
+            "attention_mask": None,
+        }
+        result = self.layer.forward(dict_args)
+        loss = result["hidden_states"].sum()
+        loss.backward()
+        self.assertIsNotNone(hidden_states.grad)
+        self.assertFalse(paddle.isnan(hidden_states.grad).any().item())
+
+    def test_forward_with_position_ids(self):
+        """Forward should work with position_ids provided."""
+        B, S = 2, 4
+        hidden_states = paddle.randn([S, B, self.n * self.C])
+        position_ids = paddle.arange(S).unsqueeze(0).expand([B, S])
+        dict_args = {
+            "hidden_states": hidden_states,
+            "attention_mask": None,
+            "position_ids": position_ids,
+        }
+        result = self.layer.forward(dict_args)
+        self.assertEqual(
+            list(result["hidden_states"].shape), [S, B, self.n * self.C]
+        )
+
 
 class TestHyperConnectionTransformerLayerRecompute(unittest.TestCase):
     """Tests for HyperConnectionTransformerLayer with selective recompute."""
@@ -305,6 +818,45 @@ class TestHyperConnectionTransformerLayerRecompute(unittest.TestCase):
         layer = _make_hc_layer(config)
         self.assertTrue(layer.recompute_input_layernorm)
         self.assertTrue(layer.recompute_post_attention_layernorm)
+
+    def test_selective_recompute_mlp_forward(self):
+        """Forward with recompute_mlp should produce valid output."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mlp"],
+        )
+        layer = _make_hc_layer(config)
+        layer.eval()
+        B, S = 2, 4
+        n = config.num_residual_streams
+        C = config.hidden_size
+        hidden_states = paddle.randn([S, B, n * C])
+        dict_args = {"hidden_states": hidden_states, "attention_mask": None}
+        result = layer.forward(dict_args)
+        self.assertEqual(list(result["hidden_states"].shape), [S, B, n * C])
+        self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+
+    def test_selective_recompute_norm_forward(self):
+        """Forward with recompute_norm should produce valid output."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["norm"],
+        )
+        layer = _make_hc_layer(config)
+        layer.eval()
+        B, S = 2, 4
+        n = config.num_residual_streams
+        C = config.hidden_size
+        hidden_states = paddle.randn([S, B, n * C])
+        dict_args = {"hidden_states": hidden_states, "attention_mask": None}
+        result = layer.forward(dict_args)
+        self.assertEqual(list(result["hidden_states"].shape), [S, B, n * C])
+        self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+
+
+# ==============================================================================
+# Tests for get_gpt_layer_local_spec with HC
+# ==============================================================================
 
 
 class TestGetGptLayerSpecWithHC(unittest.TestCase):
@@ -339,6 +891,65 @@ class TestGetGptLayerSpecWithHC(unittest.TestCase):
             spec.sublayers_spec.mlp_hyper_connection.layer,
             HyperConnectionModule,
         )
+
+
+# ==============================================================================
+# Integration test: full pipeline expand -> transformer layer -> contract
+# ==============================================================================
+
+
+class TestHCFullPipeline(unittest.TestCase):
+    """Integration test for the full HC pipeline."""
+
+    def test_expand_layer_contract(self):
+        """Test: expand -> HyperConnectionTransformerLayer -> contract produces valid output."""
+        config = _make_hc_config()
+        n = config.num_residual_streams
+        C = config.hidden_size
+        S, B = 4, 2
+
+        expand_layer = HyperConnectionExpandLayer(config)
+        transformer_layer = _make_hc_layer(config)
+        transformer_layer.eval()
+        contract_layer = HyperConnectionContractLayer(config)
+
+        # Start with standard hidden_states [S, B, C]
+        hidden_states = paddle.randn([S, B, C])
+        dict_args = {"hidden_states": hidden_states, "attention_mask": None}
+
+        # Expand: [S, B, C] -> [S, B, n*C]
+        dict_args = expand_layer.forward(dict_args)
+        self.assertEqual(list(dict_args["hidden_states"].shape), [S, B, n * C])
+
+        # Transform: [S, B, n*C] -> [S, B, n*C]
+        dict_args = transformer_layer.forward(dict_args)
+        self.assertEqual(list(dict_args["hidden_states"].shape), [S, B, n * C])
+
+        # Contract: [S, B, n*C] -> [S, B, C]
+        dict_args = contract_layer.forward(dict_args)
+        self.assertEqual(list(dict_args["hidden_states"].shape), [S, B, C])
+        self.assertFalse(paddle.isnan(dict_args["hidden_states"]).any().item())
+
+    def test_multiple_transformer_layers(self):
+        """Test multiple HC transformer layers in sequence."""
+        config = _make_hc_config()
+        n = config.num_residual_streams
+        C = config.hidden_size
+        S, B = 4, 2
+
+        layer1 = _make_hc_layer(config, layer_number=1)
+        layer2 = _make_hc_layer(config, layer_number=2)
+        layer1.eval()
+        layer2.eval()
+
+        hidden_states = paddle.randn([S, B, n * C])
+        dict_args = {"hidden_states": hidden_states, "attention_mask": None}
+
+        dict_args = layer1.forward(dict_args)
+        dict_args = layer2.forward(dict_args)
+
+        self.assertEqual(list(dict_args["hidden_states"].shape), [S, B, n * C])
+        self.assertFalse(paddle.isnan(dict_args["hidden_states"]).any().item())
 
 
 if __name__ == "__main__":
