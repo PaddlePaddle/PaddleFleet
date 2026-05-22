@@ -144,8 +144,13 @@ class FakeMoE(MoELayer):
         del is_first_fwd
         return hidden_states * 2.0
 
-    def compute_combine(self, hidden_states, async_finish=False):
-        del async_finish
+    def compute_combine(
+        self,
+        hidden_states,
+        async_finish=False,
+        use_rr_deepep_combine=False,
+    ):
+        del async_finish, use_rr_deepep_combine
         return hidden_states + 3.0
 
     def aux_loss_compute(self, args):

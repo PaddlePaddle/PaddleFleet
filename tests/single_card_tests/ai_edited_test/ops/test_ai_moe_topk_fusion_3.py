@@ -26,136 +26,171 @@ sys.path.insert(
 
 import paddle
 
-try:
-    import triton
-
-    triton.runtime.driver.active.get_current_device()
-
-    from paddlefleet.triton_ops.moe_topk_fusion import (
-        MoETopkFusion,
-        routing_map_fusion_forward,
-    )
-
-    _TRITON_AVAILABLE = True
-except Exception:
-    _TRITON_AVAILABLE = False
-
-
-@unittest.skipIf(
-    not paddle.is_compiled_with_cuda() or not _TRITON_AVAILABLE,
-    "CUDA and Triton are required for fused MoE topk kernels",
+from paddlefleet.triton_ops import moe_topk_fusion
+from paddlefleet.triton_ops.moe_topk_fusion import (
+    MoETopkFusion,
+    routing_map_fusion_forward,
 )
-class TestMoETopkFusionCuda(unittest.TestCase):
-    def setUp(self):
-        paddle.device.set_device("gpu:0")
 
-    def test_forward_selects_choice_topk_and_gate_probs(self):
-        gate_probs = paddle.to_tensor(
-            [[0.1, 0.9, 0.3, 0.7], [0.5, 0.2, 0.8, 0.1]],
-            dtype="float32",
-        )
-        probs_for_choice = gate_probs.clone()
 
-        topk_probs, topk_indices = MoETopkFusion.apply(
-            gate_probs, probs_for_choice, 2, False, 1, 1, False
-        )
+class Context:
+    def save_for_backward(self, *values):
+        self.saved = values
 
+    def saved_tensor(self):
+        return self.saved
+
+
+class KernelRecorder:
+    def __init__(self):
+        self.grid = None
+        self.args = None
+        self.kwargs = None
+
+    def __getitem__(self, grid):
+        self.grid = grid
+        return self
+
+    def __call__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+
+class TestMoETopkFusionWrappers(unittest.TestCase):
+    def test_forward_launches_kernel_and_saves_context_without_norm(self):
+        old_kernel = moe_topk_fusion._fwd_kernel
+        recorder = KernelRecorder()
+        moe_topk_fusion._fwd_kernel = recorder
+        ctx = Context()
+        gate_probs = paddle.arange(10, dtype="float32").reshape([2, 5])
+        probs_for_choice = gate_probs + 0.5
+        try:
+            topk_probs, topk_indices = MoETopkFusion.forward(
+                ctx,
+                gate_probs,
+                probs_for_choice,
+                moe_k=2,
+                use_node_limit=False,
+                n_group=4,
+                topk_group=2,
+                norm_gate_logits=False,
+            )
+        finally:
+            moe_topk_fusion._fwd_kernel = old_kernel
+
+        self.assertEqual(recorder.grid, (2,))
+        self.assertIs(recorder.args[0], gate_probs)
+        self.assertIs(recorder.args[1], probs_for_choice)
+        self.assertIs(recorder.args[4], topk_probs)
+        self.assertEqual(recorder.args[12:16], (2, False, 1, 1))
+        self.assertEqual(recorder.args[16], False)
+        self.assertEqual(recorder.args[17], 32)
         self.assertEqual(topk_probs.shape, [2, 2])
         self.assertEqual(topk_indices.dtype, paddle.int64)
-        self.assertEqual(topk_indices.numpy().tolist(), [[1, 3], [2, 0]])
-        self.assertEqual(topk_probs.numpy().tolist(), [[0.9, 0.7], [0.8, 0.5]])
+        saved_indices, saved_probs, saved_sum = ctx.saved
+        self.assertEqual(saved_indices.shape, [2, 2])
+        self.assertIs(saved_probs, topk_probs)
+        self.assertIsNone(saved_sum)
+        self.assertEqual(ctx.input_shape, [2, 5])
+        self.assertFalse(ctx.norm_gate_logits)
+        self.assertEqual(ctx.moe_k, 2)
 
-    def test_forward_normalizes_selected_gate_probs(self):
-        gate_probs = paddle.to_tensor(
-            [[0.1, 0.9, 0.3, 0.7], [0.5, 0.2, 0.8, 0.1]],
-            dtype="float32",
-        )
-
-        topk_probs, topk_indices = MoETopkFusion.apply(
-            gate_probs, gate_probs, 2, False, 1, 1, True
-        )
-
-        self.assertEqual(topk_indices.numpy().tolist(), [[1, 3], [2, 0]])
-        sums = topk_probs.sum(axis=-1).numpy().tolist()
-        self.assertAlmostEqual(sums[0], 1.0, places=6)
-        self.assertAlmostEqual(sums[1], 1.0, places=6)
-
-    def test_node_limit_restricts_selected_group(self):
-        gate_probs = paddle.arange(8, dtype="float32").reshape([1, 8]) / 10
-        probs_for_choice = paddle.to_tensor(
-            [[0.9, 0.8, 0.1, 0.1, 0.2, 0.2, 0.3, 0.3]],
-            dtype="float32",
-        )
-
-        topk_probs, topk_indices = MoETopkFusion.apply(
-            gate_probs, probs_for_choice, 2, True, 4, 1, False
-        )
-
-        self.assertEqual(topk_indices.numpy().tolist(), [[0, 1]])
-        self.assertEqual(topk_probs.numpy().tolist(), [[0.0, 0.1]])
-
-    def test_backward_scatter_gradients_to_selected_experts(self):
-        gate_probs = paddle.to_tensor(
-            [[0.1, 0.9, 0.3, 0.7], [0.5, 0.2, 0.8, 0.1]],
-            dtype="float32",
-        )
-        gate_probs.stop_gradient = False
-
-        topk_probs, _ = MoETopkFusion.apply(
-            gate_probs, gate_probs, 2, False, 1, 1, False
-        )
-        topk_probs.sum().backward()
-
-        self.assertEqual(
-            gate_probs.grad.numpy().tolist(),
-            [[0.0, 1.0, 0.0, 1.0], [1.0, 0.0, 1.0, 0.0]],
-        )
-
-    def test_routing_map_forward_without_masks(self):
-        gate_probs = paddle.ones([3, 4], dtype="float32")
-        topk_indices = paddle.to_tensor([[0, 2], [1, 3], [0, 1]], dtype="int64")
-
-        routing_map, topk_indices_out, dispatch_mask = (
-            routing_map_fusion_forward(gate_probs, topk_indices)
-        )
-
-        self.assertEqual(
-            routing_map.numpy().tolist(),
-            [[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 0.0]],
-        )
-        self.assertEqual(
-            topk_indices_out.numpy().tolist(), [[0, 2], [1, 3], [0, 1]]
-        )
-        self.assertEqual(dispatch_mask.numpy().tolist(), [2, 2, 1, 1])
-
-    def test_routing_map_forward_with_padding_and_text_masks(self):
-        gate_probs = paddle.ones([4, 4], dtype="float32")
-        topk_indices = paddle.to_tensor(
-            [[0, 2], [1, 3], [0, 1], [2, 3]], dtype="int64"
-        )
-        input_ids = paddle.to_tensor([5, 0, 7, 8], dtype="int64")
-        is_pure_text_line = paddle.to_tensor([1, 1, 0, 1], dtype="int32")
-
-        routing_map, topk_indices_out, dispatch_mask = (
-            routing_map_fusion_forward(
-                gate_probs, topk_indices, input_ids, is_pure_text_line
+    def test_forward_launches_kernel_with_node_limit_and_norm_sum(self):
+        old_kernel = moe_topk_fusion._fwd_kernel
+        recorder = KernelRecorder()
+        moe_topk_fusion._fwd_kernel = recorder
+        ctx = Context()
+        gate_probs = paddle.ones([1, 64], dtype="float32")
+        try:
+            topk_probs, topk_indices = MoETopkFusion.forward(
+                ctx,
+                gate_probs,
+                gate_probs,
+                moe_k=3,
+                use_node_limit=True,
+                n_group=8,
+                topk_group=2,
+                norm_gate_logits=True,
             )
-        )
+        finally:
+            moe_topk_fusion._fwd_kernel = old_kernel
 
-        self.assertEqual(
-            routing_map.numpy().tolist(),
-            [
-                [1.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 1.0],
-            ],
+        self.assertEqual(recorder.args[12:16], (3, True, 8, 2))
+        self.assertTrue(recorder.args[16])
+        self.assertEqual(recorder.args[17], 64)
+        self.assertEqual(ctx.saved[2].shape, [1])
+        self.assertEqual(topk_probs.shape, [1, 3])
+        self.assertEqual(topk_indices.shape, [1, 3])
+
+    def test_backward_launches_kernel_for_saved_tensors(self):
+        old_kernel = moe_topk_fusion._bwd_kernel
+        recorder = KernelRecorder()
+        moe_topk_fusion._bwd_kernel = recorder
+        ctx = Context()
+        ctx.save_for_backward(
+            paddle.to_tensor([[1, 3]], dtype="int32"),
+            paddle.ones([1, 2], dtype="float32"),
+            paddle.ones([1], dtype="float32"),
         )
-        self.assertEqual(
-            topk_indices_out.numpy().tolist(),
-            [[0, 2], [-1, -1], [-1, -1], [2, 3]],
-        )
-        self.assertEqual(dispatch_mask.numpy().tolist(), [1, 0, 2, 1])
+        ctx.input_shape = [1, 5]
+        ctx.norm_gate_logits = True
+        ctx.moe_k = 2
+        grad_output_probs = paddle.ones([1, 2], dtype="float32")
+        try:
+            grad_gate_probs, none_value = MoETopkFusion.backward(
+                ctx, grad_output_probs, None
+            )
+        finally:
+            moe_topk_fusion._bwd_kernel = old_kernel
+
+        self.assertEqual(recorder.grid, (1,))
+        self.assertIs(recorder.args[0], grad_output_probs)
+        self.assertEqual(recorder.args[13:16], (2, True, 2))
+        self.assertEqual(grad_gate_probs.shape, [1, 5])
+        self.assertIsNone(none_value)
+
+    def test_routing_map_wrapper_launches_kernel_with_masks(self):
+        old_kernel = moe_topk_fusion._routing_map_fwd_kernel
+        recorder = KernelRecorder()
+        moe_topk_fusion._routing_map_fwd_kernel = recorder
+        gate_probs = paddle.ones([3, 5], dtype="float32")
+        topk_indices = paddle.to_tensor([[1, 2], [3, 4], [0, 1]], dtype="int64")
+        input_ids = paddle.to_tensor([1, 0, 2], dtype="int64")
+        pure_text = paddle.to_tensor([1, 1, 0], dtype="int64")
+        try:
+            routing_map, topk_out, dispatch_mask = routing_map_fusion_forward(
+                gate_probs, topk_indices, input_ids, pure_text
+            )
+        finally:
+            moe_topk_fusion._routing_map_fwd_kernel = old_kernel
+
+        self.assertEqual(recorder.grid, (1, 1))
+        self.assertIs(recorder.kwargs["topk_indices_ptr"], topk_indices)
+        self.assertIs(recorder.kwargs["input_ids_ptr"], input_ids)
+        self.assertIs(recorder.kwargs["is_pure_text_line_ptr"], pure_text)
+        self.assertTrue(recorder.kwargs["has_input_ids"])
+        self.assertTrue(recorder.kwargs["has_pure_text_mask"])
+        self.assertEqual(recorder.kwargs["BLOCK_K"], 2)
+        self.assertEqual(routing_map.shape, [3, 5])
+        self.assertEqual(topk_out.shape, [3, 2])
+        self.assertEqual(dispatch_mask.shape, [5])
+
+    def test_routing_map_wrapper_uses_placeholders_without_masks(self):
+        old_kernel = moe_topk_fusion._routing_map_fwd_kernel
+        recorder = KernelRecorder()
+        moe_topk_fusion._routing_map_fwd_kernel = recorder
+        gate_probs = paddle.ones([2, 4], dtype="float32")
+        topk_indices = paddle.ones([2, 3], dtype="int64")
+        try:
+            routing_map_fusion_forward(gate_probs, topk_indices)
+        finally:
+            moe_topk_fusion._routing_map_fwd_kernel = old_kernel
+
+        self.assertIs(recorder.kwargs["input_ids_ptr"], topk_indices)
+        self.assertIs(recorder.kwargs["is_pure_text_line_ptr"], topk_indices)
+        self.assertFalse(recorder.kwargs["has_input_ids"])
+        self.assertFalse(recorder.kwargs["has_pure_text_mask"])
+        self.assertEqual(recorder.kwargs["BLOCK_K"], 4)
 
 
 if __name__ == "__main__":
