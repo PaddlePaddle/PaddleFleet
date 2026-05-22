@@ -18,16 +18,16 @@ import paddle
 
 
 class TestMIndicesChanges(unittest.TestCase):
-    """Tests covering the m_indices / tokens_per_expert_indices changes in fp8_utils.py.
+    """Tests covering the m_indices changes in fp8_utils.py.
 
     Changes covered:
-    1. fwd_gate_up: generates tokens_per_expert_indices when moe_deep_gemm=True
-    2. fwd_gate_up_bf16: uses tokens_per_expert_indices in deep_gemm path (moe_expert_fusion+moe_deep_gemm)
-    3. fwd_gate_up_fp8: generates m_indices when moe_expert_fusion=True
-    4. fwd_down_bf16: uses tokens_per_expert_indices in deep_gemm path
-    5. bwd_down_input_bf16: uses tokens_per_expert_indices in deep_gemm path
-    6. bwd_gate_up_input_bf16: uses tokens_per_expert_indices in deep_gemm path
-    7. subbatch backward: generates tokens_per_expert_indices when moe_deep_gemm=True
+    1. fwd_gate_up: generates m_indices when (moe_deep_gemm or moe_expert_fusion), else None
+    2. fwd_gate_up_bf16: uses m_indices in deep_gemm path
+    3. fwd_gate_up_fp8: uses m_indices in grouped fp8 gemm path
+    4. fwd_down_bf16: uses m_indices in deep_gemm path
+    5. bwd_down_input_bf16: uses m_indices in deep_gemm path
+    6. bwd_gate_up_input_bf16: uses m_indices in deep_gemm path
+    7. subbatch backward: generates m_indices when (moe_deep_gemm or moe_expert_fusion)
     """
 
     def _make_node(
@@ -49,8 +49,8 @@ class TestMIndicesChanges(unittest.TestCase):
         )
         return node
 
-    def test_fwd_gate_up_generates_indices_with_deep_gemm(self):
-        """Test fwd_gate_up generates tokens_per_expert_indices when moe_deep_gemm=True."""
+    def test_fwd_gate_up_generates_m_indices_with_deep_gemm(self):
+        """Test fwd_gate_up generates m_indices when moe_deep_gemm=True."""
         node = self._make_node(moe_deep_gemm=True, moe_expert_fusion=True)
         tokens_per_expert = [1, 2, 0]
         x = paddle.randn([3, 8], dtype="bfloat16")
@@ -64,14 +64,12 @@ class TestMIndicesChanges(unittest.TestCase):
                 x, expert_w1, num_expert=3, tokens_per_expert=tokens_per_expert
             )
 
-        self.assertIsNotNone(node.tokens_per_expert_indices)
+        self.assertIsNotNone(node.m_indices)
         expected = paddle.to_tensor([0, 1, 1], dtype="int32")
-        self.assertTrue(
-            paddle.equal_all(node.tokens_per_expert_indices, expected)
-        )
+        self.assertTrue(paddle.equal_all(node.m_indices, expected))
 
-    def test_fwd_gate_up_no_indices_without_deep_gemm(self):
-        """Test fwd_gate_up does not generate tokens_per_expert_indices when moe_deep_gemm=False."""
+    def test_fwd_gate_up_generates_m_indices_with_expert_fusion(self):
+        """Test fwd_gate_up generates m_indices when moe_expert_fusion=True (no deep_gemm)."""
         node = self._make_node(moe_deep_gemm=False, moe_expert_fusion=True)
         tokens_per_expert = [2, 1, 0]
         x = paddle.randn([3, 8], dtype="bfloat16")
@@ -81,13 +79,25 @@ class TestMIndicesChanges(unittest.TestCase):
             x, expert_w1, num_expert=3, tokens_per_expert=tokens_per_expert
         )
 
-        self.assertFalse(
-            hasattr(node, "tokens_per_expert_indices")
-            and node.tokens_per_expert_indices is not None
+        self.assertIsNotNone(node.m_indices)
+        expected = paddle.to_tensor([0, 0, 1], dtype="int32")
+        self.assertTrue(paddle.equal_all(node.m_indices, expected))
+
+    def test_fwd_gate_up_m_indices_none_when_neither(self):
+        """Test fwd_gate_up sets m_indices=None when neither flag is set."""
+        node = self._make_node(moe_deep_gemm=False, moe_expert_fusion=False)
+        tokens_per_expert = [2, 1, 3]
+        x = paddle.randn([6, 8], dtype="float32")
+        expert_w1 = [paddle.randn([8, 16], dtype="float32") for _ in range(3)]
+
+        node.fwd_gate_up(
+            x, expert_w1, num_expert=3, tokens_per_expert=tokens_per_expert
         )
 
+        self.assertIsNone(node.m_indices)
+
     def test_fwd_gate_up_bf16_deep_gemm_path(self):
-        """Test fwd_gate_up_bf16 calls deep_gemm with tokens_per_expert_indices."""
+        """Test fwd_gate_up_bf16 calls deep_gemm with m_indices."""
         node = self._make_node(moe_deep_gemm=True, moe_expert_fusion=True)
         tokens_per_expert = [2, 1, 0]
         x = paddle.randn([3, 8], dtype="bfloat16")
@@ -103,23 +113,8 @@ class TestMIndicesChanges(unittest.TestCase):
 
         mock_dg.m_grouped_bf16_gemm_nn_contiguous.assert_called_once()
 
-    def test_fwd_gate_up_bf16_split_path(self):
-        """Test fwd_gate_up_bf16 uses per-expert F.linear when moe_expert_fusion=False."""
-        node = self._make_node(moe_deep_gemm=False, moe_expert_fusion=False)
-        tokens_per_expert = [2, 1, 3]
-        x = paddle.randn([6, 8], dtype="float32")
-        # Split path: expert_w1 is a list, F.linear does x @ weight so weight shape [in, out]
-        expert_w1 = [paddle.randn([8, 16], dtype="float32") for _ in range(3)]
-
-        node.fwd_gate_up(
-            x, expert_w1, num_expert=3, tokens_per_expert=tokens_per_expert
-        )
-
-        # Should complete without error, m_indices/tokens_per_expert_indices not set
-        self.assertIsNone(node.m_indices)
-
-    def test_fwd_gate_up_fp8_generates_m_indices(self):
-        """Test fwd_gate_up_fp8 generates m_indices when moe_expert_fusion=True."""
+    def test_fwd_gate_up_fp8_uses_m_indices(self):
+        """Test fwd_gate_up_fp8 uses m_indices in grouped fp8 gemm."""
         from paddlefleet.transformer.moe.fp8_utils import (
             ExpertsGroupGemmContiguousNode,
         )
@@ -159,11 +154,11 @@ class TestMIndicesChanges(unittest.TestCase):
         self.assertTrue(paddle.equal_all(node.m_indices, expected))
 
     def test_fwd_down_bf16_deep_gemm_path(self):
-        """Test fwd_down_bf16 calls deep_gemm with tokens_per_expert_indices."""
+        """Test fwd_down_bf16 calls deep_gemm with m_indices."""
         node = self._make_node(moe_deep_gemm=True, moe_expert_fusion=True)
         tokens_per_expert = [2, 1, 0]
         node.tokens_per_expert = tokens_per_expert
-        node.tokens_per_expert_indices = node.gen_m_indices(tokens_per_expert)
+        node.m_indices = node.gen_m_indices(tokens_per_expert)
 
         o1 = paddle.randn([3, 16], dtype="bfloat16")
         unzipped_probs = paddle.ones([3, 1], dtype="bfloat16")
@@ -184,11 +179,11 @@ class TestMIndicesChanges(unittest.TestCase):
         mock_dg.m_grouped_bf16_gemm_nn_contiguous.assert_called_once()
 
     def test_bwd_down_input_bf16_deep_gemm_path(self):
-        """Test bwd_down_input_bf16 calls deep_gemm with tokens_per_expert_indices."""
+        """Test bwd_down_input_bf16 calls deep_gemm with m_indices."""
         node = self._make_node(moe_deep_gemm=True, moe_expert_fusion=True)
         tokens_per_expert = [2, 1, 0]
         node.tokens_per_expert = tokens_per_expert
-        node.tokens_per_expert_indices = node.gen_m_indices(tokens_per_expert)
+        node.m_indices = node.gen_m_indices(tokens_per_expert)
 
         unzipped_grad = paddle.randn([3, 8], dtype="bfloat16")
         expert_w2 = paddle.randn([3, 16, 8], dtype="bfloat16")
@@ -219,11 +214,11 @@ class TestMIndicesChanges(unittest.TestCase):
         mock_dg.m_grouped_bf16_gemm_nt_contiguous.assert_called_once()
 
     def test_bwd_gate_up_input_bf16_deep_gemm_path(self):
-        """Test bwd_gate_up_input_bf16 calls deep_gemm with tokens_per_expert_indices."""
+        """Test bwd_gate_up_input_bf16 calls deep_gemm with m_indices."""
         node = self._make_node(moe_deep_gemm=True, moe_expert_fusion=True)
         tokens_per_expert = [2, 1, 0]
         node.tokens_per_expert = tokens_per_expert
-        node.tokens_per_expert_indices = node.gen_m_indices(tokens_per_expert)
+        node.m_indices = node.gen_m_indices(tokens_per_expert)
 
         do1 = paddle.randn([3, 16], dtype="bfloat16")
         expert_w1 = paddle.randn([3, 8, 16], dtype="bfloat16")
@@ -236,8 +231,8 @@ class TestMIndicesChanges(unittest.TestCase):
 
         mock_dg.m_grouped_bf16_gemm_nt_contiguous.assert_called_once()
 
-    def test_subbatch_backward_generates_indices(self):
-        """Test subbatch backward generates tokens_per_expert_indices when moe_deep_gemm=True."""
+    def test_subbatch_backward_generates_m_indices(self):
+        """Test subbatch backward generates m_indices when (moe_deep_gemm or moe_expert_fusion)."""
         from paddlefleet.transformer.moe.fp8_utils import (
             ExpertsGroupGemmContiguousNode,
         )
@@ -254,9 +249,7 @@ class TestMIndicesChanges(unittest.TestCase):
         node.expert_id = 0
         total_rows = 256
         node.tokens_per_expert = [total_rows]
-        node.tokens_per_expert_indices = node.gen_m_indices(
-            node.tokens_per_expert
-        )
+        node.m_indices = node.gen_m_indices(node.tokens_per_expert)
         node.input = paddle.randn([total_rows, 8], dtype="float32")
         node.input_fp8 = None
         node.input_scale = paddle.ones([total_rows, 1], dtype="float32")
@@ -274,12 +267,10 @@ class TestMIndicesChanges(unittest.TestCase):
             mock_bwd.side_effect = side_effect
             node.backward(out_grad, unzipped_probs)
 
-        # After subbatch backward, tokens_per_expert_indices should be restored
-        self.assertIsNotNone(node.tokens_per_expert_indices)
+        # After subbatch backward, m_indices should be restored
+        self.assertIsNotNone(node.m_indices)
         expected = paddle.to_tensor([0] * total_rows, dtype="int32")
-        self.assertTrue(
-            paddle.equal_all(node.tokens_per_expert_indices, expected)
-        )
+        self.assertTrue(paddle.equal_all(node.m_indices, expected))
 
 
 if __name__ == "__main__":
