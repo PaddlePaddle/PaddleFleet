@@ -19,16 +19,16 @@ import sys
 import httpx
 import requests
 
-PR_checkTemplate = ["Paddle"]
+PR_checkTemplate = ["PaddleFleet"]
 
 BRANCH = os.environ["BRANCH"]
 if BRANCH.startswith("develop"):
     REPO_TEMPLATE = {
-        "Paddle": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
+        "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
     }
 elif BRANCH.startswith("release"):
     REPO_TEMPLATE = {
-        "Paddle": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*?devPR:https://github\.com/PaddlePaddle/Paddle/pull/.*?)(?:\n###|\Z)"""
+        "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*?devPR:https://github\.com/PaddlePaddle/PaddleFleet/pull/.*?)(?:\n###|\Z)"""
     }
 
 
