@@ -686,6 +686,8 @@ class TransformerLayer(nn.Layer):
         **kwargs,
     ):
         def need_do_attention():
+            # need_do_prefill = forward_meta.max_len_tensor_cpu[1] > 0
+            # need_do_decode = forward_meta.max_len_tensor_cpu[2] > 0
             if self.training:
                 return True
             if hasattr(self, "self_attn") and hasattr(
