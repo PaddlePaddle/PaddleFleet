@@ -1,24 +1,27 @@
 import paddle
-import torch
 
 from .compat import enable_tilelang_paddle_compat_before_import, paddle_tilelang_compat_guard
-
-
-enable_tilelang_paddle_compat_before_import()
-
-from .kernel.tilelang_csa_indexer_bwd import csa_indexer_bwd_interface
-from .kernel.tilelang_csa_indexer_fwd import csa_indexer_topk_fwd_interface
 
 
 DEFAULT_INDEXER_BLOCK = 32
 
 
+def _get_csa_indexer_topk_fwd_interface():
+    enable_tilelang_paddle_compat_before_import()
+    from .kernel.tilelang_csa_indexer_fwd import csa_indexer_topk_fwd_interface
+
+    return csa_indexer_topk_fwd_interface
+
+
+def _get_csa_indexer_bwd_interface():
+    enable_tilelang_paddle_compat_before_import()
+    from .kernel.tilelang_csa_indexer_bwd import csa_indexer_bwd_interface
+
+    return csa_indexer_bwd_interface
+
+
 def _is_paddle_tensor(tensor):
     return isinstance(tensor, paddle.Tensor)
-
-
-def _is_torch_tensor(tensor):
-    return isinstance(tensor, torch.Tensor)
 
 
 def _shape(tensor):
@@ -36,36 +39,28 @@ def _contiguous(tensor):
 
 
 def _cast_int32(tensor):
-    if _is_paddle_tensor(tensor):
-        return tensor.cast("int32") if tensor.dtype != paddle.int32 else tensor
-    return tensor.to(torch.int32) if tensor.dtype != torch.int32 else tensor
+    return tensor.cast("int32") if tensor.dtype != paddle.int32 else tensor
 
 
 def _cast_float32(tensor):
-    if _is_paddle_tensor(tensor):
-        return tensor.cast("float32") if tensor.dtype != paddle.float32 else tensor
-    return tensor.float() if tensor.dtype != torch.float32 else tensor
+    return tensor.cast("float32") if tensor.dtype != paddle.float32 else tensor
 
 
 def _where(mask, x, y):
-    if _is_paddle_tensor(mask):
-        return paddle.where(mask, x, y)
-    return torch.where(mask, x, y)
+    return paddle.where(mask, x, y)
 
 
 def _zeros_like(tensor):
-    if _is_paddle_tensor(tensor):
-        return paddle.zeros_like(tensor)
-    return torch.zeros_like(tensor)
+    return paddle.zeros_like(tensor)
 
 
 def _validate_indexer_inputs(index_q, index_k_comp, weights):
-    if not (_is_paddle_tensor(index_q) or _is_torch_tensor(index_q)):
-        raise TypeError(f"index_q must be a Paddle or Torch tensor, got {type(index_q)!r}")
-    if not (_is_paddle_tensor(index_k_comp) or _is_torch_tensor(index_k_comp)):
-        raise TypeError(f"index_k_comp must be a Paddle or Torch tensor, got {type(index_k_comp)!r}")
-    if not (_is_paddle_tensor(weights) or _is_torch_tensor(weights)):
-        raise TypeError(f"weights must be a Paddle or Torch tensor, got {type(weights)!r}")
+    if not _is_paddle_tensor(index_q):
+        raise TypeError(f"index_q must be a paddle.Tensor, got {type(index_q)!r}")
+    if not _is_paddle_tensor(index_k_comp):
+        raise TypeError(f"index_k_comp must be a paddle.Tensor, got {type(index_k_comp)!r}")
+    if not _is_paddle_tensor(weights):
+        raise TypeError(f"weights must be a paddle.Tensor, got {type(weights)!r}")
     if _ndim(index_q) != 4:
         raise ValueError(f"index_q must have shape [B, S, H_i, D_i], got {_shape(index_q)}")
     if _ndim(index_k_comp) != 3:
@@ -87,6 +82,10 @@ def _validate_indexer_inputs(index_q, index_k_comp, weights):
 
 
 def _validate_topk_and_grad(index_q, topk_indices, grad_scores):
+    if not _is_paddle_tensor(topk_indices):
+        raise TypeError(f"topk_indices must be a paddle.Tensor, got {type(topk_indices)!r}")
+    if not _is_paddle_tensor(grad_scores):
+        raise TypeError(f"grad_scores must be a paddle.Tensor, got {type(grad_scores)!r}")
     if _ndim(topk_indices) != 3:
         raise ValueError(f"topk_indices must have shape [B, S, topk], got {_shape(topk_indices)}")
     if _ndim(grad_scores) != 3:
@@ -132,7 +131,7 @@ def tilelang_csa_compressed_indexer_topk_paddle(
     num_stages: int = 0,
     num_threads: int = 128,
 ):
-    """Paddle/Torch compatible entry for V4 CSA compressed indexer forward.
+    """Paddle entry for V4 CSA compressed indexer forward.
 
     Args:
         index_q: [B, S, H_i, D_i] indexer queries.
@@ -156,6 +155,7 @@ def tilelang_csa_compressed_indexer_topk_paddle(
         weights,
         topk_effective,
     )
+    csa_indexer_topk_fwd_interface = _get_csa_indexer_topk_fwd_interface()
     with paddle_tilelang_compat_guard():
         topk_indices, topk_scores = csa_indexer_topk_fwd_interface(
             index_q,
@@ -209,7 +209,7 @@ def tilelang_csa_compressed_indexer_bwd_paddle(
     num_stages: int = 0,
     num_threads: int = 128,
 ):
-    """Paddle/Torch compatible entry for V4 CSA compressed indexer backward.
+    """Paddle entry for V4 CSA compressed indexer backward.
 
     Computes gradients for IndexQ, Weights, and IndexKComp given the selected
     top-k indices and the gradient of the loss w.r.t. the selected scores.
@@ -235,6 +235,7 @@ def tilelang_csa_compressed_indexer_bwd_paddle(
         topk_indices,
         grad_scores,
     )
+    csa_indexer_bwd_interface = _get_csa_indexer_bwd_interface()
     with paddle_tilelang_compat_guard():
         grad_q, grad_weights, grad_k_comp = csa_indexer_bwd_interface(
             index_q,

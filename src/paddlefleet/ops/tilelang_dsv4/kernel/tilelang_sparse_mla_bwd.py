@@ -11,7 +11,6 @@ enable_tilelang_paddle_compat_before_import()
 
 import paddle
 import tilelang
-import torch
 from tilelang import language as T
 
 
@@ -30,8 +29,11 @@ def _profile_limit():
 
 
 def _profile_sync():
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    try:
+        if paddle.is_compiled_with_cuda():
+            paddle.device.cuda.synchronize()
+    except Exception:
+        pass
 
 
 def _profile_time_ms(fn):
@@ -277,9 +279,7 @@ def bwd(
 
 
 def _zeros_like_compat(tensor, dtype=None):
-    if isinstance(tensor, paddle.Tensor):
-        return paddle.zeros_like(tensor, dtype=dtype)
-    return torch.zeros_like(tensor, dtype=dtype)
+    return paddle.zeros_like(tensor, dtype=dtype)
 
 
 def sparse_mqa_bwd_interface(q, kv, attn_sink, o, do, topk_idxs, lse, sm_scale=None):
@@ -293,8 +293,8 @@ def sparse_mqa_bwd_interface(q, kv, attn_sink, o, do, topk_idxs, lse, sm_scale=N
     block_size = 32
     padded_topk = (topk + block_size - 1) // block_size * block_size
     if padded_topk != topk:
-        pad = torch.full((B, S, padded_topk - topk), -1, device=topk_idxs.device, dtype=topk_idxs.dtype)
-        topk_idxs = torch.cat([topk_idxs, pad], dim=-1).contiguous()
+        pad = paddle.full([B, S, padded_topk - topk], -1, dtype=topk_idxs.dtype)
+        topk_idxs = paddle.concat([topk_idxs, pad], axis=-1).contiguous()
         topk = padded_topk
 
     preprocess_kernel = preprocess(B, S, H, D)
@@ -305,7 +305,7 @@ def sparse_mqa_bwd_interface(q, kv, attn_sink, o, do, topk_idxs, lse, sm_scale=N
     if profile:
         delta, elapsed_ms = _profile_time_ms(lambda: preprocess_kernel(o, do))
         _profile_log("bwd_preprocess", elapsed_ms, q_shape=tuple(q.shape), kv_shape=tuple(kv.shape), topk=topk)
-        dkv, elapsed_ms = _profile_time_ms(lambda: _zeros_like_compat(kv, dtype="float32" if isinstance(kv, paddle.Tensor) else torch.float32))
+        dkv, elapsed_ms = _profile_time_ms(lambda: _zeros_like_compat(kv, dtype="float32"))
         _profile_log("bwd_zero_dkv", elapsed_ms)
         d_attn_sink = _zeros_like_compat(attn_sink)
         dq, elapsed_ms = _profile_time_ms(
@@ -316,7 +316,7 @@ def sparse_mqa_bwd_interface(q, kv, attn_sink, o, do, topk_idxs, lse, sm_scale=N
         _profile_log("bwd_postprocess", elapsed_ms)
     else:
         delta = preprocess_kernel(o, do)
-        dkv = _zeros_like_compat(kv, dtype="float32" if isinstance(kv, paddle.Tensor) else torch.float32)
+        dkv = _zeros_like_compat(kv, dtype="float32")
         d_attn_sink = _zeros_like_compat(attn_sink)
         dq = bwd_kernel(q, kv, do, attn_sink, topk_idxs, lse, delta, dkv, d_attn_sink)
         dkv = postprocess_kernel(dkv)

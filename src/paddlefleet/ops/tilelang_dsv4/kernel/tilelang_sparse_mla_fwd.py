@@ -6,8 +6,8 @@ from paddlefleet.ops.tilelang_dsv4.compat import enable_tilelang_paddle_compat_b
 
 enable_tilelang_paddle_compat_before_import()
 
+import paddle
 import tilelang
-import torch
 from tilelang import language as T
 
 
@@ -156,8 +156,8 @@ def sparse_mqa_fwd_interface(q, kv, attn_sink, topk_idxs, sm_scale=None, block_I
 
     padded_topk = (topk + block_I - 1) // block_I * block_I
     if padded_topk != topk:
-        pad = torch.full((batch, seq_len, padded_topk - topk), -1, device=topk_idxs.device, dtype=topk_idxs.dtype)
-        topk_idxs = torch.cat([topk_idxs, pad], dim=-1).contiguous()
+        pad = paddle.full([batch, seq_len, padded_topk - topk], -1, dtype=topk_idxs.dtype)
+        topk_idxs = paddle.concat([topk_idxs, pad], axis=-1).contiguous()
         topk = padded_topk
 
     kernel = sparse_mqa_fwd(

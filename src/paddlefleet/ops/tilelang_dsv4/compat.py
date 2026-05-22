@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 
 
+_TILELANG_IMPORT_COMPAT_ENABLED = False
 _COMPAT_PROXY_SCOPE_ENABLED = False
 
 
@@ -16,7 +17,11 @@ def enable_tilelang_paddle_compat_before_import():
 
     if not hasattr(paddle, "enable_compat"):
         raise RuntimeError("paddle.enable_compat is required before importing tilelang-paddle")
-    paddle.enable_compat(scope={"tilelang"})
+
+    global _TILELANG_IMPORT_COMPAT_ENABLED
+    if not _TILELANG_IMPORT_COMPAT_ENABLED:
+        paddle.enable_compat(scope={"tilelang"}, silent=True)
+        _TILELANG_IMPORT_COMPAT_ENABLED = True
 
 
 @contextlib.contextmanager
@@ -56,7 +61,7 @@ def paddle_tilelang_compat_guard():
     global _COMPAT_PROXY_SCOPE_ENABLED
     if not _COMPAT_PROXY_SCOPE_ENABLED:
         scope = {"tilelang", "paddlefleet.ops.tilelang_dsv4"}
-        paddle.compat.enable_torch_proxy(scope=scope)
+        paddle.compat.enable_torch_proxy(scope=scope, silent=True)
         _COMPAT_PROXY_SCOPE_ENABLED = True
     with _paddle_current_device_guard():
         yield

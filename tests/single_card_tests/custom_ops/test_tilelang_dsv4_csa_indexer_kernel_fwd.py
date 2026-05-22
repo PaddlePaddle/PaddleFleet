@@ -14,8 +14,8 @@
 
 import unittest
 
-import torch
-import torch.nn.functional as F
+import paddle
+import paddle.nn.functional as F
 
 from paddlefleet.ops.tilelang_dsv4.kernel.tilelang_csa_indexer_fwd import (
     csa_indexer_topk_fwd_interface,
@@ -23,46 +23,51 @@ from paddlefleet.ops.tilelang_dsv4.kernel.tilelang_csa_indexer_fwd import (
 
 
 def ref_csa_indexer_topk(index_q, index_k_comp, weights, ratio, topk_effective):
-    scores = torch.einsum("bshd,btd->bsht", index_q.float(), index_k_comp.float())
+    scores = paddle.einsum("bshd,btd->bsht", index_q.cast("float32"), index_k_comp.cast("float32"))
     scores = F.relu(scores)
-    scores = (scores * weights.float().unsqueeze(-1)).sum(dim=2)
+    scores = (scores * weights.cast("float32").unsqueeze(-1)).sum(axis=2)
     scores = scores * (index_q.shape[-1] ** -0.5)
 
     batch, seq_len, seq_len_comp = scores.shape
-    comp_ids = torch.arange(seq_len_comp, device=scores.device).view(1, 1, seq_len_comp)
-    positions = torch.arange(1, seq_len + 1, device=scores.device).view(1, seq_len, 1)
+    comp_ids = paddle.arange(seq_len_comp, dtype="int64").reshape([1, 1, seq_len_comp])
+    positions = paddle.arange(1, seq_len + 1, dtype="int64").reshape([1, seq_len, 1])
     valid_end = positions // ratio
     valid_mask = comp_ids < valid_end
-    scores = scores.masked_fill(~valid_mask, float("-inf"))
+    scores = paddle.where(valid_mask, scores, paddle.full_like(scores, float("-inf")))
 
     actual_topk = min(topk_effective, seq_len_comp)
-    topk_scores_raw, topk_indices = torch.topk(scores, k=actual_topk, dim=-1)
-    valid_topk = torch.gather(valid_mask.expand(batch, -1, -1), dim=-1, index=topk_indices)
-    topk_indices = torch.where(valid_topk, topk_indices, torch.full_like(topk_indices, -1))
-    topk_scores_raw = torch.where(valid_topk, topk_scores_raw, torch.full_like(topk_scores_raw, float("-inf")))
+    topk_scores_raw, topk_indices = paddle.topk(scores, k=actual_topk, axis=-1)
+    valid_topk = paddle.take_along_axis(
+        paddle.expand(valid_mask, [batch, seq_len, seq_len_comp]).cast("int32"),
+        topk_indices,
+        axis=-1,
+    ).cast("bool")
+    topk_indices = paddle.where(valid_topk, topk_indices, paddle.full_like(topk_indices, -1))
+    topk_scores_raw = paddle.where(valid_topk, topk_scores_raw, paddle.full_like(topk_scores_raw, float("-inf")))
 
-    topk_probs = torch.softmax(topk_scores_raw, dim=-1)
-    topk_probs = torch.where(valid_topk, topk_probs, torch.zeros_like(topk_probs))
+    topk_probs = F.softmax(topk_scores_raw, axis=-1)
+    topk_probs = paddle.where(valid_topk, topk_probs, paddle.zeros_like(topk_probs))
 
     if topk_effective > actual_topk:
         pad = topk_effective - actual_topk
-        topk_indices = torch.cat(
-            [topk_indices, torch.full((batch, seq_len, pad), -1, device=scores.device, dtype=topk_indices.dtype)],
-            dim=-1,
+        topk_indices = paddle.concat(
+            [topk_indices, paddle.full([batch, seq_len, pad], -1, dtype=topk_indices.dtype)],
+            axis=-1,
         )
-        topk_probs = torch.cat(
-            [topk_probs, torch.zeros((batch, seq_len, pad), device=scores.device, dtype=topk_probs.dtype)],
-            dim=-1,
+        topk_probs = paddle.concat(
+            [topk_probs, paddle.zeros([batch, seq_len, pad], dtype=topk_probs.dtype)],
+            axis=-1,
         )
 
-    return topk_indices.int(), topk_probs.float()
+    return topk_indices.cast("int32"), topk_probs.cast("float32")
 
 
 class TestTileLangDSV4CSAIndexerFwd(unittest.TestCase):
     def setUp(self):
-        if not torch.cuda.is_available():
+        if not paddle.is_compiled_with_cuda():
             self.skipTest("CUDA is required for TileLang CSA indexer test")
-        torch.manual_seed(2026)
+        paddle.set_device("gpu")
+        paddle.seed(2026)
 
     def _run_case(self, topk_effective):
         batch = 1
@@ -71,11 +76,10 @@ class TestTileLangDSV4CSAIndexerFwd(unittest.TestCase):
         heads = 64
         dim = 128
         ratio = 4
-        device = "cuda"
 
-        index_q = torch.randn(batch, seq_len, heads, dim, device=device, dtype=torch.bfloat16).contiguous()
-        index_k_comp = torch.randn(batch, seq_len_comp, dim, device=device, dtype=torch.bfloat16).contiguous()
-        weights = torch.randn(batch, seq_len, heads, device=device, dtype=torch.float32).contiguous()
+        index_q = paddle.randn([batch, seq_len, heads, dim], dtype="bfloat16").contiguous()
+        index_k_comp = paddle.randn([batch, seq_len_comp, dim], dtype="bfloat16").contiguous()
+        weights = paddle.randn([batch, seq_len, heads], dtype="float32").contiguous()
 
         out_indices, out_scores = csa_indexer_topk_fwd_interface(
             index_q,
@@ -96,14 +100,13 @@ class TestTileLangDSV4CSAIndexerFwd(unittest.TestCase):
 
         self.assertEqual(tuple(out_indices.shape), (batch, seq_len, topk_effective))
         self.assertEqual(tuple(out_scores.shape), (batch, seq_len, topk_effective))
-        torch.testing.assert_close(out_indices.cpu(), ref_indices.cpu(), rtol=0, atol=0)
+        self.assertTrue(paddle.all(out_indices.cpu() == ref_indices.cpu()).item())
         valid = ref_indices >= 0
-        torch.testing.assert_close(out_scores.cpu()[valid.cpu()], ref_scores.cpu()[valid.cpu()], rtol=6e-2, atol=2e-2)
-        torch.testing.assert_close(out_scores.cpu()[~valid.cpu()], ref_scores.cpu()[~valid.cpu()], rtol=0, atol=0)
+        paddle.testing.assert_close(out_scores.cpu()[valid.cpu()], ref_scores.cpu()[valid.cpu()], rtol=6e-2, atol=2e-2)
+        self.assertTrue(paddle.all(out_scores.cpu()[~valid.cpu()] == ref_scores.cpu()[~valid.cpu()]).item())
 
-        # Early positions have no valid compressed block for ratio=4.
-        self.assertTrue(torch.all(out_indices[:, :3, :] == -1).item())
-        self.assertTrue(torch.all(out_scores[:, :3, :] == 0).item())
+        self.assertTrue(paddle.all(out_indices[:, :3, :] == -1).item())
+        self.assertTrue(paddle.all(out_scores[:, :3, :] == 0).item())
 
     def test_selected_topk_forward(self):
         self._run_case(topk_effective=2)

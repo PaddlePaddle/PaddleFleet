@@ -29,7 +29,6 @@ enable_tilelang_paddle_compat_before_import()
 
 import paddle
 import tilelang
-import torch
 from tilelang import language as T
 
 
@@ -218,16 +217,16 @@ def _next_power_of_2(x: int) -> int:
     return 1 << (x - 1).bit_length()
 
 
-def _pad_topk_output(indices: torch.Tensor, scores: torch.Tensor, topk: int):
+def _pad_topk_output(indices, scores, topk: int):
     if indices.shape[-1] == topk:
         return indices, scores
     return indices[..., :topk].contiguous(), scores[..., :topk].contiguous()
 
 
 def csa_indexer_topk_fwd_interface(
-    index_q: torch.Tensor,
-    index_k_comp: torch.Tensor,
-    weights: torch.Tensor,
+    index_q,
+    index_k_comp,
+    weights,
     ratio: int,
     topk_effective: int,
     block_K: int = 32,
@@ -281,25 +280,17 @@ def csa_indexer_topk_fwd_interface(
         num_threads=num_threads,
     )
 
-    if isinstance(index_q, paddle.Tensor):
-        topk_indices = paddle.empty(
-            [batch, seq_len, padded_topk], dtype="int32"
-        )
-        topk_scores = paddle.empty(
-            [batch, seq_len, padded_topk], dtype="float32"
-        )
-    else:
-        topk_indices = torch.empty(
-            (batch, seq_len, padded_topk), device=index_q.device, dtype=torch.int32
-        )
-        topk_scores = torch.empty(
-            (batch, seq_len, padded_topk), device=index_q.device, dtype=torch.float32
-        )
+    topk_indices = paddle.empty(
+        [batch, seq_len, padded_topk], dtype="int32"
+    )
+    topk_scores = paddle.empty(
+        [batch, seq_len, padded_topk], dtype="float32"
+    )
 
     kernel(
         index_q,
         index_k_comp,
-        weights.float().contiguous(),
+        weights.cast("float32").contiguous(),
         topk_indices,
         topk_scores,
     )
