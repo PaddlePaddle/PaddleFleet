@@ -702,6 +702,7 @@ class TransformerLayer(nn.Layer):
                         fm.max_len_tensor_cpu[1] <= 0
                         and fm.max_len_tensor_cpu[2] <= 0
                     )
+                return True
             else:
                 return True
 
