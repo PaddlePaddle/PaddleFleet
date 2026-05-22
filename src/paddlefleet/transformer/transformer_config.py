@@ -744,6 +744,27 @@ class TransformerConfig(ModelParallelConfig):
     dsv4_tilelang_enable_backward: bool = False
     """Enable DSv4 TileLang backward path. Disabled until Paddle integration is validated."""
 
+    dsv4_tilelang_enable_csa_indexer: bool = False
+    """Enable TileLang kernels for the CSA Indexer only.
+
+    This switch controls whether ratio==4 CSA may use the fused compressed
+    Indexer top-k kernel. It does not change the training phase semantics;
+    csa_dense_mode, dsa_indexer_use_sparse_loss, and dsa_indexer_loss_coeff
+    still decide dense mode, sparse/full loss scope, and loss weight.
+    """
+
+    dsv4_tilelang_csa_indexer_enable_backward: bool = False
+    """Enable TileLang backward for the CSA Indexer loss path.
+
+    This switch only selects the TileLang CSA Indexer gradient kernel when the
+    TileLang Indexer path is active. It does not replace the existing phase
+    controls csa_dense_mode, dsa_indexer_use_sparse_loss, or
+    dsa_indexer_loss_coeff.
+    """
+
+    dsv4_tilelang_csa_indexer_debug_compare: bool = False
+    """Compare TileLang CSA Indexer outputs with the Paddle reference path."""
+
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
     Set to 0 to use a single linear output projection instead.
@@ -785,6 +806,9 @@ class TransformerConfig(ModelParallelConfig):
         "dsv4_tilelang_debug_compare": "dsv4_tilelang_debug_compare",
         "dsv4_tilelang_topk_pad_to": "dsv4_tilelang_topk_pad_to",
         "dsv4_tilelang_enable_backward": "dsv4_tilelang_enable_backward",
+        "dsv4_tilelang_enable_csa_indexer": "dsv4_tilelang_enable_csa_indexer",
+        "dsv4_tilelang_csa_indexer_enable_backward": "dsv4_tilelang_csa_indexer_enable_backward",
+        "dsv4_tilelang_csa_indexer_debug_compare": "dsv4_tilelang_csa_indexer_debug_compare",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -1011,7 +1035,31 @@ class TransformerConfig(ModelParallelConfig):
                     "TileLang integration. Other values only change outer padding "
                     "and do not alter the underlying TileLang block size."
                 )
-            if self.dsv4_tilelang_enable_backward and self.dsv4_tilelang_backend not in {"attention_paddle_compat"}:
+            if (
+                self.dsv4_tilelang_enable_backward
+                and self.dsv4_tilelang_backend not in {"attention_paddle_compat"}
+            ):
                 raise ValueError(
                     "dsv4_tilelang_enable_backward requires dsv4_tilelang_backend='attention_paddle_compat'."
+                )
+            if (
+                self.dsv4_tilelang_enable_csa_indexer
+                and self.dsv4_tilelang_backend not in {"attention_paddle_compat"}
+            ):
+                raise ValueError(
+                    "dsv4_tilelang_enable_csa_indexer requires dsv4_tilelang_backend='attention_paddle_compat'."
+                )
+            if (
+                self.dsv4_tilelang_csa_indexer_enable_backward
+                and not self.dsv4_tilelang_enable_csa_indexer
+            ):
+                raise ValueError(
+                    "dsv4_tilelang_csa_indexer_enable_backward requires dsv4_tilelang_enable_csa_indexer=True."
+                )
+            if (
+                self.dsv4_tilelang_csa_indexer_debug_compare
+                and not self.dsv4_tilelang_enable_csa_indexer
+            ):
+                raise ValueError(
+                    "dsv4_tilelang_csa_indexer_debug_compare requires dsv4_tilelang_enable_csa_indexer=True."
                 )
