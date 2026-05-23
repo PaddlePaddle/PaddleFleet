@@ -68,15 +68,12 @@ def is_layer_window_attention(
     sliding_window: tuple[int, int] | None,
     window_attn_skip_freq: int | list,
     layer_number: int,
-    is_mtp_layer: bool = False,
 ) -> bool:
     # layer_number is 0-indexed
     print('sliding_window', sliding_window, 'window_attn_skip_freq', window_attn_skip_freq, 'layer_number', layer_number, 'layer_number % window_attn_skip_freq != 0', layer_number % window_attn_skip_freq != 0)
     if not sliding_window:
         return False
     if window_attn_skip_freq is None:
-        return True
-    if is_mtp_layer:
         return True
     if isinstance(window_attn_skip_freq, int):
         return layer_number % window_attn_skip_freq != 0

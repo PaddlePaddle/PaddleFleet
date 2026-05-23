@@ -137,7 +137,7 @@ class DotProductAttention(FleetLayer):
         if is_layer_window_attention(
             self.config.sliding_window,
             self.config.window_attn_skip_freq,
-            layer_number,
+            self.layer_number if not self.is_mtp_layer else (self.layer_number + self.config.num_hidden_layers),
             is_mtp_layer=self.is_mtp_layer,
         ):
             sliding_window = self.config.sliding_window

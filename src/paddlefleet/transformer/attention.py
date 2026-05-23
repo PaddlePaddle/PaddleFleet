@@ -229,8 +229,7 @@ class Attention(FleetLayer, ABC):
         if is_layer_window_attention(
             self.config.sliding_window,
             self.config.window_attn_skip_freq,
-            self.layer_number,
-            is_mtp_layer=self.is_mtp_layer,
+            self.layer_number if not self.is_mtp_layer else (self.layer_number + self.config.num_hidden_layers),
         ):
             self.is_swa = True
 
