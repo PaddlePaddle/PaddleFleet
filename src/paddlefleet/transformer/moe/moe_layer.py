@@ -142,6 +142,7 @@ class MoELayer(nn.Layer):
         config: TransformerConfig,
         sublayers: MoESublayers | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        layer_number: int | None = None,
     ):
         super().__init__()
         self.config = config
@@ -1336,4 +1337,6 @@ class MoELayer(nn.Layer):
         assert hasattr(self.gate, "set_layer_number"), (
             "expect gate has method 'set_layer_number'"
         )
+        # Hash routing activation (moe_n_hash_layers) is decided by the router
+        # itself based on layer_number. See TopKRouter._setup_hash_layer.
         self.gate.set_layer_number(layer_number)
