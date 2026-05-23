@@ -276,6 +276,11 @@ class StandardMoERouter(nn.Layer):
             )  # Used in MoECorrectionBiasAdjustCallback
             self.expert_usage.stop_gradient = True
 
+        # Hash-routing state. Activated lazily via set_layer_number() so that the
+        # router knows its layer index.
+        self.is_hash_layer = False
+        self.tid2eid = None
+
     def gate_score_func(
         self, logits: paddle.Tensor, logits_type_promotion: bool = True
     ) -> paddle.Tensor:
@@ -296,6 +301,10 @@ class StandardMoERouter(nn.Layer):
                 scores = F.gelu(logits)
             elif scoring_func == "leaky_relu":
                 scores = F.leaky_relu(logits)
+            elif scoring_func == "sftplus":
+                scores = F.softplus(logits)
+            elif scoring_func == "sqrtsoftplus":
+                scores = paddle.sqrt(F.softplus(logits) + 1e-20)
             else:
                 raise NotImplementedError(f"{scoring_func} is not implemented.")
         return scores
@@ -732,6 +741,71 @@ class StandardMoERouter(nn.Layer):
 
         return topk_weight, topk_idx
 
+    def _hash_routing(
+        self,
+        logits: paddle.Tensor,
+        flat_ids: paddle.Tensor,
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
+        """Hash-based routing: expert indices come from the tid2eid lookup table.
+
+        Scores are still computed from the gating logits for weight computation,
+        but expert selection is determined by the pre-computed hash table.
+
+        Aligned with the upstream hash-routing reference implementation
+        (``TopKRouter._hash_routing``).
+
+        Args:
+            logits (paddle.Tensor): Gating logits, shape [num_tokens, num_experts].
+            flat_ids (paddle.Tensor): Token IDs flattened to match the row order
+                of ``logits``. Shape [num_tokens], dtype int64.
+
+        Returns:
+            top_gate (paddle.Tensor): Per-token weights for the selected experts,
+                shape [num_tokens, topk]. Already normalized for non-softmax
+                score functions.
+            top_idx (paddle.Tensor): Selected expert indices, shape
+                [num_tokens, topk], dtype int64.
+        """
+        if self.tid2eid is None:
+            raise ValueError(
+                "tid2eid buffer is not registered; hash routing is not initialized."
+            )
+        score_function = self.scoring_func
+        orig_dtype = logits.dtype
+        logits_fp32 = logits.cast("float32")
+        if score_function == "softmax":
+            scores = F.softmax(logits_fp32, axis=-1).cast(orig_dtype)
+        elif score_function == "sigmoid":
+            scores = F.sigmoid(logits_fp32).cast(orig_dtype)
+        elif score_function == "sqrtsoftplus":
+            scores = paddle.sqrt(F.softplus(logits_fp32) + 1e-20).cast(
+                orig_dtype
+            )
+        else:
+            raise ValueError(
+                f"Unsupported scoring_func in hash routing: {score_function!r}"
+            )
+
+        top_idx = self.tid2eid[flat_ids].cast(paddle.int64)  # [N, topk]
+        top_gate = paddle.take_along_axis(scores, top_idx, axis=1)  # [N, topk]
+        if score_function != "softmax":
+            top_gate = top_gate / (top_gate.sum(axis=-1, keepdim=True) + 1e-20)
+
+        # Apply routed_scaling_factor to the gathered top_gate.
+        # Mirrors the non-hash path (see forward(): routed_scaling_factor[_learnable]
+        # is multiplied onto top_gate after normalization).
+        if self.routed_scaling_factor_learnable:
+            safe_topk_indices = paddle.clip(top_idx, min=0)
+            gathered_scales = F.embedding(
+                safe_topk_indices,
+                self.routed_scaling_factor_param.unsqueeze(1),
+            ).squeeze(-1)
+            top_gate = top_gate * gathered_scales
+        elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
+            top_gate = top_gate * self.routed_scaling_factor
+
+        return top_gate, top_idx
+
     def _call_topk_method(
         self, topk_method, gates, k, n_group=None, topk_group=None
     ):
@@ -755,8 +829,76 @@ class StandardMoERouter(nn.Layer):
             raise NotImplementedError(f"Invalid topk_method: {topk_method}")
         return top_gate, top_idx
 
-    def set_layer_number(self, layer_number):
+    def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self.layer_number = layer_number
+
+    def _setup_hash_layer(self, layer_number, is_mtp_layer: bool = False):
+        """Activate hash routing for this layer if it falls in the hash range.
+
+        Activation condition (0-indexed layer_number):
+            is_hash_layer = (
+                not is_mtp_layer
+                and moe_n_hash_layers > 0
+                and layer_number < moe_n_hash_layers
+            )
+        i.e. the first ``moe_n_hash_layers`` MoE layers use hash routing.
+
+        Side effects on hash layers:
+        - Registers the ``tid2eid`` buffer (round-robin placeholder; production
+          deployments are expected to load a pretrained tid2eid from checkpoint).
+        - Validates ``scoring_func`` and ``actual_vocab_size``.
+        - Disables expert-bias state (e_score_correction_bias / expert_usage)
+          on hash layers.
+        """
+        n_hash = getattr(self.config, "moe_n_hash_layers", 0)
+        self.is_hash_layer = (
+            not is_mtp_layer
+            and n_hash > 0
+            and layer_number is not None
+            and layer_number < n_hash
+        )
+        if not self.is_hash_layer:
+            return
+
+        if self.scoring_func not in ("softmax", "sigmoid", "sqrtsoftplus"):
+            raise ValueError(
+                f"Hash routing requires scoring_func in "
+                f"{{'softmax', 'sigmoid', 'sqrtsoftplus'}}, got "
+                f"{self.scoring_func!r}."
+            )
+        vocab_size = getattr(self.config, "actual_vocab_size", None)
+        if vocab_size is None:
+            raise ValueError(
+                "actual_vocab_size must be set when moe_n_hash_layers > 0; "
+                "it is required to allocate the tid2eid lookup buffer."
+            )
+
+        # Production deployments load a pretrained tid2eid table from the
+        # inference checkpoint; no public initialization recipe is documented.
+        # Round-robin is used here only as a placeholder so the layer is
+        # runnable from scratch.
+        ids = paddle.arange(vocab_size, dtype=paddle.int64)
+        tid2eid = paddle.stack(
+            [
+                (ids + k) % self.num_experts
+                for k in range(self.num_experts_per_tok)
+            ],
+            axis=1,
+        ).cast(paddle.int32)
+        # Replace the placeholder attribute with a registered buffer.
+        if hasattr(self, "tid2eid"):
+            del self.tid2eid
+        self.register_buffer("tid2eid", tid2eid)
+
+        # Hash layers do not participate in expert-bias correction: drop the
+        # buffers allocated under ``topk_method == 'noaux_tc'`` in __init__.
+        # ``del self.<name>`` goes through ``paddle.nn.Layer.__delattr__``,
+        # which removes the entry from both ``_buffers`` and
+        # ``_non_persistable_buffer_names_set`` for registered buffers.
+        if hasattr(self, "e_score_correction_bias"):
+            del self.e_score_correction_bias
+        if hasattr(self, "expert_usage"):
+            del self.expert_usage
 
 
 class TopKRouter(StandardMoERouter):
@@ -764,8 +906,10 @@ class TopKRouter(StandardMoERouter):
         super().__init__(*args, **kwargs)
         self._layer_number = None
 
-    def set_layer_number(self, layer_number):
+    def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self._layer_number = layer_number
+        self.layer_number = layer_number
+        self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
     def forward(self, input, input_ids=None):
         if len(input.shape) == 3:
@@ -783,7 +927,12 @@ class TopKRouter(StandardMoERouter):
                 # so we need to scatter input_ids here to avid the assertion below
                 input_ids = ContextParallelScatterOp.apply(input_ids, axis=1)
             if input_ids is not None:
-                input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
+                if self.sequence_parallel:
+                    input_ids_none_zero_mask = (
+                        (input_ids != 0).transpose([1, 0]).reshape([-1, 1])
+                    )
+                else:
+                    input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
                 batch_size_, seq_len_ = input_ids.shape
                 assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
                     f"input_ids shape mismatch with input: "
@@ -797,6 +946,14 @@ class TopKRouter(StandardMoERouter):
                 "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
             )
 
+        # Hash routing requires input_ids; verify early.
+        if self.is_hash_layer and input_ids is None:
+            raise ValueError(
+                "Hash routing (moe_n_hash_layers > 0) requires input_ids. "
+                "Make sure input_ids is passed through the model forward "
+                "to the MoE layer."
+            )
+
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
                 input,
@@ -807,6 +964,43 @@ class TopKRouter(StandardMoERouter):
             )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
+
+        # ---- Hash routing branch ----
+        if self.is_hash_layer:
+            if self.sequence_parallel:
+                flat_ids = (
+                    input_ids.transpose([1, 0]).reshape([-1]).cast(paddle.int64)
+                )
+            else:
+                flat_ids = input_ids.reshape([-1]).cast(paddle.int64)
+
+            top_gate, top_idx = self._hash_routing(logits, flat_ids)
+
+            # Build full [num_tokens, num_experts] probs and routing mask.
+            probs = paddle.zeros_like(logits).put_along_axis(
+                top_idx, top_gate.cast(logits.dtype), axis=1
+            )
+            mask = (probs > 0).cast(logits.dtype)
+
+            # Apply padding (input_ids == 0):
+            # routing_map = routing_map & ~padding_mask.
+            # input_ids_none_zero_mask shape: [N, 1], broadcast over expert/topk dim.
+            if input_ids_none_zero_mask is not None:
+                valid_mask = input_ids_none_zero_mask.cast(mask.dtype)
+                mask = mask * valid_mask
+                probs = probs * valid_mask
+                top_gate = top_gate * valid_mask
+                top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
+
+            _log_moe_md5(
+                top_idx.cast(paddle.float32),
+                "hash_topk_indices",
+                self._layer_number,
+            )
+            # No aux/z loss, no expert-bias updates on hash layers.
+            return (None, top_gate, top_idx, probs, mask, None, None, None)
+        # ---- end hash routing ----
+
         gates = self.gate_score_func(logits)
 
         if input_ids_none_zero_mask is not None:
