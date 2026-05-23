@@ -20,7 +20,7 @@ import paddle
 import paddle.nn.functional as F
 
 from paddlefleet.fusions.fused_swiglu_scale import (
-    fused_swiglu_scale_backward,
+    fused_swiglu_scale_clamp_forward,
     fused_swiglu_scale_forward,
 )
 
@@ -30,21 +30,22 @@ try:
         fuse_stack_fp8_quant,
         fuse_stack_transpose_fp8_quant,
         fuse_weighted_swiglu_fp8_quant,
+        fuse_weighted_swiglu_fp8_quant_clamp,
+        fused_swiglu_weighted_bwd,
+        fused_swiglu_weighted_clamp_bwd,
     )
 except (ImportError, RuntimeError):
     pass
 
-# 优先使用 FusedQuantOps.fused_swiglu_probs_bwd（inplace，行为对齐）。
-# 若环境中没有 FusedQuantOps，则回退到 paddle.incubate 的 out-of-place 实现。
-# TODO: 迁移fused_swiglu_probs_bwd至paddlefleet_ops
-try:
-    import FusedQuantOps as _FQO
+# Inplace SwiGLU backward was previously provided via
+# FusedQuantOps._fused_swiglu_probs_bwd.  The non-clamp fused backward
+# is now unified in paddlefleet_ops.fused_swiglu_weighted_bwd (out-of-place).
+# USE_INPLACE_SWIGLU_BWD flag is retained for the higher-level memory
+# management logic in backward_impl_fp8 — when True the do1 buffer may alias
+# o1 so that del o1 is safe immediately.
+import importlib.util
 
-    _fused_swiglu_probs_bwd = _FQO.fused_swiglu_probs_bwd
-    USE_INPLACE_SWIGLU_BWD = True
-except (ImportError, AttributeError):
-    _fused_swiglu_probs_bwd = None
-    USE_INPLACE_SWIGLU_BWD = False
+USE_INPLACE_SWIGLU_BWD = importlib.util.find_spec("FusedQuantOps") is not None
 
 try:
     from paddle.nn.functional import swiglu
@@ -336,6 +337,7 @@ class ExpertsGroupGemmContiguousNode:
         use_ue8m0=False,
         dw_p2p_overlap=False,
         moe_expert_fusion=False,
+        clamp_value=None,
     ):
         """
             Initializes the experts group gemm contiguous node.
@@ -384,6 +386,7 @@ class ExpertsGroupGemmContiguousNode:
         self.is_split_group_gemm = not moe_expert_fusion
         self.dw_p2p_overlap = dw_p2p_overlap
         self.moe_expert_fusion = moe_expert_fusion
+        self.clamp_value = clamp_value
 
     def cached_tensors(self):
         """
@@ -623,7 +626,12 @@ class ExpertsGroupGemmContiguousNode:
         fwd_down_bf16
         """
 
-        o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
+        if self.clamp_value is not None:
+            o2 = fused_swiglu_scale_clamp_forward(
+                o1, unzipped_probs, self.clamp_value
+            )
+        else:
+            o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
 
         if clear_o1:
             o1._clear_to_zero_allocation()
@@ -712,12 +720,21 @@ class ExpertsGroupGemmContiguousNode:
         w2_quant = w2_quant.reshape([num_expert, -1, w2_quant.shape[-1]])
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
-        o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant(
-            o1,
-            unzipped_probs,
-            using_pow2_scaling=True,
-            use_ue8m0=self.use_ue8m0,
-        )
+        if self.clamp_value is not None:
+            o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant_clamp(
+                o1,
+                unzipped_probs,
+                using_pow2_scaling=True,
+                use_ue8m0=self.use_ue8m0,
+                clamp_value=float(self.clamp_value),
+            )
+        else:
+            o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant(
+                o1,
+                unzipped_probs,
+                using_pow2_scaling=True,
+                use_ue8m0=self.use_ue8m0,
+            )
         o2_scale = paddle.transpose(
             paddle.transpose(o2_scale, [1, 0]).contiguous(), [1, 0]
         )
@@ -804,8 +821,14 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        o2_s = fused_swiglu_scale_forward(o1, unzipped_probs)
-        do1, probs_grad = fused_swiglu_scale_backward(o1, unzipped_probs, do2_s)
+        if self.clamp_value is not None:
+            do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
+                o1, unzipped_probs, do2_s, float(self.clamp_value)
+            )
+        else:
+            do1, probs_grad, o2_s = fused_swiglu_weighted_bwd(
+                o1, unzipped_probs, do2_s
+            )
 
         return do1, o2_s, probs_grad
 
@@ -916,13 +939,20 @@ class ExpertsGroupGemmContiguousNode:
                 )
 
         with paddle.amp.auto_cast(False):
-            if USE_INPLACE_SWIGLU_BWD:
+            if self.clamp_value is not None:
+                do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
+                    o1,
+                    unzipped_probs,
+                    do2_s,
+                    float(self.clamp_value),
+                )
+            elif USE_INPLACE_SWIGLU_BWD:
                 # inplace，do1 复用 o1 的 GPU buffer（data_ptr 相同）。
                 # del o1 后 do1 仍持有引用，refcount 不归零，物理页不会被 VMM 提前回收。
                 # 显存峰值：o1/do1(2H) + do2_s(H) + o2_s(H) = 4H（C 点），
                 #           do1(2H) + o2_s(H) + n2_s(2H) = 5H（D 点峰值）
-                do1, probs_grad, o2_s = _fused_swiglu_probs_bwd(
-                    o1, do2_s, unzipped_probs, True
+                do1, probs_grad, o2_s = fused_swiglu_weighted_bwd(
+                    o1, unzipped_probs, do2_s
                 )
             else:
                 # out-of-place，do1 是全新分配的 buffer。
@@ -930,10 +960,8 @@ class ExpertsGroupGemmContiguousNode:
                 # 否则 GPU 异步读 o1 时物理页已被 VMM 回收（Bug 2）。
                 # 显存峰值：o1(2H) + do2_s(H) + do1(2H) + o2_s(H) = 6H（C 点），
                 #           o1(2H) + do1(2H) + o2_s(H) + n2_s(2H) = 7H（D 点峰值）
-                do1, probs_grad, o2_s = (
-                    paddle.incubate.nn.functional.fused_swiglu_weighted_bwd(
-                        o1, do2_s, unzipped_probs
-                    )
+                do1, probs_grad, o2_s = fused_swiglu_weighted_bwd(
+                    o1, unzipped_probs, do2_s
                 )
 
         return do1, o2_s, probs_grad
@@ -1670,11 +1698,15 @@ class ExpertsGroupGemmContiguousNode:
             expert_w2, out_grad, o1, unzipped_probs, inplace_swiglu_prob=True
         )
         # del o1 时机：
-        #   inplace（USE_INPLACE_SWIGLU_BWD=True）：do1 与 o1 共用 buffer，refcount
-        #     不归零，立即 del 安全。
-        #   out-of-place（USE_INPLACE_SWIGLU_BWD=False）：do1 是独立 buffer，GPU 异步
-        #     kernel 仍在读 o1，必须等 bwd_gate_up_input_fp8 的 synchronize 后再 del。
-        if USE_INPLACE_SWIGLU_BWD:
+        #   inplace（USE_INPLACE_SWIGLU_BWD=True 且无 clamp）：do1 与 o1 共用 buffer，
+        #     refcount 不归零，立即 del 安全。
+        #   out-of-place（USE_INPLACE_SWIGLU_BWD=False 或 clamp_value 已设置）：
+        #     do1 是独立 buffer，GPU 异步 kernel 仍在读 o1，
+        #     必须等 bwd_gate_up_input_fp8 的 synchronize 后再 del。
+        used_inplace_swiglu = (
+            USE_INPLACE_SWIGLU_BWD and self.clamp_value is None
+        )
+        if used_inplace_swiglu:
             del o1
         self.o1 = None
 
