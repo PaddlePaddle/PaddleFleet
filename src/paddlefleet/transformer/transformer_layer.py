@@ -122,6 +122,7 @@ class TransformerLayerSublayersSpec:
     """
 
     input_layernorm: LayerSpec | type = IdentityOp
+    self_attention_hyper_connection: LayerSpec | type = IdentityOp
     self_attn: LayerSpec | type = IdentityOp
     self_attn_bda: LayerSpec | type = IdentityFuncOp
 
@@ -130,6 +131,7 @@ class TransformerLayerSublayersSpec:
     cross_attn_bda: LayerSpec | type = IdentityFuncOp
 
     post_attention_layernorm: LayerSpec | type = IdentityOp
+    mlp_hyper_connection: LayerSpec | type = IdentityOp
     mlp: LayerSpec | type = IdentityOp
     mlp_bda: LayerSpec | type = IdentityFuncOp
 
@@ -1029,6 +1031,250 @@ class TransformerLayer(nn.Layer):
     def use_fp8(self):
         if isinstance(self.mlp, MoELayer):
             return self.mlp.use_fp8()
+
+
+class HyperConnectionTransformerLayer(TransformerLayer):
+    """Transformer layer with Manifold-Constrained Hyper-Connections (mHC).
+
+    Replaces the single residual stream with n parallel residual streams,
+    using learned mappings H_pre, H_post, and H_res for aggregation,
+    expansion, and mixing respectively.
+
+    Input/output shape: [..., n*C] where n = num_residual_streams, C = hidden_size.
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        sublayers_spec: TransformerLayerSublayersSpec,
+        layer_number: int = 1,
+        hidden_dropout_prob: float | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
+    ):
+        super().__init__(
+            config=config,
+            sublayers_spec=sublayers_spec,
+            layer_number=layer_number,
+            hidden_dropout_prob=hidden_dropout_prob,
+            pg_collection=pg_collection,
+        )
+
+        assert (
+            sublayers_spec.self_attention_hyper_connection is not IdentityOp
+        ), (
+            "HyperConnectionTransformerLayer requires self_attention_hyper_connection. "
+            "Use TransformerLayer instead if hyper connections are not needed."
+        )
+        assert sublayers_spec.mlp_hyper_connection is not IdentityOp, (
+            "HyperConnectionTransformerLayer requires mlp_hyper_connection. "
+            "Use TransformerLayer instead if hyper connections are not needed."
+        )
+        assert not config.block_attention_residuals, (
+            "HyperConnectionTransformerLayer does not support block_attention_residuals."
+        )
+
+        self.self_attention_hyper_connection = build_spec_layer(
+            sublayers_spec.self_attention_hyper_connection,
+            config=self.config,
+            layer_number=self.layer_number,
+        )
+        self.mlp_hyper_connection = build_spec_layer(
+            sublayers_spec.mlp_hyper_connection,
+            config=self.config,
+            layer_number=self.layer_number,
+        )
+
+    def _forward_attention(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        rope_freqs_cis: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
+        in_recompute: bool = False,
+        is_first_fwd: bool = False,
+        **kwargs,
+    ):
+        """mHC attention forward: aggregate → layernorm → attention → fused_h_res_h_post_bda."""
+        # Save n-stream residual for H_res mixing
+        original_residual = hidden_states
+        ori_dtype = hidden_states.dtype
+
+        # mHC: aggregate n-stream → 1-stream
+        aggregated, h_res, h_post = self.self_attention_hyper_connection(
+            hidden_states
+        )
+        aggregated = aggregated.to(ori_dtype)
+
+        # LayerNorm on aggregated single stream
+        if self.recompute_input_layernorm:
+            input_layernorm_output = recompute(self.input_layernorm, aggregated)
+        else:
+            input_layernorm_output = self.input_layernorm(aggregated)
+
+        self._log_md5(
+            input_layernorm_output, "input_layernorm_out", self.layer_number
+        )
+
+        # Self-attention
+        if rope_freqs_cis is not None:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rope_freqs_cis=rope_freqs_cis,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+            )
+        else:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+            )
+
+        # mHC: fused H_res + H_post + bias-dropout-add
+        with paddle.enable_grad():
+            hidden_states = (
+                self.self_attention_hyper_connection.fused_h_res_h_post_bda(
+                    h_res=h_res,
+                    original_residual=original_residual,
+                    h_post=h_post,
+                    layer_output_with_bias=attention_output_with_bias,
+                    dropout_prob=self.hidden_dropout_prob,
+                    training=self.training,
+                    fused=self.config.bias_dropout_fusion,
+                )
+            )
+            hidden_states = hidden_states.to(ori_dtype)
+
+        # Cross attention (unchanged)
+        residual = hidden_states
+        pre_cross_attn_layernorm_output = self.pre_cross_attn_layernorm(
+            hidden_states
+        )
+        attention_output_with_bias = self.cross_attention(
+            pre_cross_attn_layernorm_output,
+            attention_mask=context_mask,
+            key_value_states=context,
+        )
+        if (
+            isinstance(attention_output_with_bias, dict)
+            and "context" in attention_output_with_bias
+        ):
+            context = attention_output_with_bias["context"]
+
+        with paddle.enable_grad():
+            residual.stop_gradient = False
+            hidden_states = self.cross_attn_bda(
+                self.training, self.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.hidden_dropout_prob)
+
+        if is_first_fwd:
+            hidden_states.stop_gradient = False
+
+        return hidden_states, context
+
+    def _forward_mlp(
+        self,
+        hidden_states,
+        is_first_fwd=False,
+        input_ids=None,
+        **kwargs,
+    ):
+        """mHC MLP forward: aggregate → layernorm → MLP → fused_h_res_h_post_bda."""
+        # Save n-stream residual for H_res mixing
+        original_residual = hidden_states
+        ori_dtype = hidden_states.dtype
+
+        # mHC: aggregate n-stream → 1-stream
+        aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
+        aggregated = aggregated.to(ori_dtype)
+
+        # LayerNorm on aggregated single stream
+        if self.recompute_post_attention_layernorm:
+            post_attention_layernorm_output = recompute(
+                self.post_attention_layernorm, aggregated
+            )
+        else:
+            post_attention_layernorm_output = self.post_attention_layernorm(
+                aggregated
+            )
+
+        self._log_md5(
+            post_attention_layernorm_output,
+            "post_attn_layernorm_out",
+            self.layer_number,
+        )
+
+        # MLP
+        if self.recompute_mlp:
+            _mlp_input_ids = (
+                input_ids if isinstance(self.mlp, MoELayer) else None
+            )
+
+            def recompute_handler(
+                post_attention_layernorm_output, _mlp_input_ids=None
+            ):
+                if _mlp_input_ids is not None:
+                    mlp_output, bias = self.mlp(
+                        post_attention_layernorm_output,
+                        input_ids=_mlp_input_ids,
+                    )
+                else:
+                    mlp_output, bias = self.mlp(post_attention_layernorm_output)
+                if bias is None:
+                    return mlp_output
+                return mlp_output, bias
+
+            mlp_output_with_bias = recompute(
+                recompute_handler,
+                post_attention_layernorm_output,
+                _mlp_input_ids,
+            )
+            if not isinstance(mlp_output_with_bias, tuple):
+                mlp_output_with_bias = (mlp_output_with_bias, None)
+        else:
+            if isinstance(self.mlp, MoELayer) and input_ids is not None:
+                mlp_output_with_bias = self.mlp(
+                    post_attention_layernorm_output, input_ids=input_ids
+                )
+            else:
+                mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
+
+        # mHC: fused H_res + H_post + bias-dropout-add
+        with paddle.enable_grad():
+            hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=mlp_output_with_bias,
+                dropout_prob=self.hidden_dropout_prob,
+                training=self.training,
+                fused=self.config.bias_dropout_fusion,
+            )
+            hidden_states = hidden_states.to(ori_dtype)
+
+        if is_first_fwd:
+            hidden_states.stop_gradient = False
+
+        return hidden_states
 
 
 class TransformerLayerWithOverlap(TransformerLayer):

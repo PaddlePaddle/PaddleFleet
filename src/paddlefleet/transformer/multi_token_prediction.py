@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
-from paddle import Tensor
+from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import (
     LayerSpec,
     ScheduleNode,
@@ -150,7 +150,11 @@ class MultiTokenPredictionLayerSublayersSpec:
         enorm (Union[LayerSpec, type]): Specification or instance of the
             embedding normalization to be applied.
         eh_proj (Union[LayerSpec, type]): Specification or instance of the
-            linear projection to be applied.
+            linear projection to be applied (non-mHC mode: [2h] -> [h]).
+        e_proj (Union[LayerSpec, type]): Specification or instance of the
+            embedding projection (mHC mode: [h] -> [h]).
+        h_proj (Union[LayerSpec, type]): Specification or instance of the
+            hidden state per-stream projection (mHC mode: [h] -> [h]).
         transformer_layer (Union[LayerSpec, type]): Specification
             or instance of the transformer block to be applied.
     """
@@ -158,6 +162,8 @@ class MultiTokenPredictionLayerSublayersSpec:
     enorm: LayerSpec | type = None
     hnorm: LayerSpec | type = None
     eh_proj: LayerSpec | type = None
+    e_proj: LayerSpec | type = None
+    h_proj: LayerSpec | type = None
     transformer_layer: LayerSpec | type = None
     layer_norm: LayerSpec | type = None
 
@@ -175,16 +181,26 @@ def get_mtp_layer_spec_for_backend(
     """
     column_parallel_linear_impl: type = backend.column_parallel_linear()
     layer_norm_impl: type = backend.layer_norm()
+
+    submodules_kwargs = {
+        "enorm": layer_norm_impl,
+        "hnorm": layer_norm_impl,
+        "transformer_layer": transformer_layer_spec,
+        "layer_norm": layer_norm_impl,
+    }
+
+    if config.enable_hyper_connections:
+        submodules_kwargs["e_proj"] = column_parallel_linear_impl
+        submodules_kwargs["h_proj"] = column_parallel_linear_impl
+    else:
+        submodules_kwargs["eh_proj"] = column_parallel_linear_impl
+
     mtp_layer_spec = LayerSpec(
         layer=WeightOnlyMTPLayer
         if config.mtp_load_weight_only
         else MultiTokenPredictionLayer,
         sublayers_spec=MultiTokenPredictionLayerSublayersSpec(
-            enorm=layer_norm_impl,
-            hnorm=layer_norm_impl,
-            eh_proj=column_parallel_linear_impl,
-            transformer_layer=transformer_layer_spec,
-            layer_norm=layer_norm_impl,
+            **submodules_kwargs
         ),
         extra_kwargs={
             "config": config,
@@ -290,6 +306,8 @@ class MultiTokenPredictionLayer(FleetLayer):
             + f"The supported attention mask types are {SUPPORTED_ATTN_MASK}."
         )
 
+        self.mhc_enabled = config.enable_hyper_connections
+
         self.enorm = build_spec_layer(
             self.sublayers_spec.enorm,
             config=self.config,
@@ -304,22 +322,77 @@ class MultiTokenPredictionLayer(FleetLayer):
             eps=self.config.rms_norm_eps,
         )
 
-        # For the linear projection at the (k - 1)-th MTP layer, the input is the concatenation
-        # of the i-th token's hidden states and the (i + K)-th token's decoder input,
-        # so the input's shape is [s, b, 2*h].
-        # The output will be sent to the following transformer layer,
-        # so the output's shape should be [s, b, h].
-        self.eh_proj = build_spec_layer(
-            self.sublayers_spec.eh_proj,
-            self.config.hidden_size * 2,
-            self.config.hidden_size,
-            config=self.config,
-            init_method=self.config.init_method,
-            gather_output=False,
-            bias=False,
-            skip_bias_add=False,
-            is_expert=False,
-        )
+        if self.mhc_enabled:
+            # mHC mode: separate e_proj and h_proj, operating per-stream.
+            # e_proj: [h] -> [h], applied to embedding then broadcast across streams.
+            # h_proj: [h] -> [h], applied per-stream on hidden states.
+            self.e_proj = build_spec_layer(
+                self.sublayers_spec.e_proj,
+                self.config.hidden_size,
+                self.config.hidden_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+            )
+            self.h_proj = build_spec_layer(
+                self.sublayers_spec.h_proj,
+                self.config.hidden_size,
+                self.config.hidden_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+            )
+            self.eh_proj = None
+
+            # Learned contraction parameters for MTP output
+            n = config.num_residual_streams
+            hc_dim = config.hidden_size * n
+            self.hc_head_fn = self.create_parameter(
+                shape=[hc_dim, n],
+                dtype=self.config.params_dtype,
+                default_initializer=nn.initializer.XavierUniform(),
+            )
+            self.hc_head_base = self.create_parameter(
+                shape=[n],
+                dtype=self.config.params_dtype,
+                default_initializer=nn.initializer.Constant(0.0),
+            )
+            self.hc_head_scale = self.create_parameter(
+                shape=[1],
+                dtype=self.config.params_dtype,
+                default_initializer=nn.initializer.Constant(1.0),
+            )
+            if self.sequence_parallel:
+                self.hc_head_fn.is_distributed = False
+                self.hc_head_base.is_distributed = False
+                self.hc_head_scale.is_distributed = False
+        else:
+            # Non-mHC mode: eh_proj [2h] -> [h]
+            # For the linear projection at the (k - 1)-th MTP layer, the input is the concatenation
+            # of the i-th token's hidden states and the (i + K)-th token's decoder input,
+            # so the input's shape is [s, b, 2*h].
+            # The output will be sent to the following transformer layer,
+            # so the output's shape should be [s, b, h].
+            self.eh_proj = build_spec_layer(
+                self.sublayers_spec.eh_proj,
+                self.config.hidden_size * 2,
+                self.config.hidden_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+            )
+            self.e_proj = None
+            self.h_proj = None
+
         self.transformer_layer = build_spec_layer(
             self.sublayers_spec.transformer_layer,
             config=self.config,
@@ -342,45 +415,100 @@ class MultiTokenPredictionLayer(FleetLayer):
     ):
         """
         Concatenate the tokens before sending to transformer layer.
+
+        In mHC mode, hidden_states is [s, b, n*h] (multi-stream) and decoder_input
+        is [s, b, h] (single-stream embedding). Uses separate e_proj and h_proj.
+        In non-mHC mode, concatenates and projects with eh_proj as before.
         """
         decoder_input = self.enorm(decoder_input)
-        hidden_states = self.hnorm(hidden_states)
-        # Apply mtp_hidden_inputs_mask to mask out hidden state contributions
-        # at specific positions (e.g. EOS boundaries) in MTP.
-        # mask shape: [B, 1, S] -> [B, S, 1] to broadcast with hidden_states [B, S, H]
-        if mtp_hidden_inputs_mask is not None:
-            mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose([0, 2, 1])
-            mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.astype(
-                hidden_states.dtype
-            )
 
-            if (
-                get_context_parallel_world_size() > 1
-                and self.config.experimental_dataflow
-            ):
-                # In EB dataflow and CP size > 1, mtp_hidden_inputs_mask is [b, s, 1];
-                # we need to scatter it to [b, s/cp, 1] here.
-                mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
-                    mtp_hidden_inputs_mask, axis=1
+        if self.mhc_enabled:
+            # mHC mode: hidden_states is [s, b, n*h]
+            n = self.config.num_residual_streams
+            h = self.config.hidden_size
+            s, b, _ = hidden_states.shape
+
+            hs_streams = hidden_states.reshape([s, b, n, h])
+            hs_streams = self.hnorm(hs_streams)
+
+            # Apply mask if needed
+            if mtp_hidden_inputs_mask is not None:
+                mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
+                    [0, 2, 1]
+                ).astype(hs_streams.dtype)
+                if (
+                    get_context_parallel_world_size() > 1
+                    and self.config.experimental_dataflow
+                ):
+                    mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
+                        mtp_hidden_inputs_mask, axis=1
+                    )
+                hs_streams = hs_streams * mtp_hidden_inputs_mask.unsqueeze(-1)
+
+            # e_proj: [.., h] -> [.., h/tp]
+            e_out, _ = self.e_proj(decoder_input)
+            # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp]
+            # 这里hs_streams是4D tensor: [b,s,n,h]会导致算梯度的时候调用.t()报错，必须reshape到更低维度
+            orig_shape = hs_streams.shape  # [s, b, n, h]
+            hs_flat = hs_streams.reshape([-1, orig_shape[-1]])  # [s*b*n, h]
+            h_out, _ = self.h_proj(hs_flat)
+            h_out = h_out.reshape([*orig_shape[:-1], -1])  # [s, b, n, h/tp]
+            # Broadcast add before gather (saves one all-gather vs gathering separately)
+            hidden_states = e_out.unsqueeze(-2) + h_out
+            if self.tensor_parallel > 1:
+                hidden_states = gather_from_tensor_model_parallel_region(
+                    hidden_states
+                )
+            # Flatten back to [.., n*h]
+            *leading, n, h = hidden_states.shape
+            hidden_states = hidden_states.reshape([*leading, n * h])
+
+            if self.sequence_parallel:
+                hidden_states = scatter_to_sequence_parallel_region(
+                    hidden_states
+                )
+        else:
+            hidden_states = self.hnorm(hidden_states)
+            # Apply mtp_hidden_inputs_mask to mask out hidden state contributions
+            # at specific positions (e.g. EOS boundaries) in MTP.
+            # mask shape: [B, 1, S] -> [B, S, 1] to broadcast with hidden_states [B, S, H]
+            if mtp_hidden_inputs_mask is not None:
+                mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
+                    [0, 2, 1]
+                )
+                mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.astype(
+                    hidden_states.dtype
                 )
 
-            hidden_states = hidden_states * mtp_hidden_inputs_mask
-        # At the (k - 1)-th MTP layer, concatenates the i-th token's hidden_states
-        # and the (i + K)-th token's embedding, and combine them with linear projection.
-        hidden_states = paddle.cat((decoder_input, hidden_states), -1)
-        hidden_states, _ = self.eh_proj(hidden_states)
-        # For tensor parallel we need to gather the tensor across the model-parallel
-        # ranks after the linear projection. This used to call
-        # `all_gather_last_dim_from_tensor_parallel_region`, but that utility reduces
-        # the gradient in backward pass and was therefore incorrect in this context.
-        # It has been replaced with the correct `gather_from_tensor_model_parallel_region`.
-        if self.tensor_parallel > 1:
-            hidden_states = gather_from_tensor_model_parallel_region(
-                hidden_states
-            )
-        # For sequence parallel, scatter after linear_fc and before transformer layer.
-        if self.sequence_parallel:
-            hidden_states = scatter_to_sequence_parallel_region(hidden_states)
+                if (
+                    get_context_parallel_world_size() > 1
+                    and self.config.experimental_dataflow
+                ):
+                    # In EB dataflow and CP size > 1, mtp_hidden_inputs_mask is [b, s, 1];
+                    # we need to scatter it to [b, s/cp, 1] here.
+                    mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
+                        mtp_hidden_inputs_mask, axis=1
+                    )
+
+                hidden_states = hidden_states * mtp_hidden_inputs_mask
+            # At the (k - 1)-th MTP layer, concatenates the i-th token's hidden_states
+            # and the (i + K)-th token's embedding, and combine them with linear projection.
+            hidden_states = paddle.cat((decoder_input, hidden_states), -1)
+            hidden_states, _ = self.eh_proj(hidden_states)
+            # For tensor parallel we need to gather the tensor across the model-parallel
+            # ranks after the linear projection. This used to call
+            # `all_gather_last_dim_from_tensor_parallel_region`, but that utility reduces
+            # the gradient in backward pass and was therefore incorrect in this context.
+            # It has been replaced with the correct `gather_from_tensor_model_parallel_region`.
+            if self.tensor_parallel > 1:
+                hidden_states = gather_from_tensor_model_parallel_region(
+                    hidden_states
+                )
+            # For sequence parallel, scatter after linear_fc and before transformer layer.
+            if self.sequence_parallel:
+                hidden_states = scatter_to_sequence_parallel_region(
+                    hidden_states
+                )
         return hidden_states
 
     def _proj_and_transformer_layer(
@@ -428,10 +556,43 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "input_ids": input_ids,
             }
             rst_dict = self.transformer_layer(input_dict)
+
+        hidden_states = rst_dict["hidden_states"]
+
+        # In mHC mode, skip postprocess here - it's deferred to forward()
+        # so we can keep multi-stream state for subsequent MTP layers.
+        if (
+            not self.mhc_enabled
+            and not self.config.gpt_model_use_experimental_version
+        ):
+            hidden_states = self.norm(hidden_states)
+
+        return hidden_states
+
+    def _postprocess(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
+        """Postprocess MTP layer output: learned contraction in mHC mode + layer norm.
+
+        In mHC mode, the hidden_states is multi-stream [s, b, n*h] and needs to be
+        contracted to single-stream [s, b, h] before being used for loss computation.
+        """
+        if self.mhc_enabled:
+            from paddlefleet.transformer.hyper_connection import (
+                HyperConnectionModule,
+            )
+
+            hidden_states = HyperConnectionModule.learned_output_contract(
+                hidden_states,
+                self.hc_head_fn,
+                self.hc_head_base,
+                self.hc_head_scale,
+                self.config.num_residual_streams,
+                self.config.rms_norm_eps,
+            )
+
+        # Final layer norm
         if not self.config.gpt_model_use_experimental_version:
-            hidden_states = self.norm(rst_dict["hidden_states"])
-        else:
-            hidden_states = rst_dict["hidden_states"]
+            hidden_states = self.norm(hidden_states)
+
         return hidden_states
 
     def _checkpointed_forward(self, forward_func, *args, **kwargs):
@@ -519,6 +680,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         hidden_states_concat = dict_args["hidden_states"]
+        # mHC: pop multi-stream tensor if available
+        mhc_multistream = dict_args.pop("mhc_multistream", None)
+
         # New dataflow: pop mtp_startend_row_indices_all if present (experimental_dataflow=True)
         # Shape: [B, num_nextn_predict_layers, S, 1]
         origin_start_row_indices = dict_args.pop(
@@ -600,13 +764,25 @@ class MultiTokenPredictionLayer(FleetLayer):
                 f"and mtp_hidden_inputs_mask_all shape {mtp_hidden_inputs_mask_all.shape} "
                 f"mismatch on [B, num_nextn, S] dims"
             )
+
+        # Split mhc_multistream chunks if available
+        mhc_chunks = None
+        if mhc_multistream is not None:
+            mhc_chunks = paddle.split(
+                mhc_multistream, self.config.num_nextn_predict_layers + 1
+            )
+
         if self.config.train_mtp_only:
             for i in range(self.config.num_nextn_predict_layers):
                 tensor_list = paddle.split(
                     hidden_states_concat,
                     self.config.num_nextn_predict_layers + 1,
                 )
-                dict_args["hidden_states"] = tensor_list[i]
+                if mhc_chunks is not None:
+                    # mHC mode: use multi-stream as MTP input
+                    dict_args["hidden_states"] = mhc_chunks[i]
+                else:
+                    dict_args["hidden_states"] = tensor_list[i]
                 dict_args["decoder_input"] = tensor_list[i + 1]
 
                 # New dataflow: get the mask for depth i, shape [B, 1, S, 1]
@@ -644,7 +820,14 @@ class MultiTokenPredictionLayer(FleetLayer):
                         **dict_args,
                     )
 
-                tensor_list[i + 1] = hidden_states
+                if mhc_chunks is not None:
+                    # mHC: hidden_states is multi-stream, store for next depth
+                    mhc_chunks[i + 1] = hidden_states
+                    # Contract to single-stream for loss computation
+                    tensor_list[i + 1] = self._postprocess(hidden_states)
+                else:
+                    tensor_list[i + 1] = hidden_states
+
                 hidden_states_concat = paddle.concat(tensor_list)
             dict_args["hidden_states"] = hidden_states_concat
             dict_args.pop("decoder_input")
@@ -652,7 +835,11 @@ class MultiTokenPredictionLayer(FleetLayer):
             tensor_list = paddle.split(
                 hidden_states_concat, self.config.num_nextn_predict_layers + 1
             )
-            dict_args["hidden_states"] = tensor_list[self.layer_number]
+            if mhc_chunks is not None:
+                # mHC mode: use multi-stream as MTP input
+                dict_args["hidden_states"] = mhc_chunks[self.layer_number]
+            else:
+                dict_args["hidden_states"] = tensor_list[self.layer_number]
             dict_args["decoder_input"] = tensor_list[self.layer_number + 1]
 
             # New dataflow: get the mask for this layer's depth, shape [B, 1, S, 1]
@@ -690,8 +877,6 @@ class MultiTokenPredictionLayer(FleetLayer):
             else:
                 dict_args.pop("input_ids", None)
 
-            # print(dict_args["attn_mask_startend_row_indices"])
-            # assert 0
             if self.config.recompute_granularity == "full" and self.training:
                 hidden_states = self._checkpointed_forward(
                     self._proj_and_transformer_layer,
@@ -702,10 +887,27 @@ class MultiTokenPredictionLayer(FleetLayer):
                     **dict_args,
                 )
 
-            tensor_list[self.layer_number + 1] = hidden_states
+            if mhc_chunks is not None:
+                # mHC: hidden_states is multi-stream, store for next depth
+                mhc_chunks[self.layer_number + 1] = hidden_states
+                # Contract to single-stream for loss computation
+                tensor_list[self.layer_number + 1] = self._postprocess(
+                    hidden_states
+                )
+            else:
+                tensor_list[self.layer_number + 1] = hidden_states
+
             hidden_states_concat = paddle.concat(tensor_list)
             dict_args["hidden_states"] = hidden_states_concat
             dict_args.pop("decoder_input")
+
+        # mHC: pass updated multi-stream to subsequent MTP layers
+        if (
+            mhc_chunks is not None
+            and self.layer_number < self.config.num_nextn_predict_layers - 1
+        ):
+            mhc_multistream = paddle.concat(mhc_chunks)
+            dict_args["mhc_multistream"] = mhc_multistream
 
         # Restore mtp_startend_row_indices_all for subsequent MTP layers (num_nextn > 1)
         if mtp_startend_row_indices_all is not None:

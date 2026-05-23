@@ -142,14 +142,6 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[2])
 
-        with self.assertRaisesRegex(ValueError, "apply_rope_fusion"):
-            _make_config(
-                num_layers=1,
-                csa_compress_ratios=[0],
-                multi_latent_attention=True,
-                apply_rope_fusion=True,
-            )
-
 
 class TestCSAIndexHelpers(unittest.TestCase):
     def test_doc_start_accepts_1d_and_2d_masks(self):

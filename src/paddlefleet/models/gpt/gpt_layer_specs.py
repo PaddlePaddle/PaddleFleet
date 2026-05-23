@@ -357,11 +357,23 @@ def get_gpt_layer_local_spec(
             ),
         )
     transformer_cls = getattr(config, "specific_layer", TransformerLayer)
+
+    # mHC: use HyperConnectionTransformerLayer when enabled
+    if config is not None and config.enable_hyper_connections:
+        from paddlefleet.transformer.transformer_layer import (
+            HyperConnectionTransformerLayer,
+        )
+
+        transformer_cls = HyperConnectionTransformerLayer
+
     if paddle.distributed.is_initialized():
         use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
             "pp_configs"
         ].forward_backward_overlap_scheduler
         if use_overlap:
+            assert not config.enable_hyper_connections, (
+                "HyperConnectionTransformerLayer not supported for overlap."
+            )
             assert transformer_cls.__name__ == TransformerLayer.__name__, (
                 "Only base TransformerLayer can be overlapped."
             )
@@ -388,13 +400,26 @@ def get_gpt_layer_local_spec(
             attn_mask_type=attn_mask_type,
         )
 
+    # mHC: build HC LayerSpec for sublayers_spec
+    self_attention_hc_spec = IdentityOp
+    mlp_hc_spec = IdentityOp
+    if config is not None and config.enable_hyper_connections:
+        from paddlefleet.transformer.hyper_connection import (
+            HyperConnectionModule,
+        )
+
+        self_attention_hc_spec = LayerSpec(layer=HyperConnectionModule)
+        mlp_hc_spec = LayerSpec(layer=HyperConnectionModule)
+
     return LayerSpec(
         layer=transformer_cls,
         sublayers_spec=TransformerLayerSublayersSpec(
             input_layernorm=layer_norm,
+            self_attention_hyper_connection=self_attention_hc_spec,
             self_attn=self_attn_spec,
             self_attn_bda=get_bias_dropout_add,
             post_attention_layernorm=layer_norm,
+            mlp_hyper_connection=mlp_hc_spec,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
             block_attn_res=block_attn_res,
@@ -724,6 +749,13 @@ def get_gpt_spec(
     norm_input_parallel = (
         config.sequence_parallel and config.tensor_model_parallel_size > 1
     )
+
+    if config.enable_hyper_connections:
+        from paddlefleet.transformer.hyper_connection import (
+            HyperConnectionContractLayer,
+            HyperConnectionExpandLayer,
+        )
+
     return LayerSpec(
         layer=GPTModel,
         extra_kwargs={
@@ -737,7 +769,19 @@ def get_gpt_spec(
                 extra_kwargs=embedding_extra_kwargs,
             ),
             head_empty_layers=head_empty_layers_spec,
+            mhc_expand=LayerSpec(
+                layer=HyperConnectionExpandLayer,
+                extra_kwargs={"config": config},
+            )
+            if config.enable_hyper_connections
+            else None,
             transformer_layers=transformer_layers_spec,
+            mhc_contract=LayerSpec(
+                layer=HyperConnectionContractLayer,
+                extra_kwargs={"config": config},
+            )
+            if config.enable_hyper_connections
+            else None,
             tail_empty_layers=tail_empty_layers_spec,
             mtp=mtp_layers_spec,
             mtp_lm_head=mtp_lm_head_spec,

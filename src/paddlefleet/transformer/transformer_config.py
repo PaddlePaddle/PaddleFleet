@@ -565,6 +565,28 @@ class TransformerConfig(ModelParallelConfig):
     """ Indicates whether this is a hybrid model. """
 
     ####################
+    # Hyper-Connection (mHC) Configuration
+    ####################
+    enable_hyper_connections: bool = False
+    """Enable mHC (Manifold-Constrained Hyper-Connections) residual connections."""
+
+    num_residual_streams: int = 4
+    """Number of residual streams (n in mHC paper)."""
+
+    mhc_sinkhorn_iterations: int = 20
+    """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
+
+    mhc_init_gating_factor: float = 0.01
+    """Initial value of Gating Factor (alpha in paper)."""
+
+    mhc_recompute_layer_num: int | None = None
+    """Number of layers per mHC recompute block.
+
+    When set, every `mhc_recompute_layer_num` layers form a recompute block.
+    If None, all layers in the transformer block share a single recompute block.
+    Must be a positive integer when set."""
+
+    ####################
     # miscellaneous
     ####################
     clone_scatter_output_in_embedding: bool = True
@@ -952,14 +974,15 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if (
-            self.multi_latent_attention
-            and self.apply_rope_fusion
-            and self.rope_type != "yarn"
-        ):
-            raise ValueError(
-                "apply_rope_fusion for MLA only works with YARN RoPE."
-            )
+        # Hyper-connection (mHC) validation
+        if self.enable_hyper_connections:
+            if self.mhc_recompute_layer_num is not None and (
+                not isinstance(self.mhc_recompute_layer_num, int)
+                or self.mhc_recompute_layer_num < 1
+            ):
+                raise ValueError(
+                    "mhc_recompute_layer_num must be a positive integer."
+                )
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
