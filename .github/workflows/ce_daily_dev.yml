@@ -620,6 +620,7 @@ jobs:
 
       - name: Qwen3-vl-8k-single-card
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -628,7 +629,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_single_card"
@@ -868,6 +869,7 @@ jobs:
 
       - name: GLM4.5 sft cp
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -875,7 +877,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_sft_cp"
@@ -927,6 +929,7 @@ jobs:
 
       - name: GLM4.5 dpo_lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -935,7 +938,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="glm45_dpo_lora"
@@ -1074,6 +1077,7 @@ jobs:
 
       - name: Qwen vl sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1082,7 +1086,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_tp8_multi_card"
@@ -1094,6 +1098,7 @@ jobs:
 
       - name: Qwen vl lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1102,7 +1107,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_lora_h20_multi_card"
@@ -1114,6 +1119,7 @@ jobs:
 
       - name: Qwen vl moe
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1122,7 +1128,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_moe_multi_card"
@@ -1134,6 +1140,7 @@ jobs:
 
       - name: Qwen3-vl-8k-fsdp
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1142,7 +1149,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_fsdp_multi_card"
@@ -1361,6 +1368,7 @@ jobs:
 
       - name: GLM4.5 sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1368,7 +1376,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_sft_multi_card_a100"
@@ -1380,6 +1388,7 @@ jobs:
 
       - name: GLM4.5 lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1387,7 +1396,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_lora_multi_card_a100"
@@ -1399,6 +1408,7 @@ jobs:
 
       - name: GLM4.5 dpo
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1406,7 +1416,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_multi_card_a100"
@@ -1418,6 +1428,7 @@ jobs:
 
       - name: GLM4.5 dpo_lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1425,7 +1436,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_lora_multi_card_a100"
@@ -1437,6 +1448,7 @@ jobs:
 
       - name: Qwen pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1444,7 +1456,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_pt_multi_card_a100"
@@ -1456,6 +1468,7 @@ jobs:
 
       - name: Qwen sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1463,7 +1476,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_sft_multi_card_a100"
@@ -1475,6 +1488,7 @@ jobs:
 
       - name: Qwen lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1482,7 +1496,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_lora_multi_card_a100"
@@ -1494,6 +1508,7 @@ jobs:
 
       - name: Qwen vl sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1501,7 +1516,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_tp8_multi_card"
@@ -1513,6 +1528,7 @@ jobs:
 
       - name: Qwen vl lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1520,7 +1536,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_lora_a100_multi_card"
@@ -1532,6 +1548,7 @@ jobs:
 
       - name: Qwen vl moe
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1539,7 +1556,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_moe_multi_card"
