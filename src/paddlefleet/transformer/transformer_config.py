@@ -190,6 +190,32 @@ class TransformerConfig(ModelParallelConfig):
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
     first half and second half (LLaMa style). Default to False."""
 
+    attention_value_scale: float = None
+    add_full_attention_sink_bias: bool = False
+    add_swa_attention_sink_bias: bool = True
+
+    swa_head_dim: int = 192
+    swa_v_head_dim: int = 128
+    swa_num_attention_heads: int = 64
+    swa_num_key_value_heads: int = 8
+    swa_rope_theta: float = 10000
+
+
+    virtual_head_attention: bool = False
+    """Whether to use virtual head attention."""
+
+    vha_enable_premix: bool = True
+    """Whether to enable premix for virtual head attention."""
+
+    vha_enable_postmix: bool = True
+    """Whether to enable postmix for virtual head attention."""
+
+    vha_postmix_rank: int = 4
+    """The low rank of postmix module in virtual head attention."""
+
+    vha_premix_init_alpha: float = 0.1
+    """The init alpha of premix module in virtual head attention."""
+
     multi_latent_attention: bool = False
     """Whether to use multi-latent attention."""
 
@@ -204,6 +230,9 @@ class TransformerConfig(ModelParallelConfig):
     """Frequency of full attention layers among sliding window attention layers. Accepts either:
     - An integer N: Represents a (N-1):1 ratio, one full attention layer after (N-1) SWA layers.
     - A list that defines a custom pattern, e.g.: [1,1,1,1,0,0,0,0], where 1 represents SWA. """
+
+    head_wise_swa_ratio: float = 0.0
+    """Headwise sliding_window ratio"""
 
     calculate_per_token_loss: bool = False
     """Whether cross entropy loss is calculated over the actual number of non-padded tokens in the
