@@ -230,6 +230,7 @@ class Attention(FleetLayer, ABC):
             self.config.sliding_window,
             self.config.window_attn_skip_freq,
             self.layer_number,
+            is_mtp_layer=self.is_mtp_layer,
         ):
             self.is_swa = True
 
@@ -309,6 +310,7 @@ class Attention(FleetLayer, ABC):
             layer_number=self.layer_number,
             attn_mask_type=self.attn_mask_type,
             attention_type=self.attention_type,
+            is_mtp_layer=self.is_mtp_layer,
             cp_comm_type=cp_comm_type,
             softmax_scale=self.config.softmax_scale,
             pg_collection=self.pg_collection,

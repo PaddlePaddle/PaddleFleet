@@ -74,6 +74,7 @@ class DotProductAttention(FleetLayer):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
+        is_mtp_layer: bool = False,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
         cp_comm_type: str | None = None,
@@ -91,6 +92,7 @@ class DotProductAttention(FleetLayer):
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
+        self.is_mtp_layer = is_mtp_layer
 
         projection_size = self.config.head_dim * self.config.num_attention_heads
 
@@ -136,6 +138,7 @@ class DotProductAttention(FleetLayer):
             self.config.sliding_window,
             self.config.window_attn_skip_freq,
             layer_number,
+            is_mtp_layer=self.is_mtp_layer,
         ):
             sliding_window = self.config.sliding_window
         else:
@@ -537,6 +540,7 @@ class CPDotProductAttention(FleetLayer):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
+        is_mtp_layer: bool = False,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
         cp_comm_type: str | None = None,
@@ -553,6 +557,7 @@ class CPDotProductAttention(FleetLayer):
         self.layer_number = max(1, layer_number)
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
+        self.is_mtp_layer = is_mtp_layer
         self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
 
     def forward(
