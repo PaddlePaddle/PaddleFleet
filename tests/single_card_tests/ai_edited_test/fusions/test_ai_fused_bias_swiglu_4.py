@@ -265,6 +265,7 @@ class TestWeightedSwiGLUFunction(unittest.TestCase):
         weights = paddle.randn([4, 1])
         mock_ctx.saved_tensor.return_value = [inp, weights]
         mock_ctx.fp8_input_store = False
+        mock_ctx.clamp_value = None  # no clamping path
 
         with mock.patch(
             "paddlefleet.fusions.fused_bias_swiglu.weighted_swiglu_back",
@@ -273,8 +274,11 @@ class TestWeightedSwiGLUFunction(unittest.TestCase):
             result = WeightedSwiGLUFunction.backward(
                 mock_ctx, paddle.randn([4, 4])
             )
-            self.assertEqual(len(result), 3)
-            self.assertIs(result[2], None)
+            # PyLayer.backward returns one gradient per tensor input:
+            # (input, weights) -> exactly 2 values.
+            self.assertEqual(len(result), 2)
+            self.assertEqual(result[0].shape, [4, 8])
+            self.assertEqual(result[1].shape, [4, 1])
 
 
 class TestBiasSwigluImpl(unittest.TestCase):
