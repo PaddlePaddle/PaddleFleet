@@ -99,7 +99,8 @@ def startend_row_indices_add_sliding_window(
         return startend_row_indices
     # construct sliding window mask
     bsz, heads, seq, num_vec = startend_row_indices.shape
-    assert num_vec == 1, "only support LTS now"
+    if num_vec != 1:
+        raise ValueError(f"only support LTS now")
 
     swa_head_num = int(head_wise_swa_ratio * kv_num_heads)
 

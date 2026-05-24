@@ -435,7 +435,8 @@ class Attention(FleetLayer, ABC):
         no_rope = False
 
         if self.is_swa:
-            assert rope_freqs_cis is None, "Sliding Window Not Support rope_freqs_cis"
+            if rope_freqs_cis is not None:
+                raise ValueError("Sliding Window Not Support rope_freqs_cis")
             rotary_pos_emb = swa_rotary_pos_emb
             rotary_pos_cos = swa_rotary_pos_cos
             rotary_pos_sin = swa_rotary_pos_sin
