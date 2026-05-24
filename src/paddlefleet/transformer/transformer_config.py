@@ -200,22 +200,6 @@ class TransformerConfig(ModelParallelConfig):
     swa_num_key_value_heads: int = 8
     swa_rope_theta: float = 10000
 
-
-    virtual_head_attention: bool = False
-    """Whether to use virtual head attention."""
-
-    vha_enable_premix: bool = True
-    """Whether to enable premix for virtual head attention."""
-
-    vha_enable_postmix: bool = True
-    """Whether to enable postmix for virtual head attention."""
-
-    vha_postmix_rank: int = 4
-    """The low rank of postmix module in virtual head attention."""
-
-    vha_premix_init_alpha: float = 0.1
-    """The init alpha of premix module in virtual head attention."""
-
     multi_latent_attention: bool = False
     """Whether to use multi-latent attention."""
 

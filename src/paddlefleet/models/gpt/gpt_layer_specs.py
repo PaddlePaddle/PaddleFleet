@@ -52,10 +52,6 @@ from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
 )
-from paddlefleet.transformer.attention import (
-    VHASelfAttention,
-    VHASelfAttentionSublayersSpec,
-)
 from paddlefleet.transformer.block_attn_res import (
     BlockAttnRes,
     BlockAttnResSublayersSpec,
@@ -153,46 +149,25 @@ def get_attention_spec(
     qk_l2_norm = getattr(config, "qk_l2_norm", False)
 
     if attention_layer_type == "self_attention":
-        if config.virtual_head_attention:
-            self_attn_spec = LayerSpec(
-                layer=VHASelfAttention,
-                extra_kwargs={"attn_mask_type": attn_mask_type},
-                sublayers_spec=VHASelfAttentionSublayersSpec(
-                    qkv_proj=backend.column_parallel_linear(),
-                    core_attention=backend.core_attention(),
-                    o_proj=backend.row_parallel_linear(),
-                    q_norm=(
-                        L2Norm
-                        if qk_l2_norm
-                        else (qk_norm if use_qk_norm else IdentityOp)
-                    ),
-                    k_norm=(
-                        L2Norm
-                        if qk_l2_norm
-                        else (qk_norm if use_qk_norm else IdentityOp)
-                    ),
+        return LayerSpec(
+            layer=SelfAttention,
+            extra_kwargs={"attn_mask_type": attn_mask_type},
+            sublayers_spec=SelfAttentionSublayersSpec(
+                qkv_proj=backend.column_parallel_linear(),
+                core_attention=backend.core_attention(),
+                o_proj=backend.row_parallel_linear(),
+                q_norm=(
+                    L2Norm
+                    if qk_l2_norm
+                    else (qk_norm if use_qk_norm else IdentityOp)
                 ),
-            )
-        else:
-            return LayerSpec(
-                layer=SelfAttention,
-                extra_kwargs={"attn_mask_type": attn_mask_type},
-                sublayers_spec=SelfAttentionSublayersSpec(
-                    qkv_proj=backend.column_parallel_linear(),
-                    core_attention=backend.core_attention(),
-                    o_proj=backend.row_parallel_linear(),
-                    q_norm=(
-                        L2Norm
-                        if qk_l2_norm
-                        else (qk_norm if use_qk_norm else IdentityOp)
-                    ),
-                    k_norm=(
-                        L2Norm
-                        if qk_l2_norm
-                        else (qk_norm if use_qk_norm else IdentityOp)
-                    ),
+                k_norm=(
+                    L2Norm
+                    if qk_l2_norm
+                    else (qk_norm if use_qk_norm else IdentityOp)
                 ),
-            )
+            ),
+        )
     elif attention_layer_type == "gated_delta_net":
         gdn_extra_kwargs = {
             "conv_kernel_dim": getattr(config, "linear_conv_kernel_dim", 4),
