@@ -234,7 +234,11 @@ class Attention(FleetLayer, ABC):
             self.num_key_value_heads = self.config.swa_num_key_value_heads
         else:
             self.head_dim = self.config.head_dim
-            self.v_head_dim = self.config.v_head_dim
+            # Intentionally read from config.head_dim rather than config.v_head_dim
+            # for backward compatibility: previous implementation used head_dim here,
+            # and configs without an explicit v_head_dim would resolve to an incorrect
+            # default value.
+            self.v_head_dim = self.config.head_dim
             self.num_attention_heads = self.config.num_attention_heads
             self.num_key_value_heads = self.config.num_key_value_heads
 
