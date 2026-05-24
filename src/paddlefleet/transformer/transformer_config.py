@@ -1013,6 +1013,20 @@ class TransformerConfig(ModelParallelConfig):
                     "mhc_recompute_layer_num must be a positive integer."
                 )
 
+        if self.sliding_window is not None and self.multi_latent_attention:
+            raise ValueError(
+                "sliding_window and multi_latent_attention cannot be used at the same time."
+            )
+
+        if (
+            self.multi_latent_attention
+            and self.apply_rope_fusion
+            and self.rope_type != "yarn"
+        ):
+            raise ValueError(
+                "apply_rope_fusion for MLA only works with YARN RoPE."
+            )
+
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
             if self.csa_compress_ratios is None:

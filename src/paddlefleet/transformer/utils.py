@@ -70,7 +70,6 @@ def is_layer_window_attention(
     layer_number: int,
 ) -> bool:
     # layer_number is 0-indexed
-    print('sliding_window', sliding_window, 'window_attn_skip_freq', window_attn_skip_freq, 'layer_number', layer_number, 'layer_number % window_attn_skip_freq != 0', layer_number % window_attn_skip_freq != 0)
     if not sliding_window:
         return False
     if window_attn_skip_freq is None:
