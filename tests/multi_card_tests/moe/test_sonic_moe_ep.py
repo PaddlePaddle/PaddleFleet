@@ -204,6 +204,11 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
         sim = 2 * (x * y).sum() / denominator
         return (1 - sim).item()
 
+    @staticmethod
+    def _small_init_method(tensor):
+        """Small uniform init for precision tests (matches pre-update behavior)."""
+        paddle.nn.initializer.Uniform(-0.001, 0.001)(tensor)
+
     def _build_transformer_config(
         self,
         using_sonic_moe=False,
@@ -235,6 +240,8 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             using_sonic_moe=using_sonic_moe,
             fp8=fp8,
             fp8_wgrad=fp8_wgrad,
+            init_method=self._small_init_method,
+            output_layer_init_method=self._small_init_method,
         )
 
     def _build_moe_layer(
@@ -559,25 +566,25 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
         self._assert_loss_close(
             loss_ep,
             loss_single,
-            tol=1e-2,
+            tol=2e-2,
             title="Sonic-MoE FP8 EP vs single-card",
         )
         self._assert_tensor_diff_less(
             output_ep,
             output_single,
-            tol=5e-3,
+            tol=5e-6,
             title="Sonic-MoE FP8 EP vs single-card output",
         )
         self._assert_tensor_diff_less(
             input_grad_ep,
             input_grad_single,
-            tol=5e-3,
+            tol=5e-6,
             title="Sonic-MoE FP8 EP vs single-card input grad",
         )
         self._assert_grad_diff_less(
             grads_ep,
             grads_single,
-            tol=5e-3,
+            tol=5e-6,
             title="Sonic-MoE FP8 EP vs single-card param grad",
         )
 

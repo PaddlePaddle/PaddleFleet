@@ -170,8 +170,6 @@ class MoELayer(nn.Layer):
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
-        self.fp8_dispatch = bool(config.fp8)
-        self.fp8_wgrad = config.fp8_wgrad
         self.use_ue8m0 = config.use_ue8m0
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
@@ -291,6 +289,10 @@ class MoELayer(nn.Layer):
                     )
                     self.moe_shared_expert_overlap = False
             else:
+                logger.info(
+                    "moe_use_fusion_node is only supported when moe_token_dispatcher_type is 'deepep' or 'hybridep'; disabling it."
+                )
+                self.moe_use_fusion_node = False
                 if self.moe_expert_fusion:
                     raise ValueError(
                         "moe_expert_fusion is only supported when moe_token_dispatcher_type is 'deepep' or 'hybridep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
@@ -317,8 +319,6 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.moe_sublayers.mlp_spec
 
-        self.grouped_gemm_experts = None
-        self.experts = None
         if self.moe_expert_fusion:
             if self.fp8:
                 assert self.using_sonic_moe or self.moe_deep_gemm, (
@@ -411,7 +411,10 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            if self.grouped_gemm_experts is not None:
+            if (
+                hasattr(self, "grouped_gemm_experts")
+                and self.grouped_gemm_experts is not None
+            ):
                 for p in self.grouped_gemm_experts.parameters():
                     p.is_moe_param = True
                     p.color = {
