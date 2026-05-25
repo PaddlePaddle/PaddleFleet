@@ -18,6 +18,8 @@
 #include <cub/cub.cuh>
 #include <vector>
 
+using AtomicUint64 = unsigned long long;  // NOLINT(runtime/int)
+
 __global__ void count_valid_kernel(const int64_t* indices,
                                    int64_t* valid_count,
                                    const int64_t total_elements) {
@@ -25,10 +27,11 @@ __global__ void count_valid_kernel(const int64_t* indices,
            static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
            static_cast<int64_t>(threadIdx.x);
        i < total_elements;
-       i += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+       i +=
+       static_cast<int64_t>(gridDim.x) * static_cast<int64_t>(blockDim.x)) {
     if (indices[i] != -1) {
-      atomicAdd(reinterpret_cast<unsigned long long*>(valid_count),
-                static_cast<unsigned long long>(1));
+      atomicAdd(reinterpret_cast<AtomicUint64*>(valid_count),
+                static_cast<AtomicUint64>(1));
     }
   }
 }
@@ -40,7 +43,8 @@ __global__ void create_mask_kernel(const int64_t* indices,
            static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
            static_cast<int64_t>(threadIdx.x);
        i < total_elements;
-       i += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+       i +=
+       static_cast<int64_t>(gridDim.x) * static_cast<int64_t>(blockDim.x)) {
     mask[i] = (indices[i] != -1) ? 1 : 0;
   }
 }
@@ -55,7 +59,8 @@ __global__ void scatter_scores_kernel(const scalar_t* probs,
            static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
            static_cast<int64_t>(threadIdx.x);
        i < total_elements;
-       i += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+       i +=
+       static_cast<int64_t>(gridDim.x) * static_cast<int64_t>(blockDim.x)) {
     if (indices[i] != -1) {
       int64_t write_idx = write_indices[i];
       output_scores[write_idx] = probs[i];
@@ -73,7 +78,8 @@ __global__ void scatter_grad_kernel(const scalar_t* grad_topk,
            static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
            static_cast<int64_t>(threadIdx.x);
        i < total_elements;
-       i += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+       i +=
+       static_cast<int64_t>(gridDim.x) * static_cast<int64_t>(blockDim.x)) {
     if (indices[i] != -1) {
       int64_t write_idx = write_indices[i];
       grad_probs[i] = grad_topk[write_idx];

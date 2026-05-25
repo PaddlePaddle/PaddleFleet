@@ -19,9 +19,11 @@
 template <typename IndexT>
 __global__ void simple_arange_kernel(IndexT* output, int64_t N) {
   for (int64_t idx =
-           static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
        idx < N;
-       idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+       idx +=
+       static_cast<int64_t>(blockDim.x) * static_cast<int64_t>(gridDim.x)) {
     output[idx] = static_cast<IndexT>(idx);
   }
 }
@@ -31,9 +33,12 @@ __global__ void CountValidExpertsKernel(const T* topk_router_indices,
                                         int64_t* num_activated_per_token,
                                         int64_t num_tokens,
                                         int K) {
-  int64_t token_idx =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (token_idx < num_tokens) {
+  for (int64_t token_idx =
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
+       token_idx < num_tokens;
+       token_idx +=
+       static_cast<int64_t>(blockDim.x) * static_cast<int64_t>(gridDim.x)) {
     int count = 0;
     for (int k = 0; k < K; ++k) {
       if (topk_router_indices[token_idx * K + k] > -1) {
@@ -51,9 +56,12 @@ __global__ void PopulateValidInfoKernel(const T* topk_router_indices,
                                         int64_t* original_token_indices,
                                         int64_t num_tokens,
                                         int K) {
-  int64_t token_idx =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (token_idx < num_tokens) {
+  for (int64_t token_idx =
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
+       token_idx < num_tokens;
+       token_idx +=
+       static_cast<int64_t>(blockDim.x) * static_cast<int64_t>(gridDim.x)) {
     int64_t base_offset = num_activated_offset[token_idx];
     int64_t current_offset = 0;
     for (int k = 0; k < K; ++k) {
@@ -72,8 +80,12 @@ __global__ void GenerateReverseScatterKernel(
     const int64_t* s_scatter_idx_valid,
     int64_t* s_reverse_scatter_idx_valid,
     int64_t total_valid_experts) {
-  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx < total_valid_experts) {
+  for (int64_t idx =
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
+       idx < total_valid_experts;
+       idx +=
+       static_cast<int64_t>(blockDim.x) * static_cast<int64_t>(gridDim.x)) {
     s_reverse_scatter_idx_valid[s_scatter_idx_valid[idx]] = idx;
   }
 }
@@ -82,8 +94,12 @@ __global__ void ComputeXGatherIdxKernel(const int64_t* s_scatter_idx_all,
                                         int64_t* x_gather_idx_all,
                                         int K,
                                         int64_t n) {
-  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx < n) {
+  for (int64_t idx =
+           static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+           static_cast<int64_t>(threadIdx.x);
+       idx < n;
+       idx +=
+       static_cast<int64_t>(blockDim.x) * static_cast<int64_t>(gridDim.x)) {
     x_gather_idx_all[idx] = s_scatter_idx_all[idx] / K;
   }
 }

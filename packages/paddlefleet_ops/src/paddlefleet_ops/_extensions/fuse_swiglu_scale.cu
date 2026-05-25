@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <cuda_bf16.h>
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -55,21 +56,22 @@ template <typename T, typename ScaleT, int VEC_SIZE, typename IndexT>
 __global__ void VectorizedFusedSwiGLUFwd(const T* __restrict__ x,
                                          const ScaleT* __restrict__ scale,
                                          T* __restrict__ out,
-                                         IndexT rows,
+                                         int64_t rows,
                                          IndexT hidden_size,
                                          IndexT row_stride) {
-  for (IndexT row = static_cast<IndexT>(blockIdx.x); row < rows;
-       row += static_cast<IndexT>(gridDim.x)) {
+  for (int64_t row = static_cast<int64_t>(blockIdx.x); row < rows;
+       row += static_cast<int64_t>(gridDim.x)) {
     int tid = threadIdx.x;
+    IndexT row_index = static_cast<IndexT>(row);
     IndexT lane_idx = static_cast<IndexT>(tid) * VEC_SIZE;
 
     float s = static_cast<float>(scale[row]);
 
     for (IndexT col = lane_idx; col < hidden_size;
          col += static_cast<IndexT>(blockDim.x) * VEC_SIZE) {
-      IndexT gate_offset = row * row_stride + col;
+      IndexT gate_offset = row_index * row_stride + col;
       IndexT val_offset = gate_offset + hidden_size;
-      IndexT out_offset = row * hidden_size + col;
+      IndexT out_offset = row_index * hidden_size + col;
 
       Packed128 gate_pack =
           *reinterpret_cast<const Packed128*>(&x[gate_offset]);
@@ -104,13 +106,14 @@ __global__ void VectorizedFusedSwiGLUBwd(const T* __restrict__ x,
                                          const T* __restrict__ d_out,
                                          T* __restrict__ d_x,
                                          ScaleT* __restrict__ d_scale,
-                                         IndexT rows,
+                                         int64_t rows,
                                          IndexT hidden_size,
                                          IndexT row_stride) {
   int tid = threadIdx.x;
 
-  for (IndexT row = static_cast<IndexT>(blockIdx.x); row < rows;
-       row += static_cast<IndexT>(gridDim.x)) {
+  for (int64_t row = static_cast<int64_t>(blockIdx.x); row < rows;
+       row += static_cast<int64_t>(gridDim.x)) {
+    IndexT row_index = static_cast<IndexT>(row);
     IndexT lane_idx = static_cast<IndexT>(tid) * VEC_SIZE;
 
     float local_d_scale_sum = 0.0f;
@@ -118,9 +121,9 @@ __global__ void VectorizedFusedSwiGLUBwd(const T* __restrict__ x,
 
     for (IndexT col = lane_idx; col < hidden_size;
          col += static_cast<IndexT>(blockDim.x) * VEC_SIZE) {
-      IndexT gate_offset = row * row_stride + col;
+      IndexT gate_offset = row_index * row_stride + col;
       IndexT val_offset = gate_offset + hidden_size;
-      IndexT out_offset = row * hidden_size + col;
+      IndexT out_offset = row_index * hidden_size + col;
 
       Packed128 gate_pack =
           *reinterpret_cast<const Packed128*>(&x[gate_offset]);
@@ -197,7 +200,7 @@ void LaunchFusedSwiGLUScaleFwd(const T* x,
           x,
           scale,
           out,
-          static_cast<IndexT>(rows),
+          rows,
           static_cast<IndexT>(hidden_size),
           static_cast<IndexT>(row_stride));
 }
@@ -242,7 +245,7 @@ void LaunchFusedSwiGLUScaleBwd(const T* x,
           d_out,
           d_x,
           d_scale,
-          static_cast<IndexT>(rows),
+          rows,
           static_cast<IndexT>(hidden_size),
           static_cast<IndexT>(row_stride));
 }
@@ -298,7 +301,7 @@ std::vector<paddle::Tensor> FusedSwiGLUScaleForward(
     return {out};
   }
 
-  constexpr int64_t kMaxGridX = std::numeric_limits<int>::max();
+  constexpr int64_t kMaxGridX = 65535;
   int grid_size = static_cast<int>(std::min(rows, kMaxGridX));
   auto stream = x.stream();
 
@@ -353,7 +356,7 @@ std::vector<paddle::Tensor> FusedSwiGLUScaleBackward(
     return {d_x, d_scale};
   }
 
-  constexpr int64_t kMaxGridX = std::numeric_limits<int>::max();
+  constexpr int64_t kMaxGridX = 65535;
   int grid_size = static_cast<int>(std::min(rows, kMaxGridX));
   auto stream = x.stream();
 
