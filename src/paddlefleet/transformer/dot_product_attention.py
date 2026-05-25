@@ -47,6 +47,7 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.utils import (
     attention_mask_func,
     is_layer_window_attention,
+    startend_row_indices_add_sliding_window,
 )
 from paddlefleet.utils import divide
 
@@ -73,6 +74,7 @@ class DotProductAttention(FleetLayer):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
+        is_mtp_layer: bool = False,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
         cp_comm_type: str | None = None,
@@ -89,9 +91,10 @@ class DotProductAttention(FleetLayer):
             "Context parallelism is only supported by TEDotProductAttention!"
         )
 
-        self.layer_number = max(1, layer_number)
+        self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
+        self.is_mtp_layer = is_mtp_layer
 
         # For MLA, k_channels and v_channels may differ from config.head_dim
         # Default to config.head_dim if not provided (standard attention)
@@ -145,11 +148,16 @@ class DotProductAttention(FleetLayer):
         if is_layer_window_attention(
             self.config.sliding_window,
             self.config.window_attn_skip_freq,
-            layer_number,
+            self.layer_number
+            if not self.is_mtp_layer
+            else (self.layer_number + self.config.num_hidden_layers),
         ):
             sliding_window = self.config.sliding_window
         else:
             sliding_window = None
+
+        self.head_wise_swa_ratio = self.config.head_wise_swa_ratio
+        self.sliding_window = sliding_window
 
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
             input_in_fp16=self.config.fp16,
@@ -402,6 +410,16 @@ class DotProductAttention(FleetLayer):
             else:
                 value_padded = value
 
+            if self.sliding_window is not None:
+                attn_mask_startend_row_indices = (
+                    startend_row_indices_add_sliding_window(
+                        attn_mask_startend_row_indices,
+                        self.sliding_window,
+                        self.head_wise_swa_ratio,
+                        value.shape[2],
+                    )
+                )
+
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -554,6 +572,7 @@ class CPDotProductAttention(FleetLayer):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
+        is_mtp_layer: bool = False,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
         cp_comm_type: str | None = None,
@@ -562,6 +581,8 @@ class CPDotProductAttention(FleetLayer):
     ):
         super().__init__(config=config)
 
+        # TODO(GuoxiaWang): remove CPDotProductAttention, move to DotProductAttention
+
         self.config: TransformerConfig = config
 
         # self.context_parallel_size = self.config.context_parallel_size
@@ -569,6 +590,7 @@ class CPDotProductAttention(FleetLayer):
 
         self.layer_number = max(1, layer_number)
         self.attn_mask_type = attn_mask_type
+        self.is_mtp_layer = is_mtp_layer
         self.attention_type = attention_type  # unused for now
         self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
 

@@ -190,6 +190,17 @@ class TransformerConfig(ModelParallelConfig):
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
     first half and second half (LLaMa style). Default to False."""
 
+    attention_value_scale: float = None
+    add_full_attention_sink_bias: bool = False
+    add_swa_attention_sink_bias: bool = True
+    swa_head_dim: int = 192
+    swa_v_head_dim: int = 128
+    swa_num_attention_heads: int = 64
+    swa_num_key_value_heads: int = 8
+    swa_rope_theta: float = 10000
+    head_wise_swa_ratio: float = 0.0
+    """Headwise sliding_window ratio"""
+
     multi_latent_attention: bool = False
     """Whether to use multi-latent attention."""
 
@@ -618,7 +629,7 @@ class TransformerConfig(ModelParallelConfig):
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
 
-    v_head_dim: int = 128
+    v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
     rope_type: str = "yarn"
@@ -856,6 +867,9 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
+
+        if self.v_head_dim is None:
+            self.v_head_dim = self.head_dim
 
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads

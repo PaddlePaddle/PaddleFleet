@@ -616,6 +616,7 @@ def get_gpt_spec(
     ] = "learned_absolute",
     rotary_percent: float = 1.0,
     rotary_base: int = 10000,
+    swa_rotary_base: int = 10000,
     rope_scaling: bool = False,
     parallel_output: bool = False,
     tie_word_embeddings: bool = False,
@@ -638,6 +639,7 @@ def get_gpt_spec(
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
+            "swa_rotary_base": swa_rotary_base,
             "rope_scaling": rope_scaling,
         }
         embedding_extra_kwargs = {
@@ -649,6 +651,7 @@ def get_gpt_spec(
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
+            "swa_rotary_base": swa_rotary_base,
             "rope_scaling": rope_scaling,
         }
         embedding_extra_kwargs = {
@@ -662,6 +665,7 @@ def get_gpt_spec(
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
+            "swa_rotary_base": swa_rotary_base,
             "rope_scaling": rope_scaling,
             "mrope_section": config.mrope_section,
         }

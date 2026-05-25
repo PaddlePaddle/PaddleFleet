@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from .transformer_config import TransformerConfig
 
 import paddle
-from paddle import Tensor
+from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
@@ -47,6 +47,9 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_tensor_model_parallel_region,
 )
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.utils import (
+    is_layer_window_attention,
+)
 from paddlefleet.utils import divide, get_pg_rank, get_pg_size
 
 from .dot_product_attention import CPDotProductAttention
@@ -214,14 +217,39 @@ class Attention(FleetLayer, ABC):
         self.attention_type = attention_type
         self.is_mtp_layer = is_mtp_layer
 
-        # For normal attention without groups, num_key_value_heads == num_attention_heads,
-        # so these two will be the same
-        self.query_projection_size = (
-            self.config.head_dim * self.config.num_attention_heads
-        )
-        self.kv_projection_size = (
-            self.config.head_dim * self.config.num_key_value_heads
-        )
+        self.is_swa = False
+
+        if is_layer_window_attention(
+            self.config.sliding_window,
+            self.config.window_attn_skip_freq,
+            self.layer_number
+            if not self.is_mtp_layer
+            else (self.layer_number + self.config.num_hidden_layers),
+        ):
+            self.is_swa = True
+
+        if self.is_swa:
+            self.head_dim = self.config.swa_head_dim
+            self.v_head_dim = self.config.swa_v_head_dim
+            self.num_attention_heads = self.config.swa_num_attention_heads
+            self.num_key_value_heads = self.config.swa_num_key_value_heads
+        else:
+            self.head_dim = self.config.head_dim
+            self.v_head_dim = self.config.v_head_dim
+            self.num_attention_heads = self.config.num_attention_heads
+            self.num_key_value_heads = self.config.num_key_value_heads
+
+        self.query_projection_size = self.head_dim * self.num_attention_heads
+        self.key_projection_size = self.head_dim * self.num_key_value_heads
+        self.value_projection_size = self.v_head_dim * self.num_key_value_heads
+        self.out_projection_size = self.v_head_dim * self.num_attention_heads
+        self.qk_rope_head_dim = self.head_dim
+        if self.config.rotary_percent < 1.0:
+            self.qk_rope_head_dim = int(
+                self.head_dim * self.config.rotary_percent
+            )
+
+        self.v_scale = self.config.attention_value_scale
 
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups(
@@ -239,18 +267,31 @@ class Attention(FleetLayer, ABC):
         # Per attention head and per partition values
         world_size = get_pg_size(self.pg_collection.tp)
         self.hidden_size_per_attention_head = divide(
-            self.query_projection_size, self.config.num_attention_heads
+            self.query_projection_size, self.num_attention_heads
+        )
+        self.value_hidden_size_per_attention_head = divide(
+            self.value_projection_size, self.num_key_value_heads
         )
         self.num_attention_heads_per_partition = divide(
-            self.config.num_attention_heads, world_size
+            self.num_attention_heads, world_size
         )
         self.num_query_groups_per_partition = divide(
-            self.config.num_key_value_heads, world_size
+            self.num_key_value_heads, world_size
         )
 
-        # To support both CUDA Graphs and key value with different hidden size
-        self.key_hidden_size = self.hidden_size_per_attention_head
-        self.val_hidden_size = self.hidden_size_per_attention_head
+        # TODO(GuoxiaWang): pass attn_sink in to flashmask
+        if (self.config.add_full_attention_sink_bias and not self.is_swa) or (
+            self.config.add_swa_attention_sink_bias and self.is_swa
+        ):
+            # Learnable attention sink per head
+            self.attn_sink = self.create_parameter(
+                shape=[self.num_attention_heads_per_partition],
+                dtype="float32",
+                default_initializer=nn.initializer.Constant(0.0),
+            )
+            self.config.init_method(self.attn_sink)
+        else:
+            self.attn_sink = None
 
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
@@ -258,6 +299,7 @@ class Attention(FleetLayer, ABC):
             layer_number=self.layer_number,
             attn_mask_type=self.attn_mask_type,
             attention_type=self.attention_type,
+            is_mtp_layer=self.is_mtp_layer,
             cp_comm_type=cp_comm_type,
             softmax_scale=self.config.softmax_scale,
             pg_collection=self.pg_collection,
@@ -321,7 +363,7 @@ class Attention(FleetLayer, ABC):
         # Output.
         self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
-            self.query_projection_size,
+            self.out_projection_size,
             self.config.hidden_size,
             config=self.config,
             init_method=self.config.output_layer_init_method,
@@ -351,6 +393,9 @@ class Attention(FleetLayer, ABC):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         rope_freqs_cis: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | tuple[Tensor, Tensor] | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
@@ -383,6 +428,13 @@ class Attention(FleetLayer, ABC):
         #    else False
         # )
         no_rope = False
+
+        if self.is_swa:
+            if rope_freqs_cis is not None:
+                raise ValueError("Sliding Window Not Support rope_freqs_cis")
+            rotary_pos_emb = swa_rotary_pos_emb
+            rotary_pos_cos = swa_rotary_pos_cos
+            rotary_pos_sin = swa_rotary_pos_sin
 
         if no_rope:
             rotary_pos_emb = None
@@ -419,6 +471,16 @@ class Attention(FleetLayer, ABC):
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
+        if self.qk_rope_head_dim > 0 and self.qk_rope_head_dim < self.head_dim:
+            query, query_nope = query.split(
+                [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+                axis=-1,
+            )
+            key, key_nope = key.split(
+                [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+                axis=-1,
+            )
+
         if (
             self.config.gpt_model_use_experimental_version
             and position_ids is not None
@@ -429,7 +491,7 @@ class Attention(FleetLayer, ABC):
                 query,
                 key,
                 position_ids,
-                head_dim=self.config.head_dim,
+                head_dim=self.head_dim,
                 rope_theta=self.config.rope_theta,
                 mrope_section=getattr(self.config, "mrope_section", [16, 1, 1]),
                 layer_number=self.layer_number,
@@ -532,6 +594,10 @@ class Attention(FleetLayer, ABC):
                         if self.config.sequence_parallel
                         else None,
                     )
+
+        if self.qk_rope_head_dim > 0 and self.qk_rope_head_dim < self.head_dim:
+            query = paddle.concat([query, query_nope], axis=-1)
+            key = paddle.concat([key, key_nope], axis=-1)
 
         # ==================================
         # core attention computation
@@ -665,14 +731,15 @@ class SelfAttention(Attention):
 
         self.gated_attention = getattr(self.config, "gated_attention", False)
         gate_projection_size = (
-            self.query_projection_size if self.gated_attention else 0
+            self.out_projection_size if self.gated_attention else 0
         )
 
         self.qkv_proj = build_spec_layer(
             sublayers_spec.qkv_proj,
             self.config.hidden_size,
             self.query_projection_size
-            + 2 * self.kv_projection_size
+            + self.key_projection_size
+            + self.value_projection_size
             + gate_projection_size,
             config=self.config,
             init_method=self.config.init_method,
@@ -694,7 +761,7 @@ class SelfAttention(Attention):
             if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
                 q_norm_hidden_size = (
                     self.hidden_size_per_attention_head
-                    * self.config.num_attention_heads
+                    * self.num_attention_heads
                 )
             else:
                 q_norm_hidden_size = self.hidden_size_per_attention_head
@@ -712,7 +779,7 @@ class SelfAttention(Attention):
             if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
                 k_norm_hidden_size = (
                     self.hidden_size_per_attention_head
-                    * self.config.num_key_value_heads
+                    * self.num_key_value_heads
                 )
             else:
                 k_norm_hidden_size = self.hidden_size_per_attention_head
@@ -744,15 +811,25 @@ class SelfAttention(Attention):
         q_dim = heads_per_group * self.hidden_size_per_attention_head
 
         if self.gated_attention:
+            gate_dim = (
+                heads_per_group * self.value_hidden_size_per_attention_head
+            )
+
+        if self.gated_attention:
             # Per group: Q + Gate + K + V
             group_dim = (
-                heads_per_group * 2 + 2
-            ) * self.hidden_size_per_attention_head
+                q_dim
+                + gate_dim
+                + self.hidden_size_per_attention_head
+                + self.value_hidden_size_per_attention_head
+            )
         else:
             # Per group: Q + K + V
             group_dim = (
-                heads_per_group + 2
-            ) * self.hidden_size_per_attention_head
+                q_dim
+                + self.hidden_size_per_attention_head
+                + self.value_hidden_size_per_attention_head
+            )
 
         # [b, sq, hp] --> [b, sq, ng, group_dim]
         new_tensor_shape = (
@@ -765,15 +842,15 @@ class SelfAttention(Attention):
         if self.gated_attention:
             split_arg_list = [
                 q_dim,
-                q_dim,
+                gate_dim,
                 self.hidden_size_per_attention_head,
-                self.hidden_size_per_attention_head,
+                self.value_hidden_size_per_attention_head,
             ]
         else:
             split_arg_list = [
                 q_dim,
                 self.hidden_size_per_attention_head,
-                self.hidden_size_per_attention_head,
+                self.value_hidden_size_per_attention_head,
             ]
 
         # Return unsplit mixed_qkv and split_arg_list
@@ -787,6 +864,9 @@ class SelfAttention(Attention):
         else:
             query, key, value = parts
             gate = None
+
+        if self.v_scale is not None:
+            value = value * self.v_scale
 
         if getattr(self.config, "qk_norm_type", "per_head") == "per_layer" and (
             self.q_norm is not None or self.k_norm is not None
