@@ -61,7 +61,12 @@ except Exception:
 
 
 def _ec_compatible_rope_apply(
-    q_pe, k_pe, seq_len, rope_base=1000000.0, position_offset=0, position_ids=None
+    q_pe,
+    k_pe,
+    seq_len,
+    rope_base=1000000.0,
+    position_offset=0,
+    position_ids=None,
 ):
     """Apply RoPE using EC's complex multiplication method (no YaRN, no mscale).
 

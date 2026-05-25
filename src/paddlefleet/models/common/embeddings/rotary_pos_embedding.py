@@ -172,7 +172,6 @@ class RotaryEmbedding(nn.Layer):
                 paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
             )
 
-
         if self.seq_len_interpolation_factor is not None:
             seq *= 1 / self.seq_len_interpolation_factor
 
