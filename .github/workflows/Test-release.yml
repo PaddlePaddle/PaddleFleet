@@ -42,12 +42,16 @@ jobs:
     needs: check-bypass
     if: ${{ needs.check-bypass.outputs.can-skip == 'false' }}
     name: check documents type for pull request
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     env:
       GITHUB_REPO_NAME: ${{ github.repository }}
     outputs:
       is_md_only: ${{ steps.check_files.outputs.is_md_only }}
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -84,10 +88,14 @@ jobs:
 
   check-packages-changes:
     name: Check packages directory changes
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     outputs:
       packages_changed: ${{ steps.check.outputs.packages_changed }}
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -1433,7 +1441,8 @@ jobs:
     name: Coverage Upload And Check
     needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, check-bypass]
     if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' && needs.single_card_test.result != 'skipped' }}
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     permissions:
       actions: read
       contents: read
@@ -1442,6 +1451,9 @@ jobs:
     env:
       GITHUB_REPO_NAME: ${{ github.repository }}
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
