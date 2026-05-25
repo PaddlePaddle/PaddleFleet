@@ -327,11 +327,13 @@ def _zeros_like_compat(tensor, dtype=None):
 
 
 def _deterministic_attn_sink_enabled():
-    return os.getenv("DSV4_TILELANG_SPARSE_MLA_DETERMINISTIC_ATTN_SINK", "1").lower() in {"1", "true", "yes", "on"}
+    default = os.getenv("DSV4_TILELANG_DETERMINISTIC_BWD", "1")
+    return os.getenv("DSV4_TILELANG_SPARSE_MLA_DETERMINISTIC_ATTN_SINK", default).lower() in {"1", "true", "yes", "on"}
 
 
 def _deterministic_dkv_enabled():
-    return os.getenv("DSV4_TILELANG_SPARSE_MLA_DETERMINISTIC_DKV", "1").lower() in {"1", "true", "yes", "on"}
+    default = os.getenv("DSV4_TILELANG_DETERMINISTIC_BWD", "1")
+    return os.getenv("DSV4_TILELANG_SPARSE_MLA_DETERMINISTIC_DKV", default).lower() in {"1", "true", "yes", "on"}
 
 
 def _attn_sink_block_h(H):
