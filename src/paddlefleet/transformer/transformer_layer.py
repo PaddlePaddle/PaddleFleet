@@ -180,6 +180,7 @@ class TransformerLayer(nn.Layer):
         config: TransformerConfig,
         sublayers_spec: TransformerLayerSublayersSpec,
         layer_number: int = 1,
+        is_mtp_layer: bool = False,
         hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
     ):
@@ -194,6 +195,7 @@ class TransformerLayer(nn.Layer):
         )
 
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
         self.hidden_dropout_prob = (
             config.hidden_dropout_prob
             if hidden_dropout_prob is None
@@ -291,7 +293,7 @@ class TransformerLayer(nn.Layer):
             sublayers_spec.mlp, config=self.config, **additional_mlp_kwargs
         )
         if hasattr(self.mlp, "set_layer_number"):
-            self.mlp.set_layer_number(self.layer_number)
+            self.mlp.set_layer_number(self.layer_number, self.is_mtp_layer)
 
         # [Layer 9: BiasDropoutFusion]
         self.mlp_bda = build_spec_layer(sublayers_spec.mlp_bda)
@@ -1048,6 +1050,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         config: TransformerConfig,
         sublayers_spec: TransformerLayerSublayersSpec,
         layer_number: int = 1,
+        is_mtp_layer: bool = False,
         hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
     ):
@@ -1055,6 +1058,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             config=config,
             sublayers_spec=sublayers_spec,
             layer_number=layer_number,
+            is_mtp_layer=is_mtp_layer,
             hidden_dropout_prob=hidden_dropout_prob,
             pg_collection=pg_collection,
         )
