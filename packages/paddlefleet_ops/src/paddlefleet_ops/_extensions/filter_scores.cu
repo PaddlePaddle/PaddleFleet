@@ -16,11 +16,10 @@
 #include <cuda_runtime.h>
 #include <paddle/extension.h>
 #include <cub/cub.cuh>
-#include <limits>
 #include <vector>
 
 __global__ void count_valid_kernel(const int64_t* indices,
-                                   int* valid_count,
+                                   int64_t* valid_count,
                                    const int64_t total_elements) {
   for (int64_t i =
            static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
@@ -28,13 +27,14 @@ __global__ void count_valid_kernel(const int64_t* indices,
        i < total_elements;
        i += static_cast<int64_t>(gridDim.x) * blockDim.x) {
     if (indices[i] != -1) {
-      atomicAdd(valid_count, 1);
+      atomicAdd(reinterpret_cast<unsigned long long*>(valid_count),
+                static_cast<unsigned long long>(1));
     }
   }
 }
 
 __global__ void create_mask_kernel(const int64_t* indices,
-                                   int* mask,
+                                   int64_t* mask,
                                    const int64_t total_elements) {
   for (int64_t i =
            static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
@@ -48,7 +48,7 @@ __global__ void create_mask_kernel(const int64_t* indices,
 template <typename scalar_t>
 __global__ void scatter_scores_kernel(const scalar_t* probs,
                                       const int64_t* indices,
-                                      const int* write_indices,
+                                      const int64_t* write_indices,
                                       scalar_t* output_scores,
                                       const int64_t total_elements) {
   for (int64_t i =
@@ -57,7 +57,7 @@ __global__ void scatter_scores_kernel(const scalar_t* probs,
        i < total_elements;
        i += static_cast<int64_t>(gridDim.x) * blockDim.x) {
     if (indices[i] != -1) {
-      int write_idx = write_indices[i];
+      int64_t write_idx = write_indices[i];
       output_scores[write_idx] = probs[i];
     }
   }
@@ -66,7 +66,7 @@ __global__ void scatter_scores_kernel(const scalar_t* probs,
 template <typename scalar_t>
 __global__ void scatter_grad_kernel(const scalar_t* grad_topk,
                                     const int64_t* indices,
-                                    const int* write_indices,
+                                    const int64_t* write_indices,
                                     scalar_t* grad_probs,
                                     const int64_t total_elements) {
   for (int64_t i =
@@ -75,14 +75,14 @@ __global__ void scatter_grad_kernel(const scalar_t* grad_topk,
        i < total_elements;
        i += static_cast<int64_t>(gridDim.x) * blockDim.x) {
     if (indices[i] != -1) {
-      int write_idx = write_indices[i];
+      int64_t write_idx = write_indices[i];
       grad_probs[i] = grad_topk[write_idx];
     }
   }
 }
 
 void count_valid_cuda_launcher(const int64_t* indices,
-                               int* valid_count,
+                               int64_t* valid_count,
                                const int64_t total_elements,
                                cudaStream_t stream) {
   if (total_elements == 0) return;
@@ -108,19 +108,16 @@ std::vector<paddle::Tensor> FilterScoresGPU(const paddle::Tensor& probs,
   if (total_elements == 0) {
     return {paddle::empty({0}, probs.dtype(), probs.place())};
   }
-  PD_CHECK(
-      total_elements <= static_cast<int64_t>(std::numeric_limits<int>::max()),
-      "total_elements exceeds INT_MAX in filter_scores.");
   auto valid_count_tensor =
-      paddle::full({1}, 0, paddle::DataType::INT32, probs.place());
+      paddle::full({1}, 0, paddle::DataType::INT64, probs.place());
   count_valid_cuda_launcher(indices.data<int64_t>(),
-                            valid_count_tensor.data<int>(),
+                            valid_count_tensor.data<int64_t>(),
                             total_elements,
                             stream);
-  int total_valid = 0;
+  int64_t total_valid = 0;
   PD_CHECK(cudaMemcpyAsync(&total_valid,
-                           valid_count_tensor.data<int>(),
-                           sizeof(int),
+                           valid_count_tensor.data<int64_t>(),
+                           sizeof(int64_t),
                            cudaMemcpyDeviceToHost,
                            stream) == cudaSuccess,
            "cudaMemcpyAsync total_valid_experts failed.");
@@ -131,20 +128,20 @@ std::vector<paddle::Tensor> FilterScoresGPU(const paddle::Tensor& probs,
   }
   auto topk_scores = paddle::empty({total_valid}, probs.dtype(), probs.place());
   auto mask =
-      paddle::empty({total_elements}, paddle::DataType::INT32, probs.place());
+      paddle::empty({total_elements}, paddle::DataType::INT64, probs.place());
   auto write_indices =
-      paddle::empty({total_elements}, paddle::DataType::INT32, probs.place());
+      paddle::empty({total_elements}, paddle::DataType::INT64, probs.place());
   int block_size = 256;
   int64_t grid_size64 = (total_elements + block_size - 1) / block_size;
   int grid_size = static_cast<int>(std::min<int64_t>(grid_size64, 4096));
   create_mask_kernel<<<grid_size, block_size, 0, stream>>>(
-      indices.data<int64_t>(), mask.data<int>(), total_elements);
+      indices.data<int64_t>(), mask.data<int64_t>(), total_elements);
   void* d_temp_storage = nullptr;
   size_t temp_storage_bytes = 0;
   cub::DeviceScan::ExclusiveSum(d_temp_storage,
                                 temp_storage_bytes,
-                                mask.data<int>(),
-                                write_indices.data<int>(),
+                                mask.data<int64_t>(),
+                                write_indices.data<int64_t>(),
                                 total_elements);
   auto temp_storage = paddle::empty({static_cast<int64_t>(temp_storage_bytes)},
                                     paddle::DataType::UINT8,
@@ -152,8 +149,8 @@ std::vector<paddle::Tensor> FilterScoresGPU(const paddle::Tensor& probs,
   d_temp_storage = temp_storage.data<uint8_t>();
   cub::DeviceScan::ExclusiveSum(d_temp_storage,
                                 temp_storage_bytes,
-                                mask.data<int>(),
-                                write_indices.data<int>(),
+                                mask.data<int64_t>(),
+                                write_indices.data<int64_t>(),
                                 total_elements,
                                 stream);
 
@@ -162,7 +159,7 @@ std::vector<paddle::Tensor> FilterScoresGPU(const paddle::Tensor& probs,
                                    <<<grid_size, block_size, 0, stream>>>(
                                        probs.data<data_t>(),
                                        indices.data<int64_t>(),
-                                       write_indices.data<int>(),
+                                       write_indices.data<int64_t>(),
                                        topk_scores.data<data_t>(),
                                        total_elements);
                              }));
@@ -179,32 +176,27 @@ std::vector<paddle::Tensor> FilterScoresGradGPU(
            "indices must be of type int64.");
   cudaStream_t stream = indices.stream();
   const int64_t total_elements = indices.numel();
-  PD_CHECK(
-      total_elements <= static_cast<int64_t>(std::numeric_limits<int>::max()),
-      "total_elements exceeds INT_MAX in filter_scores_grad.");
   auto grad_probs = paddle::full(
       indices.shape(), 0, grad_topk_scores.dtype(), grad_topk_scores.place());
   const int64_t total_valid = grad_topk_scores.numel();
-  PD_CHECK(total_valid <= static_cast<int64_t>(std::numeric_limits<int>::max()),
-           "total_valid exceeds INT_MAX in filter_scores_grad.");
   if (total_elements == 0 || total_valid == 0) {
     return {grad_probs};
   }
   auto mask = paddle::empty(
-      {total_elements}, paddle::DataType::INT32, grad_topk_scores.place());
+      {total_elements}, paddle::DataType::INT64, grad_topk_scores.place());
   auto write_indices = paddle::empty(
-      {total_elements}, paddle::DataType::INT32, grad_topk_scores.place());
+      {total_elements}, paddle::DataType::INT64, grad_topk_scores.place());
   int block_size = 256;
   int64_t grid_size64 = (total_elements + block_size - 1) / block_size;
   int grid_size = static_cast<int>(std::min<int64_t>(grid_size64, 4096));
   create_mask_kernel<<<grid_size, block_size, 0, stream>>>(
-      indices.data<int64_t>(), mask.data<int>(), total_elements);
+      indices.data<int64_t>(), mask.data<int64_t>(), total_elements);
   void* d_temp_storage = nullptr;
   size_t temp_storage_bytes = 0;
   cub::DeviceScan::ExclusiveSum(d_temp_storage,
                                 temp_storage_bytes,
-                                mask.data<int>(),
-                                write_indices.data<int>(),
+                                mask.data<int64_t>(),
+                                write_indices.data<int64_t>(),
                                 total_elements);
   auto temp_storage = paddle::empty({static_cast<int64_t>(temp_storage_bytes)},
                                     paddle::DataType::UINT8,
@@ -212,8 +204,8 @@ std::vector<paddle::Tensor> FilterScoresGradGPU(
   d_temp_storage = temp_storage.data<uint8_t>();
   cub::DeviceScan::ExclusiveSum(d_temp_storage,
                                 temp_storage_bytes,
-                                mask.data<int>(),
-                                write_indices.data<int>(),
+                                mask.data<int64_t>(),
+                                write_indices.data<int64_t>(),
                                 total_elements,
                                 stream);
   PD_DISPATCH_FLOATING_TYPES(
@@ -221,7 +213,7 @@ std::vector<paddle::Tensor> FilterScoresGradGPU(
         scatter_grad_kernel<data_t><<<grid_size, block_size, 0, stream>>>(
             grad_topk_scores.data<data_t>(),
             indices.data<int64_t>(),
-            write_indices.data<int>(),
+            write_indices.data<int64_t>(),
             grad_probs.data<data_t>(),
             total_elements);
       }));
