@@ -1002,7 +1002,7 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
-                if self.config.gpt_model_use_experimental_version or True:
+                if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
                         TransformerLayer,
