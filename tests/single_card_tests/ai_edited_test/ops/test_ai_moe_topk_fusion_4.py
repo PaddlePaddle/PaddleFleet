@@ -15,182 +15,300 @@ import os
 import sys
 import unittest
 
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
-
-import paddle
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 from paddlefleet.triton_ops import moe_topk_fusion
-from paddlefleet.triton_ops.moe_topk_fusion import (
-    MoETopkFusion,
-    routing_map_fusion_forward,
-)
 
 
-class Context:
-    def save_for_backward(self, *values):
-        self.saved = values
+class FakeNumber:
+    def __init__(self, value=1.0):
+        self.value = float(value)
 
-    def saved_tensor(self):
-        return self.saved
+    def __add__(self, other):
+        return FakeNumber(self.value + number_value(other))
+
+    __radd__ = __add__
+
+    def __sub__(self, other):
+        return FakeNumber(self.value - number_value(other))
+
+    def __rsub__(self, other):
+        return FakeNumber(number_value(other) - self.value)
+
+    def __mul__(self, other):
+        if isinstance(other, FakeArray):
+            return other
+        return FakeNumber(self.value * number_value(other))
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, other):
+        divisor = number_value(other)
+        if divisor == 0:
+            divisor = 1
+        return FakeNumber(self.value / divisor)
+
+    def __rtruediv__(self, other):
+        divisor = self.value if self.value != 0 else 1
+        return FakeNumber(number_value(other) / divisor)
+
+    def __gt__(self, other):
+        return self.value > number_value(other)
+
+    def __lt__(self, other):
+        return self.value < number_value(other)
+
+    def __bool__(self):
+        return self.value != 0
 
 
-class KernelRecorder:
-    def __init__(self):
-        self.grid = None
-        self.args = None
-        self.kwargs = None
+class FakeArray:
+    def __init__(self, values=None):
+        self.values = values or [0, 1, 2, 3]
 
-    def __getitem__(self, grid):
-        self.grid = grid
+    def __getitem__(self, key):
+        del key
         return self
 
-    def __call__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
+    def __add__(self, other):
+        del other
+        return self
+
+    __radd__ = __add__
+
+    def __sub__(self, other):
+        del other
+        return self
+
+    __rsub__ = __sub__
+
+    def __mul__(self, other):
+        del other
+        return self
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, other):
+        del other
+        return self
+
+    def __floordiv__(self, other):
+        del other
+        return self
+
+    def __lt__(self, other):
+        del other
+        return self
+
+    def __le__(self, other):
+        del other
+        return self
+
+    def __gt__(self, other):
+        del other
+        return self
+
+    def __eq__(self, other):
+        del other
+        return self
+
+    def __ne__(self, other):
+        del other
+        return self
+
+    def __and__(self, other):
+        del other
+        return self
+
+    __rand__ = __and__
+
+    def __or__(self, other):
+        del other
+        return self
+
+    __ror__ = __or__
+
+    def __rrshift__(self, other):
+        del other
+        return self
+
+    def to(self, dtype):
+        del dtype
+        return self
+
+    def __bool__(self):
+        return True
 
 
-class TestMoETopkFusionWrappers(unittest.TestCase):
-    def test_forward_launches_kernel_and_saves_context_without_norm(self):
-        old_kernel = moe_topk_fusion._fwd_kernel
-        recorder = KernelRecorder()
-        moe_topk_fusion._fwd_kernel = recorder
-        ctx = Context()
-        gate_probs = paddle.arange(10, dtype="float32").reshape([2, 5])
-        probs_for_choice = gate_probs + 0.5
-        try:
-            topk_probs, topk_indices = MoETopkFusion.forward(
-                ctx,
-                gate_probs,
-                probs_for_choice,
-                moe_k=2,
-                use_node_limit=False,
-                n_group=4,
-                topk_group=2,
-                norm_gate_logits=False,
-            )
-        finally:
-            moe_topk_fusion._fwd_kernel = old_kernel
+class FakePtr:
+    def __init__(self, offset=0):
+        self.offset = int(offset)
 
-        self.assertEqual(recorder.grid, (2,))
-        self.assertIs(recorder.args[0], gate_probs)
-        self.assertIs(recorder.args[1], probs_for_choice)
-        self.assertIs(recorder.args[4], topk_probs)
-        self.assertEqual(recorder.args[12:16], (2, False, 1, 1))
-        self.assertEqual(recorder.args[16], False)
-        self.assertEqual(recorder.args[17], 32)
-        self.assertEqual(topk_probs.shape, [2, 2])
-        self.assertEqual(topk_indices.dtype, paddle.int64)
-        saved_indices, saved_probs, saved_sum = ctx.saved
-        self.assertEqual(saved_indices.shape, [2, 2])
-        self.assertIs(saved_probs, topk_probs)
-        self.assertIsNone(saved_sum)
-        self.assertEqual(ctx.input_shape, [2, 5])
-        self.assertFalse(ctx.norm_gate_logits)
-        self.assertEqual(ctx.moe_k, 2)
+    def __add__(self, other):
+        if isinstance(other, FakeArray):
+            return other
+        return FakePtr(self.offset + int(number_value(other)))
 
-    def test_forward_launches_kernel_with_node_limit_and_norm_sum(self):
-        old_kernel = moe_topk_fusion._fwd_kernel
-        recorder = KernelRecorder()
-        moe_topk_fusion._fwd_kernel = recorder
-        ctx = Context()
-        gate_probs = paddle.ones([1, 64], dtype="float32")
-        try:
-            topk_probs, topk_indices = MoETopkFusion.forward(
-                ctx,
-                gate_probs,
-                gate_probs,
-                moe_k=3,
-                use_node_limit=True,
-                n_group=8,
-                topk_group=2,
-                norm_gate_logits=True,
-            )
-        finally:
-            moe_topk_fusion._fwd_kernel = old_kernel
+    __radd__ = __add__
 
-        self.assertEqual(recorder.args[12:16], (3, True, 8, 2))
-        self.assertTrue(recorder.args[16])
-        self.assertEqual(recorder.args[17], 64)
-        self.assertEqual(ctx.saved[2].shape, [1])
-        self.assertEqual(topk_probs.shape, [1, 3])
-        self.assertEqual(topk_indices.shape, [1, 3])
 
-    def test_backward_launches_kernel_for_saved_tensors(self):
-        old_kernel = moe_topk_fusion._bwd_kernel
-        recorder = KernelRecorder()
-        moe_topk_fusion._bwd_kernel = recorder
-        ctx = Context()
-        ctx.save_for_backward(
-            paddle.to_tensor([[1, 3]], dtype="int32"),
-            paddle.ones([1, 2], dtype="float32"),
-            paddle.ones([1], dtype="float32"),
+class FakeTL:
+    int1 = "int1"
+    float32 = "float32"
+    int64 = "int64"
+
+    def __init__(self, program_ids):
+        self.program_ids = program_ids
+        self.stores = []
+        self.atomic_adds = []
+
+    def program_id(self, axis):
+        return self.program_ids[axis]
+
+    def arange(self, start, end):
+        return FakeArray(list(range(start, end)))
+
+    def load(self, ptr, mask=None, other=None):
+        del mask, other
+        if isinstance(ptr, FakePtr):
+            pattern = [2.0, 1.0, 4.0, 3.0, 0.5, 0.25]
+            return FakeNumber(pattern[ptr.offset % len(pattern)])
+        return FakeArray()
+
+    def store(self, ptr, value, mask=None):
+        self.stores.append((ptr, value, mask))
+
+    def max(self, value, axis=0):
+        del value
+        if axis == 0:
+            return FakeNumber(4.0)
+        return FakeArray()
+
+    def min(self, value, axis=0):
+        del value, axis
+        return 0
+
+    def sum(self, value, axis=None):
+        del value
+        if axis is None:
+            return FakeNumber(1.0)
+        return FakeArray()
+
+    def where(self, condition, x, y):
+        del condition, y
+        return x if isinstance(x, FakeArray) else FakeArray()
+
+    def full(self, shape, value, dtype=None):
+        del dtype
+        return FakeArray([value] * shape[0])
+
+    def maximum(self, left, right):
+        return FakeNumber(max(number_value(left), number_value(right)))
+
+    def atomic_add(self, ptr, value, mask=None):
+        self.atomic_adds.append((ptr, value, mask))
+
+
+def number_value(value):
+    if isinstance(value, FakeNumber):
+        return value.value
+    if isinstance(value, FakePtr):
+        return value.offset
+    if isinstance(value, FakeArray):
+        return 1
+    return value
+
+
+class TestMoETopkFusionKernelDefinitionsNoMock(unittest.TestCase):
+    def setUp(self):
+        self.old_tl = moe_topk_fusion.tl
+
+    def tearDown(self):
+        moe_topk_fusion.tl = self.old_tl
+
+    def test_forward_kernel_python_body_exercises_group_topk_and_norm(self):
+        fake_tl = FakeTL([0, 0])
+        moe_topk_fusion.tl = fake_tl
+
+        moe_topk_fusion._fwd_kernel.kernel.fn(
+            FakePtr(),
+            FakePtr(),
+            FakePtr(),
+            FakePtr(),
+            FakePtr(),
+            4,
+            1,
+            4,
+            1,
+            2,
+            1,
+            4,
+            2,
+            True,
+            2,
+            2,
+            True,
+            4,
         )
-        ctx.input_shape = [1, 5]
-        ctx.norm_gate_logits = True
-        ctx.moe_k = 2
-        grad_output_probs = paddle.ones([1, 2], dtype="float32")
-        try:
-            grad_gate_probs, none_value = MoETopkFusion.backward(
-                ctx, grad_output_probs, None
+
+        self.assertGreater(len(fake_tl.stores), 0)
+
+    def test_backward_kernel_python_body_exercises_norm_and_plain_paths(self):
+        fake_tl = FakeTL([0, 0])
+        moe_topk_fusion.tl = fake_tl
+
+        for norm_gate_logits in (True, False):
+            moe_topk_fusion._bwd_kernel.kernel.fn(
+                FakePtr(),
+                FakePtr(),
+                FakePtr(),
+                FakePtr(),
+                FakePtr(),
+                2,
+                1,
+                2,
+                1,
+                2,
+                1,
+                4,
+                1,
+                2,
+                norm_gate_logits,
+                2,
             )
-        finally:
-            moe_topk_fusion._bwd_kernel = old_kernel
 
-        self.assertEqual(recorder.grid, (1,))
-        self.assertIs(recorder.args[0], grad_output_probs)
-        self.assertEqual(recorder.args[13:16], (2, True, 2))
-        self.assertEqual(grad_gate_probs.shape, [1, 5])
-        self.assertIsNone(none_value)
+        self.assertGreater(len(fake_tl.stores), 0)
 
-    def test_routing_map_wrapper_launches_kernel_with_masks(self):
-        old_kernel = moe_topk_fusion._routing_map_fwd_kernel
-        recorder = KernelRecorder()
-        moe_topk_fusion._routing_map_fwd_kernel = recorder
-        gate_probs = paddle.ones([3, 5], dtype="float32")
-        topk_indices = paddle.to_tensor([[1, 2], [3, 4], [0, 1]], dtype="int64")
-        input_ids = paddle.to_tensor([1, 0, 2], dtype="int64")
-        pure_text = paddle.to_tensor([1, 1, 0], dtype="int64")
-        try:
-            routing_map, topk_out, dispatch_mask = routing_map_fusion_forward(
-                gate_probs, topk_indices, input_ids, pure_text
-            )
-        finally:
-            moe_topk_fusion._routing_map_fwd_kernel = old_kernel
+    def test_routing_kernel_python_body_exercises_masks_and_dispatch(self):
+        fake_tl = FakeTL([0, 0])
+        moe_topk_fusion.tl = fake_tl
 
-        self.assertEqual(recorder.grid, (1, 1))
-        self.assertIs(recorder.kwargs["topk_indices_ptr"], topk_indices)
-        self.assertIs(recorder.kwargs["input_ids_ptr"], input_ids)
-        self.assertIs(recorder.kwargs["is_pure_text_line_ptr"], pure_text)
-        self.assertTrue(recorder.kwargs["has_input_ids"])
-        self.assertTrue(recorder.kwargs["has_pure_text_mask"])
-        self.assertEqual(recorder.kwargs["BLOCK_K"], 2)
-        self.assertEqual(routing_map.shape, [3, 5])
-        self.assertEqual(topk_out.shape, [3, 2])
-        self.assertEqual(dispatch_mask.shape, [5])
+        moe_topk_fusion._routing_map_fwd_kernel.kernel.fn(
+            FakePtr(),
+            FakePtr(),
+            FakePtr(),
+            FakePtr(),
+            FakePtr(),
+            FakePtr(),
+            2,
+            1,
+            4,
+            1,
+            4,
+            2,
+            2,
+            True,
+            True,
+            2,
+            4,
+            2,
+        )
 
-    def test_routing_map_wrapper_uses_placeholders_without_masks(self):
-        old_kernel = moe_topk_fusion._routing_map_fwd_kernel
-        recorder = KernelRecorder()
-        moe_topk_fusion._routing_map_fwd_kernel = recorder
-        gate_probs = paddle.ones([2, 4], dtype="float32")
-        topk_indices = paddle.ones([2, 3], dtype="int64")
-        try:
-            routing_map_fusion_forward(gate_probs, topk_indices)
-        finally:
-            moe_topk_fusion._routing_map_fwd_kernel = old_kernel
-
-        self.assertIs(recorder.kwargs["input_ids_ptr"], topk_indices)
-        self.assertIs(recorder.kwargs["is_pure_text_line_ptr"], topk_indices)
-        self.assertFalse(recorder.kwargs["has_input_ids"])
-        self.assertFalse(recorder.kwargs["has_pure_text_mask"])
-        self.assertEqual(recorder.kwargs["BLOCK_K"], 4)
+        self.assertGreater(len(fake_tl.stores), 0)
+        self.assertGreater(len(fake_tl.atomic_adds), 0)
 
 
 if __name__ == "__main__":

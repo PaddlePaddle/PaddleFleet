@@ -27,7 +27,6 @@ rather than an unconstrained bare name.
 import logging
 import os
 import subprocess
-from datetime import datetime
 from pathlib import Path
 
 from setuptools import build_meta as orig  # type: ignore[import-untyped]
@@ -67,7 +66,29 @@ def _generate_version_info() -> str:
     if os.environ.get("PADDLEFLEET_VERSION") is not None:
         final_version = os.environ["PADDLEFLEET_VERSION"]
     else:
-        date_str = datetime.now().strftime("%Y%m%d")
+        commit_short = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short=11", "HEAD"],
+                cwd=_pkg_root,
+            )
+            .strip()
+            .decode("utf-8")
+        )
+        date_str = (
+            subprocess.check_output(
+                [
+                    "git",
+                    "log",
+                    "-1",
+                    "--format=%cd",
+                    "--date=format:%Y%m%d",
+                    "HEAD",
+                ],
+                cwd=_pkg_root,
+            )
+            .strip()
+            .decode("utf-8")
+        )
         branch = (
             subprocess.check_output(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -76,14 +97,6 @@ def _generate_version_info() -> str:
             )
             .decode("utf-8")
             .strip()
-        )
-        commit_short = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--short=11", "HEAD"],
-                cwd=_pkg_root,
-            )
-            .strip()
-            .decode("utf-8")
         )
         if branch.startswith("release/"):
             final_version = f"{version}.post{date_str}+{commit_short}"

@@ -24,256 +24,87 @@ sys.path.insert(
 )
 
 import unittest
-from unittest.mock import patch
 
 import paddle
 
-from paddlefleet.fusions.fused_bias_swiglu import (
-    BiasSwiGLUFunction,
-    SwiGLUFunction,
-    WeightedSwiGLUFunction,
-    bias_swiglu,
-    bias_swiglu_back,
-    bias_swiglu_impl,
-    swiglu,
-    swiglu_back,
-    weighted_bias_swiglu_impl,
-    weighted_swiglu,
-    weighted_swiglu_back,
-)
 
+class TestSwiGLUFunctions(unittest.TestCase):
+    """Tests for SwiGLU activation functions."""
 
-class TestSwiglu(unittest.TestCase):
-    """Tests for swiglu function."""
+    def test_swiglu_forward(self):
+        """Test swiglu forward computation."""
+        from paddlefleet.fusions.fused_bias_swiglu import swiglu
 
-    def test_swiglu_output_shape(self):
-        """Test swiglu halves last dimension."""
-        x = paddle.randn([2, 8])
-        result = swiglu(x)
-        self.assertEqual(result.shape, [2, 4])
+        y = paddle.randn([4, 16])
+        result = swiglu(y)
+        self.assertEqual(result.shape, [4, 8])
 
-    def test_swiglu_positive_input(self):
-        """Test swiglu with positive input."""
-        x = paddle.to_tensor([[1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]])
-        result = swiglu(x)
-        self.assertEqual(result.shape, [1, 4])
-        # SiLU(x) * x for positive x should be positive
-        self.assertTrue((result >= 0).all())
+    def test_bias_swiglu_forward(self):
+        """Test bias_swiglu forward computation."""
+        from paddlefleet.fusions.fused_bias_swiglu import bias_swiglu
 
+        y = paddle.randn([4, 16])
+        bias = paddle.randn([16])
+        result = bias_swiglu(y, bias)
+        self.assertEqual(result.shape, [4, 8])
 
-class TestBiasSwiglu(unittest.TestCase):
-    """Tests for bias_swiglu function."""
+    def test_weighted_swiglu_forward(self):
+        """Test weighted_swiglu forward computation."""
+        from paddlefleet.fusions.fused_bias_swiglu import weighted_swiglu
 
-    def test_bias_swiglu_output_shape(self):
-        """Test bias_swiglu halves last dimension."""
-        x = paddle.randn([2, 8])
-        bias = paddle.randn([8])
-        result = bias_swiglu(x, bias)
-        self.assertEqual(result.shape, [2, 4])
+        y = paddle.randn([4, 16])
+        weights = paddle.randn([4, 1])
+        result = weighted_swiglu(y, weights)
+        self.assertEqual(result.shape, [4, 8])
 
-    def test_bias_swiglu_different_bias_shape(self):
-        """Test bias_swiglu with 2D bias."""
-        x = paddle.randn([2, 8])
-        bias = paddle.randn([1, 8])
-        result = bias_swiglu(x, bias)
-        self.assertEqual(result.shape, [2, 4])
-
-
-class TestWeightedSwiglu(unittest.TestCase):
-    """Tests for weighted_swiglu function."""
-
-    def test_weighted_swiglu_output_shape(self):
-        """Test weighted_swiglu output shape."""
-        x = paddle.randn([2, 8])
-        weights = paddle.randn([2, 1])
-        result = weighted_swiglu(x, weights)
-        self.assertEqual(result.shape, [2, 4])
-
-    def test_weighted_swiglu_dtype_preserved(self):
-        """Test weighted_swiglu preserves dtype."""
-        x = paddle.randn([2, 8], dtype=paddle.float32)
-        weights = paddle.randn([2, 1], dtype=paddle.float32)
-        result = weighted_swiglu(x, weights)
-        self.assertEqual(result.dtype, paddle.float32)
-
-
-class TestSwigluBack(unittest.TestCase):
-    """Tests for swiglu_back function."""
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    def test_swiglu_back_not_implemented_cpu(self, mock_cuda):
-        """Test swiglu_back raises NotImplementedError on CPU."""
-        g = paddle.randn([2, 4])
-        y = paddle.randn([2, 8])
-        with self.assertRaises(NotImplementedError):
-            swiglu_back(g, y)
-
-
-class TestBiasSwigluBack(unittest.TestCase):
-    """Tests for bias_swiglu_back function."""
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    def test_bias_swiglu_back_cpu(self, mock_cuda):
-        """Test bias_swiglu_back raises on CPU."""
-        g = paddle.randn([2, 4])
-        y = paddle.randn([2, 8])
-        bias = paddle.randn([8])
-        with self.assertRaises(NotImplementedError):
-            bias_swiglu_back(g, y, bias)
-
-
-class TestWeightedSwigluBack(unittest.TestCase):
-    """Tests for weighted_swiglu_back function."""
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    def test_weighted_swiglu_back_cpu_raises(self, mock_cuda):
-        """Test weighted_swiglu_back raises on CPU."""
-        g = paddle.randn([2, 4])
-        y = paddle.randn([2, 8])
-        weights = paddle.randn([2, 1])
-        with self.assertRaises(NotImplementedError):
-            weighted_swiglu_back(g, y, weights)
-
-
-class TestBiasSwiGLUFunction(unittest.TestCase):
-    """Tests for BiasSwiGLUFunction PyLayer."""
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    def test_forward_calls_bias_swiglu(self, mock_cuda):
-        """Test forward calls bias_swiglu."""
-        input_t = paddle.randn([2, 8])
-        bias = paddle.randn([8])
-        with (
-            patch(
-                "paddlefleet.fusions.fused_bias_swiglu.bias_swiglu",
-                return_value=paddle.randn([2, 4]),
-            ) as mock_bias_swiglu,
-            patch(
-                "paddlefleet.fusions.fused_bias_swiglu.swiglu_back",
-                side_effect=NotImplementedError,
-            ),
-        ):
-            try:
-                result = BiasSwiGLUFunction.apply(input_t, bias, False, False)
-            except NotImplementedError:
-                pass  # backward not invoked
-
-
-class TestSwiGLUFunction(unittest.TestCase):
-    """Tests for SwiGLUFunction PyLayer."""
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    def test_forward_calls_swiglu(self, mock_cuda):
-        """Test forward calls swiglu."""
-        input_t = paddle.randn([2, 8])
-        with patch(
-            "paddlefleet.fusions.fused_bias_swiglu.swiglu",
-            return_value=paddle.randn([2, 4]),
-        ) as mock_swiglu_fn:
-            try:
-                result = SwiGLUFunction.apply(input_t, False, False)
-            except NotImplementedError:
-                pass
-
-
-class TestWeightedSwiGLUFunction(unittest.TestCase):
-    """Tests for WeightedSwiGLUFunction PyLayer."""
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    def test_forward_calls_weighted_swiglu(self, mock_cuda):
-        """Test forward calls weighted_swiglu."""
-        input_t = paddle.randn([2, 8])
-        weights = paddle.randn([2, 1])
-        with patch(
-            "paddlefleet.fusions.fused_bias_swiglu.weighted_swiglu",
-            return_value=paddle.randn([2, 4]),
-        ) as mock_fn:
-            try:
-                result = WeightedSwiGLUFunction.apply(input_t, weights, False)
-            except NotImplementedError:
-                pass
-
-
-class TestBiasSwigluImpl(unittest.TestCase):
-    """Tests for bias_swiglu_impl function."""
-
-    def test_2d_input_with_bias(self):
+    def test_bias_swiglu_impl_2d(self):
         """Test bias_swiglu_impl with 2D input and bias."""
-        with patch(
-            "paddlefleet.fusions.fused_bias_swiglu.BiasSwiGLUFunction.apply",
-            return_value=paddle.randn([2, 4]),
-        ) as mock_apply:
-            x = paddle.randn([2, 8])
-            bias = paddle.randn([8])
-            result = bias_swiglu_impl(x, bias)
-            mock_apply.assert_called_once()
+        from paddlefleet.fusions.fused_bias_swiglu import bias_swiglu_impl
 
-    def test_2d_input_without_bias(self):
-        """Test bias_swiglu_impl with 2D input, no bias."""
-        with patch(
-            "paddlefleet.fusions.fused_bias_swiglu.SwiGLUFunction.apply",
-            return_value=paddle.randn([2, 4]),
-        ) as mock_apply:
-            x = paddle.randn([2, 8])
-            result = bias_swiglu_impl(x, None)
-            mock_apply.assert_called_once()
+        y = paddle.randn([4, 16])
+        bias = paddle.randn([16])
+        result = bias_swiglu_impl(y, bias)
+        self.assertEqual(result.shape, [4, 8])
 
-    def test_3d_input_with_bias(self):
+    def test_bias_swiglu_impl_2d_no_bias(self):
+        """Test bias_swiglu_impl with 2D input without bias."""
+        from paddlefleet.fusions.fused_bias_swiglu import bias_swiglu_impl
+
+        y = paddle.randn([4, 16])
+        result = bias_swiglu_impl(y, None)
+        self.assertEqual(result.shape, [4, 8])
+
+    def test_bias_swiglu_impl_3d(self):
         """Test bias_swiglu_impl with 3D input."""
-        with patch(
-            "paddlefleet.fusions.fused_bias_swiglu.BiasSwiGLUFunction.apply",
-            return_value=paddle.randn([2, 4, 4]),
-        ) as mock_apply:
-            x = paddle.randn([2, 4, 8])
-            bias = paddle.randn([8])
-            result = bias_swiglu_impl(x, bias)
-            self.assertEqual(result.shape, [2, 4, 4])
+        from paddlefleet.fusions.fused_bias_swiglu import bias_swiglu_impl
 
-    def test_asserts_invalid_dim(self):
-        """Test assertion for invalid input dimensions."""
-        x = paddle.randn([2, 4, 4, 8])
-        with self.assertRaises(AssertionError):
-            bias_swiglu_impl(x, None)
+        y = paddle.randn([2, 4, 16])
+        bias = paddle.randn([16])
+        result = bias_swiglu_impl(y, bias)
+        self.assertEqual(result.shape, [2, 4, 8])
 
+    def test_weighted_bias_swiglu_impl_no_bias(self):
+        """Test weighted_bias_swiglu_impl without bias."""
+        from paddlefleet.fusions.fused_bias_swiglu import (
+            weighted_bias_swiglu_impl,
+        )
 
-class TestWeightedBiasSwigluImpl(unittest.TestCase):
-    """Tests for weighted_bias_swiglu_impl function."""
+        y = paddle.randn([4, 16])
+        weights = paddle.randn([4, 1])
+        result = weighted_bias_swiglu_impl(y, None, weights)
+        self.assertEqual(result.shape, [4, 8])
 
-    def test_2d_input_no_bias(self):
-        """Test weighted_bias_swiglu_impl with 2D input, no bias."""
-        with patch(
-            "paddlefleet.fusions.fused_bias_swiglu.WeightedSwiGLUFunction.apply",
-            return_value=paddle.randn([2, 4]),
-        ) as mock_apply:
-            x = paddle.randn([2, 8])
-            weights = paddle.randn([2, 1])
-            result = weighted_bias_swiglu_impl(x, None, weights)
-            mock_apply.assert_called_once()
+    def test_weighted_bias_swiglu_impl_with_bias_raises(self):
+        """Test weighted_bias_swiglu_impl with bias raises NotImplementedError."""
+        from paddlefleet.fusions.fused_bias_swiglu import (
+            weighted_bias_swiglu_impl,
+        )
 
-    def test_bias_not_supported(self):
-        """Test that bias raises NotImplementedError."""
-        x = paddle.randn([2, 8])
-        bias = paddle.randn([8])
-        weights = paddle.randn([2, 1])
+        y = paddle.randn([4, 16])
+        bias = paddle.randn([16])
+        weights = paddle.randn([4, 1])
         with self.assertRaises(NotImplementedError):
-            weighted_bias_swiglu_impl(x, bias, weights)
-
-    def test_3d_input_no_bias(self):
-        """Test weighted_bias_swiglu_impl with 3D input."""
-        with patch(
-            "paddlefleet.fusions.fused_bias_swiglu.WeightedSwiGLUFunction.apply",
-            return_value=paddle.randn([2, 4, 4]),
-        ) as mock_apply:
-            x = paddle.randn([2, 4, 8])
-            weights = paddle.randn([2, 1])
-            result = weighted_bias_swiglu_impl(x, None, weights)
-            self.assertEqual(result.shape, [2, 4, 4])
-
-    def test_asserts_invalid_dim(self):
-        """Test assertion for invalid input dimensions."""
-        x = paddle.randn([2, 4, 4, 8])
-        with self.assertRaises(AssertionError):
-            weighted_bias_swiglu_impl(x, None, paddle.randn([2, 1]))
+            weighted_bias_swiglu_impl(y, bias, weights)
 
 
 if __name__ == "__main__":

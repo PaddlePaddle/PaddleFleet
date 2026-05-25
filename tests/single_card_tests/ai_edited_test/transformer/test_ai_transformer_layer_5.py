@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 import os
 import sys
 import unittest
@@ -23,6 +24,8 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 import paddle
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
+from paddlefleet.gpt_builders import gpt_builder
+from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.transformer import transformer_layer
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.transformer_layer import (
@@ -33,29 +36,25 @@ from paddlefleet.transformer.transformer_layer import (
 )
 
 
-class Plain:
-    pass
-
-
 class PGCollection:
     tp = None
 
 
-class NonIdentityLayer:
-    def __call__(self, x):
+class NonIdentityLayer(paddle.nn.Layer):
+    def forward(self, x):
         return x + 1.0
 
 
-class UnknownMLP:
+class UnknownMLP(paddle.nn.Layer):
     def set_layer_number(self, layer_number):
         self.layer_number = layer_number
 
-    def __call__(self, x):
+    def forward(self, x):
         return x + 1.0, None
 
 
-class FakeBDA:
-    def __call__(self, training, bias_dropout_fusion):
+class FakeBDA(paddle.nn.Layer):
+    def forward(self, training, bias_dropout_fusion):
         del training, bias_dropout_fusion
 
         def apply(output_with_bias, residual, hidden_dropout_prob):
@@ -74,29 +73,31 @@ class FakeBDA:
         return apply
 
 
-class TupleAttention:
-    def __call__(self, x, **kwargs):
+class TupleAttention(paddle.nn.Layer):
+    def forward(self, x, **kwargs):
         self.kwargs = kwargs
         return x + 2.0, paddle.ones_like(x)
 
 
-class ContextCrossAttention:
-    def __call__(self, x, **kwargs):
+class ContextCrossAttention(paddle.nn.Layer):
+    def forward(self, x, **kwargs):
         self.kwargs = kwargs
         return {"hidden_states": x + 3.0, "context": x + 4.0}
 
 
 class FakeMoEForMlp(MoELayer):
     def __init__(self):
+        paddle.nn.Layer.__init__(self)
         self.calls = []
 
-    def __call__(self, x, input_ids=None):
+    def forward(self, x, input_ids=None):
         self.calls.append(input_ids)
         return x + 2.0, paddle.ones_like(x)
 
 
-class FakeOverlapMLP:
+class FakeOverlapMLP(paddle.nn.Layer):
     def __init__(self):
+        super().__init__()
         self.dispatch_calls = []
 
     def compute_gate(self, hidden_states):
@@ -176,6 +177,40 @@ class FakeScheduleNode:
         return (output_grad,)
 
 
+def build_gpt_model_with_moe():
+    config = GPTConfig(
+        num_hidden_layers=1,
+        hidden_size=8,
+        vocab_size=16,
+        max_sequence_length=8,
+        num_attention_heads=2,
+        intermediate_size=16,
+        n_routed_experts=2,
+        n_shared_experts=0,
+        moe_intermediate_size=16,
+        moe_layer_freq=1,
+        moe_token_dispatcher_type="alltoall",
+        moe_expert_fusion=False,
+        moe_deep_gemm=False,
+        hidden_dropout_prob=0.0,
+        attention_dropout=0.0,
+        init_method=functools.partial(paddle.nn.init.xavier_uniform_, gain=1.0),
+        output_layer_init_method=functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        tie_word_embeddings=False,
+        use_qk_norm=True,
+    )
+    return gpt_builder(config, num_stages=1)
+
+
+def get_gpt_transformer_layer():
+    for layer in build_gpt_model_with_moe().run_function:
+        if isinstance(layer, TransformerLayer):
+            return layer
+    raise AssertionError("GPTModel did not create a TransformerLayer")
+
+
 class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
     def setUp(self):
         self.old_build_spec_layer = transformer_layer.build_spec_layer
@@ -246,7 +281,7 @@ class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
         self.assertEqual(layer.self_attn.init_kwargs["cp_comm_type"], "ring")
 
     def test_forward_attention_context_and_block_residual_branches(self):
-        model = Plain()
+        model = get_gpt_transformer_layer()
         model.recompute_input_layernorm = False
         model.input_layernorm = NonIdentityLayer()
         model.self_attn = TupleAttention()
@@ -255,7 +290,6 @@ class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
         model.cross_attn_bda = FakeBDA()
         model.hidden_dropout_prob = 0.0
         model.training = False
-        model.config = Plain()
         model.config.bias_dropout_fusion = False
         model.layer_number = 5
         model._log_md5 = lambda *args, **kwargs: None
@@ -279,14 +313,13 @@ class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
         )
         TransformerLayer._LOG_LAYER_MD5 = True
         TransformerLayer._gpt_model_use_experimental_version = True
-        model = Plain()
+        model = get_gpt_transformer_layer()
         model.recompute_post_attention_layernorm = False
         model.post_attention_layernorm = NonIdentityLayer()
         model.mlp = FakeMoEForMlp()
         model.mlp_bda = FakeBDA()
         model.hidden_dropout_prob = 0.0
         model.training = False
-        model.config = Plain()
         model.config.bias_dropout_fusion = False
         model.layer_number = 7
         model._log_md5 = lambda *args, **kwargs: None
@@ -314,11 +347,10 @@ class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
         self.assertFalse(block_output.stop_gradient)
 
     def test_forward_impl_tuple_context_and_block_cast_branches(self):
-        model = Plain()
-        model.config = Plain()
+        model = get_gpt_transformer_layer()
         model.config.block_attention_residuals = False
         model.layer_number = 1
-        model.mlp = object()
+        model.mlp = paddle.nn.Identity()
         model.full_recompute = False
         model._log_md5 = lambda *args, **kwargs: None
         model._forward_attention = lambda **kwargs: (
@@ -332,8 +364,7 @@ class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
         )
         self.assertEqual(context.shape, [1, 2])
 
-        forward_model = Plain()
-        forward_model.config = Plain()
+        forward_model = get_gpt_transformer_layer()
         forward_model.config.num_nextn_predict_layers = None
         forward_model.config.block_attention_residuals = False
         forward_model.full_recompute = False
@@ -347,12 +378,11 @@ class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
         )
         self.assertIn("context", result)
 
-        block_model = Plain()
-        block_model.config = Plain()
+        block_model = get_gpt_transformer_layer()
         block_model.config.block_attention_residuals = True
         block_model.layer_number = 1
         block_model.attn_res_block_size = 4
-        block_model.mlp = object()
+        block_model.mlp = paddle.nn.Identity()
         block_model.block_attn_res_before_attention = (
             lambda partial, blocks: partial
         )
@@ -370,13 +400,12 @@ class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
         self.assertEqual(block_output.shape, [1, 2])
 
     def test_overlap_helper_methods_drive_moe_paths(self):
-        model = Plain()
+        model = get_gpt_transformer_layer()
         model.mlp = FakeOverlapMLP()
         model.post_attention_layernorm = NonIdentityLayer()
         model.mlp_bda = FakeBDA()
         model.training = False
         model.hidden_dropout_prob = 0.0
-        model.config = Plain()
         model.config.bias_dropout_fusion = False
         model._forward_attention = lambda **kwargs: (
             kwargs["hidden_states"] + 1.0,
