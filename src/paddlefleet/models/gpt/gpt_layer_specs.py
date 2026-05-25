@@ -56,11 +56,23 @@ from paddlefleet.transformer.block_attn_res import (
     BlockAttnRes,
     BlockAttnResSublayersSpec,
 )
+from paddlefleet.transformer.csa_attention import (
+    CompressedSparseAttention,
+    CompressedSparseAttentionSublayersSpec,
+    Compressor,
+    CompressorSublayersSpec,
+    CSAIndexer,
+    CSAIndexerSublayersSpec,
+)
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexer,
     DSAIndexerSublayersSpec,
     DSAttention,
     DSAttentionSublayersSpec,
+)
+from paddlefleet.transformer.dsv4_hybrid_attention import (
+    DSv4HybridSelfAttention,
+    DSv4HybridSelfAttentionSublayersSpec,
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.gated_delta_net import (
@@ -98,6 +110,7 @@ def get_attention_spec(
     config: TransformerConfig,
     attention_layer_type: str,
     attn_mask_type: AttnMaskType = AttnMaskType.causal,
+    is_mtp_layer: bool = False,
 ) -> LayerSpec:
     """Build the self_attn LayerSpec based on attention_layer_type.
 
@@ -230,6 +243,60 @@ def get_attention_spec(
                 else None,
             ),
         )
+    elif attention_layer_type == "dsv4_hybrid_attention":
+        # Build nested CSA spec tree matching Megatron's structure
+        compressor_spec = LayerSpec(
+            layer=Compressor,
+            sublayers_spec=CompressorSublayersSpec(
+                linear_wkv=backend.linear(),
+                linear_wgate=backend.linear(),
+                norm=backend.layer_norm(rms_norm=True, for_qk=False),
+            ),
+        )
+
+        indexer_spec = LayerSpec(
+            layer=CSAIndexer,
+            sublayers_spec=CSAIndexerSublayersSpec(
+                linear_wq_b=backend.linear(),
+                linear_weights_proj=backend.linear(),
+                compressor=compressor_spec,
+            ),
+        )
+
+        core_attention_spec = LayerSpec(
+            layer=CompressedSparseAttention,
+            sublayers_spec=CompressedSparseAttentionSublayersSpec(
+                compressor=compressor_spec,
+                indexer=indexer_spec,
+            ),
+        )
+
+        # DSA indexer requires normalized q as input, so here we cannot fuse
+        # qk layernorm with linear projection and have to use unfused qk layernorm.
+        qk_norm = (
+            backend.layer_norm(
+                rms_norm=config.normalization == "RMSNorm", for_qk=True
+            )
+            if getattr(config, "qk_layernorm", True)
+            else IdentityOp
+        )
+
+        return LayerSpec(
+            layer=DSv4HybridSelfAttention,
+            extra_kwargs={
+                "attn_mask_type": attn_mask_type,
+                "is_mtp_layer": is_mtp_layer,
+            },
+            sublayers_spec=DSv4HybridSelfAttentionSublayersSpec(
+                linear_q_down_proj=backend.linear(),
+                linear_q_up_proj=backend.column_parallel_linear(),
+                linear_kv_proj=backend.column_parallel_linear(),
+                core_attention=core_attention_spec,
+                o_proj=backend.row_parallel_linear(),
+                q_layernorm=qk_norm,
+                kv_layernorm=qk_norm,
+            ),
+        )
     else:
         raise ValueError(
             f"Unknown attention_layer_type: {attention_layer_type!r}. "
@@ -248,6 +315,7 @@ def get_gpt_layer_local_spec(
     layer_number: int | None = 1,
     attention_layer_type: str = "self_attention",
     attn_mask_type: AttnMaskType = AttnMaskType.causal,
+    is_mtp_layer: bool = False,
 ) -> LayerSpec:
     """Use this spec for an implementation using only layers in Fleet-Core.
 
@@ -289,17 +357,37 @@ def get_gpt_layer_local_spec(
             ),
         )
     transformer_cls = getattr(config, "specific_layer", TransformerLayer)
+
+    # mHC: use HyperConnectionTransformerLayer when enabled
+    if config is not None and config.enable_hyper_connections:
+        from paddlefleet.transformer.transformer_layer import (
+            HyperConnectionTransformerLayer,
+        )
+
+        transformer_cls = HyperConnectionTransformerLayer
+
     if paddle.distributed.is_initialized():
         use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
             "pp_configs"
         ].forward_backward_overlap_scheduler
         if use_overlap:
+            assert not config.enable_hyper_connections, (
+                "HyperConnectionTransformerLayer not supported for overlap."
+            )
             assert transformer_cls.__name__ == TransformerLayer.__name__, (
                 "Only base TransformerLayer can be overlapped."
             )
             transformer_cls = TransformerLayerWithOverlap
-
-    if multi_latent_attention:
+    exp_variant = getattr(config, "experimental_attention_variant", None)
+    if exp_variant == "dsv4_hybrid":
+        # Route to DSv4 Hybrid if configured
+        self_attn_spec = get_attention_spec(
+            config=config,
+            attention_layer_type="dsv4_hybrid_attention",
+            attn_mask_type=AttnMaskType.causal,
+            is_mtp_layer=is_mtp_layer,
+        )
+    elif multi_latent_attention:
         self_attn_spec = get_attention_spec(
             config=config,
             attention_layer_type="multi_latent_attention",
@@ -312,13 +400,26 @@ def get_gpt_layer_local_spec(
             attn_mask_type=attn_mask_type,
         )
 
+    # mHC: build HC LayerSpec for sublayers_spec
+    self_attention_hc_spec = IdentityOp
+    mlp_hc_spec = IdentityOp
+    if config is not None and config.enable_hyper_connections:
+        from paddlefleet.transformer.hyper_connection import (
+            HyperConnectionModule,
+        )
+
+        self_attention_hc_spec = LayerSpec(layer=HyperConnectionModule)
+        mlp_hc_spec = LayerSpec(layer=HyperConnectionModule)
+
     return LayerSpec(
         layer=transformer_cls,
         sublayers_spec=TransformerLayerSublayersSpec(
             input_layernorm=layer_norm,
+            self_attention_hyper_connection=self_attention_hc_spec,
             self_attn=self_attn_spec,
             self_attn_bda=get_bias_dropout_add,
             post_attention_layernorm=layer_norm,
+            mlp_hyper_connection=mlp_hc_spec,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
             block_attn_res=block_attn_res,
@@ -458,40 +559,39 @@ def get_gpt_mtp_layers_spec_for_backend(
 ) -> list[LayerSpec]:
     assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
 
-    if config.use_dense_mtp and config.n_routed_experts is not None:
-        # When use_dense_mtp is enabled, build a dense transformer layer spec
-        # (num_experts=None) for MTP layers instead of copying the MoE decoder layer.
-        transformer_layer_spec = get_gpt_layer_local_spec(
-            config=config,
-            num_experts=None,
-            moe_expert_fusion=False,
-            use_qk_norm=config.use_qk_norm,
-            multi_latent_attention=config.multi_latent_attention,
-            normalization=config.normalization,
-        )
-    else:
-        transformer_layer_spec = spec[-1]
-
-    mtp_layer_spec_func = partial(
-        get_mtp_layer_spec_for_backend,
-        config=config,
-        transformer_layer_spec=transformer_layer_spec,
-        backend=backend,
-    )
-
     if config.mtp_num_layers > 0:
         mtp_num_layers = config.mtp_num_layers
     else:
-        mtp_num_layers = (
-            config.num_nextn_predict_layers
-            if config.num_nextn_predict_layers
-            else 0
-        )
+        mtp_num_layers = config.num_nextn_predict_layers or 0
 
     mtp_layer_specs = []
     for i in range(mtp_num_layers):
-        mtp_layer_specs.append(mtp_layer_spec_func(layer_number=i))
+        if config.use_dense_mtp and config.n_routed_experts is not None:
+            num_experts = None
+            moe_expert_fusion = False
+        else:
+            num_experts = config.n_routed_experts
+            moe_expert_fusion = config.moe_expert_fusion
 
+        transformer_layer_spec = get_gpt_layer_local_spec(
+            config=config,
+            num_experts=num_experts,
+            moe_expert_fusion=moe_expert_fusion,
+            use_qk_norm=config.use_qk_norm,
+            multi_latent_attention=config.multi_latent_attention,
+            normalization=config.normalization,
+            layer_number=i,
+            is_mtp_layer=True,
+        )
+
+        mtp_layer_specs.append(
+            get_mtp_layer_spec_for_backend(
+                config=config,
+                transformer_layer_spec=transformer_layer_spec,
+                backend=backend,
+                layer_number=i,
+            )
+        )
     return mtp_layer_specs
 
 
@@ -649,6 +749,13 @@ def get_gpt_spec(
     norm_input_parallel = (
         config.sequence_parallel and config.tensor_model_parallel_size > 1
     )
+
+    if config.enable_hyper_connections:
+        from paddlefleet.transformer.hyper_connection import (
+            HyperConnectionContractLayer,
+            HyperConnectionExpandLayer,
+        )
+
     return LayerSpec(
         layer=GPTModel,
         extra_kwargs={
@@ -662,7 +769,19 @@ def get_gpt_spec(
                 extra_kwargs=embedding_extra_kwargs,
             ),
             head_empty_layers=head_empty_layers_spec,
+            mhc_expand=LayerSpec(
+                layer=HyperConnectionExpandLayer,
+                extra_kwargs={"config": config},
+            )
+            if config.enable_hyper_connections
+            else None,
             transformer_layers=transformer_layers_spec,
+            mhc_contract=LayerSpec(
+                layer=HyperConnectionContractLayer,
+                extra_kwargs={"config": config},
+            )
+            if config.enable_hyper_connections
+            else None,
             tail_empty_layers=tail_empty_layers_spec,
             mtp=mtp_layers_spec,
             mtp_lm_head=mtp_lm_head_spec,

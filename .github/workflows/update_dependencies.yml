@@ -12,8 +12,12 @@ permissions:
 jobs:
   update-lockfile:
     if: github.repository == 'PaddlePaddle/PaddleFleet'
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Free Disk Space (Ubuntu)
         uses: BRAINSia/free-disk-space@f9f59b0ef974ff4b873aa243ce5278ab644eedc6
         with:

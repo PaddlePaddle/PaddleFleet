@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 import os
 import sys
 
@@ -24,10 +25,12 @@ sys.path.insert(
 )
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import paddle
 
+from paddlefleet.gpt_builders import gpt_builder
+from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSublayersSpec,
@@ -35,19 +38,35 @@ from paddlefleet.transformer.transformer_layer import (
 )
 
 
-def _make_layer(**attrs):
-    """Create TransformerLayer with mocked __init__ and bypass nn.Layer __setattr__."""
-    with patch.object(
-        TransformerLayer, "__init__", lambda self, *a, **kw: None
-    ):
-        layer = TransformerLayer.__new__(TransformerLayer)
-        object.__setattr__(layer, "_sub_layers", {})
-        object.__setattr__(layer, "_parameters", {})
-        object.__setattr__(layer, "_buffers", {})
-        object.__setattr__(layer, "_non_persistable_buffers", set())
-        for k, v in attrs.items():
-            object.__setattr__(layer, k, v)
-        return layer
+def _make_layer():
+    config = GPTConfig(
+        num_hidden_layers=1,
+        hidden_size=8,
+        vocab_size=16,
+        max_sequence_length=8,
+        num_attention_heads=2,
+        intermediate_size=16,
+        n_routed_experts=2,
+        n_shared_experts=0,
+        moe_intermediate_size=16,
+        moe_layer_freq=1,
+        moe_token_dispatcher_type="alltoall",
+        moe_expert_fusion=False,
+        moe_deep_gemm=False,
+        hidden_dropout_prob=0.0,
+        attention_dropout=0.0,
+        init_method=functools.partial(paddle.nn.init.xavier_uniform_, gain=1.0),
+        output_layer_init_method=functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        tie_word_embeddings=False,
+        use_qk_norm=True,
+    )
+    model = gpt_builder(config, num_stages=1)
+    for layer in model.run_function:
+        if isinstance(layer, TransformerLayer):
+            return layer
+    raise AssertionError("GPTModel did not create a TransformerLayer")
 
 
 class TestTensorsCloneEdgeCases(unittest.TestCase):
@@ -124,7 +143,7 @@ class TestTransformerLayerFP8Quant(unittest.TestCase):
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         layer = _make_layer()
-        object.__setattr__(layer, "mlp", MagicMock(spec=MoELayer))
+        layer.mlp = MagicMock(spec=MoELayer)
         layer.fp8_quant_weight(batch_mode=True, quant_transpose=False)
         layer.mlp.fp8_quant_weight.assert_called_once_with(
             batch_mode=True, quant_transpose=False
@@ -139,7 +158,7 @@ class TestTransformerLayerUseFP8(unittest.TestCase):
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         layer = _make_layer()
-        object.__setattr__(layer, "mlp", MagicMock(spec=MoELayer))
+        layer.mlp = MagicMock(spec=MoELayer)
         layer.mlp.use_fp8.return_value = True
         self.assertTrue(layer.use_fp8())
 

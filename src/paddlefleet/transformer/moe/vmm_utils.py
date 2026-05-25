@@ -39,18 +39,32 @@ def vmm_free_and_growable_block_info() -> list[tuple[int, int]]:
     free_blocks = [(size, addr) for size, addr, free in all_blocks if free]
 
     # 堆顶可增长空间即是: 配置的reserved上限 - 当前已reserved的总量
-    growable = max(max_reserved - paddle.cuda.memory_reserved(), 0)
+    growable = max_reserved - paddle.cuda.memory_reserved()
+
+    if not all_blocks:
+        return [(growable, 0)] if growable > 0 else []
+
+    heap_top = all_blocks[-1][1] + all_blocks[-1][0]
+    heap_limit = heap_top + growable
 
     # 如果最后一个 block 是空闲的，将其与 growable 合并；否则将 growable 单独作为一个 block
     if growable > 0:
-        if not all_blocks:
-            return [(growable, 0)]
         if all_blocks[-1][2]:
             size, addr = free_blocks[-1]
             free_blocks[-1] = (size + growable, addr)
         else:
             size, addr, _ = all_blocks[-1]
             free_blocks.append((growable, size + addr))
+
+    # 移除超过堆大小限制的 block，即使能分配也不使用
+    while free_blocks:
+        size, addr = free_blocks[-1]
+        if addr >= heap_limit:
+            free_blocks.pop()
+            continue
+        if addr + size > heap_limit:
+            free_blocks[-1] = (heap_limit - addr, addr)
+        break
 
     free_blocks.sort()
     return free_blocks

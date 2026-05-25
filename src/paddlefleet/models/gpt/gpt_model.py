@@ -134,7 +134,9 @@ class GPTSublayersSpec:
 
     embedding: LayerSpec | None = None
     head_empty_layers: list[LayerSpec] | None = None
+    mhc_expand: LayerSpec | None = None
     transformer_layers: list[LayerSpec] | None = None
+    mhc_contract: LayerSpec | None = None
     tail_empty_layers: list[LayerSpec] | None = None
     mtp: list[LayerSpec] | None = None
     layer_norm: LayerSpec | None = None
@@ -244,6 +246,12 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(head_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
+
+        if spec.mhc_expand is not None:
+            self.add_sequential_layer(
+                layers, LayerDesc(spec.mhc_expand), f"{name_prefix}.mhc_expand"
+            )
+
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
                 layers,
@@ -251,6 +259,13 @@ class GPTModel(PipelineLayer):
                 f"{name_prefix}.layers.{i}",
             )
             i += 1
+
+        if spec.mhc_contract is not None:
+            self.add_sequential_layer(
+                layers,
+                LayerDesc(spec.mhc_contract),
+                f"{name_prefix}.mhc_contract",
+            )
 
         # Always place layer_norm after transformer_layers and before tail_empty_layers/MTP,
         # so that the model structure is consistent regardless of whether MTP is enabled.

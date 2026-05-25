@@ -247,12 +247,13 @@ class StandardMoERouter(nn.Layer):
                 f"seq_aux is True but routing_type is {self.routing_type}. Please check."
             )
 
-        # According to the shape of gate weights in model checkpoint
+        # Initialize gate weight with Normal distribution aligned with Megatron.
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
             dtype="float32",
-            default_initializer=paddle.nn.initializer.Uniform(),
+            default_initializer=paddle.nn.initializer.Constant(0.0),
         )
+        config.init_method(self.weight)
 
         if self.routed_scaling_factor_learnable:
             self.routed_scaling_factor_param = self.create_parameter(
