@@ -190,6 +190,16 @@ class TransformerConfig(ModelParallelConfig):
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
     first half and second half (LLaMa style). Default to False."""
 
+    attention_value_scale: float = None
+    add_full_attention_sink_bias: bool = False
+    add_swa_attention_sink_bias: bool = True
+
+    swa_head_dim: int = 192
+    swa_v_head_dim: int = 128
+    swa_num_attention_heads: int = 64
+    swa_num_key_value_heads: int = 8
+    swa_rope_theta: float = 10000
+
     multi_latent_attention: bool = False
     """Whether to use multi-latent attention."""
 
@@ -204,6 +214,9 @@ class TransformerConfig(ModelParallelConfig):
     """Frequency of full attention layers among sliding window attention layers. Accepts either:
     - An integer N: Represents a (N-1):1 ratio, one full attention layer after (N-1) SWA layers.
     - A list that defines a custom pattern, e.g.: [1,1,1,1,0,0,0,0], where 1 represents SWA. """
+
+    head_wise_swa_ratio: float = 0.0
+    """Headwise sliding_window ratio"""
 
     calculate_per_token_loss: bool = False
     """Whether cross entropy loss is calculated over the actual number of non-padded tokens in the
@@ -983,6 +996,20 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "mhc_recompute_layer_num must be a positive integer."
                 )
+
+        if self.sliding_window is not None and self.multi_latent_attention:
+            raise ValueError(
+                "sliding_window and multi_latent_attention cannot be used at the same time."
+            )
+
+        if (
+            self.multi_latent_attention
+            and self.apply_rope_fusion
+            and self.rope_type != "yarn"
+        ):
+            raise ValueError(
+                "apply_rope_fusion for MLA only works with YARN RoPE."
+            )
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
