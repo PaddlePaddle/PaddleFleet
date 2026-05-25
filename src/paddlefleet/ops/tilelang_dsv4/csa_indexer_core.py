@@ -1,9 +1,49 @@
+import hashlib
+import json
+import os
+
 import paddle
 
 from .compat import enable_tilelang_paddle_compat_before_import, paddle_tilelang_compat_guard
 
 
 DEFAULT_INDEXER_BLOCK = 32
+_DIGEST_COUNTERS = {}
+
+
+def _digest_enabled():
+    return os.getenv("DSV4_TILELANG_DIGEST", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _digest_limit():
+    try:
+        return int(os.getenv("DSV4_TILELANG_DIGEST_LIMIT", "40"))
+    except ValueError:
+        return 40
+
+
+def _tensor_digest(name, tensor):
+    tensor_f32 = tensor.detach().cast("float32").cpu()
+    array = tensor_f32.numpy()
+    return {
+        "name": name,
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype),
+        "sha256": hashlib.sha256(array.tobytes()).hexdigest(),
+        "sum_f32": float(array.sum()),
+        "max_abs_f32": float(abs(array).max()) if array.size else 0.0,
+    }
+
+
+def _digest_log(op, **tensors):
+    if not _digest_enabled():
+        return
+    count = _DIGEST_COUNTERS.get(op, 0)
+    if count >= _digest_limit():
+        return
+    _DIGEST_COUNTERS[op] = count + 1
+    payload = {"op": op, "call": count, "tensors": [_tensor_digest(name, tensor) for name, tensor in tensors.items()]}
+    print("[TileLangDigest] " + json.dumps(payload, sort_keys=True), flush=True)
 
 
 def _get_csa_indexer_topk_fwd_interface():
@@ -253,6 +293,7 @@ def tilelang_csa_compressed_indexer_bwd_paddle(
             f"grad_q={_shape(grad_q)}, grad_weights={_shape(grad_weights)}, grad_k_comp={_shape(grad_k_comp)}"
         )
     # Same Paddle-in-Paddle-out strict contract as the forward wrapper.
+    _digest_log("csa_indexer_bwd", grad_q=grad_q, grad_weights=grad_weights, grad_k_comp=grad_k_comp)
     if _is_paddle_tensor(index_q) and (
         not _is_paddle_tensor(grad_q)
         or not _is_paddle_tensor(grad_weights)
