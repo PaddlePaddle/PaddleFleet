@@ -202,6 +202,7 @@ class MLP(FleetLayer):
                         bias_parallel,
                         per_token_scale.unsqueeze(-1),
                         self.config.activation_func_fp8_input_store,
+                        self.config.activation_func_clamp_value,
                     )
                 elif (
                     self.hidden_act == quick_gelu

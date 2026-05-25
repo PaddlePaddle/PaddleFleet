@@ -142,6 +142,7 @@ class MoELayer(nn.Layer):
         config: TransformerConfig,
         sublayers: MoESublayers | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        layer_number: int | None = None,
     ):
         super().__init__()
         self.config = config
@@ -755,6 +756,7 @@ class MoELayer(nn.Layer):
                     moe_subbatch_diag=self.moe_subbatch_diag,
                     use_ue8m0=self.use_ue8m0,
                     dw_p2p_overlap=self.dw_p2p_overlap,
+                    clamp_value=self.config.activation_func_clamp_value,
                 )
 
         with profile("combine"):
@@ -799,6 +801,7 @@ class MoELayer(nn.Layer):
             fp8_dispatched_handle=fp8_dispatched_handle,
             is_first_fwd=is_first_fwd,
             dw_p2p_overlap=self.dw_p2p_overlap,
+            clamp_value=self.config.activation_func_clamp_value,
         )
 
     def dispatch_preprocess(self, args):
@@ -896,6 +899,7 @@ class MoELayer(nn.Layer):
                     moe_subbatch_diag=self.moe_subbatch_diag,
                     use_ue8m0=self.use_ue8m0,
                     dw_p2p_overlap=self.dw_p2p_overlap,
+                    clamp_value=self.config.activation_func_clamp_value,
                 )
 
             if is_first_fwd:
@@ -1336,4 +1340,6 @@ class MoELayer(nn.Layer):
         assert hasattr(self.gate, "set_layer_number"), (
             "expect gate has method 'set_layer_number'"
         )
+        # Hash routing activation (moe_n_hash_layers) is decided by the router
+        # itself based on layer_number. See TopKRouter._setup_hash_layer.
         self.gate.set_layer_number(layer_number)

@@ -17,68 +17,90 @@ import paddle.nn.functional as F
 from paddle.nn.functional import swiglu
 
 
-def fused_swiglu_scale_forward(x, scale):
+def fused_swiglu_scale_forward(x, scale, clamp_value=None):
     if paddle.is_compiled_with_cuda():
-        from paddlefleet_ops import fused_swiglu_scale
+        if clamp_value is not None:
+            from paddlefleet_ops import fused_swiglu_scale_clamp
 
-        return fused_swiglu_scale(x, scale)
+            return fused_swiglu_scale_clamp(x, scale, float(clamp_value))
+        else:
+            from paddlefleet_ops import fused_swiglu_scale
+
+            return fused_swiglu_scale(x, scale)
+
+    # ----------------------------
+    # XPU / CPU fallback
+    # ----------------------------
+    if clamp_value is not None:
+        hidden = x.shape[-1] // 2
+        gate = paddle.clip(x[..., :hidden], max=clamp_value)
+        val = paddle.clip(x[..., hidden:], min=-clamp_value, max=clamp_value)
+        out = F.silu(gate) * val
     else:
         out = swiglu(x)
 
-        # scale broadcast
-        scale_exp = scale.cast(x.dtype)
-        while scale_exp.ndim < out.ndim:
-            scale_exp = scale_exp.unsqueeze(-1)
+    scale_exp = scale.cast(x.dtype)
+    while scale_exp.ndim < out.ndim:
+        scale_exp = scale_exp.unsqueeze(-1)
 
-        return out * scale_exp
+    return out * scale_exp
 
 
-def fused_swiglu_scale_backward(x, scale, out_grad):
+def fused_swiglu_scale_backward(x, scale, out_grad, clamp_value=None):
     if paddle.is_compiled_with_cuda():
-        from paddlefleet_ops import fused_swiglu_scale_bwd
+        if clamp_value is not None:
+            from paddlefleet_ops import fused_swiglu_scale_clamp_bwd
 
-        return fused_swiglu_scale_bwd(x, scale, out_grad)
+            return fused_swiglu_scale_clamp_bwd(
+                x, scale, out_grad, float(clamp_value)
+            )
+        else:
+            from paddlefleet_ops import fused_swiglu_scale_bwd
+
+            return fused_swiglu_scale_bwd(x, scale, out_grad)
+
+    # ----------------------------
+    # XPU / CPU fallback
+    # ----------------------------
+    hidden = x.shape[-1] // 2
+
+    gate_raw = x[..., :hidden]
+    val_raw = x[..., hidden:]
+
+    if clamp_value is not None:
+        gate = paddle.clip(gate_raw, max=clamp_value)
+        val = paddle.clip(val_raw, min=-clamp_value, max=clamp_value)
+        g_mask = (gate_raw <= clamp_value).cast(x.dtype)
+        v_mask = ((val_raw <= clamp_value) & (val_raw >= -clamp_value)).cast(
+            x.dtype
+        )
     else:
-        # ----------------------------
-        # XPU / CPU fallback
-        # ----------------------------
-        hidden = x.shape[-1] // 2
+        gate = gate_raw
+        val = val_raw
+        g_mask = None
+        v_mask = None
 
-        gate = x[..., :hidden]
-        val = x[..., hidden:]
+    sig = F.sigmoid(gate).cast(x.dtype)
+    silu = gate * sig
+    swiglu_val = silu * val
 
-        sig = F.sigmoid(gate).cast(x.dtype)
-        silu = gate * sig
-        swiglu = silu * val
+    scale_exp = scale.cast(x.dtype)
+    while scale_exp.ndim < out_grad.ndim:
+        scale_exp = scale_exp.unsqueeze(-1)
 
-        # scale broadcast
-        scale_exp = scale.cast(x.dtype)
-        while scale_exp.ndim < out_grad.ndim:
-            scale_exp = scale_exp.unsqueeze(-1)
+    d_u = out_grad * scale_exp
 
-        d_u = out_grad * scale_exp
+    d_val = d_u * silu
+    d_gate = d_u * val * sig * (1.0 + gate * (1.0 - sig))
 
-        # ----------------------------
-        # dv
-        # ----------------------------
-        d_val = d_u * silu
+    if clamp_value is not None:
+        d_val = d_val * v_mask
+        d_gate = d_gate * g_mask
 
-        # ----------------------------
-        # dg
-        # ----------------------------
-        d_gate = d_u * val * sig * (1.0 + gate * (1.0 - sig))
+    d_x = paddle.concat([d_gate, d_val], axis=-1).cast(x.dtype)
 
-        # ----------------------------
-        # d_x concat back
-        # ----------------------------
-        d_x = paddle.concat([d_gate, d_val], axis=-1).cast(x.dtype)
+    d_scale = paddle.sum(
+        out_grad.cast(paddle.float32) * swiglu_val.cast(paddle.float32), axis=-1
+    ).cast(scale.dtype)
 
-        # ----------------------------
-        # d_scale
-        # sum(dout * swiglu) over hidden dim
-        # ----------------------------
-        d_scale = paddle.sum(
-            out_grad.cast(paddle.float32) * swiglu.cast(paddle.float32), axis=-1
-        ).cast(scale.dtype)
-
-        return d_x, d_scale
+    return d_x, d_scale
