@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import time
 
@@ -53,6 +55,41 @@ def _profile_log(phase, elapsed_ms=None, **kwargs):
         fields.append(f"elapsed_ms={elapsed_ms:.3f}")
     fields.extend(f"{key}={value}" for key, value in kwargs.items())
     print("[TileLangProfile] " + " ".join(fields), flush=True)
+
+
+def _digest_enabled():
+    return os.getenv("DSV4_TILELANG_DIGEST", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _digest_limit():
+    try:
+        return int(os.getenv("DSV4_TILELANG_DIGEST_LIMIT", "40"))
+    except ValueError:
+        return 40
+
+
+def _tensor_digest(name, tensor):
+    tensor_f32 = tensor.detach().cast("float32").cpu()
+    array = tensor_f32.numpy()
+    return {
+        "name": name,
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype),
+        "sha256": hashlib.sha256(array.tobytes()).hexdigest(),
+        "sum_f32": float(array.sum()),
+        "max_abs_f32": float(abs(array).max()) if array.size else 0.0,
+    }
+
+
+def _digest_log(op, **tensors):
+    if not _digest_enabled():
+        return
+    count = _PROFILE_COUNTERS.get(f"digest:{op}", 0)
+    if count >= _digest_limit():
+        return
+    _PROFILE_COUNTERS[f"digest:{op}"] = count + 1
+    payload = {"op": op, "call": count, "tensors": [_tensor_digest(name, tensor) for name, tensor in tensors.items()]}
+    print("[TileLangDigest] " + json.dumps(payload, sort_keys=True), flush=True)
 
 
 def _topk_invalid_ratio(topk_idxs):
@@ -283,10 +320,14 @@ class TileLangCompressedSparseAttentionPaddleCompatPyLayer(paddle.autograd.PyLay
                 lse,
                 ctx.softmax_scale,
             )
+        dq = dq.reshape(query.shape)
+        dkv = dkv.reshape(kv_full.shape)
+        d_attn_sink = d_attn_sink.reshape(attn_sink.shape).cast(ctx.attn_sink_dtype)
+        _digest_log("sparse_mla_bwd", dq=dq, dkv=dkv, d_attn_sink=d_attn_sink)
         return (
-            dq.reshape(query.shape),
-            dkv.reshape(kv_full.shape),
-            d_attn_sink.reshape(attn_sink.shape).cast(ctx.attn_sink_dtype),
+            dq,
+            dkv,
+            d_attn_sink,
             None,
         )
 
