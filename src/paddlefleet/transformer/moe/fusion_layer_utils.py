@@ -683,12 +683,73 @@ class MlpNode:
 
     # ==================== forward methods ====================
 
+    def _ensure_weight_grad(self):
+        """Pre-allocate weight grads so VMM free-memory query reflects true availability."""
+        if self.experts is not None:
+            for expert in self.experts:
+                if expert is None:
+                    continue
+                for weight in (
+                    expert.up_gate_proj.weight,
+                    expert.down_proj.weight,
+                ):
+                    grad_attr = (
+                        "main_grad" if hasattr(weight, "main_grad") else "grad"
+                    )
+                    if getattr(weight, grad_attr) is None:
+                        setattr(
+                            weight,
+                            grad_attr,
+                            paddle.zeros(weight.shape, dtype=paddle.float32),
+                        )
+            return
+
+        # deep_gemm: stacked weight
+        nodes = self.experts_group_gemm_node
+        if isinstance(nodes, list):
+            first_sliced = getattr(nodes[0], "grouped_gemm_experts", None)
+            if first_sliced is None or not hasattr(first_sliced, "_parent"):
+                return
+            parent = first_sliced._parent
+        else:
+            parent = getattr(nodes, "grouped_gemm_experts", None)
+            if parent is None:
+                return
+
+        for attr in ("weight1", "weight2"):
+            pw = getattr(parent, attr)
+            grad_attr = "main_grad" if hasattr(pw, "main_grad") else "grad"
+            if getattr(pw, grad_attr) is None:
+                setattr(
+                    pw, grad_attr, paddle.zeros(pw.shape, dtype=paddle.float32)
+                )
+
+    def _slice_weight_grad(self):
+        """Set up grad views on sliced weights pointing back to parent grad."""
+        for gemm_node in self.experts_group_gemm_node:
+            sliced = getattr(gemm_node, "grouped_gemm_experts", None)
+            if sliced is None or not hasattr(sliced, "_parent"):
+                continue
+            parent = sliced._parent
+            lid = sliced._local_id
+            for attr in ("weight1", "weight2"):
+                pw = getattr(parent, attr)
+                sw = getattr(sliced, attr)
+                grad_attr = "main_grad" if hasattr(pw, "main_grad") else "grad"
+                if getattr(sw, grad_attr, None) is None:
+                    setattr(
+                        sw,
+                        grad_attr,
+                        getattr(pw, grad_attr)._slice(lid, lid + 1),
+                    )
+
     def fallback_to_no_expert_fusion(self):
         """
-        从 expert_fusion=True 回退到 False 模式，将融合的 experts_group_gemm_node 拆成逐专家节点。
+        Fallback from expert_fusion=True to per-expert mode, splitting the fused
+        experts_group_gemm_node into individual per-expert nodes.
 
-        当 auto_subbatch 检测到显存不足以一次做 group_gemm 时调用，通过 copy.copy
-        浅拷贝出每个专家的独立 gemm_node，并将前向保存的 input_fp8/o1 按专家切片。
+        Called by auto_subbatch when free memory is insufficient for a single group_gemm.
+        Shallow-copies the fused node for each expert and slices forward-saved tensors.
         """
         fused_gemm_node = self.experts_group_gemm_node
         self.experts_group_gemm_node = []
@@ -700,11 +761,29 @@ class MlpNode:
             global_expert_id = self._global_expert_id(local_id)
             gemm_node = copy.copy(fused_gemm_node)
             gemm_node.is_split_group_gemm = True
-            gemm_node.moe_expert_fusion = False
             gemm_node.recompute_moe_gate_up = fused_gemm_node.o1 is None
-            gemm_node.experts = [self.experts[global_expert_id]]
             gemm_node.expert_id = global_expert_id
             gemm_node.tokens_per_expert = [tokens_per_expert]
+
+            if self.experts is not None:
+                # Non deep_gemm: per-expert weight list
+                gemm_node.moe_expert_fusion = False
+                gemm_node.experts = [self.experts[global_expert_id]]
+            else:
+                # deep_gemm: slice stacked weight to [1, K, N]
+                gemm_node.moe_expert_fusion = True
+                parent = fused_gemm_node.grouped_gemm_experts
+                sliced = type("_SlicedGroupedExpert", (), {})()
+                sliced.weight1 = parent.weight1._slice(local_id, local_id + 1)
+                sliced.weight2 = parent.weight2._slice(local_id, local_id + 1)
+                sliced._parent = parent
+                sliced._local_id = local_id
+                gemm_node.grouped_gemm_experts = sliced
+                # Regenerate m_indices for single expert; global m_indices has wrong range
+                gemm_node.m_indices = gemm_node.gen_m_indices(
+                    [tokens_per_expert]
+                )
+
             self.experts_group_gemm_node.append(gemm_node)
 
             start_idx = self.token_offsets[local_id]
@@ -726,11 +805,16 @@ class MlpNode:
     @contextlib.contextmanager
     def slice_fp8_weight(self, expert_id):
         """
-        当初始为 expert_fusion=True 但回退到逐专家时，临时切片当前专家的 fp8_weight/scale。
+        Temporarily slice FP8 stacked weights for a single expert during per-expert fallback.
 
-        expert_fusion=True 时 FP8 权重以 stacked 形式存在 experts[0] 上（所有专家堆叠），
-        回退后每个专家需要独立的权重切片。此上下文管理器临时设置并在退出时恢复/清理。
+        When expert_fusion=True, FP8 weights are stacked on experts[0]. After fallback,
+        each expert needs its own weight slice. This context manager sets up and restores them.
         """
+        # deep_gemm: weights already sliced in fallback_to_no_expert_fusion
+        if self.experts is None:
+            yield
+            return
+
         # Stacked FP8 weights live on local expert 0; slice them for the current expert.
         stacked_weight_owner_global_id = self._global_expert_id(0)
         current_expert_global_id = self._global_expert_id(expert_id)
@@ -1321,6 +1405,10 @@ class MlpNode:
         #   do1 是独立新 buffer，o1 延迟释放，峰值在 dw1（D 点）：
         #   o1(2H) + do1(2H) + o2_s(H) + n2_s(2H) = 7H
         #   → feature_sizes = [2H, 2H, H, 2H]
+
+        # Pre-allocate grads before subbatch decision so VMM query accounts for grad memory
+        self._ensure_weight_grad()
+
         if USE_INPLACE_SWIGLU_BWD:
             bwd_feature_sizes = [
                 FP8_ALIGN * hidden_size * 2,  # o1/do1（inplace 共享）
@@ -1370,6 +1458,7 @@ class MlpNode:
         if not self.moe_expert_fusion:
             if bwd_path == "unknown":
                 bwd_path = "per_expert"
+            self._slice_weight_grad()
             for expert_id, tokens_per_expert in enumerate(
                 self.tokens_per_expert
             ):
