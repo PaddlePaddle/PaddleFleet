@@ -5,6 +5,9 @@ on:
     workflows:
       - "Test"
       - "Test-release"
+      - "Codestyle"
+      - "Approval"
+      - "Require PR Description"
     types:
       - completed
 
