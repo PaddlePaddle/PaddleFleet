@@ -449,7 +449,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             e_out, _ = self.e_proj(decoder_input)
             # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp]
             # 这里hs_streams是4D tensor: [b,s,n,h]会导致算梯度的时候调用.t()报错，必须reshape到更低维度
-            orig_shape = hs_streams.shape  # [s/sp, b, n, h]
+            orig_shape = list(hs_streams.shape)  # [s/sp, b, n, h]
             if self.tensor_parallel > 1 and self.sequence_parallel:
                 # [s/sp, b, n, h] --> [s, b, n, h]
                 orig_shape[0] = orig_shape[0] * self.tensor_parallel
