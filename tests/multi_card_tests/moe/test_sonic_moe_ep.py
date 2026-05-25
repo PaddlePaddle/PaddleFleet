@@ -13,21 +13,15 @@
 # limitations under the License.
 
 import random
-import sys
 import unittest
 
 import numpy as np
 import paddle
 import paddle.distributed as dist
 import paddle.nn.functional as F
-from paddle.distributed.fleet.utils import mix_precision_utils
-
-paddle.compat.enable_torch_proxy(
-    scope={"sonicmoe", "paddlefleet_ops.sonicmoe", "quack", "triton"},
-    silent=True,
-)
 import paddlefleet_ops
 from paddle.distributed import fleet
+from paddle.distributed.fleet.utils import mix_precision_utils
 
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
@@ -42,10 +36,116 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 if paddlefleet_ops.is_sonic_moe_available():
     from paddlefleet_ops.sonicmoe.functional import clear_all_fp8_weight_caches
 
-for _key in list(sys.modules):
-    if _key.startswith("paddlefleet_ops.sonicmoe"):
-        _alias = _key.replace("paddlefleet_ops.sonicmoe", "sonicmoe", 1)
-        sys.modules.setdefault(_alias, sys.modules[_key])
+
+class SonicMoETopk(paddle.autograd.PyLayer):
+    """PyLayer wrapping SonicMoE's high-performance topk operator.
+
+    Supports:
+      - softmax_fusion: fuse softmax into the topk kernel (input is
+        raw logits; output scores are softmax-normalized).
+      - n_group > 1: group-limited greedy topk selection.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        scores,
+        k,
+        n_group,
+        topk_group,
+        softmax_fusion,
+    ):
+        """
+        Args:
+            scores: [T, E] tensor. If softmax_fusion=True, these are raw
+                logits (pre-softmax). Otherwise, already-scored gates.
+            k: number of experts per token.
+            n_group: number of expert groups. 1 means no grouping.
+            topk_group: number of groups to select when n_group > 1.
+            softmax_fusion: whether to fuse softmax into the topk kernel.
+
+        Returns:
+            top_gate: [T, k] float32 scores of selected experts.
+            top_idx: [T, k] int64 indices of selected experts.
+        """
+        from paddlefleet_ops.sonicmoe.functional.forward import (
+            _topk_fwd,
+        )
+
+        T, E = scores.shape
+
+        if n_group > 1:
+            # Group-limited greedy: select top groups first, then topk
+            # within those groups.
+            group_scores = scores.reshape([T, n_group, -1]).max(axis=-1)
+            group_idx = paddle.topk(
+                group_scores, k=topk_group, axis=-1, sorted=True
+            )[1]
+            group_mask = paddle.zeros_like(group_scores).put_along_axis(
+                group_idx,
+                paddle.to_tensor(1.0, dtype="float32"),
+                axis=-1,
+            )
+            score_mask = (
+                group_mask.unsqueeze(-1)
+                .expand([T, n_group, E // n_group])
+                .reshape([T, -1])
+            )
+            # Apply mask: zero out non-selected groups.
+            # Use a very negative value for softmax_fusion (logits)
+            # so softmax gives ~0, or just zero for non-fusion.
+            if softmax_fusion:
+                masked_scores = scores + (1.0 - score_mask) * (-1e9)
+            else:
+                masked_scores = scores * score_mask
+        else:
+            masked_scores = scores
+
+        topk_scores = paddle.empty([T, k], dtype=paddle.float32)
+        topk_indices = paddle.empty([T, k], dtype=paddle.int32)
+        # print("==== sonicmoe topk fwd ====")
+        _topk_fwd(
+            masked_scores,
+            k,
+            topk_scores,
+            topk_indices,
+            require_softmax_fusion=softmax_fusion,
+        )
+
+        ctx.save_for_backward(topk_scores, topk_indices)
+        ctx.E = E
+        ctx.K = k
+        ctx.softmax_fusion = softmax_fusion
+        ctx.input_dtype = scores.dtype
+
+        return topk_scores, topk_indices.cast(paddle.int64)
+
+    @staticmethod
+    def backward(ctx, dtopk_score, _):
+        from paddlefleet_ops.sonicmoe.functional.backward import (
+            _softmax_topk_bwd,
+        )
+
+        # print("==== sonicmoe topk bwd ====")
+        # assert 0
+        topk_scores, topk_indices = ctx.saved_tensor()
+        T = dtopk_score.shape[0]
+        K = ctx.K
+        if ctx.softmax_fusion:
+            dlogits = paddle.zeros([T, ctx.E], dtype=ctx.input_dtype)
+            _softmax_topk_bwd(
+                dlogits, None, dtopk_score, topk_scores, topk_indices, K
+            )
+            return dlogits
+        else:
+            # No softmax fusion: gradient is simply scattered back
+            dscores = paddle.zeros([T, ctx.E], dtype=dtopk_score.dtype)
+            dscores = dscores.put_along_axis_(
+                topk_indices.cast(paddle.int64),
+                dtopk_score,
+                axis=1,
+            )
+            return dscores
 
 
 @unittest.skipUnless(
@@ -127,7 +227,7 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             moe_deep_gemm=moe_deep_gemm,
             bias_activation_fusion=True,
             moe_token_dispatcher_type="deepep",

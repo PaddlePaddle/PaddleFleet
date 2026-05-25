@@ -2185,21 +2185,6 @@ def run_sonic_moe(
         E,
         score_src_idx=_score_src_idx,
     )
-    # _DownProjection.backward unconditionally returns ds for topk_scores
-    # (since stop_gradient is unreliable inside .apply()), so the outer
-    # tensor passed to .apply() must have stop_gradient=False; otherwise
-    # Paddle's GradNodePyLayer raises "should return None at position 3".
-    # This branch triggers when _differentiable_router_scores returns a
-    # detached tensor (e.g. TK==0 early return, or torch.cat dropping the
-    # autograd link in some Paddle versions) — observed deterministically
-    # at the first microbatch where one expert receives no tokens.
-    # scores_for_down.stop_gradient = False
-
-    # FP8 path: use sonicmoe's optimized FP8 GEMM kernels.
-    # Scores are applied AFTER the down-projection inside
-    # _router_forward — mathematically equivalent to the
-    # baseline's score-before-downproj for per-row scalars.
-    # if fp8:
 
     with enable_fp8(fp8):
         _refresh_fp8_config()
