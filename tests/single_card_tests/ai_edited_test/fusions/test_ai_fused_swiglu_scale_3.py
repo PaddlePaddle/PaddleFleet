@@ -24,6 +24,7 @@ sys.path.insert(
 )
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 import paddle
 
@@ -93,6 +94,243 @@ class TestFusedSwigluScaleBackward(unittest.TestCase):
         d_x, d_scale = fused_swiglu_scale_backward(x, scale, out_grad)
         self.assertEqual(d_x.shape, [2, 32])
         self.assertEqual(d_scale.shape, [2, 1])
+
+
+# ----------------------------------------------------------------------------
+# New tests added by PR #999 — minimal set covering only branches not exercised
+# by the original tests above:
+#   * CPU clamp branch (fwd + bwd, with mask-zero assertion)
+#   * GPU dispatch branches (clamp / no-clamp, fwd + bwd) via mocks
+#   * Static-graph InferShape regression for the new clamp forward op
+# ----------------------------------------------------------------------------
+
+
+def _no_cuda():
+    return patch(
+        "paddlefleet.fusions.fused_swiglu_scale.paddle.is_compiled_with_cuda",
+        return_value=False,
+    )
+
+
+class TestFusedSwigluScaleCPUFallback(unittest.TestCase):
+    """CPU-fallback paths (fwd lines 34-46, bwd lines 65-106)."""
+
+    def test_forward_no_clamp_1d_scale(self):
+        """Covers line 40 (swiglu) and 42-46 (1D scale expansion)."""
+        from paddlefleet.fusions.fused_swiglu_scale import (
+            fused_swiglu_scale_forward,
+        )
+
+        with _no_cuda():
+            result = fused_swiglu_scale_forward(
+                paddle.randn([4, 16]), paddle.ones([4])
+            )
+            self.assertEqual(result.shape, [4, 8])
+
+    def test_backward_no_clamp(self):
+        """Covers lines 77-81 (no-clamp branch sets g/v_mask = None)."""
+        from paddlefleet.fusions.fused_swiglu_scale import (
+            fused_swiglu_scale_backward,
+        )
+
+        with _no_cuda():
+            d_x, _ = fused_swiglu_scale_backward(
+                paddle.randn([2, 16]),
+                paddle.ones([2]),
+                paddle.randn([2, 8]),
+            )
+            self.assertEqual(d_x.shape, [2, 16])
+
+    def test_forward_with_clamp(self):
+        from paddlefleet.fusions.fused_swiglu_scale import (
+            fused_swiglu_scale_clamp_forward,
+        )
+
+        with _no_cuda():
+            x = paddle.full([2, 16], 100.0)
+            scale = paddle.ones([2, 1])
+            result = fused_swiglu_scale_clamp_forward(x, scale, clamp_value=1.0)
+            self.assertEqual(result.shape, [2, 8])
+
+    def test_backward_with_clamp_saturated(self):
+        """Saturated inputs => g_mask/v_mask zero out the gradients."""
+        from paddlefleet.fusions.fused_swiglu_scale import (
+            fused_swiglu_scale_clamp_backward,
+        )
+
+        with _no_cuda():
+            x = paddle.full([2, 8], 5.0)
+            scale = paddle.ones([2])
+            out_grad = paddle.randn([2, 4])
+            d_x, _ = fused_swiglu_scale_clamp_backward(
+                x, scale, out_grad, clamp_value=0.5
+            )
+            self.assertEqual(d_x.shape, [2, 8])
+            self.assertTrue(bool((d_x.abs().sum() == 0).item()))
+
+
+class TestFusedSwigluScaleGPUDispatch(unittest.TestCase):
+    """GPU dispatch branches (fwd 22-29, bwd 50-60), via mock op modules."""
+
+    def test_forward_clamp_dispatch(self):
+        from paddlefleet.fusions.fused_swiglu_scale import (
+            fused_swiglu_scale_clamp_forward,
+        )
+
+        mock_op = MagicMock(return_value=paddle.randn([2, 8]))
+        with (
+            patch.object(paddle, "is_compiled_with_cuda", return_value=True),
+            patch.dict(
+                "sys.modules",
+                {
+                    "paddlefleet_ops": MagicMock(
+                        fused_swiglu_scale_clamp=mock_op
+                    )
+                },
+            ),
+        ):
+            fused_swiglu_scale_clamp_forward(
+                paddle.randn([2, 16]), paddle.ones([2, 1]), clamp_value=5.0
+            )
+            mock_op.assert_called_once()
+
+    def test_forward_no_clamp_dispatch(self):
+        from paddlefleet.fusions.fused_swiglu_scale import (
+            fused_swiglu_scale_forward,
+        )
+
+        mock_op = MagicMock(return_value=paddle.randn([2, 8]))
+        with (
+            patch.object(paddle, "is_compiled_with_cuda", return_value=True),
+            patch.dict(
+                "sys.modules",
+                {"paddlefleet_ops": MagicMock(fused_swiglu_scale=mock_op)},
+            ),
+        ):
+            fused_swiglu_scale_forward(
+                paddle.randn([2, 16]), paddle.ones([2, 1])
+            )
+            mock_op.assert_called_once()
+
+    def test_backward_clamp_dispatch(self):
+        from paddlefleet.fusions.fused_swiglu_scale import (
+            fused_swiglu_scale_clamp_backward,
+        )
+
+        mock_op = MagicMock(
+            return_value=(paddle.randn([2, 16]), paddle.randn([2]))
+        )
+        with (
+            patch.object(paddle, "is_compiled_with_cuda", return_value=True),
+            patch.dict(
+                "sys.modules",
+                {
+                    "paddlefleet_ops": MagicMock(
+                        fused_swiglu_scale_clamp_bwd=mock_op
+                    )
+                },
+            ),
+        ):
+            fused_swiglu_scale_clamp_backward(
+                paddle.randn([2, 16]),
+                paddle.ones([2]),
+                paddle.randn([2, 8]),
+                clamp_value=5.0,
+            )
+            mock_op.assert_called_once()
+
+    def test_backward_no_clamp_dispatch(self):
+        from paddlefleet.fusions.fused_swiglu_scale import (
+            fused_swiglu_scale_backward,
+        )
+
+        mock_op = MagicMock(
+            return_value=(paddle.randn([2, 16]), paddle.randn([2]))
+        )
+        with (
+            patch.object(paddle, "is_compiled_with_cuda", return_value=True),
+            patch.dict(
+                "sys.modules",
+                {"paddlefleet_ops": MagicMock(fused_swiglu_scale_bwd=mock_op)},
+            ),
+        ):
+            fused_swiglu_scale_backward(
+                paddle.randn([2, 16]),
+                paddle.ones([2]),
+                paddle.randn([2, 8]),
+            )
+            mock_op.assert_called_once()
+
+
+# ============================================================================
+# Static-graph InferShape regression for the new clamp forward op.
+#
+# fused_swiglu_scale_clamp has 2 inputs (X, Scale) and 1 output of shape
+# {rows, hidden2 / 2}, so it must register FusedFwdInferShape /
+# FusedFwdInferDtype. In eager mode a wrong InferShape would be hidden by the
+# kernel return; in static mode the framework relies on InferShape and a
+# wrong registration aborts. The static-graph test runs in a subprocess so a
+# C++ SIGABRT does not take down the pytest worker.
+# ============================================================================
+
+
+def _has_op(name):
+    if not paddle.is_compiled_with_cuda():
+        return False
+    try:
+        import paddlefleet_ops
+
+        return hasattr(paddlefleet_ops, name)
+    except ImportError:
+        return False
+
+
+def _run_static_infer_shape(op_name, hidden2, has_clamp):
+    import subprocess
+    import textwrap
+
+    code = textwrap.dedent(
+        f"""
+        import paddle
+        from paddlefleet_ops import {op_name}
+
+        paddle.enable_static()
+        main = paddle.static.Program()
+        startup = paddle.static.Program()
+        with paddle.static.program_guard(main, startup):
+            x = paddle.static.data(name='x', shape=[4, {hidden2}], dtype='float32')
+            scale = paddle.static.data(name='scale', shape=[4, 1], dtype='float32')
+            out = {op_name}(x, scale{", 5.0" if has_clamp else ""})
+            print('SHAPE_OK', list(out.shape))
+        """
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+@unittest.skipUnless(
+    _has_op("fused_swiglu_scale_clamp"),
+    "fused_swiglu_scale_clamp custom op not built / CUDA unavailable",
+)
+class TestFusedSwigluScaleClampInferShape(unittest.TestCase):
+    """Static-graph InferShape regression for the clamp forward op."""
+
+    def test_clamp_forward_infer_shape_halves_hidden(self):
+        rc, stdout, stderr = _run_static_infer_shape(
+            "fused_swiglu_scale_clamp", hidden2=32, has_clamp=True
+        )
+        self.assertEqual(
+            rc,
+            0,
+            f"static-graph build of fused_swiglu_scale_clamp crashed "
+            f"(likely InferShape registration bug).\nSTDERR:\n{stderr}",
+        )
+        self.assertIn("SHAPE_OK [4, 16]", stdout, f"stdout was:\n{stdout}")
 
 
 if __name__ == "__main__":

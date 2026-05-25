@@ -266,6 +266,7 @@ class MlpNode:
         moe_subbatch_diag=False,
         use_ue8m0=False,
         dw_p2p_overlap=False,
+        clamp_value=None,
     ):
         """
         Constructor
@@ -335,6 +336,7 @@ class MlpNode:
                     use_ue8m0=use_ue8m0,
                     dw_p2p_overlap=dw_p2p_overlap,
                     moe_expert_fusion=moe_expert_fusion,
+                    clamp_value=clamp_value,
                 )
                 for local_expert_id in range(self.num_experts_per_device)
             ]
@@ -350,6 +352,7 @@ class MlpNode:
                 use_ue8m0=use_ue8m0,
                 dw_p2p_overlap=dw_p2p_overlap,
                 moe_expert_fusion=moe_expert_fusion,
+                clamp_value=clamp_value,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -1910,6 +1913,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         moe_subbatch_diag=False,
         use_ue8m0=False,
         dw_p2p_overlap=False,
+        clamp_value=None,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -1938,6 +1942,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             moe_subbatch_diag=moe_subbatch_diag,
             use_ue8m0=use_ue8m0,
             dw_p2p_overlap=dw_p2p_overlap,
+            clamp_value=clamp_value,
         )
 
         if fp8_dispatched_handle is not None:
@@ -2055,6 +2060,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         fp8_dispatched_handle=None,
         is_first_fwd=False,
         dw_p2p_overlap=False,
+        clamp_value=None,
     ):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
@@ -2065,6 +2071,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             moe_deep_gemm=moe_deep_gemm,
             moe_expert_fusion=moe_expert_fusion,
             dw_p2p_overlap=dw_p2p_overlap,
+            clamp_value=clamp_value,
         )
         original_hidden_shape = tuple(hidden_states.shape)
         original_probs_shape = tuple(dispatched_probs.shape)
