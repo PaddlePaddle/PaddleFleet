@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 
 #include "paddle/phi/backends/gpu/gpu_context.h"
 #include "paddle/phi/core/kernel_registry.h"
@@ -236,8 +237,8 @@ __global__ void FusedSPAQKernelVec4(const phi::bfloat16* __restrict__ Xin,
       if constexpr (ue8m0) {
         const size_t row_idx = in_y_idx;
         const size_t col_idx = in_x_idx >> 7;
-        const size_t idx =
-            (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
+        const size_t idx = (col_idx >> 2) * (static_cast<size_t>(rows) * 4) +
+                           row_idx * 4 + (col_idx & 0x3);
         const uint8_t exp =
             (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
         uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
@@ -356,8 +357,8 @@ __global__ void FusedSPAQKernelVec8(const phi::bfloat16* __restrict__ Xin,
       const float inv_scale = __frcp_rn(scale);
       if constexpr (ue8m0) {
         const size_t col_idx = in_x_idx >> 7;
-        const size_t idx =
-            (col_idx >> 2) * (rows << 2) + base_y * 4 + (col_idx & 0x3);
+        const size_t idx = (col_idx >> 2) * (static_cast<size_t>(rows) * 4) +
+                           static_cast<size_t>(base_y) * 4 + (col_idx & 0x3);
         const uint8_t exp =
             (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
         uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
@@ -473,8 +474,8 @@ __global__ void FusedSPAQKernel(const phi::bfloat16* __restrict__ Xin,
         if constexpr (ue8m0) {
           const size_t row_idx = g_output_y_offset;
           const size_t col_idx = in_x_idx >> 7;
-          const size_t idx =
-              (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
+          const size_t idx = (col_idx >> 2) * (static_cast<size_t>(rows) * 4) +
+                             row_idx * 4 + (col_idx & 0x3);
           const uint8_t exp =
               (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
           uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
@@ -605,6 +606,15 @@ std::vector<paddle::Tensor> FusedWeightedSwigluActQuantKernel(
     auto input_dim = x.dims();
     const int64_t token_num = input_dim[0];
     const int64_t hidden_size = input_dim[1];
+
+    constexpr int64_t kMaxRowsForUe8m0ScaleIndex =
+        static_cast<int64_t>(std::numeric_limits<size_t>::max() / 4);
+    PADDLE_ENFORCE_LE(
+        rows,
+        kMaxRowsForUe8m0ScaleIndex,
+        common::errors::InvalidArgument(
+            "rows is too large for ue8m0 scale index calculation, got %d.",
+            rows));
 
     PADDLE_ENFORCE(hidden_size % 1024 == 0,
                    "hidden_size must be divisible by 1024");

@@ -14,11 +14,10 @@
 
 // swiglu_kernel.cu
 #include <cuda_bf16.h>
-#include <algorithm>
 #include <cstdint>
-#include <limits>
 #include <vector>
 #include "paddle/extension.h"
+#include "swiglu_utils.h"
 
 // 128-bit memory alignment struct
 struct __align__(16) Packed128 {
@@ -31,19 +30,6 @@ __device__ __forceinline__ float precise_sigmoid(T x) {
 }
 
 constexpr int kSwiGLUBackBlockSize = 256;
-
-inline bool ShouldUseInt64Index(int64_t rows, int64_t row_stride) {
-  // This predicate protects Y/DX offsets:
-  //   row * row_stride + col
-  // The G offset uses row * hidden_size + col. For fused_swiglu_bwd,
-  // row_stride is 2 * hidden_size after shape checks, so any int32-safe Y/DX
-  // offset range also bounds the G offset range. Rows beyond INT_MAX also
-  // require int64_t row iteration because the kernel uses a capped CUDA grid
-  // and grid-stride over rows.
-  return rows > static_cast<int64_t>(std::numeric_limits<int>::max()) ||
-         rows >=
-             static_cast<int64_t>(std::numeric_limits<int>::max()) / row_stride;
-}
 
 inline void CheckSwiGLUBackShape(const paddle::Tensor& g,
                                  const paddle::Tensor& y,
@@ -199,7 +185,7 @@ void DispatchSwiGLUBackKernel(const T* g,
                               int64_t hidden_size,
                               int64_t input_stride,
                               StreamT stream) {
-  if (ShouldUseInt64Index(rows, input_stride)) {
+  if (paddlefleet::extensions::ShouldUseInt64Index(rows, input_stride)) {
     LaunchSwiGLUBackKernel<T, VEC_SIZE, int64_t>(
         g, y, dx, grid_size, rows, hidden_size, input_stride, stream);
   } else {
@@ -242,8 +228,7 @@ std::vector<paddle::Tensor> SwiGLUBackward(const paddle::Tensor& g,
 
   CheckSwiGLUBackPackedAccess(y.dtype(), hidden_size);
 
-  constexpr int64_t kMaxGridX = 65535;
-  int grid_size = static_cast<int>(std::min(rows, kMaxGridX));
+  int grid_size = paddlefleet::extensions::GetSwiGLURowGridSize(rows);
   auto stream = y.stream();
 
   if (y.dtype() == paddle::DataType::BFLOAT16) {

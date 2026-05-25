@@ -13,11 +13,10 @@
 // limitations under the License.
 
 #include <cuda_bf16.h>
-#include <algorithm>
 #include <cstdint>
-#include <limits>
 #include <vector>
 #include "paddle/extension.h"
+#include "swiglu_utils.h"
 
 // ==========================================================================
 // Utils: Packed Memory Access (128-bit Vectorization)
@@ -36,18 +35,6 @@ __device__ __forceinline__ float precise_sigmoid(T x) {
 }
 
 constexpr int kFusedSwiGLUScaleBlockSize = 256;
-
-inline bool ShouldUseInt64Index(int64_t rows, int64_t row_stride) {
-  // This predicate protects X/DX offsets:
-  //   row * row_stride + col
-  // Out/DOut offsets use row * hidden_size + col, and row_stride is
-  // 2 * hidden_size for fused_swiglu_scale, so the X/DX offset range is the
-  // larger one. Rows beyond INT_MAX also require int64_t row iteration because
-  // the kernels use a capped CUDA grid and grid-stride over rows.
-  return rows > static_cast<int64_t>(std::numeric_limits<int>::max()) ||
-         rows >=
-             static_cast<int64_t>(std::numeric_limits<int>::max()) / row_stride;
-}
 
 // ==========================================================================
 // Optimized Forward Kernel
@@ -110,6 +97,7 @@ __global__ void VectorizedFusedSwiGLUBwd(const T* __restrict__ x,
                                          IndexT hidden_size,
                                          IndexT row_stride) {
   int tid = threadIdx.x;
+  __shared__ float shared_sum[kFusedSwiGLUScaleBlockSize];
 
   for (int64_t row = static_cast<int64_t>(blockIdx.x); row < rows;
        row += static_cast<int64_t>(gridDim.x)) {
@@ -164,12 +152,13 @@ __global__ void VectorizedFusedSwiGLUBwd(const T* __restrict__ x,
           *reinterpret_cast<Packed128*>(dv_buffer);
     }
 
-    static __shared__ float shared_sum[256];
-    if (tid < 256) shared_sum[tid] = local_d_scale_sum;
+    if (tid < kFusedSwiGLUScaleBlockSize) {
+      shared_sum[tid] = local_d_scale_sum;
+    }
     __syncthreads();
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-      if (tid < stride && (tid + stride) < 256) {
+      if (tid < stride && (tid + stride) < kFusedSwiGLUScaleBlockSize) {
         shared_sum[tid] += shared_sum[tid + stride];
       }
       __syncthreads();
@@ -214,7 +203,7 @@ void DispatchFusedSwiGLUScaleFwd(const T* x,
                                  int64_t hidden_size,
                                  int64_t row_stride,
                                  StreamT stream) {
-  if (ShouldUseInt64Index(rows, row_stride)) {
+  if (paddlefleet::extensions::ShouldUseInt64Index(rows, row_stride)) {
     LaunchFusedSwiGLUScaleFwd<T, ScaleT, VEC_SIZE, int64_t>(
         x, scale, out, grid_size, rows, hidden_size, row_stride, stream);
   } else {
@@ -261,7 +250,7 @@ void DispatchFusedSwiGLUScaleBwd(const T* x,
                                  int64_t hidden_size,
                                  int64_t row_stride,
                                  StreamT stream) {
-  if (ShouldUseInt64Index(rows, row_stride)) {
+  if (paddlefleet::extensions::ShouldUseInt64Index(rows, row_stride)) {
     LaunchFusedSwiGLUScaleBwd<T, ScaleT, VEC_SIZE, int64_t>(x,
                                                             scale,
                                                             d_out,
@@ -301,8 +290,7 @@ std::vector<paddle::Tensor> FusedSwiGLUScaleForward(
     return {out};
   }
 
-  constexpr int64_t kMaxGridX = 65535;
-  int grid_size = static_cast<int>(std::min(rows, kMaxGridX));
+  int grid_size = paddlefleet::extensions::GetSwiGLURowGridSize(rows);
   auto stream = x.stream();
 
   if (x.dtype() == paddle::DataType::BFLOAT16) {
@@ -356,8 +344,7 @@ std::vector<paddle::Tensor> FusedSwiGLUScaleBackward(
     return {d_x, d_scale};
   }
 
-  constexpr int64_t kMaxGridX = 65535;
-  int grid_size = static_cast<int>(std::min(rows, kMaxGridX));
+  int grid_size = paddlefleet::extensions::GetSwiGLURowGridSize(rows);
   auto stream = x.stream();
 
   if (x.dtype() == paddle::DataType::BFLOAT16) {
