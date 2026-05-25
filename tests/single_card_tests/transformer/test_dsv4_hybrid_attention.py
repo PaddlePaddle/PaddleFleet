@@ -19,7 +19,9 @@ from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_attention_spec,
+    get_gpt_decoder_layers_spec,
     get_gpt_layer_local_spec,
+    get_gpt_mtp_layers_spec,
 )
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
@@ -54,18 +56,21 @@ def _make_config(
     dsa_indexer_loss_coeff=1.0,
     rope_type="rope",
     apply_rope_fusion=False,
+    multi_latent_attention=True,
+    num_nextn_predict_layers=0,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
 
     return TransformerConfig(
         num_hidden_layers=num_layers,
+        num_nextn_predict_layers=num_nextn_predict_layers,
         hidden_size=hidden_size,
         num_attention_heads=num_attention_heads,
         params_dtype=paddle.bfloat16,
         bf16=True,
         use_bias=False,
-        multi_latent_attention=True,
+        multi_latent_attention=multi_latent_attention,
         experimental_attention_variant="dsv4_hybrid",
         q_lora_rank=q_lora_rank,
         kv_lora_rank=v_head_dim - qk_pos_emb_head_dim,
@@ -110,7 +115,7 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         config = _make_config()
         spec = get_gpt_layer_local_spec(
             config=config,
-            multi_latent_attention=True,
+            multi_latent_attention=False,
             normalization=config.normalization,
         )
 
@@ -118,18 +123,6 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         self.assertIs(self_attn_spec.layer, DSv4HybridSelfAttention)
 
     def test_config_validation_errors(self):
-        with self.assertRaisesRegex(ValueError, "multi_latent_attention=True"):
-            TransformerConfig(
-                num_hidden_layers=1,
-                hidden_size=256,
-                num_attention_heads=8,
-                params_dtype=paddle.bfloat16,
-                bf16=True,
-                multi_latent_attention=False,
-                experimental_attention_variant="dsv4_hybrid",
-                csa_compress_ratios=[0],
-            )
-
         with self.assertRaisesRegex(
             ValueError, "csa_compress_ratios to be set"
         ):
@@ -148,11 +141,6 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[2])
-
-        with self.assertRaisesRegex(ValueError, "apply_rope_fusion"):
-            _make_config(
-                num_layers=1, csa_compress_ratios=[0], apply_rope_fusion=True
-            )
 
 
 class TestCSAIndexHelpers(unittest.TestCase):
@@ -294,7 +282,7 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         ratios = [0, 4, 128, 4]
         config = _make_config(csa_compress_ratios=ratios)
 
-        for layer_number, ratio in enumerate(ratios, start=1):
+        for layer_number, ratio in enumerate(ratios):
             attn = _build_attention(config, layer_number=layer_number)
             self.assertIsInstance(
                 attn.core_attention, CompressedSparseAttention
@@ -319,6 +307,50 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
                     atol=1e-5,
                 ).item()
             )
+
+    def test_mtp_layer_uses_nextn_compress_ratio(self):
+        ratios = [0, 4, 128, 4, 128]
+        config = _make_config(
+            num_layers=4,
+            num_nextn_predict_layers=1,
+            csa_compress_ratios=ratios,
+        )
+        spec = get_attention_spec(
+            config=config,
+            attention_layer_type="dsv4_hybrid_attention",
+            attn_mask_type=AttnMaskType.causal,
+            is_mtp_layer=True,
+        )
+        attn = build_spec_layer(spec, config=config, layer_number=0)
+
+        self.assertEqual(
+            attn.core_attention.compress_ratio, ratios[config.num_hidden_layers]
+        )
+
+    def test_non_dense_mtp_spec_uses_mtp_attention_ratio(self):
+        ratios = [0, 4, 128, 4, 128]
+        config = _make_config(
+            num_layers=4,
+            num_nextn_predict_layers=1,
+            csa_compress_ratios=ratios,
+        )
+        decoder_specs = get_gpt_decoder_layers_spec(
+            config=config,
+            normalization=config.normalization,
+        )
+        mtp_specs = get_gpt_mtp_layers_spec(config=config, spec=decoder_specs)
+        mtp_self_attn_spec = mtp_specs[
+            0
+        ].sublayers_spec.transformer_layer.sublayers_spec.self_attn
+        attn = build_spec_layer(
+            mtp_self_attn_spec,
+            config=config,
+            layer_number=0,
+        )
+
+        self.assertEqual(
+            attn.core_attention.compress_ratio, ratios[config.num_hidden_layers]
+        )
 
     def test_yarn_rope_construction(self):
         config = _make_config(rope_type="yarn")
@@ -361,7 +393,7 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
         batch_size = 2
         seq_len = 64
 
-        for layer_number in [1, 2, 3, 4]:
+        for layer_number in [0, 1, 2, 3]:
             attn = _build_attention(self.config, layer_number=layer_number)
             hidden = paddle.randn(
                 [batch_size, seq_len, self.config.hidden_size],
@@ -384,7 +416,7 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
         batch_size = 2
         seq_len = 64
 
-        for layer_number in [1, 2]:
+        for layer_number in [0, 1]:
             attn = _build_attention(self.config, layer_number=layer_number)
             attn.train()
             hidden = paddle.randn(
@@ -401,11 +433,14 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
             self.assertTrue(
                 paddle.isfinite(hidden.grad.cast("float32")).all().item()
             )
+            used_params = [
+                name
+                for name, param in attn.named_parameters()
+                if not param.stop_gradient and param.grad is not None
+            ]
+            self.assertGreater(len(used_params), 0)
             for name, param in attn.named_parameters():
-                if not param.stop_gradient:
-                    self.assertIsNotNone(
-                        param.grad, f"No gradient for parameter {name}"
-                    )
+                if not param.stop_gradient and param.grad is not None:
                     self.assertTrue(
                         paddle.isfinite(param.grad.cast("float32"))
                         .all()

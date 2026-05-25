@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils
+from paddlefleet.recompute_utils import need_recompute_in_first_n
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
@@ -435,6 +436,55 @@ class MoELayer(nn.Layer):
                     if self.is_mp_moe or self.is_ep_moe:
                         p.is_distributed = True
 
+        self.use_rr_deepep_combine = False
+
+    def rr_recompute_update(self, in_full_recompute, in_mlp_recompute):
+        if (
+            self.config.recompute_modules is not None
+            and "moe_combine" in self.config.recompute_modules
+        ):
+            if (
+                self.moe_token_dispatcher_type != "deepep"
+                or not self.moe_shared_expert_overlap
+            ):
+                raise ValueError(
+                    "moe_combine RR is only supported in DeepEP mode with "
+                    "moe_shared_expert_overlap enabled (combine_overlap scenario)."
+                )
+            if self.config.recompute_granularity is None:
+                raise ValueError(
+                    "recompute_granularity must be set when moe_combine RR is enabled."
+                )
+            if isinstance(self.config.recompute_modules, list):
+                self.use_rr_deepep_combine = True
+            elif isinstance(self.config.recompute_modules, dict):
+                # dict mode only supports first_n: uniform applies recompute to all layers
+                # (use list mode instead), block is not yet implemented but can be extended.
+                if self.config.recompute_method != "first_n":
+                    raise ValueError(
+                        "recompute_modules dict mode for moe_combine RR requires "
+                        f"recompute_method='first_n', got '{self.config.recompute_method}'."
+                    )
+                if not hasattr(self, "layer_number"):
+                    raise ValueError(
+                        "layer_number must be set before rr_recompute_update is called in dict mode. "
+                        "Ensure set_layer_number() is called first."
+                    )
+                self.use_rr_deepep_combine = not need_recompute_in_first_n(
+                    self.layer_number,
+                    self.config,
+                    self.config.recompute_modules["moe_combine"],
+                )
+        if (
+            (not in_full_recompute)
+            and (not in_mlp_recompute)
+            and self.use_rr_deepep_combine
+        ):
+            raise ValueError(
+                "Enabling rr for moe_combine is meaningless when neither full_recompute "
+                "nor mlp_recompute is active."
+            )
+
     def _init_expert_parallel(self):
         def _parse_moe_expert_parallel(
             num_experts: int, expert_model_parallel_size: int
@@ -709,7 +759,9 @@ class MoELayer(nn.Layer):
 
         with profile("combine"):
             hidden_states = self.token_dispatcher._comm_manager.combine(
-                hidden_states, combine_overlap_handle
+                hidden_states,
+                combine_overlap_handle,
+                use_rr_deepep_combine=self.use_rr_deepep_combine,
             )
 
         # Latent MoE: project back from latent space to hidden_size
@@ -854,9 +906,14 @@ class MoELayer(nn.Layer):
         return hidden_states
 
     def compute_combine(self, hidden_states, async_finish=False):
+        # Note: RR (use_rr_deepep_combine) is NOT passed here because this method
+        # is used by TransformerLayerWithOverlap where shared expert computation is
+        # managed by the scheduler separately, not via combine_overlap_handle.
         if self.moe_use_fusion_node:
             hidden_states = self.token_dispatcher._comm_manager.combine(
-                hidden_states, None, async_finish=async_finish
+                hidden_states,
+                None,
+                async_finish=async_finish,
             )
         else:
             hidden_states = self.combine(hidden_states)
