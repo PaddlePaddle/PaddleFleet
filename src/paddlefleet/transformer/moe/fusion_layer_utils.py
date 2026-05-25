@@ -273,21 +273,15 @@ class MlpNode:
         self.token_dispatcher = custom_map.token_dispatcher
         self.moe_expert_fusion = moe_expert_fusion
         self.experts = getattr(custom_map, "experts", None)
-        # 记录 EP 分片信息，用于计算 experts_group_gemm_node 的索引偏移。
-        # 初始 non-fusion 模式下，experts_group_gemm_node 按全局 ID 构建，
-        # tokens_per_expert 循环变量是本地 ID（0..num_local-1），需要加偏移才能
-        # 正确索引。fallback_to_no_expert_fusion 后列表重建为本地长度，偏移置 0。
+
         self.moe_rank = getattr(custom_map, "moe_rank", 0)
+        self.tokens_per_expert = (
+            self.token_dispatcher._comm_manager.tokens_per_expert
+        )
         self.num_experts_per_device = getattr(
             custom_map,
             "num_experts_per_device",
-            len(self.experts) if self.experts is not None else 0,
-        )
-        # 初始 non-fusion 时 experts_group_gemm_node 是全局长度列表，需要偏移
-        self._gemm_node_id_offset = (
-            self.moe_rank * self.num_experts_per_device
-            if not moe_expert_fusion
-            else 0
+            len(self.tokens_per_expert),
         )
         if recompute_moe_premute:
             assert not moe_expert_fusion, (
@@ -327,12 +321,13 @@ class MlpNode:
             )
             or use_auto_subbatch
         ):
+            # Keep per-expert gemm nodes local-indexed.
             self.experts_group_gemm_node = [
                 ExpertsGroupGemmContiguousNode(
                     custom_map,
                     recompute_moe_gate_up=recompute_moe_gate_up,
                     dequant_input=dequant_input,
-                    expert_id=expert_id,
+                    expert_id=self._global_expert_id(local_expert_id),
                     moe_subbatch_token_num_after_dispatch=moe_subbatch_token_num_after_dispatch,
                     use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
                     use_fp8_mlp=use_fp8_mlp,
@@ -341,7 +336,7 @@ class MlpNode:
                     dw_p2p_overlap=dw_p2p_overlap,
                     moe_expert_fusion=moe_expert_fusion,
                 )
-                for expert_id in range(len(custom_map.experts))
+                for local_expert_id in range(self.num_experts_per_device)
             ]
         else:
             self.experts_group_gemm_node = ExpertsGroupGemmContiguousNode(
@@ -363,9 +358,6 @@ class MlpNode:
         self.dispatched_indices = None
         self.dispatched_probs = None
         self.unzipped_probs = None
-        self.tokens_per_expert = (
-            self.token_dispatcher._comm_manager.tokens_per_expert
-        )
         self.padding_token_per_experts = [
             (x + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
             for x in self.tokens_per_expert
@@ -391,6 +383,12 @@ class MlpNode:
             )
         else:
             self.min_auto_subbatch_rows = FP8_ALIGN**2 // 2
+
+    def _global_expert_id(self, local_expert_id):
+        return self.moe_rank * self.num_experts_per_device + local_expert_id
+
+    def _gemm_node(self, local_expert_id):
+        return self.experts_group_gemm_node[local_expert_id]
 
     def cached_tensors(self):
         """
@@ -541,10 +539,7 @@ class MlpNode:
             FP8_ALIGN,
         )
         # 将 gather 出的输入设置到对应专家的 gemm_node 上
-        # expert_id 是本地 ID，需加偏移才能索引全局 experts_group_gemm_node
-        gemm_node = self.experts_group_gemm_node[
-            self._gemm_node_id_offset + expert_id
-        ]
+        gemm_node = self._gemm_node(expert_id)
         if self.use_fp8_mlp is not None:
             gemm_node.input_fp8 = expert_out
             gemm_node.input_scale = expert_out_scale
@@ -560,7 +555,7 @@ class MlpNode:
         Prepare input for this node. Dequant if needed.
         """
         input_fp8, input_scale = unzipped_hs_2d
-        gemm_node = self.experts_group_gemm_node[expert_id]
+        gemm_node = self._gemm_node(expert_id)
         if self.use_fp8_mlp is not None:
             gemm_node.input_fp8 = input_fp8
             gemm_node.input_scale = input_scale
@@ -609,10 +604,7 @@ class MlpNode:
             unzipped_out: 预分配的输出 buffer（zip_unzip_fusion=True 时传入，GEMM 结果 in-place 写入）。
             start_idx/end_idx: subbatch 切片范围。None 表示不切片，整个专家一次算完。
         """
-        # expert_id 是本地 ID，需加偏移才能索引全局 experts_group_gemm_node
-        gemm_node = self.experts_group_gemm_node[
-            self._gemm_node_id_offset + expert_id
-        ]
+        gemm_node = self._gemm_node(expert_id)
         if start_idx is not None:
             # --- subbatch 切片：从完整专家的输入/输出中截取 [start_idx, end_idx) ---
             tokens_per_expert = end_idx - start_idx
@@ -701,19 +693,17 @@ class MlpNode:
         fused_gemm_node = self.experts_group_gemm_node
         self.experts_group_gemm_node = []
         self.moe_expert_fusion = False
-        # 重建后列表为本地长度，local_id 直接索引，不需要偏移
-        self._gemm_node_id_offset = 0
 
         for local_id, tokens_per_expert in enumerate(
             self.padding_token_per_experts
         ):
-            expert_id = self.moe_rank * self.num_experts_per_device + local_id
+            global_expert_id = self._global_expert_id(local_id)
             gemm_node = copy.copy(fused_gemm_node)
             gemm_node.is_split_group_gemm = True
             gemm_node.moe_expert_fusion = False
             gemm_node.recompute_moe_gate_up = fused_gemm_node.o1 is None
-            gemm_node.experts = [fused_gemm_node.experts[expert_id]]
-            gemm_node.expert_id = expert_id
+            gemm_node.experts = [self.experts[global_expert_id]]
+            gemm_node.expert_id = global_expert_id
             gemm_node.tokens_per_expert = [tokens_per_expert]
             self.experts_group_gemm_node.append(gemm_node)
 
@@ -741,7 +731,9 @@ class MlpNode:
         expert_fusion=True 时 FP8 权重以 stacked 形式存在 experts[0] 上（所有专家堆叠），
         回退后每个专家需要独立的权重切片。此上下文管理器临时设置并在退出时恢复/清理。
         """
-        expert_id_offset = self.moe_rank * self.num_experts_per_device
+        # Stacked FP8 weights live on local expert 0; slice them for the current expert.
+        stacked_weight_owner_global_id = self._global_expert_id(0)
+        current_expert_global_id = self._global_expert_id(expert_id)
 
         def has_fp8_weight(expert):
             weight = expert.up_gate_proj.weight
@@ -749,14 +741,16 @@ class MlpNode:
 
         if not (
             self.num_experts_per_device > 1
-            and has_fp8_weight(self.experts[expert_id_offset])
-            and not has_fp8_weight(self.experts[expert_id_offset + 1])
+            and has_fp8_weight(self.experts[stacked_weight_owner_global_id])
+            and not has_fp8_weight(
+                self.experts[stacked_weight_owner_global_id + 1]
+            )
         ):
             yield
             return
 
-        w1 = self.experts[expert_id_offset].up_gate_proj.weight
-        w2 = self.experts[expert_id_offset].down_proj.weight
+        w1 = self.experts[stacked_weight_owner_global_id].up_gate_proj.weight
+        w2 = self.experts[stacked_weight_owner_global_id].down_proj.weight
         w1_weight, w1_scale = w1.fp8_weight_stacked, w1.fp8_scale_stacked
         w2_weight, w2_scale = w2.fp8_weight_stacked, w2.fp8_scale_stacked
 
@@ -766,8 +760,8 @@ class MlpNode:
                 chunk_size * expert_id, chunk_size * (expert_id + 1)
             )
 
-        cur_w1 = self.experts[expert_id_offset + expert_id].up_gate_proj.weight
-        cur_w2 = self.experts[expert_id_offset + expert_id].down_proj.weight
+        cur_w1 = self.experts[current_expert_global_id].up_gate_proj.weight
+        cur_w2 = self.experts[current_expert_global_id].down_proj.weight
         cur_w1.fp8_weight_stacked = slice_expert(w1_weight)
         cur_w1.fp8_scale_stacked = slice_expert(w1_scale)
         cur_w1.fp8_weight_stacked_transpose = None
@@ -780,7 +774,6 @@ class MlpNode:
         try:
             yield
         finally:
-            # 对于 0 号专家，需要恢复成融合的 fp8_weight；对于其他专家，直接删除其 fp8_weight
             if expert_id == 0:
                 w1.fp8_weight_stacked, w1.fp8_scale_stacked = (
                     w1_weight,
@@ -1103,7 +1096,7 @@ class MlpNode:
             for expert_id, tokens_per_expert in enumerate(
                 self.tokens_per_expert
             ):
-                gemm_node = self.experts_group_gemm_node[expert_id]
+                gemm_node = self._gemm_node(expert_id)
                 start_idx, end_idx = (
                     self.token_offsets[expert_id],
                     self.token_offsets[expert_id + 1],
@@ -1380,7 +1373,7 @@ class MlpNode:
             for expert_id, tokens_per_expert in enumerate(
                 self.tokens_per_expert
             ):
-                gemm_node = self.experts_group_gemm_node[expert_id]
+                gemm_node = self._gemm_node(expert_id)
                 start_idx, end_idx = (
                     self.token_offsets[expert_id],
                     self.token_offsets[expert_id + 1],
@@ -1605,9 +1598,7 @@ class MlpNode:
                         )
                     # nparts>1 的 expert 全部 subbatch 跑完后，释放 input_fp8
                     if self.recompute_moe_premute:
-                        gemm_node = self.experts_group_gemm_node[
-                            self._gemm_node_id_offset + expert_id
-                        ]
+                        gemm_node = self._gemm_node(expert_id)
                         gemm_node.input_fp8 = None
                         gemm_node.input_scale = None
                 else:
@@ -1736,10 +1727,8 @@ class MlpNode:
                         expert_id,
                     )
 
-                _gn = self.experts_group_gemm_node[
-                    self._gemm_node_id_offset + expert_id
-                ]
-                expert_unzipped_grad, unzipped_probs_grad = _gn.backward(
+                gemm_node = self._gemm_node(expert_id)
+                expert_unzipped_grad, unzipped_probs_grad = gemm_node.backward(
                     expert_unzipped_grad,
                     self.unzipped_probs[
                         self.token_offsets[expert_id] : self.token_offsets[

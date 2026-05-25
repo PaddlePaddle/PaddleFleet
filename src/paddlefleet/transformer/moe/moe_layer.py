@@ -1331,9 +1331,11 @@ class MoELayer(nn.Layer):
             return True
         return False
 
-    def set_layer_number(self, layer_number):
+    def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self.layer_number = layer_number
         assert hasattr(self.gate, "set_layer_number"), (
             "expect gate has method 'set_layer_number'"
         )
-        self.gate.set_layer_number(layer_number)
+        # Hash routing activation (moe_n_hash_layers) is decided by the router
+        # itself based on layer_number. See TopKRouter._setup_hash_layer.
+        self.gate.set_layer_number(layer_number, is_mtp_layer=is_mtp_layer)

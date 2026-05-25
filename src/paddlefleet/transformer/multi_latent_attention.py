@@ -61,7 +61,7 @@ except Exception:
 
 
 def _ec_compatible_rope_apply(
-    q_pe, k_pe, seq_len, rope_base=1000000.0, position_offset=0
+    q_pe, k_pe, seq_len, rope_base=1000000.0, position_offset=0, position_ids=None
 ):
     """Apply RoPE using EC's complex multiplication method (no YaRN, no mscale).
 
@@ -75,6 +75,8 @@ def _ec_compatible_rope_apply(
         seq_len: sequence length
         rope_base: base frequency (default 1e6)
         position_offset: starting position index for autoregressive decode
+        position_ids: optional [S] position ID in fastdeploy decode mode.
+                     If None, defaults to [0, 1, ..., seq_len-1] (offset by position_offset).
     """
     head_dim = q_pe.shape[-1]
     # inv_freq same as EC: 1 / (base^(arange(0, dim, 2) / dim))
@@ -82,16 +84,20 @@ def _ec_compatible_rope_apply(
         rope_base
         ** (paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim))
     )
-
     if get_context_parallel_world_size() > 1:
         # In EB dataflow and CP size > 1, shape of q is [b, s/cp, h, d],
         # we need to get full seq_len here
         seq_len = seq_len * get_context_parallel_world_size()
+        seq_len = seq_len * get_context_parallel_world_size()
 
-    # position ids: [position_offset, position_offset+1, ..., position_offset+seq_len-1]
-    positions = paddle.arange(
-        position_offset, position_offset + seq_len, dtype="float32"
-    )
+    # Compute positions: prefer 1D position_ids (fastdeploy decode), else use sequential with offset
+    if position_ids is not None and position_ids.ndim == 1:
+        positions = position_ids.astype(freqs.dtype)
+    else:
+        # position ids: [position_offset, position_offset+1, ..., position_offset+seq_len-1]
+        positions = paddle.arange(
+            position_offset, position_offset + seq_len, dtype="float32"
+        )
     # freqs_table: [S, D/2]
     freqs_table = paddle.outer(positions, freqs)
     # Expand for batch: [1, S, D/2]
@@ -343,6 +349,67 @@ class MultiLatentAttention(Attention):
             and "gated_attn" in self.config.recompute_modules
         )
 
+    def _compute_absorbed_q(self, query):
+        """
+        Compute absorbed query for FD MLA decode kernel.
+
+        The MLA decode kernel expects q in absorbed form:
+            q_absorbed = [q_nope @ W_k_b, q_pe] per head
+        where per-head dim = kv_lora_rank + qk_rope_head_dim (e.g. 576)
+
+        Also returns wv_b for V de-absorption on the kernel output.
+
+        Args:
+            query: [b, s, heads, qk_nope_head_dim + qk_rope_head_dim]
+
+        Returns:
+            q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
+            wv_b: [heads, kv_lora_rank, v_head_dim]
+        """
+        qk_nope_head_dim = self.config.qk_nope_head_dim
+        qk_rope_head_dim = self.config.qk_rope_head_dim
+        kv_lora_rank = self.config.kv_lora_rank
+        v_head_dim = self.config.v_head_dim
+        num_heads = self.num_attention_heads_per_partition
+
+        # Split query into nope and rope parts
+        q_nope = query[
+            ..., :qk_nope_head_dim
+        ]  # [b, s, heads, qk_nope_head_dim]
+        q_pe = query[..., qk_nope_head_dim:]  # [b, s, heads, qk_rope_head_dim]
+
+        # Get kv_b_proj weight and reshape to per-head form
+        # kv_b_proj.weight: [kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)]
+        kv_b_weight = self.kv_b_proj.weight
+        w = kv_b_weight.reshape([kv_lora_rank, num_heads, -1]).transpose(
+            perm=[1, 2, 0]
+        )
+
+        # w: [heads, qk_nope + v_head, kv_lora_rank]
+        # wk_b: [heads, qk_nope_head_dim, kv_lora_rank]
+        wk_b = w[:, :qk_nope_head_dim, :]
+        # wv_b: [heads, kv_lora_rank, v_head_dim]
+        wv_b = w[:, -v_head_dim:, :].transpose(perm=[0, 2, 1])
+
+        # Absorption: q_nope @ wk_b => q_nope_absorbed
+        # q_nope: [b, s, heads, qk_nope] -> [b*s, heads, qk_nope] -> [heads, b*s, qk_nope]
+        orig_shape = q_nope.shape  # [b, s, heads, qk_nope]
+        bs = orig_shape[0] * orig_shape[1]
+
+        q_nope_3d = q_nope.reshape([bs, num_heads, qk_nope_head_dim]).transpose(
+            [1, 0, 2]
+        )
+        q_pe_3d = q_pe.reshape([bs, num_heads, qk_rope_head_dim])
+        # bmm: [heads, b*s, qk_nope] @ [heads, qk_nope, kv_lora_rank] -> [b*s, heads, kv_lora_rank]
+
+        q_nope_absorbed = paddle.bmm(q_nope_3d, wk_b).transpose([1, 0, 2])
+        # Concat: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
+        q_absorbed = paddle.concat([q_nope_absorbed, q_pe_3d], axis=-1)
+        q_absorbed = q_absorbed.reshape(
+            orig_shape[0], orig_shape[1], num_heads, -1
+        )
+        return q_absorbed, wv_b
+
     def forward(
         self,
         hidden_states,
@@ -378,8 +445,7 @@ class MultiLatentAttention(Attention):
         # =====================
         # Get the query, key and value tensors based on the type of attention
         # Also get q_compressed for DSA indexer (if enabled)
-
-        query, key, value, q_compressed, kv_compressed = (
+        query, key, value, q_compressed, kv_compressed, k_pos_emb = (
             self.get_query_key_value_tensors(
                 hidden_states,
                 key_value_states,
@@ -418,6 +484,18 @@ class MultiLatentAttention(Attention):
         layer_idx = kwargs.get("layer_idx")
         use_cache = kwargs.get("use_cache", False)
 
+        if (
+            hasattr(self.core_attention.config, "forward_meta")
+            and self.core_attention.config.forward_meta.max_len_tensor_cpu[2]
+            > 0
+        ):  # decode mode
+            # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
+            # q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
+            # wv_b: [heads, kv_lora_rank, v_head_dim]
+            q_absorbed, wv_b = self._compute_absorbed_q(query)
+        else:
+            q_absorbed, wv_b = None, None
+
         if self.recompute_core_attention and self.training:
             core_attn_out = recompute(
                 self.core_attention,
@@ -435,6 +513,11 @@ class MultiLatentAttention(Attention):
                 # DSA-specific parameters
                 x=hidden_states,
                 qr=q_compressed,
+                # fastdeploy support
+                kv_compressed=kv_compressed,
+                k_pos_emb=k_pos_emb,
+                q_absorbed=q_absorbed,
+                v_b_proj_weight=wv_b,
             )
         else:
             # Static batching attention kernel.
@@ -455,6 +538,11 @@ class MultiLatentAttention(Attention):
                 # DSA-specific parameters
                 x=hidden_states,
                 qr=q_compressed,
+                # fastdeploy support
+                kv_compressed=kv_compressed,
+                k_pos_emb=k_pos_emb,
+                q_absorbed=q_absorbed,
+                v_b_proj_weight=wv_b,
             )
 
         _log(core_attn_out, "core_attn_out", layer_num)
@@ -655,7 +743,9 @@ class MLASelfAttention(MultiLatentAttention):
         )
         if self.config.rope_type == "rope":
             rotary_pos_emb = self.rotary_pos_emb(
-                rotary_seq_len, packed_seq=packed_seq
+                rotary_seq_len,
+                packed_seq=packed_seq,
+                position_ids=None if self.training else position_ids,
             )
         else:
             if self.config.apply_rope_fusion:
@@ -678,7 +768,8 @@ class MLASelfAttention(MultiLatentAttention):
                 ), "Fused MLA RoPE apply is not imported successfully"
             else:
                 rotary_pos_emb, mscale = self.rotary_pos_emb(
-                    rotary_seq_len, packed_seq=packed_seq
+                    rotary_seq_len,
+                    packed_seq=packed_seq,
                 )
                 # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
                 # mscale = 1.0
@@ -793,6 +884,7 @@ class MLASelfAttention(MultiLatentAttention):
             rotary_pos_emb,
             rotary_pos_cos,
             rotary_pos_sin,
+            position_ids=None,
         ):
             """
             Apply the up projection and RoPE to the query and key.
@@ -968,8 +1060,9 @@ class MLASelfAttention(MultiLatentAttention):
                         q_pos_emb,
                         k_pos_emb,
                         q_len,
-                        rope_base=self.config.rope_theta,
+                        rope_base=self.config.rope_theta,  # Must match EC's config.rope_theta
                         position_offset=start_pos,
+                        position_ids=position_ids,
                     )
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)
@@ -999,6 +1092,7 @@ class MLASelfAttention(MultiLatentAttention):
                     )
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
+                k_pe = k_pos_emb
                 query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
 
                 # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
@@ -1021,18 +1115,19 @@ class MLASelfAttention(MultiLatentAttention):
             key = key.contiguous()
             value = value.contiguous()
 
-            return query, key, value
+            return query, key, value, k_pe
 
-        query, key, value = qkv_up_proj_and_rope_apply(
+        query, key, value, k_pos_emb = qkv_up_proj_and_rope_apply(
             q_compressed,
             kv_compressed,
             k_pos_emb,
             rotary_pos_emb,
             rotary_pos_cos,
             rotary_pos_sin,
+            position_ids,
         )
 
-        return query, key, value, q_compressed, kv_compressed
+        return query, key, value, q_compressed, kv_compressed, k_pos_emb
 
     def backward_dw(self) -> NoReturn:
         """Execute weight gradient computation"""

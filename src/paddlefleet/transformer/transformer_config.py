@@ -229,17 +229,6 @@ class TransformerConfig(ModelParallelConfig):
     """Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). Only
     used when gated_linear_unit is True"""
 
-    apply_residual_connection_post_layernorm: bool = False
-    """If True, uses the original BERT residue connection ordering."""
-
-    activation_func_clamp_value: float = None
-    """Clamp the output of the linear_fc1 in the activation function. Only used when activation_func
-    is quick_gelu."""
-
-    glu_linear_offset: float = 0.0
-    """Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). Only
-    used when gated_linear_unit is True"""
-
     multimodal_embedding: bool = False
     """Whether to use multimodal embedding."""
 
@@ -364,7 +353,9 @@ class TransformerConfig(ModelParallelConfig):
     """Number of experts to route to for each token."""
 
     scoring_func: str = "softmax"
-    """Score function for MoE routing. Can be "softmax" or "sigmoid"."""
+    """Score function for MoE routing. Options: "softmax", "sigmoid", "tanh",
+    "relu", "gelu", "leaky_relu", "sftplus" (softplus, non-negative unbounded),
+    "sqrtsoftplus" (sqrt(softplus), non-negative unbounded)."""
 
     moe_intermediate_size: int | None = None
     """MoE Feed-Forward Network hidden size"""
@@ -461,6 +452,16 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
+
+    moe_n_hash_layers: int = 0
+    """Number of leading transformer layers that use hash-based MoE routing.
+    Layers with layer_number < moe_n_hash_layers (0-indexed) use a pre-computed
+    tid2eid lookup table for expert selection instead of learned top-k routing.
+    Score weights are still computed from the gate logits. 0 disables hash routing."""
+
+    actual_vocab_size: int | None = None
+    """Padded actual vocabulary size. Required when moe_n_hash_layers > 0 for the
+    tid2eid lookup buffer in hash-based MoE routing."""
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
@@ -1006,3 +1007,43 @@ class TransformerConfig(ModelParallelConfig):
                         f"csa_compress_ratios[{i}]={r} is invalid. "
                         f"Must be one of {valid_ratios}."
                     )
+        # Hash-based MoE routing consistency checks.
+        if self.moe_n_hash_layers > 0:
+            if self.actual_vocab_size is None:
+                raise ValueError(
+                    "actual_vocab_size must be set when moe_n_hash_layers > 0; "
+                    "it is required to allocate the tid2eid lookup buffer."
+                )
+            if self.actual_vocab_size <= 0:
+                raise ValueError(
+                    f"actual_vocab_size must be positive, got "
+                    f"{self.actual_vocab_size}."
+                )
+            if self.moe_n_hash_layers > self.num_hidden_layers:
+                raise ValueError(
+                    f"moe_n_hash_layers ({self.moe_n_hash_layers}) cannot exceed "
+                    f"num_hidden_layers ({self.num_hidden_layers})."
+                )
+            if self.scoring_func not in ("softmax", "sigmoid", "sqrtsoftplus"):
+                raise ValueError(
+                    f"Hash routing requires scoring_func in "
+                    f"{{'softmax', 'sigmoid', 'sqrtsoftplus'}}, got "
+                    f"{self.scoring_func!r}."
+                )
+            if (
+                self.num_experts_per_tok is None
+                or self.num_experts_per_tok <= 0
+            ):
+                raise ValueError(
+                    "num_experts_per_tok (top-k) must be a positive integer "
+                    "when moe_n_hash_layers > 0."
+                )
+            if (
+                self.n_routed_experts is None
+                or self.n_routed_experts < self.num_experts_per_tok
+            ):
+                raise ValueError(
+                    f"n_routed_experts ({self.n_routed_experts}) must be >= "
+                    f"num_experts_per_tok ({self.num_experts_per_tok}) "
+                    f"when moe_n_hash_layers > 0."
+                )

@@ -152,7 +152,7 @@ class RotaryEmbedding(nn.Layer):
         used to create positional encodings"""
         if position_ids is not None:
             # Handle different position_ids shapes:
-            # - 1D [S]: use directly
+            # - 1D [S]: use directly (also covers fastdeploy decode mode)
             # - 2D [B, S]: use first batch (assume all batches have same positions)
             # - 3D: not supported by RotaryEmbedding, use MultimodalRotaryEmbedding instead
             if position_ids.ndim == 1:
@@ -171,6 +171,7 @@ class RotaryEmbedding(nn.Layer):
             seq = (
                 paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
             )
+
 
         if self.seq_len_interpolation_factor is not None:
             seq *= 1 / self.seq_len_interpolation_factor

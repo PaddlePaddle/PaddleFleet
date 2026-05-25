@@ -396,6 +396,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         self.transformer_layer = build_spec_layer(
             self.sublayers_spec.transformer_layer,
             config=self.config,
+            is_mtp_layer=True,
         )
         if not self.config.gpt_model_use_experimental_version:
             self.norm = build_spec_layer(
