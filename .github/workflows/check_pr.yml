@@ -8,8 +8,12 @@ on:
 jobs:
   check-pr-description:
     name: Check PR Description
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Checkout repository
         uses: actions/checkout@v6
         with:

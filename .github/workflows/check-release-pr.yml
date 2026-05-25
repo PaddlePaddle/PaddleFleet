@@ -15,8 +15,12 @@ env:
 jobs:
   validate:
     name: Validate Dev PR
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - uses: actions/checkout@v6
       - name: Check if PR description contains dev PR link
         run: |

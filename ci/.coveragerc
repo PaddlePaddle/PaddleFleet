@@ -6,3 +6,8 @@ patch = subprocess
 parallel = True
 omit =
     **/sonicmoe/**
+
+[paths]
+source =
+    src/paddlefleet
+    */site-packages/paddlefleet

@@ -24,10 +24,14 @@ defaults:
 jobs:
   check-packages-changes:
     name: Check packages directory changes
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     outputs:
       packages_changed: ${{ steps.check.outputs.packages_changed }}
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -49,11 +53,15 @@ jobs:
     name: Upload PR ops whl
     needs: check-packages-changes
     if: needs.check-packages-changes.outputs.packages_changed == 'true'
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     env:
       AK: ${{ secrets.BOS_CREDENTIAL_AK }}
       SK: ${{ secrets.BOS_CREDENTIAL_SK }}
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Setup Python 3.10
         uses: actions/setup-python@v3
         with:

@@ -16,7 +16,8 @@ permissions:
 
 jobs:
   check-and-collect:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     permissions:
       pull-requests: read
       actions: read
@@ -26,6 +27,9 @@ jobs:
       failed_job_urls: ${{ steps.check.outputs.failed_job_urls }}
       failed_run_ids: ${{ steps.check.outputs.failed_run_ids }}
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Check all workflows done and collect failed job URLs
         id: check
         env:
@@ -224,10 +228,14 @@ jobs:
   post-comment:
     needs: [check-and-collect, analyze]
     if: always() && needs.check-and-collect.outputs.skip == 'false'
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     permissions:
       actions: read
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Download bot result artifact
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
