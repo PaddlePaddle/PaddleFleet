@@ -431,6 +431,7 @@ def get_gpt_layer_local_spec(
         extra_kwargs={
             "config": config,
             "layer_number": layer_number,
+            "is_mtp_layer": is_mtp_layer,
             "hidden_dropout_prob": config.hidden_dropout_prob
             if config is not None
             else None,

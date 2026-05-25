@@ -831,6 +831,7 @@ class StandardMoERouter(nn.Layer):
 
     def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self.layer_number = layer_number
+        self._setup_hash_layer(layer_number, is_mtp_layer)
 
     def _setup_hash_layer(self, layer_number, is_mtp_layer: bool = False):
         """Activate hash routing for this layer if it falls in the hash range.
@@ -884,7 +885,7 @@ class StandardMoERouter(nn.Layer):
                 for k in range(self.num_experts_per_tok)
             ],
             axis=1,
-        ).cast(paddle.int32)
+        )
         # Replace the placeholder attribute with a registered buffer.
         if hasattr(self, "tid2eid"):
             del self.tid2eid
