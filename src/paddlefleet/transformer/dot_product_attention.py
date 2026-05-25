@@ -238,6 +238,11 @@ class DotProductAttention(FleetLayer):
         # DSA-specific parameters (ignored by DotProductAttention)
         x: Tensor | None = None,
         qr: Tensor | None = None,
+        # fastdeploy specific parameters
+        kv_compressed: paddle.Tensor = None,
+        k_pos_emb: paddle.Tensor = None,
+        q_absorbed: paddle.Tensor = None,
+        v_b_proj_weight: paddle.Tensor = None,
     ):
         """Forward."""
         assert attention_bias is None, (
@@ -553,9 +558,14 @@ class CPDotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
-        # DSA-specific parameters
+        # DSA-specific parameters (ignored by DotProductAttention)
         x: Tensor | None = None,
         qr: Tensor | None = None,
+        # fastdeploy specific parameters
+        kv_compressed: paddle.Tensor = None,
+        k_pos_emb: paddle.Tensor = None,
+        q_absorbed: paddle.Tensor = None,
+        v_b_proj_weight: paddle.Tensor = None,
     ):
         """Forward."""
         assert packed_seq_params is None, (

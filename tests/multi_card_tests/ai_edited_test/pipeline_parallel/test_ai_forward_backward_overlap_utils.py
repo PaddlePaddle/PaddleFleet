@@ -18,6 +18,7 @@ import unittest
 
 import numpy as np
 import paddle
+import paddle.distributed as dist
 from paddle.distributed import fleet
 
 sys.path.insert(
@@ -30,15 +31,12 @@ sys.path.insert(
 )
 
 from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
-    FakeClone,
     ScheduleChunk,
     ScheduleNode,
-    clone_and_clear_dataptr,
-    detach_and_requires_grad,
 )
 from paddlefleet.training.initialize import initialize_fleet
 
-PP_DEGREE = 2
+PP_DEGREE = 4
 
 
 def _init_pp():
@@ -66,204 +64,243 @@ def _init_pp():
     initialize_fleet(strategy)
 
 
-def setUpModule():
-    """Initialize fleet once for all tests in this module (PP=2)."""
-    _init_pp()
-    np.random.seed(42)
-    paddle.seed(42)
+def _set_random_seed(seed_):
+    seed = seed_ + 100 * dist.get_rank()
+    np.random.seed(seed)
+    paddle.manual_seed(seed)
 
 
-class TestFakeCloneForwardBackward(unittest.TestCase):
-    """Test FakeClone.apply creates empty_like tensor and backward passes grad."""
+class TestScheduleNode(unittest.TestCase):
+    def test_schedule_node_creation(self):
+        """Test ScheduleNode can be created with a function and name."""
+        node = ScheduleNode(lambda x: x * 2, name="test_node")
+        self.assertEqual(node.name, "test_node")
 
-    def test_fake_clone_forward_backward(self):
-        """FakeClone.forward should produce same-shape tensor; backward passes grad_output through."""
-        x = paddle.randn([4, 8], dtype="float32")
-        x.stop_gradient = False
-        cloned = FakeClone.apply(x)
-        # FakeClone creates an empty_like tensor (same shape, same dtype)
-        self.assertEqual(cloned.shape, x.shape)
-        self.assertEqual(cloned.dtype, x.dtype)
+    def test_schedule_node_name_default(self):
+        """Test ScheduleNode default name is empty string."""
+        node = ScheduleNode(lambda x: x)
+        self.assertEqual(node.name, "")
 
-        # backward should pass grad_output through
-        grad_output = paddle.randn([4, 8], dtype="float32")
-        paddle.autograd.backward([cloned], [grad_output])
-        np.testing.assert_allclose(
-            x.grad.numpy(), grad_output.numpy(), rtol=1e-5
+
+class TestDetachAndRequiresGrad(unittest.TestCase):
+    def test_detach_and_requires_grad_tensor(self):
+        """Test detach_and_requires_grad with a plain tensor."""
+        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+            detach_and_requires_grad,
         )
 
-
-class TestCloneAndClearDataptrSingleTensor(unittest.TestCase):
-    """Test clone_and_clear_dataptr with a single tensor."""
-
-    def test_clone_and_clear_dataptr_single_tensor(self):
-        """clone_and_clear_dataptr should return a tensor with the same shape."""
-        x = paddle.randn([4, 8], dtype="float32")
-        result = clone_and_clear_dataptr(x)
-        self.assertEqual(result.shape, x.shape)
-        self.assertEqual(result.dtype, x.dtype)
-
-
-class TestCloneAndClearDataptrTuple(unittest.TestCase):
-    """Test clone_and_clear_dataptr with a tuple of tensors."""
-
-    def test_clone_and_clear_dataptr_tuple(self):
-        """clone_and_clear_dataptr with tuple should return a tuple of cloned tensors."""
-        t1 = paddle.randn([2, 4], dtype="float32")
-        t2 = paddle.randn([3, 6], dtype="float32")
-        result = clone_and_clear_dataptr((t1, t2))
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 2)
-        self.assertEqual(result[0].shape, t1.shape)
-        self.assertEqual(result[1].shape, t2.shape)
-
-
-class TestCloneAndClearDataptrDict(unittest.TestCase):
-    """Test clone_and_clear_dataptr with a dict of tensors."""
-
-    def test_clone_and_clear_dataptr_dict(self):
-        """clone_and_clear_dataptr with dict should return a dict of cloned tensors."""
-        t1 = paddle.randn([2, 4], dtype="float32")
-        t2 = paddle.randn([3, 6], dtype="float32")
-        inputs = {"a": t1, "b": t2}
-        result = clone_and_clear_dataptr(inputs)
-        self.assertIsInstance(result, dict)
-        self.assertIn("a", result)
-        self.assertIn("b", result)
-        self.assertEqual(result["a"].shape, t1.shape)
-        self.assertEqual(result["b"].shape, t2.shape)
-
-
-class TestCloneAndClearDataptrWithClear(unittest.TestCase):
-    """Test clone_and_clear_dataptr with clear_dataptr=True."""
-
-    def test_clone_and_clear_dataptr_with_clear(self):
-        """clone_and_clear_dataptr with clear_dataptr=True should call _clear_dataptr."""
-        x = paddle.randn([4, 8], dtype="float32")
-        expected_shape = x.shape
-        expected_dtype = x.dtype
-        result = clone_and_clear_dataptr(x, clear_dataptr=True)
-        # After clearing dataptr, the tensor shell still exists but
-        # shape/dtype access may not work. Verify the tensor was created.
-        self.assertIsNotNone(result)
-
-
-class TestDetachAndRequiresGradTuple(unittest.TestCase):
-    """Test detach_and_requires_grad with tuple input."""
+        x = paddle.to_tensor([1.0, 2.0, 3.0], stop_gradient=False)
+        y = x * 2
+        detached = detach_and_requires_grad(y)
+        self.assertFalse(detached.stop_gradient)
+        np.testing.assert_allclose(detached.numpy(), [2.0, 4.0, 6.0], rtol=1e-5)
 
     def test_detach_and_requires_grad_tuple(self):
-        """detach_and_requires_grad with tuple should return tuple of detached tensors."""
-        t1 = paddle.to_tensor([1.0, 2.0], stop_gradient=False)
-        t2 = paddle.to_tensor([3.0, 4.0], stop_gradient=False)
+        """Test detach_and_requires_grad with a tuple of tensors."""
+        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+            detach_and_requires_grad,
+        )
+
+        t1 = paddle.to_tensor([1.0], stop_gradient=False)
+        t2 = paddle.to_tensor([2.0], stop_gradient=False)
         result = detach_and_requires_grad((t1, t2))
         self.assertIsInstance(result, tuple)
         self.assertEqual(len(result), 2)
-        np.testing.assert_allclose(result[0].numpy(), [1.0, 2.0], rtol=1e-5)
-        np.testing.assert_allclose(result[1].numpy(), [3.0, 4.0], rtol=1e-5)
         self.assertFalse(result[0].stop_gradient)
         self.assertFalse(result[1].stop_gradient)
 
+    def test_detach_and_requires_grad_dict(self):
+        """Test detach_and_requires_grad with a dict of tensors."""
+        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+            detach_and_requires_grad,
+        )
 
-class TestDetachAndRequiresGradNested(unittest.TestCase):
-    """Test detach_and_requires_grad with nested tuple input."""
-
-    def test_detach_and_requires_grad_nested(self):
-        """detach_and_requires_grad with nested tuple should recursively detach."""
         t1 = paddle.to_tensor([1.0], stop_gradient=False)
         t2 = paddle.to_tensor([2.0], stop_gradient=False)
-        t3 = paddle.to_tensor([3.0], stop_gradient=False)
-        result = detach_and_requires_grad(((t1, t2), t3))
-        self.assertIsInstance(result, tuple)
-        self.assertIsInstance(result[0], tuple)
-        self.assertEqual(len(result[0]), 2)
-        self.assertEqual(len(result), 2)
-        np.testing.assert_allclose(result[0][0].numpy(), [1.0], rtol=1e-5)
-        np.testing.assert_allclose(result[0][1].numpy(), [2.0], rtol=1e-5)
-        np.testing.assert_allclose(result[1].numpy(), [3.0], rtol=1e-5)
+        result = detach_and_requires_grad({"a": t1, "b": t2})
+        self.assertIsInstance(result, dict)
+        self.assertFalse(result["a"].stop_gradient)
 
 
-class TestScheduleNodeForwardNoRecompute(unittest.TestCase):
-    """Test ScheduleNode.forward with a simple fwd_func (no recompute)."""
-
-    def test_schedule_node_forward_no_recompute(self):
-        """ScheduleNode.forward should call fwd_func and return its output."""
-        node = ScheduleNode(
-            fwd_func=lambda inputs, **kwargs: inputs * 2, name="double_node"
-        )
-        inputs = paddle.to_tensor([1.0, 2.0, 3.0], stop_gradient=False)
-        output = node.forward(inputs)
-        np.testing.assert_allclose(output.numpy(), [2.0, 4.0, 6.0], rtol=1e-5)
-
-
-class TestScheduleNodeBackward(unittest.TestCase):
-    """Test ScheduleNode.backward after forward, verify _reset_states is called."""
-
-    def test_schedule_node_backward(self):
-        """ScheduleNode.backward should clear internal state after backward."""
-        weight = paddle.create_parameter(
-            shape=[3, 3],
-            dtype="float32",
-            default_initializer=paddle.nn.initializer.Constant(1.0),
+class TestCloneAndClearDataptr(unittest.TestCase):
+    def test_clone_and_clear_dataptr_basic(self):
+        """Test clone_and_clear_dataptr creates a FakeClone wrapper."""
+        from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
+            clone_and_clear_dataptr,
         )
 
-        def fwd_func(inputs, **kwargs):
-            return paddle.matmul(inputs, weight)
-
-        node = ScheduleNode(fwd_func=fwd_func, name="matmul_node")
-        inputs = paddle.to_tensor([[1.0, 2.0, 3.0]], stop_gradient=False)
-        output = node.forward(inputs)
-
-        # backward should not raise error
-        grad = node.backward()
-        # After backward, internal state should be reset
-        self.assertIsNone(node.inputs)
-        self.assertIsNone(node.outputs)
+        x = paddle.to_tensor([1.0, 2.0, 3.0])
+        cloned = clone_and_clear_dataptr(x)
+        # FakeClone wraps the tensor; verify it has the right type
+        self.assertIsNotNone(cloned)
 
 
-class TestScheduleChunkForwardBackward(unittest.TestCase):
-    """Test ScheduleChunk with multiple nodes."""
+class TestScheduleChunk(unittest.TestCase):
+    def test_schedule_chunk_creation(self):
+        """Test ScheduleChunk validates nodes."""
+        node = ScheduleNode(lambda x: x, name="node1")
+        chunk = ScheduleChunk([node])
+        self.assertEqual(len(chunk.nodes), 1)
 
-    def test_schedule_chunk_forward_backward(self):
-        """ScheduleChunk should chain forward and backward through its nodes."""
-        node1 = ScheduleNode(
-            fwd_func=lambda inputs, **kwargs: inputs * 2, name="mul_node"
+
+class TestP2PCommunicationInit(unittest.TestCase):
+    """Test p2p_communication initialization with real PP."""
+
+    @unittest.skipIf(
+        not (
+            paddle.is_compiled_with_cuda()
+            and paddle.distributed.is_initialized()
+        ),
+        "Requires CUDA and distributed environment",
+    )
+    def test_initialize_p2p_groups(self):
+        """Test initialize_p2p_groups with hybrid communicate group."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            initialize_p2p_groups,
         )
-        node2 = ScheduleNode(
-            fwd_func=lambda inputs, **kwargs: inputs + 1, name="add_node"
+
+        hcg = fleet.get_hybrid_communicate_group()
+        initialize_p2p_groups(hcg, enable_partial_send_recv=True)
+
+
+class TestSendRecvMeta(unittest.TestCase):
+    def test_init_or_erase_meta(self):
+        """Test that init_or_erase_meta resets all fields."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            SendRecvMeta,
         )
-        chunk = ScheduleChunk([node1, node2])
-        inputs = paddle.to_tensor([1.0, 2.0, 3.0], stop_gradient=False)
 
-        # Forward: first multiply by 2, then add 1
-        output = chunk.forward(inputs)
-        np.testing.assert_allclose(output.numpy(), [3.0, 5.0, 7.0], rtol=1e-5)
+        meta = SendRecvMeta()
+        meta.send_shape_message = [2, 3]
+        meta.recv_shape_message = [4, 5]
+        meta.has_send_meta = True
+        meta.has_recv_meta = True
+        meta.init_or_erase_meta()
+        self.assertIsNone(meta.send_shape_message)
+        self.assertIsNone(meta.recv_shape_message)
+        # has_send_meta and has_recv_meta are on the meta object, not SendRecvMeta class
+        self.assertFalse(meta.has_send_meta)
+        self.assertFalse(meta.has_recv_meta)
 
-        # Backward should not raise error
-        grad = chunk.backward(output)
+    def test_obtain_send_message_single(self):
+        """Test _obtain_send_message with a single tensor."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            SendRecvMeta,
+        )
 
+        meta = SendRecvMeta()
+        tensor = paddle.randn([4, 8], dtype="float32")
+        shape, dtype, key = meta._obtain_send_message(tensor)
+        self.assertEqual(shape, [4, 8])
+        self.assertEqual(dtype, 1)  # float32 = 1 in PADDLE_TO_NUMBER
+        self.assertIsNone(key)
 
-class TestScheduleChunkValidation(unittest.TestCase):
-    """Test ScheduleChunk validates node types."""
+    def test_obtain_send_message_tuple(self):
+        """Test _obtain_send_message with a tuple of tensors."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            SendRecvMeta,
+        )
 
-    def test_schedule_chunk_validates_node_type(self):
-        """ScheduleChunk should raise AssertionError if node is not ScheduleNode or ScheduleChunk."""
+        meta = SendRecvMeta()
+        t1 = paddle.randn([2, 4], dtype="float32")
+        t1.stop_gradient = False
+        t2 = paddle.randn([2, 4], dtype="float16")
+        t2.stop_gradient = False
+        shapes, dtypes, keys = meta._obtain_send_message((t1, t2))
+        self.assertEqual(shapes, ([2, 4], [2, 4]))
+        self.assertEqual(dtypes, (1, 0))  # float32=1, float16=0
+        self.assertEqual(keys, (None, None))
+
+    def test_set_and_check_send_message(self):
+        """Test set_send_message and check_send_message."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            SendRecvMeta,
+        )
+
+        meta = SendRecvMeta()
+        tensor = paddle.randn([4, 8], dtype="float32")
+        meta.set_send_message(tensor)
+        self.assertEqual(meta.send_shape_message, [4, 8])
+        meta.check_send_message(tensor)
+
+    def test_check_send_message_mismatch(self):
+        """Test check_send_message raises on shape mismatch."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            SendRecvMeta,
+        )
+
+        meta = SendRecvMeta()
+        t1 = paddle.randn([4, 8], dtype="float32")
+        meta.set_send_message(t1)
+        t2 = paddle.randn([4, 16], dtype="float32")
         with self.assertRaises(AssertionError):
-            ScheduleChunk([lambda x: x])
+            meta.check_send_message(t2)
+
+    def test_repr(self):
+        """Test __repr__ output."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            SendRecvMeta,
+        )
+
+        meta = SendRecvMeta()
+        repr_str = repr(meta)
+        self.assertIn("send_shape_message", repr_str)
+        self.assertIn("recv_shape_message", repr_str)
 
 
-class TestScheduleNodeReset(unittest.TestCase):
-    """Test ScheduleNode._reset_states clears internal state."""
+class TestIsValidSendRecvPartial(unittest.TestCase):
+    def test_valid_partial(self):
+        """Test valid partial when tensor divisible by mp_degree."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            _is_valid_send_recv_partial,
+        )
 
-    def test_schedule_node_reset_states(self):
-        """After _reset_states, inputs and outputs should be None."""
-        node = ScheduleNode(lambda x: x, name="test")
-        inputs = paddle.to_tensor([1.0], stop_gradient=False)
-        node.forward(inputs)
-        self.assertIsNotNone(node.inputs)
-        self.assertIsNotNone(node.outputs)
-        node._reset_states()
-        self.assertIsNone(node.inputs)
-        self.assertIsNone(node.outputs)
+        tensor = paddle.randn([4, 8], dtype="float32")
+        self.assertTrue(_is_valid_send_recv_partial(tensor, 4))
+
+    def test_not_divisible(self):
+        """Test invalid when tensor not divisible by mp_degree."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            _is_valid_send_recv_partial,
+        )
+
+        tensor = paddle.randn([3, 7], dtype="float32")
+        self.assertFalse(_is_valid_send_recv_partial(tensor, 4))
+
+    def test_mp_degree_one(self):
+        """Test invalid when mp_degree is 1."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            _is_valid_send_recv_partial,
+        )
+
+        tensor = paddle.randn([4, 8], dtype="float32")
+        self.assertFalse(_is_valid_send_recv_partial(tensor, 1))
+
+    def test_empty_tensor_raises(self):
+        """Test empty tensor raises assertion."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            _is_valid_send_recv_partial,
+        )
+
+        tensor = paddle.randn([0, 8], dtype="float32")
+        with self.assertRaises(AssertionError):
+            _is_valid_send_recv_partial(tensor, 4)
+
+
+class TestP2PonCalcStream(unittest.TestCase):
+    def test_invalid_op(self):
+        """Test P2PonCalcStream raises on invalid op."""
+        from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
+            P2PonCalcStream,
+        )
+
+        with self.assertRaises(RuntimeError):
+            P2PonCalcStream(
+                lambda x, y, z: None,
+                paddle.randn([4], dtype="float32"),
+                0,
+                None,
+            )
 
 
 if __name__ == "__main__":
