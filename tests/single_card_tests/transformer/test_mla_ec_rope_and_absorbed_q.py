@@ -360,40 +360,6 @@ class TestECRopeBranchFullGPT(unittest.TestCase):
             [micro_batch_size, sequence_length, config.vocab_size],
         )
 
-    def _test_3d_position_ids_raises_value_error(self):
-        """3D position_ids should raise ValueError (not supported by RotaryEmbedding)."""
-        model, config = _build_gpt_model(
-            gpt_model_use_experimental_version=True
-        )
-        model.eval()
-
-        sequence_length = 16
-        micro_batch_size = 2
-
-        input_ids = paddle.randint(
-            0, config.vocab_size, [micro_batch_size, sequence_length]
-        )
-        # 3D position_ids: [3, batch, seq_len] - M-RoPE style
-        position_ids = paddle.arange(
-            3 * micro_batch_size * sequence_length, dtype=paddle.int64
-        ).reshape([3, micro_batch_size, sequence_length])
-        attention_mask = paddle.ones(
-            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
-        )
-
-        dict_args = {
-            "input_ids": input_ids,
-            "position_ids": position_ids,
-            "attention_mask": attention_mask,
-        }
-
-        with self.assertRaises(ValueError) as context:
-            model(dict_args)
-
-        self.assertIn(
-            "position_ids must be either 1D or 2D", str(context.exception)
-        )
-
     def test_backward_ec_rope_with_1d_position_ids(self):
         """Backward through EC rope path with 1D position_ids."""
         model, config = _build_gpt_model(
@@ -932,40 +898,6 @@ class TestNonExperimentalVersionPositionIds(unittest.TestCase):
                 has_grad = True
                 self.assertTrue(paddle.isfinite(param.grad).all().item())
         self.assertTrue(has_grad, "Should have gradients after backward")
-
-    def _test_3d_position_ids_raises_value_error(self):
-        """3D position_ids should raise ValueError (non-experimental version)."""
-        model, config = _build_gpt_model(
-            gpt_model_use_experimental_version=False
-        )
-        model.eval()
-
-        sequence_length = 16
-        micro_batch_size = 2
-
-        input_ids = paddle.randint(
-            0, config.vocab_size, [micro_batch_size, sequence_length]
-        )
-        # 3D position_ids: [3, batch, seq_len] - M-RoPE style
-        position_ids = paddle.arange(
-            3 * micro_batch_size * sequence_length, dtype=paddle.int64
-        ).reshape([3, micro_batch_size, sequence_length])
-        attention_mask = paddle.ones(
-            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
-        )
-
-        dict_args = {
-            "input_ids": input_ids,
-            "position_ids": position_ids,
-            "attention_mask": attention_mask,
-        }
-
-        with self.assertRaises(ValueError) as context:
-            model(dict_args)
-
-        self.assertIn(
-            "position_ids must be either 1D or 2D", str(context.exception)
-        )
 
 
 if __name__ == "__main__":

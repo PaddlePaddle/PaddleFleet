@@ -74,9 +74,8 @@ def _ec_compatible_rope_apply(
         k_pe: [B, S, 1, D] key positional embedding portion
         seq_len: sequence length
         rope_base: base frequency (default 1e6)
-        position_ids: optional [B, S] or [B, S, 3] position IDs.
+        position_ids: optional [S] position ID in fastdeploy decode mode.
                      If None, defaults to [0, 1, ..., seq_len-1].
-                     For 3D mRoPE, uses the first axis (position_ids[:, :, 0]).
     """
     head_dim = q_pe.shape[-1]
     # inv_freq same as EC: 1 / (base^(arange(0, dim, 2) / dim))
@@ -89,21 +88,11 @@ def _ec_compatible_rope_apply(
         # we need to get full seq_len here
         seq_len = seq_len * get_context_parallel_world_size()
     # Compute positions from position_ids or default to sequential
-    if position_ids is not None:
-        # Handle different position_ids shapes:
-        # - 1D [S]: use directly
-        # - 2D [B, S]: use first batch (assume all batches have same positions)
-        # - 3D: not supported by RotaryEmbedding, use MultimodalRotaryEmbedding instead
-        if position_ids.ndim == 1:
-            positions = position_ids.astype(freqs.dtype)
-        elif position_ids.ndim == 2:
-            # Take first batch, assuming all batches have same position_ids
-            positions = position_ids[0].astype(freqs.dtype)
-        else:
-            # For 3D position_ids (M-RoPE style), use other rope implementation (e.g., MLaBE)
-            raise ValueError("position_ids must be either 1D or 2D")
+    if position_ids is not None and position_ids.ndim == 1:
+        # fastdeploy decode mode
+        positions = position_ids.astype(freqs.dtype)
     else:
-        positions = paddle.arange(seq_len).astype(freqs.dtype)  # + offset
+        positions = paddle.arange(seq_len).astype(freqs.dtype)
     # freqs_table: [S, D/2]
     freqs_table = paddle.outer(positions, freqs)
     # Expand for batch: [1, S, D/2]
@@ -1013,7 +1002,7 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
-                if self.config.gpt_model_use_experimental_version:
+                if self.config.gpt_model_use_experimental_version or True:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
                         TransformerLayer,
