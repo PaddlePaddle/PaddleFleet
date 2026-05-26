@@ -93,7 +93,6 @@ def _ec_compatible_rope_apply(
         # In EB dataflow and CP size > 1, shape of q is [b, s/cp, h, d],
         # we need to get full seq_len here
         seq_len = seq_len * get_context_parallel_world_size()
-        seq_len = seq_len * get_context_parallel_world_size()
 
     # Compute positions: prefer 1D position_ids (fastdeploy decode), else use sequential with offset
     if position_ids is not None and position_ids.ndim == 1:
