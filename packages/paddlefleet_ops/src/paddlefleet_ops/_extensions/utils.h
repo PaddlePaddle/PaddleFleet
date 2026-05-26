@@ -63,7 +63,8 @@ inline int LimitGridDim(int64_t n) {
 }
 
 inline bool ShouldUseInt64Index(int64_t rows, int64_t stride) {
-  return rows * stride >= static_cast<int64_t>(std::numeric_limits<int>::max());
+  const int64_t max_int = static_cast<int64_t>(std::numeric_limits<int>::max());
+  return rows >= max_int / stride;
 }
 
 #ifdef __CUDACC__
