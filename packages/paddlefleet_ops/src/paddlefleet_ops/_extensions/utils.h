@@ -62,6 +62,11 @@ inline int LimitGridDim(int64_t n) {
   return static_cast<int>(std::min<int64_t>(n, 1024 * 1024));
 }
 
+inline bool ShouldUseInt64Index(int64_t rows, int64_t stride) {
+  return rows * stride >=
+         static_cast<int64_t>(std::numeric_limits<int>::max());
+}
+
 #ifdef __CUDACC__
 template <typename T>
 T** GetTensorDevicePtrs(const std::vector<paddle::Tensor>& tensors,

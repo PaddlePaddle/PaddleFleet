@@ -18,6 +18,7 @@
 #include <limits>
 #include <vector>
 #include "paddle/extension.h"
+#include "utils.h"
 
 // 128-bit memory alignment struct
 struct __align__(16) Packed128 {
@@ -36,10 +37,6 @@ constexpr int64_t kSwiGLUBackMaxRowGridSize = 65535;
 inline int GetSwiGLURowGridSize(int64_t rows) {
   return static_cast<int>(
       rows < kSwiGLUBackMaxRowGridSize ? rows : kSwiGLUBackMaxRowGridSize);
-}
-
-inline bool ShouldUseInt64Index(int64_t rows, int64_t input_stride) {
-  return rows >= static_cast<int64_t>(std::numeric_limits<int>::max());
 }
 
 inline void CheckSwiGLUBackShape(const paddle::Tensor& g,

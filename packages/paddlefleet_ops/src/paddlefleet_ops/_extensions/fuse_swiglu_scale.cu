@@ -17,6 +17,7 @@
 #include <limits>
 #include <vector>
 #include "paddle/extension.h"
+#include "utils.h"
 
 // ==========================================================================
 // Utils: Packed Memory Access (128-bit Vectorization)
@@ -41,10 +42,6 @@ constexpr int64_t kFusedSwiGLUMaxRowGridSize = 65535;
 inline int GetSwiGLURowGridSize(int64_t rows) {
   return static_cast<int>(
       rows < kFusedSwiGLUMaxRowGridSize ? rows : kFusedSwiGLUMaxRowGridSize);
-}
-
-inline bool ShouldUseInt64Index(int64_t rows, int64_t row_stride) {
-  return rows >= static_cast<int64_t>(std::numeric_limits<int>::max());
 }
 
 // ==========================================================================
