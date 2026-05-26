@@ -4,7 +4,7 @@ import os
 
 import paddle
 
-from .compat import enable_tilelang_paddle_compat_before_import, paddle_tilelang_compat_guard
+from .compat import enable_tilelang_paddle_compat_before_import
 
 
 DEFAULT_INDEXER_BLOCK = 32
@@ -196,17 +196,16 @@ def tilelang_csa_compressed_indexer_topk_paddle(
         topk_effective,
     )
     csa_indexer_topk_fwd_interface = _get_csa_indexer_topk_fwd_interface()
-    with paddle_tilelang_compat_guard():
-        topk_indices, topk_scores = csa_indexer_topk_fwd_interface(
-            index_q,
-            index_k_comp,
-            weights,
-            ratio=int(ratio),
-            topk_effective=topk_effective,
-            block_K=int(block_K),
-            num_stages=int(num_stages),
-            num_threads=int(num_threads),
-        )
+    topk_indices, topk_scores = csa_indexer_topk_fwd_interface(
+        index_q,
+        index_k_comp,
+        weights,
+        ratio=int(ratio),
+        topk_effective=topk_effective,
+        block_K=int(block_K),
+        num_stages=int(num_stages),
+        num_threads=int(num_threads),
+    )
     expected_shape = (_shape(index_q)[0], _shape(index_q)[1], topk_effective)
     if _shape(topk_indices) != expected_shape or _shape(topk_scores) != expected_shape:
         raise RuntimeError(
@@ -276,17 +275,16 @@ def tilelang_csa_compressed_indexer_bwd_paddle(
         grad_scores,
     )
     csa_indexer_bwd_interface = _get_csa_indexer_bwd_interface()
-    with paddle_tilelang_compat_guard():
-        grad_q, grad_weights, grad_k_comp = csa_indexer_bwd_interface(
-            index_q,
-            weights,
-            index_k_comp,
-            topk_indices,
-            grad_scores,
-            block_I=int(block_I),
-            num_stages=int(num_stages),
-            num_threads=int(num_threads),
-        )
+    grad_q, grad_weights, grad_k_comp = csa_indexer_bwd_interface(
+        index_q,
+        weights,
+        index_k_comp,
+        topk_indices,
+        grad_scores,
+        block_I=int(block_I),
+        num_stages=int(num_stages),
+        num_threads=int(num_threads),
+    )
     if _shape(grad_q) != _shape(index_q) or _shape(grad_weights) != _shape(weights) or _shape(grad_k_comp) != _shape(index_k_comp):
         raise RuntimeError(
             "unexpected CSA indexer backward output shapes: "

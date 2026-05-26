@@ -1,6 +1,5 @@
 import paddle
 
-from ..compat import paddle_tilelang_compat_guard
 from . import tilelang_sparse_mla_fwd as sparse_mla_fwd
 
 
@@ -33,8 +32,7 @@ def _prepare_inputs_paddle(q, kv, attn_sink, topk_idxs, topk_pad_to=64):
 
 def sparse_attn_tilelang_paddle(q, kv, attn_sink, topk_idxs, sm_scale=None, topk_pad_to=64):
     q, kv, attn_sink, topk_idxs = _prepare_inputs_paddle(q, kv, attn_sink, topk_idxs, topk_pad_to=topk_pad_to)
-    with paddle_tilelang_compat_guard():
-        out, lse = sparse_mla_fwd.sparse_mqa_fwd_interface(q, kv, attn_sink, topk_idxs, sm_scale=sm_scale)
+    out, lse = sparse_mla_fwd.sparse_mqa_fwd_interface(q, kv, attn_sink, topk_idxs, sm_scale=sm_scale)
     if not isinstance(out, paddle.Tensor) or not isinstance(lse, paddle.Tensor):
         raise RuntimeError(
             "attention_paddle_compat requires TileLang to return Paddle tensors, "

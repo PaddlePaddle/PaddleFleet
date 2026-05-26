@@ -5,7 +5,7 @@ import time
 
 import paddle
 
-from .compat import enable_tilelang_paddle_compat_before_import, paddle_tilelang_compat_guard
+from .compat import enable_tilelang_paddle_compat_before_import
 
 
 DEFAULT_TOPK_PAD_TO = 64
@@ -223,17 +223,16 @@ def _get_sparse_attn_tilelang_paddle():
 
 def _compat_backward_kernel(query, kv_full, attn_sink, output, grad_output, topk_idxs, lse, softmax_scale):
     sparse_mla_bwd = _get_sparse_mla_bwd()
-    with paddle_tilelang_compat_guard():
-        return sparse_mla_bwd.sparse_mqa_bwd_interface(
-            query,
-            kv_full,
-            attn_sink,
-            output,
-            grad_output,
-            topk_idxs,
-            lse,
-            sm_scale=softmax_scale,
-        )
+    return sparse_mla_bwd.sparse_mqa_bwd_interface(
+        query,
+        kv_full,
+        attn_sink,
+        output,
+        grad_output,
+        topk_idxs,
+        lse,
+        sm_scale=softmax_scale,
+    )
 
 
 class TileLangCompressedSparseAttentionPaddleCompatPyLayer(paddle.autograd.PyLayer):
