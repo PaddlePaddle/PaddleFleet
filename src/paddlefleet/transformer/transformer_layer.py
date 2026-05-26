@@ -698,7 +698,10 @@ class TransformerLayer(nn.Layer):
             # need_do_decode = forward_meta.max_len_tensor_cpu[2] > 0
             # in fastdeploy mode , not need_do_prefill and not need_do_decode,
             # core_attention will return none, so pass self attention
-            if getattr(self, "training", True):
+            if (
+                getattr(self, "training", True)
+                or not self.config.multi_latent_attention
+            ):
                 return True
             if hasattr(self, "self_attn") and hasattr(
                 self.self_attn, "core_attention"
@@ -708,10 +711,15 @@ class TransformerLayer(nn.Layer):
                     core_attn.config, "forward_meta"
                 ):
                     fm = core_attn.config.forward_meta
-                    return not (
+                    res = not (
                         fm.max_len_tensor_cpu[1] <= 0
                         and fm.max_len_tensor_cpu[2] <= 0
                     )
+                    if not res:
+                        logging.warning(
+                            "need_do_attention skipped because fm.max_len_tensor_cpu[1]=0 and fm.max_len_tensor_cpu[2]=0"
+                        )
+                    return res
                 return True
             else:
                 return True
