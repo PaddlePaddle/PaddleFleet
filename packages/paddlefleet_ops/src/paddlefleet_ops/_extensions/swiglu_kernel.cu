@@ -31,14 +31,15 @@ __device__ __forceinline__ float precise_sigmoid(T x) {
 
 constexpr int kSwiGLUBackBlockSize = 256;
 
-inline bool ShouldUseInt64Index(int64_t rows, int64_t row_stride) {
-  // This predicate protects Y/DX offsets:
-  //   row * row_stride + col
-  // The G offset uses row * hidden_size + col. For fused_swiglu_bwd,
-  // row_stride is 2 * hidden_size after shape checks, so any int32-safe Y/DX
-  // offset range also bounds the G offset range.
-  return rows >=
-         static_cast<int64_t>(std::numeric_limits<int>::max()) / row_stride;
+constexpr int64_t kSwiGLUBackMaxRowGridSize = 65535;
+
+inline int GetSwiGLURowGridSize(int64_t rows) {
+  return static_cast<int>(
+      rows < kSwiGLUBackMaxRowGridSize ? rows : kSwiGLUBackMaxRowGridSize);
+}
+
+inline bool ShouldUseInt64Index(int64_t rows, int64_t input_stride) {
+  return rows >= static_cast<int64_t>(std::numeric_limits<int>::max());
 }
 
 inline void CheckSwiGLUBackShape(const paddle::Tensor& g,
@@ -116,50 +117,54 @@ template <typename T, int VEC_SIZE, typename IndexT>
 __global__ void VectorizedSwiGLUBackKernel(const T* __restrict__ g,
                                            const T* __restrict__ y,
                                            T* __restrict__ dx,
+                                           int64_t rows,
                                            IndexT hidden_size,
                                            IndexT input_stride) {
-  IndexT row = static_cast<IndexT>(blockIdx.x);
   int tid = threadIdx.x;
   IndexT lane_idx = static_cast<IndexT>(tid) * VEC_SIZE;
 
-  for (IndexT col = lane_idx; col < hidden_size;
-       col += static_cast<IndexT>(blockDim.x) * VEC_SIZE) {
-    IndexT g_offset = row * hidden_size + col;
-    IndexT y1_offset = row * input_stride + col;
-    IndexT y2_offset = y1_offset + hidden_size;
+  for (int64_t row = static_cast<int64_t>(blockIdx.x); row < rows;
+       row += static_cast<int64_t>(gridDim.x)) {
+    IndexT row_index = static_cast<IndexT>(row);
+    for (IndexT col = lane_idx; col < hidden_size;
+         col += static_cast<IndexT>(blockDim.x) * VEC_SIZE) {
+      IndexT g_offset = row_index * hidden_size + col;
+      IndexT y1_offset = row_index * input_stride + col;
+      IndexT y2_offset = y1_offset + hidden_size;
 
-    Packed128 g_pack = *reinterpret_cast<const Packed128*>(&g[g_offset]);
-    Packed128 y1_pack = *reinterpret_cast<const Packed128*>(&y[y1_offset]);
-    Packed128 y2_pack = *reinterpret_cast<const Packed128*>(&y[y2_offset]);
+      Packed128 g_pack = *reinterpret_cast<const Packed128*>(&g[g_offset]);
+      Packed128 y1_pack = *reinterpret_cast<const Packed128*>(&y[y1_offset]);
+      Packed128 y2_pack = *reinterpret_cast<const Packed128*>(&y[y2_offset]);
 
-    const T* g_ptr = reinterpret_cast<const T*>(&g_pack);
-    const T* y1_ptr = reinterpret_cast<const T*>(&y1_pack);
-    const T* y2_ptr = reinterpret_cast<const T*>(&y2_pack);
+      const T* g_ptr = reinterpret_cast<const T*>(&g_pack);
+      const T* y1_ptr = reinterpret_cast<const T*>(&y1_pack);
+      const T* y2_ptr = reinterpret_cast<const T*>(&y2_pack);
 
-    T dx1_buffer[VEC_SIZE];
-    T dx2_buffer[VEC_SIZE];
+      T dx1_buffer[VEC_SIZE];
+      T dx2_buffer[VEC_SIZE];
 
 #pragma unroll
-    for (int i = 0; i < VEC_SIZE; ++i) {
-      float val_g = static_cast<float>(g_ptr[i]);
-      float val_y1 = static_cast<float>(y1_ptr[i]);
-      float val_y2 = static_cast<float>(y2_ptr[i]);
+      for (int i = 0; i < VEC_SIZE; ++i) {
+        float val_g = static_cast<float>(g_ptr[i]);
+        float val_y1 = static_cast<float>(y1_ptr[i]);
+        float val_y2 = static_cast<float>(y2_ptr[i]);
 
-      float sig_y1 = precise_sigmoid(val_y1);
-      float silu_y1 = val_y1 * sig_y1;
+        float sig_y1 = precise_sigmoid(val_y1);
+        float silu_y1 = val_y1 * sig_y1;
 
-      dx2_buffer[i] = static_cast<T>(val_g * silu_y1);
+        dx2_buffer[i] = static_cast<T>(val_g * silu_y1);
 
-      float d_silu = sig_y1 * (1.0f + val_y1 * (1.0f - sig_y1));
-      float grad_y1 = val_g * val_y2 * d_silu;
+        float d_silu = sig_y1 * (1.0f + val_y1 * (1.0f - sig_y1));
+        float grad_y1 = val_g * val_y2 * d_silu;
 
-      dx1_buffer[i] = static_cast<T>(grad_y1);
+        dx1_buffer[i] = static_cast<T>(grad_y1);
+      }
+
+      *reinterpret_cast<Packed128*>(&dx[y1_offset]) =
+          *reinterpret_cast<Packed128*>(dx1_buffer);
+      *reinterpret_cast<Packed128*>(&dx[y2_offset]) =
+          *reinterpret_cast<Packed128*>(dx2_buffer);
     }
-
-    *reinterpret_cast<Packed128*>(&dx[y1_offset]) =
-        *reinterpret_cast<Packed128*>(dx1_buffer);
-    *reinterpret_cast<Packed128*>(&dx[y2_offset]) =
-        *reinterpret_cast<Packed128*>(dx2_buffer);
   }
 }
 
@@ -168,16 +173,13 @@ void LaunchSwiGLUBackKernel(const T* g,
                             const T* y,
                             T* dx,
                             int grid_size,
-                            int64_t hidden_size,
-                            int64_t input_stride,
+                            int64_t rows,
+                            IndexT hidden_size,
+                            IndexT input_stride,
                             StreamT stream) {
   VectorizedSwiGLUBackKernel<T, VEC_SIZE, IndexT>
       <<<grid_size, kSwiGLUBackBlockSize, 0, stream>>>(
-          g,
-          y,
-          dx,
-          static_cast<IndexT>(hidden_size),
-          static_cast<IndexT>(input_stride));
+          g, y, dx, rows, hidden_size, input_stride);
 }
 
 template <typename T, int VEC_SIZE, typename StreamT>
@@ -191,10 +193,10 @@ void DispatchSwiGLUBackKernel(const T* g,
                               StreamT stream) {
   if (ShouldUseInt64Index(rows, input_stride)) {
     LaunchSwiGLUBackKernel<T, VEC_SIZE, int64_t>(
-        g, y, dx, grid_size, hidden_size, input_stride, stream);
+        g, y, dx, grid_size, rows, hidden_size, input_stride, stream);
   } else {
     LaunchSwiGLUBackKernel<T, VEC_SIZE, int>(
-        g, y, dx, grid_size, hidden_size, input_stride, stream);
+        g, y, dx, grid_size, rows, hidden_size, input_stride, stream);
   }
 }
 
@@ -232,14 +234,7 @@ std::vector<paddle::Tensor> SwiGLUBackward(const paddle::Tensor& g,
 
   CheckSwiGLUBackPackedAccess(y.dtype(), hidden_size);
 
-  PADDLE_ENFORCE_LE(
-      rows,
-      static_cast<int64_t>(std::numeric_limits<int>::max()),
-      common::errors::InvalidArgument(
-          "rows must be <= INT_MAX for fused_swiglu_bwd because one CUDA "
-          "block is launched per row."));
-
-  int grid_size = static_cast<int>(rows);
+  int grid_size = GetSwiGLURowGridSize(rows);
   auto stream = y.stream();
 
   if (y.dtype() == paddle::DataType::BFLOAT16) {

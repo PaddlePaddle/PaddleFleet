@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+
 #include "paddle/phi/backends/gpu/gpu_context.h"
 #include "paddle/phi/core/kernel_registry.h"
 #include "paddle/phi/core/tensor_utils.h"
 #include "paddle/phi/kernels/funcs/aligned_vector.h"
 #include "paddle/phi/kernels/fusion/gpu/quant_utils.h"
 
-__host__ __device__ __forceinline__ int ceil_div(int x, int y) {
+__host__ __device__ __forceinline__ int64_t ceil_div(int64_t x, int64_t y) {
   return (x + y - 1) / y;
 }
 
@@ -162,7 +166,8 @@ __global__ void FusedSPAQKernelVec4(const phi::bfloat16* __restrict__ Xin,
       static_cast<int64_t>(threadIdx.x) * elements_per_thread;
   const unsigned int mask = 0xffffffff;  // whole warp mask
 
-  for (int64_t base_y = blockIdx.y; base_y < rows; base_y += gridDim.y) {
+  for (int64_t base_y = static_cast<int64_t>(blockIdx.y); base_y < rows;
+       base_y += static_cast<int64_t>(gridDim.y)) {
     const int64_t in_y_idx = base_y;
     const int64_t in_x_idx = static_cast<int64_t>(blockIdx.x) *
                                  static_cast<int64_t>(blockDim.x) *
@@ -232,8 +237,8 @@ __global__ void FusedSPAQKernelVec4(const phi::bfloat16* __restrict__ Xin,
       if constexpr (ue8m0) {
         const size_t row_idx = in_y_idx;
         const size_t col_idx = in_x_idx >> 7;
-        const size_t idx =
-            (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
+        const size_t idx = (col_idx >> 2) * (static_cast<size_t>(rows) * 4) +
+                           row_idx * 4 + (col_idx & 0x3);
         const uint8_t exp =
             (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
         uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
@@ -265,7 +270,8 @@ __global__ void FusedSPAQKernelVec8(const phi::bfloat16* __restrict__ Xin,
       static_cast<int64_t>(threadIdx.x) * elements_per_thread;
   const unsigned int mask = 0xffffffff;
 
-  for (int64_t base_y = blockIdx.y; base_y < rows; base_y += gridDim.y) {
+  for (int64_t base_y = static_cast<int64_t>(blockIdx.y); base_y < rows;
+       base_y += static_cast<int64_t>(gridDim.y)) {
     const int64_t in_x_idx =
         ((static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x)) *
          elements_per_thread) +
@@ -351,8 +357,8 @@ __global__ void FusedSPAQKernelVec8(const phi::bfloat16* __restrict__ Xin,
       const float inv_scale = __frcp_rn(scale);
       if constexpr (ue8m0) {
         const size_t col_idx = in_x_idx >> 7;
-        const size_t idx =
-            (col_idx >> 2) * (rows << 2) + base_y * 4 + (col_idx & 0x3);
+        const size_t idx = (col_idx >> 2) * (static_cast<size_t>(rows) * 4) +
+                           static_cast<size_t>(base_y) * 4 + (col_idx & 0x3);
         const uint8_t exp =
             (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
         uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
@@ -370,8 +376,8 @@ __global__ void FusedSPAQKernel(const phi::bfloat16* __restrict__ Xin,
                                 const float* __restrict__ prob,
                                 phi::float8_e4m3fn* __restrict__ out,
                                 ScaleT* __restrict__ scales,
-                                const int rows,
-                                const int cols) {
+                                const int64_t rows,
+                                const int64_t cols) {
   // Configure shared memory
   __shared__ float smem_tile[256];  // Shared memory for activation values
   __shared__ float warp_max[2][4];  // Shared memory for warp maxima (2 quant
@@ -380,100 +386,107 @@ __global__ void FusedSPAQKernel(const phi::bfloat16* __restrict__ Xin,
       quant_block_amax[2];  // Shared memory for quant block maxima
 
   const __nv_bfloat16* X = reinterpret_cast<const __nv_bfloat16*>(Xin);
-  const int x_offset = threadIdx.x;
+  const int64_t x_offset = static_cast<int64_t>(threadIdx.x);
   const int quant_block_idx =
       threadIdx.x / 128;  // 0 or 1, two quant blocks per block
-  const int in_y_idx = blockIdx.y;
-  const int in_x_idx = blockIdx.x * blockDim.x + x_offset;
-  const int src_idx = in_y_idx * cols + in_x_idx;
+  const int64_t in_x_idx =
+      static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+      x_offset;
+  const int64_t scale_stride = (cols / 2 + 127) / 128;
 
-  // Load data and compute swiGLU activation
-  if (in_x_idx < cols / 2) [[likely]] {        // NOLINT
-    __nv_bfloat16 x1 = X[src_idx];             // First half of the input
-    __nv_bfloat16 x2 = X[src_idx + cols / 2];  // Second half of the input
+  for (int64_t in_y_idx = static_cast<int64_t>(blockIdx.y); in_y_idx < rows;
+       in_y_idx += static_cast<int64_t>(gridDim.y)) {
+    const int64_t src_idx = in_y_idx * cols + in_x_idx;
 
-    if constexpr (with_prob) {
-      float row_prob = prob[in_y_idx];
-      smem_tile[x_offset] = fast_swiglu(x1, x2) * row_prob;
-    } else {
-      smem_tile[x_offset] = fast_swiglu(x1, x2);
-    }
-  }
+    // Load data and compute swiGLU activation
+    if (in_x_idx < cols / 2) [[likely]] {        // NOLINT
+      __nv_bfloat16 x1 = X[src_idx];             // First half of the input
+      __nv_bfloat16 x2 = X[src_idx + cols / 2];  // Second half of the input
 
-  __syncthreads();  // Ensure all threads have loaded their data
-
-  // Phase 2: Block Reduction to find per-quant block absolute maximums
-  float local_max = (in_x_idx < (cols / 2)) ? fabsf(smem_tile[x_offset]) : 0.0f;
-
-  // Warp-level reduction
-  unsigned int mask = 0xffffffff;
-  int lane = threadIdx.x % 32;
-  int warp_id =
-      (threadIdx.x % 128) / 32;  // Warp ID within the quant block (0-3)
-
-  // Reduce within the warp
-  for (int offset = 16; offset > 0; offset /= 2) {
-    float val = __shfl_down_sync(mask, local_max, offset);
-    local_max = fmaxf(local_max, val);
-  }
-
-  // Store warp maxima
-  if (lane == 0) {
-    warp_max[quant_block_idx][warp_id] = local_max;
-  }
-
-  __syncthreads();
-
-  // Reduce warp maxima to get quant block maxima
-  if (warp_id == 0 && lane < 4) {
-    if (threadIdx.x < 256) {  // Ensure only valid threads participate
-      float block_max = warp_max[quant_block_idx][lane];
-      // Reduce over the 4 warp maxima
-      if (lane == 0) {
-        block_max = fmaxf(block_max, warp_max[quant_block_idx][1]);
-        block_max = fmaxf(block_max, warp_max[quant_block_idx][2]);
-        block_max = fmaxf(block_max, warp_max[quant_block_idx][3]);
-        quant_block_amax[quant_block_idx] = __float2bfloat16(block_max);
-      }
-    }
-  }
-
-  __syncthreads();
-
-  // Phase 3: Compute scales and quantize the outputs
-  const float block_max_float =
-      static_cast<float>(quant_block_amax[quant_block_idx]);
-  const int scale_stride = (cols / 2 + 127) / 128;
-
-  float scale = ComputeScale<float, __nv_fp8_e4m3, using_pow2_scaling>(
-      block_max_float, 0.0f);
-  float inv_scale = __frcp_rn(scale);
-
-  // Quantize
-  float output_scaled_fp32 = smem_tile[x_offset] * scale;
-
-  const int g_output_y_offset = in_y_idx;
-  const int g_output_x_offset = in_x_idx;
-
-  // Write output and scales
-  if (g_output_y_offset < rows && g_output_x_offset < cols / 2) {
-    out[g_output_y_offset * (cols / 2) + g_output_x_offset] =
-        static_cast<phi::float8_e4m3fn>(output_scaled_fp32);
-    if (x_offset % 128 == 0) {
-      if constexpr (ue8m0) {
-        const size_t row_idx = g_output_y_offset;
-        const size_t col_idx = in_x_idx >> 7;
-        const size_t idx =
-            (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
-        const uint8_t exp =
-            (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
-        uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
-        *dst = exp;
+      if constexpr (with_prob) {
+        float row_prob = prob[in_y_idx];
+        smem_tile[x_offset] = fast_swiglu(x1, x2) * row_prob;
       } else {
-        // Only one thread per quant block writes the scale
-        scales[g_output_y_offset * scale_stride + in_x_idx / 128] = inv_scale;
+        smem_tile[x_offset] = fast_swiglu(x1, x2);
       }
     }
+
+    __syncthreads();  // Ensure all threads have loaded their data
+
+    // Phase 2: Block Reduction to find per-quant block absolute maximums
+    float local_max =
+        (in_x_idx < (cols / 2)) ? fabsf(smem_tile[x_offset]) : 0.0f;
+
+    // Warp-level reduction
+    unsigned int mask = 0xffffffff;
+    int lane = threadIdx.x % 32;
+    int warp_id =
+        (threadIdx.x % 128) / 32;  // Warp ID within the quant block (0-3)
+
+    // Reduce within the warp
+    for (int offset = 16; offset > 0; offset /= 2) {
+      float val = __shfl_down_sync(mask, local_max, offset);
+      local_max = fmaxf(local_max, val);
+    }
+
+    // Store warp maxima
+    if (lane == 0) {
+      warp_max[quant_block_idx][warp_id] = local_max;
+    }
+
+    __syncthreads();
+
+    // Reduce warp maxima to get quant block maxima
+    if (warp_id == 0 && lane < 4) {
+      if (threadIdx.x < 256) {  // Ensure only valid threads participate
+        float block_max = warp_max[quant_block_idx][lane];
+        // Reduce over the 4 warp maxima
+        if (lane == 0) {
+          block_max = fmaxf(block_max, warp_max[quant_block_idx][1]);
+          block_max = fmaxf(block_max, warp_max[quant_block_idx][2]);
+          block_max = fmaxf(block_max, warp_max[quant_block_idx][3]);
+          quant_block_amax[quant_block_idx] = __float2bfloat16(block_max);
+        }
+      }
+    }
+
+    __syncthreads();
+
+    // Phase 3: Compute scales and quantize the outputs
+    const float block_max_float =
+        static_cast<float>(quant_block_amax[quant_block_idx]);
+
+    float scale = ComputeScale<float, __nv_fp8_e4m3, using_pow2_scaling>(
+        block_max_float, 0.0f);
+    float inv_scale = __frcp_rn(scale);
+
+    // Quantize
+    float output_scaled_fp32 = smem_tile[x_offset] * scale;
+
+    const int64_t g_output_y_offset = in_y_idx;
+    const int64_t g_output_x_offset = in_x_idx;
+
+    // Write output and scales
+    if (g_output_y_offset < rows && g_output_x_offset < cols / 2) {
+      out[g_output_y_offset * (cols / 2) + g_output_x_offset] =
+          static_cast<phi::float8_e4m3fn>(output_scaled_fp32);
+      if (x_offset % 128 == 0) {
+        if constexpr (ue8m0) {
+          const size_t row_idx = g_output_y_offset;
+          const size_t col_idx = in_x_idx >> 7;
+          const size_t idx = (col_idx >> 2) * (static_cast<size_t>(rows) * 4) +
+                             row_idx * 4 + (col_idx & 0x3);
+          const uint8_t exp =
+              (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
+          uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
+          *dst = exp;
+        } else {
+          // Only one thread per quant block writes the scale
+          scales[g_output_y_offset * scale_stride + in_x_idx / 128] = inv_scale;
+        }
+      }
+    }
+    __syncthreads();
   }
 }
 
@@ -483,8 +496,8 @@ void dispatch_fused_spaq(const phi::bfloat16* x_data,
                          phi::float8_e4m3fn* out_data,
                          void* void_scale_data,
                          cudaStream_t stream,
-                         const int rows,
-                         const int cols,
+                         const int64_t rows,
+                         const int64_t cols,
                          const bool& using_pow2_scaling,
                          const bool& with_prob) {
   constexpr int thread_per_block = 256;
@@ -496,12 +509,14 @@ void dispatch_fused_spaq(const phi::bfloat16* x_data,
   if (cols % 16 == 0) {
     block.x = thread_per_block;
     constexpr int vec_numel = 8;
-    const int scale_cols = (cols / 2 + 127) / 128;
+    const int64_t scale_cols = (cols / 2 + 127) / 128;
     DISPATCH_BOOL(
         using_pow2_scaling,
         k_using_pow2_scaling,
         DISPATCH_BOOL(
-            with_prob, k_with_prob, grid.y = rows > 65535 ? 65535 : rows;
+            with_prob,
+            k_with_prob,
+            grid.y = static_cast<uint32_t>(std::min<int64_t>(rows, 65535));
             grid.x =
                 ((cols / 2) + block.x * vec_numel - 1) / (block.x * vec_numel);
             LAUNCH_FUSED_SPAQ_VEC8(k_using_pow2_scaling, k_with_prob);))
@@ -512,12 +527,14 @@ void dispatch_fused_spaq(const phi::bfloat16* x_data,
     // of input vector
     block.x = thread_per_block;
     constexpr int vec_numel = 4;
-    const int scale_cols = (cols / 2 + 127) / 128;
+    const int64_t scale_cols = (cols / 2 + 127) / 128;
     DISPATCH_BOOL(
         using_pow2_scaling,
         k_using_pow2_scaling,
         DISPATCH_BOOL(
-            with_prob, k_with_prob, grid.y = rows > 65535 ? 65535 : rows;
+            with_prob,
+            k_with_prob,
+            grid.y = static_cast<uint32_t>(std::min<int64_t>(rows, 65535));
             grid.x =
                 ((cols / 2) + block.x * vec_numel - 1) / (block.x * vec_numel);
             LAUNCH_FUSED_SPAQ_VEC4(k_using_pow2_scaling, k_with_prob);))
@@ -529,7 +546,9 @@ void dispatch_fused_spaq(const phi::bfloat16* x_data,
         using_pow2_scaling,
         k_using_pow2_scaling,
         DISPATCH_BOOL(
-            with_prob, k_with_prob, grid.y = rows > 65535 ? 65535 : rows;
+            with_prob,
+            k_with_prob,
+            grid.y = static_cast<uint32_t>(std::min<int64_t>(rows, 65535));
             grid.x = ((cols / 2) + block.x - 1) / block.x;
             LAUNCH_FUSED_SPAQ(k_using_pow2_scaling, k_with_prob);))
   }
@@ -585,18 +604,27 @@ std::vector<paddle::Tensor> FusedWeightedSwigluActQuantKernel(
 
   if (use_ue8m0) {
     auto input_dim = x.dims();
-    const int token_num = input_dim[0];
-    const int hidden_size = input_dim[1];
+    const int64_t token_num = input_dim[0];
+    const int64_t hidden_size = input_dim[1];
+
+    constexpr int64_t kMaxRowsForUe8m0ScaleIndex =
+        static_cast<int64_t>(std::numeric_limits<size_t>::max() / 4);
+    PADDLE_ENFORCE_LE(
+        rows,
+        kMaxRowsForUe8m0ScaleIndex,
+        common::errors::InvalidArgument(
+            "rows is too large for ue8m0 scale index calculation, got %d.",
+            rows));
 
     PADDLE_ENFORCE(hidden_size % 1024 == 0,
                    "hidden_size must be divisible by 1024");
-    const int hidden_size_scale = hidden_size / 2 / 128;
+    const int64_t hidden_size_scale = hidden_size / 2 / 128;
     out = GetEmptyTensor(
         {token_num, hidden_size / 2}, phi::DataType::FLOAT8_E4M3FN, x.place());
     const int tma_alignment_bytes = 16;
     const int tma_alignment_elements = tma_alignment_bytes / sizeof(float);
 
-    int padded_token_num =
+    int64_t padded_token_num =
         ((token_num + tma_alignment_elements - 1) / tma_alignment_elements) *
         tma_alignment_elements;
     scale = GetEmptyTensor({padded_token_num, ceil_div(hidden_size_scale, 4)},
