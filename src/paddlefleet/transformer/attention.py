@@ -528,7 +528,9 @@ class Attention(FleetLayer, ABC):
                             self.config
                         ),
                         cp_group=self.pg_collection.cp,
-                        sp_group=self.pg_collection.tp,
+                        sp_group=self.pg_collection.tp
+                        if self.config.sequence_parallel
+                        else None,
                     )
 
         # ==================================
