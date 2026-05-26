@@ -29,13 +29,13 @@ from unittest.mock import MagicMock, patch
 import paddle
 
 from paddlefleet.refined_recompute.flash_attn import (
-    _get_fa_version,
     flashattn_auto_cast,
+    get_fa_version,
 )
 
 
 class TestGetFAVersionXPU(unittest.TestCase):
-    """Tests for _get_fa_version with XPU device."""
+    """Tests for get_fa_version with XPU device."""
 
     @patch(
         "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
@@ -43,7 +43,7 @@ class TestGetFAVersionXPU(unittest.TestCase):
     )
     def test_xpu_returns_version_2(self, mock_device):
         """Test XPU device always returns version 2."""
-        result = _get_fa_version(64)
+        result = get_fa_version(64)
         self.assertEqual(result, 2)
 
     @patch(
@@ -52,7 +52,7 @@ class TestGetFAVersionXPU(unittest.TestCase):
     )
     def test_xpu_any_id(self, mock_device):
         """Test XPU device with any device ID returns version 2."""
-        result = _get_fa_version(128)
+        result = get_fa_version(128)
         self.assertEqual(result, 2)
 
     @patch(
@@ -62,12 +62,12 @@ class TestGetFAVersionXPU(unittest.TestCase):
     def test_xpu_different_hdim(self, mock_device):
         """Test XPU returns version 2 regardless of hdim."""
         for hdim in [32, 64, 128, 256]:
-            result = _get_fa_version(hdim)
+            result = get_fa_version(hdim)
             self.assertEqual(result, 2)
 
 
 class TestGetFAVersionGPU(unittest.TestCase):
-    """Tests for _get_fa_version with GPU device."""
+    """Tests for get_fa_version with GPU device."""
 
     @patch(
         "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
@@ -89,7 +89,7 @@ class TestGetFAVersionGPU(unittest.TestCase):
                 return_value={"FLAGS_cudnn_deterministic": False},
             ),
         ):
-            result = _get_fa_version(64)
+            result = get_fa_version(64)
             self.assertEqual(result, 3)
 
     @patch(
@@ -112,12 +112,12 @@ class TestGetFAVersionGPU(unittest.TestCase):
                 return_value={"FLAGS_cudnn_deterministic": False},
             ),
         ):
-            result = _get_fa_version(64)
+            result = get_fa_version(64)
             self.assertEqual(result, 2)
 
 
 class TestGetFAVersionDeterministic(unittest.TestCase):
-    """Tests for _get_fa_version with deterministic mode."""
+    """Tests for get_fa_version with deterministic mode."""
 
     @patch(
         "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
@@ -135,7 +135,7 @@ class TestGetFAVersionDeterministic(unittest.TestCase):
             "paddlefleet.refined_recompute.flash_attn.inspect.signature",
             return_value=MagicMock(parameters={}),
         ):
-            result = _get_fa_version(64)
+            result = get_fa_version(64)
             self.assertEqual(result, 2)
 
     @patch(
@@ -154,7 +154,7 @@ class TestGetFAVersionDeterministic(unittest.TestCase):
             "paddlefleet.refined_recompute.flash_attn.inspect.signature",
             return_value=MagicMock(parameters={"block_mask": MagicMock()}),
         ):
-            result = _get_fa_version(64)
+            result = get_fa_version(64)
             self.assertEqual(result, 2)
 
     @patch(
@@ -173,7 +173,7 @@ class TestGetFAVersionDeterministic(unittest.TestCase):
             "paddlefleet.refined_recompute.flash_attn.inspect.signature",
             return_value=MagicMock(parameters={"block_mask": MagicMock()}),
         ):
-            result = _get_fa_version(256)
+            result = get_fa_version(256)
             self.assertEqual(result, 2)
 
     @patch(
@@ -192,12 +192,12 @@ class TestGetFAVersionDeterministic(unittest.TestCase):
             "paddlefleet.refined_recompute.flash_attn.inspect.signature",
             return_value=MagicMock(parameters={"block_mask": MagicMock()}),
         ):
-            result = _get_fa_version(128)
+            result = get_fa_version(128)
             self.assertEqual(result, 2)
 
 
 class TestGetFAVersionNonDeterministic(unittest.TestCase):
-    """Tests for _get_fa_version with non-deterministic mode."""
+    """Tests for get_fa_version with non-deterministic mode."""
 
     @patch(
         "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
@@ -218,12 +218,8 @@ class TestGetFAVersionNonDeterministic(unittest.TestCase):
                 "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
                 return_value={"FLAGS_cudnn_deterministic": False},
             ),
-            patch(
-                "paddlefleet.refined_recompute.flash_attn._flash_mask_available",
-                True,
-            ),
         ):
-            result = _get_fa_version(64)
+            result = get_fa_version(64)
             self.assertEqual(result, 4)
 
 

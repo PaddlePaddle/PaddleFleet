@@ -33,13 +33,13 @@ from paddlefleet.refined_recompute.flash_attn import (
     FlashMaskAttnFunctor,
     RefinedRcomputeFlashAttention,
     RefinedRcomputeFlashMaskAttention,
-    _get_fa_version,
     flashattn_auto_cast,
+    get_fa_version,
 )
 
 
 class TestGetFAVersion(unittest.TestCase):
-    """Tests for _get_fa_version function."""
+    """Tests for get_fa_version function."""
 
     @patch(
         "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
@@ -47,7 +47,7 @@ class TestGetFAVersion(unittest.TestCase):
     )
     def test_xpu_returns_version_2(self, mock_device):
         """Test that XPU device returns version 2."""
-        result = _get_fa_version(64)
+        result = get_fa_version(64)
         self.assertEqual(result, 2)
 
     @patch(
@@ -70,7 +70,7 @@ class TestGetFAVersion(unittest.TestCase):
                 return_value={"FLAGS_cudnn_deterministic": False},
             ),
         ):
-            result = _get_fa_version(64)
+            result = get_fa_version(64)
             self.assertEqual(result, 3)
 
     @patch(
@@ -87,7 +87,7 @@ class TestGetFAVersion(unittest.TestCase):
             "paddlefleet.refined_recompute.flash_attn.inspect.signature",
             return_value=MagicMock(parameters={}),
         ):
-            result = _get_fa_version(64)
+            result = get_fa_version(64)
             self.assertEqual(result, 2)
 
 
@@ -139,7 +139,7 @@ class TestFlashAttnFunctorForwardVersion3(unittest.TestCase):
     """Tests for FlashAttnFunctor.forward with FA version 3."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
     def test_forward_version_3_saves_correct_tensors(self, mock_version):
@@ -164,7 +164,7 @@ class TestFlashAttnFunctorForwardVersion4(unittest.TestCase):
     """Tests for FlashAttnFunctor.forward with FA version 4."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=4,
     )
     def test_forward_version_4_saves_correct_tensors(self, mock_version):
@@ -189,7 +189,7 @@ class TestRefinedRcomputeFlashAttentionFirstFwd(unittest.TestCase):
     """Tests for RefinedRcomputeFlashAttention._first_fwd."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
     @patch("paddlefleet.refined_recompute.flash_attn._C_ops.flash_attn_v3")
@@ -216,7 +216,7 @@ class TestRefinedRcomputeFlashAttentionFirstFwd(unittest.TestCase):
         self.assertFalse(attn._hold_tensors_queue.empty())
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=2,
     )
     @patch("paddlefleet.refined_recompute.flash_attn._C_ops.flash_attn")
@@ -251,7 +251,7 @@ class TestFlashMaskAttnFunctorVersion3(unittest.TestCase):
     """Tests for FlashMaskAttnFunctor with FA version 3."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
     def test_forward_version_3(self, mock_version):
@@ -277,7 +277,7 @@ class TestFlashMaskAttnFunctorVersion4(unittest.TestCase):
     """Tests for FlashMaskAttnFunctor with FA version 4."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=4,
     )
     def test_forward_version_4(self, mock_version):
@@ -303,7 +303,7 @@ class TestRefinedRcomputeFlashMaskAttentionFirstFwdV3(unittest.TestCase):
     """Tests for RefinedRcomputeFlashMaskAttention._first_fwd with v3."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
     @patch(

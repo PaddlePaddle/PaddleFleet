@@ -41,7 +41,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         from paddlefleet.context_parallel_utils import FlashMaskContextParallel
 
         mock_ctx = mock.MagicMock()
-        mock_config = mock.MagicMock()
         query = paddle.randn([2, 8, 4, 16])
         key = paddle.randn([2, 8, 4, 16])
         value = paddle.randn([2, 8, 4, 16])
@@ -50,7 +49,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         with self.assertRaises(NotImplementedError) as ctx:
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 query,
                 key,
                 value,
@@ -64,7 +62,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         from paddlefleet.context_parallel_utils import FlashMaskContextParallel
 
         mock_ctx = mock.MagicMock()
-        mock_config = mock.MagicMock()
         query = paddle.randn([2, 8, 4, 16])
         key = paddle.randn([2, 8, 4, 16])
         value = paddle.randn([2, 8, 4, 16])
@@ -73,7 +70,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         with self.assertRaises(NotImplementedError) as ctx:
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 query,
                 key,
                 value,
@@ -87,7 +83,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         from paddlefleet.context_parallel_utils import FlashMaskContextParallel
 
         mock_ctx = mock.MagicMock()
-        mock_config = mock.MagicMock()
         query = paddle.randn([2, 8, 4, 16])
         key = paddle.randn([2, 8, 4, 16])
         value = paddle.randn([2, 8, 4, 16])
@@ -97,7 +92,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 query,
                 key,
                 value,
@@ -110,7 +104,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         from paddlefleet.context_parallel_utils import FlashMaskContextParallel
 
         mock_ctx = mock.MagicMock()
-        mock_config = mock.MagicMock()
         query = paddle.randn([2, 7, 4, 16])  # 7 is odd
         key = paddle.randn([2, 7, 4, 16])
         value = paddle.randn([2, 7, 4, 16])
@@ -129,7 +122,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
             with self.assertRaises(AssertionError) as ctx:
                 FlashMaskContextParallel.forward(
                     mock_ctx,
-                    mock_config,
                     query,
                     key,
                     value,
@@ -142,7 +134,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         from paddlefleet.context_parallel_utils import FlashMaskContextParallel
 
         mock_ctx = mock.MagicMock()
-        mock_config = mock.MagicMock()
         query = paddle.randn([2, 8, 4, 16])
         key = paddle.randn([2, 8, 4, 16])
         value = paddle.randn([2, 8, 4, 16])
@@ -169,11 +160,12 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
                     mock_lse,
                     mock_processed_indices,
                     2,
+                    False,
+                    16,
                 ),
             ):
                 result = FlashMaskContextParallel.forward(
                     mock_ctx,
-                    mock_config,
                     query,
                     key,
                     value,
@@ -209,6 +201,8 @@ class TestFlashMaskContextParallelBackward(unittest.TestCase):
         mock_ctx.group = mock.MagicMock()
         mock_ctx.causal = False
         mock_ctx.fa_version = 2
+        mock_ctx.need_value_padding = False
+        mock_ctx.v_head_dim = 16
 
         grad = paddle.randn([2, 8, 4, 16])
 
@@ -219,7 +213,7 @@ class TestFlashMaskContextParallelBackward(unittest.TestCase):
             result = FlashMaskContextParallel.backward(mock_ctx, grad)
             mock_bwd.assert_called_once()
             call_args = mock_bwd.call_args[0]
-            # First args are tensors (query/key/value); fa_version is the last arg.
+            # Check first few args (query, key, value) and last arg (fa_version)
             self.assertIs(call_args[0], query)
             self.assertIs(call_args[1], key)
             self.assertIs(call_args[2], value)
@@ -236,7 +230,6 @@ class TestFlashmaskAttentionCP(unittest.TestCase):
             flashmask_attention_cp,
         )
 
-        mock_config = mock.MagicMock()
         query = paddle.randn([2, 8, 4, 16])
         key = paddle.randn([2, 8, 4, 16])
         value = paddle.randn([2, 8, 4, 16])
@@ -248,7 +241,7 @@ class TestFlashmaskAttentionCP(unittest.TestCase):
             return_value=paddle.randn([2, 8, 4, 16]),
         ) as mock_apply:
             result = flashmask_attention_cp(
-                mock_config, query, key, value, mask_indices
+                query, key, value, mask_indices
             )
             mock_apply.assert_called_once()
 
@@ -357,8 +350,9 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
       D) block_mask NOT in signature, no deterministic -> no override
     """
 
-    def _run_forward(self, *, has_block_mask, deterministic, hdim, fa_flag=3):
+    def _run_forward(self, *, deterministic, hdim, fa_flag=3, **_kwargs):
         from paddlefleet import context_parallel_utils as cpu
+        from paddlefleet_ops.flash_mask_facade import get_fa_version
 
         group = mock.MagicMock()
         group.rank = 0
@@ -369,39 +363,26 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
         value = paddle.randn([1, 4, 1, hdim])
         indices = paddle.randint(0, 4, [4, 2])
 
-        # Build a fake flashmask_attention whose inspect.signature carries or
-        # omits the `block_mask` parameter.
-        if has_block_mask:
-
-            def fake_flashmask(
-                q,
-                k,
-                v,
-                startend_row_indices=None,
-                causal=False,
-                return_softmax_lse=False,
-                training=False,
-                block_mask=None,
-            ):
-                return paddle.zeros_like(q), paddle.zeros([1, 1, 4])
-        else:
-
-            def fake_flashmask(
-                q,
-                k,
-                v,
-                startend_row_indices=None,
-                causal=False,
-                return_softmax_lse=False,
-                training=False,
-            ):
-                return paddle.zeros_like(q), paddle.zeros([1, 1, 4])
+        def fake_dispatch_fwd(q, k, v, **kwargs):
+            """Fake dispatch that just returns the fa_version from get_fa_version."""
+            fa_version = get_fa_version(q.shape[-1], v.shape[-1], kwargs.get("startend_row_indices"))
+            return {
+                "output": paddle.zeros_like(q),
+                "softmax_lse": paddle.zeros([1, 1, 4]),
+                "seed_offset": None,
+                "result_softmax": None,
+                "fa_version": fa_version,
+                "causal": kwargs.get("causal", False),
+                "dropout": 0.0,
+                "need_value_padding": False,
+                "v_head_dim": v.shape[-1],
+            }
 
         flags_base = {"FLAGS_flash_attn_version": fa_flag}
         flags_det = {"FLAGS_cudnn_deterministic": deterministic}
 
         with (
-            mock.patch.object(cpu, "flashmask_attention", fake_flashmask),
+            mock.patch.object(cpu, "flash_attn_dispatch_fwd", fake_dispatch_fwd),
             mock.patch.object(
                 cpu, "all_gather_balance", side_effect=lambda t, axis, group: t
             ),
@@ -418,7 +399,7 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
             out = cpu.cp_flashmask_allgatherkv_balance_forward(
                 query, key, value, indices, group, False, True
             )
-        return out[-1]  # fa_version
+        return out[3]  # fa_version
 
     def test_branch_a_block_mask_det_hdim_gt_128(self):
         """A) block_mask in sig, deterministic + hdim>128 -> 2."""
@@ -435,11 +416,11 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
         self.assertEqual(fa, 3)
 
     def test_branch_c_no_block_mask_deterministic(self):
-        """C) block_mask NOT in sig, deterministic -> override to 2."""
+        """C) block_mask NOT in sig, deterministic + hdim<=128 -> no override."""
         fa = self._run_forward(
             has_block_mask=False, deterministic=True, hdim=64, fa_flag=3
         )
-        self.assertEqual(fa, 2)
+        self.assertEqual(fa, 3)
 
     def test_branch_d_no_block_mask_no_deterministic(self):
         """D) block_mask NOT in sig, no deterministic -> no override."""

@@ -12,31 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
-
 import paddle
 from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
-from paddle.nn.functional.flash_attention import flashmask_attention
-
-_flash_mask_available = False
-try:
-    if (
-        paddle.cuda.is_available()
-        and paddle.cuda.get_device_capability()[0] == 10
-    ):
-        from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
-            FlashMaskInfoPaddle,
-        )
-        from paddlefleet_ops.flash_mask.cute.interface import (
-            _flash_attn_bwd,
-            _flash_attn_fwd,
-        )
-
-        _flash_mask_available = True
-except (ImportError, AttributeError):
-    _flash_mask_available = False
+from paddlefleet_ops.flash_mask_facade import (
+    _pad_value,
+    flash_attn_dispatch_bwd,
+    flash_attn_dispatch_fwd,
+)
 
 
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
@@ -562,7 +546,7 @@ def cp_flashmask_allgatherkv_balance_forward(
         causal (bool): Whether to use causal attention
         is_training (bool): Whether in training mode
     Returns:
-        tuple: (output, log_sum_exp, processed_indices, fa_version)
+        tuple: (output, log_sum_exp, processed_indices, fa_version, need_value_padding, v_head_dim)
             ``fa_version`` is the effective FlashAttention version actually
             used by the forward kernel and must be passed to the backward
             counterpart to keep fwd/bwd consistent.
@@ -592,45 +576,25 @@ def cp_flashmask_allgatherkv_balance_forward(
         max_seqlen_q=seq_blocksize,
     )
 
-    # Perform flashmask attention with startend_row_indices
-    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-        "FLAGS_flash_attn_version"
-    ]
-    # Apply deterministic override here so forward and backward use the same
-    # effective fa_version (mirrors backward's previous logic and the
-    # framework flashmask_attention's internal deterministic fallback).
-    deterministic = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-        "FLAGS_cudnn_deterministic"
-    ]
-    if "block_mask" in inspect.signature(flashmask_attention).parameters:
-        if deterministic and query.shape[-1] > 128:
-            fa_version = 2
-    elif deterministic:
-        fa_version = 2
-
-    if fa_version == 4 and _flash_mask_available:
-        output, log_sum_exp = _flash_attn_fwd(
-            query,
-            key_gathered,
-            value_gathered,
-            causal=causal,
-            return_lse=True,
-            startend_row_indices=startend_row_indices,
-            pack_gqa=False,
-        )
-    else:
-        output, log_sum_exp = flashmask_attention(
-            query,
-            key_gathered,
-            value_gathered,
-            startend_row_indices=startend_row_indices,
-            causal=causal,
-            return_softmax_lse=True,
-            training=is_training,
-        )
+    # Perform flashmask attention via unified dispatch
+    fwd_result = flash_attn_dispatch_fwd(
+        query,
+        key_gathered,
+        value_gathered,
+        startend_row_indices=startend_row_indices,
+        causal=causal,
+        training=is_training,
+    )
 
     paddle.base.core.nvprof_nvtx_pop()
-    return output, log_sum_exp, startend_row_indices, fa_version
+    return (
+        fwd_result["output"],
+        fwd_result["softmax_lse"],
+        startend_row_indices,
+        fwd_result["fa_version"],
+        fwd_result["need_value_padding"],
+        fwd_result["v_head_dim"],
+    )
 
 
 def cp_flashmask_allgatherkv_balance_backward(
@@ -644,6 +608,8 @@ def cp_flashmask_allgatherkv_balance_backward(
     group,
     causal,
     fa_version: int,
+    need_value_padding: bool = False,
+    v_head_dim: int | None = None,
 ):
     """
     Backward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -659,9 +625,9 @@ def cp_flashmask_allgatherkv_balance_backward(
         output_grad (paddle.Tensor): Gradient of output
         group (paddle.distributed.Group): Communication group
         causal (bool): Whether causal attention was used
-        fa_version (int): FlashAttention version that was actually used by the
-            forward kernel. Must be propagated from the forward call to keep
-            fwd/bwd consistent (do not re-derive from external config here).
+        fa_version (int): FlashAttention version (2, 3, or 4), passed explicitly from forward.
+        need_value_padding (bool): Whether value was padded in forward.
+        v_head_dim (int | None): Original value head dim before padding.
     Returns:
         tuple: (query_grad, key_grad, value_grad)
     """
@@ -673,100 +639,35 @@ def cp_flashmask_allgatherkv_balance_backward(
     key_gathered = all_gather_balance(key, axis=1, group=group)
     value_gathered = all_gather_balance(value, axis=1, group=group)
 
+    # Pad value if forward did (backward kernel expects same shapes)
+    if need_value_padding:
+        q_head_dim = query.shape[-1]
+        value_gathered = _pad_value(value_gathered, q_head_dim)
+
+    # FA2 requires a seed_offset tensor for gradient computation
+    seed_offset = None
     if fa_version == 2:
-        # Create seed offset tensor (required for gradient computation)
         seed_offset = paddle.zeros(
             shape=[query.shape[1], query.shape[2]], dtype=paddle.int64
         )
 
-        # Compute gradients using flashmask attention backward pass
-        query_grad, key_grad_gathered, value_grad_gathered = (
-            paddle._C_ops.flashmask_attention_grad(
-                query,
-                key_gathered,
-                value_gathered,
-                startend_row_indices,
-                output,
-                log_sum_exp,
-                seed_offset,
-                output_grad,
-                0.0,  # dropout probability
-                causal,
-            )
-        )
-    elif fa_version == 3:
-        sig_params = inspect.signature(flashmask_attention).parameters
-        if "group" in sig_params:
-            query_grad, key_grad_gathered, value_grad_gathered = (
-                paddle._C_ops.flashmask_attention_v2_grad(
-                    query,
-                    key_gathered,
-                    value_gathered,
-                    output,
-                    log_sum_exp,
-                    startend_row_indices,
-                    None,  # block_mask
-                    output_grad,
-                    query.shape[-1] ** (-0.5),
-                    False,
-                    0,  # rank
-                    1,  # nranks
-                )
-            )
-        elif "block_mask" in sig_params:
-            query_grad, key_grad_gathered, value_grad_gathered = (
-                paddle._C_ops.flashmask_attention_v2_grad(
-                    query,
-                    key_gathered,
-                    value_gathered,
-                    output,
-                    log_sum_exp,
-                    startend_row_indices,
-                    None,  # block_mask
-                    output_grad,
-                    query.shape[-1] ** (-0.5),
-                    False,
-                )
-            )
-        else:
-            query_grad, key_grad_gathered, value_grad_gathered = (
-                paddle._C_ops.flashmask_attention_v2_grad(
-                    query,
-                    key_gathered,
-                    value_gathered,
-                    output,
-                    log_sum_exp,
-                    startend_row_indices,
-                    output_grad,
-                    query.shape[-1] ** (-0.5),
-                    False,
-                )
-            )
-    elif fa_version == 4 and _flash_mask_available:
-        if startend_row_indices is not None:
-            flashmask_info = FlashMaskInfoPaddle(
-                startend_row_indices=startend_row_indices,
-                is_causal=causal,
-            )
-        else:
-            flashmask_info = None
-        query_grad, key_grad_gathered, value_grad_gathered = _flash_attn_bwd(
-            query,
-            key_gathered,
-            value_gathered,
-            output,
-            output_grad,
-            log_sum_exp,
-            flashmask_info,
-            causal=causal,
-            deterministic=paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-                "FLAGS_cudnn_deterministic"
-            ],
-        )
-    else:
-        raise ValueError(
-            f"FlashAttention version {fa_version} is not supported."
-        )
+    query_grad, key_grad_gathered, value_grad_gathered = flash_attn_dispatch_bwd(
+        query,
+        key_gathered,
+        value_gathered,
+        output,
+        output_grad,
+        log_sum_exp,
+        fa_version=fa_version,
+        startend_row_indices=startend_row_indices,
+        seed_offset=seed_offset,
+        dropout=0.0,
+        causal=causal,
+    )
+
+    # Trim value grad if value was padded
+    if need_value_padding:
+        value_grad_gathered = value_grad_gathered[..., :v_head_dim]
 
     # Reduce-scatter key and value gradients
     key_grad = reduce_scatter_any_axis_balance(
@@ -907,7 +808,6 @@ class FlashMaskContextParallel(PyLayer):
     @staticmethod
     def forward(
         ctx,
-        config,
         query,
         key,
         value,
@@ -963,7 +863,7 @@ class FlashMaskContextParallel(PyLayer):
         )
 
         # Perform forward pass
-        output, log_sum_exp, startend_row_indices, fa_version = (
+        output, log_sum_exp, startend_row_indices, fa_version, need_value_padding, v_head_dim = (
             cp_flashmask_allgatherkv_balance_forward(
                 query, key, value, startend_row_indices, group, causal, training
             )
@@ -976,6 +876,8 @@ class FlashMaskContextParallel(PyLayer):
         ctx.group = group
         ctx.causal = causal
         ctx.fa_version = fa_version
+        ctx.need_value_padding = need_value_padding
+        ctx.v_head_dim = v_head_dim
 
         return output
 
@@ -1010,6 +912,8 @@ class FlashMaskContextParallel(PyLayer):
                 group,
                 causal,
                 fa_version,
+                need_value_padding=ctx.need_value_padding,
+                v_head_dim=ctx.v_head_dim,
             )
         )
 
@@ -1017,7 +921,6 @@ class FlashMaskContextParallel(PyLayer):
 
 
 def flashmask_attention_cp(
-    config,
     query,
     key,
     value,
@@ -1062,7 +965,6 @@ def flashmask_attention_cp(
         ```
     """
     output = FlashMaskContextParallel.apply(
-        config,
         query,
         key,
         value,
