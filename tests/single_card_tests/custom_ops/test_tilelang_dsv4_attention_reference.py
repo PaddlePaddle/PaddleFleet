@@ -16,7 +16,7 @@ import unittest
 
 import paddle
 
-from paddlefleet.ops.tilelang_dsv4.attention_core import sparse_attn_paddle
+from paddlefleet.tilelang_ops.attention_core import sparse_attn_paddle
 
 
 def dense_sparse_attention_reference(q, kv, attn_sink, topk_idxs, sm_scale):

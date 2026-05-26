@@ -23,7 +23,7 @@ REPO_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "
 if REPO_SRC not in sys.path:
     sys.path.insert(0, REPO_SRC)
 
-from paddlefleet.ops.tilelang_dsv4 import attention_core
+from paddlefleet.tilelang_ops import attention_core
 
 _REQUIRED_ENV = {
     "DSV4_TILELANG_SPARSE_MLA_DETERMINISTIC_ATTN_SINK": "1",

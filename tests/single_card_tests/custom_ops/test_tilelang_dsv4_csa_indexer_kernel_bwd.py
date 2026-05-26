@@ -17,10 +17,10 @@ import unittest
 import paddle
 import paddle.nn.functional as F
 
-from paddlefleet.ops.tilelang_dsv4.kernel.tilelang_csa_indexer_bwd import (
+from paddlefleet.tilelang_ops.kernel.tilelang_csa_indexer_bwd import (
     csa_indexer_bwd_interface,
 )
-from paddlefleet.ops.tilelang_dsv4.kernel.tilelang_csa_indexer_fwd import (
+from paddlefleet.tilelang_ops.kernel.tilelang_csa_indexer_fwd import (
     csa_indexer_topk_fwd_interface,
 )
 

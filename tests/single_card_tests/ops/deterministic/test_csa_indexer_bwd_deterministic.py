@@ -23,7 +23,7 @@ REPO_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "
 if REPO_SRC not in sys.path:
     sys.path.insert(0, REPO_SRC)
 
-from paddlefleet.ops.tilelang_dsv4 import csa_indexer_core as core
+from paddlefleet.tilelang_ops import csa_indexer_core as core
 
 _ENV_VAR = "DSV4_TILELANG_CSA_INDEXER_DETERMINISTIC_BWD"
 _THRESHOLD = 0.0

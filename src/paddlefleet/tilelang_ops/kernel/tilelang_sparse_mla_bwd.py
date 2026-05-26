@@ -602,7 +602,7 @@ _BUCKET_OVERFLOW_COUNTERS = {"hits": 0, "total": 0}
 
 
 def _bucket_overflow_log_enabled():
-    return os.getenv("DSV4_TILELANG_SPARSE_MLA_DKV_BUCKET_OVERFLOW_LOG", "1").lower() in {"1", "true", "yes", "on"}
+    return os.getenv("DSV4_TILELANG_SPARSE_MLA_DKV_BUCKET_OVERFLOW_LOG", "0").lower() in {"1", "true", "yes", "on"}
 
 
 def get_bucket_overflow_stats():

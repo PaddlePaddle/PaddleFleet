@@ -16,11 +16,11 @@ import unittest
 
 import paddle
 
-from paddlefleet.ops.tilelang_dsv4.attention_core import (
+from paddlefleet.tilelang_ops.attention_core import (
     DEFAULT_TOPK_PAD_TO,
     tilelang_compressed_sparse_attn_paddle_compat_autograd,
 )
-from paddlefleet.ops.tilelang_dsv4.kernel.tilelang_sparse_mla import sparse_attn_tilelang_paddle
+from paddlefleet.tilelang_ops.kernel.tilelang_sparse_mla import sparse_attn_tilelang_paddle
 
 
 class TestTileLangDSV4AttentionTileLang(unittest.TestCase):

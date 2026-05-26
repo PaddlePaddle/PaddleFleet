@@ -275,7 +275,7 @@ class TestForwardTileLangIndexerDispatch(unittest.TestCase):
         return query, key, value, x, qr
 
     def _patch_tilelang_kernel(self, fake_indices, fake_scores=None):
-        """Inject a fake ``paddlefleet.ops.tilelang_dsv4`` module exposing
+        """Inject a fake ``paddlefleet.tilelang_ops`` module exposing
         ``tilelang_csa_compressed_indexer_topk_paddle``.
 
         Returns the mock callable so tests can assert on its calls.
@@ -283,13 +283,13 @@ class TestForwardTileLangIndexerDispatch(unittest.TestCase):
         if fake_scores is None:
             fake_scores = paddle.zeros_like(fake_indices, dtype="float32")
         kernel_mock = mock.MagicMock(return_value=(fake_indices, fake_scores))
-        fake_module = types.ModuleType("paddlefleet.ops.tilelang_dsv4")
+        fake_module = types.ModuleType("paddlefleet.tilelang_ops")
         fake_module.tilelang_csa_compressed_indexer_topk_paddle = kernel_mock
         # Ensure parent package exists in sys.modules (it does, but be safe).
         self.addCleanup(
-            sys.modules.pop, "paddlefleet.ops.tilelang_dsv4", None
+            sys.modules.pop, "paddlefleet.tilelang_ops", None
         )
-        sys.modules["paddlefleet.ops.tilelang_dsv4"] = fake_module
+        sys.modules["paddlefleet.tilelang_ops"] = fake_module
         return kernel_mock
 
     def test_dispatch_disabled_does_not_call_kernel(self):
@@ -561,13 +561,13 @@ class TestTileLangCSAIndexerLossPyLayer(unittest.TestCase):
     def _patch_kernels(self, fwd_indices, fwd_probs, bwd_returns):
         fwd_mock = mock.MagicMock(return_value=(fwd_indices, fwd_probs))
         bwd_mock = mock.MagicMock(return_value=bwd_returns)
-        fake_module = types.ModuleType("paddlefleet.ops.tilelang_dsv4")
+        fake_module = types.ModuleType("paddlefleet.tilelang_ops")
         fake_module.tilelang_csa_compressed_indexer_topk_paddle = fwd_mock
         fake_module.tilelang_csa_compressed_indexer_bwd_paddle = bwd_mock
         self.addCleanup(
-            sys.modules.pop, "paddlefleet.ops.tilelang_dsv4", None
+            sys.modules.pop, "paddlefleet.tilelang_ops", None
         )
-        sys.modules["paddlefleet.ops.tilelang_dsv4"] = fake_module
+        sys.modules["paddlefleet.tilelang_ops"] = fake_module
         return fwd_mock, bwd_mock
 
     def test_forward_zero_loss_when_target_equals_probs(self):
@@ -774,12 +774,12 @@ class TestTask10EndToEndDispatch(unittest.TestCase):
         layer.indexer = None
 
         kernel_mock = mock.MagicMock()
-        fake_module = types.ModuleType("paddlefleet.ops.tilelang_dsv4")
+        fake_module = types.ModuleType("paddlefleet.tilelang_ops")
         fake_module.tilelang_csa_compressed_indexer_topk_paddle = kernel_mock
         self.addCleanup(
-            sys.modules.pop, "paddlefleet.ops.tilelang_dsv4", None
+            sys.modules.pop, "paddlefleet.tilelang_ops", None
         )
-        sys.modules["paddlefleet.ops.tilelang_dsv4"] = fake_module
+        sys.modules["paddlefleet.tilelang_ops"] = fake_module
 
         q, k, v, x, qr = self._build_inputs(
             1, sq, layer.n_local_heads, layer.v_head_dim
@@ -844,12 +844,12 @@ class TestTask10EndToEndDispatch(unittest.TestCase):
         kernel_mock = mock.MagicMock(
             return_value=(tl_topk, paddle.zeros_like(tl_topk, dtype="float32"))
         )
-        fake_module = types.ModuleType("paddlefleet.ops.tilelang_dsv4")
+        fake_module = types.ModuleType("paddlefleet.tilelang_ops")
         fake_module.tilelang_csa_compressed_indexer_topk_paddle = kernel_mock
         self.addCleanup(
-            sys.modules.pop, "paddlefleet.ops.tilelang_dsv4", None
+            sys.modules.pop, "paddlefleet.tilelang_ops", None
         )
-        sys.modules["paddlefleet.ops.tilelang_dsv4"] = fake_module
+        sys.modules["paddlefleet.tilelang_ops"] = fake_module
 
         # Both attention paths return the same tensor so allclose passes.
         b = 1
@@ -908,12 +908,12 @@ class TestTask10EndToEndDispatch(unittest.TestCase):
         kernel_mock = mock.MagicMock(
             return_value=(tl_topk, paddle.zeros_like(tl_topk, dtype="float32"))
         )
-        fake_module = types.ModuleType("paddlefleet.ops.tilelang_dsv4")
+        fake_module = types.ModuleType("paddlefleet.tilelang_ops")
         fake_module.tilelang_csa_compressed_indexer_topk_paddle = kernel_mock
         self.addCleanup(
-            sys.modules.pop, "paddlefleet.ops.tilelang_dsv4", None
+            sys.modules.pop, "paddlefleet.tilelang_ops", None
         )
-        sys.modules["paddlefleet.ops.tilelang_dsv4"] = fake_module
+        sys.modules["paddlefleet.tilelang_ops"] = fake_module
 
         b = 1
         out_shape = [b, sq, layer.n_local_heads * layer.v_head_dim]

@@ -381,7 +381,7 @@ def _tilelang_compressed_sparse_attn_paddle_compat(
     topk_pad_to: int = 64,
 ) -> Tensor:
     """Run DSv4 TileLang attention through the local Paddle compat fast path."""
-    from paddlefleet.ops.tilelang_dsv4 import tilelang_compressed_sparse_attn_paddle_compat_autograd
+    from paddlefleet.tilelang_ops import tilelang_compressed_sparse_attn_paddle_compat_autograd
 
     return tilelang_compressed_sparse_attn_paddle_compat_autograd(
         query,
@@ -601,7 +601,7 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
         # PyLayer treats this as a single fused op: forward materializes only
         # the selected ``[B,S,topk_effective]`` tensors and backward never
         # touches the full ``[B,S,S_comp]`` logits.
-        from paddlefleet.ops.tilelang_dsv4 import (
+        from paddlefleet.tilelang_ops import (
             tilelang_csa_compressed_indexer_topk_paddle,
         )
 
@@ -639,7 +639,7 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_loss: Tensor):
-        from paddlefleet.ops.tilelang_dsv4 import (
+        from paddlefleet.tilelang_ops import (
             tilelang_csa_compressed_indexer_bwd_paddle,
         )
 
@@ -1293,7 +1293,7 @@ class CompressedSparseAttention(FleetLayer):
                 # autograd graph. Skipped when the fused TileLang loss path
                 # already produced TileLang indices (use_tilelang_loss_path).
                 if use_tilelang_indexer and not use_tilelang_loss_path:
-                    from paddlefleet.ops.tilelang_dsv4 import (
+                    from paddlefleet.tilelang_ops import (
                         tilelang_csa_compressed_indexer_topk_paddle,
                     )
 

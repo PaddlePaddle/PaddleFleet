@@ -178,7 +178,7 @@ class TestTileLangDSV4CSAIndexerForward(unittest.TestCase):
     """Covers Tasks 8.3 / 8.4 / 8.5 / 8.6."""
 
     def setUp(self):
-        from paddlefleet.ops.tilelang_dsv4 import (
+        from paddlefleet.tilelang_ops import (
             tilelang_csa_compressed_indexer_topk_paddle,
         )
 
