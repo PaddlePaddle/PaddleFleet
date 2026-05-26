@@ -46,7 +46,6 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.utils import (
     attention_mask_func,
-    is_layer_window_attention,
     startend_row_indices_add_sliding_window,
 )
 from paddlefleet.utils import divide
@@ -75,6 +74,7 @@ class DotProductAttention(FleetLayer):
         attn_mask_type: AttnMaskType,
         attention_type: str,
         is_mtp_layer: bool = False,
+        is_swa: bool = False,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
         cp_comm_type: str | None = None,
@@ -95,6 +95,7 @@ class DotProductAttention(FleetLayer):
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
         self.is_mtp_layer = is_mtp_layer
+        self.is_swa = is_swa
 
         # For MLA, k_channels and v_channels may differ from config.head_dim
         # Default to config.head_dim if not provided (standard attention)
@@ -145,13 +146,7 @@ class DotProductAttention(FleetLayer):
             coeff = self.layer_number
             self.softmax_scale /= coeff
 
-        if is_layer_window_attention(
-            self.config.sliding_window,
-            self.config.window_attn_skip_freq,
-            self.layer_number
-            if not self.is_mtp_layer
-            else (self.layer_number + self.config.num_hidden_layers),
-        ):
+        if self.is_swa:
             sliding_window = self.config.sliding_window
         else:
             sliding_window = None

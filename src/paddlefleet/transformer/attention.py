@@ -219,12 +219,22 @@ class Attention(FleetLayer, ABC):
 
         self.is_swa = False
 
+        if self.is_mtp_layer:
+            for_swa_layer_number = (
+                self.layer_number + self.config.num_hidden_layers
+            )
+        else:
+            # for non-mtp layer, layer_number add num_empty_layers_add_in_head in
+            # src/paddlefleet/models/gpt/gpt_layer_specs.py#L533
+            # real_layer_number = layer_number + config.num_empty_layers_add_in_head
+            for_swa_layer_number = (
+                self.layer_number - self.config.num_empty_layers_add_in_head
+            )
+
         if is_layer_window_attention(
             self.config.sliding_window,
             self.config.window_attn_skip_freq,
-            self.layer_number
-            if not self.is_mtp_layer
-            else (self.layer_number + self.config.num_hidden_layers),
+            for_swa_layer_number,
         ):
             self.is_swa = True
 
@@ -300,6 +310,7 @@ class Attention(FleetLayer, ABC):
             attn_mask_type=self.attn_mask_type,
             attention_type=self.attention_type,
             is_mtp_layer=self.is_mtp_layer,
+            is_swa=self.is_swa,
             cp_comm_type=cp_comm_type,
             softmax_scale=self.config.softmax_scale,
             pg_collection=self.pg_collection,
