@@ -77,8 +77,12 @@ class FlashAttnFunctor(PyLayer):
         """
         fa_version = hold_tensors["fa_version"]
         ctx.fa_version = fa_version
+        ctx.need_pad = hold_tensors.get("need_pad", False)
+        ctx.head_dim_v = hold_tensors.get("head_dim_v", None)
+        ctx.padded_value = hold_tensors.get("padded_value", None)
 
         result_attention = hold_tensors["result_attention"]
+        padded_output = hold_tensors.get("padded_output", result_attention)
         softmax_lse = hold_tensors["softmax_lse"]
         causal = hold_tensors["causal"]
 
@@ -86,8 +90,10 @@ class FlashAttnFunctor(PyLayer):
             seed_offset = hold_tensors["seed_offset"]
             dropout = hold_tensors["dropout"]
             ctx.save_for_backward(
-                q, k, v,
-                result_attention,
+                q,
+                k,
+                v,
+                padded_output,
                 softmax_lse,
                 seed_offset,
                 dropout,
@@ -95,9 +101,8 @@ class FlashAttnFunctor(PyLayer):
             )
         else:
             # FA3 and FA4 share the same saved tensors
-            ctx.save_for_backward(
-                q, k, v, result_attention, softmax_lse, causal
-            )
+            ctx.save_for_backward(q, k, v, padded_output, softmax_lse, causal)
+        # TODO: 这里为什么不用 raise ValueError(f"Invalid flash attention version: {fa_version}")
 
         return result_attention
 
@@ -111,32 +116,51 @@ class FlashAttnFunctor(PyLayer):
 
         if fa_version == 2:
             (
-                q, k, v,
-                result_attention, softmax_lse,
-                seed_offset, dropout, causal,
+                q,
+                k,
+                v,
+                padded_output,
+                softmax_lse,
+                seed_offset,
+                dropout,
+                causal,
             ) = ctx.saved_tensor()
             q_grad, k_grad, v_grad = flash_attn_dispatch_bwd(
-                q.detach(), k.detach(), v.detach(),
-                result_attention, grad, softmax_lse,
+                q.detach(),
+                k.detach(),
+                v.detach(),
+                padded_output,
+                grad,
+                softmax_lse,
                 fa_version=fa_version,
                 startend_row_indices=None,
                 seed_offset=seed_offset,
                 dropout=dropout,
                 causal=causal,
+                need_pad=ctx.need_pad,
+                head_dim_v=ctx.head_dim_v,
+                padded_value=ctx.padded_value,
             )
             seed_offset._clear_dataptr()
         else:
-            q, k, v, result_attention, softmax_lse, causal = ctx.saved_tensor()
+            q, k, v, padded_output, softmax_lse, causal = ctx.saved_tensor()
             q_grad, k_grad, v_grad = flash_attn_dispatch_bwd(
-                q.detach(), k.detach(), v.detach(),
-                result_attention, grad, softmax_lse,
+                q.detach(),
+                k.detach(),
+                v.detach(),
+                padded_output,
+                grad,
+                softmax_lse,
                 fa_version=fa_version,
                 startend_row_indices=None,
                 causal=causal,
+                need_pad=ctx.need_pad,
+                head_dim_v=ctx.head_dim_v,
+                padded_value=ctx.padded_value,
             )
 
         # Manually release memory of intermediate tensors to save GPU memory.
-        result_attention._clear_dataptr()
+        padded_output._clear_dataptr()
         softmax_lse._clear_dataptr()
 
         return q_grad, k_grad, v_grad
@@ -212,7 +236,9 @@ class RefinedRcomputeFlashAttention:
         )
 
         fwd_result = flash_attn_dispatch_fwd(
-            query_states, key_states, value_states,
+            query_states,
+            key_states,
+            value_states,
             startend_row_indices=None,
             causal=causal,
             dropout=dropout,
@@ -222,17 +248,23 @@ class RefinedRcomputeFlashAttention:
 
         hold_tensors = {
             "result_attention": fwd_result["output"],
+            "padded_output": fwd_result.get("padded_output"),
             "softmax_lse": fwd_result["softmax_lse"],
             "seed_offset": fwd_result["seed_offset"],
             "result_softmax": fwd_result["result_softmax"],
             "dropout": dropout,
             "causal": causal,
             "fa_version": fwd_result["fa_version"],
+            "need_pad": fwd_result["need_pad"],
+            "head_dim_v": fwd_result["head_dim_v"],
+            "padded_value": fwd_result.get("padded_value"),
         }
 
         # Put the dictionary of saved tensors into the queue.
         self._hold_tensors_queue.put(hold_tensors)
-        return fwd_result["output"], fwd_result["result_softmax"] if return_softmax else None
+        return fwd_result["output"], fwd_result[
+            "result_softmax"
+        ] if return_softmax else None
 
     def _second_fwd(self, query_states, key_states, value_states):
         """
@@ -274,8 +306,12 @@ class FlashMaskAttnFunctor(PyLayer):
         """
         fa_version = hold_tensors["fa_version"]
         ctx.fa_version = fa_version
+        ctx.need_pad = hold_tensors.get("need_pad", False)
+        ctx.head_dim_v = hold_tensors.get("head_dim_v", None)
+        ctx.padded_value = hold_tensors.get("padded_value", None)
 
         result_attention = hold_tensors["result_attention"]
+        padded_output = hold_tensors.get("padded_output", result_attention)
         softmax_lse = hold_tensors["softmax_lse"]
         causal = hold_tensors["causal"]
 
@@ -283,9 +319,11 @@ class FlashMaskAttnFunctor(PyLayer):
             seed_offset = hold_tensors["seed_offset"]
             dropout = hold_tensors["dropout"]
             ctx.save_for_backward(
-                q, k, v,
+                q,
+                k,
+                v,
                 startend_row_indices,
-                result_attention,
+                padded_output,
                 softmax_lse,
                 seed_offset,
                 dropout,
@@ -294,9 +332,11 @@ class FlashMaskAttnFunctor(PyLayer):
         else:
             # FA3 and FA4 share the same saved tensors
             ctx.save_for_backward(
-                q, k, v,
+                q,
+                k,
+                v,
                 startend_row_indices,
-                result_attention,
+                padded_output,
                 softmax_lse,
                 causal,
             )
@@ -313,38 +353,60 @@ class FlashMaskAttnFunctor(PyLayer):
 
         if fa_version == 2:
             (
-                q, k, v,
+                q,
+                k,
+                v,
                 startend_row_indices,
-                result_attention, softmax_lse,
-                seed_offset, dropout, causal,
+                padded_output,
+                softmax_lse,
+                seed_offset,
+                dropout,
+                causal,
             ) = ctx.saved_tensor()
             q_grad, k_grad, v_grad = flash_attn_dispatch_bwd(
-                q.detach(), k.detach(), v.detach(),
-                result_attention, grad, softmax_lse,
+                q.detach(),
+                k.detach(),
+                v.detach(),
+                padded_output,
+                grad,
+                softmax_lse,
                 fa_version=fa_version,
                 startend_row_indices=startend_row_indices,
                 seed_offset=seed_offset,
                 dropout=dropout,
                 causal=causal,
+                need_pad=ctx.need_pad,
+                head_dim_v=ctx.head_dim_v,
+                padded_value=ctx.padded_value,
             )
             seed_offset._clear_dataptr()
         else:
             (
-                q, k, v,
+                q,
+                k,
+                v,
                 startend_row_indices,
-                result_attention, softmax_lse,
+                padded_output,
+                softmax_lse,
                 causal,
             ) = ctx.saved_tensor()
             q_grad, k_grad, v_grad = flash_attn_dispatch_bwd(
-                q.detach(), k.detach(), v.detach(),
-                result_attention, grad, softmax_lse,
+                q.detach(),
+                k.detach(),
+                v.detach(),
+                padded_output,
+                grad,
+                softmax_lse,
                 fa_version=fa_version,
                 startend_row_indices=startend_row_indices,
                 causal=causal,
+                need_pad=ctx.need_pad,
+                head_dim_v=ctx.head_dim_v,
+                padded_value=ctx.padded_value,
             )
 
         # Manually release memory.
-        result_attention._clear_dataptr()
+        padded_output._clear_dataptr()
         softmax_lse._clear_dataptr()
 
         return q_grad, k_grad, v_grad
@@ -422,7 +484,9 @@ class RefinedRcomputeFlashMaskAttention:
         )
 
         fwd_result = flash_attn_dispatch_fwd(
-            query_states, key_states, value_states,
+            query_states,
+            key_states,
+            value_states,
             startend_row_indices=startend_row_indices,
             causal=causal,
             dropout=dropout,
@@ -432,12 +496,16 @@ class RefinedRcomputeFlashMaskAttention:
 
         hold_tensors = {
             "result_attention": fwd_result["output"],
+            "padded_output": fwd_result.get("padded_output"),
             "softmax_lse": fwd_result["softmax_lse"],
             "seed_offset": fwd_result["seed_offset"],
             "result_softmax": fwd_result["result_softmax"],
             "dropout": dropout,
             "causal": causal,
             "fa_version": fwd_result["fa_version"],
+            "need_pad": fwd_result["need_pad"],
+            "head_dim_v": fwd_result["head_dim_v"],
+            "padded_value": fwd_result.get("padded_value"),
         }
 
         self._hold_tensors_queue.put(hold_tensors)
@@ -489,10 +557,12 @@ class FlashMaskAttnCpFunctor(PyLayer):
         causal = hold_tensors["causal"]
 
         ctx.fa_version = fa_version
-        ctx.need_value_padding = hold_tensors["need_value_padding"]
-        ctx.v_head_dim = hold_tensors["v_head_dim"]
+        ctx.need_pad = hold_tensors["need_pad"]
+        ctx.head_dim_v = hold_tensors["head_dim_v"]
         ctx.save_for_backward(
-            q, k, v,
+            q,
+            k,
+            v,
             startend_row_indices,
             result_attention,
             softmax_lse,
@@ -508,17 +578,23 @@ class FlashMaskAttnCpFunctor(PyLayer):
         Defines the custom backward pass for CP masked FlashAttention.
         """
         (
-            q, k, v,
+            q,
+            k,
+            v,
             startend_row_indices,
-            result_attention, softmax_lse,
-            group, causal,
+            result_attention,
+            softmax_lse,
+            group,
+            causal,
         ) = ctx.saved_tensor()
         fa_version = ctx.fa_version
 
         # Compute gradients via context parallel backward
         query_grad, key_grad, value_grad = (
             cp_flashmask_allgatherkv_balance_backward(
-                q, k, v,
+                q,
+                k,
+                v,
                 startend_row_indices,
                 result_attention,
                 softmax_lse,
@@ -526,8 +602,8 @@ class FlashMaskAttnCpFunctor(PyLayer):
                 group,
                 causal,
                 fa_version,
-                need_value_padding=ctx.need_value_padding,
-                v_head_dim=ctx.v_head_dim,
+                need_pad=ctx.need_pad,
+                v_head_dim=ctx.head_dim_v,
             )
         )
 
@@ -634,16 +710,21 @@ class RefinedRcomputeFlashMaskCpAttention:
             f"Current query sequence length: {query_states.shape[1]}"
         )
 
-        result_attention, softmax_lse, startend_row_indices, fa_version, need_value_padding, v_head_dim = (
-            cp_flashmask_allgatherkv_balance_forward(
-                query_states,
-                key_states,
-                value_states,
-                startend_row_indices,
-                group,
-                causal,
-                training,
-            )
+        (
+            result_attention,
+            softmax_lse,
+            startend_row_indices,
+            fa_version,
+            need_pad,
+            head_dim_v,
+        ) = cp_flashmask_allgatherkv_balance_forward(
+            query_states,
+            key_states,
+            value_states,
+            startend_row_indices,
+            group,
+            causal,
+            training,
         )
 
         hold_tensors = {
@@ -653,8 +734,8 @@ class RefinedRcomputeFlashMaskCpAttention:
             "fa_version": fa_version,
             "group": group,
             "causal": causal,
-            "need_value_padding": need_value_padding,
-            "v_head_dim": v_head_dim,
+            "need_pad": need_pad,
+            "head_dim_v": head_dim_v,
         }
 
         self._hold_tensors_queue.put(hold_tensors)

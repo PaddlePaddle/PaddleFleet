@@ -91,8 +91,12 @@ def get_fa_version(
     deterministic = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
         "FLAGS_cudnn_deterministic"
     ]
-    if fa_version == 3 and deterministic and head_dim > 128:
-        return 2
+
+    if fa_version == 3:
+        if startend_row_indices is None:
+            return 2
+        if deterministic and head_dim > 128:
+            return 2
 
     if fa_version == 4:
         _head_dim_v = head_dim_v if head_dim_v is not None else head_dim
@@ -102,8 +106,7 @@ def get_fa_version(
             or (head_dim == 256 and _head_dim_v == 256)
         )
         fa4_mask_ok = (
-            startend_row_indices is None
-            or startend_row_indices.shape[-1] != 4
+            startend_row_indices is None or startend_row_indices.shape[-1] != 4
         )
         if not (fa4_hdim_ok and fa4_mask_ok):
             return 2
@@ -111,22 +114,25 @@ def get_fa_version(
     return fa_version
 
 
-def _need_value_padding(fa_version, q_head_dim, v_head_dim):
+def _need_pad(fa_version, head_dim, head_dim_v):
     """Determine if value needs padding to match query head dim."""
-    if q_head_dim == v_head_dim:
+    if head_dim == head_dim_v:
         return False
-    # FA4 natively supports q_head_dim=192, v_head_dim=128
-    if fa_version == 4 and q_head_dim == 192 and v_head_dim == 128:
+    # FA4 natively supports head_dim=192, head_dim_v=128
+    if fa_version == 4 and head_dim == 192 and head_dim_v == 128:
         return False
     return True
 
 
-def _pad_value(value, q_head_dim):
+def _pad_value(value, head_dim, head_dim_v):
     """Pad value tensor to match query head dim."""
-    v_head_dim = value.shape[-1]
-    bsz, q_len = value.shape[0], value.shape[1]
+    batch_size, seqlen_k, nheads = (
+        value.shape[0],
+        value.shape[1],
+        value.shape[2],
+    )
     value_padding = paddle.zeros(
-        [bsz, q_len, value.shape[2], q_head_dim - v_head_dim],
+        [batch_size, seqlen_k, nheads, head_dim - head_dim_v],
         dtype=value.dtype,
     )
     return paddle.concat([value, value_padding], axis=-1)
@@ -168,7 +174,7 @@ def flash_attn_dispatch_fwd(
 
     Handles:
       - FA version selection via get_fa_version
-      - Value padding when q_head_dim != v_head_dim (except FA4 192/128)
+      - Value padding when head_dim != head_dim_v (except FA4 192/128)
       - FA2/3/4 kernel dispatch
 
     Args:
@@ -191,24 +197,24 @@ def flash_attn_dispatch_fwd(
           - "fa_version": int, the version actually used
           - "causal": bool
           - "dropout": float
-          - "need_value_padding": bool
-          - "v_head_dim": original v head dim before padding
+          - "need_pad": bool
+          - "head_dim_v": original v head dim before padding
     """
-    q_head_dim = q.shape[-1]
-    v_head_dim = v.shape[-1]
+    head_dim = q.shape[-1]
+    head_dim_v = v.shape[-1]
 
-    fa_version = get_fa_version(q_head_dim, v_head_dim, startend_row_indices)
+    fa_version = get_fa_version(head_dim, head_dim_v, startend_row_indices)
 
-    need_pad = _need_value_padding(fa_version, q_head_dim, v_head_dim)
+    need_pad = _need_pad(fa_version, head_dim, head_dim_v)
     if need_pad:
-        v = _pad_value(v, q_head_dim)
+        v = _pad_value(v, head_dim, head_dim_v)
 
     result = {
         "fa_version": fa_version,
         "causal": causal,
         "dropout": dropout,
-        "need_value_padding": need_pad,
-        "v_head_dim": v_head_dim,
+        "need_pad": need_pad,
+        "head_dim_v": head_dim_v,
         "seed_offset": None,
         "result_softmax": None,
     }
@@ -218,7 +224,9 @@ def flash_attn_dispatch_fwd(
             # flashmask path
             (output, result_softmax, softmax_lse, seed_offset) = (
                 _C_ops.flashmask_attention(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     startend_row_indices,
                     None,
                     dropout,
@@ -232,7 +240,9 @@ def flash_attn_dispatch_fwd(
             # plain flash attention path
             (output, result_softmax, softmax_lse, seed_offset) = (
                 _C_ops.flash_attn(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     None,
                     None,
                     dropout,
@@ -248,14 +258,16 @@ def flash_attn_dispatch_fwd(
         result["result_softmax"] = result_softmax
 
     elif fa_version == 3:
-        _scale = softmax_scale if softmax_scale is not None else q_head_dim ** (-0.5)
+        _scale = head_dim ** (-0.5)
 
         if startend_row_indices is not None:
             # flashmask v2 path
             variant = _get_flashmask_v2_sig_variant()
             if variant == "group":
                 (output, softmax_lse) = _C_ops.flashmask_attention_v2(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     startend_row_indices,
                     None,  # block_mask
                     None,  # nvshmem unique id
@@ -266,7 +278,9 @@ def flash_attn_dispatch_fwd(
                 )
             elif variant == "block_mask":
                 (output, softmax_lse) = _C_ops.flashmask_attention_v2(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     startend_row_indices,
                     None,  # block_mask
                     _scale,
@@ -274,7 +288,9 @@ def flash_attn_dispatch_fwd(
                 )
             else:
                 (output, softmax_lse) = _C_ops.flashmask_attention_v2(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     startend_row_indices,
                     _scale,
                     causal,
@@ -282,7 +298,9 @@ def flash_attn_dispatch_fwd(
         else:
             # plain flash attention v3 path
             (output, softmax_lse) = _C_ops.flash_attn_v3(
-                q, k, v,
+                q,
+                k,
+                v,
                 None,
                 None,
                 None,
@@ -302,7 +320,9 @@ def flash_attn_dispatch_fwd(
 
     elif fa_version == 4:
         (output, softmax_lse) = _flash_attn_fwd(
-            q, k, v,
+            q,
+            k,
+            v,
             causal=causal,
             return_lse=True,
             startend_row_indices=startend_row_indices,
@@ -314,6 +334,11 @@ def flash_attn_dispatch_fwd(
 
     else:
         raise ValueError(f"Invalid flash attention version: {fa_version}")
+
+    if need_pad:
+        result["padded_output"] = result["output"]
+        result["output"] = result["output"][..., :head_dim_v]
+        result["padded_value"] = v
 
     return result
 
@@ -335,6 +360,9 @@ def flash_attn_dispatch_bwd(
     seed_offset=None,
     dropout=0.0,
     causal=False,
+    need_pad=False,
+    head_dim_v=None,
+    padded_value=None,
 ):
     """Unified backward dispatch for FlashAttention across all versions.
 
@@ -342,7 +370,7 @@ def flash_attn_dispatch_bwd(
         q: Query tensor (detached)
         k: Key tensor (detached)
         v: Value tensor (detached)
-        output: Forward pass output (result_attention)
+        output: Forward pass output (padded_output if value was padded)
         grad: Gradient of output
         softmax_lse: Log-sum-exp from forward pass
         fa_version: FlashAttention version (2, 3, or 4) from forward pass
@@ -350,14 +378,23 @@ def flash_attn_dispatch_bwd(
         seed_offset: Seed offset tensor (FA2 only)
         dropout: Dropout probability (FA2 only)
         causal: Whether causal masking was used
+        need_pad: Whether value needs padding (from forward)
+        head_dim_v: Original value head dim before padding
 
     Returns:
         tuple: (q_grad, k_grad, v_grad)
     """
+    if need_pad:
+        if padded_value is not None:
+            v = padded_value
+        else:
+            v = _pad_value(v, q.shape[-1], head_dim_v)
     if fa_version == 2:
         if startend_row_indices is not None:
             q_grad, k_grad, v_grad = _C_ops.flashmask_attention_grad(
-                q, k, v,
+                q,
+                k,
+                v,
                 startend_row_indices,
                 output,
                 softmax_lse,
@@ -368,7 +405,9 @@ def flash_attn_dispatch_bwd(
             )
         else:
             q_grad, k_grad, v_grad = _C_ops.flash_attn_grad(
-                q, k, v,
+                q,
+                k,
+                v,
                 output,
                 softmax_lse,
                 seed_offset,
@@ -385,7 +424,9 @@ def flash_attn_dispatch_bwd(
             variant = _get_flashmask_v2_sig_variant()
             if variant == "group":
                 q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     output,
                     softmax_lse,
                     startend_row_indices,
@@ -398,7 +439,9 @@ def flash_attn_dispatch_bwd(
                 )
             elif variant == "block_mask":
                 q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     output,
                     softmax_lse,
                     startend_row_indices,
@@ -409,7 +452,9 @@ def flash_attn_dispatch_bwd(
                 )
             else:
                 q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     output,
                     softmax_lse,
                     startend_row_indices,
@@ -419,7 +464,9 @@ def flash_attn_dispatch_bwd(
                 )
         else:
             q_grad, k_grad, v_grad = _C_ops.flash_attn_v3_grad(
-                q, k, v,
+                q,
+                k,
+                v,
                 output,
                 softmax_lse,
                 grad,
@@ -440,7 +487,9 @@ def flash_attn_dispatch_bwd(
         else:
             flashmask_info = None
         q_grad, k_grad, v_grad = _flash_attn_bwd(
-            q, k, v,
+            q,
+            k,
+            v,
             output,
             grad,
             softmax_lse,
@@ -455,6 +504,9 @@ def flash_attn_dispatch_bwd(
 
     else:
         raise ValueError(f"Invalid flash attention version: {fa_version}")
+
+    if need_pad:
+        v_grad = v_grad[..., :head_dim_v]
 
     return q_grad, k_grad, v_grad
 
@@ -488,15 +540,17 @@ def flashmask_attention(
             "use_varlen" in inspect.signature(_flashmask_attention).parameters
         ), "The flash_mask installed does not support use_varlen"
 
-    fa_version = get_fa_version(query.shape[-1], value.shape[-1], startend_row_indices)
+    fa_version = get_fa_version(
+        query.shape[-1], value.shape[-1], startend_row_indices
+    )
 
-    bsz, q_len, num_heads, q_head_dim = query.shape
-    v_head_dim = value.shape[-1]
+    bsz, q_len, num_heads, head_dim = query.shape
+    head_dim_v = value.shape[-1]
 
-    need_value_padding = _need_value_padding(fa_version, q_head_dim, v_head_dim)
+    need_pad = _need_pad(fa_version, head_dim, head_dim_v)
 
-    if need_value_padding:
-        value = _pad_value(value, q_head_dim)
+    if need_pad:
+        value = _pad_value(value, head_dim, head_dim_v)
 
     if use_varlen:
         flashmask_attention_func = partial(
@@ -529,10 +583,10 @@ def flashmask_attention(
     else:
         attn_out = outs
 
-    if need_value_padding:
-        attn_out = attn_out[..., :v_head_dim]
+    if need_pad:
+        attn_out = attn_out[..., :head_dim_v]
 
-    attn_out = attn_out.reshape([bsz, q_len, num_heads, v_head_dim])
+    attn_out = attn_out.reshape([bsz, q_len, num_heads, head_dim_v])
 
     if return_softmax_lse:
         return [attn_out, lse]
@@ -554,12 +608,12 @@ def flash_attention(
     name=None,
     softmax_scale=None,
 ):
-    bsz, q_len, num_heads, q_head_dim = query.shape
-    v_head_dim = value.shape[-1]
-    need_value_padding = q_head_dim != v_head_dim
+    bsz, q_len, num_heads, head_dim = query.shape
+    head_dim_v = value.shape[-1]
+    need_pad = head_dim != head_dim_v
 
-    if need_value_padding:
-        value = _pad_value(value, q_head_dim)
+    if need_pad:
+        value = _pad_value(value, head_dim, head_dim_v)
 
     attn_output, softmax_result = _flash_attention(
         query=query,
@@ -575,10 +629,10 @@ def flash_attention(
         softmax_scale=softmax_scale,
     )
 
-    if need_value_padding:
-        attn_output = attn_output[..., :v_head_dim]
+    if need_pad:
+        attn_output = attn_output[..., :head_dim_v]
 
-    attn_output = attn_output.reshape([bsz, q_len, num_heads, v_head_dim])
+    attn_output = attn_output.reshape([bsz, q_len, num_heads, head_dim_v])
 
     return attn_output, softmax_result
 
@@ -589,6 +643,6 @@ __all__ = [
     "get_fa_version",
     "flash_attn_dispatch_fwd",
     "flash_attn_dispatch_bwd",
-    "_need_value_padding",
+    "_need_pad",
     "_pad_value",
 ]

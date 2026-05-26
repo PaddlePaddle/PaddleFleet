@@ -54,28 +54,23 @@ class TestRefinedRcomputeFlashMaskAttentionInit(unittest.TestCase):
 class TestRefinedRcomputeFlashMaskAttentionForward(unittest.TestCase):
     """Tests for RefinedRcomputeFlashMaskAttention.forward."""
 
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
-        return_value=2,
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn._C_ops.flashmask_attention"
-    )
+    @patch("paddlefleet.refined_recompute.flash_attn.flash_attn_dispatch_fwd")
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
-    def test_first_fwd_dispatches(
-        self, mock_tracer, mock_flashmask, mock_version
-    ):
+    def test_first_fwd_dispatches(self, mock_tracer, mock_dispatch_fwd):
         """Test forward dispatches to _first_fwd when no grad."""
         mock_tracer_obj = MagicMock()
         mock_tracer_obj._has_grad = False
         mock_tracer.return_value = mock_tracer_obj
 
-        mock_flashmask.return_value = (
-            paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
-            None,
-            paddle.randn([2, 4], dtype=paddle.float32),
-            paddle.zeros([2], dtype=paddle.int64),
-        )
+        mock_dispatch_fwd.return_value = {
+            "output": paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
+            "softmax_lse": paddle.randn([2, 4], dtype=paddle.float32),
+            "seed_offset": paddle.zeros([2], dtype=paddle.int64),
+            "result_softmax": None,
+            "fa_version": 2,
+            "need_pad": False,
+            "head_dim_v": 8,
+        }
 
         attn = RefinedRcomputeFlashMaskAttention()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
@@ -96,9 +91,12 @@ class TestRefinedRcomputeFlashMaskAttentionForward(unittest.TestCase):
         attn = RefinedRcomputeFlashMaskAttention()
         # Put something in queue
         hold_tensors = {
+            "fa_version": 3,
             "result_attention": paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
             "softmax_lse": paddle.randn([2, 4], dtype=paddle.float32),
             "causal": True,
+            "need_pad": False,
+            "head_dim_v": 8,
         }
         attn._hold_tensors_queue.put(hold_tensors)
 
@@ -134,48 +132,34 @@ class TestRefinedRcomputeFlashMaskAttentionForward(unittest.TestCase):
 class TestRefinedRcomputeFlashMaskAttentionFirstFwdV4(unittest.TestCase):
     """Tests for _first_fwd with version 4."""
 
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
-        return_value=4,
-    )
+    @patch("paddlefleet.refined_recompute.flash_attn.flash_attn_dispatch_fwd")
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
-    def test_first_fwd_v4(self, mock_tracer, mock_version):
+    def test_first_fwd_v4(self, mock_tracer, mock_dispatch_fwd):
         """Test _first_fwd with version 4."""
-        # _flash_attn_fwd is conditionally imported (sm_10x only).
-        # Create it on the module if it doesn't exist so the test can run.
-        import paddlefleet.refined_recompute.flash_attn as fa_mod
+        mock_tracer_obj = MagicMock()
+        mock_tracer_obj._has_grad = False
+        mock_tracer.return_value = mock_tracer_obj
+        mock_dispatch_fwd.return_value = {
+            "output": paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
+            "softmax_lse": paddle.randn([2, 4], dtype=paddle.float32),
+            "seed_offset": None,
+            "result_softmax": None,
+            "fa_version": 4,
+            "need_pad": False,
+            "head_dim_v": 8,
+        }
 
-        _orig_flash_fwd = getattr(fa_mod, "_flash_attn_fwd", None)
+        attn = RefinedRcomputeFlashMaskAttention()
+        q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
+        k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
+        v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
+        startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
 
-        mock_flash_fwd = MagicMock()
-        mock_flash_fwd.return_value = (
-            paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
-            paddle.randn([2, 4], dtype=paddle.float32),
-        )
-        fa_mod._flash_attn_fwd = mock_flash_fwd
-
-        try:
-            mock_tracer_obj = MagicMock()
-            mock_tracer_obj._has_grad = False
-            mock_tracer.return_value = mock_tracer_obj
-
-            attn = RefinedRcomputeFlashMaskAttention()
-            q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-            k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-            v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-            startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
-
-            result = attn.forward(q, k, v, startend, causal=False)
-            self.assertTrue(result is not None)
-            hold_tensors = attn._hold_tensors_queue.get()
-            self.assertIn("result_attention", hold_tensors)
-            self.assertIn("softmax_lse", hold_tensors)
-        finally:
-            # Restore original state
-            if _orig_flash_fwd is not None:
-                fa_mod._flash_attn_fwd = _orig_flash_fwd
-            elif hasattr(fa_mod, "_flash_attn_fwd"):
-                delattr(fa_mod, "_flash_attn_fwd")
+        result = attn.forward(q, k, v, startend, causal=False)
+        self.assertTrue(result is not None)
+        hold_tensors = attn._hold_tensors_queue.get()
+        self.assertIn("result_attention", hold_tensors)
+        self.assertIn("softmax_lse", hold_tensors)
 
 
 class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
@@ -183,7 +167,6 @@ class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
 
     def test_forward_saves_tensors(self):
         """Test forward saves the correct tensors."""
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
@@ -200,9 +183,11 @@ class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
             "fa_version": 2,
             "group": group,
             "causal": causal,
+            "need_pad": False,
+            "head_dim_v": 8,
         }
 
-        result = FlashMaskAttnCpFunctor.apply(config, q, k, v, hold_tensors)
+        result = FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
         self.assertEqual(result.shape, result_attn.shape)
 
 
@@ -220,7 +205,6 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
         )
 
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
@@ -237,9 +221,11 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
             "fa_version": 2,
             "group": group,
             "causal": causal,
+            "need_pad": False,
+            "head_dim_v": 8,
         }
 
-        FlashMaskAttnCpFunctor.apply(config, q, k, v, hold_tensors)
+        FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
         mock_cp_backward.assert_not_called()  # Not called in forward
 
 

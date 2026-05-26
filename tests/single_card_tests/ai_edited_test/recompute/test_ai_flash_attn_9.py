@@ -76,16 +76,17 @@ class TestRefinedRcomputeFlashMaskCpAttentionForward(unittest.TestCase):
             paddle.randn([2, 4], dtype=paddle.float32),
             paddle.to_tensor([0, 4, 8], dtype=paddle.int32),
             2,
+            False,
+            8,
         )
 
         attn = RefinedRcomputeFlashMaskCpAttention()
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
 
-        result = attn.forward(config, q, k, v, startend)
+        result = attn.forward(q, k, v, startend)
         self.assertFalse(attn._hold_tensors_queue.empty())
 
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
@@ -105,10 +106,11 @@ class TestRefinedRcomputeFlashMaskCpAttentionForward(unittest.TestCase):
             "group": MagicMock(),
             "causal": False,
             "fa_version": 2,
+            "need_pad": False,
+            "head_dim_v": 8,
         }
         attn._hold_tensors_queue.put(hold_tensors)
 
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
@@ -118,7 +120,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionForward(unittest.TestCase):
             "paddlefleet.refined_recompute.flash_attn.FlashMaskAttnCpFunctor.apply",
             return_value=paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
         ) as mock_functor:
-            result = attn.forward(config, q, k, v, startend)
+            result = attn.forward(q, k, v, startend)
             mock_functor.assert_called_once()
 
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
@@ -129,14 +131,13 @@ class TestRefinedRcomputeFlashMaskCpAttentionForward(unittest.TestCase):
         mock_tracer.return_value = mock_tracer_obj
 
         attn = RefinedRcomputeFlashMaskCpAttention()
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
 
         with self.assertRaises(AssertionError):
-            attn.forward(config, q, k, v, startend)
+            attn.forward(q, k, v, startend)
 
 
 class TestRefinedRcomputeFlashMaskCpAttentionDropoutRaises(unittest.TestCase):
@@ -158,14 +159,13 @@ class TestRefinedRcomputeFlashMaskCpAttentionDropoutRaises(unittest.TestCase):
         mock_tracer.return_value = mock_tracer_obj
 
         attn = RefinedRcomputeFlashMaskCpAttention()
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
 
         with self.assertRaises(NotImplementedError):
-            attn.forward(config, q, k, v, startend, dropout=0.1)
+            attn.forward(q, k, v, startend, dropout=0.1)
 
     @patch(
         "paddlefleet.refined_recompute.flash_attn.cp_flashmask_allgatherkv_balance_forward"
@@ -181,14 +181,13 @@ class TestRefinedRcomputeFlashMaskCpAttentionDropoutRaises(unittest.TestCase):
         mock_tracer.return_value = mock_tracer_obj
 
         attn = RefinedRcomputeFlashMaskCpAttention()
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
 
         with self.assertRaises(NotImplementedError):
-            attn.forward(config, q, k, v, startend, causal=True)
+            attn.forward(q, k, v, startend, causal=True)
 
     @patch(
         "paddlefleet.refined_recompute.flash_attn.cp_flashmask_allgatherkv_balance_forward"
@@ -206,16 +205,13 @@ class TestRefinedRcomputeFlashMaskCpAttentionDropoutRaises(unittest.TestCase):
         mock_tracer.return_value = mock_tracer_obj
 
         attn = RefinedRcomputeFlashMaskCpAttention()
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
 
         with self.assertRaises(NotImplementedError):
-            attn.forward(
-                config, q, k, v, startend, fixed_seed_offset=MagicMock()
-            )
+            attn.forward(q, k, v, startend, fixed_seed_offset=MagicMock())
 
 
 class TestRefinedRcomputeFlashMaskCpAttentionSeqLenAssertion(unittest.TestCase):
@@ -237,14 +233,13 @@ class TestRefinedRcomputeFlashMaskCpAttentionSeqLenAssertion(unittest.TestCase):
         mock_tracer.return_value = mock_tracer_obj
 
         attn = RefinedRcomputeFlashMaskCpAttention()
-        config = MagicMock()
         q = paddle.randn([2, 3, 8], dtype=paddle.bfloat16)  # odd seq len
         k = paddle.randn([2, 3, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 3, 8], dtype=paddle.bfloat16)
         startend = paddle.to_tensor([0, 3, 6], dtype=paddle.int32)
 
         with self.assertRaises(AssertionError):
-            attn.forward(config, q, k, v, startend)
+            attn.forward(q, k, v, startend)
 
 
 class TestRefinedRcomputeFlashMaskCpAttentionCall(unittest.TestCase):
@@ -257,13 +252,12 @@ class TestRefinedRcomputeFlashMaskCpAttentionCall(unittest.TestCase):
         """Test __call__ delegates to forward."""
         mock_forward.return_value = paddle.randn([2, 4, 8])
         attn = RefinedRcomputeFlashMaskCpAttention()
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
 
-        result = attn(config, q, k, v, startend)
+        result = attn(q, k, v, startend)
         mock_forward.assert_called_once()
 
 
@@ -272,7 +266,6 @@ class TestFlashMaskAttnCpFunctorForwardAndBackward(unittest.TestCase):
 
     def test_forward_returns_result_attention(self):
         """Test forward returns result_attention from hold_tensors."""
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
@@ -287,9 +280,11 @@ class TestFlashMaskAttnCpFunctorForwardAndBackward(unittest.TestCase):
             "group": MagicMock(),
             "causal": False,
             "fa_version": 2,
+            "need_pad": False,
+            "head_dim_v": 8,
         }
 
-        result = FlashMaskAttnCpFunctor.apply(config, q, k, v, hold_tensors)
+        result = FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
         self.assertTrue(result is result_attn)
 
 

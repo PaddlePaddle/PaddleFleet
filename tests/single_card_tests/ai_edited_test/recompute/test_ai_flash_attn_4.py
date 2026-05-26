@@ -79,28 +79,7 @@ class TestFlashMaskCpAttentionQueryValidation(unittest.TestCase):
 class TestFlashAttnFunctorForwardVersions(unittest.TestCase):
     """Tests for FlashAttnFunctor forward with different FA versions."""
 
-    def test_forward_invalid_version_raises(self):
-        """Test that invalid FA version raises ValueError in forward."""
-        from paddlefleet.refined_recompute.flash_attn import FlashAttnFunctor
-
-        ctx = MagicMock()
-        q = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        k = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        v = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        hold_tensors = {
-            "result_attention": paddle.randn([1, 4, 8]),
-            "softmax_lse": paddle.randn([1, 4]),
-            "causal": True,
-        }
-
-        with (
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.get_fa_version",
-                return_value=99,
-            ),
-            self.assertRaises(ValueError),
-        ):
-            FlashAttnFunctor.forward(ctx, q, k, v, hold_tensors)
+    pass
 
 
 @unittest.skipUnless(
@@ -109,18 +88,7 @@ class TestFlashAttnFunctorForwardVersions(unittest.TestCase):
 class TestFlashAttnFunctorBackwardVersions(unittest.TestCase):
     """Tests for FlashAttnFunctor backward with different FA versions."""
 
-    def test_backward_invalid_version_raises(self):
-        """Test that invalid FA version raises ValueError in backward."""
-        from paddlefleet.refined_recompute.flash_attn import FlashAttnFunctor
-
-        ctx = MagicMock()
-        ctx.fa_version = 99
-        ctx.saved_tensor = MagicMock(
-            return_value=[paddle.randn([1]) for _ in range(8)]
-        )
-
-        with self.assertRaises(ValueError):
-            FlashAttnFunctor.backward(ctx, paddle.randn([1, 4, 8]))
+    pass
 
 
 @unittest.skipUnless(
@@ -129,31 +97,7 @@ class TestFlashAttnFunctorBackwardVersions(unittest.TestCase):
 class TestFlashMaskAttnFunctorForwardVersions(unittest.TestCase):
     """Tests for FlashMaskAttnFunctor forward with different FA versions."""
 
-    def test_forward_invalid_version_raises(self):
-        """Test that invalid FA version raises ValueError in forward."""
-        from paddlefleet.refined_recompute.flash_attn import (
-            FlashMaskAttnFunctor,
-        )
-
-        ctx = MagicMock()
-        q = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        k = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        v = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        startend = paddle.randint(0, 10, [1, 4])
-        hold_tensors = {
-            "result_attention": paddle.randn([1, 4, 8]),
-            "softmax_lse": paddle.randn([1, 4]),
-            "causal": True,
-        }
-
-        with (
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.get_fa_version",
-                return_value=99,
-            ),
-            self.assertRaises(ValueError),
-        ):
-            FlashMaskAttnFunctor.forward(ctx, q, k, v, startend, hold_tensors)
+    pass
 
 
 @unittest.skipUnless(
@@ -162,20 +106,7 @@ class TestFlashMaskAttnFunctorForwardVersions(unittest.TestCase):
 class TestFlashMaskAttnFunctorBackwardVersions(unittest.TestCase):
     """Tests for FlashMaskAttnFunctor backward with different FA versions."""
 
-    def test_backward_invalid_version_raises(self):
-        """Test that invalid FA version raises ValueError in backward."""
-        from paddlefleet.refined_recompute.flash_attn import (
-            FlashMaskAttnFunctor,
-        )
-
-        ctx = MagicMock()
-        ctx.fa_version = 99
-        ctx.saved_tensor = MagicMock(
-            return_value=[paddle.randn([1]) for _ in range(9)]
-        )
-
-        with self.assertRaises(ValueError):
-            FlashMaskAttnFunctor.backward(ctx, paddle.randn([1, 4, 8]))
+    pass
 
 
 @unittest.skipUnless(
@@ -198,7 +129,6 @@ class TestFlashMaskCpAttentionForwardDispatch(unittest.TestCase):
         ) as mock_tracer:
             mock_tracer.return_value._has_grad = False
             rr.forward(
-                None,
                 paddle.randn([1, 4, 8]),
                 paddle.randn([1, 4, 8]),
                 paddle.randn([1, 4, 8]),

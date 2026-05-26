@@ -17,7 +17,6 @@ from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddlefleet_ops.flash_mask_facade import (
-    _pad_value,
     flash_attn_dispatch_bwd,
     flash_attn_dispatch_fwd,
 )
@@ -601,7 +600,7 @@ def cp_flashmask_allgatherkv_balance_forward(
         causal (bool): Whether to use causal attention
         is_training (bool): Whether in training mode
     Returns:
-        tuple: (output, log_sum_exp, processed_indices, fa_version, need_value_padding, v_head_dim)
+        tuple: (output, log_sum_exp, processed_indices, fa_version, need_pad, v_head_dim)
             ``fa_version`` is the effective FlashAttention version actually
             used by the forward kernel and must be passed to the backward
             counterpart to keep fwd/bwd consistent.
@@ -647,8 +646,8 @@ def cp_flashmask_allgatherkv_balance_forward(
         fwd_result["softmax_lse"],
         startend_row_indices,
         fwd_result["fa_version"],
-        fwd_result["need_value_padding"],
-        fwd_result["v_head_dim"],
+        fwd_result["need_pad"],
+        fwd_result["head_dim_v"],
     )
 
 
@@ -663,7 +662,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     group,
     causal,
     fa_version: int,
-    need_value_padding: bool = False,
+    need_pad: bool = False,
     v_head_dim: int | None = None,
 ):
     """
@@ -681,7 +680,7 @@ def cp_flashmask_allgatherkv_balance_backward(
         group (paddle.distributed.Group): Communication group
         causal (bool): Whether causal attention was used
         fa_version (int): FlashAttention version (2, 3, or 4), passed explicitly from forward.
-        need_value_padding (bool): Whether value was padded in forward.
+        need_pad (bool): Whether value was padded in forward.
         v_head_dim (int | None): Original value head dim before padding.
     Returns:
         tuple: (query_grad, key_grad, value_grad)
@@ -694,11 +693,6 @@ def cp_flashmask_allgatherkv_balance_backward(
     key_gathered = all_gather_balance(key, axis=1, group=group)
     value_gathered = all_gather_balance(value, axis=1, group=group)
 
-    # Pad value if forward did (backward kernel expects same shapes)
-    if need_value_padding:
-        q_head_dim = query.shape[-1]
-        value_gathered = _pad_value(value_gathered, q_head_dim)
-
     # FA2 requires a seed_offset tensor for gradient computation
     seed_offset = None
     if fa_version == 2:
@@ -706,23 +700,23 @@ def cp_flashmask_allgatherkv_balance_backward(
             shape=[query.shape[1], query.shape[2]], dtype=paddle.int64
         )
 
-    query_grad, key_grad_gathered, value_grad_gathered = flash_attn_dispatch_bwd(
-        query,
-        key_gathered,
-        value_gathered,
-        output,
-        output_grad,
-        log_sum_exp,
-        fa_version=fa_version,
-        startend_row_indices=startend_row_indices,
-        seed_offset=seed_offset,
-        dropout=0.0,
-        causal=causal,
+    query_grad, key_grad_gathered, value_grad_gathered = (
+        flash_attn_dispatch_bwd(
+            query,
+            key_gathered,
+            value_gathered,
+            output,
+            output_grad,
+            log_sum_exp,
+            fa_version=fa_version,
+            startend_row_indices=startend_row_indices,
+            seed_offset=seed_offset,
+            dropout=0.0,
+            causal=causal,
+            need_pad=need_pad,
+            head_dim_v=v_head_dim,
+        )
     )
-
-    # Trim value grad if value was padded
-    if need_value_padding:
-        value_grad_gathered = value_grad_gathered[..., :v_head_dim]
 
     # Reduce-scatter key and value gradients
     key_grad = reduce_scatter_any_axis_balance(
@@ -918,10 +912,15 @@ class FlashMaskContextParallel(PyLayer):
         )
 
         # Perform forward pass
-        output, log_sum_exp, startend_row_indices, fa_version, need_value_padding, v_head_dim = (
-            cp_flashmask_allgatherkv_balance_forward(
-                query, key, value, startend_row_indices, group, causal, training
-            )
+        (
+            output,
+            log_sum_exp,
+            startend_row_indices,
+            fa_version,
+            need_pad,
+            head_dim_v,
+        ) = cp_flashmask_allgatherkv_balance_forward(
+            query, key, value, startend_row_indices, group, causal, training
         )
 
         # Save tensors for backward pass
@@ -931,8 +930,8 @@ class FlashMaskContextParallel(PyLayer):
         ctx.group = group
         ctx.causal = causal
         ctx.fa_version = fa_version
-        ctx.need_value_padding = need_value_padding
-        ctx.v_head_dim = v_head_dim
+        ctx.need_pad = need_pad
+        ctx.head_dim_v = head_dim_v
 
         return output
 
@@ -967,8 +966,8 @@ class FlashMaskContextParallel(PyLayer):
                 group,
                 causal,
                 fa_version,
-                need_value_padding=ctx.need_value_padding,
-                v_head_dim=ctx.v_head_dim,
+                need_pad=ctx.need_pad,
+                v_head_dim=ctx.head_dim_v,
             )
         )
 

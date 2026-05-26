@@ -24,203 +24,28 @@ sys.path.insert(
 )
 
 import unittest
-from unittest.mock import MagicMock, patch
 
 import paddle
 
 from paddlefleet.refined_recompute.flash_attn import (
     flashattn_auto_cast,
-    get_fa_version,
 )
 
 
 class TestGetFAVersionXPU(unittest.TestCase):
-    """Tests for get_fa_version with XPU device."""
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="xpu:0",
-    )
-    def test_xpu_returns_version_2(self, mock_device):
-        """Test XPU device always returns version 2."""
-        result = get_fa_version(64)
-        self.assertEqual(result, 2)
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="xpu:1",
-    )
-    def test_xpu_any_id(self, mock_device):
-        """Test XPU device with any device ID returns version 2."""
-        result = get_fa_version(128)
-        self.assertEqual(result, 2)
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="xpu:0",
-    )
-    def test_xpu_different_hdim(self, mock_device):
-        """Test XPU returns version 2 regardless of hdim."""
-        for hdim in [32, 64, 128, 256]:
-            result = get_fa_version(hdim)
-            self.assertEqual(result, 2)
+    """Tests for get_fa_version - removed as function no longer exists in this module."""
 
 
 class TestGetFAVersionGPU(unittest.TestCase):
-    """Tests for get_fa_version with GPU device."""
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="gpu:0",
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.base.framework.get_flags"
-    )
-    def test_gpu_returns_flag_value(self, mock_get_flags, mock_device):
-        """Test GPU returns FLAGS_flash_attn_version."""
-        mock_get_flags.return_value = {"FLAGS_flash_attn_version": 3}
-        with (
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.inspect.signature",
-                return_value=MagicMock(parameters={}),
-            ),
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
-                return_value={"FLAGS_cudnn_deterministic": False},
-            ),
-        ):
-            result = get_fa_version(64)
-            self.assertEqual(result, 3)
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="gpu:0",
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.base.framework.get_flags"
-    )
-    def test_gpu_flag_version_2(self, mock_get_flags, mock_device):
-        """Test GPU returns 2 when flag is set to 2."""
-        mock_get_flags.return_value = {"FLAGS_flash_attn_version": 2}
-        with (
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.inspect.signature",
-                return_value=MagicMock(parameters={}),
-            ),
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
-                return_value={"FLAGS_cudnn_deterministic": False},
-            ),
-        ):
-            result = get_fa_version(64)
-            self.assertEqual(result, 2)
+    """Tests for get_fa_version - removed as function no longer exists in this module."""
 
 
 class TestGetFAVersionDeterministic(unittest.TestCase):
-    """Tests for get_fa_version with deterministic mode."""
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="gpu:0",
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
-        return_value={"FLAGS_cudnn_deterministic": True},
-    )
-    def test_deterministic_no_block_mask_returns_2(
-        self, mock_get_flags, mock_device
-    ):
-        """Test deterministic mode returns 2 when no block_mask param."""
-        with patch(
-            "paddlefleet.refined_recompute.flash_attn.inspect.signature",
-            return_value=MagicMock(parameters={}),
-        ):
-            result = get_fa_version(64)
-            self.assertEqual(result, 2)
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="gpu:0",
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
-        return_value={"FLAGS_cudnn_deterministic": True},
-    )
-    def test_deterministic_with_block_mask_small_hdim(
-        self, mock_get_flags, mock_device
-    ):
-        """Test deterministic with block_mask and small hdim returns 2."""
-        with patch(
-            "paddlefleet.refined_recompute.flash_attn.inspect.signature",
-            return_value=MagicMock(parameters={"block_mask": MagicMock()}),
-        ):
-            result = get_fa_version(64)
-            self.assertEqual(result, 2)
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="gpu:0",
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
-        return_value={"FLAGS_cudnn_deterministic": True},
-    )
-    def test_deterministic_with_block_mask_large_hdim(
-        self, mock_get_flags, mock_device
-    ):
-        """Test deterministic with block_mask and large hdim returns 2."""
-        with patch(
-            "paddlefleet.refined_recompute.flash_attn.inspect.signature",
-            return_value=MagicMock(parameters={"block_mask": MagicMock()}),
-        ):
-            result = get_fa_version(256)
-            self.assertEqual(result, 2)
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="gpu:0",
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
-        return_value={"FLAGS_cudnn_deterministic": True},
-    )
-    def test_deterministic_with_block_mask_hdim_128(
-        self, mock_get_flags, mock_device
-    ):
-        """Test deterministic with block_mask and hdim=128 returns 2."""
-        with patch(
-            "paddlefleet.refined_recompute.flash_attn.inspect.signature",
-            return_value=MagicMock(parameters={"block_mask": MagicMock()}),
-        ):
-            result = get_fa_version(128)
-            self.assertEqual(result, 2)
+    """Tests for get_fa_version - removed as function no longer exists in this module."""
 
 
 class TestGetFAVersionNonDeterministic(unittest.TestCase):
-    """Tests for get_fa_version with non-deterministic mode."""
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
-        return_value="gpu:0",
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.base.framework.get_flags"
-    )
-    def test_non_deterministic_returns_flag(self, mock_get_flags, mock_device):
-        """Test non-deterministic returns flag value."""
-        mock_get_flags.return_value = {"FLAGS_flash_attn_version": 4}
-        with (
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.inspect.signature",
-                return_value=MagicMock(parameters={}),
-            ),
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
-                return_value={"FLAGS_cudnn_deterministic": False},
-            ),
-        ):
-            result = get_fa_version(64)
-            self.assertEqual(result, 4)
+    """Tests for get_fa_version - removed as function no longer exists in this module."""
 
 
 class TestFlashattnAutoCastBasic(unittest.TestCase):

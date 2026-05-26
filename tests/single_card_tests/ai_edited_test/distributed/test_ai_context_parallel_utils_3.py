@@ -201,7 +201,7 @@ class TestFlashMaskContextParallelBackward(unittest.TestCase):
         mock_ctx.group = mock.MagicMock()
         mock_ctx.causal = False
         mock_ctx.fa_version = 2
-        mock_ctx.need_value_padding = False
+        mock_ctx.need_pad = False
         mock_ctx.v_head_dim = 16
 
         grad = paddle.randn([2, 8, 4, 16])
@@ -240,9 +240,7 @@ class TestFlashmaskAttentionCP(unittest.TestCase):
             "apply",
             return_value=paddle.randn([2, 8, 4, 16]),
         ) as mock_apply:
-            result = flashmask_attention_cp(
-                query, key, value, mask_indices
-            )
+            result = flashmask_attention_cp(query, key, value, mask_indices)
             mock_apply.assert_called_once()
 
 
@@ -351,8 +349,9 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
     """
 
     def _run_forward(self, *, deterministic, hdim, fa_flag=3, **_kwargs):
-        from paddlefleet import context_parallel_utils as cpu
         from paddlefleet_ops.flash_mask_facade import get_fa_version
+
+        from paddlefleet import context_parallel_utils as cpu
 
         group = mock.MagicMock()
         group.rank = 0
@@ -365,7 +364,9 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
 
         def fake_dispatch_fwd(q, k, v, **kwargs):
             """Fake dispatch that just returns the fa_version from get_fa_version."""
-            fa_version = get_fa_version(q.shape[-1], v.shape[-1], kwargs.get("startend_row_indices"))
+            fa_version = get_fa_version(
+                q.shape[-1], v.shape[-1], kwargs.get("startend_row_indices")
+            )
             return {
                 "output": paddle.zeros_like(q),
                 "softmax_lse": paddle.zeros([1, 1, 4]),
@@ -374,7 +375,7 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
                 "fa_version": fa_version,
                 "causal": kwargs.get("causal", False),
                 "dropout": 0.0,
-                "need_value_padding": False,
+                "need_pad": False,
                 "v_head_dim": v.shape[-1],
             }
 
@@ -382,7 +383,9 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
         flags_det = {"FLAGS_cudnn_deterministic": deterministic}
 
         with (
-            mock.patch.object(cpu, "flash_attn_dispatch_fwd", fake_dispatch_fwd),
+            mock.patch.object(
+                cpu, "flash_attn_dispatch_fwd", fake_dispatch_fwd
+            ),
             mock.patch.object(
                 cpu, "all_gather_balance", side_effect=lambda t, axis, group: t
             ),
