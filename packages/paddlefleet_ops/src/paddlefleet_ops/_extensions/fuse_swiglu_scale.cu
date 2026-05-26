@@ -17,7 +17,7 @@
 #include <limits>
 #include <vector>
 #include "paddle/extension.h"
-#include "utils.h"
+#include "utils.h"  // NOLINT
 
 // ==========================================================================
 // Utils: Packed Memory Access (128-bit Vectorization)

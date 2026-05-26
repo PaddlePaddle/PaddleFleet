@@ -18,7 +18,7 @@
 #include <limits>
 #include <vector>
 #include "paddle/extension.h"
-#include "utils.h"
+#include "utils.h"  // NOLINT
 
 // 128-bit memory alignment struct
 struct __align__(16) Packed128 {
