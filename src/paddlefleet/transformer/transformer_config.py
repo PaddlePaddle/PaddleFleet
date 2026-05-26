@@ -578,6 +578,18 @@ class TransformerConfig(ModelParallelConfig):
     using_sonic_moe: bool = False
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
 
+    sonic_recompute_z: bool = True
+    """When using_sonic_moe and fp8 are both enabled, recomputes z_fp8 during backward
+    instead of saving it from forward. Saves ~E*TK_padded*2I bytes of activation memory
+    at the cost of one extra fused GEMM per backward pass. Defaults to True for
+    production Sonic FP8. Controlled by SONIC_MOE_FP8_RECOMPUTE_Z env var."""
+
+    sonic_iso32_weight: bool = True
+    """When using_sonic_moe is enabled, uses ISO32 (32x32) single-buffer FP8 weight
+    quantization instead of directional 1x32 dual-buffer layout. ISO32 shares one FP8
+    buffer between forward and backward, saving ~33% weight cache memory. Defaults to
+    True (recommended for production). Controlled by SONIC_MOE_FP8_ISO32_WEIGHT env var."""
+
     ####################
     # MLA
     ####################

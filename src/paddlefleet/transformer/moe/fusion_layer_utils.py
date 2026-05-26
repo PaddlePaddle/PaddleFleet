@@ -43,8 +43,63 @@ if paddlefleet_ops.is_sonic_moe_available():
         _UpProjection,
     )
     from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+    from paddlefleet_ops.sonicmoe.quack_utils import (
+        precompute_weight_fp8_warmup,
+    )
 
 logger = logging.getLogger(__name__)
+
+
+class _FP8DispatchDequantBridge(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, hidden_fp8, scale):
+        ctx.set_grad_in_dtype_consistent(False)
+        return paddle.incubate.nn.functional.fused_act_dequant(
+            hidden_fp8, scale
+        )
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None
+
+
+def _tensor_version(tensor):
+    version = getattr(tensor, "_inplace_version", None)
+    if version is not None:
+        return version() if callable(version) else version
+    return getattr(tensor, "_version", 0)
+
+
+def prepare_sonic_moe_fp8_weight_cache(w1, w2, fp8=False, force=False):
+    w1_sonic = w1.permute([1, 2, 0])
+    w2_sonic = w2.permute([1, 2, 0])
+    if not fp8:
+        return w1_sonic, w2_sonic
+
+    w1_version = _tensor_version(w1)
+    w2_version = _tensor_version(w2)
+    cache = getattr(w1, "sonic_fp8_weight_cache", None)
+    if (
+        force
+        or cache is None
+        or cache["w1_version"] != w1_version
+        or cache["w2_version"] != w2_version
+    ):
+        with enable_fp8(True):
+            _refresh_fp8_config()
+            precompute_weight_fp8_warmup(w1_sonic, w2_sonic)
+        cache = {
+            "w1_version": w1_version,
+            "w2_version": w2_version,
+            "w1_cache": w1_sonic.fp8_weight_cache,
+            "w2_cache": w2_sonic.fp8_weight_cache,
+        }
+        w1.sonic_fp8_weight_cache = cache
+        w2.sonic_fp8_weight_cache = cache
+    else:
+        w1_sonic.fp8_weight_cache = cache["w1_cache"]
+        w2_sonic.fp8_weight_cache = cache["w2_cache"]
+    return w1_sonic, w2_sonic
 
 
 class UnZipNode:
@@ -2027,8 +2082,57 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
 
 
 def run_sonic_moe(
-    hidden_states, topk_indices, topk_scores, K, E, w1, w2, fp8=False
+    hidden_states,
+    topk_indices,
+    topk_scores,
+    K,
+    E,
+    w1,
+    w2,
+    fp8=False,
+    fp8_dispatched_handle=None,
 ):
+    # TODO(sonic-dispatch): Add Sonic-native FP8 dispatch support.
+    #
+    # Design (requires sonic-moe submodule bump to include prequant APIs):
+    #
+    # 1. Dispatch side (moe_layer / fused_a2a):
+    #    Before DeepEP all-to-all, quantize BF16 hidden_states with Sonic 1x32:
+    #      x_fp8, raw_scale = quantize_activation_blockscaled_fast(x_torch)
+    #      # raw_scale shape: (T, H/32), dtype float32 (UE8M0 / E8M0)
+    #    Dispatch (x_fp8, raw_scale) tuple alongside original BF16 x (for grad).
+    #    Return received (recv_fp8, recv_raw_scale) in the dispatch handle.
+    #    NOTE: do NOT reuse fp8_dispatched_handle["scale"] — that is Fleet 1x128
+    #    layout and is incompatible with Sonic 1x32 scale semantics.
+    #
+    # 2. run_sonic_moe (this function):
+    #    Receive sonic_dispatch_handle = {
+    #        "fp8": recv_fp8,      # (T_recv, H) float8_e4m3fn
+    #        "raw_scale": recv_raw_scale,  # (T_recv, H/32) float32
+    #    }
+    #    Pack scales: packed = pack_blockscaled_1x32_scales(recv_raw_scale, H)
+    #    Pass prequant_activation_payload=(recv_fp8, packed) to _UpProjection.apply().
+    #
+    # 3. Gradient contract:
+    #    - BF16 hidden_states remains the PyLayer input (carries gradient).
+    #    - prequant payload is auxiliary, not a gradient-carrying arg.
+    #    - _UpProjection.backward uses dequant_colwise_quantize_and_pack_from_isa
+    #      for dw1 (from saved x_fp8/x_scales_pre), without needing BF16 x.
+    #
+    # 4. Bandwidth savings: T×H×2 bytes (BF16) → T×H×(1 + 4/32) ≈ 1.125 bytes
+    #    (FP8 data + 1x32 raw scale), saving ~44% dispatch bandwidth.
+    #
+    # Current bridge: Fleet dispatch sends FP8 with a 1x128 scale. Sonic GEMMs
+    # require 1x32 scales, so dequantize before entering Sonic and let Sonic
+    # re-quantize with its native scale layout until a Sonic-native dispatch
+    # payload is wired through end to end.
+    if fp8_dispatched_handle is not None:
+        assert hidden_states.dtype == paddle.float8_e4m3fn
+        hidden_states = _FP8DispatchDequantBridge.apply(
+            hidden_states,
+            fp8_dispatched_handle["scale"],
+        )
+
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
 
@@ -2086,11 +2190,13 @@ def run_sonic_moe(
     # baseline's score-before-downproj for per-row scalars.
     # if fp8:
 
+    w1_sonic, w2_sonic = prepare_sonic_moe_fp8_weight_cache(w1, w2, fp8)
+
     with enable_fp8(fp8):
         _refresh_fp8_config()
         y1, z = _UpProjection.apply(
             hidden_states,
-            w1.permute([1, 2, 0]),
+            w1_sonic,
             None,
             expert_frequency_offset,
             total_expert_freq,
@@ -2108,7 +2214,7 @@ def run_sonic_moe(
         hidden_states = _DownProjection.apply(
             y1,
             z,
-            w2.permute([1, 2, 0]),
+            w2_sonic,
             None,
             scores_for_down,
             s_scatter_idx,

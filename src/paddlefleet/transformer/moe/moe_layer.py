@@ -44,6 +44,7 @@ from .fused_a2a import configure_buffer
 from .fusion_layer_utils import (
     FusionMoePyLayer,
     HybridEPMoePyLayer,
+    prepare_sonic_moe_fp8_weight_cache,
     run_sonic_moe,
 )
 from .moe_expert import GroupedMLPExpert, StandardMLPExpert
@@ -164,8 +165,6 @@ class MoELayer(nn.Layer):
         self.use_ue8m0 = config.use_ue8m0
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
-        self.fp8_dispatch = bool(config.fp8) and not self.using_sonic_moe
-        self.fp8_wgrad = config.fp8_wgrad
         self.moe_expert_fusion = config.moe_expert_fusion
         self.moe_subbatch_token_num_after_dispatch = (
             config.moe_subbatch_token_num_after_dispatch
@@ -175,6 +174,17 @@ class MoELayer(nn.Layer):
                 paddlefleet_ops.blocked_import_messages[
                     "paddlefleet_ops.sonicmoe"
                 ]
+            )
+            # Set Sonic-specific env vars once at model init.  They are
+            # read by _refresh_fp8_config() on each forward pass.
+            # Use setdefault so an explicit env var from the shell wins.
+            _sonic_iso32 = getattr(config, "sonic_iso32_weight", True)
+            _sonic_rz = getattr(config, "sonic_recompute_z", True)
+            os.environ.setdefault(
+                "SONIC_MOE_FP8_ISO32_WEIGHT", "1" if _sonic_iso32 else "0"
+            )
+            os.environ.setdefault(
+                "SONIC_MOE_FP8_RECOMPUTE_Z", "1" if _sonic_rz else "0"
             )
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_grouped_gemm = config.moe_grouped_gemm
@@ -613,6 +623,7 @@ class MoELayer(nn.Layer):
                     self.grouped_gemm_experts.weight1,
                     self.grouped_gemm_experts.weight2,
                     use_fp8,
+                    fp8_dispatched_handle=fp8_dispatched_handle,
                 )
             else:
                 hidden_states = FusionMoePyLayer.apply(
@@ -867,7 +878,6 @@ class MoELayer(nn.Layer):
         _log_moe_md5(mask, "routing_mask", layer_idx)
         if framework._dygraph_tracer()._has_grad:
             log_moe_losses(layer_idx, aux_loss=aux_loss, z_loss=z_loss)
-
         if (
             self.shared_experts is not None
             and self.moe_shared_expert_overlap
@@ -1058,6 +1068,16 @@ class MoELayer(nn.Layer):
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         if not (self.moe_use_fusion_node and self.fp8):
+            return
+
+        if self.using_sonic_moe:
+            if self.grouped_gemm_experts is not None:
+                prepare_sonic_moe_fp8_weight_cache(
+                    self.grouped_gemm_experts.weight1,
+                    self.grouped_gemm_experts.weight2,
+                    True,
+                    force=True,
+                )
             return
 
         def quantize_weights(
