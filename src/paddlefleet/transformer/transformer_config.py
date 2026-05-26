@@ -1060,4 +1060,21 @@ class TransformerConfig(ModelParallelConfig):
                     f"n_routed_experts ({self.n_routed_experts}) must be >= "
                     f"num_experts_per_tok ({self.num_experts_per_tok}) "
                     f"when moe_n_hash_layers > 0."
+
+        if self.num_nextn_predict_layers > 0:
+            assert isinstance(self.window_attn_skip_freq, list), (
+                f"window_attn_skip_freq must be a list of length "
+                f"num_hidden_layers + num_nextn_predict_layers "
+                f"({self.num_hidden_layers} + {self.num_nextn_predict_layers} = "
+                f"{self.num_hidden_layers + self.num_nextn_predict_layers}) "
+                f"when num_nextn_predict_layers > 0, "
+                f"but got {type(self.window_attn_skip_freq).__name__} instead."
+            )
+            if (
+                len(self.window_attn_skip_freq)
+                != self.num_hidden_layers + self.num_nextn_predict_layers
+            ):
+                raise ValueError(
+                    f"self.window_attn_skip_freq ({len(self.window_attn_skip_freq)}) "
+                    f"must equal num_hidden_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
                 )

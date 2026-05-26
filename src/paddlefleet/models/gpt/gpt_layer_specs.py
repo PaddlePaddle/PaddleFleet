@@ -151,7 +151,10 @@ def get_attention_spec(
     if attention_layer_type == "self_attention":
         return LayerSpec(
             layer=SelfAttention,
-            extra_kwargs={"attn_mask_type": attn_mask_type},
+            extra_kwargs={
+                "attn_mask_type": attn_mask_type,
+                "is_mtp_layer": is_mtp_layer,
+            },
             sublayers_spec=SelfAttentionSublayersSpec(
                 qkv_proj=backend.column_parallel_linear(),
                 core_attention=backend.core_attention(),
@@ -227,6 +230,7 @@ def get_attention_spec(
             layer=attn_cls,
             extra_kwargs={
                 "attn_mask_type": attn_mask_type,
+                "is_mtp_layer": is_mtp_layer,
             },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
@@ -400,12 +404,14 @@ def get_gpt_layer_local_spec(
             config=config,
             attention_layer_type="multi_latent_attention",
             attn_mask_type=AttnMaskType.causal,
+            is_mtp_layer=is_mtp_layer,
         )
     else:
         self_attn_spec = get_attention_spec(
             config=config,
             attention_layer_type=attention_layer_type,
             attn_mask_type=attn_mask_type,
+            is_mtp_layer=is_mtp_layer,
         )
 
     # mHC: build HC LayerSpec for sublayers_spec
