@@ -14,19 +14,19 @@
 
 """Lightweight PEP 517 build backend for the root paddlefleet package.
 
-Generates ``src/paddlefleet/_version.py`` at build time (same pattern as
-``packages/paddlefleet_ops/build_backend.py``) and delegates every actual
-build hook to ``setuptools.build_meta``.
+Generates ``src/paddlefleet/_version.py`` at build time and delegates
+every actual build hook to ``setuptools.build_meta``.
 
-At build time the ``paddlefleet-ops`` dependency is pinned to the exact
-version of the ops package built in the same workspace (xFormers-style),
-so the published wheel carries a precise ``Requires-Dist: paddlefleet-ops==X``
-rather than an unconstrained bare name.
+On XPU builds the backend rewrites ``METADATA`` so the wheel carries
+``paddlepaddle-xpu`` instead of ``paddlepaddle-gpu``.
+On non-XPU builds it does nothing.
 """
 
 import logging
 import os
+import re
 import subprocess
+import zipfile
 from pathlib import Path
 
 from setuptools import build_meta as orig  # type: ignore[import-untyped]
@@ -132,7 +132,98 @@ def _generate_version_info() -> str:
 _generate_version_info()
 
 
-# -- PEP 517 hooks (pure delegation to setuptools) --
+# -- XPU helpers -------------------------------------------------------------
+
+
+def _is_xpu() -> bool:
+    """Detect XPU via ``IS_XPU`` env var or ``xpu-smi`` command."""
+    env = os.environ.get("IS_XPU")
+    if env is not None:
+        return env.lower() in {"1", "true", "yes", "on"}
+    try:
+        subprocess.run(
+            ["xpu-smi"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _xpu_dep() -> str | None:
+    """Read ``[tool.paddlefleet.paddle].xpu`` from ``pyproject.toml``."""
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return None
+
+    try:
+        with open(_pkg_root / "pyproject.toml", "rb") as f:
+            data = tomllib.load(f)
+        return (
+            data.get("tool", {})
+            .get("paddlefleet", {})
+            .get("paddle", {})
+            .get("xpu")
+        )
+    except Exception:
+        return None
+
+
+def _patch_metadata(path: Path) -> None:
+    """Replace ``paddlepaddle-gpu`` with ``paddlepaddle-xpu`` in a METADATA file.
+
+    Does nothing on non-XPU builds or when the XPU spec is missing.
+    """
+    if not _is_xpu():
+        return
+
+    xpu = _xpu_dep()
+    if not xpu:
+        return
+
+    content = path.read_text(encoding="utf-8")
+    m = re.search(r"Requires-Dist: paddlepaddle-gpu(==[^\s;]+)", content)
+    if not m:
+        return
+
+    new = content.replace(m.group(0), f"Requires-Dist: {xpu}", 1)
+    path.write_text(new, encoding="utf-8")
+    logger.info(f"Rewrote METADATA: {m.group(0)} -> Requires-Dist: {xpu}")
+
+
+def _patch_wheel(path: Path) -> None:
+    """Rewrite METADATA inside a ``.whl`` zip for XPU builds."""
+    if not _is_xpu():
+        return
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        ext = Path(td) / "ext"
+        ext.mkdir()
+
+        with zipfile.ZipFile(path, "r") as zf:
+            zf.extractall(ext)
+
+        for meta in ext.rglob("*.dist-info/METADATA"):
+            _patch_metadata(meta)
+
+        new = Path(td) / path.name
+        with zipfile.ZipFile(new, "w", zipfile.ZIP_DEFLATED) as zf_out:
+            for f in ext.rglob("*"):
+                if f.is_file():
+                    zf_out.write(f, f.relative_to(ext))
+
+        path.write_bytes(new.read_bytes())
+
+
+# -- PEP 517 hooks -----------------------------------------------------------
 
 
 def get_requires_for_build_wheel(config_settings=None):
@@ -148,31 +239,39 @@ def get_requires_for_build_editable(config_settings=None):
 
 
 def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None):
-    return orig.prepare_metadata_for_build_wheel(
+    dist_info = orig.prepare_metadata_for_build_wheel(
         metadata_directory, config_settings
     )
+    _patch_metadata(Path(metadata_directory) / dist_info / "METADATA")
+    return dist_info
 
 
 def prepare_metadata_for_build_editable(
     metadata_directory, config_settings=None
 ):
-    return orig.prepare_metadata_for_build_editable(
+    dist_info = orig.prepare_metadata_for_build_editable(
         metadata_directory, config_settings
     )
+    _patch_metadata(Path(metadata_directory) / dist_info / "METADATA")
+    return dist_info
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
-    return orig.build_wheel(
+    wheel_name = orig.build_wheel(
         wheel_directory, config_settings, metadata_directory
     )
+    _patch_wheel(Path(wheel_directory) / wheel_name)
+    return wheel_name
 
 
 def build_editable(
     wheel_directory, config_settings=None, metadata_directory=None
 ):
-    return orig.build_editable(
+    wheel_name = orig.build_editable(
         wheel_directory, config_settings, metadata_directory
     )
+    _patch_wheel(Path(wheel_directory) / wheel_name)
+    return wheel_name
 
 
 def build_sdist(sdist_directory, config_settings=None):
