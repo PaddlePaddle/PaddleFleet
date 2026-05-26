@@ -2,10 +2,6 @@
 # Adapted from miles_plugins/models/deepseek_v4/ops/kernel/tilelang_sparse_mla_fwd.py.
 # This module is imported only by explicit TileLang DSv4 callers and is not wired
 # into PaddleFleet attention dispatch by default.
-from paddlefleet.ops.tilelang_dsv4.compat import enable_tilelang_paddle_compat_before_import
-
-enable_tilelang_paddle_compat_before_import()
-
 import paddle
 import tilelang
 from tilelang import language as T

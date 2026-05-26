@@ -35,9 +35,7 @@ def sparse_attn_tilelang_paddle(q, kv, attn_sink, topk_idxs, sm_scale=None, topk
     out, lse = sparse_mla_fwd.sparse_mqa_fwd_interface(q, kv, attn_sink, topk_idxs, sm_scale=sm_scale)
     if not isinstance(out, paddle.Tensor) or not isinstance(lse, paddle.Tensor):
         raise RuntimeError(
-            "attention_paddle_compat requires TileLang to return Paddle tensors, "
-            f"but got output={type(out)!r}, lse={type(lse)!r}. "
-            "Paddle torch proxy did not take over the already-imported TileLang runtime; "
-            "refusing to fall back to DLPack bridge."
+            f"TileLang must return Paddle tensors, got output={type(out)!r}, lse={type(lse)!r}. "
+            "Ensure paddle.enable_compat(scope={'tilelang'}) runs before import tilelang."
         )
     return out, lse

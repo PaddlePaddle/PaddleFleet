@@ -5,10 +5,6 @@
 import os
 import time
 
-from paddlefleet.ops.tilelang_dsv4.compat import enable_tilelang_paddle_compat_before_import
-
-enable_tilelang_paddle_compat_before_import()
-
 import paddle
 import tilelang
 from tilelang import language as T

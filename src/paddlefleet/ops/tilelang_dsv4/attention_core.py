@@ -5,8 +5,6 @@ import time
 
 import paddle
 
-from .compat import enable_tilelang_paddle_compat_before_import
-
 
 DEFAULT_TOPK_PAD_TO = 64
 _PROFILE_COUNTERS = {}
@@ -92,25 +90,13 @@ def _digest_log(op, **tensors):
     print("[TileLangDigest] " + json.dumps(payload, sort_keys=True), flush=True)
 
 
-def _topk_invalid_ratio(topk_idxs):
-    if topk_idxs.numel() == 0:
-        return 0.0
-    return float((topk_idxs == -1).sum().item()) / float(topk_idxs.numel())
-
-
-def _ensure_paddle_tensor(name, tensor):
-    if not isinstance(tensor, paddle.Tensor):
-        raise TypeError(f"{name} must be a paddle.Tensor, got {type(tensor)!r}")
-
-
 def _contiguous(tensor):
-    if hasattr(tensor, "contiguous"):
-        return tensor.contiguous()
-    return tensor
+    return tensor.contiguous()
 
 
 def _prepare_topk_idxs(topk_idxs, *, topk_pad_to=DEFAULT_TOPK_PAD_TO):
-    _ensure_paddle_tensor("topk_idxs", topk_idxs)
+    if not isinstance(topk_idxs, paddle.Tensor):
+        raise TypeError(f"topk_idxs must be a paddle.Tensor, got {type(topk_idxs)!r}")
     if len(topk_idxs.shape) != 3:
         raise ValueError(f"topk_idxs must have shape [B, S, topk], got {tuple(topk_idxs.shape)}")
     if topk_pad_to <= 0:
@@ -132,7 +118,8 @@ def _prepare_topk_idxs(topk_idxs, *, topk_pad_to=DEFAULT_TOPK_PAD_TO):
 
 
 def _prepare_attn_sink(attn_sink):
-    _ensure_paddle_tensor("attn_sink", attn_sink)
+    if not isinstance(attn_sink, paddle.Tensor):
+        raise TypeError(f"attn_sink must be a paddle.Tensor, got {type(attn_sink)!r}")
     if len(attn_sink.shape) != 1:
         raise ValueError(f"attn_sink must have shape [H], got {tuple(attn_sink.shape)}")
     if attn_sink.dtype != paddle.float32:
@@ -141,8 +128,10 @@ def _prepare_attn_sink(attn_sink):
 
 
 def _prepare_inputs(q, kv, attn_sink, topk_idxs, *, topk_pad_to=DEFAULT_TOPK_PAD_TO):
-    _ensure_paddle_tensor("q", q)
-    _ensure_paddle_tensor("kv", kv)
+    if not isinstance(q, paddle.Tensor):
+        raise TypeError(f"q must be a paddle.Tensor, got {type(q)!r}")
+    if not isinstance(kv, paddle.Tensor):
+        raise TypeError(f"kv must be a paddle.Tensor, got {type(kv)!r}")
     if len(q.shape) != 4:
         raise ValueError(f"q must have shape [B, S, H, D], got {tuple(q.shape)}")
     if len(kv.shape) != 3:
@@ -208,14 +197,12 @@ def sparse_attn_paddle(q, kv, attn_sink, topk_idxs, sm_scale=None):
 
 
 def _get_sparse_mla_bwd():
-    enable_tilelang_paddle_compat_before_import()
     from .kernel import tilelang_sparse_mla_bwd as sparse_mla_bwd
 
     return sparse_mla_bwd
 
 
 def _get_sparse_attn_tilelang_paddle():
-    enable_tilelang_paddle_compat_before_import()
     from .kernel.tilelang_sparse_mla import _prepare_inputs_paddle, sparse_attn_tilelang_paddle
 
     return _prepare_inputs_paddle, sparse_attn_tilelang_paddle

@@ -1,3 +1,7 @@
+import paddle
+
+paddle.enable_compat(scope={"tilelang"}, silent=True)
+
 from .attention_core import (
     tilelang_compressed_sparse_attn_paddle_compat_autograd,
 )
