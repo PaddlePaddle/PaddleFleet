@@ -75,19 +75,10 @@ def swiglu_back(g, y):
 
     Returns:
         paddle.Tensor: Gradient with respect to the input tensor, computed using the
-            chain rule and the derivative of the SiLU activation function.
+            Paddle native SwiGLU gradient operator.
     """
-    if paddle.is_compiled_with_cuda():
-        from paddlefleet_ops import fused_swiglu_bwd
-
-        return fused_swiglu_bwd(g, y)
-    elif paddle.is_compiled_with_xpu():
-        dx, _ = paddle._C_ops.swiglu_grad(y, None, g)
-        return dx
-    else:
-        raise NotImplementedError(
-            "fused_swiglu_bwd is not implemented for non-CUDA backends."
-        )
+    dx, _ = paddle._C_ops.swiglu_grad(y, None, g)
+    return dx
 
 
 @jit_fuser
