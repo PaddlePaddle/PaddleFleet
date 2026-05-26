@@ -241,7 +241,7 @@ class TestKGroupGemm(unittest.TestCase):
         self.probs = probs
 
         # Each token is assigned 1~topk experts, always include expert 0
-        indices_np = np.full([self.seq_len, self.topk], -1, dtype=np.int64)
+        indices_np = np.full([self.seq_len, self.topk], -1, dtype=np.int32)
         tokens_per_expert = [0] * self.n_routed_experts
         for i in range(self.seq_len):
             chosen = np.array([0])
@@ -478,21 +478,21 @@ class TestKGroupGemm(unittest.TestCase):
         # Simulate backward: create tokens_per_expert_tensor manually
         # This is what the backward method does:
         #   self.tokens_per_expert_tensor = paddle.to_tensor(
-        #       self.tokens_per_expert, dtype="int64"
+        #       self.tokens_per_expert, dtype="int32"
         #   )
         node.tokens_per_expert_tensor = paddle.to_tensor(
-            node.tokens_per_expert, dtype="int64"
+            node.tokens_per_expert, dtype="int32"
         )
 
         # Verify
         self.assertIsNotNone(node.tokens_per_expert_tensor)
-        self.assertEqual(node.tokens_per_expert_tensor.dtype, paddle.int64)
+        self.assertEqual(node.tokens_per_expert_tensor.dtype, paddle.int32)
         self.assertEqual(
             node.tokens_per_expert_tensor.shape,
             [self.n_routed_experts],
         )
         print(
-            "[PASS] test_tokens_per_expert_tensor_created: tensor with int64 dtype"
+            "[PASS] test_tokens_per_expert_tensor_created: tensor with int32 dtype"
         )
 
     # ---------------------------------------------------------------
@@ -811,14 +811,14 @@ class TestKGroupGemm(unittest.TestCase):
         )
 
     # ---------------------------------------------------------------
-    # Test 15: tokens_per_expert_tensor dtype is int64 (not int32)
+    # Test 15: tokens_per_expert_tensor dtype is int32
     # Covers: the change from paddle.to_tensor(ks, dtype="int32") to
-    #         self.tokens_per_expert_tensor with dtype="int64"
+    #         self.tokens_per_expert_tensor with dtype="int32"
     # ---------------------------------------------------------------
     def test_tokens_per_expert_tensor_dtype(self):
         """
-        Verify that tokens_per_expert_tensor uses int64 dtype,
-        matching the new code: paddle.to_tensor(self.tokens_per_expert, dtype="int64")
+        Verify that tokens_per_expert_tensor uses int32 dtype,
+        matching the new code: paddle.to_tensor(self.tokens_per_expert, dtype="int32")
         """
         from paddlefleet.transformer.moe.fp8_utils import (
             ExpertsGroupGemmContiguousNode,
@@ -836,16 +836,16 @@ class TestKGroupGemm(unittest.TestCase):
 
         # Simulate what backward does
         node.tokens_per_expert_tensor = paddle.to_tensor(
-            node.tokens_per_expert, dtype="int64"
+            node.tokens_per_expert, dtype="int32"
         )
 
-        self.assertEqual(node.tokens_per_expert_tensor.dtype, paddle.int64)
+        self.assertEqual(node.tokens_per_expert_tensor.dtype, paddle.int32)
 
         # Verify the values match
         for i, t in enumerate(self.tokens_per_expert):
             self.assertEqual(node.tokens_per_expert_tensor[i].item(), t)
         print(
-            "[PASS] test_tokens_per_expert_tensor_dtype: uses int64 dtype correctly"
+            "[PASS] test_tokens_per_expert_tensor_dtype: uses int32 dtype correctly"
         )
 
 

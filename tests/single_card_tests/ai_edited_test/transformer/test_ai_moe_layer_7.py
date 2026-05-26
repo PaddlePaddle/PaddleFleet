@@ -240,7 +240,9 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
         layer.gate = MagicMock()
         layer.set_layer_number(5)
         self.assertEqual(layer.layer_number, 5)
-        layer.gate.set_layer_number.assert_called_once_with(5)
+        layer.gate.set_layer_number.assert_called_once_with(
+            5, is_mtp_layer=False
+        )
 
     def test_set_layer_number_no_set_method(self):
         layer = MoELayer.__new__(MoELayer)
