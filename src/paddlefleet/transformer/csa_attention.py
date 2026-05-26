@@ -1135,13 +1135,6 @@ class CompressedSparseAttention(FleetLayer):
                         self.config, "dsv4_tilelang_enable_csa_indexer", False
                     )
                 )
-                debug_compare_indexer = bool(
-                    getattr(
-                        self.config,
-                        "dsv4_tilelang_csa_indexer_debug_compare",
-                        False,
-                    )
-                )
                 enable_tilelang_bwd = bool(
                     getattr(
                         self.config,
@@ -1311,40 +1304,6 @@ class CompressedSparseAttention(FleetLayer):
                             )
                         )
 
-                    if debug_compare_indexer:
-                        # Compare TileLang output with the Paddle reference at
-                        # the same topk_effective. Top-k ordering can tie when
-                        # scores match, so compare the sorted index sets per
-                        # row instead of element-wise equality.
-                        ref_index_scores, ref_topk_indices = (
-                            fused_qk_topk_naive(
-                                q_indexer_tl,
-                                k_indexer_tl,
-                                weights_indexer_tl,
-                                topk_effective,
-                                causal_mask,
-                            )
-                        )
-                        ref_sorted = paddle.sort(
-                            ref_topk_indices.cast("int32"), axis=-1
-                        )
-                        tl_sorted = paddle.sort(
-                            tl_topk_indices.cast("int32"), axis=-1
-                        )
-                        if not bool(
-                            paddle.all(ref_sorted == tl_sorted).item()
-                        ):
-                            num_diff = int(
-                                paddle.sum(ref_sorted != tl_sorted).item()
-                            )
-                            total = int(ref_sorted.numel())
-                            print(
-                                "[DSv4 TileLang CSA Indexer debug_compare] "
-                                f"sorted-index set mismatch: {num_diff}/{total} "
-                                f"slots differ (topk_effective={topk_effective}, "
-                                f"layer={self.layer_number})"
-                            )
-
                     topk_indices_compressed = tl_topk_indices
 
                 # Filter invalid indices and shift to kv_full space
@@ -1390,17 +1349,6 @@ class CompressedSparseAttention(FleetLayer):
                 self.softmax_scale,
                 topk_pad_to=getattr(self.config, "dsv4_tilelang_topk_pad_to", 64),
             )
-            if getattr(self.config, "dsv4_tilelang_debug_compare", False):
-                ref_output = unfused_compressed_sparse_attn(
-                    query,
-                    kv_full,
-                    self.attn_sink.cast("float32"),
-                    topk_idxs,
-                    self.softmax_scale,
-                )
-                if not paddle.allclose(output, ref_output, rtol=2e-2, atol=2e-2):
-                    max_diff = paddle.max(paddle.abs(output.cast("float32") - ref_output.cast("float32")))
-                    raise AssertionError(f"DSv4 TileLang attention mismatch: max_diff={float(max_diff)}")
         else:
             output = unfused_compressed_sparse_attn(
                 query,

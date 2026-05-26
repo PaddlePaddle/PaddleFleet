@@ -3,7 +3,6 @@
 # This module is imported only by explicit TileLang DSv4 callers and is not wired
 # into PaddleFleet attention dispatch by default.
 import os
-import time
 
 import paddle
 import tilelang
@@ -12,54 +11,6 @@ from tilelang import language as T
 # Numerical constants for exp2/log2 domain flash-attention
 _RECIPROCAL_LOG2 = 1.44269504  # 1 / ln(2)
 _LOG2 = 0.6931471805599453     # ln(2)
-
-
-_PROFILE_COUNTERS = {}
-
-
-def _profile_enabled():
-    return os.getenv("DSV4_TILELANG_PROFILE", "0").lower() in {"1", "true", "yes", "on"}
-
-
-def _profile_limit():
-    try:
-        return int(os.getenv("DSV4_TILELANG_PROFILE_STEPS", "20"))
-    except ValueError:
-        return 20
-
-
-def _profile_sync():
-    try:
-        if paddle.is_compiled_with_cuda():
-            paddle.device.cuda.synchronize()
-    except Exception:
-        pass
-
-
-def _profile_time_ms(fn):
-    _profile_sync()
-    start = time.perf_counter()
-    result = fn()
-    _profile_sync()
-    return result, (time.perf_counter() - start) * 1000.0
-
-
-def _profile_should_log(key):
-    if not _profile_enabled():
-        return False
-    count = _PROFILE_COUNTERS.get(key, 0)
-    if count >= _profile_limit():
-        return False
-    _PROFILE_COUNTERS[key] = count + 1
-    return True
-
-
-def _profile_log(phase, elapsed_ms=None, **kwargs):
-    fields = [f"phase={phase}"]
-    if elapsed_ms is not None:
-        fields.append(f"elapsed_ms={elapsed_ms:.3f}")
-    fields.extend(f"{key}={value}" for key, value in kwargs.items())
-    print("[TileLangBwdProfile] " + " ".join(fields), flush=True)
 
 
 @tilelang.jit(out_idx=[-1])
@@ -743,37 +694,15 @@ def sparse_mqa_bwd_interface(q, kv, attn_sink, o, do, topk_idxs, lse, sm_scale=N
         attn_sink_bwd_deterministic(B, S, H, block_H=_attn_sink_block_h(H)) if deterministic_attn_sink else None
     )
 
-    profile = _profile_should_log("sparse_mqa_bwd_interface")
-    if profile:
-        delta, elapsed_ms = _profile_time_ms(lambda: preprocess_kernel(o, do))
-        _profile_log("bwd_preprocess", elapsed_ms, q_shape=tuple(q.shape), kv_shape=tuple(kv.shape), topk=topk)
-        dkv, elapsed_ms = _profile_time_ms(lambda: _zeros_like_compat(kv, dtype="float32"))
-        _profile_log("bwd_zero_dkv", elapsed_ms)
-        d_attn_sink = _zeros_like_compat(attn_sink)
-        dq, elapsed_ms = _profile_time_ms(
-            lambda: bwd_kernel(q, kv, do, attn_sink, topk_idxs, lse, delta, dkv, d_attn_sink)
-        )
-        _profile_log("bwd_main_kernel", elapsed_ms)
-        if deterministic_attn_sink:
-            d_attn_sink, elapsed_ms = _profile_time_ms(lambda: attn_sink_bwd_det_kernel(attn_sink, lse, delta))
-            _profile_log("bwd_attn_sink_det", elapsed_ms)
-        if deterministic_dkv:
-            dkv_fn = _select_dkv_fn()
-            dkv, elapsed_ms = _profile_time_ms(lambda: dkv_fn(q, kv, do, topk_idxs, lse, delta, sm_scale))
-            _profile_log("bwd_dkv_det", elapsed_ms, mode=_deterministic_dkv_reduction_mode())
-        else:
-            dkv, elapsed_ms = _profile_time_ms(lambda: postprocess_kernel(dkv))
-            _profile_log("bwd_postprocess", elapsed_ms)
+    delta = preprocess_kernel(o, do)
+    dkv = _zeros_like_compat(kv, dtype="float32")
+    d_attn_sink = _zeros_like_compat(attn_sink)
+    dq = bwd_kernel(q, kv, do, attn_sink, topk_idxs, lse, delta, dkv, d_attn_sink)
+    if deterministic_attn_sink:
+        d_attn_sink = attn_sink_bwd_det_kernel(attn_sink, lse, delta)
+    if deterministic_dkv:
+        dkv = _select_dkv_fn()(q, kv, do, topk_idxs, lse, delta, sm_scale)
     else:
-        delta = preprocess_kernel(o, do)
-        dkv = _zeros_like_compat(kv, dtype="float32")
-        d_attn_sink = _zeros_like_compat(attn_sink)
-        dq = bwd_kernel(q, kv, do, attn_sink, topk_idxs, lse, delta, dkv, d_attn_sink)
-        if deterministic_attn_sink:
-            d_attn_sink = attn_sink_bwd_det_kernel(attn_sink, lse, delta)
-        if deterministic_dkv:
-            dkv = _select_dkv_fn()(q, kv, do, topk_idxs, lse, delta, sm_scale)
-        else:
-            dkv = postprocess_kernel(dkv)
+        dkv = postprocess_kernel(dkv)
 
     return dq, dkv, d_attn_sink

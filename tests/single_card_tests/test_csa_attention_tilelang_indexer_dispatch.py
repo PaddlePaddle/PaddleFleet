@@ -76,7 +76,6 @@ class _StubConfig:
         # Defaults match the production behaviour we care about.
         self.dsa_indexer_use_sparse_loss = True
         self.dsv4_tilelang_enable_csa_indexer = False
-        self.dsv4_tilelang_csa_indexer_debug_compare = False
         # Allow caller to override anything.
         for k, v in kw.items():
             setattr(self, k, v)
@@ -444,8 +443,6 @@ class TestForwardTileLangIndexerDispatch(unittest.TestCase):
             expected.append(row)
         self.assertEqual(compress_topk.tolist(), [expected])
 
-    def test_debug_compare_runs_paddle_reference(self):
-        """When ``dsv4_tilelang_csa_indexer_debug_compare=True`` the test
         ensures ``fused_qk_topk_naive`` is invoked from ``csa_attention``.
 
         The set-equality check should not raise even when indices mismatch;
@@ -458,7 +455,6 @@ class TestForwardTileLangIndexerDispatch(unittest.TestCase):
         cfg = _StubConfig(
             dsv4_tilelang_enable_csa_indexer=True,
             dsa_indexer_use_sparse_loss=True,
-            dsv4_tilelang_csa_indexer_debug_compare=True,
         )
         paddle_topk = paddle.zeros([1, sq, index_topk], dtype="int64")
         tl_topk = paddle.zeros([1, sq, index_topk], dtype="int32")
@@ -490,7 +486,6 @@ class TestForwardTileLangIndexerDispatch(unittest.TestCase):
                 layer.forward(q, k, v, attention_mask=None, x=x, qr=qr)
         fused_mock.assert_called_once()
         out = buf.getvalue()
-        self.assertIn("debug_compare", out)
         self.assertIn("topk_effective=", out)
 
 
@@ -726,7 +721,6 @@ class TestShouldUseTilelangAttention(unittest.TestCase):
 # pin down the remaining sub-tasks:
 #
 # * 10.3 — Compare unfused vs TileLang sparse attention output via the
-#   ``dsv4_tilelang_debug_compare`` branch.
 # * 10.6 — Phase 1 (``csa_dense_mode=True``) must skip the indexer block
 #   entirely; ``self.indexer is None`` is the production guarantee.
 #
@@ -811,8 +805,6 @@ class TestTask10EndToEndDispatch(unittest.TestCase):
 
     # ----- Task 10.3 ------------------------------------------------------
 
-    def test_debug_compare_runs_unfused_reference_alongside_tilelang(self):
-        """When ``dsv4_tilelang_debug_compare=True`` the forward must call
         BOTH ``_tilelang_compressed_sparse_attn_paddle_compat`` AND
         ``unfused_compressed_sparse_attn`` so their outputs can be
         compared in place. Returning identical tensors from both mocks
@@ -826,7 +818,6 @@ class TestTask10EndToEndDispatch(unittest.TestCase):
             dsv4_tilelang_enable_backward=True,  # not training, but harmless
             dsv4_tilelang_enable_csa_indexer=True,
             dsa_indexer_use_sparse_loss=True,
-            dsv4_tilelang_debug_compare=True,
             csa_dense_mode=False,
         )
         paddle_topk = paddle.zeros([1, sq, index_topk], dtype="int64")
@@ -880,8 +871,6 @@ class TestTask10EndToEndDispatch(unittest.TestCase):
         un_topk_idxs = un_args[3].numpy()
         self.assertEqual(tl_topk_idxs.tolist(), un_topk_idxs.tolist())
 
-    def test_debug_compare_disabled_only_runs_tilelang(self):
-        """Without ``dsv4_tilelang_debug_compare`` the unfused reference
         must NOT run (production sparse attention path)."""
         sq = 8
         ratio = 4
@@ -892,7 +881,6 @@ class TestTask10EndToEndDispatch(unittest.TestCase):
             dsv4_tilelang_enable_backward=True,
             dsv4_tilelang_enable_csa_indexer=True,
             dsa_indexer_use_sparse_loss=True,
-            dsv4_tilelang_debug_compare=False,
             csa_dense_mode=False,
         )
         paddle_topk = paddle.zeros([1, sq, index_topk], dtype="int64")

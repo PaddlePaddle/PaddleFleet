@@ -1,93 +1,7 @@
-import hashlib
-import json
-import os
-import time
-
 import paddle
 
 
 DEFAULT_TOPK_PAD_TO = 64
-_PROFILE_COUNTERS = {}
-
-
-def _profile_enabled():
-    return os.getenv("DSV4_TILELANG_PROFILE", "0").lower() in {"1", "true", "yes", "on"}
-
-
-def _profile_limit():
-    try:
-        return int(os.getenv("DSV4_TILELANG_PROFILE_STEPS", "20"))
-    except ValueError:
-        return 20
-
-
-def _profile_sync():
-    try:
-        if paddle.is_compiled_with_cuda():
-            paddle.device.cuda.synchronize()
-    except Exception:
-        pass
-
-
-def _profile_time_ms(fn):
-    _profile_sync()
-    start = time.perf_counter()
-    result = fn()
-    _profile_sync()
-    return result, (time.perf_counter() - start) * 1000.0
-
-
-def _profile_should_log(key):
-    if not _profile_enabled():
-        return False
-    count = _PROFILE_COUNTERS.get(key, 0)
-    if count >= _profile_limit():
-        return False
-    _PROFILE_COUNTERS[key] = count + 1
-    return True
-
-
-def _profile_log(phase, elapsed_ms=None, **kwargs):
-    fields = [f"phase={phase}"]
-    if elapsed_ms is not None:
-        fields.append(f"elapsed_ms={elapsed_ms:.3f}")
-    fields.extend(f"{key}={value}" for key, value in kwargs.items())
-    print("[TileLangProfile] " + " ".join(fields), flush=True)
-
-
-def _digest_enabled():
-    return os.getenv("DSV4_TILELANG_DIGEST", "0").lower() in {"1", "true", "yes", "on"}
-
-
-def _digest_limit():
-    try:
-        return int(os.getenv("DSV4_TILELANG_DIGEST_LIMIT", "40"))
-    except ValueError:
-        return 40
-
-
-def _tensor_digest(name, tensor):
-    tensor_f32 = tensor.detach().cast("float32").cpu()
-    array = tensor_f32.numpy()
-    return {
-        "name": name,
-        "shape": list(tensor.shape),
-        "dtype": str(tensor.dtype),
-        "sha256": hashlib.sha256(array.tobytes()).hexdigest(),
-        "sum_f32": float(array.sum()),
-        "max_abs_f32": float(abs(array).max()) if array.size else 0.0,
-    }
-
-
-def _digest_log(op, **tensors):
-    if not _digest_enabled():
-        return
-    count = _PROFILE_COUNTERS.get(f"digest:{op}", 0)
-    if count >= _digest_limit():
-        return
-    _PROFILE_COUNTERS[f"digest:{op}"] = count + 1
-    payload = {"op": op, "call": count, "tensors": [_tensor_digest(name, tensor) for name, tensor in tensors.items()]}
-    print("[TileLangDigest] " + json.dumps(payload, sort_keys=True), flush=True)
 
 
 def _contiguous(tensor):
@@ -233,45 +147,21 @@ class TileLangCompressedSparseAttentionPaddleCompatPyLayer(paddle.autograd.PyLay
         ctx.topk_pad_to = int(topk_pad_to)
         ctx.attn_sink_dtype = attn_sink.dtype
         _prepare_inputs_paddle, sparse_attn_tilelang_paddle = _get_sparse_attn_tilelang_paddle()
-        profile = _profile_should_log("paddle_compat_forward")
-        if profile:
-            (query, kv_full, attn_sink, topk_idxs), elapsed_ms = _profile_time_ms(
-                lambda: _prepare_inputs_paddle(
-                    query,
-                    kv_full,
-                    attn_sink,
-                    topk_idxs,
-                    topk_pad_to=ctx.topk_pad_to,
-                )
-            )
-            _profile_log("compat_forward_prepare", elapsed_ms, q_shape=tuple(query.shape), kv_shape=tuple(kv_full.shape), topk=topk_idxs.shape[-1])
-            (output, lse), elapsed_ms = _profile_time_ms(
-                lambda: sparse_attn_tilelang_paddle(
-                    query,
-                    kv_full,
-                    attn_sink,
-                    topk_idxs,
-                    sm_scale=ctx.softmax_scale,
-                    topk_pad_to=ctx.topk_pad_to,
-                )
-            )
-            _profile_log("compat_forward_kernel", elapsed_ms)
-        else:
-            query, kv_full, attn_sink, topk_idxs = _prepare_inputs_paddle(
-                query,
-                kv_full,
-                attn_sink,
-                topk_idxs,
-                topk_pad_to=ctx.topk_pad_to,
-            )
-            output, lse = sparse_attn_tilelang_paddle(
-                query,
-                kv_full,
-                attn_sink,
-                topk_idxs,
-                sm_scale=ctx.softmax_scale,
-                topk_pad_to=ctx.topk_pad_to,
-            )
+        query, kv_full, attn_sink, topk_idxs = _prepare_inputs_paddle(
+            query,
+            kv_full,
+            attn_sink,
+            topk_idxs,
+            topk_pad_to=ctx.topk_pad_to,
+        )
+        output, lse = sparse_attn_tilelang_paddle(
+            query,
+            kv_full,
+            attn_sink,
+            topk_idxs,
+            sm_scale=ctx.softmax_scale,
+            topk_pad_to=ctx.topk_pad_to,
+        )
         ctx.save_for_backward(query, kv_full, attn_sink, topk_idxs, output, lse)
         return output.reshape([b, sq, np_heads * hn])
 
@@ -280,36 +170,19 @@ class TileLangCompressedSparseAttentionPaddleCompatPyLayer(paddle.autograd.PyLay
         query, kv_full, attn_sink, topk_idxs, output, lse = ctx.saved_tensor()
         b, sq, np_heads, hn = ctx.query_shape
         grad_output = grad_output.reshape([b, sq, np_heads, hn])
-        profile = _profile_should_log("paddle_compat_backward")
-        if profile:
-            (dq, dkv, d_attn_sink), elapsed_ms = _profile_time_ms(
-                lambda: _compat_backward_kernel(
-                    query,
-                    kv_full,
-                    attn_sink,
-                    output,
-                    grad_output,
-                    topk_idxs,
-                    lse,
-                    ctx.softmax_scale,
-                )
-            )
-            _profile_log("compat_backward_total", elapsed_ms)
-        else:
-            dq, dkv, d_attn_sink = _compat_backward_kernel(
-                query,
-                kv_full,
-                attn_sink,
-                output,
-                grad_output,
-                topk_idxs,
-                lse,
-                ctx.softmax_scale,
-            )
+        dq, dkv, d_attn_sink = _compat_backward_kernel(
+            query,
+            kv_full,
+            attn_sink,
+            output,
+            grad_output,
+            topk_idxs,
+            lse,
+            ctx.softmax_scale,
+        )
         dq = dq.reshape(query.shape)
         dkv = dkv.reshape(kv_full.shape)
         d_attn_sink = d_attn_sink.reshape(attn_sink.shape).cast(ctx.attn_sink_dtype)
-        _digest_log("sparse_mla_bwd", dq=dq, dkv=dkv, d_attn_sink=d_attn_sink)
         return (
             dq,
             dkv,

@@ -203,7 +203,6 @@ class TestDsv4TileLangCSAIndexerConfig(unittest.TestCase):
         config = TransformerConfig(num_hidden_layers=self.NL)
         self.assertFalse(config.dsv4_tilelang_enable_csa_indexer)
         self.assertFalse(config.dsv4_tilelang_csa_indexer_enable_backward)
-        self.assertFalse(config.dsv4_tilelang_csa_indexer_debug_compare)
 
     def test_transform_rules_contain_new_keys(self):
         """transform_rules must include the three new HF config.json keys."""
@@ -211,7 +210,6 @@ class TestDsv4TileLangCSAIndexerConfig(unittest.TestCase):
         for k in (
             "dsv4_tilelang_enable_csa_indexer",
             "dsv4_tilelang_csa_indexer_enable_backward",
-            "dsv4_tilelang_csa_indexer_debug_compare",
         ):
             self.assertIn(k, rules)
             self.assertEqual(rules[k], k)
@@ -244,13 +242,11 @@ class TestDsv4TileLangCSAIndexerConfig(unittest.TestCase):
                 )
             )
 
-    def test_debug_compare_requires_enable_csa_indexer(self):
         with self.assertRaises(ValueError):
             TransformerConfig(
                 **self._hybrid_kwargs(
                     dsv4_tilelang_backend="attention_paddle_compat",
                     dsv4_tilelang_enable_csa_indexer=False,
-                    dsv4_tilelang_csa_indexer_debug_compare=True,
                 )
             )
 
@@ -260,12 +256,10 @@ class TestDsv4TileLangCSAIndexerConfig(unittest.TestCase):
                 dsv4_tilelang_backend="attention_paddle_compat",
                 dsv4_tilelang_enable_csa_indexer=True,
                 dsv4_tilelang_csa_indexer_enable_backward=True,
-                dsv4_tilelang_csa_indexer_debug_compare=True,
             )
         )
         self.assertTrue(config.dsv4_tilelang_enable_csa_indexer)
         self.assertTrue(config.dsv4_tilelang_csa_indexer_enable_backward)
-        self.assertTrue(config.dsv4_tilelang_csa_indexer_debug_compare)
 
     def test_switches_independent_of_phase_controls(self):
         """The new TileLang switches must not modify training-phase fields
@@ -276,7 +270,6 @@ class TestDsv4TileLangCSAIndexerConfig(unittest.TestCase):
                 dsv4_tilelang_backend="attention_paddle_compat",
                 dsv4_tilelang_enable_csa_indexer=True,
                 dsv4_tilelang_csa_indexer_enable_backward=True,
-                dsv4_tilelang_csa_indexer_debug_compare=True,
             )
         )
         self.assertEqual(config.csa_dense_mode, baseline.csa_dense_mode)
@@ -300,13 +293,11 @@ class TestDsv4TileLangCSAIndexerConfig(unittest.TestCase):
                 dsv4_tilelang_backend="attention_paddle_compat",
                 dsv4_tilelang_enable_csa_indexer=True,
                 dsv4_tilelang_csa_indexer_enable_backward=True,
-                dsv4_tilelang_csa_indexer_debug_compare=True,
             )
         )
         config = TransformerConfig.from_config(cfg)
         self.assertTrue(config.dsv4_tilelang_enable_csa_indexer)
         self.assertTrue(config.dsv4_tilelang_csa_indexer_enable_backward)
-        self.assertTrue(config.dsv4_tilelang_csa_indexer_debug_compare)
         self.assertEqual(
             config.dsv4_tilelang_backend, "attention_paddle_compat"
         )

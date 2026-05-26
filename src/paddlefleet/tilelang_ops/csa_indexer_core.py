@@ -245,7 +245,6 @@ def tilelang_csa_compressed_indexer_bwd_paddle(
             "unexpected CSA indexer backward output shapes: "
             f"grad_q={tuple(grad_q.shape)}, grad_weights={tuple(grad_weights.shape)}, grad_k_comp={tuple(grad_k_comp.shape)}"
         )
-    _digest_log("csa_indexer_bwd", grad_q=grad_q, grad_weights=grad_weights, grad_k_comp=grad_k_comp)
     if not isinstance(grad_q, paddle.Tensor) or not isinstance(grad_weights, paddle.Tensor) or not isinstance(grad_k_comp, paddle.Tensor):
         raise RuntimeError(
             "TileLang must return Paddle tensors. "
