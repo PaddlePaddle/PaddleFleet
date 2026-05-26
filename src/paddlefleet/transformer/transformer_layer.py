@@ -715,15 +715,10 @@ class TransformerLayer(nn.Layer):
                     core_attn.config, "forward_meta"
                 ):
                     fm = core_attn.config.forward_meta
-                    res = not (
+                    return not (
                         fm.max_len_tensor_cpu[1] <= 0
                         and fm.max_len_tensor_cpu[2] <= 0
                     )
-                    if not res:
-                        logging.warning(
-                            "need_do_attention skipped because fm.max_len_tensor_cpu[1]=0 and fm.max_len_tensor_cpu[2]=0"
-                        )
-                    return res
                 return True
             else:
                 return True
