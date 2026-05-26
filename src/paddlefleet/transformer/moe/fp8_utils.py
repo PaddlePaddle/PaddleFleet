@@ -1405,7 +1405,7 @@ class ExpertsGroupGemmContiguousNode:
         subbatch_rows = self.moe_subbatch_token_num_after_dispatch
         if subbatch_rows is None:
             self.tokens_per_expert_tensor = paddle.to_tensor(
-                self.tokens_per_expert, dtype="int64"
+                self.tokens_per_expert, dtype="int32"
             )
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
@@ -1420,7 +1420,7 @@ class ExpertsGroupGemmContiguousNode:
         nparts = (rows + subbatch_rows - 1) // subbatch_rows
         if nparts <= 1:
             self.tokens_per_expert_tensor = paddle.to_tensor(
-                self.tokens_per_expert, dtype="int64"
+                self.tokens_per_expert, dtype="int32"
             )
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
@@ -1447,13 +1447,14 @@ class ExpertsGroupGemmContiguousNode:
                 self.o1 = o1._slice(s_idx, e_idx)
             self.tokens_per_expert = [e_idx - s_idx]
             self.tokens_per_expert_tensor = paddle.to_tensor(
-                self.tokens_per_expert, dtype="int64"
+                self.tokens_per_expert, dtype="int32"
             )
             if self.moe_deep_gemm:
                 self.tokens_per_expert_indices = paddle.repeat_interleave(
                     paddle.arange(len(self.tokens_per_expert)),
                     paddle.to_tensor(self.tokens_per_expert),
                 ).cast("int32")
+                self.m_indices = self.gen_m_indices(self.tokens_per_expert)
 
             tmp_out_grad = out_grad._slice(s_idx, e_idx)
             tmp_unzipped_probs = unzipped_probs._slice(s_idx, e_idx)

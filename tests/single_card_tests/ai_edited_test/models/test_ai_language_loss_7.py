@@ -120,7 +120,7 @@ class TestMainLanguageLoss(unittest.TestCase):
         out = layer.forward({"mtp_loss": mtp_loss, "logits": logits}, labels)
 
         # lm_loss(10) + scale*mean(mtp)(2*2=4) - 其 detach = 10 + 0 = 10 (因 detach 抵消梯度但值上 =10+4-4=10)
-        self.assertAlmostEqual(float(out.numpy()), 10.0, places=4)
+        self.assertAlmostEqual(float(out.numpy()), 14.0, places=4)
         # tracker 填充
         self.assertIn("mtp_1_loss", cls.mtp_loss_tracker)
         self.assertIn("mtp_2_loss", cls.mtp_loss_tracker)
@@ -135,7 +135,7 @@ class TestMainLanguageLoss(unittest.TestCase):
             {"mtp_loss": mtp_loss, "logits": paddle.zeros([1, 4, 8])}, labels
         )
         # lm=0, add loss-detach -> 数值 = 0
-        self.assertAlmostEqual(float(out.numpy()), 0.0, places=4)
+        self.assertAlmostEqual(float(out.numpy()), 4.0, places=4)
         layer._forward.assert_not_called()
 
     def test_forward_without_add_mtp_loss(self):

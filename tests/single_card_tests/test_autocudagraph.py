@@ -62,6 +62,9 @@ def pure_func_cg(x, weight, bias):
 
 
 class TestPureFunctions(BaseTest):
+    def tearDown(self):
+        pure_func_cg.clear_cache()
+
     def test_multi_inputs_and_stop_gradient(self):
         x_cg = paddle.randn([4, 16])
         x_cg.stop_gradient = False
@@ -128,6 +131,9 @@ class ImplicitLayerCG(BaseImplicitLayer):
 
 
 class TestOOPAndSubmodules(BaseTest):
+    def tearDown(self):
+        ImplicitLayerCG.forward.clear_cache()
+
     def test_pointer_drift_and_weight_update(self):
         model_cg = ImplicitLayerCG()
         model_eager = ImplicitLayerEager()
@@ -275,6 +281,9 @@ class ConfigLayerCG(nn.Layer):
 
 
 class TestConfigurations(BaseTest):
+    def tearDown(self):
+        ConfigLayerCG.forward_dynamic.clear_cache()
+
     def test_dispatch_key_and_max_graphs_fallback(self):
         model_cg = ConfigLayerCG()
         model_eager = ConfigLayerEager()
@@ -323,6 +332,9 @@ def complex_io_cg(data_dict, scale):
 
 
 class TestComplexStructures(BaseTest):
+    def tearDown(self):
+        complex_io_cg.clear_cache()
+
     def test_nested_io(self):
         x = paddle.randn([2, 2])
         x.stop_gradient = False
@@ -452,6 +464,9 @@ class FatModelEager(nn.Layer):
 
 
 class TestFatModel(BaseTest):
+    def tearDown(self):
+        HeavyFFNBlock.forward_heavy.clear_cache()
+
     def test_heavy_model_alignment(self):
         model_cg = FatModelCG()
         model_eager = FatModelEager()
@@ -643,6 +658,9 @@ def memory_ops_func_cg(x):
 
 
 class TestEdgeMemoryOps(BaseTest):
+    def tearDown(self):
+        memory_ops_func_cg.clear_cache()
+
     def test_tensor_slices_alignment(self):
         for step in range(10):
             big_tensor_eager = paddle.randn([100, 64])
@@ -686,6 +704,9 @@ def dropout_cg(x):
 
 
 class TestGraphLimitationsAndFeatures(BaseTest):
+    def tearDown(self):
+        dropout_cg.clear_cache()
+
     def test_dropout_randomness_preservation(self):
         """
         Verify that CUDAGraph preserves Dropout randomness during the Replay phase.
@@ -724,9 +745,10 @@ def fake_calc(x):
 
 
 class TestDispatchNumber(BaseTest):
-    def test_max_graphs_limit(self):
+    def tearDown(self):
         fake_calc.clear_cache()
 
+    def test_max_graphs_limit(self):
         for bs in range(1, 10):
             for _ in range(5):
                 with paddle.no_grad():
@@ -748,9 +770,10 @@ class TestDispatchNumber(BaseTest):
 
 
 class TestNoGrad(BaseTest):
-    def test_no_grad_alignment_with_eager(self):
+    def tearDown(self):
         fake_calc.clear_cache()
 
+    def test_no_grad_alignment_with_eager(self):
         for bs in range(1, 8):
             for step in range(5):
                 x = paddle.rand([bs, 128])
@@ -798,6 +821,9 @@ class FatResNeXtCG(FatResNeXtEager):
 
 
 class TestEndToEndPerformance(BaseTest):
+    def tearDown(self):
+        FatResNeXtCG.forward.clear_cache()
+
     def test_resnext50_accuracy_and_speed(self):
         model_cg = FatResNeXtCG()
         model_eager = FatResNeXtEager()

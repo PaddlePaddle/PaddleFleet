@@ -46,7 +46,7 @@ class NonIdentityLayer(paddle.nn.Layer):
 
 
 class UnknownMLP(paddle.nn.Layer):
-    def set_layer_number(self, layer_number):
+    def set_layer_number(self, layer_number, is_mtp_layer=False):
         self.layer_number = layer_number
 
     def forward(self, x):

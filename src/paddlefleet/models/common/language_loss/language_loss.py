@@ -549,23 +549,20 @@ class LanguageLoss(FleetLayer):
 
             def add_loss(main_loss, loss):
                 if self.config.add_mtp_loss:
-                    return main_loss + loss - loss.detach()
+                    return main_loss + loss
                 else:
-                    return main_loss
+                    return main_loss + loss - loss.detach()
 
             if self.config.gpt_model_use_experimental_version:
                 # Align with EB: accumulate inside loop to match float32
                 # arithmetic order: loss += scaling * loss_i / N
                 loss = lm_loss
-                if self.config.add_mtp_loss:
-                    num_mtp = len(mtp_loss)
-                    for mtp_l in mtp_loss:
-                        loss = (
-                            loss
-                            + self.config.mtp_loss_scaling_factor
-                            * mtp_l
-                            / num_mtp
-                        )
+                num_mtp = len(mtp_loss)
+                for mtp_l in mtp_loss:
+                    loss = add_loss(
+                        loss,
+                        self.config.mtp_loss_scaling_factor * mtp_l / num_mtp,
+                    )
             else:
                 loss = add_loss(
                     lm_loss,
@@ -625,9 +622,9 @@ class MainLanguageLoss(LanguageLoss):
 
         def add_loss(main_loss, loss):
             if self.config.add_mtp_loss:
-                return main_loss + loss - loss.detach()
+                return main_loss + loss
             else:
-                return main_loss
+                return main_loss + loss - loss.detach()
 
         loss = add_loss(
             lm_loss,
