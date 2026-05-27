@@ -108,10 +108,14 @@ class DotProductAttention(FleetLayer):
             v_channels if v_channels is not None else self.config.head_dim
         )
         self.num_attention_heads = (
-            num_attention_heads if num_attention_heads is not None else  self.config.num_attention_heads
+            num_attention_heads
+            if num_attention_heads is not None
+            else self.config.num_attention_heads
         )
         self.num_key_value_heads = (
-            num_key_value_heads if num_key_value_heads is not None else self.config.num_key_value_heads
+            num_key_value_heads
+            if num_key_value_heads is not None
+            else self.config.num_key_value_heads
         )
 
         projection_size = self.k_channels * self.num_attention_heads
