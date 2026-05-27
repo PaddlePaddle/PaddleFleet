@@ -313,6 +313,7 @@ class _HybridEPManager(_DispatchManager):
             token_weights,
             self,
             fp8_dispatch,
+            use_ue8m0,
         )
         self.dispatched_indices = None
         return hidden_states, None if scale is None else {"scale": scale}
@@ -323,6 +324,7 @@ class _HybridEPManager(_DispatchManager):
         token_indices: paddle.Tensor,
         token_weights: paddle.Tensor,
         use_fp8: bool = False,
+        use_ue8m0: bool = False,
     ):
         buffer = self._get_buffer(hidden_states)
         routing_map, probs = self._get_dispatch_metadata(
@@ -340,6 +342,7 @@ class _HybridEPManager(_DispatchManager):
                     input_transpose=False,
                     output_scale_transpose=True,
                     return_transpose_only=False,
+                    using_ue8m0_scale=use_ue8m0,
                 )
             )
             scaling_factor = scaling_factor.T.contiguous()
@@ -389,6 +392,7 @@ class _HybridEPManager(_DispatchManager):
             self.token_probs,
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
+            use_ue8m0=use_ue8m0,
         )
 
     def combine(

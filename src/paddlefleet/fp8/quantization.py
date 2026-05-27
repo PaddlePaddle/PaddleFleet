@@ -18,7 +18,7 @@ import paddle
 
 
 def get_quant_func(
-    fp8_recipe, input_trans=False, out_scale_trans=False, pow2_scale=False
+    fp8_recipe, input_trans=False, out_scale_trans=False, pow2_scale=False, use_ue8m0=False
 ):
     """
     Get quant function by recipe
@@ -30,6 +30,7 @@ def get_quant_func(
             quant_method="1x128",
             input_transpose=input_trans,
             using_pow2_scale=pow2_scale,
+            using_ue8m0_scale=use_ue8m0,
         )
 
         weight_quant_func = functools.partial(
@@ -38,6 +39,7 @@ def get_quant_func(
             quant_method="128x128",
             input_transpose=False,
             using_pow2_scale=pow2_scale,
+            using_ue8m0_scale=use_ue8m0,
         )
     else:
         raise ValueError(
