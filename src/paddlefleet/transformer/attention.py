@@ -230,6 +230,11 @@ class Attention(FleetLayer, ABC):
             for_swa_layer_number = (
                 self.layer_number - self.config.num_empty_layers_add_in_head
             )
+            assert for_swa_layer_number >= 0, (
+                f"for_swa_layer_number must be non-negative, but got {for_swa_layer_number} "
+                f"(layer_number={self.layer_number}, "
+                f"num_empty_layers_add_in_head={self.config.num_empty_layers_add_in_head})"
+            )
 
         if is_layer_window_attention(
             self.config.sliding_window,
@@ -297,6 +302,10 @@ class Attention(FleetLayer, ABC):
             attention_type=self.attention_type,
             is_mtp_layer=self.is_mtp_layer,
             is_swa=self.is_swa,
+            k_channels=self.head_dim,
+            v_channels=self.v_head_dim,
+            num_attention_heads=self.num_attention_heads,
+            num_key_value_heads=self.num_key_value_heads,
             cp_comm_type=cp_comm_type,
             softmax_scale=self.config.softmax_scale,
             pg_collection=self.pg_collection,

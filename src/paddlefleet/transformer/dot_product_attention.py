@@ -81,6 +81,8 @@ class DotProductAttention(FleetLayer):
         pg_collection: ProcessGroupCollection = None,
         k_channels: int | None = None,
         v_channels: int | None = None,
+        num_attention_heads: int | None = None,
+        num_key_value_heads: int | None = None,
         **kwargs,
     ):
         super().__init__(config=config)
@@ -97,7 +99,7 @@ class DotProductAttention(FleetLayer):
         self.is_mtp_layer = is_mtp_layer
         self.is_swa = is_swa
 
-        # For MLA, k_channels and v_channels may differ from config.head_dim
+        # k_channels and v_channels may differ from config.head_dim
         # Default to config.head_dim if not provided (standard attention)
         self.k_channels = (
             k_channels if k_channels is not None else self.config.head_dim
@@ -105,8 +107,14 @@ class DotProductAttention(FleetLayer):
         self.v_channels = (
             v_channels if v_channels is not None else self.config.head_dim
         )
+        self.num_attention_heads = (
+            num_attention_heads if num_attention_heads is not None else  self.config.num_attention_heads
+        )
+        self.num_key_value_heads = (
+            num_key_value_heads if num_key_value_heads is not None else self.config.num_key_value_heads
+        )
 
-        projection_size = self.k_channels * self.config.num_attention_heads
+        projection_size = self.k_channels * self.num_attention_heads
 
         # Per attention head and per partition values.
         if pg_collection is None:
@@ -125,13 +133,13 @@ class DotProductAttention(FleetLayer):
         )
         self.hidden_size_per_partition = divide(projection_size, world_size)
         self.hidden_size_per_attention_head = divide(
-            projection_size, config.num_attention_heads
+            projection_size, self.num_attention_heads
         )
         self.num_attention_heads_per_partition = divide(
-            self.config.num_attention_heads, world_size
+            self.num_attention_heads, world_size
         )
         self.num_query_groups_per_partition = divide(
-            self.config.num_key_value_heads, world_size
+            self.num_key_value_heads, world_size
         )
 
         coeff = None
@@ -547,7 +555,7 @@ class DotProductAttention(FleetLayer):
         context = context.transpose([0, 2, 1, 3]).contiguous()
 
         # [b, sq, np, hn] --> [b, sq, hp]
-        # For MLA, use v_channels for output dimension (may differ from k_channels)
+        # use v_channels for output dimension (may differ from k_channels)
         new_context_shape = (
             *context.shape[:-2],
             self.hidden_size_per_partition // self.k_channels * self.v_channels,

@@ -260,9 +260,10 @@ class MultiLatentAttention(Attention):
             is_mtp_layer=is_mtp_layer,
         )
         self.config: TransformerConfig
+        self.num_attention_heads = self.config.num_attention_heads
 
         self.query_projection_size = (
-            self.config.v_head_dim * self.config.num_attention_heads
+            self.config.v_head_dim * self.num_attention_heads
         )
 
         self.q_head_dim = (
@@ -310,6 +311,8 @@ class MultiLatentAttention(Attention):
             softmax_scale=self.softmax_scale,
             k_channels=self.q_head_dim,
             v_channels=self.config.v_head_dim,
+            num_attention_heads=self.num_attention_heads,
+            num_key_value_heads=1,
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
         )
