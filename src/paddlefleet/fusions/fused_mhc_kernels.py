@@ -1296,13 +1296,15 @@ else:
 
         Args:
             x: [..., K] input (last dim is K)
-            weight: [N, K] projection weight
+            weight: [K, N] projection weight
             eps: stability epsilon
 
         Returns:
             proj: [..., N] = x @ weight^T
             r: [..., 1] = 1 / (||x|| / sqrt(K) + eps)
         """
+        # [K, N] --> [N, K]
+        weight = weight.t()
         assert weight.ndim == 2, (
             f"fused_proj_rms: weight must be 2D [N, K], got shape {list(weight.shape)}"
         )

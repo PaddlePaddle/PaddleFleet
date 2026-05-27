@@ -288,9 +288,7 @@ class HyperConnectionModule(nn.Layer):
         Args:
             x: [..., n*C] - n-stream hidden states
         """
-        proj, r = self._proj_rms_op(
-            x, self.mapping_proj.weight.t(), self.norm_eps
-        )
+        proj, r = self._proj_rms_op(x, self.mapping_proj.weight, self.norm_eps)
         return proj, r
 
     def _compute_h(
