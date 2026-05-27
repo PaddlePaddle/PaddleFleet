@@ -457,7 +457,8 @@ class DotProductAttention(FleetLayer):
 
         # attn_mask_type is not used.
         if (
-            self.num_attention_heads_per_partition
+            query.shape[2] != key.shape[2]
+            and self.num_attention_heads_per_partition
             // self.num_query_groups_per_partition
             > 1
         ):

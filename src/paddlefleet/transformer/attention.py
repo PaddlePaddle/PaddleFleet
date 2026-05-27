@@ -219,29 +219,30 @@ class Attention(FleetLayer, ABC):
 
         self.is_swa = False
 
-        if self.is_mtp_layer:
-            for_swa_layer_number = (
-                self.layer_number + self.config.num_hidden_layers
-            )
-        else:
-            # for non-mtp layer, layer_number add num_empty_layers_add_in_head in
-            # src/paddlefleet/models/gpt/gpt_layer_specs.py#L533
-            # real_layer_number = layer_number + config.num_empty_layers_add_in_head
-            for_swa_layer_number = (
-                self.layer_number - self.config.num_empty_layers_add_in_head
-            )
-            assert for_swa_layer_number >= 0, (
-                f"for_swa_layer_number must be non-negative, but got {for_swa_layer_number} "
-                f"(layer_number={self.layer_number}, "
-                f"num_empty_layers_add_in_head={self.config.num_empty_layers_add_in_head})"
-            )
+        if isinstance(self.config.sliding_window, tuple):
+            if self.is_mtp_layer:
+                for_swa_layer_number = (
+                    self.layer_number + self.config.num_hidden_layers
+                )
+            else:
+                # for non-mtp layer, layer_number add num_empty_layers_add_in_head in
+                # src/paddlefleet/models/gpt/gpt_layer_specs.py#L533
+                # real_layer_number = layer_number + config.num_empty_layers_add_in_head
+                for_swa_layer_number = (
+                    self.layer_number - self.config.num_empty_layers_add_in_head
+                )
+                assert for_swa_layer_number >= 0, (
+                    f"for_swa_layer_number must be non-negative, but got {for_swa_layer_number} "
+                    f"(layer_number={self.layer_number}, "
+                    f"num_empty_layers_add_in_head={self.config.num_empty_layers_add_in_head})"
+                )
 
-        if is_layer_window_attention(
-            self.config.sliding_window,
-            self.config.window_attn_skip_freq,
-            for_swa_layer_number,
-        ):
-            self.is_swa = True
+            if is_layer_window_attention(
+                self.config.sliding_window,
+                self.config.window_attn_skip_freq,
+                for_swa_layer_number,
+            ):
+                self.is_swa = True
 
         if self.is_swa:
             self.head_dim = self.config.swa_head_dim
@@ -250,7 +251,11 @@ class Attention(FleetLayer, ABC):
             self.num_key_value_heads = self.config.swa_num_key_value_heads
         else:
             self.head_dim = self.config.head_dim
-            self.v_head_dim = self.config.v_head_dim
+            self.v_head_dim = (
+                self.config.v_head_dim
+                if isinstance(self.config.v_head_dim, int)
+                else self.config.head_dim
+            )
             self.num_attention_heads = self.config.num_attention_heads
             self.num_key_value_heads = self.config.num_key_value_heads
 
@@ -259,7 +264,10 @@ class Attention(FleetLayer, ABC):
         self.value_projection_size = self.v_head_dim * self.num_key_value_heads
         self.out_projection_size = self.v_head_dim * self.num_attention_heads
         self.qk_rope_head_dim = self.head_dim
-        if self.config.rotary_percent < 1.0:
+        if (
+            isinstance(self.config.rotary_percent, (int, float))
+            and self.config.rotary_percent < 1.0
+        ):
             self.qk_rope_head_dim = int(
                 self.head_dim * self.config.rotary_percent
             )
@@ -989,7 +997,7 @@ class CrossAttention(Attention):
             raise ValueError(
                 "Group query attention is not currently supported in cross attention."
             )
-        assert self.query_projection_size == self.kv_projection_size
+        assert self.query_projection_size == self.key_projection_size
 
         self.linear_q = build_spec_layer(
             sublayers_spec.linear_q,
@@ -1006,7 +1014,7 @@ class CrossAttention(Attention):
         self.linear_kv = build_spec_layer(
             sublayers_spec.linear_kv,
             self.config.hidden_size,
-            2 * self.kv_projection_size,
+            2 * self.key_projection_size,
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
