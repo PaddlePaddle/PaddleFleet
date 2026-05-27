@@ -215,7 +215,7 @@ class FP8Linear(ColumnParallelLinear):
             input_trans=True,
             out_scale_trans=False,
             pow2_scale=self.use_pow2_scale,
-            use_ue8m0_scale=self.use_ue8m0,
+            use_ue8m0=self.use_ue8m0,
         )
 
     def forward(self, inp):

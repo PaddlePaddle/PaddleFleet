@@ -302,6 +302,7 @@ class _HybridEPManager(_DispatchManager):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         del async_finish
@@ -312,8 +313,9 @@ class _HybridEPManager(_DispatchManager):
             token_indices,
             token_weights,
             self,
-            fp8_dispatch,
-            use_ue8m0,
+            fp8_dispatch=fp8_dispatch,
+            use_pow2_scale=use_pow2_scale,
+            use_ue8m0=use_ue8m0,
         )
         self.dispatched_indices = None
         return hidden_states, None if scale is None else {"scale": scale}
@@ -386,6 +388,7 @@ class _HybridEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         return self.dispatch_overlap(
@@ -394,6 +397,7 @@ class _HybridEPManager(_DispatchManager):
             self.token_probs,
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
+            use_pow2_scale=use_pow2_scale,
             use_ue8m0=use_ue8m0,
         )
 
@@ -515,6 +519,7 @@ class _DeepEPManager(_DispatchManager):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
@@ -525,6 +530,7 @@ class _DeepEPManager(_DispatchManager):
             self.group,
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
+            use_pow2_scale=use_pow2_scale,
             use_ue8m0=use_ue8m0,
         )
         self.handle = states["handle"]
@@ -539,6 +545,7 @@ class _DeepEPManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
@@ -550,6 +557,7 @@ class _DeepEPManager(_DispatchManager):
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
+            use_pow2_scale=use_pow2_scale,
             use_ue8m0=use_ue8m0,
         )
         self.handle = states["handle"]
@@ -790,6 +798,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ):
         return self._comm_manager.dispatch_overlap(
@@ -798,6 +807,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             token_weights,
             fp8_dispatch,
             async_finish,
+            use_pow2_scale=use_pow2_scale,
             use_ue8m0=use_ue8m0,
         )
 
@@ -806,10 +816,15 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ):
         return self._comm_manager.dispatch(
-            hidden_states, fp8_dispatch, async_finish, use_ue8m0=use_ue8m0
+            hidden_states,
+            fp8_dispatch,
+            async_finish,
+            use_pow2_scale=use_pow2_scale,
+            use_ue8m0=use_ue8m0,
         )
 
     def dispatch_postprocess(
@@ -983,6 +998,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         permutated_local_input_tokens: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank

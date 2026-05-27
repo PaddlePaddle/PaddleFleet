@@ -204,7 +204,7 @@ def tilewise_quant(x):
             output_scale_transpose=False,
             quant_method="1x128",
             input_transpose=False,
-            use_pow2_scale=pow_2_scales,
+            using_pow2_scale=pow_2_scales,
             using_ue8m0_scale=False,
         )
     else:

@@ -642,6 +642,7 @@ if HAVE_DEEP_EP:
         async_finish=False,
         allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ):
         """Perform fused dispatch operation if deep_ep is available.
@@ -669,6 +670,7 @@ if HAVE_DEEP_EP:
             async_finish,
             allocate_on_comm_stream,
             moe_ep_barrier,
+            use_pow2_scale,
             use_ue8m0,
         )
 
@@ -885,6 +887,7 @@ def hybrid_ep_dispatch(
     token_probs,
     manager,
     fp8_dispatch: bool = False,
+    use_pow2_scale: bool = True,
     use_ue8m0: bool = False,
 ):
     """Perform HybridEP dispatch_with_permute with explicit Paddle autograd."""
@@ -894,6 +897,7 @@ def hybrid_ep_dispatch(
         token_probs,
         manager,
         fp8_dispatch,
+        use_pow2_scale,
         use_ue8m0,
     )
 
