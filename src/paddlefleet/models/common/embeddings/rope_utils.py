@@ -120,6 +120,7 @@ def _apply_rotary_pos_emb_bshd(
     high_precision_rope: bool = False,
     rope_theta: float = 10000.0,
     time_major: bool = False,
+    sp_group: Group = None,
     inverse: bool = False,
     mla_output_remove_interleaving: bool = False,
 ) -> Tensor | tuple[Tensor, ...]:
@@ -192,6 +193,57 @@ def _apply_rotary_pos_emb_bshd(
 
     rot_dim = freqs.shape[-1]
 
+    # For Sequence Parallel: slice freqs to match sharded sequence length
+    # When SP is enabled, each rank processes only a subset of the full sequence.
+    # We need to slice freqs to corresponding positions for this rank.
+    # NOTE: Determine unsqueeze_dim BEFORE slicing freqs, as slicing changes the shape.
+    # But we need to handle M-RoPE case where freqs may be [S, B, D] vs t's [B, S, H, D].
+    # In that case, we should transpose first before calculating unsqueeze_dim.
+
+    # Check if freqs needs transpose (M-RoPE with swapped dims)
+    needs_transpose = False
+    if freqs.ndim == 3:
+        t_d0, t_d1 = t.shape[0], t.shape[1]
+        f_d0, f_d1 = freqs.shape[0], freqs.shape[1]
+        # freqs is [S, B, D] but t is [B, S, H, D] -> need transpose
+        if t_d0 == f_d1 and t_d1 == f_d0 and t_d0 != f_d0:
+            needs_transpose = True
+
+    if len(freqs.shape) < len(t.shape):
+        if needs_transpose:
+            # For M-RoPE [S, B, D] -> [B, S, D], unsqueeze should be at dim 2
+            unsqueeze_dim = 2
+        else:
+            unsqueeze_dim = get_unsqueeze_dim(t, freqs)
+    else:
+        unsqueeze_dim = None
+
+    if sp_group is not None and sp_group.nranks > 1 and not apply_rope_fusion:
+        sp_rank = sp_group.rank
+        sp_size = sp_group.nranks
+        # Determine sequence dimension based on time_major flag
+        if freqs.ndim == 2:
+            # freqs: [S, D] -> slice to [S_sp, D]
+            seq_len = freqs.shape[0]
+            seq_per_rank = seq_len // sp_size
+            freqs = freqs[sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank]
+        elif freqs.ndim == 3:
+            # freqs: [B, S, D] or [S, B, D] based on time_major
+            if time_major:
+                # freqs: [S, B, D] -> slice to [S_sp, B, D]
+                seq_len = freqs.shape[0]
+                seq_per_rank = seq_len // sp_size
+                freqs = freqs[
+                    sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :, :
+                ]
+            else:
+                # freqs: [B, S, D] -> slice to [B, S_sp, D]
+                seq_len = freqs.shape[1]
+                seq_per_rank = seq_len // sp_size
+                freqs = freqs[
+                    :, sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :
+                ]
+
     # For M-RoPE with sequence parallel, freqs may be [S, B, D] while t is [B, S, H, D].
     # When the first two dims are swapped (same product but different order), transpose
     # freqs to align with t's [batch, seq] layout.  A plain reshape would silently
@@ -201,6 +253,9 @@ def _apply_rotary_pos_emb_bshd(
         f_d0, f_d1 = freqs.shape[0], freqs.shape[1]
         if (t_d0 != f_d0 or t_d1 != f_d1) and t_d0 * t_d1 == f_d0 * f_d1:
             freqs = freqs.transpose([1, 0, 2]).contiguous()
+            # After transpose, need to recalculate unsqueeze_dim
+            if len(freqs.shape) < len(t.shape):
+                unsqueeze_dim = get_unsqueeze_dim(t, freqs)
 
     # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
     t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
@@ -227,7 +282,10 @@ def _apply_rotary_pos_emb_bshd(
             sin_ = -sin_
         if len(cos_.shape) < len(t.shape):
             # [b,s,h]->[b,s,1,h]
-            unsqueeze_dim = get_unsqueeze_dim(t, cos_)
+            # Use pre-computed unsqueeze_dim if available (for SP case),
+            # otherwise compute it now
+            if unsqueeze_dim is None:
+                unsqueeze_dim = get_unsqueeze_dim(t, cos_)
             cos_.unsqueeze_(unsqueeze_dim)
             sin_.unsqueeze_(unsqueeze_dim)
 
@@ -310,6 +368,7 @@ def _apply_rotary_pos_emb_thd(
     sin: Tensor | None = None,
     mscale: float = 1.0,
     cp_group: Group = None,
+    sp_group: Group = None,
     position_ids: Tensor | None = None,
     apply_rope_fusion: bool = False,
     rotary_interleaved: bool = False,
@@ -450,6 +509,7 @@ def apply_rotary_pos_emb(
     total_seq_len: int | None = None,
     mscale: float = 1.0,
     cp_group: Group = None,
+    sp_group: Group = None,
     position_ids: Tensor | None = None,
     inverse: bool = False,
     mla_output_remove_interleaving: bool = False,
@@ -489,6 +549,7 @@ def apply_rotary_pos_emb(
         "high_precision_rope": config.high_precision_rope,
         "rope_theta": config.rope_theta,
         "time_major": config.sequence_parallel,
+        "sp_group": sp_group,
         "inverse": inverse,
         "mla_output_remove_interleaving": mla_output_remove_interleaving,
     }

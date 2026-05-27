@@ -98,6 +98,9 @@ jobs:
           rm PaddleFleet.tar.gz
           git config --global --add safe.directory /workspace
           sed -i "s#packages/nightly/cu129#packages/nightly/${{ matrix.xpu.bos_XPU }}#g" pyproject.toml
+
+          sed -i "s/paddlepaddle-gpu==[^\"]*/paddlepaddle-xpu>=3.5.0.dev20260501/" pyproject.toml
+
           cat pyproject.toml
           # mkdir -p /root/.cache/pip
           # pip cache dir

@@ -114,12 +114,6 @@ class TestExtensionsOpsModule(unittest.TestCase):
 
         self.assertTrue(hasattr(ops, "tokens_unzip_slice"))
 
-    def test_module_has_fused_swiglu_bwd(self):
-        """Module should have fused_swiglu_bwd function."""
-        from paddlefleet._extensions import ops
-
-        self.assertTrue(hasattr(ops, "fused_swiglu_bwd"))
-
     def test_module_has_tokens_zip_unique_add(self):
         """Module should have tokens_zip_unique_add function."""
         from paddlefleet._extensions import ops

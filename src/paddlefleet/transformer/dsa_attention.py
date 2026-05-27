@@ -1229,9 +1229,18 @@ class DSAttention(FleetLayer):
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
+        # KV cache parameters (ignored by DSAttention, for interface compatibility)
+        past_key_values=None,
+        layer_idx=None,
+        use_cache: bool = False,
         # DSA-specific parameters
         x: Tensor | None = None,
         qr: Tensor | None = None,
+        # ignore fastdeploy specific parameters
+        kv_compressed: paddle.Tensor = None,
+        k_pos_emb: paddle.Tensor = None,
+        q_absorbed: paddle.Tensor = None,
+        v_b_proj_weight: paddle.Tensor = None,
     ) -> Tensor:
         """Forward pass for Sparse Attention.
 

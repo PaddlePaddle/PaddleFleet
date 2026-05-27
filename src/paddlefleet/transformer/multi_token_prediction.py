@@ -396,6 +396,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         self.transformer_layer = build_spec_layer(
             self.sublayers_spec.transformer_layer,
             config=self.config,
+            is_mtp_layer=True,
         )
         if not self.config.gpt_model_use_experimental_version:
             self.norm = build_spec_layer(
@@ -449,9 +450,12 @@ class MultiTokenPredictionLayer(FleetLayer):
             e_out, _ = self.e_proj(decoder_input)
             # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp]
             # 这里hs_streams是4D tensor: [b,s,n,h]会导致算梯度的时候调用.t()报错，必须reshape到更低维度
-            orig_shape = hs_streams.shape  # [s, b, n, h]
-            hs_flat = hs_streams.reshape([-1, orig_shape[-1]])  # [s*b*n, h]
-            h_out, _ = self.h_proj(hs_flat)
+            orig_shape = list(hs_streams.shape)  # [s/sp, b, n, h]
+            if self.tensor_parallel > 1 and self.sequence_parallel:
+                # [s/sp, b, n, h] --> [s, b, n, h]
+                orig_shape[0] = orig_shape[0] * self.tensor_parallel
+            hs_flat = hs_streams.reshape([-1, orig_shape[-1]])  # [s/sp*b*n, h]
+            h_out, _ = self.h_proj(hs_flat)  # [s*b*n, h/tp]
             h_out = h_out.reshape([*orig_shape[:-1], -1])  # [s, b, n, h/tp]
             # Broadcast add before gather (saves one all-gather vs gathering separately)
             hidden_states = e_out.unsqueeze(-2) + h_out

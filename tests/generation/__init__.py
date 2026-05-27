@@ -1,4 +1,4 @@
-#   Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,17 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from paddle.distributed.fleet.meta_parallel.parallel_layers.pp_layers import (
-    PipelineLayer,
-)
-
-from .pp_utils.forward_backward_overlap_utils import (
-    ScheduleChunk,
-    ScheduleNode,
-)
-
-__all__ = [
-    "PipelineLayer",
-    "ScheduleNode",
-    "ScheduleChunk",
-]
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.

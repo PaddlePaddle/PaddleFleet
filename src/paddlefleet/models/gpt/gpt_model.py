@@ -205,6 +205,7 @@ class GPTModel(PipelineLayer):
             if getattr(param, "is_weight_only_mtp", False)
         ]
 
+    # ========================================
     def offload_weight_only_params(self):
         """Offload all weight-only MTP parameters to CPU pinned memory."""
         for param in self._get_weight_only_params():

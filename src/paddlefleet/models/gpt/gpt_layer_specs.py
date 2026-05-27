@@ -367,9 +367,17 @@ def get_gpt_layer_local_spec(
         transformer_cls = HyperConnectionTransformerLayer
 
     if paddle.distributed.is_initialized():
-        use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
-            "pp_configs"
-        ].forward_backward_overlap_scheduler
+        try:
+            pp_configs = fleet.fleet._user_defined_strategy.hybrid_configs[
+                "pp_configs"
+            ]
+            use_overlap = pp_configs.forward_backward_overlap_scheduler
+        except KeyError:
+            # pp_configs key does not exist, no overlap configured
+            use_overlap = False
+        except AttributeError:
+            # pp_configs attribute does not exist, no overlap configured
+            use_overlap = False
         if use_overlap:
             assert not config.enable_hyper_connections, (
                 "HyperConnectionTransformerLayer not supported for overlap."

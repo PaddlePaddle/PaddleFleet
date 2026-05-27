@@ -27,7 +27,6 @@ class TestOpsImport(unittest.TestCase):
         "tokens_zip_unique_add_subbatch",
         "fused_swiglu_scale",
         "fused_swiglu_scale_bwd",
-        "fused_swiglu_bwd",
         "fuse_weighted_swiglu_fp8_quant",
         "fuse_stack_transpose_fp8_quant",
         "fuse_stack_fp8_quant",

@@ -1,4 +1,4 @@
-#   Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,17 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from paddle.distributed.fleet.meta_parallel.parallel_layers.pp_layers import (
-    PipelineLayer,
-)
+"""Generation module for Fleet models."""
 
-from .pp_utils.forward_backward_overlap_utils import (
-    ScheduleChunk,
-    ScheduleNode,
+from .config import GenerationConfig
+from .greedy_generator import DynamicKVCache, GreedyGenerator
+from .inference_utils import init_inference_fleet
+from .utils import (
+    apply_repetition_penalty,
+    sample_with_top_k,
+    sample_with_top_p,
 )
 
 __all__ = [
-    "PipelineLayer",
-    "ScheduleNode",
-    "ScheduleChunk",
+    "DynamicKVCache",
+    "GenerationConfig",
+    "GreedyGenerator",
+    "apply_repetition_penalty",
+    "init_inference_fleet",
+    "sample_with_top_k",
+    "sample_with_top_p",
 ]

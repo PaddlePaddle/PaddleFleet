@@ -20,14 +20,23 @@ from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
 
-if paddle.cuda.get_device_capability()[0] == 10:
-    from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
-        FlashMaskInfoPaddle,
-    )
-    from paddlefleet_ops.flash_mask.cute.interface import (
-        _flash_attn_bwd,
-        _flash_attn_fwd,
-    )
+_flash_mask_available = False
+try:
+    if (
+        paddle.cuda.is_available()
+        and paddle.cuda.get_device_capability()[0] == 10
+    ):
+        from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
+            FlashMaskInfoPaddle,
+        )
+        from paddlefleet_ops.flash_mask.cute.interface import (
+            _flash_attn_bwd,
+            _flash_attn_fwd,
+        )
+
+        _flash_mask_available = True
+except (ImportError, AttributeError):
+    _flash_mask_available = False
 
 
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
@@ -584,7 +593,7 @@ def cp_flashmask_allgatherkv_balance_forward(
     fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
         "FLAGS_flash_attn_version"
     ]
-    if fa_version == 4:
+    if fa_version == 4 and _flash_mask_available:
         output, log_sum_exp = _flash_attn_fwd(
             query,
             key_gathered,
@@ -721,7 +730,7 @@ def cp_flashmask_allgatherkv_balance_backward(
                     False,
                 )
             )
-    elif fa_version == 4:
+    elif fa_version == 4 and _flash_mask_available:
         if startend_row_indices is not None:
             flashmask_info = FlashMaskInfoPaddle(
                 startend_row_indices=startend_row_indices,
