@@ -1081,6 +1081,7 @@ class TransformerConfig(ModelParallelConfig):
                     f"n_routed_experts ({self.n_routed_experts}) must be >= "
                     f"num_experts_per_tok ({self.num_experts_per_tok}) "
                     f"when moe_n_hash_layers > 0."
+                )
 
         if self.window_attn_skip_freq is not None:
             if (

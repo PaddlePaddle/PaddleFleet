@@ -344,7 +344,7 @@ class TestTransformerConfigSWAValidation(unittest.TestCase):
 
     def test_mtp_requires_list_window_attn_skip_freq(self):
         """When num_nextn_predict_layers > 0, window_attn_skip_freq must be a list."""
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(TypeError):
             TransformerConfig(
                 num_hidden_layers=4,
                 num_nextn_predict_layers=1,
