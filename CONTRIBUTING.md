@@ -69,6 +69,6 @@ uv pip install -e . -vv
 uv pip install -e packages/paddlefleet_ops -vv --no-build-isolation --system
 
 # 在虚拟环境中安装子包 paddlefleet_ops
-# 需要先安装 paddlepaddle-gpu
+# 需要先安装 paddlepaddle-gpu 
 uv pip install -e packages/paddlefleet_ops -vv --no-build-isolation
 ```
