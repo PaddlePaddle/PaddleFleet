@@ -180,9 +180,9 @@ class TransformerLayer(nn.Layer):
         config: TransformerConfig,
         sublayers_spec: TransformerLayerSublayersSpec,
         layer_number: int = 1,
-        is_mtp_layer: bool = False,
         hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
     ):
         super().__init__()
 
@@ -1080,17 +1080,17 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         config: TransformerConfig,
         sublayers_spec: TransformerLayerSublayersSpec,
         layer_number: int = 1,
-        is_mtp_layer: bool = False,
         hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
     ):
         super().__init__(
             config=config,
             sublayers_spec=sublayers_spec,
             layer_number=layer_number,
-            is_mtp_layer=is_mtp_layer,
             hidden_dropout_prob=hidden_dropout_prob,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
 
         assert (
