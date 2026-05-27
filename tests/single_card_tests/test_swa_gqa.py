@@ -22,6 +22,7 @@ Covers the following commits:
 """
 
 import unittest
+from unittest.mock import patch
 
 import paddle
 
@@ -381,6 +382,46 @@ class TestTransformerConfigSWAValidation(unittest.TestCase):
             window_attn_skip_freq=4,
         )
         self.assertEqual(config.window_attn_skip_freq, 4)
+
+    def test_window_attn_skip_freq_non_positive_int_raises(self):
+        """window_attn_skip_freq as int must be positive."""
+        with self.assertRaises(ValueError):
+            TransformerConfig(
+                num_hidden_layers=4,
+                sliding_window=(4096, 0),
+                window_attn_skip_freq=0,
+            )
+        with self.assertRaises(ValueError):
+            TransformerConfig(
+                num_hidden_layers=4,
+                sliding_window=(4096, 0),
+                window_attn_skip_freq=-1,
+            )
+
+    def test_no_mtp_list_wrong_length_raises(self):
+        """Without MTP, list length must equal num_hidden_layers."""
+        with self.assertRaises(ValueError):
+            TransformerConfig(
+                num_hidden_layers=4,
+                num_nextn_predict_layers=0,
+                sliding_window=(4096, 0),
+                window_attn_skip_freq=[1, 0, 1],  # length 3, expected 4
+            )
+
+    def test_head_wise_swa_ratio_out_of_range_raises(self):
+        """head_wise_swa_ratio must be between 0.0 and 1.0."""
+        with self.assertRaises(ValueError):
+            TransformerConfig(
+                num_hidden_layers=4,
+                sliding_window=(4096, 0),
+                head_wise_swa_ratio=1.5,
+            )
+        with self.assertRaises(ValueError):
+            TransformerConfig(
+                num_hidden_layers=4,
+                sliding_window=(4096, 0),
+                head_wise_swa_ratio=-0.1,
+            )
 
 
 # ============================================================================
@@ -1841,6 +1882,98 @@ class TestSWAComputationalCorrectness(unittest.TestCase):
         self.assertFalse(
             paddle.allclose(out_mtp, out_normal, atol=1e-5).item(),
             "MTP-SWA layer and normal layer should produce different outputs",
+        )
+
+
+class TestDotProductAttentionFlashMaskSWA(unittest.TestCase):
+    """Test that DotProductAttention applies sliding_window in flashmask path."""
+
+    def _make_swa_dot_product_attention(self):
+        """Create a DotProductAttention with is_swa=True."""
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            hidden_size=256,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=64,
+            v_head_dim=64,
+            sliding_window=(4096, 0),
+            window_attn_skip_freq=[1, 0, 1, 0],
+            swa_head_dim=64,
+            swa_v_head_dim=64,
+            swa_num_attention_heads=4,
+            swa_num_key_value_heads=4,
+        )
+        config.softmax_scale = None
+        config.context_parallel_size = 1
+        config.apply_query_key_layer_scaling = False
+        config.fp16 = False
+        config.bf16 = True
+        config.masked_softmax_fusion = False
+        config.attention_softmax_in_fp32 = True
+        config.attention_dropout = 0.0
+        config.softmax_type = "vanilla"
+        config.perform_initialization = True
+        config.params_dtype = "float32"
+        config.init_method = init_method_normal(0.02)
+        config.add_full_attention_sink_bias = False
+        config.add_swa_attention_sink_bias = False
+        config.head_wise_swa_ratio = 0.0
+        config._attn_implementation = "flash"
+        config.flashmask_use_varlen = False
+
+        attn = DotProductAttention(
+            config=config,
+            layer_number=0,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+            is_swa=True,
+        )
+        return attn
+
+    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    def test_flashmask_path_applies_sliding_window(self, mock_fm):
+        """Verify startend_row_indices_add_sliding_window is called when is_swa."""
+        attn = self._make_swa_dot_product_attention()
+
+        batch_size, seq_len, num_heads, head_dim = 2, 8, 4, 64
+        query = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+        key = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+        value = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+        # startend_row_indices: [bsz, 1, seq_len, 1] - LTS format
+        attn_mask_startend_row_indices = paddle.zeros(
+            [batch_size, 1, seq_len, 1], dtype="int32"
+        )
+
+        # Mock flashmask_attention to return proper shape [b, s, h, d]
+        mock_fm.return_value = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+
+        output = attn(
+            query,
+            key,
+            value,
+            attention_mask=None,
+            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+        )
+
+        # flashmask_attention should have been called
+        mock_fm.assert_called_once()
+        # Check that the startend_row_indices passed to flashmask has been modified
+        # (sliding window applied) - heads should be expanded
+        call_kwargs = mock_fm.call_args
+        passed_indices = call_kwargs[1]["startend_row_indices"]
+        self.assertEqual(passed_indices.shape[1], num_heads)
+        # Output shape: [batch, seq, hidden]
+        self.assertEqual(
+            output.shape, [batch_size, seq_len, num_heads * head_dim]
         )
 
 
