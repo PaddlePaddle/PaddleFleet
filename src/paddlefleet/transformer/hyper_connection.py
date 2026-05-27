@@ -123,6 +123,66 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         return grad_input
 
 
+def native_sinkhorn(
+    input_logits: Tensor, num_iterations: int, eps: float = 1e-6
+) -> Tensor:
+    """Native Sinkhorn-Knopp (PyLayer wrapper)."""
+    return SinkhornKnopp.apply(input_logits, num_iterations)
+
+
+def native_proj_rms(
+    x: Tensor, weight: Tensor, eps: float = 1e-6
+) -> tuple[Tensor, Tensor]:
+    """Native fused projection + RMS normalization."""
+    nC = x.shape[-1]
+    r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)
+    r = 1.0 / (r + eps)
+    proj = paddle.matmul(x, weight)
+    return proj, r
+
+
+def native_h_aggregate(x_streams: Tensor, h_pre: Tensor) -> Tensor:
+    """Native n-stream weighted aggregation: out = sum_j(h_pre_j * x_j)."""
+    return (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
+
+
+def native_h_post_bda(
+    h_res: Tensor,
+    original_residual: Tensor,
+    h_post: Tensor,
+    x: Tensor,
+    bias: Tensor | None,
+) -> Tensor:
+    """Native H_res @ residual + H_post * (x [+ bias]).
+
+    Args:
+        h_res: [..., n, n] - residual mixing matrix
+        original_residual: [..., n, C] - n-stream hidden states
+        h_post: [..., n] - expansion weights
+        x: [..., C] - layer output
+        bias: [C] or None
+
+    Returns:
+        output: [..., n, C]
+    """
+    leading_shape = original_residual.shape[:-2]
+    n, C = original_residual.shape[-2], original_residual.shape[-1]
+    num_tokens = math.prod(leading_shape)
+
+    h_res_batched = h_res.reshape([num_tokens, n, n])
+    residual_batched = original_residual.reshape([num_tokens, n, C])
+    mixed = paddle.bmm(h_res_batched, residual_batched).reshape(
+        [*leading_shape, n, C]
+    )
+
+    x_expanded = h_post.unsqueeze(-1) * x.unsqueeze(-2)  # [..., n, C]
+    if bias is not None:
+        bias = bias.reshape([1] * len(leading_shape) + [1, C])
+        bias_expanded = h_post.unsqueeze(-1) * bias
+        return x_expanded + bias_expanded + mixed
+    return x_expanded + mixed
+
+
 class HyperConnectionModule(nn.Layer):
     """
     Unified mHC (Manifold-Constrained Hyper-Connections) module.
@@ -187,6 +247,25 @@ class HyperConnectionModule(nn.Layer):
 
         self.norm_eps = 1e-6
 
+        # Choose implementation: fused kernels vs native reference.
+        if config.use_fused_mhc:
+            from paddlefleet.fusions.fused_mhc_kernels import (
+                fused_h_aggregate,
+                fused_h_post_bda,
+                fused_proj_rms,
+                fused_sinkhorn,
+            )
+
+            self._sinkhorn_op = fused_sinkhorn
+            self._h_aggregate_op = fused_h_aggregate
+            self._h_post_bda_op = fused_h_post_bda
+            self._proj_rms_op = fused_proj_rms
+        else:
+            self._sinkhorn_op = native_sinkhorn
+            self._h_aggregate_op = native_h_aggregate
+            self._h_post_bda_op = native_h_post_bda
+            self._proj_rms_op = native_proj_rms
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -209,10 +288,9 @@ class HyperConnectionModule(nn.Layer):
         Args:
             x: [..., n*C] - n-stream hidden states
         """
-        nC = x.shape[-1]
-        r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)  # [..., 1]
-        r = 1.0 / (r + self.norm_eps)  # [..., 1]
-        proj = self.mapping_proj(x)  # [..., n^2 + 2n]
+        proj, r = self._proj_rms_op(
+            x, self.mapping_proj.weight.t(), self.norm_eps
+        )
         return proj, r
 
     def _compute_h(
@@ -264,9 +342,10 @@ class HyperConnectionModule(nn.Layer):
         leading_shape = x.shape[:-1]
         proj, r = self._projection_and_get_norm(x)
         h_pre, h_post, h_res = self._compute_h(proj, r)
-        h_res = SinkhornKnopp.apply(
+        h_res = self._sinkhorn_op(
             h_res.reshape([*leading_shape, self.n, self.n]),
             self.sinkhorn_iterations,
+            self.norm_eps,
         )  # [..., n, n]
 
         return h_pre, h_post, h_res
@@ -290,10 +369,7 @@ class HyperConnectionModule(nn.Layer):
         # Reshape to [..., n, C]
         x_streams = x.reshape([*leading_shape, self.n, C])
 
-        # Weighted sum: [..., n, C] * [..., n, 1] -> sum over n -> [..., C]
-        aggregated = (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
-
-        return aggregated
+        return self._h_aggregate_op(x_streams, h_pre)
 
     def apply_h_res(self, h_res: Tensor, residual: Tensor) -> Tensor:
         """
@@ -390,6 +466,7 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (for fused kernel)
             h_post: [..., n] - expansion weights
         """
+        b, s, nC = hidden_states.shape
         # Compute mappings
         h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
@@ -522,17 +599,24 @@ class HyperConnectionModule(nn.Layer):
         Returns:
             output: [..., n*C] - final output after all operations
         """
-        # Step 1: Apply H_res to original residual
-        mixed = self.apply_h_res(h_res, original_residual)
-
-        # Step 2: Apply H_post to layer output
         x, bias = layer_output_with_bias
+
+        # Fast path: no dropout — use fused/native h_post_bda kernel
+        if dropout_prob == 0.0 or not training:
+            leading_shape = original_residual.shape[:-1]
+            n = self.n
+            C = self.hidden_size
+            orig_reshaped = original_residual.reshape([*leading_shape, n, C])
+            output = self._h_post_bda_op(h_res, orig_reshaped, h_post, x, bias)
+            return output.reshape([*leading_shape, n * C])
+
+        # Slow path: dropout required — sequential ops
+        mixed = self.apply_h_res(h_res, original_residual)
         x_expanded = self._apply_h_post(x, h_post)
         bias_expanded = (
             self._apply_h_post(bias, h_post) if bias is not None else None
         )
 
-        # Step 3: Bias-dropout-add
         if bias_expanded is not None:
             x_expanded = x_expanded + bias_expanded
         out = paddle.nn.functional.dropout(

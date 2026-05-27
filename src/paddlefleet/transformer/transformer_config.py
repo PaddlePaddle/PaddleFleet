@@ -580,12 +580,9 @@ class TransformerConfig(ModelParallelConfig):
     mhc_init_gating_factor: float = 0.01
     """Initial value of Gating Factor (alpha in paper)."""
 
-    mhc_recompute_layer_num: int | None = None
-    """Number of layers per mHC recompute block.
-
-    When set, every `mhc_recompute_layer_num` layers form a recompute block.
-    If None, all layers in the transformer block share a single recompute block.
-    Must be a positive integer when set."""
+    use_fused_mhc: bool = False
+    """Use fused triton kernels for mHC operations (sinkhorn, h_aggregate, h_post_bda, proj_rms).
+    Requires cuTile to be available."""
 
     ####################
     # miscellaneous
