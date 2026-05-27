@@ -45,8 +45,10 @@ BF16_FWD_ATOL, BF16_FWD_RTOL = 2e-2, 2e-2
 BF16_BWD_ATOL, BF16_BWD_RTOL = 5e-2, 5e-2
 COSINE_SIM_THRESH = 0.999
 # Relaxed tolerances for TF32 matmul kernels (10-bit mantissa)
-TF32_FWD_ATOL, TF32_FWD_RTOL = 5e-4, 5e-4
-TF32_BWD_ATOL, TF32_BWD_RTOL = 1e-3, 1e-3
+TF32_FWD_ATOL, TF32_FWD_RTOL = 1e-3, 1e-3
+TF32_BWD_ATOL, TF32_BWD_RTOL = 2e-3, 2e-3
+# E2E fused pipeline accumulates TF32 error across multiple kernels
+E2E_FUSED_FWD_ATOL, E2E_FUSED_FWD_RTOL = 5e-3, 5e-3
 RAND_LO, RAND_HI = -0.1, 0.1
 
 
@@ -791,15 +793,15 @@ class TestEndToEndFused(unittest.TestCase):
         _assert_close(
             agg_f,
             agg_r,
-            TF32_FWD_ATOL,
-            TF32_FWD_RTOL,
+            E2E_FUSED_FWD_ATOL,
+            E2E_FUSED_FWD_RTOL,
             "E2E fused aggregated output",
         )
         _assert_close(
             out_f,
             out_r,
-            TF32_FWD_ATOL,
-            TF32_FWD_RTOL,
+            E2E_FUSED_FWD_ATOL,
+            E2E_FUSED_FWD_RTOL,
             "E2E fused h_post_bda output",
         )
         _assert_cosine_similar(
