@@ -736,7 +736,7 @@ static std::vector<paddle::Tensor> FusedWeightedSwigluActQuantImpl(
         rows,
         kMaxRowsForUe8m0ScaleIndex,
         common::errors::InvalidArgument(
-            "rows is too large for ue8m0 scale index calculation, got %d.",
+            "rows is too large for ue8m0 scale index calculation, got %ld.",
             rows));
 
     PADDLE_ENFORCE(hidden_size % 1024 == 0,

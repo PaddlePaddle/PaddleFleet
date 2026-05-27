@@ -62,19 +62,7 @@ inline int LimitGridDim(int64_t n) {
   return static_cast<int>(std::min<int64_t>(n, 1024 * 1024));
 }
 
-inline int GetSwiGLURowGridSize(int64_t rows) {
-  constexpr int64_t kSwiGLUMaxRowGridSize = 65535;
-  return static_cast<int>(rows < kSwiGLUMaxRowGridSize ? rows
-                                                       : kSwiGLUMaxRowGridSize);
-}
-
-inline bool ShouldUseInt64Index(int64_t rows, int64_t stride) {
-  if (stride == 0) {
-    return false;
-  }
-  const int64_t max_int = static_cast<int64_t>(std::numeric_limits<int>::max());
-  return rows >= max_int / stride;
-}
+inline int GetSwiGLURowGridSize(int64_t rows) { return LimitGridDim(rows); }
 
 #ifdef __CUDACC__
 template <typename T>
