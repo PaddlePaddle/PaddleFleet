@@ -50,7 +50,7 @@ def is_cutile_available() -> bool:
 
 def _get_cuda_stream():
     """Get current CUDA stream for cuTile launch."""
-    return paddle.device.cuda.current_stream().cuda_stream
+    return paddle.device.current_stream().stream_base.cuda_stream
 
 
 # ============================================================================

@@ -972,16 +972,6 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        # Hyper-connection (mHC) validation
-        if self.enable_hyper_connections:
-            if self.mhc_recompute_layer_num is not None and (
-                not isinstance(self.mhc_recompute_layer_num, int)
-                or self.mhc_recompute_layer_num < 1
-            ):
-                raise ValueError(
-                    "mhc_recompute_layer_num must be a positive integer."
-                )
-
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
             if self.csa_compress_ratios is None:
