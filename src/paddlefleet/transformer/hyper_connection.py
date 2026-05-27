@@ -46,35 +46,39 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
     Reference: Eq. (9) in mHC paper - M^{(t)} = T_c(T_r(M^{(t-1)}))
     """
 
-    eps = 1e-6
-
     @staticmethod
-    def _sinkhorn_normalize(M: Tensor, num_iterations: int) -> Tensor:
+    def _sinkhorn_normalize(
+        M: Tensor, num_iterations: int, eps: float = 1e-6
+    ) -> Tensor:
         """
         Apply Sinkhorn-Knopp normalization iterations.
 
         Args:
             M: [..., n, n] - positive matrix to normalize
             num_iterations: Number of Sinkhorn iterations
+            eps: Small constant for numerical stability
 
         Returns:
             M: [..., n, n] - doubly stochastic matrix
         """
         for _ in range(num_iterations):
             # T_r: Row normalization
-            M = M / M.sum(axis=-1, keepdim=True).clip(min=SinkhornKnopp.eps)
+            M = M / M.sum(axis=-1, keepdim=True).clip(min=eps)
             # T_c: Column normalization
-            M = M / M.sum(axis=-2, keepdim=True).clip(min=SinkhornKnopp.eps)
+            M = M / M.sum(axis=-2, keepdim=True).clip(min=eps)
         return M
 
     @staticmethod
-    def forward(ctx, H_res_logits: Tensor, num_iterations: int) -> Tensor:
+    def forward(
+        ctx, H_res_logits: Tensor, num_iterations: int, eps: float = 1e-6
+    ) -> Tensor:
         """
         Project to doubly stochastic matrix via iterative row/col normalization.
 
         Args:
             H_res_logits: [..., n, n] - raw logits for residual mixing matrix
             num_iterations: Number of Sinkhorn iterations (paper uses 20)
+            eps: Small constant for numerical stability
 
         Returns:
             H_res: [..., n, n] - doubly stochastic matrix
@@ -84,11 +88,12 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
             H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
         )
 
-        M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations)
+        M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations, eps)
 
         # Save initial M for backward recomputation
         ctx.save_for_backward(M_init)
         ctx.num_iterations = num_iterations
+        ctx.eps = eps
         return M
 
     @staticmethod
@@ -98,6 +103,7 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         """
         (M_init,) = ctx.saved_tensor()
         num_iterations = ctx.num_iterations
+        eps = ctx.eps
 
         with paddle.enable_grad():
             # Recompute forward with autograd enabled
@@ -105,7 +111,7 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
             M_input.stop_gradient = False
 
             M_current = SinkhornKnopp._sinkhorn_normalize(
-                M_input, num_iterations
+                M_input, num_iterations, eps
             )
 
             # Compute dL/dM_input via autograd
@@ -127,7 +133,7 @@ def native_sinkhorn(
     input_logits: Tensor, num_iterations: int, eps: float = 1e-6
 ) -> Tensor:
     """Native Sinkhorn-Knopp (PyLayer wrapper)."""
-    return SinkhornKnopp.apply(input_logits, num_iterations)
+    return SinkhornKnopp.apply(input_logits, num_iterations, eps)
 
 
 def native_proj_rms(
