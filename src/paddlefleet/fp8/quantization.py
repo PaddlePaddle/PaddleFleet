@@ -21,7 +21,7 @@ def get_quant_func(
     fp8_recipe,
     input_trans=False,
     out_scale_trans=False,
-    pow2_scale=False,
+    pow2_scale=True,
     use_ue8m0=False,
 ):
     """
