@@ -43,10 +43,19 @@ PaddleFleet 现在使用 uv workspace 方式管理项目，请在 PaddleFleet �
 uv build --wheel -vv
 
 # 只编子包 paddlefleet_ops，产出 C++ wheel 包
+# 需要先在当前环境中准备好 paddlepaddle-gpu 等依赖包
 uv build --package paddlefleet-ops --wheel -vv --no-build-isolation
 ```
 
 #### 开发模式安装
+
+##### 安装根包 `paddlefleet`
+
+```bash
+uv pip install -e . -vv
+```
+
+##### 安装 C++ 包 `paddlefleet_ops`
 
 如果不需要自己开发自定义算子，可以执行以下脚本自动安装匹配当前代码的 `paddlefleet_ops`：
 
@@ -54,16 +63,17 @@ uv build --package paddlefleet-ops --wheel -vv --no-build-isolation
 bash scripts/install_ops_wheel.sh
 ```
 
-如果需要开发自定义算子，可以使用 editable 方式安装：
+如果需要开发自定义算子，可以使用 editable 方式安装。
+
+###### 系统环境
 
 ```bash
-# 安装根包 paddlefleet
-uv pip install -e . -vv
-
-# 在系统环境中安装子包 paddlefleet_ops
 uv pip install -e packages/paddlefleet_ops -vv --no-build-isolation --system
+```
 
-# 在虚拟环境中安装子包 paddlefleet_ops
-# 需要先安装 paddlepaddle-gpu 
+###### 虚拟环境
+
+```bash
+# 需要先安装 paddlepaddle-gpu
 uv pip install -e packages/paddlefleet_ops -vv --no-build-isolation
 ```
