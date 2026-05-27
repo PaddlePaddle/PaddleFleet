@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-import sys
 import unittest
 
 # Enable sync_send mode before importing the module
@@ -24,15 +23,6 @@ import numpy as np
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
 
 from paddlefleet.pipeline_parallel.pp_utils.four_directions_p2p_communication import (
     SendRecvMeta,

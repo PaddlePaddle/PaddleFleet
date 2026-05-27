@@ -13,23 +13,12 @@
 # limitations under the License.
 
 import functools
-import os
-import sys
 import unittest
 
 import numpy as np
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
 
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.process_groups_config import ProcessGroupCollection

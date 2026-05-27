@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import sys
 import unittest
 from unittest.mock import MagicMock
@@ -24,15 +23,6 @@ from paddle.distributed import fleet
 # vpp_simulator.py imports matplotlib which may not be installed in CI
 sys.modules["matplotlib"] = MagicMock()
 sys.modules["matplotlib.pyplot"] = MagicMock()
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
 
 from paddlefleet.pipeline_parallel.vpp_simulator import (
     PPChunkRecorder,

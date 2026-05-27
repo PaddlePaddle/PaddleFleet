@@ -12,23 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 import unittest
 
 import numpy as np
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
 
 from paddlefleet.pipeline_parallel.pp_utils.p2p_communication import (
     P2PonCalcStream,

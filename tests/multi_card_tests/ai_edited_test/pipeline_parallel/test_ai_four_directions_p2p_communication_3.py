@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-import sys
 import unittest
 
 os.environ["PADDLE_USE_FOUR_DIRECTIONS_P2P"] = "True"
@@ -22,15 +21,6 @@ import numpy as np
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
 
 from paddlefleet.pipeline_parallel.pp_utils.four_directions_p2p_communication import (
     _is_valid_send_recv_partial,
