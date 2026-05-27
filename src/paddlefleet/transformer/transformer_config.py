@@ -1009,15 +1009,6 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if (
-            self.multi_latent_attention
-            and self.apply_rope_fusion
-            and self.rope_type != "yarn"
-        ):
-            raise ValueError(
-                "apply_rope_fusion for MLA only works with YARN RoPE."
-            )
-
         # Hyper-connection (mHC) validation
         if self.enable_hyper_connections:
             if self.mhc_recompute_layer_num is not None and (
