@@ -33,7 +33,7 @@ class _FP8Gemm(paddle.autograd.Function):
         weight,
         inp_quant_func,
         weight_quant_func,
-        use_pow2_scale=False,
+        use_pow2_scale=True,
         using_ue8m0_scale=False,
     ):
         """

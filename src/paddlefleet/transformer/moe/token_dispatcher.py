@@ -324,6 +324,7 @@ class _HybridEPManager(_DispatchManager):
         token_indices: paddle.Tensor,
         token_weights: paddle.Tensor,
         use_fp8: bool = False,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ):
         buffer = self._get_buffer(hidden_states)
@@ -342,6 +343,7 @@ class _HybridEPManager(_DispatchManager):
                     input_transpose=False,
                     output_scale_transpose=True,
                     return_transpose_only=False,
+                    using_pow2_scale=use_pow2_scale,
                     using_ue8m0_scale=use_ue8m0,
                 )
             )

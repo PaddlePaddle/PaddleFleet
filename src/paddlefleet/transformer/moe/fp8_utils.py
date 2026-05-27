@@ -335,6 +335,7 @@ class ExpertsGroupGemmContiguousNode:
         use_bf16_gemm_weight_grad=False,
         use_fp8_mlp=True,
         moe_deep_gemm=False,
+        use_pow2_scale=True,
         use_ue8m0=False,
         dw_p2p_overlap=False,
         moe_expert_fusion=False,
@@ -382,6 +383,7 @@ class ExpertsGroupGemmContiguousNode:
         self.use_bf16_gemm_weight_grad = use_bf16_gemm_weight_grad
         self.use_fp8_mlp = use_fp8_mlp
         self.moe_deep_gemm = moe_deep_gemm
+        self.use_pow2_scale = use_pow2_scale
         self.use_ue8m0 = use_ue8m0
         self.is_split_group_gemm = not moe_expert_fusion
         self.dw_p2p_overlap = dw_p2p_overlap
@@ -576,6 +578,7 @@ class ExpertsGroupGemmContiguousNode:
                 output_scale_transpose=True,
                 quant_method="1x128",
                 input_transpose=False,
+                using_pow2_scale=self.use_pow2_scale,
                 using_ue8m0_scale=self.use_ue8m0,
             )
             x_scale = x_scale.T
@@ -873,6 +876,7 @@ class ExpertsGroupGemmContiguousNode:
                     output_scale_transpose=True,
                     quant_method="1x128",
                     input_transpose=False,
+                    using_pow2_scale=self.use_pow2_scale,
                     using_ue8m0_scale=True,
                 )
             )
@@ -884,6 +888,7 @@ class ExpertsGroupGemmContiguousNode:
                     output_scale_transpose=False,
                     quant_method="1x128",
                     input_transpose=False,
+                    using_pow2_scale=self.use_pow2_scale,
                     using_ue8m0_scale=self.use_ue8m0,
                 )
             )
@@ -1033,6 +1038,7 @@ class ExpertsGroupGemmContiguousNode:
                     output_scale_transpose=True,
                     quant_method="1x128",
                     input_transpose=False,
+                    using_pow2_scale=self.use_pow2_scale,
                     using_ue8m0_scale=True,
                 )
             )
@@ -1044,6 +1050,7 @@ class ExpertsGroupGemmContiguousNode:
                     output_scale_transpose=False,
                     quant_method="1x128",
                     input_transpose=False,
+                    using_pow2_scale=self.use_pow2_scale,
                     using_ue8m0_scale=self.use_ue8m0,
                 )
             )

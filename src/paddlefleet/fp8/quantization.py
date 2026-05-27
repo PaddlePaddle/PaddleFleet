@@ -18,7 +18,11 @@ import paddle
 
 
 def get_quant_func(
-    fp8_recipe, input_trans=False, out_scale_trans=False, pow2_scale=False, use_ue8m0=False
+    fp8_recipe,
+    input_trans=False,
+    out_scale_trans=False,
+    pow2_scale=False,
+    use_ue8m0=False,
 ):
     """
     Get quant function by recipe
