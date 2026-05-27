@@ -11,18 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import sys
 import unittest
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
 
 from paddle import nn
 from paddle.distributed.fleet.meta_parallel import SharedLayerDesc

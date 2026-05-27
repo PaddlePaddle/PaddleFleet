@@ -23,18 +23,6 @@ Covers new code in:
 Target: >90% line coverage of all newly added lines.
 """
 
-import os
-import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
 import unittest
 from unittest.mock import MagicMock, patch
 

@@ -20,19 +20,8 @@ is exercised in test_ai_fused_bias_swiglu.py. This file focuses on the
 PyLayer apply paths for both clamp and non-clamp variants.
 """
 
-import os
-import sys
 import unittest
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
 
 import paddle
 

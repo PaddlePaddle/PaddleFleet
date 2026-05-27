@@ -17,15 +17,6 @@ import os
 import sys
 import types
 
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
 # Setup comprehensive triton mock before any paddlefleet_ops imports
 _mock_tl = types.ModuleType("triton.language")
 _mock_tl_core = types.ModuleType("triton.language.core")

@@ -11,23 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
 
 # Extra tests for paddlefleet_ops/_extensions/flashmask/rr_attn_estimate_triton_op.py
 # Focus on: _require, _extract_raw_ptrs, _prepare_stride_maxmin_ptrs,
 # rr_attn_estimate_triton_func validation, dataclass structures
-
 import types
 import unittest
 
