@@ -174,24 +174,25 @@ class DotProductAttention(FleetLayer):
             else attention_dropout
         )
 
-        if self.config.softmax_type == "vanilla":
+        softmax_type = self.config.softmax_type
+        if (self.config.add_full_attention_sink_bias and not self.is_swa) or (
+            self.config.add_swa_attention_sink_bias and self.is_swa
+        ):
+            softmax_type = "learnable"
+
+        if softmax_type == "vanilla":
             self.softmax_offset = None
-        elif self.config.softmax_type == "off-by-one":
+        elif softmax_type == "off-by-one":
             self.softmax_offset = paddle.zeros(
                 self.num_attention_heads_per_partition
             )
-        elif self.config.softmax_type == "learnable":
-            self.register_parameter(
-                "softmax_offset",
-                paddle.nn.Parameter(
-                    paddle.empty(
-                        self.num_attention_heads_per_partition,
-                        dtype=self.config.params_dtype,
-                    )
-                ),
+        elif softmax_type == "learnable":
+            self.softmax_offset = self.create_parameter(
+                shape=[self.num_attention_heads_per_partition],
+                dtype=self.config.params_dtype,
             )
             if config.perform_initialization:
-                self.softmax_offset = config.init_method(self.softmax_offset)
+                config.init_method(self.softmax_offset)
         else:
             raise ValueError("Softmax type not supported")
         self.rr_flashmask_attention_func = rr_flashmask_attention()

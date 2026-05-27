@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from .transformer_config import TransformerConfig
 
 import paddle
-from paddle import Tensor, nn
+from paddle import Tensor
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
@@ -288,20 +288,6 @@ class Attention(FleetLayer, ABC):
         self.num_query_groups_per_partition = divide(
             self.num_key_value_heads, world_size
         )
-
-        # TODO(GuoxiaWang): pass attn_sink in to flashmask
-        if (self.config.add_full_attention_sink_bias and not self.is_swa) or (
-            self.config.add_swa_attention_sink_bias and self.is_swa
-        ):
-            # Learnable attention sink per head
-            self.attn_sink = self.create_parameter(
-                shape=[self.num_attention_heads_per_partition],
-                dtype="float32",
-                default_initializer=nn.initializer.Constant(0.0),
-            )
-            self.config.init_method(self.attn_sink)
-        else:
-            self.attn_sink = None
 
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
