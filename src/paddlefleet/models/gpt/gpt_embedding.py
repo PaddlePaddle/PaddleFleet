@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -113,10 +114,13 @@ class GPTEmbedding(FleetLayer):
                 rope_scaling=rope_scaling,
             )
 
-            if (
-                config.sliding_window is not None
-                and config.window_attn_skip_freq is not None
-            ):
+            if config.sliding_window is not None:
+                if config.window_attn_skip_freq is None:
+                    warnings.warn(
+                        "sliding_window is set but window_attn_skip_freq is None. "
+                        "is_layer_window_attention() will return True for all layers, "
+                        "meaning all layers will use sliding window attention (SWA)."
+                    )
                 self.swa_rotary_pos_emb = build_spec_layer(
                     sublayers_spec.rope_embedding,
                     head_dim=config.swa_head_dim,

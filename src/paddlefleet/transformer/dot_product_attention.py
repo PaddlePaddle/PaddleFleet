@@ -143,7 +143,7 @@ class DotProductAttention(FleetLayer):
             self.softmax_scale = softmax_scale
 
         if self.config.apply_query_key_layer_scaling:
-            coeff = self.layer_number
+            coeff = max(1, self.layer_number)
             self.softmax_scale /= coeff
 
         if self.is_swa:
