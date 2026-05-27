@@ -506,7 +506,7 @@ class ExpertsGroupGemmContiguousNode:
         self, x, expert_w1, num_expert, tokens_per_expert, scale=None
     ):
         self.tokens_per_expert = tokens_per_expert
-        if self.moe_deep_gemm:
+        if self.moe_deep_gemm or self.moe_expert_fusion:
             self.m_indices = self.gen_m_indices(self.tokens_per_expert)
         else:
             self.m_indices = None
