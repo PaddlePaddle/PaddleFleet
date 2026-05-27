@@ -229,17 +229,17 @@ def bwd(
                 T.copy(acc_dp, dP_shared_cast)
                 T.gemm(dP_shared_cast, KV_shared, acc_dq, policy=T.GemmWarpPolicy.FullCol)
 
-                T.gemm(
-                    dP_shared_cast,
-                    Q_shared,
-                    acc_dkv,
-                    transpose_A=True,
-                    policy=T.GemmWarpPolicy.FullCol,
-                    clear_accum=True,
-                )
-                T.gemm(P_shared_cast, dO_shared, acc_dkv, transpose_A=True, policy=T.GemmWarpPolicy.FullCol)
-
                 if not skip_dkv:
+                    T.gemm(
+                        dP_shared_cast,
+                        Q_shared,
+                        acc_dkv,
+                        transpose_A=True,
+                        policy=T.GemmWarpPolicy.FullCol,
+                        clear_accum=True,
+                    )
+                    T.gemm(P_shared_cast, dO_shared, acc_dkv, transpose_A=True, policy=T.GemmWarpPolicy.FullCol)
+
                     for s in range(split_store):
                         for bi_i, d_i in T.Parallel(BS, D):
                             if bi_i < BS // split_store:
@@ -470,8 +470,7 @@ def _bucketed_cap(chunk_size, topk, S_kv):
     if cap_env:
         cap = int(cap_env)
     else:
-        safety = max(1.0, float(os.getenv("DSV4_TILELANG_SPARSE_MLA_DKV_BUCKET_SAFETY", "4.0")))
-        cap = int((chunk_size * topk * safety + max(1, S_kv) - 1) // max(1, S_kv))
+        cap = chunk_size
     return max(32, ((cap + 31) // 32) * 32)
 
 

@@ -160,17 +160,17 @@ def tl_csa_indexer_bwd_impl(
                     clear_accum=False,
                 )
 
-                T.copy(d_logits_qk, d_logits_qk_cast2)
-                T.gemm(
-                    d_logits_qk_cast2,
-                    index_q_scaled_shared,
-                    d_index_k_frag,
-                    transpose_A=False,
-                    transpose_B=False,
-                    clear_accum=True,
-                )
-
                 if not skip_grad_k_comp:
+                    T.copy(d_logits_qk, d_logits_qk_cast2)
+                    T.gemm(
+                        d_logits_qk_cast2,
+                        index_q_scaled_shared,
+                        d_index_k_frag,
+                        transpose_A=False,
+                        transpose_B=False,
+                        clear_accum=True,
+                    )
+
                     for i, j in T.Parallel(block_I, dim):
                         if (indices_shared[i] >= 0) & (indices_shared[i] < seq_len_comp):
                             T.atomic_add(dIndexKComp[i_b, indices_shared[i], j], d_index_k_frag[i, j])
