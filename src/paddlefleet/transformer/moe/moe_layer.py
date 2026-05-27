@@ -45,9 +45,8 @@ from .fused_a2a import configure_buffer
 from .fusion_layer_utils import (
     FusionMoePyLayer,
     HybridEPMoePyLayer,
-    run_sonic_moe,
 )
-from .moe_expert import GroupedMLPExpert, StandardMLPExpert
+from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss
@@ -324,12 +323,22 @@ class MoELayer(nn.Layer):
                 assert self.using_sonic_moe or self.moe_deep_gemm, (
                     "For fp8 grouped_gemm, either set using_sonic_moe=True or moe_deep_gemm=True."
                 )
-            self.grouped_gemm_experts = GroupedMLPExpert(
-                self.num_local_experts,
-                routed_expert_config,
-                self.moe_deep_gemm,
-                pg_collection,
-            )
+            if self.using_sonic_moe:
+                # TODO: replace grouped_gemm_experts with fusion_experts
+                self.grouped_gemm_experts = SonicMoEExpert(
+                    self.num_local_experts,
+                    self.num_experts_per_tok,
+                    routed_expert_config,
+                    pg_collection,
+                )
+            else:
+                # TODO: replace grouped_gemm_experts with fusion_experts
+                self.grouped_gemm_experts = GroupedMLPExpert(
+                    self.num_local_experts,
+                    routed_expert_config,
+                    self.moe_deep_gemm,
+                    pg_collection,
+                )
         else:
             self.experts = nn.LayerList([])
             for i in range(self.num_experts):
@@ -411,11 +420,11 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
-            if (
-                hasattr(self, "grouped_gemm_experts")
-                and self.grouped_gemm_experts is not None
-            ):
-                for p in self.grouped_gemm_experts.parameters():
+            fusion_experts = None
+            if hasattr(self, "grouped_gemm_experts"):
+                fusion_experts = self.grouped_gemm_experts
+            if fusion_experts is not None:
+                for p in fusion_experts.parameters():
                     p.is_moe_param = True
                     p.color = {
                         "color": "moe_expert",
@@ -677,14 +686,10 @@ class MoELayer(nn.Layer):
                 )
             elif self.using_sonic_moe:
                 use_fp8 = self.fp8 is not None
-                hidden_states = run_sonic_moe(
+                hidden_states = self.grouped_gemm_experts(
                     dispatched_hidden_states,
                     dispatched_indices,
                     dispatched_probs,
-                    self.num_experts_per_tok,
-                    self.num_experts_per_device,
-                    self.grouped_gemm_experts.weight1,
-                    self.grouped_gemm_experts.weight2,
                     use_fp8,
                 )
             else:
@@ -827,20 +832,6 @@ class MoELayer(nn.Layer):
                     dispatched_probs,
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     is_first_fwd=is_first_fwd,
-                )
-            elif self.using_sonic_moe:
-                use_fp8 = self.fp8 is not None
-                hidden_states = run_sonic_moe(
-                    dispatched_hidden_states,
-                    dispatched_indices.clone()
-                    if is_first_fwd
-                    else dispatched_indices,
-                    dispatched_probs,
-                    self.num_experts_per_tok,
-                    self.num_experts_per_device,
-                    self.grouped_gemm_experts.weight1,
-                    self.grouped_gemm_experts.weight2,
-                    use_fp8,
                 )
             else:
                 hidden_states = FusionMoePyLayer.apply(
@@ -1110,14 +1101,10 @@ class MoELayer(nn.Layer):
 
         if self.using_sonic_moe:
             use_fp8 = self.fp8 is not None
-            final_hidden_states = run_sonic_moe(
+            final_hidden_states = self.grouped_gemm_experts(
                 hidden_states,
                 topk_indices,
                 topk_weights,
-                self.num_experts_per_tok,
-                self.num_experts_per_device,
-                self.grouped_gemm_experts.weight1,
-                self.grouped_gemm_experts.weight2,
                 use_fp8,
             )
             return final_hidden_states.cast(hidden_states.dtype)
