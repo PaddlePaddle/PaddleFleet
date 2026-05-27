@@ -1038,7 +1038,7 @@ class MoELayer(nn.Layer):
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
 
-        if self.training and self.router_aux_loss_coef:
+        if self.training and self.router_aux_loss_coef and aux_loss is not None:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(output, aux_loss)
 
