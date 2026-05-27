@@ -337,12 +337,14 @@ class DotProductAttention(FleetLayer):
             if use_cache and past_key_values is not None:
                 key, value = past_key_values.update(key, value, layer_idx)
                 # During prefill (query_len > 1), is_causal=True handles causal masking.
-                # We still need attention_mask to prevent attending to padding tokens.
-                # During decode (query_len == 1), no causal mask needed.
+                # During decode (query_len == 1), no causal mask needed; and KV length
+                # = history + 1, so the original prefill attention_mask no longer matches
+                # the extended KV length. Skip the mask in that case.
                 is_causal = query.shape[1] > 1
-                # When KV cache is used, key/value include history and may have different
-                # seq length than attention_mask. In that case, skip using attention_mask.
-                attn_mask_kv = attention_mask
+                if query.shape[1] == 1:
+                    attn_mask_kv = None
+                else:
+                    attn_mask_kv = attention_mask
             else:
                 is_causal = True
                 attn_mask_kv = attention_mask

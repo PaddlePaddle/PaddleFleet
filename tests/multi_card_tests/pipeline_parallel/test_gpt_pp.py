@@ -228,8 +228,7 @@ class TestPP(unittest.TestCase):
         pp.pprint(rst)
 
         if judge_machine_type() == "H":
-            # TODO: update expected MD5 after position_ids fix
-            print(f"[SKIP] loss MD5: {overlap_loss._md5sum()}")
+            assert overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
             if paddle.distributed.get_rank() == 0:
                 for name, p in overlap_gpt_model.named_parameters():
                     print(f"  {name}: {p.grad._md5sum()}")

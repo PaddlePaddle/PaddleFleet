@@ -241,7 +241,7 @@ class TestPP(unittest.TestCase):
 
         if judge_machine_type() == "H":
             actual_md5 = overlap_loss._md5sum()
-            expected_md5 = "493ecb9c52dc36c42378d550ff1f487b"
+            expected_md5 = "e5fdb6c3bc189ea3e4f2235f0e73353d"
             print(
                 f"PP loss MD5 - Actual: {actual_md5}, Expected: {expected_md5}"
             )

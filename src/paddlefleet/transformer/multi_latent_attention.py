@@ -1092,7 +1092,9 @@ class MLASelfAttention(MultiLatentAttention):
                         cu_seqlens=cu_seqlens_kv,
                         mscale=mscale,
                         cp_group=self.pg_collection.cp,
-                        sp_group=getattr(self.pg_collection, "sp", None),
+                        sp_group=self.pg_collection.tp
+                        if self.config.sequence_parallel
+                        else None,
                     )
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]

@@ -137,8 +137,10 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
         loss.backward()
 
     print(f"actual loss: {loss.item()}")
-    # TODO: update loss_baseline after position_ids fix
-    print(f"[SKIP] loss baseline check: {loss.item()}")
+    loss_baseline = 7.235002040863037
+    np.testing.assert_allclose(
+        np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
+    )
 
 
 if __name__ == "__main__":
