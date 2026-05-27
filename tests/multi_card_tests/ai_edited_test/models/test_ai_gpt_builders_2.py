@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import functools
-import os
-import sys
 import unittest
 
 import numpy as np
@@ -22,15 +20,6 @@ import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
 from paddle.distributed.fleet import distributed_model
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
 
 import paddlefleet
 from paddlefleet.gpt_builders import gpt_builder
