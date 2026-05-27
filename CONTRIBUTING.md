@@ -36,11 +36,6 @@ PaddleFleet 现在使用 uv workspace 方式管理项目，请在 PaddleFleet �
 - **编包**：将当前代码构建成 `.whl` 安装包，适合发布、部署，或在其他环境中安装验证。
 - **开发模式（editable）**：将源码目录以可编辑方式安装到当前 Python 环境中，适合本地开发调试。Python 代码修改后通常无需重新安装；如果修改了 C++ 自定义算子，则需要重新编译或重新安装对应子包。
 
-| 需求 | 编包（产出 `.whl`） | 开发模式（editable） |
-| --- | --- | --- |
-| 只编根包（`paddlefleet`），纯 Python 包 | `uv build --wheel -vv` | `uv pip install -e . -vv` |
-| 只编子包（`paddlefleet_ops`），C++ 包 | `uv build --package paddlefleet-ops --wheel -vv --no-build-isolation` | 系统环境：`uv pip install -e packages/paddlefleet_ops -vv --no-build-isolation --system`<br>虚拟环境：先安装 `paddlepaddle-gpu`，再执行 `uv pip install -e packages/paddlefleet_ops -vv --no-build-isolation` |
-
 #### 编包
 
 ```bash
