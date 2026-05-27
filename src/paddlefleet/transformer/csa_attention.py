@@ -415,6 +415,9 @@ def _should_use_tilelang_attention(config: TransformerConfig, compress_ratio: in
     """
     if getattr(config, "dsv4_tilelang_backend", None) not in {"attention_paddle_compat"}:
         return False
+    enable_attention = getattr(config, "dsv4_tilelang_enable_attention", None)
+    if enable_attention is False:
+        return False
     if training and not getattr(config, "dsv4_tilelang_enable_backward", False):
         return False
     if getattr(config, "csa_dense_mode", False):
@@ -1120,32 +1123,32 @@ class CompressedSparseAttention(FleetLayer):
                     x_det.stop_gradient = False
                     qr_det.stop_gradient = False
 
-                # Resolve TileLang switches and per-phase topk_effective.
+                # Resolve TileLang backend and per-phase topk_effective.
                 # Phase 2 (dsa_indexer_use_sparse_loss=False) uses
                 # topk_effective=n_compressed so that the selected set covers
                 # the full compressed candidate range; Phase 3
                 # (dsa_indexer_use_sparse_loss=True) uses
                 # topk_effective=min(index_topk, n_compressed) and keeps the
-                # existing selected-topk semantics. The new switches only
-                # gate which kernel produces the indices, they do not change
+                # existing selected-topk semantics. The TileLang backend only
+                # gates which kernel produces the indices, it does not change
                 # phase semantics (csa_dense_mode / dsa_indexer_use_sparse_loss
                 # / dsa_indexer_loss_coeff still own that).
-                use_tilelang_indexer = bool(
-                    getattr(
-                        self.config, "dsv4_tilelang_enable_csa_indexer", False
+                use_tilelang_indexer = (
+                    getattr(self.config, "dsv4_tilelang_backend", None)
+                    == "attention_paddle_compat"
+                    and getattr(
+                        self.config,
+                        "dsv4_tilelang_enable_csa_indexer",
+                        None,
                     )
+                    is not False
                 )
                 enable_tilelang_bwd = bool(
-                    getattr(
-                        self.config,
-                        "dsv4_tilelang_csa_indexer_enable_backward",
-                        False,
-                    )
+                    getattr(self.config, "dsv4_tilelang_enable_backward", False)
                 )
                 # The fused TileLang indexer-loss path is only active during
-                # training and only when both the forward kernel and the
-                # backward kernel switches are enabled. Otherwise we fall
-                # back to:
+                # training and only when backend/indexer and backward are enabled.
+                # Otherwise we fall back to:
                 #   * TileLang forward-only override (no_grad TileLang fwd +
                 #     Paddle FusedDSAIndexerLoss backward), or
                 #   * Pure Paddle reference.

@@ -767,24 +767,23 @@ class TransformerConfig(ModelParallelConfig):
     dsv4_tilelang_enable_backward: bool = False
     """Enable DSv4 TileLang backward path. Disabled until Paddle integration is validated."""
 
-    dsv4_tilelang_enable_csa_indexer: bool = False
-    """Enable TileLang kernels for the CSA Indexer only.
+    dsv4_tilelang_enable_attention: bool | None = None
+    """Optional per-component override for TileLang sparse MLA attention.
 
-    This switch controls whether ratio==4 CSA may use the fused compressed
-    Indexer top-k kernel. It does not change the training phase semantics;
-    csa_dense_mode, dsa_indexer_use_sparse_loss, and dsa_indexer_loss_coeff
-    still decide dense mode, sparse/full loss scope, and loss weight.
+    None follows dsv4_tilelang_backend: enabled when backend is
+    'attention_paddle_compat', disabled when backend is None. False disables
+    only the sparse MLA attention TileLang path while keeping other TileLang
+    components available for ablation.
     """
 
-    dsv4_tilelang_csa_indexer_enable_backward: bool = False
-    """Enable TileLang backward for the CSA Indexer loss path.
+    dsv4_tilelang_enable_csa_indexer: bool | None = None
+    """Optional per-component override for TileLang CSA Indexer.
 
-    This switch only selects the TileLang CSA Indexer gradient kernel when the
-    TileLang Indexer path is active. It does not replace the existing phase
-    controls csa_dense_mode, dsa_indexer_use_sparse_loss, or
-    dsa_indexer_loss_coeff.
+    None follows dsv4_tilelang_backend: enabled when backend is
+    'attention_paddle_compat', disabled when backend is None. False disables
+    only the CSA Indexer TileLang path while keeping other TileLang components
+    available for ablation.
     """
-
 
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
@@ -827,8 +826,8 @@ class TransformerConfig(ModelParallelConfig):
         "dsv4_tilelang_backend": "dsv4_tilelang_backend",
         "dsv4_tilelang_topk_pad_to": "dsv4_tilelang_topk_pad_to",
         "dsv4_tilelang_enable_backward": "dsv4_tilelang_enable_backward",
+        "dsv4_tilelang_enable_attention": "dsv4_tilelang_enable_attention",
         "dsv4_tilelang_enable_csa_indexer": "dsv4_tilelang_enable_csa_indexer",
-        "dsv4_tilelang_csa_indexer_enable_backward": "dsv4_tilelang_csa_indexer_enable_backward",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -1066,13 +1065,15 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "dsv4_tilelang_enable_backward requires dsv4_tilelang_backend='attention_paddle_compat'."
                 )
-            if (
-                self.dsv4_tilelang_csa_indexer_enable_backward
-                and not self.dsv4_tilelang_enable_csa_indexer
-            ):
-                raise ValueError(
-                    "dsv4_tilelang_csa_indexer_enable_backward requires dsv4_tilelang_enable_csa_indexer=True."
-                )
+            if self.dsv4_tilelang_backend is None:
+                if self.dsv4_tilelang_enable_attention:
+                    raise ValueError(
+                        "dsv4_tilelang_enable_attention=True requires dsv4_tilelang_backend='attention_paddle_compat'."
+                    )
+                if self.dsv4_tilelang_enable_csa_indexer:
+                    raise ValueError(
+                        "dsv4_tilelang_enable_csa_indexer=True requires dsv4_tilelang_backend='attention_paddle_compat'."
+                    )
 
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:
