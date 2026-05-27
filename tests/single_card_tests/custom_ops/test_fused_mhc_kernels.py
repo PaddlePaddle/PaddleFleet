@@ -549,10 +549,10 @@ class TestFusedProjRms(unittest.TestCase):
         grad_proj = _rand(M, N)
         grad_r = _rand(M, 1)
 
-        # -- fused (expects weight [N, K]) --
+        # -- fused (expects weight [K, N]) --
         xf = x_data.clone()
         xf.stop_gradient = False
-        wf = w_data.clone()
+        wf = w_data.t().clone()
         wf.stop_gradient = False
         proj_f, r_f = fused_proj_rms(xf, wf, eps)
         (proj_f * grad_proj + r_f * grad_r).sum().backward()
@@ -582,7 +582,7 @@ class TestFusedProjRms(unittest.TestCase):
         )
         _assert_close(
             wf.grad,
-            wr.grad,
+            wr.grad.t(),
             TF32_BWD_ATOL,
             TF32_BWD_RTOL,
             "fused proj_rms bwd weight",
@@ -591,7 +591,10 @@ class TestFusedProjRms(unittest.TestCase):
             xf.grad, xr.grad, COSINE_SIM_THRESH, "fused proj_rms grad_x cosine"
         )
         _assert_cosine_similar(
-            wf.grad, wr.grad, COSINE_SIM_THRESH, "fused proj_rms grad_w cosine"
+            wf.grad,
+            wr.grad.t(),
+            COSINE_SIM_THRESH,
+            "fused proj_rms grad_w cosine",
         )
 
 
@@ -724,7 +727,7 @@ class TestEndToEndFused(unittest.TestCase):
         def _run_fused():
             hs = hs_data.clone()
             hs.stop_gradient = False
-            w = w_data.clone()
+            w = w_data.t().clone()
             w.stop_gradient = False
 
             x_2d = hs.reshape([s * b, n * C])
@@ -844,7 +847,7 @@ class TestFusedMHCErrorHandling(unittest.TestCase):
                 None,
             )
         with self.assertRaises(RuntimeError):
-            fused_proj_rms(paddle.randn([32, 128]), paddle.randn([16, 128]))
+            fused_proj_rms(paddle.randn([32, 128]), paddle.randn([128, 16]))
 
 
 if __name__ == "__main__":
