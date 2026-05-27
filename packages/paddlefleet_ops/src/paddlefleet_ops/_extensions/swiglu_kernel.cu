@@ -32,13 +32,6 @@ __device__ __forceinline__ float precise_sigmoid(T x) {
 
 constexpr int kSwiGLUBackBlockSize = 256;
 
-constexpr int64_t kSwiGLUBackMaxRowGridSize = 65535;
-
-inline int GetSwiGLURowGridSize(int64_t rows) {
-  return static_cast<int>(
-      rows < kSwiGLUBackMaxRowGridSize ? rows : kSwiGLUBackMaxRowGridSize);
-}
-
 inline void CheckSwiGLUBackShape(const paddle::Tensor& g,
                                  const paddle::Tensor& y,
                                  int64_t input_dim,

@@ -37,13 +37,6 @@ __device__ __forceinline__ float precise_sigmoid(T x) {
 
 constexpr int kFusedSwiGLUScaleBlockSize = 256;
 
-constexpr int64_t kFusedSwiGLUMaxRowGridSize = 65535;
-
-inline int GetSwiGLURowGridSize(int64_t rows) {
-  return static_cast<int>(
-      rows < kFusedSwiGLUMaxRowGridSize ? rows : kFusedSwiGLUMaxRowGridSize);
-}
-
 // ==========================================================================
 // Optimized Forward Kernel
 // ==========================================================================
