@@ -515,15 +515,10 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
             target,
         ) = ctx.saved_tensor()
 
-        # Match the forward KL smoothing exactly:
-        # loss = target * (log(target + eps) - log(prob + eps)).
-        # First differentiate w.r.t. probabilities, then apply the softmax
-        # Jacobian for the selected logits.
-        eps = 1e-10
+        # Treat the forward eps as numerical protection only and use the
+        # fused softmax + KL gradient w.r.t. the selected logits.
         scale = ctx.loss_coeff / max(ctx.num_rows, 1.0)
-        grad_probs = -target / (topk_probs + eps) * scale
-        sum_grad = (grad_probs * topk_probs).sum(axis=-1, keepdim=True)
-        grad_index_scores = topk_probs * (grad_probs - sum_grad)
+        grad_index_scores = (topk_probs - target) * scale
         if grad_loss is not None:
             grad_index_scores = grad_index_scores * grad_loss
 
