@@ -373,10 +373,13 @@ def csa_indexer_topk_fwd_interface(
     topk_indices = paddle.empty([batch, seq_len, padded_topk], dtype="int32")
     topk_scores = paddle.empty([batch, seq_len, padded_topk], dtype="float32")
 
+    if weights.dtype != paddle.float32:
+        weights = weights.cast("float32").contiguous()
+
     kernel(
         index_q,
         index_k_comp,
-        weights.cast("float32").contiguous(),
+        weights,
         topk_indices,
         topk_scores,
     )

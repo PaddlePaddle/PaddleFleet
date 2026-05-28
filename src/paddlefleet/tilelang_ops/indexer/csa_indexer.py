@@ -12,60 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import hashlib
-import json
-import os
-
 import paddle
 
 DEFAULT_INDEXER_BLOCK = 32
-_DIGEST_COUNTERS = {}
-
-
-def _digest_enabled():
-    return os.getenv("DSV4_TILELANG_DIGEST", "0").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def _digest_limit():
-    try:
-        return int(os.getenv("DSV4_TILELANG_DIGEST_LIMIT", "40"))
-    except ValueError:
-        return 40
-
-
-def _tensor_digest(name, tensor):
-    tensor_f32 = tensor.detach().cast("float32").cpu()
-    array = tensor_f32.numpy()
-    return {
-        "name": name,
-        "shape": list(tensor.shape),
-        "dtype": str(tensor.dtype),
-        "sha256": hashlib.sha256(array.tobytes()).hexdigest(),
-        "sum_f32": float(array.sum()),
-        "max_abs_f32": float(abs(array).max()) if array.size else 0.0,
-    }
-
-
-def _digest_log(op, **tensors):
-    if not _digest_enabled():
-        return
-    count = _DIGEST_COUNTERS.get(op, 0)
-    if count >= _digest_limit():
-        return
-    _DIGEST_COUNTERS[op] = count + 1
-    payload = {
-        "op": op,
-        "call": count,
-        "tensors": [
-            _tensor_digest(name, tensor) for name, tensor in tensors.items()
-        ],
-    }
-    print("[TileLangDigest] " + json.dumps(payload, sort_keys=True), flush=True)
 
 
 def _get_csa_indexer_topk_fwd_interface():
@@ -86,18 +35,6 @@ def _get_csa_attn_target_reducesum_interface():
     return csa_attn_target_reducesum_interface
 
 
-def _contiguous(tensor):
-    return tensor.contiguous()
-
-
-def _cast_int32(tensor):
-    return tensor.cast("int32") if tensor.dtype != paddle.int32 else tensor
-
-
-def _cast_float32(tensor):
-    return tensor.cast("float32") if tensor.dtype != paddle.float32 else tensor
-
-
 def _validate_indexer_inputs(index_q, index_k_comp, weights):
     if not isinstance(index_q, paddle.Tensor):
         raise TypeError(
@@ -113,27 +50,27 @@ def _validate_indexer_inputs(index_q, index_k_comp, weights):
         )
     if len(index_q.shape) != 4:
         raise ValueError(
-            f"index_q must have shape [B, S, H_i, D_i], got {tuple(index_q.shape)}"
+            f"index_q must have shape [B, S, H_i, D_i], got {index_q.shape}"
         )
     if len(index_k_comp.shape) != 3:
         raise ValueError(
-            f"index_k_comp must have shape [B, S_comp, D_i], got {tuple(index_k_comp.shape)}"
+            f"index_k_comp must have shape [B, S_comp, D_i], got {index_k_comp.shape}"
         )
     if len(weights.shape) != 3:
         raise ValueError(
-            f"weights must have shape [B, S, H_i], got {tuple(weights.shape)}"
+            f"weights must have shape [B, S, H_i], got {weights.shape}"
         )
 
-    batch, seq_len, heads, dim = tuple(index_q.shape)
-    batch_k, _, dim_k = tuple(index_k_comp.shape)
-    batch_w, seq_len_w, heads_w = tuple(weights.shape)
+    batch, seq_len, heads, dim = index_q.shape
+    batch_k, _, dim_k = index_k_comp.shape
+    batch_w, seq_len_w, heads_w = weights.shape
     if batch != batch_k or batch != batch_w:
         raise ValueError(
-            f"batch mismatch: index_q={tuple(index_q.shape)}, index_k_comp={tuple(index_k_comp.shape)}, weights={tuple(weights.shape)}"
+            f"batch mismatch: index_q={index_q.shape}, index_k_comp={index_k_comp.shape}, weights={weights.shape}"
         )
     if seq_len != seq_len_w or heads != heads_w or dim != dim_k:
         raise ValueError(
-            f"shape mismatch: index_q={tuple(index_q.shape)}, index_k_comp={tuple(index_k_comp.shape)}, weights={tuple(weights.shape)}"
+            f"shape mismatch: index_q={index_q.shape}, index_k_comp={index_k_comp.shape}, weights={weights.shape}"
         )
 
 
@@ -148,23 +85,21 @@ def _validate_topk_and_grad(index_q, topk_indices, grad_scores):
         )
     if len(topk_indices.shape) != 3:
         raise ValueError(
-            f"topk_indices must have shape [B, S, topk], got {tuple(topk_indices.shape)}"
+            f"topk_indices must have shape [B, S, topk], got {topk_indices.shape}"
         )
     if len(grad_scores.shape) != 3:
         raise ValueError(
-            f"grad_scores must have shape [B, S, topk], got {tuple(grad_scores.shape)}"
+            f"grad_scores must have shape [B, S, topk], got {grad_scores.shape}"
         )
-    batch, seq_len, _, _ = tuple(index_q.shape)
-    topk_shape = tuple(topk_indices.shape)
-    grad_shape = tuple(grad_scores.shape)
-    if topk_shape != grad_shape:
+    batch, seq_len, _, _ = index_q.shape
+    if topk_indices.shape != grad_scores.shape:
         raise ValueError(
-            f"topk_indices shape {topk_shape} must match grad_scores shape {grad_shape}"
+            f"topk_indices shape {topk_indices.shape} must match grad_scores shape {grad_scores.shape}"
         )
-    topk_batch, topk_seq_len, topk_last_dim = topk_shape
+    topk_batch, topk_seq_len, topk_last_dim = topk_indices.shape
     if topk_batch != batch or topk_seq_len != seq_len:
         raise ValueError(
-            f"topk_indices shape {topk_shape} is incompatible with index_q shape {tuple(index_q.shape)}"
+            f"topk_indices shape {topk_indices.shape} is incompatible with index_q shape {index_q.shape}"
         )
     if topk_last_dim <= 0:
         raise ValueError("topk_indices last dimension must be positive")
@@ -176,11 +111,12 @@ def _prepare_forward_inputs(index_q, index_k_comp, weights, topk_effective):
         raise ValueError(
             f"topk_effective must be positive, got {topk_effective}"
         )
-    batch, seq_len = tuple(index_q.shape)[:2]
+    if weights.dtype != paddle.float32:
+        weights = weights.cast("float32")
     return (
-        _contiguous(index_q),
-        _contiguous(index_k_comp),
-        _contiguous(_cast_float32(weights)),
+        index_q.contiguous(),
+        index_k_comp.contiguous(),
+        weights.contiguous(),
         int(topk_effective),
     )
 
@@ -190,17 +126,23 @@ def _prepare_backward_inputs(
 ):
     _validate_indexer_inputs(index_q, index_k_comp, weights)
     _validate_topk_and_grad(index_q, topk_indices, grad_scores)
-    topk_indices = _contiguous(_cast_int32(topk_indices))
-    grad_scores = _contiguous(_cast_float32(grad_scores))
+    if topk_indices.dtype != paddle.int32:
+        topk_indices = topk_indices.cast("int32")
+    if grad_scores.dtype != paddle.float32:
+        grad_scores = grad_scores.cast("float32")
+    if weights.dtype != paddle.float32:
+        weights = weights.cast("float32")
+
+    topk_indices = topk_indices.contiguous()
     grad_scores = paddle.where(
         topk_indices >= 0, grad_scores, paddle.zeros_like(grad_scores)
     )
     return (
-        _contiguous(index_q),
-        _contiguous(_cast_float32(weights)),
-        _contiguous(index_k_comp),
+        index_q.contiguous(),
+        weights.contiguous(),
+        index_k_comp.contiguous(),
         topk_indices,
-        _contiguous(grad_scores),
+        grad_scores.contiguous(),
     )
 
 
@@ -249,14 +191,14 @@ def csa_indexer_topk_fwd(
         num_stages=int(num_stages),
         num_threads=int(num_threads),
     )
-    batch, seq_len = tuple(index_q.shape)[:2]
-    expected_shape = (batch, seq_len, topk_effective)
+    batch, seq_len = index_q.shape[:2]
+    expected_shape = [batch, seq_len, topk_effective]
     if (
-        tuple(topk_indices.shape) != expected_shape
-        or tuple(topk_scores.shape) != expected_shape
+        topk_indices.shape != expected_shape
+        or topk_scores.shape != expected_shape
     ):
         raise RuntimeError(
-            f"unexpected CSA indexer forward output shapes: indices={tuple(topk_indices.shape)}, scores={tuple(topk_scores.shape)}, expected={expected_shape}"
+            f"unexpected CSA indexer forward output shapes: indices={topk_indices.shape}, scores={topk_scores.shape}, expected={expected_shape}"
         )
     if not isinstance(topk_indices, paddle.Tensor) or not isinstance(
         topk_scores, paddle.Tensor
@@ -297,48 +239,50 @@ def csa_attn_target_reducesum(
         )
     if len(query_mla.shape) != 4:
         raise ValueError(
-            f"query_mla must have shape [B, S, H, D], got {tuple(query_mla.shape)}"
+            f"query_mla must have shape [B, S, H, D], got {query_mla.shape}"
         )
     if len(key_comp_mla.shape) != 3:
         raise ValueError(
-            f"key_comp_mla must have shape [B, S_comp, D], got {tuple(key_comp_mla.shape)}"
+            f"key_comp_mla must have shape [B, S_comp, D], got {key_comp_mla.shape}"
         )
     if len(topk_indices.shape) != 3:
         raise ValueError(
-            f"topk_indices must have shape [B, S, topk], got {tuple(topk_indices.shape)}"
+            f"topk_indices must have shape [B, S, topk], got {topk_indices.shape}"
         )
-    query_shape = tuple(query_mla.shape)
-    key_shape = tuple(key_comp_mla.shape)
-    topk_shape = tuple(topk_indices.shape)
-    if query_shape[0] != key_shape[0] or query_shape[0] != topk_shape[0]:
+    if (
+        query_mla.shape[0] != key_comp_mla.shape[0]
+        or query_mla.shape[0] != topk_indices.shape[0]
+    ):
         raise ValueError(
-            f"batch mismatch: query_mla={tuple(query_mla.shape)}, key_comp_mla={tuple(key_comp_mla.shape)}, topk_indices={tuple(topk_indices.shape)}"
+            f"batch mismatch: query_mla={query_mla.shape}, key_comp_mla={key_comp_mla.shape}, topk_indices={topk_indices.shape}"
         )
-    if query_shape[1] != topk_shape[1]:
+    if query_mla.shape[1] != topk_indices.shape[1]:
         raise ValueError(
-            f"sequence mismatch: query_mla={tuple(query_mla.shape)}, topk_indices={tuple(topk_indices.shape)}"
+            f"sequence mismatch: query_mla={query_mla.shape}, topk_indices={topk_indices.shape}"
         )
-    if query_shape[3] != key_shape[2]:
+    if query_mla.shape[3] != key_comp_mla.shape[2]:
         raise ValueError(
-            f"dim mismatch: query_mla={tuple(query_mla.shape)}, key_comp_mla={tuple(key_comp_mla.shape)}"
+            f"dim mismatch: query_mla={query_mla.shape}, key_comp_mla={key_comp_mla.shape}"
         )
-    topk_indices = _contiguous(_cast_int32(topk_indices))
+    if topk_indices.dtype != paddle.int32:
+        topk_indices = topk_indices.cast("int32")
+    topk_indices = topk_indices.contiguous()
     csa_attn_target_reducesum_interface = (
         _get_csa_attn_target_reducesum_interface()
     )
     target = csa_attn_target_reducesum_interface(
-        _contiguous(query_mla),
-        _contiguous(key_comp_mla),
+        query_mla.contiguous(),
+        key_comp_mla.contiguous(),
         topk_indices,
         float(softmax_scale),
         block_I=int(block_I),
         num_stages=int(num_stages),
         num_threads=int(num_threads),
     )
-    expected_shape = tuple(topk_indices.shape)
-    if tuple(target.shape) != expected_shape:
+    expected_shape = topk_indices.shape
+    if target.shape != expected_shape:
         raise RuntimeError(
-            f"unexpected CSA attention target shape: target={tuple(target.shape)}, expected={expected_shape}"
+            f"unexpected CSA attention target shape: target={target.shape}, expected={expected_shape}"
         )
     if not isinstance(target, paddle.Tensor):
         raise RuntimeError(
@@ -398,13 +342,13 @@ def csa_indexer_bwd(
         num_threads=int(num_threads),
     )
     if (
-        tuple(grad_q.shape) != tuple(index_q.shape)
-        or tuple(grad_weights.shape) != tuple(weights.shape)
-        or tuple(grad_k_comp.shape) != tuple(index_k_comp.shape)
+        grad_q.shape != index_q.shape
+        or grad_weights.shape != weights.shape
+        or grad_k_comp.shape != index_k_comp.shape
     ):
         raise RuntimeError(
             "unexpected CSA indexer backward output shapes: "
-            f"grad_q={tuple(grad_q.shape)}, grad_weights={tuple(grad_weights.shape)}, grad_k_comp={tuple(grad_k_comp.shape)}"
+            f"grad_q={grad_q.shape}, grad_weights={grad_weights.shape}, grad_k_comp={grad_k_comp.shape}"
         )
     if (
         not isinstance(grad_q, paddle.Tensor)

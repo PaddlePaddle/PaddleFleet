@@ -382,12 +382,17 @@ def csa_indexer_bwd_interface(
     grad_weights = paddle.empty_like(weights, dtype="float32")
     grad_k_comp = paddle.zeros_like(index_k_comp, dtype="float32")
 
+    if weights.dtype != paddle.float32:
+        weights = weights.cast("float32").contiguous()
+    if grad_scores.dtype != paddle.float32:
+        grad_scores = grad_scores.cast("float32").contiguous()
+
     kernel(
         index_q,
         index_k_comp,
-        weights.cast("float32").contiguous(),
+        weights,
         topk_indices,
-        grad_scores.cast("float32").contiguous(),
+        grad_scores,
         grad_q,
         grad_weights,
         grad_k_comp,
