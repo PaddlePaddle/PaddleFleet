@@ -1,0 +1,67 @@
+name: Check Forbidden Keyword
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  check-forbidden-keyword:
+    name: Check Forbidden keyword
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for forbidden keyword in PR
+        uses: actions/github-script@v7
+        env:
+          FORBIDDEN_KEYWORD: ${{ secrets.FORBIDDEN_KEYWORD }}
+        with:
+          script: |
+            const keyword = process.env.FORBIDDEN_KEYWORD;
+            if (!keyword) {
+              core.info('FORBIDDEN_KEYWORD is not set, skipping check.');
+              return;
+            }
+
+            const regex = new RegExp(keyword, 'i');
+            const errors = [];
+            const pr = context.payload.pull_request;
+
+            // Check PR title
+            if (regex.test(pr.title)) {
+              errors.push(`PR title contains forbidden keyword: ${pr.title}`);
+            }
+
+            // Check PR body
+            if (pr.body && regex.test(pr.body)) {
+              errors.push(`PR description contains forbidden keyword`);
+            }
+
+            // Check changed files content via API
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            for (const file of files) {
+              if (file.status === 'removed') continue;
+              // Check filename
+              if (regex.test(file.filename)) {
+                errors.push(`File name '${file.filename}' contains forbidden keyword`);
+              }
+              // Check patch (diff content)
+              if (file.patch && regex.test(file.patch)) {
+                errors.push(`File '${file.filename}' contains forbidden keyword in changes`);
+              }
+            }
+
+            if (errors.length > 0) {
+              core.setFailed(
+                '--------\n' +
+                errors.map(e => `ERROR: ${e}`).join('\n') +
+                '\n--------\n' +
+                'PR contains forbidden keyword (case-insensitive).\n' +
+                'Please remove all occurrences before merging.'
+              );
+            } else {
+              core.info('No forbidden keywords found.');
+            }
