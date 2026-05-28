@@ -49,6 +49,97 @@ def _tilelang_dtype(tensor):
     )
 
 
+def _shape(tensor):
+    return tuple(tensor.shape)
+
+
+def _require_tensor(name, tensor):
+    if not isinstance(tensor, paddle.Tensor):
+        raise TypeError(f"{name} must be a paddle.Tensor, got {type(tensor)!r}")
+
+
+def _require_contiguous(name, tensor):
+    if not tensor.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
+
+
+def _validate_interface_inputs(
+    index_q,
+    weights,
+    index_k_comp,
+    topk_indices,
+    grad_scores,
+    block_I,
+    num_stages,
+):
+    for name, tensor in (
+        ("index_q", index_q),
+        ("weights", weights),
+        ("index_k_comp", index_k_comp),
+        ("topk_indices", topk_indices),
+        ("grad_scores", grad_scores),
+    ):
+        _require_tensor(name, tensor)
+        _require_contiguous(name, tensor)
+    if index_q.ndim != 4:
+        raise ValueError(
+            f"index_q must have shape [B, S, H_i, D_i], got {_shape(index_q)}"
+        )
+    if weights.ndim != 3:
+        raise ValueError(
+            f"weights must have shape [B, S, H_i], got {_shape(weights)}"
+        )
+    if index_k_comp.ndim != 3:
+        raise ValueError(
+            f"index_k_comp must have shape [B, S_comp, D_i], got {_shape(index_k_comp)}"
+        )
+    if topk_indices.ndim != 3:
+        raise ValueError(
+            f"topk_indices must have shape [B, S, topk], got {_shape(topk_indices)}"
+        )
+    if grad_scores.ndim != 3:
+        raise ValueError(
+            f"grad_scores must have shape [B, S, topk], got {_shape(grad_scores)}"
+        )
+
+    batch, seq_len, heads, dim = _shape(index_q)
+    batch_w, seq_len_w, heads_w = _shape(weights)
+    batch_k, _, dim_k = _shape(index_k_comp)
+    batch_i, seq_len_i, topk_effective = _shape(topk_indices)
+    batch_g, seq_len_g, topk_g = _shape(grad_scores)
+    if not (batch == batch_w == batch_k == batch_i == batch_g):
+        raise ValueError(
+            "batch mismatch: "
+            f"index_q={_shape(index_q)}, weights={_shape(weights)}, index_k_comp={_shape(index_k_comp)}, "
+            f"topk_indices={_shape(topk_indices)}, grad_scores={_shape(grad_scores)}"
+        )
+    if not (seq_len == seq_len_w == seq_len_i == seq_len_g):
+        raise ValueError(
+            "sequence mismatch: "
+            f"index_q={_shape(index_q)}, weights={_shape(weights)}, topk_indices={_shape(topk_indices)}, grad_scores={_shape(grad_scores)}"
+        )
+    if heads != heads_w:
+        raise ValueError(
+            f"heads mismatch: index_q={_shape(index_q)}, weights={_shape(weights)}"
+        )
+    if dim != dim_k:
+        raise ValueError(
+            f"dim mismatch: index_q={_shape(index_q)}, index_k_comp={_shape(index_k_comp)}"
+        )
+    if topk_effective != topk_g:
+        raise ValueError(
+            f"topk mismatch: topk_indices={_shape(topk_indices)}, grad_scores={_shape(grad_scores)}"
+        )
+    if heads > 64 or heads % 8 != 0:
+        raise ValueError(f"heads must be <= 64 and divisible by 8, got {heads}")
+    if topk_effective <= 0:
+        raise ValueError("topk_indices last dimension must be positive")
+    if int(block_I) <= 0:
+        raise ValueError(f"block_I must be positive, got {block_I}")
+    if int(num_stages) != 0:
+        raise ValueError(f"num_stages must be 0, got {num_stages}")
+
+
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
@@ -241,29 +332,19 @@ def csa_indexer_bwd_interface(
         grad_weights: [B, S, H_i] fp32.
         grad_k_comp: [B, S_comp, D_i] fp32.
     """
-    assert index_q.is_contiguous()
-    assert weights.is_contiguous()
-    assert index_k_comp.is_contiguous()
-    assert topk_indices.is_contiguous()
-    assert grad_scores.is_contiguous()
-    assert index_q.ndim == 4
-    assert weights.ndim == 3
-    assert index_k_comp.ndim == 3
-    assert topk_indices.ndim == 3
-    assert grad_scores.ndim == 3
+    _validate_interface_inputs(
+        index_q,
+        weights,
+        index_k_comp,
+        topk_indices,
+        grad_scores,
+        block_I,
+        num_stages,
+    )
 
     batch, seq_len, heads, dim = index_q.shape
-    batch_w, seq_len_w, heads_w = weights.shape
-    batch_k, seq_len_comp, dim_k = index_k_comp.shape
-    batch_i, seq_len_i, topk_effective = topk_indices.shape
-    batch_g, seq_len_g, topk_g = grad_scores.shape
-
-    assert batch == batch_w == batch_k == batch_i == batch_g
-    assert seq_len == seq_len_w == seq_len_i == seq_len_g
-    assert heads == heads_w
-    assert dim == dim_k
-    assert topk_effective == topk_g
-    assert topk_effective > 0
+    _, seq_len_comp, _ = index_k_comp.shape
+    topk_effective = topk_indices.shape[-1]
     padded_topk = 1 << (topk_effective - 1).bit_length()
     if padded_topk % block_I != 0:
         padded_topk = ((padded_topk + block_I - 1) // block_I) * block_I

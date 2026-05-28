@@ -254,6 +254,71 @@ def _tilelang_dtype(tensor):
     )
 
 
+def _shape(tensor):
+    return tuple(tensor.shape)
+
+
+def _require_tensor(name, tensor):
+    if not isinstance(tensor, paddle.Tensor):
+        raise TypeError(f"{name} must be a paddle.Tensor, got {type(tensor)!r}")
+
+
+def _require_contiguous(name, tensor):
+    if not tensor.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
+
+
+def _validate_interface_inputs(
+    index_q,
+    index_k_comp,
+    weights,
+    topk_effective,
+    block_K,
+    num_stages,
+):
+    for name, tensor in (
+        ("index_q", index_q),
+        ("index_k_comp", index_k_comp),
+        ("weights", weights),
+    ):
+        _require_tensor(name, tensor)
+        _require_contiguous(name, tensor)
+    if index_q.ndim != 4:
+        raise ValueError(
+            f"index_q must have shape [B, S, H_i, D_i], got {_shape(index_q)}"
+        )
+    if index_k_comp.ndim != 3:
+        raise ValueError(
+            f"index_k_comp must have shape [B, S_comp, D_i], got {_shape(index_k_comp)}"
+        )
+    if weights.ndim != 3:
+        raise ValueError(
+            f"weights must have shape [B, S, H_i], got {_shape(weights)}"
+        )
+
+    batch, seq_len, heads, dim = _shape(index_q)
+    batch_k, _, dim_k = _shape(index_k_comp)
+    batch_w, seq_len_w, heads_w = _shape(weights)
+    if batch != batch_k or batch != batch_w:
+        raise ValueError(
+            f"batch mismatch: index_q={_shape(index_q)}, index_k_comp={_shape(index_k_comp)}, weights={_shape(weights)}"
+        )
+    if seq_len != seq_len_w or heads != heads_w or dim != dim_k:
+        raise ValueError(
+            f"shape mismatch: index_q={_shape(index_q)}, index_k_comp={_shape(index_k_comp)}, weights={_shape(weights)}"
+        )
+    if heads > 64 or heads % 8 != 0:
+        raise ValueError(f"heads must be <= 64 and divisible by 8, got {heads}")
+    if int(topk_effective) <= 0:
+        raise ValueError(
+            f"topk_effective must be positive, got {topk_effective}"
+        )
+    if int(block_K) <= 0:
+        raise ValueError(f"block_K must be positive, got {block_K}")
+    if int(num_stages) != 0:
+        raise ValueError(f"num_stages must be 0, got {num_stages}")
+
+
 def csa_indexer_topk_fwd_interface(
     index_q,
     index_k_comp,
@@ -279,21 +344,16 @@ def csa_indexer_topk_fwd_interface(
         topk_indices: [B, S, topk_effective] int32, invalid slots are -1.
         topk_scores: [B, S, topk_effective] fp32 top-k softmax probabilities.
     """
-    assert index_q.is_contiguous()
-    assert index_k_comp.is_contiguous()
-    assert weights.is_contiguous()
-    assert index_q.ndim == 4
-    assert index_k_comp.ndim == 3
-    assert weights.ndim == 3
+    _validate_interface_inputs(
+        index_q,
+        index_k_comp,
+        weights,
+        topk_effective,
+        block_K,
+        num_stages,
+    )
 
     batch, seq_len, heads, dim = index_q.shape
-    batch_k, seq_len_comp, dim_k = index_k_comp.shape
-    batch_w, seq_len_w, heads_w = weights.shape
-    assert batch == batch_k == batch_w
-    assert seq_len == seq_len_w
-    assert heads == heads_w
-    assert dim == dim_k
-    assert topk_effective > 0
     padded_topk = _next_power_of_2(topk_effective)
     if padded_topk % block_K != 0:
         padded_topk = ((padded_topk + block_K - 1) // block_K) * block_K

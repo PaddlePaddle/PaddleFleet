@@ -215,6 +215,50 @@ def _paddle_ref_csa_indexer_topk(q, k, weights, ratio, topk_effective):
 # =========================================================================
 
 
+class TestTileLangCSAIndexerInterfaceValidation(unittest.TestCase):
+    """Raw kernel interfaces should fail before TileLang JIT on bad inputs."""
+
+    def test_forward_rejects_shape_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_fwd import (
+            csa_indexer_topk_fwd_interface,
+        )
+
+        q = paddle.empty([1, 4, 8, 16], dtype="bfloat16")
+        k = paddle.empty([2, 1, 16], dtype="bfloat16")
+        w = paddle.empty([1, 4, 8], dtype="float32")
+
+        with self.assertRaisesRegex(ValueError, "batch mismatch"):
+            csa_indexer_topk_fwd_interface(q, k, w, ratio=4, topk_effective=1)
+
+    def test_backward_rejects_topk_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_bwd import (
+            csa_indexer_bwd_interface,
+        )
+
+        q = paddle.empty([1, 4, 8, 16], dtype="bfloat16")
+        k = paddle.empty([1, 1, 16], dtype="bfloat16")
+        w = paddle.empty([1, 4, 8], dtype="float32")
+        topk_indices = paddle.empty([1, 4, 2], dtype="int32")
+        grad_scores = paddle.empty([1, 4, 1], dtype="float32")
+
+        with self.assertRaisesRegex(ValueError, "topk mismatch"):
+            csa_indexer_bwd_interface(q, w, k, topk_indices, grad_scores)
+
+    def test_attn_target_rejects_non_power_of_two_dim(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            csa_attn_target_reducesum_interface,
+        )
+
+        query = paddle.empty([1, 4, 8, 24], dtype="bfloat16")
+        key = paddle.empty([1, 1, 24], dtype="bfloat16")
+        topk_indices = paddle.empty([1, 4, 1], dtype="int32")
+
+        with self.assertRaisesRegex(ValueError, "power of 2"):
+            csa_attn_target_reducesum_interface(
+                query, key, topk_indices, softmax_scale=1.0
+            )
+
+
 class TestTileLangCSAIndexerKernel(unittest.TestCase):
     """Correctness of raw TileLang kernel interfaces."""
 

@@ -36,6 +36,78 @@ def _tilelang_dtype(tensor):
     )
 
 
+def _shape(tensor):
+    return tuple(tensor.shape)
+
+
+def _require_tensor(name, tensor):
+    if not isinstance(tensor, paddle.Tensor):
+        raise TypeError(f"{name} must be a paddle.Tensor, got {type(tensor)!r}")
+
+
+def _require_contiguous(name, tensor):
+    if not tensor.is_contiguous():
+        raise ValueError(f"{name} must be contiguous")
+
+
+def _validate_interface_inputs(
+    query,
+    key_comp,
+    topk_indices,
+    block_I,
+    num_stages,
+):
+    for name, tensor in (
+        ("query", query),
+        ("key_comp", key_comp),
+        ("topk_indices", topk_indices),
+    ):
+        _require_tensor(name, tensor)
+        _require_contiguous(name, tensor)
+    if query.ndim != 4:
+        raise ValueError(
+            f"query must have shape [B, S, H, D], got {_shape(query)}"
+        )
+    if key_comp.ndim != 3:
+        raise ValueError(
+            f"key_comp must have shape [B, S_comp, D], got {_shape(key_comp)}"
+        )
+    if topk_indices.ndim != 3:
+        raise ValueError(
+            f"topk_indices must have shape [B, S, topk], got {_shape(topk_indices)}"
+        )
+
+    batch, seq_len, heads, dim = _shape(query)
+    batch_k, _, dim_k = _shape(key_comp)
+    batch_i, seq_len_i, topk_effective = _shape(topk_indices)
+    if batch != batch_k or batch != batch_i:
+        raise ValueError(
+            f"batch mismatch: query={_shape(query)}, key_comp={_shape(key_comp)}, topk_indices={_shape(topk_indices)}"
+        )
+    if seq_len != seq_len_i:
+        raise ValueError(
+            f"sequence mismatch: query={_shape(query)}, topk_indices={_shape(topk_indices)}"
+        )
+    if dim != dim_k:
+        raise ValueError(
+            f"dim mismatch: query={_shape(query)}, key_comp={_shape(key_comp)}"
+        )
+    if dim & (dim - 1):
+        raise ValueError(f"dim must be a power of 2, got {dim}")
+    if heads <= 0:
+        raise ValueError(f"heads must be positive, got {heads}")
+    if heads > 64 and heads % 64 != 0:
+        raise ValueError(
+            f"heads must be a multiple of 64 when heads > 64, got {heads}"
+        )
+    if topk_effective <= 0:
+        raise ValueError("topk_indices last dimension must be positive")
+    if int(block_I) <= 0:
+        raise ValueError(f"block_I must be positive, got {block_I}")
+    if int(num_stages) != 0:
+        raise ValueError(f"num_stages must be 0, got {num_stages}")
+
+
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
@@ -235,20 +307,16 @@ def csa_attn_target_reducesum_interface(
     num_stages: int = 0,
     num_threads: int = 128,
 ):
-    assert query.is_contiguous()
-    assert key_comp.is_contiguous()
-    assert topk_indices.is_contiguous()
-    assert query.ndim == 4
-    assert key_comp.ndim == 3
-    assert topk_indices.ndim == 3
+    _validate_interface_inputs(
+        query,
+        key_comp,
+        topk_indices,
+        block_I,
+        num_stages,
+    )
 
     batch, seq_len, heads, dim = query.shape
-    batch_k, seq_len_comp, dim_k = key_comp.shape
-    batch_i, seq_len_i, topk_effective = topk_indices.shape
-    assert batch == batch_k == batch_i
-    assert seq_len == seq_len_i
-    assert dim == dim_k
-    assert topk_effective > 0
+    topk_effective = topk_indices.shape[-1]
 
     padded_topk = (topk_effective + block_I - 1) // block_I * block_I
     if padded_topk != topk_effective:

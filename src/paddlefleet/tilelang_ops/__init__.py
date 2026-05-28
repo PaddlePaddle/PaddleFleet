@@ -20,7 +20,7 @@ __all__ = [
     "csa_attn_target_reducesum",
     "csa_indexer_bwd",
     "csa_indexer_topk_fwd",
-    "tilelang_compressed_sparse_attn",
+    "csa_sparse_attn",
 ]
 
 
@@ -43,9 +43,9 @@ def __getattr__(name):
         }
         globals().update(exports)
         return exports[name]
-    if name == "tilelang_compressed_sparse_attn":
-        from .compressed_sparse_attn import tilelang_compressed_sparse_attn
+    if name == "csa_sparse_attn":
+        from .compressed_sparse_attn import csa_sparse_attn
 
-        globals()[name] = tilelang_compressed_sparse_attn
-        return tilelang_compressed_sparse_attn
+        globals()[name] = csa_sparse_attn
+        return csa_sparse_attn
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

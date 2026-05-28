@@ -23,9 +23,10 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_mtp_layers_spec,
 )
-from paddlefleet.tilelang_ops import tilelang_compressed_sparse_attn
+from paddlefleet.tilelang_ops import csa_sparse_attn
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
+    _resolve_csa_tilelang_switch,
     get_compress_topk_idxs,
     get_window_topk_idxs,
     unfused_compressed_sparse_attn,
@@ -61,7 +62,9 @@ def _make_config(
     apply_rope_fusion=False,
     multi_latent_attention=True,
     num_nextn_predict_layers=0,
-    csa_sparse_attn_fusion=False,
+    csa_tilelang_backend=None,
+    csa_tilelang_enable_indexer=None,
+    csa_tilelang_enable_sparse_attn=None,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -102,7 +105,9 @@ def _make_config(
         attention_softmax_in_fp32=True,
         masked_softmax_fusion=False,
         softmax_type="vanilla",
-        csa_sparse_attn_fusion=csa_sparse_attn_fusion,
+        csa_tilelang_backend=csa_tilelang_backend,
+        csa_tilelang_enable_indexer=csa_tilelang_enable_indexer,
+        csa_tilelang_enable_sparse_attn=csa_tilelang_enable_sparse_attn,
     )
 
 
@@ -146,6 +151,59 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[2])
+
+    def test_csa_tilelang_backend_switches_and_overrides(self):
+        paddle_config = _make_config()
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                paddle_config, "csa_tilelang_enable_indexer"
+            )
+        )
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                paddle_config, "csa_tilelang_enable_sparse_attn"
+            )
+        )
+
+        tilelang_config = _make_config(
+            csa_tilelang_backend="attention_paddle_compat"
+        )
+        self.assertTrue(
+            _resolve_csa_tilelang_switch(
+                tilelang_config, "csa_tilelang_enable_indexer"
+            )
+        )
+        self.assertTrue(
+            _resolve_csa_tilelang_switch(
+                tilelang_config, "csa_tilelang_enable_sparse_attn"
+            )
+        )
+
+        override_config = _make_config(
+            csa_tilelang_backend="attention_paddle_compat",
+            csa_tilelang_enable_indexer=False,
+            csa_tilelang_enable_sparse_attn=False,
+        )
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                override_config, "csa_tilelang_enable_indexer"
+            )
+        )
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                override_config, "csa_tilelang_enable_sparse_attn"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "csa_tilelang_enable_indexer=True requires"
+        ):
+            _make_config(csa_tilelang_enable_indexer=True)
+
+        with self.assertRaisesRegex(
+            ValueError, "csa_tilelang_enable_sparse_attn=True requires"
+        ):
+            _make_config(csa_tilelang_enable_sparse_attn=True)
 
 
 class TestCSAIndexHelpers(unittest.TestCase):
@@ -359,7 +417,7 @@ class TestDSv4HybridFusedSparseAttention(unittest.TestCase):
             query.stop_gradient = False
             kv_full.stop_gradient = False
             attn_sink.stop_gradient = False
-            fused_out = tilelang_compressed_sparse_attn(
+            fused_out = csa_sparse_attn(
                 query, kv_full, attn_sink, topk_idxs, softmax_scale
             )
             fused_loss = fused_out.cast("float32").sum()

@@ -21,7 +21,7 @@ from .attn.sparse_mqa import (
 )
 
 
-class TileLangCompressedSparseAttention(paddle.autograd.PyLayer):
+class CSASparseAttention(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, query, kv_full, attn_sink, topk_idxs, softmax_scale):
         b, sq, np_heads, hn = query.shape
@@ -72,14 +72,14 @@ class TileLangCompressedSparseAttention(paddle.autograd.PyLayer):
         )
 
 
-def tilelang_compressed_sparse_attn(
+def csa_sparse_attn(
     query,
     kv_full,
     attn_sink,
     topk_idxs,
     softmax_scale,
 ):
-    return TileLangCompressedSparseAttention.apply(
+    return CSASparseAttention.apply(
         query,
         kv_full,
         attn_sink,

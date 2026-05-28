@@ -285,6 +285,17 @@ def _resolve_csa_indexer_topk_effective(
     return int(n_compressed)
 
 
+def _resolve_csa_tilelang_switch(config, field_name: str) -> bool:
+    backend_enabled = (
+        getattr(config, "csa_tilelang_backend", None)
+        == "attention_paddle_compat"
+    )
+    override = getattr(config, field_name, None)
+    if override is None:
+        return backend_enabled
+    return bool(override)
+
+
 def _map_compressed_topk_to_kv_full(
     topk_indices_compressed: Tensor,
     sq: int,
@@ -984,30 +995,16 @@ class CompressedSparseAttention(FleetLayer):
                 # gates which kernel produces the indices, it does not change
                 # phase semantics (csa_dense_mode / dsa_indexer_use_sparse_loss
                 # / dsa_indexer_loss_coeff still own that).
-                use_tilelang_indexer = (
-                    getattr(self.config, "dsv4_tilelang_backend", None)
-                    == "attention_paddle_compat"
-                    and getattr(
-                        self.config,
-                        "dsv4_tilelang_enable_csa_indexer",
-                        None,
-                    )
-                    is not False
-                )
-                enable_tilelang_bwd = bool(
-                    getattr(self.config, "dsv4_tilelang_enable_backward", False)
+                use_tilelang_indexer = _resolve_csa_tilelang_switch(
+                    self.config,
+                    "csa_tilelang_enable_indexer",
                 )
                 # The fused TileLang indexer-loss path is only active during
-                # training and only when backend/indexer and backward are enabled.
+                # training when the CSA TileLang indexer path is enabled.
                 # Otherwise we fall back to:
-                #   * TileLang forward-only override (no_grad TileLang fwd +
-                #     Paddle FusedDSAIndexerLoss backward), or
-                #   * Pure Paddle reference.
-                use_tilelang_loss_path = (
-                    use_tilelang_indexer
-                    and enable_tilelang_bwd
-                    and self.training
-                )
+                #   * Paddle FusedDSAIndexerLoss during training, or
+                #   * Paddle/TileLang forward-only top-k during inference.
+                use_tilelang_loss_path = use_tilelang_indexer and self.training
                 topk_effective = _resolve_csa_indexer_topk_effective(
                     self.config,
                     self.indexer.index_topk,
@@ -1197,10 +1194,13 @@ class CompressedSparseAttention(FleetLayer):
         topk_idxs: Tensor,
         softmax_scale: float,
     ):
-        if self.config.csa_sparse_attn_fusion:
-            from paddlefleet.tilelang_ops import tilelang_compressed_sparse_attn
+        if _resolve_csa_tilelang_switch(
+            self.config,
+            "csa_tilelang_enable_sparse_attn",
+        ):
+            from paddlefleet.tilelang_ops import csa_sparse_attn
 
-            output = tilelang_compressed_sparse_attn(
+            output = csa_sparse_attn(
                 query,
                 kv_full,
                 attn_sink.cast("float32"),

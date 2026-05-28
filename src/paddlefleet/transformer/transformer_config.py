@@ -794,22 +794,28 @@ class TransformerConfig(ModelParallelConfig):
     Useful for debugging or ablation studies.
     """
 
-    csa_sparse_attn_fusion: bool = False
-    """If True, use fused sparse attention tilelang-kernel for CSA.
+    csa_tilelang_backend: str | None = None
+    """Optional CSA TileLang backend.
+
+    None keeps the default Paddle implementation. 'attention_paddle_compat'
+    enables the TileLang indexer and sparse attention paths by default while
+    preserving Paddle-compatible tensor layouts and algorithm semantics.
     """
 
-    dsv4_tilelang_backend: str | None = None
-    """Optional DSv4 TileLang backend. None keeps the default Paddle indexer path."""
+    csa_tilelang_enable_indexer: bool | None = None
+    """Optional override for the CSA TileLang indexer path.
 
-    dsv4_tilelang_enable_backward: bool = False
-    """Enable DSv4 TileLang CSA Indexer backward path."""
+    None follows csa_tilelang_backend. True requires
+    csa_tilelang_backend='attention_paddle_compat'. False disables only the
+    CSA indexer TileLang path.
+    """
 
-    dsv4_tilelang_enable_csa_indexer: bool | None = None
-    """Optional override for TileLang CSA Indexer.
+    csa_tilelang_enable_sparse_attn: bool | None = None
+    """Optional override for the CSA TileLang sparse attention path.
 
-    None follows dsv4_tilelang_backend: enabled when backend is
-    'attention_paddle_compat', disabled when backend is None. False disables
-    only the CSA Indexer TileLang path.
+    None follows csa_tilelang_backend. True requires
+    csa_tilelang_backend='attention_paddle_compat'. False disables only the
+    final sparse MQA attention TileLang path.
     """
 
     o_groups: int = 8
@@ -850,10 +856,9 @@ class TransformerConfig(ModelParallelConfig):
         "csa_compress_ratios": "csa_compress_ratios",
         "csa_compress_rotary_base": "csa_compress_rotary_base",
         "csa_dense_mode": "csa_dense_mode",
-        "csa_sparse_attn_fusion": "csa_sparse_attn_fusion",
-        "dsv4_tilelang_backend": "dsv4_tilelang_backend",
-        "dsv4_tilelang_enable_backward": "dsv4_tilelang_enable_backward",
-        "dsv4_tilelang_enable_csa_indexer": "dsv4_tilelang_enable_csa_indexer",
+        "csa_tilelang_backend": "csa_tilelang_backend",
+        "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
+        "csa_tilelang_enable_sparse_attn": "csa_tilelang_enable_sparse_attn",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -1076,24 +1081,24 @@ class TransformerConfig(ModelParallelConfig):
                     )
 
             valid_tilelang_backends = {None, "attention_paddle_compat"}
-            if self.dsv4_tilelang_backend not in valid_tilelang_backends:
+            if self.csa_tilelang_backend not in valid_tilelang_backends:
                 raise ValueError(
-                    f"dsv4_tilelang_backend={self.dsv4_tilelang_backend!r} is invalid. "
+                    f"csa_tilelang_backend={self.csa_tilelang_backend!r} is invalid. "
                     f"Must be one of {valid_tilelang_backends}."
                 )
             if (
-                self.dsv4_tilelang_enable_backward
-                and self.dsv4_tilelang_backend != "attention_paddle_compat"
+                self.csa_tilelang_backend is None
+                and self.csa_tilelang_enable_indexer
             ):
                 raise ValueError(
-                    "dsv4_tilelang_enable_backward requires dsv4_tilelang_backend='attention_paddle_compat'."
+                    "csa_tilelang_enable_indexer=True requires csa_tilelang_backend='attention_paddle_compat'."
                 )
             if (
-                self.dsv4_tilelang_backend is None
-                and self.dsv4_tilelang_enable_csa_indexer
+                self.csa_tilelang_backend is None
+                and self.csa_tilelang_enable_sparse_attn
             ):
                 raise ValueError(
-                    "dsv4_tilelang_enable_csa_indexer=True requires dsv4_tilelang_backend='attention_paddle_compat'."
+                    "csa_tilelang_enable_sparse_attn=True requires csa_tilelang_backend='attention_paddle_compat'."
                 )
 
         # Hash-based MoE routing consistency checks.
