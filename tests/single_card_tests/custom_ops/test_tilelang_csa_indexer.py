@@ -12,24 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 import unittest
-
-_LOCAL_SRC = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "src")
-)
-if _LOCAL_SRC not in sys.path:
-    sys.path.insert(0, _LOCAL_SRC)
-for _m in [
-    m
-    for m in list(sys.modules)
-    if m == "paddlefleet" or m.startswith("paddlefleet.")
-]:
-    _mod = sys.modules.get(_m)
-    _f = getattr(_mod, "__file__", "") or ""
-    if _LOCAL_SRC not in _f:
-        sys.modules.pop(_m, None)
 
 import paddle
 import paddle.nn.functional as F
