@@ -1977,5 +1977,126 @@ class TestDotProductAttentionFlashMaskSWA(unittest.TestCase):
         )
 
 
+class TestGPTEmbeddingSWA(unittest.TestCase):
+    """Tests for GPTEmbedding SWA rotary pos embedding paths."""
+
+    def _make_swa_embedding(self, window_attn_skip_freq=None):
+        """Create a GPTEmbedding with sliding_window and SWA RoPE."""
+        from paddle.distributed.fleet.meta_parallel import LayerSpec
+
+        from paddlefleet.models.common.embeddings.language_model_embedding import (
+            LanguageModelEmbedding,
+        )
+        from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+            RotaryEmbedding,
+        )
+        from paddlefleet.models.gpt.gpt_embedding import (
+            GPTEmbedding,
+            GPTEmbeddingSpec,
+        )
+
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            hidden_size=256,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=64,
+            v_head_dim=64,
+            sliding_window=(4096, 0),
+            window_attn_skip_freq=window_attn_skip_freq,
+            swa_head_dim=64,
+            swa_v_head_dim=64,
+            swa_num_attention_heads=4,
+            swa_num_key_value_heads=4,
+        )
+        config.init_method = init_method_normal(0.02)
+        config.output_layer_init_method = scaled_init_method_normal(
+            0.02, 1, 2.0
+        )
+        config.apply_rope_fusion = False
+        config.sequence_parallel = False
+        config.multimodal_embedding = False
+        config.mtp_load_weight_only = False
+        config.experimental_dataflow = False
+
+        spec = GPTEmbeddingSpec(
+            language_embedding=LayerSpec(layer=LanguageModelEmbedding),
+            rope_embedding=LayerSpec(layer=RotaryEmbedding),
+        )
+        emb = GPTEmbedding(
+            sublayers_spec=spec,
+            config=config,
+            vocab_size=1000,
+            max_sequence_length=512,
+            position_embedding_type="rope",
+            rotary_percent=1.0,
+            rotary_base=10000,
+            swa_rotary_base=10000,
+        )
+        return emb, config
+
+    def test_swa_rotary_pos_emb_constructed(self):
+        """When sliding_window is set, swa_rotary_pos_emb should be constructed."""
+        emb, _ = self._make_swa_embedding(window_attn_skip_freq=[1, 0, 1, 0])
+        self.assertIsNotNone(emb.swa_rotary_pos_emb)
+
+    def test_swa_warning_when_skip_freq_none(self):
+        """Should warn when sliding_window set but window_attn_skip_freq is None."""
+        import warnings as w
+
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            emb, _ = self._make_swa_embedding(window_attn_skip_freq=None)
+            swa_warnings = [
+                x
+                for x in caught
+                if "window_attn_skip_freq is None" in str(x.message)
+            ]
+            self.assertGreater(len(swa_warnings), 0)
+        self.assertIsNotNone(emb.swa_rotary_pos_emb)
+
+    def test_swa_rotary_forward_produces_swa_emb(self):
+        """Forward pass with SWA should produce swa_rotary_pos_emb in output."""
+        emb, config = self._make_swa_embedding(
+            window_attn_skip_freq=[1, 0, 1, 0]
+        )
+
+        batch_size, seq_len = 2, 16
+        input_ids = paddle.randint(0, 1000, [batch_size, seq_len])
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": None,
+            "attention_mask": None,
+        }
+
+        output = emb(dict_args)
+        # Output should contain swa_rotary_pos_emb
+        self.assertIn("swa_rotary_pos_emb", output)
+        self.assertIsNotNone(output["swa_rotary_pos_emb"])
+
+    def test_swa_rotary_forward_with_rope_fusion(self):
+        """Forward with apply_rope_fusion should produce swa cos/sin."""
+        emb, config = self._make_swa_embedding(
+            window_attn_skip_freq=[1, 0, 1, 0]
+        )
+        config.apply_rope_fusion = True
+
+        batch_size, seq_len = 2, 16
+        input_ids = paddle.randint(0, 1000, [batch_size, seq_len])
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": None,
+            "attention_mask": None,
+        }
+
+        output = emb(dict_args)
+        self.assertIn("swa_rotary_pos_cos", output)
+        self.assertIn("swa_rotary_pos_sin", output)
+        self.assertIsNotNone(output["swa_rotary_pos_cos"])
+        self.assertIsNotNone(output["swa_rotary_pos_sin"])
+
+
 if __name__ == "__main__":
     unittest.main()
