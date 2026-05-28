@@ -471,7 +471,6 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (for fused kernel)
             h_post: [..., n] - expansion weights
         """
-        b, s, nC = hidden_states.shape
         # Compute mappings
         h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
