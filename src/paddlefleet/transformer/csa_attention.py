@@ -264,10 +264,10 @@ def unfused_compressed_sparse_attn(
     return output
 
 
-def _resolve_csa_indexer_topk_effective(
+def _resolve_csa_indexer_loss_topk_effective(
     config, index_topk: int, n_compressed: int
 ) -> int:
-    """Return the topk_effective fed to the TileLang CSA Indexer kernel.
+    """Return the TileLang CSA indexer top-k width used by indexer loss.
 
     Phase semantics (driven by ``dsa_indexer_use_sparse_loss``, **not** by the
     new TileLang switches):
@@ -283,6 +283,13 @@ def _resolve_csa_indexer_topk_effective(
     if use_sparse_loss:
         return min(int(index_topk), int(n_compressed))
     return int(n_compressed)
+
+
+def _resolve_csa_indexer_attn_topk_effective(
+    index_topk: int, n_compressed: int
+) -> int:
+    """Return the compressed top-k width consumed by main CSA attention."""
+    return min(int(index_topk), int(n_compressed))
 
 
 def _resolve_csa_tilelang_switch(config, field_name: str) -> bool:
@@ -408,8 +415,9 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
         3. Returns the scalar KL loss
            ``KL(p[t,S_t] || softmax(I[t,S_t])) * loss_coeff``.
 
-        ``topk_indices`` is returned alongside the scalar loss so the outer
-        ``CompressedSparseAttention.forward`` can feed it to sparse attention.
+        ``topk_indices`` is returned alongside the scalar loss. The outer
+        ``CompressedSparseAttention.forward`` may trim it back to the main
+        attention top-k width before feeding sparse attention.
 
     Backward:
         Following the Megatron / Miles selected-topk convention, the gradient
@@ -985,16 +993,12 @@ class CompressedSparseAttention(FleetLayer):
                     x_det.stop_gradient = False
                     qr_det.stop_gradient = False
 
-                # Resolve TileLang backend and per-phase topk_effective.
-                # Phase 2 (dsa_indexer_use_sparse_loss=False) uses
-                # topk_effective=n_compressed so that the selected set covers
-                # the full compressed candidate range; Phase 3
-                # (dsa_indexer_use_sparse_loss=True) uses
-                # topk_effective=min(index_topk, n_compressed) and keeps the
-                # existing selected-topk semantics. The TileLang backend only
-                # gates which kernel produces the indices, it does not change
-                # phase semantics (csa_dense_mode / dsa_indexer_use_sparse_loss
-                # / dsa_indexer_loss_coeff still own that).
+                # Loss and main attention intentionally use different top-k
+                # widths during phase 2. ``dsa_indexer_use_sparse_loss=False``
+                # expands only the indexer loss to the full compressed range;
+                # the main CSA attention remains sparse and consumes
+                # ``min(index_topk, n_compressed)`` compressed blocks, matching
+                # the Paddle FusedDSAIndexerLoss path.
                 use_tilelang_indexer = _resolve_csa_tilelang_switch(
                     self.config,
                     "csa_tilelang_enable_indexer",
@@ -1005,8 +1009,12 @@ class CompressedSparseAttention(FleetLayer):
                 #   * Paddle FusedDSAIndexerLoss during training, or
                 #   * Paddle/TileLang forward-only top-k during inference.
                 use_tilelang_loss_path = use_tilelang_indexer and self.training
-                topk_effective = _resolve_csa_indexer_topk_effective(
+                loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
                     self.config,
+                    self.indexer.index_topk,
+                    n_compressed,
+                )
+                attn_topk_effective = _resolve_csa_indexer_attn_topk_effective(
                     self.indexer.index_topk,
                     n_compressed,
                 )
@@ -1020,12 +1028,9 @@ class CompressedSparseAttention(FleetLayer):
 
                 if use_tilelang_loss_path:
                     # Fused TileLang fwd + selected-set KL + TileLang bwd in
-                    # one PyLayer. This replaces both the Paddle
-                    # FusedDSAIndexerLoss call AND the TileLang forward-only
-                    # no_grad override below, because the PyLayer already
-                    # returns TileLang indices for sparse attention to consume,
-                    # and its backward pipes ``q - p`` through the TileLang
-                    # indexer bwd kernel.
+                    # one PyLayer. The returned indices may be wider than the
+                    # main attention top-k during phase 2 and are trimmed below
+                    # before sparse attention consumes them.
                     indexer_loss_coeff = getattr(
                         self.config, "dsa_indexer_loss_coeff", 0.0
                     )
@@ -1045,7 +1050,7 @@ class CompressedSparseAttention(FleetLayer):
                             query.detach(),
                             key_comp_mla,
                             int(self.compress_ratio),
-                            int(topk_effective),
+                            int(loss_topk_effective),
                             float(self.softmax_scale),
                             float(indexer_loss_coeff),
                             self.tp_group,
@@ -1140,10 +1145,15 @@ class CompressedSparseAttention(FleetLayer):
                             k_indexer_tl,
                             weights_indexer_tl,
                             ratio=self.compress_ratio,
-                            topk_effective=topk_effective,
+                            topk_effective=attn_topk_effective,
                         )
 
                     topk_indices_compressed = tl_topk_indices
+
+                if topk_indices_compressed.shape[-1] > attn_topk_effective:
+                    topk_indices_compressed = topk_indices_compressed[
+                        ..., :attn_topk_effective
+                    ].contiguous()
 
                 # Filter invalid indices and shift to kv_full space
                 compress_topk_idxs = _map_compressed_topk_to_kv_full(

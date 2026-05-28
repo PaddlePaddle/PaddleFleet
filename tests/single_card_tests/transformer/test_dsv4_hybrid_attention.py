@@ -26,6 +26,8 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
 from paddlefleet.tilelang_ops import csa_sparse_attn
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
+    _resolve_csa_indexer_attn_topk_effective,
+    _resolve_csa_indexer_loss_topk_effective,
     _resolve_csa_tilelang_switch,
     get_compress_topk_idxs,
     get_window_topk_idxs,
@@ -204,6 +206,33 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             ValueError, "csa_tilelang_enable_sparse_attn=True requires"
         ):
             _make_config(csa_tilelang_enable_sparse_attn=True)
+
+    def test_phase2_loss_topk_does_not_expand_attention_topk(self):
+        config = _make_config(
+            dsa_index_topk=2,
+        )
+        n_compressed = 8
+
+        self.assertEqual(
+            _resolve_csa_indexer_loss_topk_effective(
+                config, config.dsa_index_topk, n_compressed
+            ),
+            n_compressed,
+        )
+        self.assertEqual(
+            _resolve_csa_indexer_attn_topk_effective(
+                config.dsa_index_topk, n_compressed
+            ),
+            config.dsa_index_topk,
+        )
+
+        config.dsa_indexer_use_sparse_loss = True
+        self.assertEqual(
+            _resolve_csa_indexer_loss_topk_effective(
+                config, config.dsa_index_topk, n_compressed
+            ),
+            config.dsa_index_topk,
+        )
 
 
 class TestCSAIndexHelpers(unittest.TestCase):
