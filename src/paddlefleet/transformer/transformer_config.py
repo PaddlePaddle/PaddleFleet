@@ -757,6 +757,10 @@ class TransformerConfig(ModelParallelConfig):
     Useful for debugging or ablation studies.
     """
 
+    csa_sparse_attn_fusion: bool = False
+    """If True, use fused sparse attention tilelang-kernel for CSA.
+    """
+
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
     Set to 0 to use a single linear output projection instead.
@@ -790,14 +794,6 @@ class TransformerConfig(ModelParallelConfig):
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
         "indexer_rope_interleave": "dsa_indexer_rotary_interleaved",
-        # CSA / DSv4 Hybrid field mapping
-        "csa_window_size": "csa_window_size",
-        "csa_compress_ratios": "csa_compress_ratios",
-        "csa_compress_rotary_base": "csa_compress_rotary_base",
-        "csa_dense_mode": "csa_dense_mode",
-        "o_groups": "o_groups",
-        "o_lora_rank": "o_lora_rank",
-        "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
     }
 
     @classmethod

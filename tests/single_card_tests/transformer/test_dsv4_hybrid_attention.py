@@ -23,11 +23,13 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_mtp_layers_spec,
 )
+from paddlefleet.tilelang_ops import tilelang_compressed_sparse_attn
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
     _get_doc_start,
     get_compress_topk_idxs,
     get_window_topk_idxs,
+    unfused_compressed_sparse_attn,
 )
 from paddlefleet.transformer.dsa_attention import fused_qk_topk_naive
 from paddlefleet.transformer.dsv4_hybrid_attention import (
@@ -58,6 +60,7 @@ def _make_config(
     apply_rope_fusion=False,
     multi_latent_attention=True,
     num_nextn_predict_layers=0,
+    csa_sparse_attn_fusion=False,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -98,6 +101,7 @@ def _make_config(
         attention_softmax_in_fp32=True,
         masked_softmax_fusion=False,
         softmax_type="vanilla",
+        csa_sparse_attn_fusion=csa_sparse_attn_fusion,
     )
 
 
@@ -382,6 +386,92 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
             list(attn.linear_o_group_proj.shape), [expected_out, expected_in]
         )
         self.assertFalse(attn.linear_o_group_proj.stop_gradient)
+
+
+class TestDSv4HybridFusedSparseAttention(unittest.TestCase):
+    def test_fused_matches_unfused_forward_backward(self):
+        old_flag = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ]
+        paddle.set_flags({"FLAGS_cudnn_deterministic": 0})
+        try:
+            paddle.seed(_SEED)
+            batch_size = 1
+            seq_len = 128
+            num_heads = 16
+            head_dim = 128
+            topk = 64
+            softmax_scale = head_dim**-0.5
+
+            query = paddle.randn(
+                [batch_size, seq_len, num_heads, head_dim],
+                dtype=paddle.bfloat16,
+            )
+            kv_full = paddle.randn(
+                [batch_size, seq_len, head_dim], dtype=paddle.bfloat16
+            )
+            attn_sink = paddle.randn([num_heads], dtype=paddle.float32)
+            topk_idxs = (
+                paddle.arange(topk, dtype="int32")
+                .reshape([1, 1, topk])
+                .expand([batch_size, seq_len, topk])
+            )
+
+            query.stop_gradient = False
+            kv_full.stop_gradient = False
+            attn_sink.stop_gradient = False
+            fused_out = tilelang_compressed_sparse_attn(
+                query, kv_full, attn_sink, topk_idxs, softmax_scale
+            )
+            fused_loss = fused_out.cast("float32").sum()
+            fused_loss.backward()
+            fused_query_grad = query.grad.clone()
+            fused_kv_grad = kv_full.grad.clone()
+            fused_attn_sink_grad = attn_sink.grad.clone()
+
+            query.clear_gradient()
+            kv_full.clear_gradient()
+            attn_sink.clear_gradient()
+            unfused_out = unfused_compressed_sparse_attn(
+                query, kv_full, attn_sink, topk_idxs, softmax_scale
+            )
+            unfused_loss = unfused_out.cast("float32").sum()
+            unfused_loss.backward()
+
+            self.assertTrue(
+                paddle.allclose(
+                    fused_out.cast("float32"),
+                    unfused_out.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    fused_query_grad.cast("float32"),
+                    query.grad.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    fused_kv_grad.cast("float32"),
+                    kv_full.grad.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    fused_attn_sink_grad.cast("float32"),
+                    attn_sink.grad.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+        finally:
+            paddle.set_flags({"FLAGS_cudnn_deterministic": old_flag})
 
 
 class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):

@@ -372,6 +372,8 @@ def unfused_compressed_sparse_attn(
     return output
 
 
+from paddlefleet.tilelang_ops import tilelang_compressed_sparse_attn
+
 # ---------------------------------------------------------------------------
 # Compressor
 # ---------------------------------------------------------------------------
@@ -920,10 +922,10 @@ class CompressedSparseAttention(FleetLayer):
         topk_idxs = topk_idxs.cast("int32")
 
         # Step 5: Sparse attention
-        output = unfused_compressed_sparse_attn(
+        output = self.compressed_sparse_attn(
             query,
             kv_full,
-            self.attn_sink.cast("float32"),
+            self.attn_sink,
             topk_idxs,
             self.softmax_scale,
         )
@@ -932,4 +934,30 @@ class CompressedSparseAttention(FleetLayer):
         if indexer_loss is not None and self.training:
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
 
+        return output
+
+    def compressed_sparse_attn(
+        self,
+        query: Tensor,
+        kv_full: Tensor,
+        attn_sink: Tensor,
+        topk_idxs: Tensor,
+        softmax_scale: float,
+    ):
+        if self.config.csa_sparse_attn_fusion:
+            output = tilelang_compressed_sparse_attn(
+                query,
+                kv_full,
+                attn_sink.cast("float32"),
+                topk_idxs,
+                softmax_scale,
+            )
+        else:
+            output = unfused_compressed_sparse_attn(
+                query,
+                kv_full,
+                attn_sink.cast("float32"),
+                topk_idxs,
+                softmax_scale,
+            )
         return output
