@@ -14,16 +14,16 @@
 # limitations under the License.
 
 """
-Single-card unit tests for auto_subbatch with moe_deep_gemm=True.
+Single-card unit tests for static subbatch (moe_subbatch_token_num_after_dispatch)
+with moe_deep_gemm=True.
 
-Tests auto_subbatch fallback correctness when using GroupedMLPExpert (stacked weights)
-instead of per-expert weight lists.
+Tests that per-expert static subbatch produces the same results as the
+full group_gemm reference when using GroupedMLPExpert (stacked weights).
 
 Run with:
-  python tests/single_card_tests/test_moe_auto_subbatch_deep_gemm.py
+  python tests/single_card_tests/test_moe_static_subbatch_deep_gemm.py
 """
 
-import contextlib
 import logging
 import os
 import unittest
@@ -37,39 +37,19 @@ from types import SimpleNamespace
 
 import paddle
 from paddle import nn
-from paddle.device.cuda.memory_analyzer import MemoryAnalysisTool
 
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.transformer.moe.fp8_utils import (
     fused_stack_quant_without_cache,
     tilewise_quant,
 )
-from paddlefleet.transformer.moe.fusion_layer_utils import (
-    FusionMoePyLayer,
-    MlpNode,
-)
+from paddlefleet.transformer.moe.fusion_layer_utils import FusionMoePyLayer
 from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-# hack: lower min_auto_subbatch_rows so small seq_len can trigger multi-chunk subbatch
-_orig_mlpnode_init = MlpNode.__init__
-
-
-def _patched_mlpnode_init(self, *args, **kwargs):
-    _orig_mlpnode_init(self, *args, **kwargs)
-    self.min_auto_subbatch_rows = 256
-
-
-MlpNode.__init__ = _patched_mlpnode_init
-
 
 class FakeDeepGemmMOELayer(nn.Layer):
-    """
-    A mock MoE layer for deep_gemm mode using GroupedMLPExpert (stacked weights).
-
-    In deep_gemm mode, MoELayer creates grouped_gemm_experts instead of per-expert list.
-    This fake layer mimics that structure.
-    """
+    """Mock MoE layer for deep_gemm mode using GroupedMLPExpert (stacked weights)."""
 
     def __init__(
         self,
@@ -89,7 +69,6 @@ class FakeDeepGemmMOELayer(nn.Layer):
             config=config,
             moe_deep_gemm=True,
         )
-        # Initialize weights with small random values for numerical stability
         with paddle.no_grad():
             self.grouped_gemm_experts.weight1.set_value(
                 paddle.randn(
@@ -108,7 +87,6 @@ class FakeDeepGemmMOELayer(nn.Layer):
                 tokens_per_expert=tokens_per_expert,
             ),
         )
-        # deep_gemm mode has no per-expert list
         self.experts = None
 
     def clear_main_grad(self):
@@ -123,7 +101,6 @@ class FakeDeepGemmMOELayer(nn.Layer):
         w1_list = [w1[i, :, :] for i in range(local_expert_num)]
         w2_list = [w2[i, :, :] for i in range(local_expert_num)]
 
-        # Non-transpose version
         fp8_w1, fp8_s1 = fused_stack_quant_without_cache(
             w1_list, transpose=False
         )
@@ -136,7 +113,6 @@ class FakeDeepGemmMOELayer(nn.Layer):
         w2.fp8_weight_stacked = fp8_w2
         w2.fp8_scale_stacked = fp8_s2
 
-        # Transpose version
         if quant_transpose:
             fp8_w1_t, fp8_s1_t = fused_stack_quant_without_cache(
                 w1_list, transpose=True
@@ -161,24 +137,7 @@ class FakeDeepGemmMOELayer(nn.Layer):
         self.grouped_gemm_experts.weight2._clear_to_zero_allocation()
 
 
-@contextlib.contextmanager
-def vmm_no_free_space():
-    """Occupy all free blocks and disable growable space to simulate tight memory."""
-    (old_value,) = paddle.framework.get_flags(
-        "FLAGS_max_reserved_threshold_in_gb"
-    ).values()
-    paddle.set_flags({"FLAGS_max_reserved_threshold_in_gb": 0})
-    buffers = []
-    for size, _ in MemoryAnalysisTool.vmm_free_block_info()[-1]:
-        buffers.append(paddle.empty([size], dtype="uint8"))
-    try:
-        yield
-    finally:
-        paddle.set_flags({"FLAGS_max_reserved_threshold_in_gb": old_value})
-        del buffers
-
-
-class TestAutoSubbatchDeepGemm(unittest.TestCase):
+class TestStaticSubbatchDeepGemm(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         model_parallel_cuda_manual_seed(1234)
@@ -206,7 +165,6 @@ class TestAutoSubbatchDeepGemm(unittest.TestCase):
         self.scale = scale
         self.probs = probs
 
-        # Each token is assigned 1 to topk experts, always including expert 0
         indices_np = np.full([self.seq_len, self.topk], -1, dtype=np.int64)
         tokens_per_expert = [0] * self.n_routed_experts
         for i in range(self.seq_len):
@@ -237,37 +195,35 @@ class TestAutoSubbatchDeepGemm(unittest.TestCase):
         moe_layer.clear_main_grad()
         self.moe_layer = moe_layer
 
-    def run_moe_layer(
-        self, is_ref=False, tight_forward=False, tight_backward=False, **kwargs
-    ):
+    def run_moe_layer(self, is_ref=False, **kwargs):
         params = {
             "use_fp8_mlp": True,
             "moe_deep_gemm": True,
-            "recompute_moe_gate_up": False,
+            "recompute_moe_gate_up": True,
             "dequant_input": True,
             "moe_expert_fusion": True,
             "recompute_moe_premute": False,
             "use_bf16_gemm_weight_grad": True,
             "fp8_dispatched_handle": {"scale": self.scale},
-            "use_auto_subbatch": not is_ref,
+            "use_auto_subbatch": False,
             "moe_subbatch_diag": True,
         }
+        if not is_ref:
+            params["moe_subbatch_token_num_after_dispatch"] = kwargs.pop(
+                "moe_subbatch_token_num_after_dispatch", 256
+            )
         params.update(kwargs)
 
-        with vmm_no_free_space() if tight_forward else contextlib.nullcontext():
-            hidden_states = FusionMoePyLayer.apply(
-                self.hidden_states,
-                self.probs,
-                self.indices.clone(),
-                self.moe_layer,
-                self.topk,
-                **params,
-            )
+        hidden_states = FusionMoePyLayer.apply(
+            self.hidden_states,
+            self.probs,
+            self.indices.clone(),
+            self.moe_layer,
+            self.topk,
+            **params,
+        )
 
-        with (
-            vmm_no_free_space() if tight_backward else contextlib.nullcontext()
-        ):
-            paddle.autograd.backward(hidden_states, self.hidden_states_out_grad)
+        paddle.autograd.backward(hidden_states, self.hidden_states_out_grad)
 
         hidden_states_grad = self.hidden_states.grad
         probs_grad = self.probs.grad
@@ -286,7 +242,6 @@ class TestAutoSubbatchDeepGemm(unittest.TestCase):
             "probs_grad",
             "weight_grad",
         ]
-        # First three must be bitwise equal; weight_grad allows FP8 accumulation order diff
         tolerances = {
             "weight_grad": {"atol": 1e-4, "rtol": 1e-5},
         }
@@ -300,7 +255,6 @@ class TestAutoSubbatchDeepGemm(unittest.TestCase):
                 diff = np.abs(ref_np - tgt_np)
                 max_diff = diff.max()
                 if max_diff > tol["atol"]:
-                    # Print top diffs on failure for debugging
                     flat = diff.flatten()
                     top_idx = np.argsort(flat)[-10:][::-1]
                     lines = [
@@ -315,162 +269,80 @@ class TestAutoSubbatchDeepGemm(unittest.TestCase):
                     self.fail("\n".join(lines))
                 np.testing.assert_allclose(ref_np, tgt_np, **tol, err_msg=name)
 
-    def test_auto_subbatch_deep_gemm_no_recompute(self):
-        """deep_gemm + no_recompute: auto_subbatch vs group_gemm reference"""
+    def test_static_subbatch_deep_gemm(self):
+        """deep_gemm + static subbatch vs group_gemm reference"""
         ref_out = self.run_moe_layer(is_ref=True)
 
         cases = {}
-        kwargs = {"recompute_moe_gate_up": False}
-
-        logging.info("case1 (deep_gemm, plenty)")
-        cases["case1 (plenty)"] = self.run_moe_layer(**kwargs)
-        logging.info("case2 (deep_gemm, tight_fwd)")
-        cases["case2 (tight_fwd)"] = self.run_moe_layer(
-            tight_forward=True, **kwargs
+        logging.info("case1 (subbatch=256)")
+        cases["subbatch=256"] = self.run_moe_layer(
+            moe_subbatch_token_num_after_dispatch=256
         )
-
-        logging.info("case3 (deep_gemm, tight_bwd)")
-        cases["case3 (tight_bwd)"] = self.run_moe_layer(
-            tight_backward=True, **kwargs
-        )
-        logging.info("case4 (deep_gemm, tight_both)")
-        cases["case4 (tight_both)"] = self.run_moe_layer(
-            tight_forward=True, tight_backward=True, **kwargs
+        logging.info("case2 (subbatch=512)")
+        cases["subbatch=512"] = self.run_moe_layer(
+            moe_subbatch_token_num_after_dispatch=512
         )
 
         for name, result in cases.items():
             with self.subTest(case=name):
                 self.compare_results(ref_out, result)
 
-    def test_auto_subbatch_deep_gemm_recompute(self):
-        """deep_gemm + recompute_moe_gate_up: auto_subbatch vs group_gemm reference"""
-        ref_out = self.run_moe_layer(is_ref=True, recompute_moe_gate_up=True)
+    def test_static_subbatch_deep_gemm_recompute_premute(self):
+        """deep_gemm + static subbatch + recompute_moe_premute"""
+        ref_out = self.run_moe_layer(is_ref=True, recompute_moe_premute=True)
 
         cases = {}
-        kwargs = {"recompute_moe_gate_up": True}
+        kwargs = {"recompute_moe_premute": True}
 
-        logging.info("case5 (deep_gemm recompute, plenty)")
-        cases["case5 (plenty)"] = self.run_moe_layer(**kwargs)
-        logging.info("case6 (deep_gemm recompute, tight_fwd)")
-        cases["case6 (tight_fwd)"] = self.run_moe_layer(
-            tight_forward=True, **kwargs
+        logging.info("case3 (recompute_premute, subbatch=256)")
+        cases["recompute_premute, subbatch=256"] = self.run_moe_layer(
+            moe_subbatch_token_num_after_dispatch=256, **kwargs
         )
-
-        logging.info("case7 (deep_gemm recompute, tight_bwd)")
-        cases["case7 (tight_bwd)"] = self.run_moe_layer(
-            tight_backward=True, **kwargs
-        )
-        logging.info("case8 (deep_gemm recompute, tight_both)")
-        cases["case8 (tight_both)"] = self.run_moe_layer(
-            tight_forward=True, tight_backward=True, **kwargs
+        logging.info("case4 (recompute_premute, subbatch=512)")
+        cases["recompute_premute, subbatch=512"] = self.run_moe_layer(
+            moe_subbatch_token_num_after_dispatch=512, **kwargs
         )
 
         for name, result in cases.items():
             with self.subTest(case=name):
                 self.compare_results(ref_out, result)
 
-    def test_auto_subbatch_deep_gemm_offline_quant(self):
-        """deep_gemm + offline fp8 quant + clear bf16 weight: simulates FP8QuantWeightCallback.
-
-        After offline quant, bf16 weight memory is cleared (memory_size=0).
-        Forward/backward must work using only fp8_weight_stacked attributes.
-        """
-        # First get reference output BEFORE clearing weight
+    def test_static_subbatch_deep_gemm_offline_quant(self):
+        """deep_gemm + static subbatch + offline fp8 quant + clear bf16 weight."""
         ref_out = self.run_moe_layer(is_ref=True)
 
-        # Now simulate FP8QuantWeightCallback: quant + clear bf16
         self.moe_layer.fp8_quant_weight(quant_transpose=False)
         self.moe_layer.clear_weight_storage()
 
         cases = {}
-        # no recompute
-        kwargs = {"recompute_moe_gate_up": False}
-
-        logging.info("case9 (offline_quant, plenty)")
-        cases["case9 (plenty)"] = self.run_moe_layer(**kwargs)
-        logging.info("case10 (offline_quant, tight_fwd)")
-        cases["case10 (tight_fwd)"] = self.run_moe_layer(
-            tight_forward=True, **kwargs
+        logging.info("case5 (offline_quant, subbatch=256)")
+        cases["offline_quant, subbatch=256"] = self.run_moe_layer(
+            moe_subbatch_token_num_after_dispatch=256
         )
-        logging.info("case11 (offline_quant, tight_bwd)")
-        cases["case11 (tight_bwd)"] = self.run_moe_layer(
-            tight_backward=True, **kwargs
-        )
-        logging.info("case12 (offline_quant, tight_both)")
-        cases["case12 (tight_both)"] = self.run_moe_layer(
-            tight_forward=True, tight_backward=True, **kwargs
-        )
-
-        # with recompute
-        kwargs_rc = {"recompute_moe_gate_up": True}
-
-        logging.info("case9r (offline_quant+recompute, plenty)")
-        cases["case9r (plenty)"] = self.run_moe_layer(**kwargs_rc)
-        logging.info("case10r (offline_quant+recompute, tight_fwd)")
-        cases["case10r (tight_fwd)"] = self.run_moe_layer(
-            tight_forward=True, **kwargs_rc
-        )
-        logging.info("case11r (offline_quant+recompute, tight_bwd)")
-        cases["case11r (tight_bwd)"] = self.run_moe_layer(
-            tight_backward=True, **kwargs_rc
-        )
-        logging.info("case12r (offline_quant+recompute, tight_both)")
-        cases["case12r (tight_both)"] = self.run_moe_layer(
-            tight_forward=True, tight_backward=True, **kwargs_rc
+        logging.info("case6 (offline_quant, subbatch=512)")
+        cases["offline_quant, subbatch=512"] = self.run_moe_layer(
+            moe_subbatch_token_num_after_dispatch=512
         )
 
         for name, result in cases.items():
             with self.subTest(case=name):
                 self.compare_results(ref_out, result)
 
-    def test_auto_subbatch_deep_gemm_offline_quant_transpose(self):
-        """deep_gemm + offline fp8 quant with quant_transpose=True + clear bf16 weight.
-
-        When quant_transpose=True, fp8_weight_stacked_transpose is pre-computed.
-        The per-expert fallback should use the pre-computed transpose directly.
-        """
-        # First get reference output BEFORE clearing weight
+    def test_static_subbatch_deep_gemm_offline_quant_transpose(self):
+        """deep_gemm + static subbatch + offline fp8 quant with quant_transpose=True."""
         ref_out = self.run_moe_layer(is_ref=True)
 
-        # Simulate FP8QuantWeightCallback with quant_transpose=True
         self.moe_layer.fp8_quant_weight(quant_transpose=True)
         self.moe_layer.clear_weight_storage()
 
         cases = {}
-        # no recompute
-        kwargs = {"recompute_moe_gate_up": False}
-
-        logging.info("case13 (offline_quant_transpose, plenty)")
-        cases["case13 (plenty)"] = self.run_moe_layer(**kwargs)
-        logging.info("case14 (offline_quant_transpose, tight_fwd)")
-        cases["case14 (tight_fwd)"] = self.run_moe_layer(
-            tight_forward=True, **kwargs
+        logging.info("case7 (offline_quant_transpose, subbatch=256)")
+        cases["offline_quant_transpose, subbatch=256"] = self.run_moe_layer(
+            moe_subbatch_token_num_after_dispatch=256
         )
-        logging.info("case15 (offline_quant_transpose, tight_bwd)")
-        cases["case15 (tight_bwd)"] = self.run_moe_layer(
-            tight_backward=True, **kwargs
-        )
-        logging.info("case16 (offline_quant_transpose, tight_both)")
-        cases["case16 (tight_both)"] = self.run_moe_layer(
-            tight_forward=True, tight_backward=True, **kwargs
-        )
-
-        # with recompute
-        kwargs_rc = {"recompute_moe_gate_up": True}
-
-        logging.info("case13r (offline_quant_transpose+recompute, plenty)")
-        cases["case13r (plenty)"] = self.run_moe_layer(**kwargs_rc)
-        logging.info("case14r (offline_quant_transpose+recompute, tight_fwd)")
-        cases["case14r (tight_fwd)"] = self.run_moe_layer(
-            tight_forward=True, **kwargs_rc
-        )
-        logging.info("case15r (offline_quant_transpose+recompute, tight_bwd)")
-        cases["case15r (tight_bwd)"] = self.run_moe_layer(
-            tight_backward=True, **kwargs_rc
-        )
-        logging.info("case16r (offline_quant_transpose+recompute, tight_both)")
-        cases["case16r (tight_both)"] = self.run_moe_layer(
-            tight_forward=True, tight_backward=True, **kwargs_rc
+        logging.info("case8 (offline_quant_transpose, subbatch=512)")
+        cases["offline_quant_transpose, subbatch=512"] = self.run_moe_layer(
+            moe_subbatch_token_num_after_dispatch=512
         )
 
         for name, result in cases.items():

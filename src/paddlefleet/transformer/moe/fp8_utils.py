@@ -321,6 +321,112 @@ def kitchen_gemm(
     return y
 
 
+class _PerExpertWeightView:
+    """A lightweight view into a single expert's slice of the stacked fp8 weight.
+
+    After offline fp8 quant, the original bf16 weight storage is cleared.
+    This view provides the same interface that ``_get_fp8_weight_and_scale``
+    expects (``fp8_weight_stacked``, ``fp8_scale_stacked``, etc.) by slicing
+    the parent's stacked fp8 tensors for a single expert.
+
+    The ``shape`` property reports ``[1, K, N]`` so that downstream code
+    (e.g., ``_get_fp8_weight_and_scale``) correctly infers ``num_expert = 1``.
+    """
+
+    def __init__(self, parent_weight, local_id, num_experts):
+        self._parent = parent_weight
+        self._local_id = local_id
+        self._num_experts = num_experts
+        self._shape = [1, *list(parent_weight.shape[1:])]
+
+    def _slice_stacked(self, attr_name):
+        """Slice a 2D stacked tensor [E*rows, cols] to this expert's rows."""
+        t = getattr(self._parent, attr_name, None)
+        if t is None:
+            return None
+        rows_per_expert = t.shape[0] // self._num_experts
+        start = self._local_id * rows_per_expert
+        return t._slice(start, start + rows_per_expert)
+
+    @property
+    def shape(self):
+        return self._shape
+
+    def __len__(self):
+        return self._shape[0]
+
+    @property
+    def dtype(self):
+        return self._parent.dtype
+
+    @property
+    def fp8_weight_stacked(self):
+        return self._slice_stacked("fp8_weight_stacked")
+
+    @property
+    def fp8_scale_stacked(self):
+        return self._slice_stacked("fp8_scale_stacked")
+
+    @property
+    def fp8_weight_stacked_transpose(self):
+        return self._slice_stacked("fp8_weight_stacked_transpose")
+
+    @property
+    def fp8_scale_stacked_transpose(self):
+        return self._slice_stacked("fp8_scale_stacked_transpose")
+
+    @property
+    def main_grad(self):
+        mg = getattr(self._parent, "main_grad", None)
+        if mg is None:
+            return None
+        return mg._slice(self._local_id, self._local_id + 1)
+
+    @main_grad.setter
+    def main_grad(self, value):
+        # When backward tries to allocate main_grad, ensure parent has it
+        if getattr(self._parent, "main_grad", None) is None:
+            self._parent.main_grad = paddle.zeros(
+                self._parent.shape, dtype=paddle.float32
+            )
+
+    @property
+    def grad(self):
+        g = self._parent.grad
+        if g is None:
+            return None
+        return g._slice(self._local_id, self._local_id + 1)
+
+    @grad.setter
+    def grad(self, value):
+        pass
+
+    def _apply_backward_hook(self):
+        if hasattr(self._parent, "_apply_backward_hook"):
+            self._parent._apply_backward_hook()
+
+    @property
+    def stop_gradient(self):
+        return self._parent.stop_gradient
+
+
+class _PerExpertWeightProxy:
+    """Proxy for grouped_gemm_experts that provides per-expert weight views.
+
+    Holds ``weight1`` and ``weight2`` as ``_PerExpertWeightView`` instances
+    that lazily slice from the parent's fp8 stacked weights.
+    """
+
+    def __init__(self, parent, local_id):
+        num_experts = parent.weight1.shape[0]
+        self.weight1 = _PerExpertWeightView(
+            parent.weight1, local_id, num_experts
+        )
+        self.weight2 = _PerExpertWeightView(
+            parent.weight2, local_id, num_experts
+        )
+
+
 class ExpertsGroupGemmContiguousNode:
     """ExpertsGroupGemmContiguousNode"""
 
@@ -350,12 +456,30 @@ class ExpertsGroupGemmContiguousNode:
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
         """
-        # 两条路径：
-        #   split path (self.experts): 权重为 list，支持 auto_subbatch 逐专家 fallback
-        #     条件: moe_expert_fusion=False, 或 use_fp8_mlp=True & moe_deep_gemm=False
-        #   grouped path (self.grouped_gemm_experts): 权重为 stacked tensor，走批量 gemm
-        #     条件: moe_expert_fusion=True & (use_fp8_mlp=False 或 moe_deep_gemm=True)
-        if not moe_expert_fusion or (use_fp8_mlp and not moe_deep_gemm):
+        if moe_deep_gemm and expert_id is not None:
+            # Per-expert node for deep_gemm: slice stacked weight to [1, K, N]
+            parent = custom_map.grouped_gemm_experts
+            moe_rank = getattr(custom_map, "moe_rank", 0)
+            num_experts_per_device = getattr(
+                custom_map, "num_experts_per_device", parent.weight1.shape[0]
+            )
+            local_id = expert_id - moe_rank * num_experts_per_device
+            if hasattr(parent.weight1, "fp8_weight_stacked"):
+                # Offline quant: bf16 weight may have been cleared, use proxy
+                self.grouped_gemm_experts = _PerExpertWeightProxy(
+                    parent, local_id
+                )
+            else:
+                # Normal: bf16 weight is valid, slice directly
+                sliced = type("_SlicedGroupedExpert", (), {})()
+                sliced.weight1 = parent.weight1._slice(local_id, local_id + 1)
+                sliced.weight2 = parent.weight2._slice(local_id, local_id + 1)
+                sliced._parent = parent
+                sliced._local_id = local_id
+                self.grouped_gemm_experts = sliced
+            self.experts = None
+            moe_expert_fusion = True
+        elif not moe_expert_fusion or (use_fp8_mlp and not moe_deep_gemm):
             if expert_id is None:
                 self.experts = custom_map.experts
             else:

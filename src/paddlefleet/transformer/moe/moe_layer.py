@@ -712,6 +712,7 @@ class MoELayer(nn.Layer):
                     use_ue8m0=self.use_ue8m0,
                     dw_p2p_overlap=self.dw_p2p_overlap,
                     clamp_value=self.config.activation_func_clamp_value,
+                    is_first_fwd=not framework._dygraph_tracer()._has_grad,
                 )
 
         with profile("combine"):
