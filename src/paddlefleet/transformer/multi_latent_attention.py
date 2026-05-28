@@ -687,7 +687,9 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_b_proj = build_spec_layer(
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
-            self.num_query_groups_per_partition
+            # Use global num_key_value_heads so ColumnParallelLinear registers
+            # the correct original_shape (required by Muon optimizer).
+            self.config.num_key_value_heads
             * (self.config.qk_nope_head_dim + self.config.v_head_dim),
             config=self.config,
             init_method=self.config.init_method,
