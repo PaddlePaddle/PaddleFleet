@@ -49,13 +49,13 @@ __global__ void SwigluProbsGradKernel(
     float* probs_grad,            // [seq_len*topk, 1]
     BFloat16* o2_s,               // [seq_len*topk, moe_intermediate_size]
     int moe_intermediate_size) {
-  const int row_idx = blockIdx.x;
+  const int64_t row_idx = blockIdx.x;
   const int tid = threadIdx.x;
 
-  const BFloat16* o1_row = o1 + row_idx * moe_intermediate_size * 2;
-  const BFloat16* do2_s_row = do2_s + row_idx * moe_intermediate_size;
-  BFloat16* do1_row = do1 + row_idx * moe_intermediate_size * 2;
-  BFloat16* o2s_row = o2_s + row_idx * moe_intermediate_size;
+  const BFloat16* o1_row = o1 + row_idx * (int64_t)moe_intermediate_size * 2;
+  const BFloat16* do2_s_row = do2_s + row_idx * (int64_t)moe_intermediate_size;
+  BFloat16* do1_row = do1 + row_idx * (int64_t)moe_intermediate_size * 2;
+  BFloat16* o2s_row = o2_s + row_idx * (int64_t)moe_intermediate_size;
 
   float prob = unzipped_probs[row_idx];
 
@@ -260,7 +260,7 @@ std::vector<paddle::Tensor> SwigluProbsGradCUDABackward(
     const paddle::Tensor& unzipped_probs,
     bool inplace) {
   auto o1_dims = o1.dims();
-  int o1_outer_dim = 1;
+  int64_t o1_outer_dim = 1;
   for (int i = 0; i < o1_dims.size() - 1; i++) {
     o1_outer_dim *= o1_dims[i];
   }
@@ -272,6 +272,14 @@ std::vector<paddle::Tensor> SwigluProbsGradCUDABackward(
   auto probs_grad =
       paddle::empty({o1_outer_dim}, paddle::DataType::FLOAT32, o1.place());
   auto o2_s = inplace ? do2_s : paddle::empty_like(do2_s);
+
+  PD_CHECK(moe_intermediate_size > 0,
+           "moe_intermediate_size must be > 0, but got ",
+           moe_intermediate_size);
+
+  if (o1_outer_dim == 0) {
+    return {do1, probs_grad, o2_s};
+  }
 
   const BFloat16* o1_ptr =
       reinterpret_cast<const BFloat16*>(o1.data<phi::bfloat16>());
