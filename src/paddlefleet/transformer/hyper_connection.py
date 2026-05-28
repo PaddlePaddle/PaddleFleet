@@ -344,7 +344,6 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (doubly stochastic)
         """
         leading_shape = x.shape[:-1]
-        x = x.float()
         proj, r = self._projection_and_get_norm(x)
         h_pre, h_post, h_res = self._compute_h(proj, r)
         h_res = self._sinkhorn_op(
@@ -472,6 +471,7 @@ class HyperConnectionModule(nn.Layer):
             h_post: [..., n] - expansion weights
         """
         # Compute mappings
+        hidden_states = hidden_states.astype("float32")
         h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
         # Aggregate for layer input
@@ -610,7 +610,12 @@ class HyperConnectionModule(nn.Layer):
             leading_shape = original_residual.shape[:-1]
             n = self.n
             C = self.hidden_size
-            orig_reshaped = original_residual.reshape([*leading_shape, n, C])
+            orig_reshaped = original_residual.reshape(
+                [*leading_shape, n, C]
+            ).astype("float32")
+            x = x.astype("float32")
+            if bias is not None:
+                bias = bias.astype("float32")
             output = self._h_post_bda_op(h_res, orig_reshaped, h_post, x, bias)
             return output.reshape([*leading_shape, n * C])
 
