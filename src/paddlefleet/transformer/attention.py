@@ -219,7 +219,7 @@ class Attention(FleetLayer, ABC):
 
         self.is_swa = False
 
-        if isinstance(self.config.sliding_window, tuple):
+        if self.config.sliding_window is not None:
             if self.is_mtp_layer:
                 for_swa_layer_number = (
                     self.layer_number + self.config.num_hidden_layers

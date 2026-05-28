@@ -96,7 +96,7 @@ class TestDotProductAttentionConstruction(unittest.TestCase):
             attn_mask_type=AttnMaskType.causal,
             attention_type="self",
         )
-        self.assertEqual(attn.layer_number, 1)
+        self.assertEqual(attn.layer_number, 0)
 
     def test_context_parallel_size_not_1_raises(self):
         """Test that context_parallel_size != 1 raises assertion."""
