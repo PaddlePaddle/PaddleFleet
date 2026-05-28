@@ -72,6 +72,7 @@ gen_gpus_arg() {
 
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
+export FLAGS_tcp_store_using_libuv=0
 
 run_count=0
 failed_tests=()

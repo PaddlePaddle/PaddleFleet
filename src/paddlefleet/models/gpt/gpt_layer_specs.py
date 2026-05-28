@@ -48,6 +48,7 @@ from paddlefleet.models.gpt.lm_head import (
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
+from paddlefleet.models.gpt.mtp_embedding_layer import MTPEmbeddingLayer
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
@@ -367,9 +368,17 @@ def get_gpt_layer_local_spec(
         transformer_cls = HyperConnectionTransformerLayer
 
     if paddle.distributed.is_initialized():
-        use_overlap = fleet.fleet._user_defined_strategy.hybrid_configs[
-            "pp_configs"
-        ].forward_backward_overlap_scheduler
+        try:
+            pp_configs = fleet.fleet._user_defined_strategy.hybrid_configs[
+                "pp_configs"
+            ]
+            use_overlap = pp_configs.forward_backward_overlap_scheduler
+        except KeyError:
+            # pp_configs key does not exist, no overlap configured
+            use_overlap = False
+        except AttributeError:
+            # pp_configs attribute does not exist, no overlap configured
+            use_overlap = False
         if use_overlap:
             assert not config.enable_hyper_connections, (
                 "HyperConnectionTransformerLayer not supported for overlap."
@@ -431,6 +440,7 @@ def get_gpt_layer_local_spec(
         extra_kwargs={
             "config": config,
             "layer_number": layer_number,
+            "is_mtp_layer": is_mtp_layer,
             "hidden_dropout_prob": config.hidden_dropout_prob
             if config is not None
             else None,
@@ -756,6 +766,14 @@ def get_gpt_spec(
             HyperConnectionExpandLayer,
         )
 
+    # MTP magic send: re-embed input_ids at the last stage
+    mtp_embedding_spec = None
+    if config.enable_mtp_magic_send and config.num_nextn_predict_layers > 0:
+        mtp_embedding_spec = LayerSpec(
+            layer=MTPEmbeddingLayer,
+            extra_kwargs={"config": config},
+        )
+
     return LayerSpec(
         layer=GPTModel,
         extra_kwargs={
@@ -784,6 +802,7 @@ def get_gpt_spec(
             else None,
             tail_empty_layers=tail_empty_layers_spec,
             mtp=mtp_layers_spec,
+            mtp_embedding=mtp_embedding_spec,
             mtp_lm_head=mtp_lm_head_spec,
             mtp_loss=mtp_loss_spec,
             layer_norm=LayerSpec(

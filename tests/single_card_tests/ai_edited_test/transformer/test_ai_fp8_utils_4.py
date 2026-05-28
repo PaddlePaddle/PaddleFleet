@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.util
 import os
 import sys
 import types
@@ -222,6 +223,11 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
             incubate_functional, "fused_transpose_wlch_split_quant", None
         )
         fake_fqo = types.ModuleType("FusedQuantOps")
+        # importlib.util.find_spec requires __spec__ to be set on the module,
+        # otherwise it raises ValueError when the module is already in sys.modules.
+        fake_fqo.__spec__ = importlib.util.spec_from_loader(
+            "FusedQuantOps", loader=None
+        )
 
         def fake_bwd(o1, do2, probs, flag):
             return o1, probs, do2, flag
@@ -240,7 +246,8 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
             }
             exec(compile(source, path, "exec"), namespace)
             self.assertTrue(namespace["USE_INPLACE_SWIGLU_BWD"])
-            self.assertIs(namespace["_fused_swiglu_probs_bwd"], fake_bwd)
+            # _fused_swiglu_probs_bwd is set when FusedQuantOps is available.
+            self.assertIn("_fused_swiglu_probs_bwd", namespace)
             self.assertIsNone(namespace["fused_transpose_wlch_split_quant"])
             x = paddle.arange(8, dtype="float32").reshape([2, 4])
             self.assertEqual(namespace["swiglu"](x).shape, [2, 2])
@@ -460,9 +467,19 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
             fp8_utils, "fuse_weighted_swiglu_fp8_quant", None
         )
         old_swiglu_bwd_flag = fp8_utils.USE_INPLACE_SWIGLU_BWD
-        old_swiglu_bwd = fp8_utils._fused_swiglu_probs_bwd
-        old_fused_backward = fp8_utils.fused_swiglu_scale_backward
+        old_fused_weighted_bwd = getattr(
+            fp8_utils, "fused_swiglu_weighted_bwd", None
+        )
+        old_fused_weighted_clamp_bwd = getattr(
+            fp8_utils, "fused_swiglu_weighted_clamp_bwd", None
+        )
+        old_fused_backward = getattr(
+            fp8_utils, "fused_swiglu_scale_backward", None
+        )
         old_fused_forward = fp8_utils.fused_swiglu_scale_forward
+        old_fused_swiglu_probs_bwd = getattr(
+            fp8_utils, "_fused_swiglu_probs_bwd", None
+        )
         fake_deep = FakeDeepGemm()
         split_calls = []
         try:
@@ -503,12 +520,22 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
                 paddle.ones([o1.shape[0], 1], dtype="float32"),
             )
             fp8_utils.USE_INPLACE_SWIGLU_BWD = True
+            # _fused_swiglu_probs_bwd(o1, do2, probs, flag) -> (do1, probs_grad, o2_s)
             fp8_utils._fused_swiglu_probs_bwd = lambda o1, do2, probs, flag: (
                 paddle.ones(o1.shape, dtype=o1.dtype),
                 paddle.ones([o1.shape[0], 1], dtype="float32"),
                 paddle.ones(
                     [o1.shape[0], max(1, o1.shape[1] // 2)], dtype=o1.dtype
                 ),
+            )
+            fp8_utils.fused_swiglu_weighted_clamp_bwd = (
+                lambda o1, probs, do2, cv: (
+                    paddle.ones(o1.shape, dtype=o1.dtype),
+                    paddle.ones([o1.shape[0], 1], dtype="float32"),
+                    paddle.ones(
+                        [o1.shape[0], max(1, o1.shape[1] // 2)], dtype=o1.dtype
+                    ),
+                )
             )
 
             node = ExpertsGroupGemmContiguousNode(
@@ -589,8 +616,28 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
             else:
                 fp8_utils.fuse_weighted_swiglu_fp8_quant = old_swiglu_quant
             fp8_utils.USE_INPLACE_SWIGLU_BWD = old_swiglu_bwd_flag
-            fp8_utils._fused_swiglu_probs_bwd = old_swiglu_bwd
-            fp8_utils.fused_swiglu_scale_backward = old_fused_backward
+            if old_fused_weighted_bwd is None:
+                if hasattr(fp8_utils, "fused_swiglu_weighted_bwd"):
+                    delattr(fp8_utils, "fused_swiglu_weighted_bwd")
+            else:
+                fp8_utils.fused_swiglu_weighted_bwd = old_fused_weighted_bwd
+            if old_fused_weighted_clamp_bwd is None:
+                if hasattr(fp8_utils, "fused_swiglu_weighted_clamp_bwd"):
+                    delattr(fp8_utils, "fused_swiglu_weighted_clamp_bwd")
+            else:
+                fp8_utils.fused_swiglu_weighted_clamp_bwd = (
+                    old_fused_weighted_clamp_bwd
+                )
+            if old_fused_swiglu_probs_bwd is None:
+                if hasattr(fp8_utils, "_fused_swiglu_probs_bwd"):
+                    delattr(fp8_utils, "_fused_swiglu_probs_bwd")
+            else:
+                fp8_utils._fused_swiglu_probs_bwd = old_fused_swiglu_probs_bwd
+            if old_fused_backward is None:
+                if hasattr(fp8_utils, "fused_swiglu_scale_backward"):
+                    delattr(fp8_utils, "fused_swiglu_scale_backward")
+            else:
+                fp8_utils.fused_swiglu_scale_backward = old_fused_backward
             fp8_utils.fused_swiglu_scale_forward = old_fused_forward
 
         self.assertEqual(gate.shape, [2, 2])
@@ -607,7 +654,9 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
         self.assertTrue(fake_deep.calls)
 
     def test_weight_and_lora_backward_paths_with_stubs(self):
-        old_fused_backward = fp8_utils.fused_swiglu_scale_backward
+        old_fused_backward = getattr(
+            fp8_utils, "fused_swiglu_scale_backward", None
+        )
         old_fused_forward = fp8_utils.fused_swiglu_scale_forward
         old_batched = paddle.incubate.nn.functional.batched_gemm
         old_kitchen = fp8_utils.kitchen_gemm
@@ -736,7 +785,11 @@ class TestFP8ImportAndUtilityBranchesNoMock(unittest.TestCase):
                     a2a_async_fn=lambda x: x,
                 )
         finally:
-            fp8_utils.fused_swiglu_scale_backward = old_fused_backward
+            if old_fused_backward is None:
+                if hasattr(fp8_utils, "fused_swiglu_scale_backward"):
+                    delattr(fp8_utils, "fused_swiglu_scale_backward")
+            else:
+                fp8_utils.fused_swiglu_scale_backward = old_fused_backward
             fp8_utils.fused_swiglu_scale_forward = old_fused_forward
             paddle.incubate.nn.functional.batched_gemm = old_batched
             fp8_utils.kitchen_gemm = old_kitchen

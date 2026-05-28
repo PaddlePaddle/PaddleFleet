@@ -203,7 +203,6 @@ def setup_ops_extension():
             f"{_ext_rel}/merge_subbatch_cast.cu",
             f"{_ext_rel}/tokens_unzip_slice.cu",
             f"{_ext_rel}/fuse_swiglu_scale.cu",
-            f"{_ext_rel}/swiglu_kernel.cu",
             f"{_ext_rel}/fuse_weighted_swiglu_fp8_quant.cu",
             f"{_ext_rel}/router_metadata.cu",
             f"{_ext_rel}/count_cumsum.cu",

@@ -150,13 +150,28 @@ class RotaryEmbedding(nn.Layer):
     ) -> Tensor:
         """Generates matrix of frequencies based on positions in the sequence,
         used to create positional encodings"""
-        if position_ids is not None and position_ids.ndim == 1:
-            # fastdeploy decode mode
-            seq = position_ids.astype(self.inv_freq.dtype)
+        if position_ids is not None:
+            # Handle different position_ids shapes:
+            # - 1D [S]: use directly (also covers fastdeploy decode mode)
+            # - 2D [B, S]: use first batch (assume all batches have same positions)
+            # - 3D: not supported by RotaryEmbedding, use MultimodalRotaryEmbedding instead
+            if position_ids.ndim == 1:
+                seq = position_ids.astype(self.inv_freq.dtype)
+            elif position_ids.ndim == 2:
+                # Take first batch, assuming all batches have same position_ids
+                seq = position_ids[0].astype(self.inv_freq.dtype)
+            else:
+                # For 3D position_ids (M-RoPE), this function should not be called
+                # Fall back to max_seq_len to avoid cryptic errors
+                seq = (
+                    paddle.arange(max_seq_len).astype(self.inv_freq.dtype)
+                    + offset
+                )
         else:
             seq = (
                 paddle.arange(max_seq_len).astype(self.inv_freq.dtype) + offset
             )
+
         if self.seq_len_interpolation_factor is not None:
             seq *= 1 / self.seq_len_interpolation_factor
 

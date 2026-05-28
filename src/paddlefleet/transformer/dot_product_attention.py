@@ -77,6 +77,8 @@ class DotProductAttention(FleetLayer):
         softmax_scale: float | None = None,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
+        k_channels: int | None = None,
+        v_channels: int | None = None,
         **kwargs,
     ):
         super().__init__(config=config)
@@ -91,7 +93,16 @@ class DotProductAttention(FleetLayer):
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
 
-        projection_size = self.config.head_dim * self.config.num_attention_heads
+        # For MLA, k_channels and v_channels may differ from config.head_dim
+        # Default to config.head_dim if not provided (standard attention)
+        self.k_channels = (
+            k_channels if k_channels is not None else self.config.head_dim
+        )
+        self.v_channels = (
+            v_channels if v_channels is not None else self.config.head_dim
+        )
+
+        projection_size = self.k_channels * self.config.num_attention_heads
 
         # Per attention head and per partition values.
         if pg_collection is None:
@@ -235,6 +246,9 @@ class DotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
+        past_key_values=None,
+        layer_idx=None,
+        use_cache: bool = False,
         # DSA-specific parameters (ignored by DotProductAttention)
         x: Tensor | None = None,
         qr: Tensor | None = None,
@@ -319,19 +333,29 @@ class DotProductAttention(FleetLayer):
             and attn_mask_startend_row_indices is None
             and not use_eager
         ):
-            # Note:
-            # attention_mask is None in default
-            # is_causal is True in default
-            # training is True in default
-            # Default values above maybe changed in the future
+            # KV cache support for inference
+            if use_cache and past_key_values is not None:
+                key, value = past_key_values.update(key, value, layer_idx)
+                # During prefill (query_len > 1), is_causal=True handles causal masking.
+                # During decode (query_len == 1), no causal mask needed; and KV length
+                # = history + 1, so the original prefill attention_mask no longer matches
+                # the extended KV length. Skip the mask in that case.
+                is_causal = query.shape[1] > 1
+                if query.shape[1] == 1:
+                    attn_mask_kv = None
+                else:
+                    attn_mask_kv = attention_mask
+            else:
+                is_causal = True
+                attn_mask_kv = attention_mask
+
             attn_output = paddle.nn.functional.scaled_dot_product_attention(
                 query,
                 key,
                 value,
-                attention_mask,
+                attn_mask_kv,
                 self.config.attention_dropout,
-                is_causal=True,
-                training=True,
+                is_causal=is_causal,
             )
 
             attn_output = paddle.reshape(
@@ -509,9 +533,10 @@ class DotProductAttention(FleetLayer):
         context = context.transpose([0, 2, 1, 3]).contiguous()
 
         # [b, sq, np, hn] --> [b, sq, hp]
+        # For MLA, use v_channels for output dimension (may differ from k_channels)
         new_context_shape = (
             *context.shape[:-2],
-            self.hidden_size_per_partition,
+            self.hidden_size_per_partition // self.k_channels * self.v_channels,
         )
         context = context.reshape(*new_context_shape)
 
@@ -558,6 +583,9 @@ class CPDotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
+        past_key_values=None,
+        layer_idx=None,
+        use_cache: bool = False,
         # DSA-specific parameters (ignored by DotProductAttention)
         x: Tensor | None = None,
         qr: Tensor | None = None,

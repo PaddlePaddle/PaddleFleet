@@ -139,6 +139,7 @@ class GPTSublayersSpec:
     mhc_contract: LayerSpec | None = None
     tail_empty_layers: list[LayerSpec] | None = None
     mtp: list[LayerSpec] | None = None
+    mtp_embedding: LayerSpec | None = None
     layer_norm: LayerSpec | None = None
     lm_head: LayerSpec | None = None
     mtp_lm_head: LayerDesc | None = None
@@ -205,6 +206,7 @@ class GPTModel(PipelineLayer):
             if getattr(param, "is_weight_only_mtp", False)
         ]
 
+    # ========================================
     def offload_weight_only_params(self):
         """Offload all weight-only MTP parameters to CPU pinned memory."""
         for param in self._get_weight_only_params():
@@ -231,6 +233,18 @@ class GPTModel(PipelineLayer):
                 layers,
                 SharedLayerDesc(
                     "embed",
+                    spec.embedding,
+                    shared_weight_attr="embedding_weight",
+                ),
+                name_prefix,
+            )
+        elif self.config.enable_mtp_magic_send:
+            # MTP magic send: share embedding weight between GPTEmbedding (first stage)
+            # and MTPEmbeddingLayer (last stage) via SharedLayerDesc broadcast mechanism.
+            self.add_sequential_layer(
+                layers,
+                SharedLayerDesc(
+                    "mtp_embed",
                     spec.embedding,
                     shared_weight_attr="embedding_weight",
                 ),
@@ -278,6 +292,18 @@ class GPTModel(PipelineLayer):
             )
 
         if spec.mtp:
+            # MTP magic send: MTPEmbeddingLayer shares weight with GPTEmbedding
+            # via SharedLayerDesc("mtp_embed") broadcast mechanism.
+            if spec.mtp_embedding:
+                self.add_sequential_layer(
+                    layers,
+                    SharedLayerDesc(
+                        "mtp_embed",
+                        spec.mtp_embedding,
+                        shared_weight_attr="embedding_weight",
+                    ),
+                    f"{name_prefix}.mtp_embedding",
+                )
             for mtp_spec in spec.mtp:
                 self.add_sequential_layer(
                     layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"

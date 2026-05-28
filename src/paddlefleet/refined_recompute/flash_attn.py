@@ -28,14 +28,23 @@ from paddlefleet.context_parallel_utils import (
 )
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
-if paddle.cuda.get_device_capability()[0] == 10:
-    from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
-        FlashMaskInfoPaddle,
-    )
-    from paddlefleet_ops.flash_mask.cute.interface import (
-        _flash_attn_bwd,
-        _flash_attn_fwd,
-    )
+_flash_mask_available = False
+try:
+    if (
+        paddle.cuda.is_available()
+        and paddle.cuda.get_device_capability()[0] == 10
+    ):
+        from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
+            FlashMaskInfoPaddle,
+        )
+        from paddlefleet_ops.flash_mask.cute.interface import (
+            _flash_attn_bwd,
+            _flash_attn_fwd,
+        )
+
+        _flash_mask_available = True
+except (ImportError, AttributeError):
+    _flash_mask_available = False
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +73,16 @@ def _get_fa_version(hdim):
         "FLAGS_cudnn_deterministic"
     ]:
         return 2
-    return paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
         "FLAGS_flash_attn_version"
     ]
+    # Fall back to version 3 if flash_mask is not available
+    if fa_version == 4 and not _flash_mask_available:
+        logger.warning(
+            "FlashMask (fa_version=4) is not available, falling back to fa_version=3"
+        )
+        return 3
+    return fa_version
 
 
 def flashattn_auto_cast(q, k, v, dtype=paddle.bfloat16):

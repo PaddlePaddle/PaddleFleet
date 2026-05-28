@@ -40,6 +40,7 @@ from paddlefleet.fusions.fused_bias_geglu import (
 from paddlefleet.fusions.fused_bias_gelu import bias_gelu_impl
 from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
+    clamped_weighted_bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
 from paddlefleet.transformer.layer import FleetLayer
@@ -197,12 +198,23 @@ class MLP(FleetLayer):
             if per_token_scale is not None:
                 if self.hidden_act == F.silu and self.config.gated_linear_unit:
                     # dtype is handled inside the fused kernel
-                    intermediate_parallel = weighted_bias_swiglu_impl(
-                        intermediate_parallel,
-                        bias_parallel,
-                        per_token_scale.unsqueeze(-1),
-                        self.config.activation_func_fp8_input_store,
-                    )
+                    if self.config.activation_func_clamp_value is not None:
+                        intermediate_parallel = (
+                            clamped_weighted_bias_swiglu_impl(
+                                intermediate_parallel,
+                                bias_parallel,
+                                per_token_scale.unsqueeze(-1),
+                                self.config.activation_func_clamp_value,
+                                self.config.activation_func_fp8_input_store,
+                            )
+                        )
+                    else:
+                        intermediate_parallel = weighted_bias_swiglu_impl(
+                            intermediate_parallel,
+                            bias_parallel,
+                            per_token_scale.unsqueeze(-1),
+                            self.config.activation_func_fp8_input_store,
+                        )
                 elif (
                     self.hidden_act == quick_gelu
                     and self.config.gated_linear_unit

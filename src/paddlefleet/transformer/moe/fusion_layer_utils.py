@@ -29,6 +29,21 @@ from .vmm_utils import (
     tokens_zip_unique_add_with_subbatch,
 )
 
+if paddlefleet_ops.is_sonic_moe_available():
+    from paddlefleet_ops.sonicmoe.enums import ActivationType
+    from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
+        deepep_topk_to_sonic_metadata,
+    )
+    from paddlefleet_ops.sonicmoe.ernie_compat.mlp_node_v2 import (
+        _differentiable_router_scores,
+    )
+    from paddlefleet_ops.sonicmoe.functional import (
+        _DownProjection,
+        _refresh_fp8_config,
+        _UpProjection,
+    )
+    from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+
 logger = logging.getLogger(__name__)
 
 
@@ -266,6 +281,7 @@ class MlpNode:
         moe_subbatch_diag=False,
         use_ue8m0=False,
         dw_p2p_overlap=False,
+        clamp_value=None,
     ):
         """
         Constructor
@@ -335,6 +351,7 @@ class MlpNode:
                     use_ue8m0=use_ue8m0,
                     dw_p2p_overlap=dw_p2p_overlap,
                     moe_expert_fusion=moe_expert_fusion,
+                    clamp_value=clamp_value,
                 )
                 for local_expert_id in range(self.num_experts_per_device)
             ]
@@ -350,6 +367,7 @@ class MlpNode:
                 use_ue8m0=use_ue8m0,
                 dw_p2p_overlap=dw_p2p_overlap,
                 moe_expert_fusion=moe_expert_fusion,
+                clamp_value=clamp_value,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -1910,6 +1928,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         moe_subbatch_diag=False,
         use_ue8m0=False,
         dw_p2p_overlap=False,
+        clamp_value=None,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -1938,6 +1957,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             moe_subbatch_diag=moe_subbatch_diag,
             use_ue8m0=use_ue8m0,
             dw_p2p_overlap=dw_p2p_overlap,
+            clamp_value=clamp_value,
         )
 
         if fp8_dispatched_handle is not None:
@@ -2055,6 +2075,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         fp8_dispatched_handle=None,
         is_first_fwd=False,
         dw_p2p_overlap=False,
+        clamp_value=None,
     ):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
@@ -2065,6 +2086,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             moe_deep_gemm=moe_deep_gemm,
             moe_expert_fusion=moe_expert_fusion,
             dw_p2p_overlap=dw_p2p_overlap,
+            clamp_value=clamp_value,
         )
         original_hidden_shape = tuple(hidden_states.shape)
         original_probs_shape = tuple(dispatched_probs.shape)
@@ -2117,3 +2139,90 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             ctx.original_probs_shape,
         )
         return hidden_states_grad, dispatched_probs_grad
+
+
+def run_sonic_moe(
+    hidden_states, topk_indices, topk_scores, K, E, w1, w2, fp8=False
+):
+    T = hidden_states.shape[0]
+    stream_id = paddle.device.current_stream()
+
+    valid = topk_indices >= 0
+    valid_experts = topk_indices[valid].cast(paddle.int32)
+    tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
+        paddle.int32
+    )
+
+    (
+        expert_frequency_offset,
+        x_gather_idx,
+        s_scatter_idx,
+        s_reverse_scatter_idx,
+        num_activated_expert_per_token_offset,
+        _router_scores,
+        TK_padded,
+        total_pad_rows,
+        _N_recv,
+        _score_src_idx,
+    ) = deepep_topk_to_sonic_metadata(
+        topk_indices.cast(paddle.int32),
+        topk_scores,
+        tokens_per_expert,
+        E,
+        block=128 if fp8 else 1,
+    )
+
+    s_scatter_idx.stop_gradient = True
+    activation_type = ActivationType("swiglu")
+
+    total_expert_freq = TK_padded
+    scores_for_down = _differentiable_router_scores(
+        topk_scores,
+        topk_indices.cast(paddle.int32),
+        num_activated_expert_per_token_offset,
+        TK_padded - total_pad_rows,
+        TK_padded,
+        E,
+        score_src_idx=_score_src_idx,
+    )
+
+    with enable_fp8(fp8):
+        _refresh_fp8_config()
+        y1, z = _UpProjection.apply(
+            hidden_states,
+            w1.permute([1, 2, 0]),
+            None,
+            expert_frequency_offset,
+            total_expert_freq,
+            K,
+            stream_id,
+            x_gather_idx,
+            s_scatter_idx,
+            s_reverse_scatter_idx,
+            num_activated_expert_per_token_offset,
+            True,  # is_varlen_k
+            activation_type,
+            is_inference_mode_enabled=False,
+            use_low_precision_postact_buffer=False,
+        )
+        hidden_states = _DownProjection.apply(
+            y1,
+            z,
+            w2.permute([1, 2, 0]),
+            None,
+            scores_for_down,
+            s_scatter_idx,
+            expert_frequency_offset,
+            T,
+            K,
+            stream_id,
+            x_gather_idx,
+            s_scatter_idx,
+            s_reverse_scatter_idx,
+            num_activated_expert_per_token_offset,
+            True,  # is_varlen_k
+            activation_type,
+            None,
+        )
+
+    return hidden_states

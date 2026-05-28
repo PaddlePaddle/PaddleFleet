@@ -61,7 +61,12 @@ except Exception:
 
 
 def _ec_compatible_rope_apply(
-    q_pe, k_pe, seq_len, rope_base=1000000.0, position_ids=None
+    q_pe,
+    k_pe,
+    seq_len,
+    rope_base=1000000.0,
+    position_offset=0,
+    position_ids=None,
 ):
     """Apply RoPE using EC's complex multiplication method (no YaRN, no mscale).
 
@@ -74,8 +79,9 @@ def _ec_compatible_rope_apply(
         k_pe: [B, S, 1, D] key positional embedding portion
         seq_len: sequence length
         rope_base: base frequency (default 1e6)
+        position_offset: starting position index for autoregressive decode
         position_ids: optional [S] position ID in fastdeploy decode mode.
-                     If None, defaults to [0, 1, ..., seq_len-1].
+                     If None, defaults to [0, 1, ..., seq_len-1] (offset by position_offset).
     """
     head_dim = q_pe.shape[-1]
     # inv_freq same as EC: 1 / (base^(arange(0, dim, 2) / dim))
@@ -87,12 +93,15 @@ def _ec_compatible_rope_apply(
         # In EB dataflow and CP size > 1, shape of q is [b, s/cp, h, d],
         # we need to get full seq_len here
         seq_len = seq_len * get_context_parallel_world_size()
-    # Compute positions from position_ids or default to sequential
+
+    # Compute positions: prefer 1D position_ids (fastdeploy decode), else use sequential with offset
     if position_ids is not None and position_ids.ndim == 1:
-        # fastdeploy decode mode
         positions = position_ids.astype(freqs.dtype)
     else:
-        positions = paddle.arange(seq_len).astype(freqs.dtype)
+        # position ids: [position_offset, position_offset+1, ..., position_offset+seq_len-1]
+        positions = paddle.arange(
+            position_offset, position_offset + seq_len, dtype="float32"
+        )
     # freqs_table: [S, D/2]
     freqs_table = paddle.outer(positions, freqs)
     # Expand for batch: [1, S, D/2]
@@ -418,6 +427,7 @@ class MultiLatentAttention(Attention):
         packed_seq_params=None,
         in_recompute: bool = False,
         position_ids=None,
+        **kwargs,
     ):
         """Forward pass for multi-latent attention"""
         from paddlefleet.transformer.transformer_layer import TransformerLayer
@@ -473,6 +483,11 @@ class MultiLatentAttention(Attention):
             key = key.transpose([1, 0, 2, 3]).contiguous()
             value = value.transpose([1, 0, 2, 3]).contiguous()
 
+        # Extract inference kwargs to pass through to core_attention
+        past_key_values = kwargs.get("past_key_values")
+        layer_idx = kwargs.get("layer_idx")
+        use_cache = kwargs.get("use_cache", False)
+
         if (
             hasattr(self.core_attention.config, "forward_meta")
             and self.core_attention.config.forward_meta.max_len_tensor_cpu[2]
@@ -521,6 +536,9 @@ class MultiLatentAttention(Attention):
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention
                 and in_recompute,
+                past_key_values=past_key_values,
+                layer_idx=layer_idx,
+                use_cache=use_cache,
                 # DSA-specific parameters
                 x=hidden_states,
                 qr=q_compressed,
@@ -669,7 +687,7 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_b_proj = build_spec_layer(
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
-            self.config.num_attention_heads
+            self.num_query_groups_per_partition
             * (self.config.qk_nope_head_dim + self.config.v_head_dim),
             config=self.config,
             init_method=self.config.init_method,
@@ -897,12 +915,20 @@ class MLASelfAttention(MultiLatentAttention):
             # kv: [num_tokens, n * (qk_nope_head_dim + v_head_dim)]
             kv, _ = self.kv_b_proj(kv_compressed)
 
+            # Debug: print kv shape
+            # if self.layer_number == 0:
+            #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after kv_b_proj: {kv.shape}", flush=True)
+
             # kv: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
+            # For GQA, kv_b_proj outputs num_query_groups (num_key_value_heads)
             kv = kv.view(
                 *kv.size()[:-1],
-                self.num_attention_heads_per_partition,
+                self.num_query_groups_per_partition,
                 self.config.qk_nope_head_dim + self.config.v_head_dim,
             )
+
+            # if self.layer_number == 0:
+            #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after view: {kv.shape}", flush=True)
 
             # [num_tokens, qk_rope_head_dim] -> [num_tokens, 1, qk_rope_head_dim]
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
@@ -968,7 +994,12 @@ class MLASelfAttention(MultiLatentAttention):
                     q_len = q.size(0)
                 else:
                     q_len = q.size(1)
-                # rotary_pos_emb: squeeze [1, seq_len, 1, headdim]
+
+                # Determine RoPE start position from position_ids (for decode offset)
+                if position_ids is not None and position_ids.numel() == q_len:
+                    start_pos = int(position_ids.flatten()[0].item())
+                else:
+                    start_pos = 0
 
                 if get_context_parallel_world_size() > 1:
                     # In EB dataflow and CP size > 1, rotary_pos_emb is [1, s, 1, d];
@@ -976,12 +1007,30 @@ class MLASelfAttention(MultiLatentAttention):
                     rotary_pos_emb = ContextParallelScatterOp.apply(
                         rotary_pos_emb, axis=1
                     )
-                elif self.config.context_parallel_size == 1:
-                    # During training, the sequence length is always
-                    # the full rotary_pos_emb length, except for sequence packing + CP.
-                    # We need the full rotary_pos_emb to cover the full sequence,
-                    # so we do not shorten it here.
-                    rotary_pos_emb = rotary_pos_emb[:, 0:q_len]
+                elif (
+                    packed_seq_params is None
+                    or self.config.context_parallel_size == 1
+                ):
+                    if rotary_pos_emb.shape[1] >= start_pos + q_len:
+                        rotary_pos_emb = rotary_pos_emb[
+                            :, start_pos : start_pos + q_len
+                        ]
+                    else:
+                        # During inference with KV cache, rotary_pos_emb was
+                        # computed for the current input length only, but
+                        # position_ids indicate we need embeddings at start_pos.
+                        # Recompute with the correct offset.
+                        if self.config.rope_type == "rope":
+                            rotary_pos_emb = self.rotary_pos_emb(
+                                q_len, offset=start_pos, packed_seq=packed_seq
+                            )
+                        else:
+                            # mscale is constant for Yarn (depends only on
+                            # model hyper-params), so we can safely drop the
+                            # recomputed value and keep the outer-scope one.
+                            rotary_pos_emb, _ = self.rotary_pos_emb(
+                                q_len, offset=start_pos, packed_seq=packed_seq
+                            )
 
                 # Replace paddle.split with zero-copy slice views.
                 q_no_pe = q[..., : self.config.qk_nope_head_dim]
@@ -1016,6 +1065,7 @@ class MLASelfAttention(MultiLatentAttention):
                         k_pos_emb,
                         q_len,
                         rope_base=self.config.rope_theta,  # Must match EC's config.rope_theta
+                        position_offset=start_pos,
                         position_ids=position_ids,
                     )
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
@@ -1042,6 +1092,9 @@ class MLASelfAttention(MultiLatentAttention):
                         cu_seqlens=cu_seqlens_kv,
                         mscale=mscale,
                         cp_group=self.pg_collection.cp,
+                        sp_group=self.pg_collection.tp
+                        if self.config.sequence_parallel
+                        else None,
                     )
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
@@ -1049,16 +1102,20 @@ class MLASelfAttention(MultiLatentAttention):
                 query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
 
                 # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
+                # For GQA, use num_query_groups for key expansion
                 if k_pos_emb.ndim == 4:
                     k_pos_emb = k_pos_emb.expand(
-                        -1, -1, self.num_attention_heads_per_partition, -1
+                        -1, -1, self.num_query_groups_per_partition, -1
                     )
                 else:
                     assert k_pos_emb.ndim == 3
                     k_pos_emb = k_pos_emb.expand(
-                        -1, self.num_attention_heads_per_partition, -1
+                        -1, self.num_query_groups_per_partition, -1
                     )
                 key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
+
+            # if self.layer_number == 0:
+            #     print(f"[DEBUG MLA layer {self.layer_number}] key final shape: {key.shape}, head_dim={key.shape[-1]}", flush=True)
 
             query = query.contiguous()
             key = key.contiguous()

@@ -33,6 +33,7 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
+from .fusion_layer_utils import run_sonic_moe
 from .moe_utils import (
     k_grouped_bf16_gemm_tn_contiguous_aligned,
 )
@@ -143,7 +144,6 @@ class GroupedMLPExpert(FleetLayer):
         self.config.hidden_act = F.silu
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
-        self.using_sonic_moe = self.config.using_sonic_moe
         assert not config.use_bias, (
             "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
         )
@@ -185,28 +185,16 @@ class GroupedMLPExpert(FleetLayer):
         fc2_input_size = self.config.moe_intermediate_size
 
         dtype = "bfloat16"
-        if self.using_sonic_moe:
-            w1_shape = [
-                self.num_local_experts,
-                fc1_output_size,
-                self.config.hidden_size,
-            ]
-            w2_shape = [
-                self.num_local_experts,
-                self.config.hidden_size,
-                fc2_input_size,
-            ]
-        else:
-            w1_shape = [
-                self.num_local_experts,
-                self.config.hidden_size,
-                fc1_output_size,
-            ]
-            w2_shape = [
-                self.num_local_experts,
-                fc2_input_size,
-                self.config.hidden_size,
-            ]
+        w1_shape = [
+            self.num_local_experts,
+            self.config.hidden_size,
+            fc1_output_size,
+        ]
+        w2_shape = [
+            self.num_local_experts,
+            fc2_input_size,
+            self.config.hidden_size,
+        ]
 
         rng_ctx = (
             get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name())
@@ -294,6 +282,160 @@ class GroupedMLPExpert(FleetLayer):
         Empty implementation for compatibility with SequentialMLP and TEGroupedMLP.
         """
         pass
+
+    def sharded_state_dict(
+        self,
+        structured_name_prefix: str = "",
+    ):
+        state_dict = self.state_dict(structured_name_prefix="")
+        model_type = getattr(self.config, "model_type", "none")
+        if "qwen3_vl" not in model_type and "qwen3_5" not in model_type:
+            w1 = state_dict["weight1"].reshape(-1, self.weight1.shape[-1])
+            w2 = state_dict["weight2"].reshape(-1, self.weight2.shape[-1])
+            w1.name = self.weight1.name
+            w2.name = self.weight2.name
+            state_dict["weight1"] = w1
+            state_dict["weight2"] = w2
+
+        sharded_dict = {}
+        full_key1 = f"{structured_name_prefix}weight1"
+        full_key2 = f"{structured_name_prefix}weight2"
+        if self.ep_group is None:
+            sharded_dict = build_sharded_state_dict(
+                state_dict, None, structured_name_prefix
+            )
+        else:
+            sharded_dict[full_key1] = shard_weight(
+                key=full_key1,
+                weight=state_dict["weight1"],
+                axis=0,
+                group=self.ep_group,
+            )
+            sharded_dict[full_key1].grouped_gemm_param = True
+            sharded_dict[full_key2] = shard_weight(
+                key=full_key2,
+                weight=state_dict["weight2"],
+                axis=0,
+                group=self.ep_group,
+            )
+            sharded_dict[full_key2].grouped_gemm_param = True
+        return sharded_dict
+
+
+class SonicMoEExpert(FleetLayer):
+    @staticmethod
+    def _split_to_sonic_interleaved(weight):
+        # make the weight tensor of sonicmoe consistent
+        # with the original GroupedGEMM weight.
+        gate, up = paddle.chunk(weight, 2, axis=-1)
+        gate = gate.transpose([0, 2, 1])
+        up = up.transpose([0, 2, 1])
+        return paddle.stack([gate, up], axis=2).reshape(
+            [weight.shape[0], -1, weight.shape[1]]
+        )
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        topk: int,
+        config: TransformerConfig,
+        pg_collection: ProcessGroupCollection | None = None,
+    ):
+        super().__init__(config=config)
+        self.config: TransformerConfig = config
+        self.config.hidden_act = F.silu
+        self.num_local_experts = num_local_experts
+        self.hidden_size = self.config.hidden_size
+        self.K = topk
+        assert config.gated_linear_unit is True, (
+            "Sonic MoE must use SwiGLU, i.e. set gated_linear_unit=True."
+        )
+        assert not config.use_bias, (
+            "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
+        )
+
+        self.ep_group = pg_collection.ep if pg_collection else None
+        self.expert_parallel = (
+            utils.get_pg_size(self.ep_group) > 1 if self.ep_group else False
+        )
+
+        if self.config.gated_linear_unit:
+            if self.config.hidden_act not in [F.silu, F.gelu]:
+                raise ValueError(
+                    "Activation function must be silu or gelu when using SonicMoE."
+                )
+
+        # No tensor parallel - full sizes
+        fc1_output_size = self.config.moe_intermediate_size * 2
+        fc2_input_size = self.config.moe_intermediate_size
+
+        dtype = "bfloat16"
+
+        rng_ctx = (
+            get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name())
+            if paddle.distributed.get_world_size() > 1 and self.expert_parallel
+            else nullcontext()
+        )
+
+        with rng_ctx:
+            # NOTE: make the initial weight of sonicmoe consistent with
+            # the original GroupedGEMM implementation for fair comparison.
+            baseline_weight1 = paddle.zeros(
+                shape=[
+                    self.num_local_experts,
+                    self.hidden_size,
+                    fc1_output_size,
+                ],
+                dtype=dtype,
+            )
+            self.config.init_method(baseline_weight1)
+            baseline_weight2 = paddle.zeros(
+                shape=[
+                    self.num_local_experts,
+                    fc2_input_size,
+                    self.hidden_size,
+                ],
+                dtype=dtype,
+            )
+            self.config.output_layer_init_method(baseline_weight2)
+            self.weight1 = paddle.create_parameter(
+                shape=[
+                    self.num_local_experts,
+                    fc1_output_size,
+                    self.hidden_size,
+                ],
+                dtype=dtype,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+            self.weight2 = paddle.create_parameter(
+                shape=[
+                    self.num_local_experts,
+                    self.hidden_size,
+                    fc2_input_size,
+                ],
+                dtype=dtype,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+            self.weight1.set_value(
+                self._split_to_sonic_interleaved(baseline_weight1)
+            )
+            self.weight2.set_value(baseline_weight2.transpose([0, 2, 1]))
+
+        self.weight1.is_distributed = self.expert_parallel
+        self.weight2.is_distributed = self.expert_parallel
+
+    def forward(self, hidden_states, topk_indices, topk_scores, use_fp8=False):
+        hidden_states = run_sonic_moe(
+            hidden_states,
+            topk_indices,
+            topk_scores,
+            self.K,
+            self.num_local_experts,
+            self.weight1,
+            self.weight2,
+            use_fp8,
+        )
+        return hidden_states
 
     def sharded_state_dict(
         self,

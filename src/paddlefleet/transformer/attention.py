@@ -355,6 +355,9 @@ class Attention(FleetLayer, ABC):
         attention_bias: Tensor | None = None,
         packed_seq_params: Tensor | None = None,
         in_recompute: bool = False,
+        past_key_values=None,
+        layer_idx=None,
+        use_cache: bool = False,
     ) -> tuple[Tensor, Tensor]:
         """
         Perform a forward pass through the attention layer.
@@ -485,11 +488,14 @@ class Attention(FleetLayer, ABC):
                     position_ids=position_ids,
                     mscale=None,
                     cp_group=self.pg_collection.cp,
+                    sp_group=self.pg_collection.tp,
                 )
             # elif self.config.apply_vision_rope:
             #     query, key = apply_rotary_pos_emb_vision(query,key,rotary_pos_cos,rotary_pos_sin)
             else:
                 if q_pos_emb is not None:
+                    # For sequence parallel, input is [S_sp, B, H, D] (time-major),
+                    # so we need to set time_major=True for RoPE
                     query = apply_rotary_pos_emb(
                         query,
                         q_pos_emb,
@@ -503,6 +509,9 @@ class Attention(FleetLayer, ABC):
                             self.config
                         ),
                         cp_group=self.pg_collection.cp,
+                        sp_group=self.pg_collection.tp
+                        if self.config.sequence_parallel
+                        else None,
                     )
 
                 if k_pos_emb is not None:
@@ -519,6 +528,9 @@ class Attention(FleetLayer, ABC):
                             self.config
                         ),
                         cp_group=self.pg_collection.cp,
+                        sp_group=self.pg_collection.tp
+                        if self.config.sequence_parallel
+                        else None,
                     )
 
         # ==================================
@@ -581,6 +593,9 @@ class Attention(FleetLayer, ABC):
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention
                 and in_recompute,
+                past_key_values=past_key_values,
+                layer_idx=layer_idx,
+                use_cache=use_cache,
             )
         # =================
         # Output. [b, sq, h]

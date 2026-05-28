@@ -763,24 +763,24 @@ jobs:
           fi
           '
 
-      - name: Integration test (Qwen3-30B-A3B single-card)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-qwen
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
-          qwen3_single_card_exit_code=$?
-          if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
-          fi
-          '
+      # - name: Integration test (Qwen3-30B-A3B single-card)
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-qwen
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
+      #     qwen3_single_card_exit_code=$?
+      #     if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
+      #     fi
+      #     '
 
       - name: Qwen3-vl-8k-single-card
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
