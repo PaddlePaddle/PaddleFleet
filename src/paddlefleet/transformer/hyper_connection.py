@@ -344,6 +344,7 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (doubly stochastic)
         """
         leading_shape = x.shape[:-1]
+        x = x.float()
         proj, r = self._projection_and_get_norm(x)
         h_pre, h_post, h_res = self._compute_h(proj, r)
         h_res = self._sinkhorn_op(
