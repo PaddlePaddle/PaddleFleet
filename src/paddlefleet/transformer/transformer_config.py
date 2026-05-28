@@ -798,6 +798,20 @@ class TransformerConfig(ModelParallelConfig):
     """If True, use fused sparse attention tilelang-kernel for CSA.
     """
 
+    dsv4_tilelang_backend: str | None = None
+    """Optional DSv4 TileLang backend. None keeps the default Paddle indexer path."""
+
+    dsv4_tilelang_enable_backward: bool = False
+    """Enable DSv4 TileLang CSA Indexer backward path."""
+
+    dsv4_tilelang_enable_csa_indexer: bool | None = None
+    """Optional override for TileLang CSA Indexer.
+
+    None follows dsv4_tilelang_backend: enabled when backend is
+    'attention_paddle_compat', disabled when backend is None. False disables
+    only the CSA Indexer TileLang path.
+    """
+
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
     Set to 0 to use a single linear output projection instead.
@@ -831,6 +845,18 @@ class TransformerConfig(ModelParallelConfig):
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
         "indexer_rope_interleave": "dsa_indexer_rotary_interleaved",
+        # CSA / DSv4 Hybrid field mapping
+        "csa_window_size": "csa_window_size",
+        "csa_compress_ratios": "csa_compress_ratios",
+        "csa_compress_rotary_base": "csa_compress_rotary_base",
+        "csa_dense_mode": "csa_dense_mode",
+        "csa_sparse_attn_fusion": "csa_sparse_attn_fusion",
+        "dsv4_tilelang_backend": "dsv4_tilelang_backend",
+        "dsv4_tilelang_enable_backward": "dsv4_tilelang_enable_backward",
+        "dsv4_tilelang_enable_csa_indexer": "dsv4_tilelang_enable_csa_indexer",
+        "o_groups": "o_groups",
+        "o_lora_rank": "o_lora_rank",
+        "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
     }
 
     @classmethod
@@ -1048,6 +1074,28 @@ class TransformerConfig(ModelParallelConfig):
                         f"csa_compress_ratios[{i}]={r} is invalid. "
                         f"Must be one of {valid_ratios}."
                     )
+
+            valid_tilelang_backends = {None, "attention_paddle_compat"}
+            if self.dsv4_tilelang_backend not in valid_tilelang_backends:
+                raise ValueError(
+                    f"dsv4_tilelang_backend={self.dsv4_tilelang_backend!r} is invalid. "
+                    f"Must be one of {valid_tilelang_backends}."
+                )
+            if (
+                self.dsv4_tilelang_enable_backward
+                and self.dsv4_tilelang_backend != "attention_paddle_compat"
+            ):
+                raise ValueError(
+                    "dsv4_tilelang_enable_backward requires dsv4_tilelang_backend='attention_paddle_compat'."
+                )
+            if (
+                self.dsv4_tilelang_backend is None
+                and self.dsv4_tilelang_enable_csa_indexer
+            ):
+                raise ValueError(
+                    "dsv4_tilelang_enable_csa_indexer=True requires dsv4_tilelang_backend='attention_paddle_compat'."
+                )
+
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:
             if self.actual_vocab_size is None:
