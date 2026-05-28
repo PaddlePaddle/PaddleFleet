@@ -37,17 +37,23 @@ try:
 except (ImportError, RuntimeError):
     pass
 
-# 优先使用 FusedQuantOps.fused_swiglu_probs_bwd（inplace，行为对齐）。
-# 若环境中没有 FusedQuantOps，则回退到 paddle.incubate 的 out-of-place 实现。
-# TODO: 迁移fused_swiglu_probs_bwd至paddlefleet_ops
+# 优先从 paddlefleet_ops 导入（算子已重命名为 paddlefleet_fused_swiglu_probs_bwd 避免冲突），
+# 仅在 paddlefleet_ops 中不存在时回退到旧的 FusedQuantOps。
 try:
-    import FusedQuantOps as _FQO
+    from paddlefleet_ops import (
+        fused_swiglu_probs_bwd as _fused_swiglu_probs_bwd,
+    )
 
-    _fused_swiglu_probs_bwd = _FQO.fused_swiglu_probs_bwd
     USE_INPLACE_SWIGLU_BWD = True
-except (ImportError, AttributeError):
-    _fused_swiglu_probs_bwd = None
-    USE_INPLACE_SWIGLU_BWD = False
+except (ImportError, AttributeError, RuntimeError):
+    try:
+        import FusedQuantOps as _FQO
+
+        _fused_swiglu_probs_bwd = _FQO.fused_swiglu_probs_bwd
+        USE_INPLACE_SWIGLU_BWD = True
+    except (ImportError, AttributeError):
+        _fused_swiglu_probs_bwd = None
+        USE_INPLACE_SWIGLU_BWD = False
 
 try:
     from paddle.nn.functional import swiglu

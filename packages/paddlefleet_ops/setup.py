@@ -209,6 +209,7 @@ def setup_ops_extension():
             f"{_ext_rel}/filter_scores.cu",
             f"{_ext_rel}/fuse_stack_transpose_fp8_quant.cu",
             f"{_ext_rel}/fuse_apply_rotary_pos_emb_vision.cu",
+            f"{_ext_rel}/fused_swiglu_probs_bwd.cu",
         ],
         include_dirs=[str(Path(__file__).parent / _ext_rel)],
         extra_compile_args={

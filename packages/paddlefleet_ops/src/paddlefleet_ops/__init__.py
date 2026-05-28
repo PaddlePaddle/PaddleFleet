@@ -240,6 +240,13 @@ import_custom_ops(
     global_ns=globals(),
 )
 
+# 别名：算子注册名改为 paddlefleet_fused_swiglu_probs_bwd 以避免与 FusedQuantOps 冲突，
+# 但对外仍保持 fused_swiglu_probs_bwd 的导入接口。
+if "paddlefleet_fused_swiglu_probs_bwd" in globals():
+    globals()["fused_swiglu_probs_bwd"] = globals()[
+        "paddlefleet_fused_swiglu_probs_bwd"
+    ]
+
 blocked_import_messages: dict[str, str] = {}
 
 if paddle.is_compiled_with_cuda():
