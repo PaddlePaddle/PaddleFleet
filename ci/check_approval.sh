@@ -128,6 +128,21 @@ for PATTERN in "${PACKAGING_PATTERNS[@]}"; do
 done
 
 
+PADDLEFORMERS_APPROVERS="From00"
+PADDLEFORMERS_FILES=(
+    "paddleformers/trainer/training_args.py"
+    "paddleformers/cli/hparams/"
+)
+for FILE in "${PADDLEFORMERS_FILES[@]}"; do
+    HAS_MODIFIED=$(git diff --name-only "${DIFF_BASE}" HEAD -- | grep "^${FILE}" || true)
+    if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
+        echo_line="You must be approved by From00 for changes in ${FILE}.\n"
+        APPROVER_LIST=(${PADDLEFORMERS_APPROVERS})
+        check_approval 1 "${APPROVER_LIST[@]}"
+    fi
+done
+
+
 if [ -n "${echo_list}" ];then
   echo "****************"
   echo -e "${echo_list[@]}"
