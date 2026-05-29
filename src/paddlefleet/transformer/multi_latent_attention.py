@@ -694,9 +694,7 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_b_proj = build_spec_layer(
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
-            # Use global num_key_value_heads so ColumnParallelLinear registers
-            # the correct original_shape (required by Muon optimizer).
-            self.config.num_key_value_heads
+            self.config.num_attention_heads
             * (self.config.qk_nope_head_dim + self.config.v_head_dim),
             config=self.config,
             init_method=self.config.init_method,
@@ -929,10 +927,9 @@ class MLASelfAttention(MultiLatentAttention):
             #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after kv_b_proj: {kv.shape}", flush=True)
 
             # kv: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
-            # For GQA, kv_b_proj outputs num_query_groups (num_key_value_heads)
             kv = kv.view(
                 *kv.size()[:-1],
-                self.num_query_groups_per_partition,
+                self.num_attention_heads_per_partition,
                 self.config.qk_nope_head_dim + self.config.v_head_dim,
             )
 
@@ -1111,15 +1108,14 @@ class MLASelfAttention(MultiLatentAttention):
                 query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
 
                 # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
-                # For GQA, use num_query_groups for key expansion
                 if k_pos_emb.ndim == 4:
                     k_pos_emb = k_pos_emb.expand(
-                        -1, -1, self.num_query_groups_per_partition, -1
+                        -1, -1, self.num_attention_heads_per_partition, -1
                     )
                 else:
                     assert k_pos_emb.ndim == 3
                     k_pos_emb = k_pos_emb.expand(
-                        -1, self.num_query_groups_per_partition, -1
+                        -1, self.num_attention_heads_per_partition, -1
                     )
                 key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
 
