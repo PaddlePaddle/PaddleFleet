@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """End-to-end PyLayer apply+backward coverage for WeightedSwiGLUFunction
-and ClampedWeightedSwiGLUFunction.
+(including clamp_value path).
 
 Note: forward/backward shape coverage of standalone clamped_swiglu/
 clamped_swiglu_back/clamped_weighted_swiglu/clamped_weighted_swiglu_back
@@ -37,9 +37,8 @@ sys.path.insert(
 import paddle
 
 from paddlefleet.fusions.fused_bias_swiglu import (
-    ClampedWeightedSwiGLUFunction,
     WeightedSwiGLUFunction,
-    clamped_weighted_bias_swiglu_impl,
+    weighted_bias_swiglu_impl,
 )
 
 
@@ -47,12 +46,12 @@ class TestWeightedSwiGLUFunctionClampPyLayer(unittest.TestCase):
     """Forward/backward through PyLayer for clamp and non-clamp branches."""
 
     def test_backward_with_clamp(self):
-        """ClampedWeightedSwiGLUFunction forward + clamp backward path."""
+        """WeightedSwiGLUFunction forward + clamp backward path."""
         x = paddle.randn([4, 16]).astype("float32")
         x.stop_gradient = False
         weights = paddle.ones([4, 1]).astype("float32")
         weights.stop_gradient = False
-        result = ClampedWeightedSwiGLUFunction.apply(x, weights, False, 1.0)
+        result = WeightedSwiGLUFunction.apply(x, weights, False, 1.0)
         self.assertEqual(result.shape, [4, 8])
         result.sum().backward()
         self.assertIsNotNone(x.grad)
@@ -88,7 +87,7 @@ class TestWeightedSwiGLUFunctionClampPyLayer(unittest.TestCase):
         weights_3d = paddle.full([S, B, 1], 0.5, dtype="float32")
         weights_3d.stop_gradient = False
 
-        out = clamped_weighted_bias_swiglu_impl(
+        out = weighted_bias_swiglu_impl(
             x, None, weights_3d, clamp_value=1.0, fp8_input_store=False
         )
         self.assertEqual(out.shape, [S, B, H // 2])
@@ -109,7 +108,7 @@ class TestWeightedSwiGLUFunctionClampPyLayer(unittest.TestCase):
         weights_3d = paddle.full([S, B, 1], 0.25, dtype="float32")
         weights_3d.stop_gradient = False
 
-        out = clamped_weighted_bias_swiglu_impl(
+        out = weighted_bias_swiglu_impl(
             x, None, weights_3d, clamp_value=1.0, fp8_input_store=False
         )
         self.assertEqual(out.shape, [S, B, H // 2])

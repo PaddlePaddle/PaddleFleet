@@ -21,7 +21,6 @@ import paddle.nn.functional as F
 
 from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
-    fused_swiglu_scale_clamp_forward,
     fused_swiglu_scale_forward,
 )
 
@@ -756,7 +755,7 @@ class ExpertsGroupGemmContiguousNode:
         """
 
         if self.clamp_value is not None:
-            o2 = fused_swiglu_scale_clamp_forward(
+            o2 = fused_swiglu_scale_forward(
                 o1, unzipped_probs, self.clamp_value
             )
         else:

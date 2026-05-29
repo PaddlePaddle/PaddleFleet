@@ -13,17 +13,12 @@
 # limitations under the License.
 """Tests for MLP with clamped weighted bias swiglu fusion and bias_activation_fusion.
 
-This file covers the diff lines 201-212 in mlp.py which are:
-   if self.config.activation_func_clamp_value is not None:
-       intermediate_parallel = clamped_weighted_bias_swiglu_impl(...)
-   else:
-       intermediate_parallel = weighted_bias_swiglu_impl(...)
 
 The mock strategy:
   - ``build_spec_layer`` returns a simple layer that produces a proper
     (output, bias) tuple so MLP can forward without distributed setup.
   - Only the lowest-level CUDA autograd Function.apply is mocked so that
-    the outer ``clamped_weighted_bias_swiglu_impl`` / ``weighted_bias_swiglu_impl``
+    the outer ``weighted_bias_swiglu_impl``
     function bodies are executed and tracked by coverage.
 """
 
@@ -46,7 +41,6 @@ import paddle
 import paddle.nn.functional as F
 
 from paddlefleet.fusions.fused_bias_swiglu import (
-    ClampedWeightedSwiGLUFunction,
     WeightedSwiGLUFunction,
 )
 from paddlefleet.transformer.mlp import MLP
@@ -100,13 +94,13 @@ class TestMLPClampBiasActivationFusion(unittest.TestCase):
         side_effect=_make_mock_linear,
     )
     @patch.object(
-        ClampedWeightedSwiGLUFunction,
+        WeightedSwiGLUFunction,
         "apply",
         return_value=paddle.randn([2, 4, 128]),
     )
     def test_forward_with_clamp_bias_fusion(self, _, __):
         """Lines 201-210: when activation_func_clamp_value is set and
-        bias_activation_fusion=True, clamped_weighted_bias_swiglu_impl is
+        bias_activation_fusion=True, weighted_bias_swiglu_impl is
         called instead of weighted_bias_swiglu_impl."""
         config = _make_config(activation_func_clamp_value=5.0)
         from paddlefleet.models.gpt.gpt_layer_specs import (
@@ -167,13 +161,13 @@ class TestMLPClampBiasActivationFusion(unittest.TestCase):
         side_effect=_make_mock_linear,
     )
     @patch.object(
-        ClampedWeightedSwiGLUFunction,
+        WeightedSwiGLUFunction,
         "apply",
         return_value=paddle.randn([2, 4, 128]),
     )
     def test_backward_with_clamp_bias_fusion(self, _, __):
-        """Lines 201-210: test fwd path with clamp_value exercises the new
-        clamped_weighted_bias_swiglu_impl code path in mlp.py."""
+        """test fwd path with clamp_value exercises the new
+        weighted_bias_swiglu_impl code path in mlp.py."""
         config = _make_config(activation_func_clamp_value=3.0)
         from paddlefleet.models.gpt.gpt_layer_specs import (
             get_gpt_layer_local_spec,

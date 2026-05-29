@@ -170,7 +170,17 @@ __global__ void VectorizedFusedSwiGLUBwd(const T* __restrict__ x,
         float silu_g = g_eff * sig_g;
         float swiglu_val = silu_g * v_eff;
 
-        local_d_scale_sum += dout * swiglu_val;
+        //   sum(swiglu_val.cast(dtype) * d_out.cast(scale_dtype))
+        // Same-type multiply preserves native precision (bf16*bf16→bf16)
+        // matching reference bit-exact; mixed types promote to float.
+        if constexpr (std::is_same_v<T, ScaleT>) {
+          local_d_scale_sum += static_cast<float>(
+              static_cast<T>(swiglu_val) * static_cast<ScaleT>(dout_ptr[i]));
+        } else {
+          local_d_scale_sum +=
+              static_cast<float>(static_cast<T>(swiglu_val)) *
+              static_cast<float>(static_cast<ScaleT>(dout_ptr[i]));
+        }
 
         float d_u = dout * s;
 
@@ -290,8 +300,15 @@ __global__ void VectorizedFusedSwiGLUWeightedBwd(
         // forward result
         out_buffer[i] = static_cast<T>(swiglu_val * p);
 
-        // d_probs accumulation (sum of dout * swiglu_val, no scale multiplier)
-        local_d_probs_sum += dout * swiglu_val;
+        //   sum(swiglu_val.cast(dtype) * d_out.cast(probs_dtype))
+        if constexpr (std::is_same_v<T, ScaleT>) {
+          local_d_probs_sum += static_cast<float>(
+              static_cast<T>(swiglu_val) * static_cast<ScaleT>(dout_ptr[i]));
+        } else {
+          local_d_probs_sum +=
+              static_cast<float>(static_cast<T>(swiglu_val)) *
+              static_cast<float>(static_cast<ScaleT>(dout_ptr[i]));
+        }
 
         // d_u = dout * p
         float d_u = dout * p;
