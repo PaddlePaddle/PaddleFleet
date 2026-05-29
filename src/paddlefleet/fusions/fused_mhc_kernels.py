@@ -61,6 +61,7 @@ if _CUTILE_AVAILABLE:
     ConstInt = ct.Constant[int]
     PAD_ZERO = ct.PaddingMode.ZERO
     LOG2E = 1.4426950408889634
+    _INT32_MAX = 2**31 - 1
 
     # -- Sinkhorn kernels ----------------------------------------------------
 
@@ -1228,6 +1229,11 @@ else:
             f"fused_sinkhorn: last two dims must be equal (square matrix), "
             f"got shape {list(input_logits.shape)}"
         )
+        hc = input_logits.shape[-1]
+        N_batch = input_logits.numel() // (hc * hc)
+        assert N_batch <= _INT32_MAX, (
+            f"fused_sinkhorn: N_batch={N_batch} exceeds int32 max ({_INT32_MAX})"
+        )
         return FusedSinkhornKnopp.apply(input_logits, num_iterations, eps)
 
     def fused_h_aggregate(x: Tensor, h_pre: Tensor) -> Tensor:
@@ -1249,6 +1255,13 @@ else:
         assert x.shape[:3] == h_pre.shape[:3], (
             f"fused_h_aggregate: x shape {list(x.shape)} and h_pre shape {list(h_pre.shape)} "
             f"must match on first 3 dims [s,b,n]"
+        )
+        s, b, n, C = x.shape
+        assert s * b <= _INT32_MAX, (
+            f"fused_h_aggregate: s*b={s * b} exceeds int32 max ({_INT32_MAX})"
+        )
+        assert C <= _INT32_MAX, (
+            f"fused_h_aggregate: C={C} exceeds int32 max ({_INT32_MAX})"
         )
         return FusedHAggregate.apply(x, h_pre)
 
@@ -1287,6 +1300,14 @@ else:
         assert x.ndim == 3 and x.shape[-1] == original_residual.shape[-1], (
             f"fused_h_post_bda: x must be 3D [s,b,C] with C={original_residual.shape[-1]}, got shape {list(x.shape)}"
         )
+        s, b = original_residual.shape[:2]
+        C = original_residual.shape[-1]
+        assert s * b <= _INT32_MAX, (
+            f"fused_h_post_bda: s*b={s * b} exceeds int32 max ({_INT32_MAX})"
+        )
+        assert C <= _INT32_MAX, (
+            f"fused_h_post_bda: C={C} exceeds int32 max ({_INT32_MAX})"
+        )
         return FusedHPostBDA.apply(h_res, original_residual, h_post, x, bias)
 
     def fused_proj_rms(
@@ -1318,5 +1339,12 @@ else:
         assert N <= 256, (
             f"fused_proj_rms: N={N} exceeds max supported tile size 256. "
             f"weight.shape={list(weight.shape)}. Check if weight needs transposing."
+        )
+        M = x.numel() // K
+        assert M <= _INT32_MAX, (
+            f"fused_proj_rms: M={M} (x reshaped to [M, K]) exceeds int32 max ({_INT32_MAX})"
+        )
+        assert K <= _INT32_MAX, (
+            f"fused_proj_rms: K={K} exceeds int32 max ({_INT32_MAX})"
         )
         return FusedProjRms.apply(x, weight, eps)

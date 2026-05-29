@@ -175,7 +175,7 @@ def native_h_post_bda(
     n, C = original_residual.shape[-2], original_residual.shape[-1]
     num_tokens = math.prod(leading_shape)
 
-    h_res_batched = h_res.reshape([num_tokens, n, n])
+    h_res_batched = h_res.transpose([0, 1, 3, 2]).reshape([num_tokens, n, n])
     residual_batched = original_residual.reshape([num_tokens, n, C])
     mixed = paddle.bmm(h_res_batched, residual_batched).reshape(
         [*leading_shape, n, C]
