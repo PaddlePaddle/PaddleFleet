@@ -102,6 +102,13 @@ class EcosystemLibrary:
             shutil.rmtree(self.install_dir)
         self.install_dir.mkdir(parents=True, exist_ok=True)
 
+        # Also clean the source-tree build directory to avoid
+        # "[Errno 17] File exists: ...dist-info" from setuptools/bdist_wheel.
+        source_build_dir = self.source_dir / "build"
+        if source_build_dir.exists():
+            logger.info(f"Removing stale source build dir: {source_build_dir}")
+            shutil.rmtree(source_build_dir)
+
         # Special pre-build step for DeepGEMM: link CUTLASS headers into deep_gemm/include
         if self.name.lower() == "deepgemm":
             cutlass_root = (
@@ -315,7 +322,10 @@ def get_special_build_deps():
             else:
                 deps.append("nvidia-nvshmem-cu12>=3.3.9,<3.5")
         elif cuda_major == 13:
-            deps.append("paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5")
+            if cuda_minor == 0:
+                deps.append("paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5")
+            else:
+                deps.append("nvidia-nvshmem-cu13>=3.3.9,<3.5")
         else:
             raise ValueError(
                 f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
