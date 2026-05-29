@@ -119,7 +119,6 @@ class DotProductAttention(FleetLayer):
         )
 
         projection_size = self.k_channels * self.num_attention_heads
-
         # Per attention head and per partition values.
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups(
@@ -262,9 +261,6 @@ class DotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
-        past_key_values=None,
-        layer_idx=None,
-        use_cache: bool = False,
         # DSA-specific parameters (ignored by DotProductAttention)
         x: Tensor | None = None,
         qr: Tensor | None = None,
@@ -349,29 +345,19 @@ class DotProductAttention(FleetLayer):
             and attn_mask_startend_row_indices is None
             and not use_eager
         ):
-            # KV cache support for inference
-            if use_cache and past_key_values is not None:
-                key, value = past_key_values.update(key, value, layer_idx)
-                # During prefill (query_len > 1), is_causal=True handles causal masking.
-                # During decode (query_len == 1), no causal mask needed; and KV length
-                # = history + 1, so the original prefill attention_mask no longer matches
-                # the extended KV length. Skip the mask in that case.
-                is_causal = query.shape[1] > 1
-                if query.shape[1] == 1:
-                    attn_mask_kv = None
-                else:
-                    attn_mask_kv = attention_mask
-            else:
-                is_causal = True
-                attn_mask_kv = attention_mask
-
+            # Note:
+            # attention_mask is None in default
+            # is_causal is True in default
+            # training is True in default
+            # Default values above maybe changed in the future
             attn_output = paddle.nn.functional.scaled_dot_product_attention(
                 query,
                 key,
                 value,
-                attn_mask_kv,
+                attention_mask,
                 self.config.attention_dropout,
-                is_causal=is_causal,
+                is_causal=True,
+                training=True,
             )
 
             attn_output = paddle.reshape(
@@ -563,7 +549,7 @@ class DotProductAttention(FleetLayer):
         # use v_channels for output dimension (may differ from k_channels)
         new_context_shape = (
             *context.shape[:-2],
-            self.hidden_size_per_partition // self.k_channels * self.v_channels,
+            self.hidden_size_per_partition,
         )
         context = context.reshape(*new_context_shape)
 
@@ -614,9 +600,6 @@ class CPDotProductAttention(FleetLayer):
         attention_bias: Tensor = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
-        past_key_values=None,
-        layer_idx=None,
-        use_cache: bool = False,
         # DSA-specific parameters (ignored by DotProductAttention)
         x: Tensor | None = None,
         qr: Tensor | None = None,

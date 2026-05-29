@@ -447,20 +447,6 @@ class GPTEmbedding(FleetLayer):
         swa_rotary_pos_cos = None
         swa_rotary_pos_sin = None
 
-        # For MTP mode: truncate position_ids to match the actual sequence length
-        # MTP reduces sequence length by num_nextn_predict_layers
-        mtp_position_ids = position_ids
-        if (
-            mtp_emb_res is not None
-            and position_ids is not None
-            and self.config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
-        ):
-            # mtp_emb_res[0] has shape [B, seq_len - num_nextn_predict_layers, H]
-            actual_seq_len = mtp_emb_res[0].shape[1]
-            if position_ids.shape[1] > actual_seq_len:
-                mtp_position_ids = position_ids[:, :actual_seq_len]
-
         if (
             self.position_embedding_type == "rope"
             and self.rotary_pos_emb is not None
@@ -473,7 +459,7 @@ class GPTEmbedding(FleetLayer):
                 rotary_seq_len,
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
-                position_ids=None if self.training else mtp_position_ids,
+                position_ids=None if self.training else position_ids,
             )
         elif (
             self.position_embedding_type == "mrope"
@@ -597,11 +583,6 @@ class GPTEmbedding(FleetLayer):
             assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
             hidden_states_concat = paddle.concat(mtp_emb_res)
             preproc_output["hidden_states"] = hidden_states_concat
-
-        # Pass through KV cache kwargs for inference
-        for key in ("past_key_values", "use_cache"):
-            if key in dict_args and key not in preproc_output:
-                preproc_output[key] = dict_args[key]
 
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:

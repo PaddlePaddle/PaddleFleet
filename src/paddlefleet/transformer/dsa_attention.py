@@ -1233,10 +1233,6 @@ class DSAttention(FleetLayer):
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
-        # KV cache parameters (ignored by DSAttention, for interface compatibility)
-        past_key_values=None,
-        layer_idx=None,
-        use_cache: bool = False,
         # DSA-specific parameters
         x: Tensor | None = None,
         qr: Tensor | None = None,
