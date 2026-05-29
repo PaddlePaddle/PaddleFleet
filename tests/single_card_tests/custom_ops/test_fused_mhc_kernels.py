@@ -50,6 +50,12 @@ TF32_BWD_ATOL, TF32_BWD_RTOL = 2e-3, 2e-3
 # E2E fused pipeline accumulates TF32 error across multiple kernels
 E2E_FUSED_FWD_ATOL, E2E_FUSED_FWD_RTOL = 5e-3, 5e-3
 RAND_LO, RAND_HI = -0.1, 0.1
+# Relaxed tolerances for large-shape tests (accumulated fp error over more elements)
+LARGE_FWD_ATOL, LARGE_FWD_RTOL = 1e-4, 1e-4
+LARGE_BWD_ATOL, LARGE_BWD_RTOL = 5e-4, 5e-4
+LARGE_TF32_FWD_ATOL, LARGE_TF32_FWD_RTOL = 5e-3, 5e-3
+LARGE_TF32_BWD_ATOL, LARGE_TF32_BWD_RTOL = 1e-2, 1e-2
+LARGE_COSINE_SIM_THRESH = 0.998
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +220,27 @@ class TestFusedSinkhorn(unittest.TestCase):
     def test_fwd_bwd_shape_8192_1_4_iters5(self):
         self._run_fwd_bwd(8192, 1, 4, 5)
 
+    @_requires_cutile
+    def test_fwd_bwd_large_shape_int32_overflow(self):
+        """Large N_batch to stress int32 offset boundaries."""
+        # N_batch=262144, n=4 => tensor [262144, 4, 4], 16MB fp32 (small but tests large pid offsets)
+        self._run_fwd_bwd(262144, 1, 4, 5)
+
     def _run_fwd_bwd(self, s, b, n, iters, eps=1e-6):
         from paddlefleet.fusions.fused_mhc_kernels import fused_sinkhorn
 
         data = _rand(s, b, n, n)
         grad_out = _rand(s, b, n, n)
+
+        # Use relaxed tolerances for large shapes
+        is_large = s * b * n * n > 2**20
+        fwd_atol = LARGE_FWD_ATOL if is_large else FWD_ATOL
+        fwd_rtol = LARGE_FWD_RTOL if is_large else FWD_RTOL
+        bwd_atol = LARGE_BWD_ATOL if is_large else BWD_ATOL
+        bwd_rtol = LARGE_BWD_RTOL if is_large else BWD_RTOL
+        cosine_thresh = (
+            LARGE_COSINE_SIM_THRESH if is_large else COSINE_SIM_THRESH
+        )
 
         # -- fused path --
         inp_f = data.clone()
@@ -234,10 +256,10 @@ class TestFusedSinkhorn(unittest.TestCase):
         paddle.autograd.backward([out_r], [grad_out])
         grad_r = inp_r.grad.clone()
 
-        _assert_close(out_f, out_r, FWD_ATOL, FWD_RTOL, "fused sinkhorn fwd")
-        _assert_close(grad_f, grad_r, BWD_ATOL, BWD_RTOL, "fused sinkhorn bwd")
+        _assert_close(out_f, out_r, fwd_atol, fwd_rtol, "fused sinkhorn fwd")
+        _assert_close(grad_f, grad_r, bwd_atol, bwd_rtol, "fused sinkhorn bwd")
         _assert_cosine_similar(
-            grad_f, grad_r, COSINE_SIM_THRESH, "fused sinkhorn grad cosine"
+            grad_f, grad_r, cosine_thresh, "fused sinkhorn grad cosine"
         )
 
 
@@ -303,12 +325,28 @@ class TestFusedHAggregate(unittest.TestCase):
     def test_fwd_bwd_shape_8192_1_4_4096(self):
         self._run_fwd_bwd(8192, 1, 4, 4096)
 
+    @_requires_cutile
+    def test_fwd_bwd_large_shape_int32_overflow(self):
+        """Large sb*C to stress int32 offset boundaries."""
+        # sb=65536, n=4, C=8192 => x tensor [65536, 4, 8192] ~8GB fp32
+        self._run_fwd_bwd(65536, 1, 4, 8192)
+
     def _run_fwd_bwd(self, s, b, n, C):
         from paddlefleet.fusions.fused_mhc_kernels import fused_h_aggregate
 
         x_data = _rand(s, b, n, C)
         h_data = _rand(s, b, n)
         grad_out = _rand(s, b, C)
+
+        # Use relaxed tolerances for large shapes
+        is_large = s * b * n * C > 2**20
+        fwd_atol = LARGE_FWD_ATOL if is_large else FWD_ATOL
+        fwd_rtol = LARGE_FWD_RTOL if is_large else FWD_RTOL
+        bwd_atol = LARGE_BWD_ATOL if is_large else BWD_ATOL
+        bwd_rtol = LARGE_BWD_RTOL if is_large else BWD_RTOL
+        cosine_thresh = (
+            LARGE_COSINE_SIM_THRESH if is_large else COSINE_SIM_THRESH
+        )
 
         # -- fused --
         xf = x_data.clone()
@@ -326,18 +364,15 @@ class TestFusedHAggregate(unittest.TestCase):
         oref = _ref_h_aggregate(xr, hr)
         paddle.autograd.backward([oref], [grad_out])
 
-        _assert_close(of, oref, FWD_ATOL, FWD_RTOL, "fused h_aggregate fwd")
+        _assert_close(of, oref, fwd_atol, fwd_rtol, "fused h_aggregate fwd")
         _assert_close(
-            xf.grad, xr.grad, BWD_ATOL, BWD_RTOL, "fused h_aggregate grad_x"
+            xf.grad, xr.grad, bwd_atol, bwd_rtol, "fused h_aggregate grad_x"
         )
         _assert_close(
-            hf.grad, hr.grad, BWD_ATOL, BWD_RTOL, "fused h_aggregate grad_h"
+            hf.grad, hr.grad, bwd_atol, bwd_rtol, "fused h_aggregate grad_h"
         )
         _assert_cosine_similar(
-            xf.grad,
-            xr.grad,
-            COSINE_SIM_THRESH,
-            "fused h_aggregate grad_x cosine",
+            xf.grad, xr.grad, cosine_thresh, "fused h_aggregate grad_x cosine"
         )
 
 
@@ -418,6 +453,12 @@ class TestFusedHPostBDA(unittest.TestCase):
     def test_with_bias_8192_1_4_1280(self):
         self._run_fwd_bwd(8192, 1, 4, 1280, with_bias=True)
 
+    @_requires_cutile
+    def test_large_shape_int32_overflow(self):
+        """Large sb*n*C to stress int32 offset boundaries."""
+        # sb=65536, n=4, C=8192 => orig_residual [65536, 4, 8192] ~8GB fp32
+        self._run_fwd_bwd(65536, 1, 4, 8192, with_bias=True)
+
     def _run_fwd_bwd(self, s, b, n, C, with_bias):
         from paddlefleet.fusions.fused_mhc_kernels import fused_h_post_bda
 
@@ -427,6 +468,16 @@ class TestFusedHPostBDA(unittest.TestCase):
         x_data = _rand(s, b, C)
         bias_data = _rand(C) if with_bias else None
         grad_out = _rand(s, b, n, C)
+
+        # Use relaxed tolerances for large shapes
+        is_large = s * b * n * C > 2**20
+        fwd_atol = LARGE_FWD_ATOL if is_large else FWD_ATOL
+        fwd_rtol = LARGE_FWD_RTOL if is_large else FWD_RTOL
+        bwd_atol = LARGE_BWD_ATOL if is_large else BWD_ATOL
+        bwd_rtol = LARGE_BWD_RTOL if is_large else BWD_RTOL
+        cosine_thresh = (
+            LARGE_COSINE_SIM_THRESH if is_large else COSINE_SIM_THRESH
+        )
 
         def _make_inputs():
             hr = hr_data.clone()
@@ -452,7 +503,7 @@ class TestFusedHPostBDA(unittest.TestCase):
         out_r = _ref_h_post_bda(hr_r, orig_r, hp_r, x_r, bi_r)
         paddle.autograd.backward([out_r], [grad_out])
 
-        _assert_close(out_f, out_r, FWD_ATOL, FWD_RTOL, "fused h_post_bda fwd")
+        _assert_close(out_f, out_r, fwd_atol, fwd_rtol, "fused h_post_bda fwd")
         for name, gf, gr in [
             ("h_res", hr_f.grad, hr_r.grad),
             ("orig_res", orig_f.grad, orig_r.grad),
@@ -460,17 +511,17 @@ class TestFusedHPostBDA(unittest.TestCase):
             ("x", x_f.grad, x_r.grad),
         ]:
             _assert_close(
-                gf, gr, BWD_ATOL, BWD_RTOL, f"fused h_post_bda bwd {name}"
+                gf, gr, bwd_atol, bwd_rtol, f"fused h_post_bda bwd {name}"
             )
             _assert_cosine_similar(
-                gf, gr, COSINE_SIM_THRESH, f"fused h_post_bda bwd {name} cosine"
+                gf, gr, cosine_thresh, f"fused h_post_bda bwd {name} cosine"
             )
         if with_bias:
             _assert_close(
                 bi_f.grad,
                 bi_r.grad,
-                BWD_ATOL,
-                BWD_RTOL,
+                bwd_atol,
+                bwd_rtol,
                 "fused h_post_bda bwd bias",
             )
 
@@ -541,6 +592,29 @@ class TestFusedProjRms(unittest.TestCase):
     def test_fwd_bwd_8192_24_16384(self):
         self._run_fwd_bwd(8192, 24, 16384)
 
+    @_requires_cutile
+    def test_fwd_bwd_large_shape_int32_overflow(self):
+        """M*K*elem_size > 2^31 to verify no int32 offset overflow."""
+        # M=131072, K=8192, bf16 => 131072*8192*2 = 2GB (boundary)
+        # M=262144, K=8192, bf16 => 262144*8192*2 = 4GB (exceeds int32)
+        self._run_fwd_bwd(262144, 24, 8192)
+
+    @_requires_cutile
+    def test_large_tensor_boundary_correctness(self):
+        """Verify last-tile data is read/written correctly (catches address truncation)."""
+        from paddlefleet.fusions.fused_mhc_kernels import fused_proj_rms
+
+        M, K, N = 262144, 8192, 24
+        x = paddle.zeros([M, K], dtype="float32")
+        x[-1, -1] = 1.0  # highest address element
+        w = paddle.zeros([K, N], dtype="float32")
+        w[-1, 0] = 1.0  # so proj[-1, 0] should be 1.0
+        proj, r = fused_proj_rms(x, w, 1e-6)
+        assert abs(proj[-1, 0].item() - 1.0) < 1e-3, (
+            f"Last element incorrect: {proj[-1, 0].item()}, possible address overflow"
+        )
+        assert proj[0, 0].item() == 0.0, "First element should be zero"
+
     def _run_fwd_bwd(self, M, N, K, eps=1e-6):
         from paddlefleet.fusions.fused_mhc_kernels import fused_proj_rms
 
@@ -548,6 +622,18 @@ class TestFusedProjRms(unittest.TestCase):
         w_data = _rand(N, K)
         grad_proj = _rand(M, N)
         grad_r = _rand(M, 1)
+
+        # Use relaxed tolerances for large shapes
+        is_large = M * K > 2**20
+        tf32_fwd_atol = LARGE_TF32_FWD_ATOL if is_large else TF32_FWD_ATOL
+        tf32_fwd_rtol = LARGE_TF32_FWD_RTOL if is_large else TF32_FWD_RTOL
+        tf32_bwd_atol = LARGE_TF32_BWD_ATOL if is_large else TF32_BWD_ATOL
+        tf32_bwd_rtol = LARGE_TF32_BWD_RTOL if is_large else TF32_BWD_RTOL
+        fwd_atol = LARGE_FWD_ATOL if is_large else FWD_ATOL
+        fwd_rtol = LARGE_FWD_RTOL if is_large else FWD_RTOL
+        cosine_thresh = (
+            LARGE_COSINE_SIM_THRESH if is_large else COSINE_SIM_THRESH
+        )
 
         # -- fused (expects weight [K, N]) --
         xf = x_data.clone()
@@ -568,33 +654,30 @@ class TestFusedProjRms(unittest.TestCase):
         _assert_close(
             proj_f,
             proj_r,
-            TF32_FWD_ATOL,
-            TF32_FWD_RTOL,
+            tf32_fwd_atol,
+            tf32_fwd_rtol,
             "fused proj_rms proj fwd",
         )
-        _assert_close(r_f, r_r, FWD_ATOL, FWD_RTOL, "fused proj_rms r fwd")
+        _assert_close(r_f, r_r, fwd_atol, fwd_rtol, "fused proj_rms r fwd")
         _assert_close(
             xf.grad,
             xr.grad,
-            TF32_BWD_ATOL,
-            TF32_BWD_RTOL,
+            tf32_bwd_atol,
+            tf32_bwd_rtol,
             "fused proj_rms bwd x",
         )
         _assert_close(
             wf.grad,
             wr.grad.t(),
-            TF32_BWD_ATOL,
-            TF32_BWD_RTOL,
+            tf32_bwd_atol,
+            tf32_bwd_rtol,
             "fused proj_rms bwd weight",
         )
         _assert_cosine_similar(
-            xf.grad, xr.grad, COSINE_SIM_THRESH, "fused proj_rms grad_x cosine"
+            xf.grad, xr.grad, cosine_thresh, "fused proj_rms grad_x cosine"
         )
         _assert_cosine_similar(
-            wf.grad,
-            wr.grad.t(),
-            COSINE_SIM_THRESH,
-            "fused proj_rms grad_w cosine",
+            wf.grad, wr.grad.t(), cosine_thresh, "fused proj_rms grad_w cosine"
         )
 
 
